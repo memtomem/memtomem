@@ -244,6 +244,96 @@ class TestProjectLocalNoneSkip:
         assert results["gemini_settings"].status == "skipped"
 
 
+# ── Ownership markers + re-sync (ADR-0019 / issue #1110) ─────────────
+
+
+class TestCodexOwnership:
+    def test_fresh_sync_stamps_status_message_marker(self, tmp_path, all_home):
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "mm index")]})
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        written = json.loads((all_home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        handler = written["hooks"]["PreToolUse"][0]["hooks"][0]
+        assert handler["statusMessage"] == "memtomem · PreToolUse"
+
+    def test_resync_updates_own_marked_codex_rule(self, tmp_path, all_home):
+        target = all_home / ".codex" / "hooks.json"
+        old = {
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index --v1",
+                    "timeout": 5000,
+                    "statusMessage": "memtomem · PreToolUse",
+                }
+            ],
+        }
+        target.write_text(json.dumps({"hooks": {"PreToolUse": [old]}}) + "\n", encoding="utf-8")
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "mm index --v2")]})
+
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        assert results["codex_settings"].warnings == []
+
+        written = json.loads(target.read_text(encoding="utf-8"))
+        rule = written["hooks"]["PreToolUse"][0]
+        assert rule["hooks"][0]["command"] == "mm index --v2"  # updated
+        assert rule["hooks"][0]["statusMessage"] == "memtomem · PreToolUse"
+
+
+class TestGeminiOwnership:
+    def test_canonical_name_is_overridden_with_memtomem_prefix(self, tmp_path, all_home):
+        """A canonical handler ``name`` is overridden so memtomem owns the Gemini name."""
+        rule = {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "mm index", "name": "user-chosen-name"}],
+        }
+        _canonical(tmp_path, {"PreToolUse": [rule]})
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        hooks = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))[
+            "hooks"
+        ]
+        name = hooks["BeforeTool"][0]["hooks"][0]["name"]
+        assert name.startswith("memtomem-")
+        assert name != "user-chosen-name"
+
+    def test_no_status_message_leaks_into_gemini(self, tmp_path, all_home):
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "mm index")]})
+        generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+
+        hooks = json.loads((all_home / ".gemini" / "settings.json").read_text(encoding="utf-8"))[
+            "hooks"
+        ]
+        for handler in hooks["BeforeTool"][0]["hooks"]:
+            assert "statusMessage" not in handler  # marker is Claude/Codex-only
+
+    def test_resync_updates_own_marked_gemini_rule(self, tmp_path, all_home):
+        target = all_home / ".gemini" / "settings.json"
+        # An old memtomem-emitted Gemini rule (remapped event/matcher, memtomem- name).
+        old = {
+            "matcher": "run_shell_command",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index --v1",
+                    "timeout": 5000000,
+                    "name": "memtomem-BeforeTool-run_shell_command-deadbeef",
+                }
+            ],
+        }
+        target.write_text(json.dumps({"hooks": {"BeforeTool": [old]}}) + "\n", encoding="utf-8")
+        _canonical(tmp_path, {"PreToolUse": [_rule("Bash", "mm index --v2")]})
+
+        results = generate_all_settings(tmp_path, scope="user", allow_host_writes=True)
+        assert results["gemini_settings"].warnings == []
+
+        hooks = json.loads(target.read_text(encoding="utf-8"))["hooks"]
+        rules = hooks["BeforeTool"]
+        assert len(rules) == 1  # replaced in place, not appended alongside
+        assert rules[0]["hooks"][0]["command"] == "mm index --v2"
+
+
 # ── host-write gate across runtimes ──────────────────────────────────
 
 

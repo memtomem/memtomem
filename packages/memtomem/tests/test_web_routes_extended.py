@@ -907,6 +907,325 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    async def test_marked_rule_differing_is_not_conflict(self, app, client: AsyncClient, tmp_path):
+        """ADR-0019: a memtomem-marked target rule that differs is a pending
+        update (a plain re-sync fixes it), not a user conflict (issue #1110)."""
+        canonical_rule = self._rule("Write", "mm index --v2")
+        # Target rule is memtomem-owned (statusMessage marker) with the old command.
+        marked = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index --v1",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}), encoding="utf-8"
+        )
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(json.dumps({"hooks": {"PostToolUse": [marked]}}), encoding="utf-8")
+            app.state.project_root = tmp_path
+
+            resp = await client.get("/api/settings-sync?target_scope=user")
+            data = resp.json()
+            assert data["status"] != "conflicts"
+            assert data["hooks"]["conflicts"] == []
+            assert len(data["hooks"]["pending"]) == 1
+            assert data["hooks"]["pending"][0]["matcher"] == "Write"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_resolve_writes_ownership_marker(self, app, client: AsyncClient, tmp_path):
+        """ADR-0019: resolving via 'use memtomem's version' writes a *marked*
+        rule, so a later GET reports it synced rather than re-flagging it."""
+        canonical_rule = self._rule("Write", "echo new")
+        target_rule = self._rule("Write", "echo old")
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [canonical_rule]}}), encoding="utf-8"
+        )
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [target_rule]}}), encoding="utf-8"
+            )
+            app.state.project_root = tmp_path
+
+            resp = await client.post(
+                "/api/settings-sync/resolve?target_scope=user",
+                json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+            )
+            assert resp.json()["status"] == "ok"
+
+            written = json.loads(target.read_text(encoding="utf-8"))
+            handler = written["hooks"]["PostToolUse"][0]["hooks"][0]
+            assert handler["statusMessage"].startswith("memtomem · ")
+
+            # A follow-up sync status read sees it as synced, not a conflict.
+            resp2 = await client.get("/api/settings-sync?target_scope=user")
+            data = resp2.json()
+            assert data["status"] == "in_sync"
+            assert data["hooks"]["conflicts"] == []
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_diff_mirrors_merge_owned_slot_fifo(self, app, client: AsyncClient, tmp_path):
+        """ADR-0019: with two canonical rules at one matcher and a target that
+        has one owned + one user rule there, the GET diff consumes the single
+        owned slot (1 pending) and reports the leftover as a conflict — matching
+        what a sync actually does (Codex review)."""
+        marked = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm a --v1",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+        user_rule = self._rule("Write", "echo user")
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            self._rule("Write", "mm a --v2"),
+                            self._rule("Write", "mm b"),
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [marked, user_rule]}}), encoding="utf-8"
+            )
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            # One owned slot → one managed-update pending; the second canonical
+            # rule has no slot and collides with the user rule → one conflict.
+            assert len(data["hooks"]["pending"]) == 1
+            assert len(data["hooks"]["conflicts"]) == 1
+            assert data["hooks"]["conflicts"][0]["existing"]["hooks"][0]["command"] == "echo user"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_diff_consumes_owned_slot_before_user_equality(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """ADR-0019: a stale owned rule + a user rule that equals canonical (same
+        matcher) → the owned slot is consumed first, so GET reports the update as
+        pending (the sync still replaces the stale rule), not a false in_sync."""
+        marked_stale = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm a --v1",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+        user_equal = self._rule("Write", "mm a --v2")  # functionally == canonical
+
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "mm a --v2")]}}),
+            encoding="utf-8",
+        )
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [marked_stale, user_equal]}}), encoding="utf-8"
+            )
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "out_of_sync"
+            assert len(data["hooks"]["pending"]) == 1
+            assert data["hooks"]["conflicts"] == []
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_diff_owned_target_only_is_out_of_sync(self, app, client: AsyncClient, tmp_path):
+        """ADR-0019: a memtomem-owned rule under an event canonical no longer
+        emits is pruned by a sync, so GET reports out_of_sync (not in_sync) even
+        when every canonical rule is already synced."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "mm index")]}}),
+            encoding="utf-8",
+        )
+        # Target: the PostToolUse rule already synced (marked), plus a stale
+        # memtomem-owned SessionStart rule the canonical no longer emits.
+        synced_marked = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+        stale_owned = {
+            "matcher": "",
+            "hooks": [
+                {"type": "command", "command": "mm log", "statusMessage": "memtomem · SessionStart"}
+            ],
+        }
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(
+                json.dumps(
+                    {"hooks": {"PostToolUse": [synced_marked], "SessionStart": [stale_owned]}}
+                ),
+                encoding="utf-8",
+            )
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "out_of_sync"  # stale owned rule will be pruned
+            assert data["hooks"]["conflicts"] == []
+            assert data["hooks"]["pending"] == []  # nothing to add; only a removal
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_diff_surplus_owned_duplicate_is_out_of_sync(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """ADR-0019: two memtomem-owned rules at one matcher but a single
+        canonical rule → the surplus owned rule will be pruned, so GET reports
+        out_of_sync even though the first owned rule is already synced."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(
+            json.dumps({"hooks": {"PostToolUse": [self._rule("Write", "mm index")]}}),
+            encoding="utf-8",
+        )
+        o1 = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+        o2 = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index --dup",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            target.write_text(json.dumps({"hooks": {"PostToolUse": [o1, o2]}}), encoding="utf-8")
+            app.state.project_root = tmp_path
+
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "out_of_sync"  # surplus owned rule will be pruned
+            assert data["hooks"]["conflicts"] == []
+            assert len(data["hooks"]["synced"]) == 1  # first owned rule matches canonical
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
+    async def test_diff_empty_canonical_owned_target_is_out_of_sync(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """ADR-0019: an empty canonical still prunes memtomem-owned target rules,
+        so GET reports out_of_sync (not no_hooks); a target with only user rules
+        stays no_hooks."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+
+        owned = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index",
+                    "statusMessage": "memtomem · PostToolUse",
+                }
+            ],
+        }
+
+        target = Path.home() / ".claude" / "settings.json"
+        backup = target.read_text(encoding="utf-8") if target.is_file() else None
+        try:
+            # Owned rule present → a sync prunes it → out_of_sync.
+            target.write_text(json.dumps({"hooks": {"PostToolUse": [owned]}}), encoding="utf-8")
+            app.state.project_root = tmp_path
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "out_of_sync"
+
+            # Only user rules → nothing for memtomem to do → no_hooks.
+            target.write_text(
+                json.dumps({"hooks": {"PostToolUse": [self._rule("Bash", "echo user")]}}),
+                encoding="utf-8",
+            )
+            data = (await client.get("/api/settings-sync?target_scope=user")).json()
+            assert data["status"] == "no_hooks"
+        finally:
+            if backup is not None:
+                target.write_text(backup, encoding="utf-8")
+            elif target.is_file():
+                target.unlink()
+
     # -- URL alias tests (/api/context/settings/*) ----------------------------
 
     async def test_alias_get_context_settings(self, app, client: AsyncClient, tmp_path):

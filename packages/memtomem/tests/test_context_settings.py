@@ -37,6 +37,17 @@ def _rule(matcher: str = "", command: str = "echo ok", timeout: int = 5000) -> d
     }
 
 
+def _marked(rule: dict, event: str) -> dict:
+    """The rule as memtomem writes it for Claude: the ADR-0019 ownership marker
+    (``statusMessage`` = ``"memtomem · <event>"``) stamped onto each command
+    handler. Used to assert the exact on-disk shape of a memtomem-written rule."""
+    out = json.loads(json.dumps(rule))  # deep copy
+    for handler in out.get("hooks", []):
+        if isinstance(handler, dict) and handler.get("type") == "command":
+            handler["statusMessage"] = f"memtomem · {event}"
+    return out
+
+
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
@@ -136,8 +147,8 @@ class TestClaudeSettingsMergeAdditive:
         assert results["claude_settings"].status == "ok"
 
         written = _read_target(claude_home)
-        assert written["hooks"]["Stop"] == [user_rule]
-        assert written["hooks"]["PostToolUse"] == [mm_rule]
+        assert written["hooks"]["Stop"] == [user_rule]  # user rule untouched (no marker)
+        assert written["hooks"]["PostToolUse"] == [_marked(mm_rule, "PostToolUse")]
 
     def test_appends_rule_to_same_event(self, claude_home, tmp_path):
         """Multiple rules under the same event with different matchers."""
@@ -155,8 +166,8 @@ class TestClaudeSettingsMergeAdditive:
 
         written = _read_target(claude_home)
         assert len(written["hooks"]["PostToolUse"]) == 2
-        assert written["hooks"]["PostToolUse"][0] == user_rule
-        assert written["hooks"]["PostToolUse"][1] == mm_rule
+        assert written["hooks"]["PostToolUse"][0] == user_rule  # user rule untouched
+        assert written["hooks"]["PostToolUse"][1] == _marked(mm_rule, "PostToolUse")
 
 
 class TestClaudeSettingsMergeConflict:
@@ -245,6 +256,239 @@ class TestClaudeSettingsMergeWarningContent:
         # (c) concrete remediation step
         assert "remove" in w
         assert "mm context sync --include=settings" in w
+
+
+class TestClaudeOwnershipResync:
+    """ADR-0019 / issue #1110: re-sync updates memtomem's own emitted rules."""
+
+    def test_resync_updates_own_marked_rule_no_warning(self, claude_home, tmp_path):
+        """A memtomem-marked target rule is replaced when canonical changes."""
+        target = claude_home / ".claude" / "settings.json"
+        old = _marked(_rule("Write", "mm index --v1"), "PostToolUse")
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [old]}}) + "\n", encoding="utf-8")
+
+        _make_canonical_settings(
+            tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index --v2")]}}
+        )
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "ok"
+        assert r.warnings == []  # memtomem updating its own rule is not a conflict
+
+        written = _read_target(claude_home)
+        assert written["hooks"]["PostToolUse"] == [
+            _marked(_rule("Write", "mm index --v2"), "PostToolUse")
+        ]
+
+    def test_resync_preserves_user_rule_at_other_matcher(self, claude_home, tmp_path):
+        """Updating memtomem's rule leaves a user rule (other matcher) untouched."""
+        target = claude_home / ".claude" / "settings.json"
+        user_rule = _rule("Bash", "echo user")
+        old = _marked(_rule("Write", "mm index --v1"), "PostToolUse")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [user_rule, old]}}) + "\n", encoding="utf-8"
+        )
+
+        _make_canonical_settings(
+            tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index --v2")]}}
+        )
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []
+
+        written = _read_target(claude_home)
+        # User Bash rule kept in place; memtomem Write rule updated in place.
+        assert written["hooks"]["PostToolUse"][0] == user_rule
+        assert written["hooks"]["PostToolUse"][1] == _marked(
+            _rule("Write", "mm index --v2"), "PostToolUse"
+        )
+
+    def test_resync_marked_and_user_same_matcher_both_kept(self, claude_home, tmp_path):
+        """Marked + user rule under one matcher: marked updated in place, user kept."""
+        target = claude_home / ".claude" / "settings.json"
+        marked_old = _marked(_rule("Write", "mm index --v1"), "PostToolUse")
+        user_rule = _rule("Write", "echo user")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [marked_old, user_rule]}}) + "\n", encoding="utf-8"
+        )
+
+        _make_canonical_settings(
+            tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index --v2")]}}
+        )
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []
+
+        written = _read_target(claude_home)["hooks"]["PostToolUse"]
+        assert written[0] == _marked(
+            _rule("Write", "mm index --v2"), "PostToolUse"
+        )  # updated in place
+        assert written[1] == user_rule  # user rule preserved
+
+    def test_resync_is_idempotent(self, claude_home, tmp_path):
+        """Re-syncing an unchanged canonical produces no warning and no rewrite."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index")]}})
+
+        generate_all_settings(tmp_path, scope="user")
+        first = _read_target(claude_home)
+        # First sync stamps the marker.
+        assert first["hooks"]["PostToolUse"] == [_marked(_rule("Write", "mm index"), "PostToolUse")]
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []
+        assert _read_target(claude_home) == first  # byte-stable
+
+    def test_legacy_unmarked_same_command_warns_not_replaced(self, claude_home, tmp_path):
+        """A pre-marker memtomem rule (unmarked) gets a sharper warning, not a clobber."""
+        target = claude_home / ".claude" / "settings.json"
+        legacy = _rule("Write", "mm index", timeout=5000)  # no marker (old release)
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [legacy]}}) + "\n", encoding="utf-8")
+
+        # Canonical: same command, changed timeout — would be an update if marked.
+        _make_canonical_settings(
+            tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index", timeout=9000)]}}
+        )
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert len(r.warnings) == 1
+        assert "previous version" in r.warnings[0]  # migration-guidance wording
+
+        written = _read_target(claude_home)
+        assert written["hooks"]["PostToolUse"] == [legacy]  # never silently overwritten
+
+    def test_preserves_author_statusMessage_text(self, claude_home, tmp_path):
+        """A canonical statusMessage is preserved after the reserved prefix."""
+        rule = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index",
+                    "timeout": 5000,
+                    "statusMessage": "Indexing memory",
+                }
+            ],
+        }
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [rule]}})
+        generate_all_settings(tmp_path, scope="user")
+
+        written = _read_target(claude_home)
+        handler = written["hooks"]["PostToolUse"][0]["hooks"][0]
+        assert handler["statusMessage"] == "memtomem · Indexing memory"
+
+    def test_two_same_matcher_canonical_rules_not_dropped(self, claude_home, tmp_path):
+        """Two canonical rules under one matcher both survive (mutation-safety)."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "mm index"), _rule("Write", "mm graph")]}},
+        )
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []
+        written = _read_target(claude_home)["hooks"]["PostToolUse"]
+        commands = {h["command"] for rule in written for h in rule["hooks"]}
+        assert commands == {"mm index", "mm graph"}
+
+        # Re-sync: both are now marked; both update in place, neither dropped.
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []
+        written2 = _read_target(claude_home)["hooks"]["PostToolUse"]
+        assert {h["command"] for rule in written2 for h in rule["hooks"]} == {
+            "mm index",
+            "mm graph",
+        }
+
+    def test_stale_event_owned_rule_pruned_user_kept(self, claude_home, tmp_path):
+        """A memtomem rule under an event canonical no longer emits is pruned;
+        a user rule under that same event is preserved."""
+        target = claude_home / ".claude" / "settings.json"
+        marked_stale = _marked(_rule("", "mm session-log"), "SessionStart")
+        user_rule = _rule("", "echo my-session-hook")
+        target.write_text(
+            json.dumps({"hooks": {"SessionStart": [marked_stale, user_rule]}}) + "\n",
+            encoding="utf-8",
+        )
+        # Canonical no longer emits any SessionStart rule.
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index")]}})
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "ok"
+
+        written = _read_target(claude_home)["hooks"]
+        assert written["SessionStart"] == [user_rule]  # stale memtomem rule pruned, user kept
+        assert written["PostToolUse"] == [_marked(_rule("Write", "mm index"), "PostToolUse")]
+
+    def test_stale_event_fully_pruned_drops_empty_event(self, claude_home, tmp_path):
+        """An event holding only a stale memtomem rule is removed entirely."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"SessionStart": [_marked(_rule("", "mm log"), "SessionStart")]}})
+            + "\n",
+            encoding="utf-8",
+        )
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index")]}})
+
+        generate_all_settings(tmp_path, scope="user")
+        assert "SessionStart" not in _read_target(claude_home)["hooks"]
+
+    def test_raw_user_rule_matching_pre_stamp_is_in_sync(self, claude_home, tmp_path):
+        """A user rule byte-identical to the canonical (no marker) is in-sync,
+        regardless of statusMessage — comparison ignores the marker-carrier
+        field symmetrically (no spurious conflict warning)."""
+        target = claude_home / ".claude" / "settings.json"
+        # User authored the exact rule, including a hand-written statusMessage.
+        raw = {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "mm index",
+                    "timeout": 5000,
+                    "statusMessage": "Indexing",
+                }
+            ],
+        }
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [raw]}}) + "\n", encoding="utf-8")
+        # Canonical is the same command/matcher/timeout (would stamp its own marker).
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "mm index", timeout=5000)]}},
+        )
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []  # functionally identical → in sync
+        assert _read_target(claude_home)["hooks"]["PostToolUse"] == [raw]  # left untouched
+
+    def test_resync_drops_surplus_owned_duplicate(self, claude_home, tmp_path):
+        """Two memtomem-owned rules at one matcher but one canonical rule → the
+        surplus owned rule is pruned (kept count matches canonical)."""
+        target = claude_home / ".claude" / "settings.json"
+        o1 = _marked(_rule("Write", "mm index"), "PostToolUse")
+        o2 = _marked(_rule("Write", "mm index --dup"), "PostToolUse")  # surplus owned
+        target.write_text(json.dumps({"hooks": {"PostToolUse": [o1, o2]}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": [_rule("Write", "mm index")]}})
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].warnings == []
+        written = _read_target(claude_home)["hooks"]["PostToolUse"]
+        assert written == [_marked(_rule("Write", "mm index"), "PostToolUse")]  # surplus dropped
+
+    def test_empty_canonical_prunes_owned_keeps_user(self, claude_home, tmp_path):
+        """Canonical emitting no hooks prunes every memtomem-owned target rule
+        while leaving user rules in place."""
+        target = claude_home / ".claude" / "settings.json"
+        owned = _marked(_rule("Write", "mm index"), "PostToolUse")
+        user_rule = _rule("Bash", "echo user")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [owned, user_rule]}}) + "\n", encoding="utf-8"
+        )
+        _make_canonical_settings(tmp_path, {"hooks": {}})
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "ok"
+        assert _read_target(claude_home)["hooks"]["PostToolUse"] == [user_rule]  # owned pruned
 
 
 class TestClaudeSettingsMergeMalformed:

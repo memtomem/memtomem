@@ -16,7 +16,10 @@ from memtomem.config import TargetScope
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
+    _rule_content_equal,
+    _rule_is_memtomem_owned,
     _safe_load_json,
+    _stamp_status_markers,
     _write_json,
     generate_all_settings,
 )
@@ -167,6 +170,12 @@ def _compare_hooks(
         result["error"] = "hooks must be a record (object), not an array"
         return result
 
+    # Stamp the ownership marker (ADR-0019) so the canonical rules compared
+    # here match what ``generate_all_settings`` actually writes to the Claude
+    # target — otherwise a synced (already-stamped) target rule would mismatch
+    # the raw canonical and surface as a false conflict (issue #1110).
+    canonical_hooks = _stamp_status_markers({"hooks": canonical_hooks})["hooks"]
+
     canonical_index: dict[tuple[str, str], list[dict]] = {}
     for row in _iter_hook_rules(canonical_hooks):
         canonical_index.setdefault((row["event"], row["matcher"]), []).append(row["rule"])
@@ -179,7 +188,16 @@ def _compare_hooks(
     ]
 
     if not _has_hook_rules(canonical_hooks):
-        result["status"] = "no_hooks"
+        # Canonical emits no hooks. A sync still prunes any memtomem-owned
+        # target rule (ADR-0019), so surface that as out_of_sync; only when the
+        # target has none of memtomem's rules is there genuinely nothing to do.
+        owned_in_target = any(
+            _rule_is_memtomem_owned(rule)
+            for rules in target_hooks.values()
+            if isinstance(rules, list)
+            for rule in rules
+        )
+        result["status"] = "out_of_sync" if owned_in_target else "no_hooks"
         return result
 
     if not target_path.is_file():
@@ -209,6 +227,22 @@ def _compare_hooks(
             if isinstance(rule, dict):
                 target_index.setdefault((event, rule.get("matcher", "")), []).append(rule)
 
+    # Mirror _merge_hooks_record's resolution so the GET diff classifies rules
+    # exactly as a sync would (ADR-0019). Each memtomem-owned target rule under
+    # a matcher is one in-place "managed update" slot, consumed FIFO before
+    # falling back to the user-wins conflict / append logic. Comparing against
+    # the *specific* owned rule being consumed — not any same-matcher rule —
+    # keeps the diff and the merge in agreement even when a user rule happens to
+    # equal canonical while a stale owned rule still needs replacing (Codex r2).
+    owned_by_matcher: dict[tuple[str, str], list[dict]] = {}
+    user_by_matcher: dict[tuple[str, str], list[dict]] = {}
+    for key, rules_at in target_index.items():
+        for r in rules_at:
+            (owned_by_matcher if _rule_is_memtomem_owned(r) else user_by_matcher).setdefault(
+                key, []
+            ).append(r)
+    consumed_owned: dict[tuple[str, str], int] = {}
+
     for event, rules in canonical_hooks.items():
         if not isinstance(rules, list):
             continue
@@ -217,34 +251,51 @@ def _compare_hooks(
                 continue
             matcher = rule.get("matcher", "")
             key = (event, matcher)
-            same_matcher = target_index.get(key, [])
 
-            if same_matcher:
-                if any(existing == rule for existing in same_matcher):
-                    result["hooks"]["synced"].append(
-                        {"event": event, "matcher": matcher, "rule": rule}
-                    )
-                else:
-                    # Surface the first same-matcher rule as the conflict
-                    # representative — keeps the API payload shape stable
-                    # for the resolve flow while not silently shadowing the
-                    # rest of the user's same-matcher rules.
-                    result["hooks"]["conflicts"].append(
-                        {
-                            "event": event,
-                            "matcher": matcher,
-                            "existing": same_matcher[0],
-                            "proposed": rule,
-                        }
-                    )
+            owned_slots = owned_by_matcher.get(key, [])
+            used = consumed_owned.get(key, 0)
+            if used < len(owned_slots):
+                # Replaces an existing memtomem-owned rule in place: synced if
+                # byte-equal (ignoring the marker), else a pending managed
+                # update — never a user conflict (issue #1110).
+                consumed_owned[key] = used + 1
+                bucket = "synced" if _rule_content_equal(owned_slots[used], rule) else "pending"
+                result["hooks"][bucket].append({"event": event, "matcher": matcher, "rule": rule})
+                continue
+
+            # Owned slots exhausted → merge additively against the user rules.
+            user_rules = user_by_matcher.get(key, [])
+            if any(_rule_content_equal(u, rule) for u in user_rules):
+                result["hooks"]["synced"].append({"event": event, "matcher": matcher, "rule": rule})
+            elif user_rules:
+                # Surface the first user rule as the conflict representative —
+                # keeps the payload shape stable for the resolve flow while not
+                # silently shadowing the rest of the user's same-matcher rules.
+                result["hooks"]["conflicts"].append(
+                    {
+                        "event": event,
+                        "matcher": matcher,
+                        "existing": user_rules[0],
+                        "proposed": rule,
+                    }
+                )
             else:
                 result["hooks"]["pending"].append(
                     {"event": event, "matcher": matcher, "rule": rule}
                 )
 
+    # Any memtomem-owned target slot a canonical rule did NOT consume will be
+    # pruned by the next sync (ADR-0019) — whether the whole (event, matcher) is
+    # gone from canonical, or canonical simply emits fewer rules under it than
+    # the target currently holds. Those removals put the status out_of_sync even
+    # when there is nothing to add. Plain user hooks are never counted.
+    pending_removals = sum(
+        max(0, len(owned) - consumed_owned.get(key, 0)) for key, owned in owned_by_matcher.items()
+    )
+
     if result["hooks"]["conflicts"]:
         result["status"] = "conflicts"
-    elif result["hooks"]["pending"]:
+    elif result["hooks"]["pending"] or pending_removals:
         result["status"] = "out_of_sync"
     else:
         result["status"] = "in_sync"
@@ -381,6 +432,14 @@ async def resolve_conflict(
                         break
                 if proposed is None:
                     raise HTTPException(404, detail=f"Rule '{label}' not in canonical source")
+
+                # Stamp the ownership marker (ADR-0019) so the rule we write
+                # matches what ``generate_all_settings`` would write — a later
+                # re-sync then recognizes it as memtomem-owned and can update
+                # it instead of re-flagging it as a conflict (issue #1110).
+                proposed = _stamp_status_markers({"hooks": {body.event: [proposed]}})["hooks"][
+                    body.event
+                ][0]
 
                 # Read target + mtime guard. ``st_mtime_ns`` matches
                 # ``hot_reload.py`` precision and detects sub-second writes

@@ -145,19 +145,163 @@ def _register(gen: SettingsGenerator) -> SettingsGenerator:
     return gen
 
 
+# ── Hook-rule ownership marker (ADR-0019) ───────────────────────────
+#
+# memtomem stamps every hook rule it generates with an ownership marker so a
+# later ``mm context sync`` can recognize — and *update* — its own previously
+# emitted rules instead of treating them as user conflicts (issue #1110). The
+# marker uses only **officially documented** handler fields (a custom key risks
+# strict-schema rejection of the whole settings file):
+#   * Gemini handlers carry ``name`` → prefix ``memtomem-`` (synthesized in
+#     :func:`_ensure_gemini_handler_names`).
+#   * Claude/Codex command handlers carry ``statusMessage`` → reserved prefix
+#     ``"memtomem · "`` (stamped by :func:`_stamp_status_markers`).
+# Both prefixes are a *reserved namespace*: a rule whose handler name/
+# statusMessage starts with them is memtomem-owned and will be overwritten on
+# re-sync. Hand-editing such a rule while keeping the prefix loses the edit.
+_MEMTOMEM_NAME_PREFIX = "memtomem-"
+_MEMTOMEM_STATUS_PREFIX = "memtomem · "
+
+
+def _handler_is_memtomem_owned(handler: object) -> bool:
+    """True if *handler* carries a memtomem ownership marker (name/statusMessage)."""
+    if not isinstance(handler, dict):
+        return False
+    name = handler.get("name")
+    if isinstance(name, str) and name.startswith(_MEMTOMEM_NAME_PREFIX):
+        return True
+    status = handler.get("statusMessage")
+    return isinstance(status, str) and status.startswith(_MEMTOMEM_STATUS_PREFIX)
+
+
+def _rule_is_memtomem_owned(rule: object) -> bool:
+    """True if any handler in *rule* is memtomem-owned."""
+    if not isinstance(rule, dict):
+        return False
+    handlers = rule.get("hooks")
+    if not isinstance(handlers, list):
+        return False
+    return any(_handler_is_memtomem_owned(h) for h in handlers)
+
+
+def _rule_commands(rule: object) -> set[str]:
+    """Set of handler ``command`` strings in *rule* (for the legacy-rule heuristic)."""
+    if not isinstance(rule, dict):
+        return set()
+    handlers = rule.get("hooks")
+    if not isinstance(handlers, list):
+        return set()
+    return {
+        h["command"] for h in handlers if isinstance(h, dict) and isinstance(h.get("command"), str)
+    }
+
+
+def _strip_ownership_markers(rule: dict) -> dict:
+    """Return a copy of *rule* with the marker-carrier fields removed.
+
+    Used for *functional* comparison. The marker lives in cosmetic handler
+    fields — ``name`` (Gemini's ``/hooks disable`` handle) and ``statusMessage``
+    (Claude/Codex spinner text) — which do not change what the hook *does*
+    (``type``/``command``/``timeout``/``matcher``). Both are dropped **entirely
+    and symmetrically** so comparison turns purely on hook function. Stripping
+    only the memtomem prefix would be asymmetric: a target with no
+    ``statusMessage`` would compare equal to a stamped contribution while a
+    user's raw pre-stamp ``statusMessage`` would not — hiding/raising conflicts
+    inconsistently (Codex review). A genuine cosmetic-only change to a
+    memtomem-owned rule still propagates: such a rule is replaced wholesale by
+    the merge's in-place owned-slot pass, not gated on this comparison.
+    """
+    handlers = rule.get("hooks")
+    if not isinstance(handlers, list):
+        return rule
+    new_handlers: list = []
+    for h in handlers:
+        if not isinstance(h, dict):
+            new_handlers.append(h)
+            continue
+        nh = {k: v for k, v in h.items() if k not in ("name", "statusMessage")}
+        new_handlers.append(nh)
+    return {**rule, "hooks": new_handlers}
+
+
+def _rule_content_equal(a: object, b: object) -> bool:
+    """True if *a* and *b* are functionally equal (ignoring marker-carrier fields)."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return a == b
+    return _strip_ownership_markers(a) == _strip_ownership_markers(b)
+
+
+def _stamp_status_markers(contributions: dict) -> dict:
+    """Return a deep copy of *contributions* with the ownership marker stamped.
+
+    Sets ``statusMessage`` on every **command** handler to a reserved-prefixed
+    string. Author text is preserved after the prefix (so a canonical
+    ``statusMessage`` still shows a meaningful spinner message) and an
+    already-prefixed value is left unchanged — making the stamp a pure,
+    deterministic function of the handler so re-sync stays idempotent. Used by
+    the Claude/Codex generators; Gemini marks via ``name`` instead and must not
+    receive ``statusMessage`` (not a Gemini handler field).
+    """
+    src_hooks = contributions.get("hooks", {})
+    if not isinstance(src_hooks, dict):
+        return contributions
+    out_hooks: dict[str, list] = {}
+    for event, rules in src_hooks.items():
+        if not isinstance(rules, list):
+            out_hooks[event] = rules
+            continue
+        new_rules: list = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                new_rules.append(rule)
+                continue
+            new_rule = dict(rule)
+            handlers = rule.get("hooks")
+            if isinstance(handlers, list):
+                new_handlers: list = []
+                for handler in handlers:
+                    if not isinstance(handler, dict) or handler.get("type") != "command":
+                        new_handlers.append(handler)
+                        continue
+                    new_handler = dict(handler)
+                    existing = new_handler.get("statusMessage")
+                    if isinstance(existing, str):
+                        if not existing.startswith(_MEMTOMEM_STATUS_PREFIX):
+                            new_handler["statusMessage"] = f"{_MEMTOMEM_STATUS_PREFIX}{existing}"
+                    else:
+                        new_handler["statusMessage"] = f"{_MEMTOMEM_STATUS_PREFIX}{event}"
+                    new_handlers.append(new_handler)
+                new_rule["hooks"] = new_handlers
+            new_rules.append(new_rule)
+        out_hooks[event] = new_rules
+    return {**contributions, "hooks": out_hooks}
+
+
 def _merge_hooks_record(
     existing: dict | None,
     contributions: dict,
 ) -> tuple[dict, list[str]]:
-    """Additive merge of record-format ``hooks``.  User rules always win.
+    """Additive merge of record-format ``hooks``, ownership-aware (ADR-0019).
 
-    Identity key is ``(event, matcher)``; on a same-key collision with a
-    different payload the user's existing rule is kept and a guided warning
-    is emitted.  Shared by Claude and Codex (identical event names + record
-    shape).  Gemini remaps event/matcher names first via
-    :func:`_remap_for_gemini`, then merges the remapped record through this
-    same function — so the conflict/dedup semantics stay identical across
-    runtimes.
+    Identity key is ``(event, matcher)``. On a same-key collision:
+
+    * an existing **memtomem-owned** rule (carries the ownership marker) is
+      *replaced* by the freshly generated contribution — memtomem updates its
+      own rules across releases (issue #1110) — while any *user* rules under
+      the same matcher are preserved;
+    * an existing **user** rule wins and a guided warning is emitted (the
+      long-standing "user rules always win" contract). When the user rule
+      shares a command with the contribution it is most likely a memtomem rule
+      from before ownership markers existed, so the warning is sharpened to
+      guide the one-time cleanup — but the rule is **never** silently
+      overwritten.
+
+    Shared by Claude and Codex (identical event names + record shape); Gemini
+    remaps event/matcher names via :func:`_remap_for_gemini` first, then merges
+    the remapped record through here, so semantics stay identical across
+    runtimes. Contributions are expected to be marker-stamped before this call
+    (Claude/Codex via :func:`_stamp_status_markers`, Gemini via
+    :func:`_ensure_gemini_handler_names`).
     """
     warnings: list[str] = []
     merged = dict(existing) if existing else {}
@@ -176,38 +320,99 @@ def _merge_hooks_record(
             existing_hooks[event] = list(rules)
             continue
 
-        # Index existing rules by matcher for conflict detection. Keep
-        # the value as a list, not a single dict — Claude Code allows the
-        # same matcher to appear more than once under one event (e.g. a
-        # user keeping two PostToolUse rules without explicit matchers).
-        # Collapsing to a dict-of-rule means whichever same-matcher rule
-        # comes last silently shadows the rest, so byte-identical
-        # contributions can mismatch and emit a noisy warning.
         existing_rules: list = list(existing_hooks[event])
-        existing_by_matcher: dict[str, list[dict]] = {}
-        for rule in existing_rules:
-            if isinstance(rule, dict):
-                existing_by_matcher.setdefault(rule.get("matcher", ""), []).append(rule)
+        contrib_rules: list[dict] = [r for r in rules if isinstance(r, dict)]
+        # Contributions queued per matcher (FIFO, order preserved) so each
+        # memtomem-owned slot consumes exactly one — never double-replacing or
+        # dropping a contribution when canonical emits two rules per matcher.
+        contrib_by_matcher: dict[str, list[dict]] = {}
+        for c in contrib_rules:
+            contrib_by_matcher.setdefault(c.get("matcher", ""), []).append(c)
 
-        for rule in rules:
-            if not isinstance(rule, dict):
+        # Pass 1 — walk existing rules in place: a memtomem-owned rule is
+        # replaced by the next unconsumed contribution of the same matcher
+        # (memtomem updates its own rule across releases, issue #1110); an
+        # owned rule memtomem no longer emits is dropped; user rules are kept
+        # verbatim and in position.
+        result_rules: list = []
+        consumed: dict[str, int] = {}
+        placed_ids: set[int] = set()
+        replaced_any = False
+        for r in existing_rules:
+            if isinstance(r, dict) and _rule_is_memtomem_owned(r):
+                matcher = r.get("matcher", "")
+                queue = contrib_by_matcher.get(matcher, [])
+                idx = consumed.get(matcher, 0)
+                if idx < len(queue):
+                    c = queue[idx]
+                    consumed[matcher] = idx + 1
+                    placed_ids.add(id(c))
+                    result_rules.append(c)
+                    replaced_any = True
+                # else: no current contribution for this matcher → drop the
+                # stale memtomem rule.
                 continue
-            matcher = rule.get("matcher", "")
-            same_matcher = existing_by_matcher.get(matcher, [])
-            if same_matcher:
-                if any(existing == rule for existing in same_matcher):
-                    continue  # already in sync (with at least one)
-                label = f"{event}:{matcher}" if matcher else event
+            result_rules.append(r)
+
+        # Pass 2 — contributions not consumed by an owned slot merge additively
+        # against the *user* rules. Claude Code allows the same matcher to
+        # appear more than once, so user rules stay as a list (not collapsed).
+        for c in contrib_rules:
+            if id(c) in placed_ids:
+                continue
+            matcher = c.get("matcher", "")
+            same_user = [
+                r
+                for r in result_rules
+                if isinstance(r, dict)
+                and r.get("matcher", "") == matcher
+                and not _rule_is_memtomem_owned(r)
+            ]
+            if not same_user:
+                result_rules.append(c)
+                continue
+            if any(_rule_content_equal(u, c) for u in same_user):
+                # Already present ignoring our marker — leave the user's copy
+                # untouched rather than rewrite it just to add the marker.
+                continue
+            label = f"{event}:{matcher}" if matcher else event
+            contrib_commands = _rule_commands(c)
+            if contrib_commands and any(contrib_commands & _rule_commands(u) for u in same_user):
+                warnings.append(
+                    f"Hook rule '{label}' looks like a memtomem-managed rule "
+                    f"from a previous version (same command, no ownership "
+                    f"marker). Remove it, then re-run "
+                    f"`mm context sync --include=settings` to let memtomem "
+                    f"update it."
+                )
+            else:
                 warnings.append(
                     f"Hook rule '{label}' already exists in the target "
                     f"settings with different config. To use memtomem's "
                     f"version, remove the existing rule, then re-run "
                     f"`mm context sync --include=settings`."
                 )
-                continue
-            existing_rules.append(rule)
 
-        existing_hooks[event] = existing_rules
+        if replaced_any:
+            logger.debug("Updated memtomem-managed hook rule(s) for event %r", event)
+        existing_hooks[event] = result_rules
+
+    # Prune memtomem-owned rules from events the canonical no longer emits at
+    # all. The ownership marker makes them safe to remove; user rules under the
+    # same event are preserved, and an event left empty is dropped entirely.
+    for event in list(existing_hooks):
+        if event in contrib_hooks:
+            continue
+        rules = existing_hooks[event]
+        if not isinstance(rules, list):
+            continue
+        kept = [r for r in rules if not (isinstance(r, dict) and _rule_is_memtomem_owned(r))]
+        if len(kept) == len(rules):
+            continue
+        if kept:
+            existing_hooks[event] = kept
+        else:
+            del existing_hooks[event]
 
     merged["hooks"] = existing_hooks
     return merged, warnings
@@ -235,8 +440,8 @@ class ClaudeSettingsGenerator:
         existing: dict | None,
         contributions: dict,
     ) -> tuple[dict, list[str]]:
-        """Additive merge of record-format ``hooks``.  User rules always win."""
-        return _merge_hooks_record(existing, contributions)
+        """Ownership-aware merge of record-format ``hooks`` (ADR-0019)."""
+        return _merge_hooks_record(existing, _stamp_status_markers(contributions))
 
 
 _register(ClaudeSettingsGenerator())
@@ -399,11 +604,15 @@ def _ensure_gemini_handler_names(
       *milliseconds*. A numeric ``timeout`` is multiplied by 1000 so a canonical
       ``timeout: 30`` (30s) doesn't become 30ms on Gemini and kill the hook
       before it can run. ``bool`` (an ``int`` subclass) is left alone.
-    * **stable name.** Gemini exposes ``/hooks disable <name>``, so each handler
-      needs a *distinct* stable name. The slug alone is not enough: distinct
-      Claude matchers can collapse to one Gemini tool (``Edit`` and ``MultiEdit``
-      both map to ``replace``), which previously made two handlers share
-      ``memtomem-<event>-replace-0``. We hash the handler's **canonical
+    * **stable name (ownership marker).** Gemini exposes ``/hooks disable
+      <name>``, so each handler needs a *distinct* stable name; the
+      ``memtomem-`` prefix is also memtomem's ownership marker (ADR-0019), so a
+      re-sync can recognize and update its own Gemini rules (issue #1110). The
+      name is **always (re)stamped**, overriding any canonical-provided
+      ``name`` — memtomem owns the Gemini name. The slug alone is not enough:
+      distinct Claude matchers can collapse to one Gemini tool (``Edit`` and
+      ``MultiEdit`` both map to ``replace``), which would make two handlers
+      share ``memtomem-<event>-replace``. We hash the handler's **canonical
       identity** — the *original* (pre-remap) matcher, its position in the rule,
       and the command — *not* the remapped Gemini matcher. So ``Edit`` and
       ``MultiEdit`` get distinct names even when they run the *same* command,
@@ -422,14 +631,13 @@ def _ensure_gemini_handler_names(
         timeout = new_handler.get("timeout")
         if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
             new_handler["timeout"] = timeout * 1000
-        if not new_handler.get("name"):
-            command = new_handler.get("command")
-            command_str = command if isinstance(command, str) else ""
-            # NUL-delimited so the three fields can't be confused with each
-            # other (e.g. matcher "a" + command "b" vs matcher "a\x00b").
-            identity = f"{original_matcher}\x00{idx}\x00{command_str}"
-            digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:8]
-            new_handler["name"] = f"memtomem-{event}-{slug}-{digest}"
+        command = new_handler.get("command")
+        command_str = command if isinstance(command, str) else ""
+        # NUL-delimited so the three fields can't be confused with each
+        # other (e.g. matcher "a" + command "b" vs matcher "a\x00b").
+        identity = f"{original_matcher}\x00{idx}\x00{command_str}"
+        digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:8]
+        new_handler["name"] = f"memtomem-{event}-{slug}-{digest}"
         out.append(new_handler)
     return out
 
@@ -512,7 +720,7 @@ class CodexSettingsGenerator:
         contributions: dict,
     ) -> tuple[dict, list[str]]:
         filtered, drop_warnings = _filter_codex_events(contributions)
-        merged, merge_warnings = _merge_hooks_record(existing, filtered)
+        merged, merge_warnings = _merge_hooks_record(existing, _stamp_status_markers(filtered))
         return merged, drop_warnings + merge_warnings
 
 
