@@ -849,6 +849,8 @@
   "toast.request_failed": "Request failed",
   "toast.unexpected_response": "Unexpected response",
   "toast.sync_failed": "Sync failed: {error}",
+  "toast.sync_scope_changed": "Target scope changed during confirmation — sync cancelled. Re-run sync for the current scope.",
+  "toast.sync_targets_unavailable": "Sync cancelled — the server did not disclose which files the write would touch.",
   "toast.create_failed": "Create failed: {error}",
   "toast.refresh_complete": "Refresh complete",
   "toast.name_required": "Name is required",
@@ -873,7 +875,7 @@
   "confirm.hooks_replace_title": "Replace hook rule",
   "confirm.hooks_replace_msg": "Replace your \"{label}\" rule with memtomem's version?",
   "confirm.hooks_sync_title": "Sync settings",
-  "confirm.hooks_sync_msg": "Merge .memtomem/settings.json hooks into the installed runtimes' settings files (Claude, Codex, and Gemini where present)? This writes user-level config under your home directory.",
+  "confirm.hooks_sync_msg": "Merge .memtomem/settings.json hooks into these runtime settings files?\n{targets}",
 
   "settings.exclude_patterns.builtin_title": "Built-in (read-only)",
   "settings.exclude_patterns.builtin_hint": "cannot be disabled",

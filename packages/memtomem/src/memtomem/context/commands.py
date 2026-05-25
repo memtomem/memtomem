@@ -22,9 +22,11 @@ Claude's ``$ARGUMENTS`` placeholder and Gemini's ``{{args}}`` placeholder have
 the same semantics — both substitute the entire user-supplied argument string.
 When fanning out Claude-flavoured canonical → Gemini TOML we rewrite
 ``$ARGUMENTS`` → ``{{args}}``; the reverse import rewrites it back.
-``!{...}`` shell injection and ``@{...}`` file embed syntax are Gemini-only
-advanced features and remain out of scope — users who need them can hand-edit
-``.gemini/commands/*.toml`` directly.
+Codex custom prompts are not generated today, so Codex placeholder syntax is
+documented here only as migration context. ``!{...}`` shell injection and
+``@{...}`` file embed syntax are Gemini-only advanced features and remain out
+of scope — users who need them can hand-edit ``.gemini/commands/*.toml``
+directly.
 """
 
 from __future__ import annotations
