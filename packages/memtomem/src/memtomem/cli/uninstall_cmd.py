@@ -26,10 +26,12 @@ Design notes:
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shutil
 import sqlite3
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -305,10 +307,39 @@ def _probe_external_integrations() -> list[_External]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        # Substring detection — first-cut, false-positive-tolerant since
-        # this is detect-and-report. LOW 7 in the plan upgrades to a
-        # parsed mcpServers.memtomem key check in a follow-up.
-        if "memtomem" in text:
+
+        # ── parsed mcpServers.memtomem key check ──────────────────────────
+        # JSON files: check ``mcpServers.memtomem`` via json.loads.
+        # Codex TOML: check ``mcp_servers.memtomem`` via tomllib (TOML uses
+        #   snake_case dotted keys resolved to nested dicts by tomllib).
+        # Unparseable files are silently skipped — uninstall is a recovery
+        #   path and must not crash on malformed configs.
+        suffix = path.suffix.lower()
+        matched = False
+
+        if suffix == ".json":
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            else:
+                if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
+                    if "memtomem" in data["mcpServers"]:
+                        matched = True
+        elif suffix == ".toml":
+            try:
+                data = tomllib.loads(text)
+            except (tomllib.TOMLDecodeError, TypeError, ValueError):
+                pass
+            else:
+                # tomllib resolves TOML dotted keys into nested dicts, e.g.
+                # ``[mcp_servers.memtomem]`` becomes ``{"mcp_servers": {"memtomem": {...}}}``
+                # and ``[mcp_servers]`` with ``memtomem = {...}`` also nests.
+                if isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict):
+                    if "memtomem" in data["mcp_servers"]:
+                        matched = True
+
+        if matched:
             found.append(_External(path=path, reason="contains memtomem MCP entry"))
     return found
 

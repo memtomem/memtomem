@@ -81,6 +81,12 @@ def home(tmp_path, monkeypatch):
 
     h = tmp_path / "home"
     h.mkdir()
+    # The external-MCP probe also checks ``Path.cwd() / ".mcp.json"`` (the
+    # project-local Claude config). Pin cwd into the tmp home so the repo's
+    # own ``.mcp.json`` doesn't leak into the probe and trip the negative
+    # "not reported" assertions — CI runs pytest from the repo root, which
+    # ships a real ``.mcp.json``.
+    monkeypatch.chdir(h)
     xdg = tmp_path / "xdg_runtime"
     xdg.mkdir()
     os.chmod(xdg, 0o700)  # _runtime_paths validator requires owner-only
@@ -242,6 +248,171 @@ class TestExternalsDetectedNotModified:
         # external file untouched
         assert claude_json.exists()
         assert claude_json.read_text(encoding="utf-8") == original_text
+
+
+class TestProbeExternalParsedMCP:
+    """#975: parsed MCP config check avoids substring false positives."""
+
+    def _seed_state_dir(self, home: Path) -> Path:
+        state = home / ".memtomem"
+        state.mkdir()
+        (state / "config.json").write_text("{}", encoding="utf-8")
+        return state
+
+    def test_json_mcp_servers_memtomem_reported(self, home):
+        """Valid JSON with ``mcpServers.memtomem`` is still reported."""
+        self._seed_state_dir(home)
+        path = home / ".cursor" / "mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"mcpServers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" in result.output
+        assert "mcp.json" in result.output
+
+    def test_json_unrelated_text_not_reported(self, home):
+        """JSON that only mentions 'memtomem' in a comment/description is NOT reported."""
+        self._seed_state_dir(home)
+        path = home / ".cursor" / "mcp.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "other-server": {"command": "some-tool"},
+                    },
+                    "description": "This config works with memtomem for context",
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
+
+    def test_json_no_mcp_servers_key_not_reported(self, home):
+        """JSON without an ``mcpServers`` key is NOT reported even if
+        'memtomem' appears elsewhere in the config."""
+        self._seed_state_dir(home)
+        path = home / ".gemini" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"someOtherKey": {"memtomem": "mentioned-but-not-mcp"}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
+
+    def test_toml_mcp_servers_memtomem_reported(self, home):
+        """TOML (Codex config) with ``mcp_servers.memtomem`` is reported."""
+        import tomllib as _tl
+
+        self._seed_state_dir(home)
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True)
+        toml_text = 'command = "mm-server"\n[mcp_servers.memtomem]\n'
+        path.write_text(toml_text, encoding="utf-8")
+        # Sanity: tomllib round-trips
+        parsed = _tl.loads(toml_text)
+        assert "mcp_servers" in parsed
+        assert "memtomem" in parsed["mcp_servers"]
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" in result.output
+        assert "config.toml" in result.output
+
+    def test_toml_unrelated_text_not_reported(self, home):
+        """TOML with 'memtomem' only in a comment or non-MCP section is NOT reported."""
+        self._seed_state_dir(home)
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True)
+        # "memtomem" appears only in a comment and in an unrelated value
+        path.write_text(
+            "# This config used to reference memtomem\n"
+            "[unrelated]\n"
+            'note = "not about memtomem here"\n',
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        # Must NOT be reported — "memtomem" is only in comment / unrelated value,
+        # not under a parsed mcp_servers key.
+        assert "External integrations" not in result.output
+
+    def test_toml_no_mcp_servers_section_not_reported(self, home):
+        """TOML with ``memtomem = true`` at top level (not under mcp_servers)
+        is NOT reported — the parsed check only looks under ``mcp_servers``."""
+        self._seed_state_dir(home)
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text("memtomem = true\n", encoding="utf-8")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
+
+    def test_invalid_json_ignored_no_crash(self, home):
+        """Malformed JSON must NOT crash uninstall — uninstall is a recovery path."""
+        self._seed_state_dir(home)
+        path = home / ".claude.json"
+        path.write_text("{this is not valid json //}", encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        # The substring "memtomem" isn't in the bad json, so no external is reported
+        assert "External integrations" not in result.output
+
+    def test_invalid_toml_ignored_no_crash(self, home):
+        """Malformed TOML must NOT crash uninstall — parsed check fails, no fallback."""
+        self._seed_state_dir(home)
+        path = home / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True)
+        path.write_text("[mcp_servers\n  memtomem = bad\n", encoding="utf-8")
+
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        # Invalid TOML → parse fails → silently skipped. No crash, no false report.
+        assert "External integrations" not in result.output
+
+    def test_windsurf_mcp_config_json_parsed(self, home):
+        """Windsurf ``mcp_config.json`` is a JSON file and uses the parsed path."""
+        self._seed_state_dir(home)
+        path = home / ".codeium" / "windsurf" / "mcp_config.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"mcpServers": {"memtomem": {"command": "mm-server"}}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" in result.output
+        assert "mcp_config.json" in result.output
+
+    def test_gemini_settings_json_parsed(self, home):
+        """Gemini ``settings.json`` uses the parsed JSON path.
+        No ``mcpServers`` key → NOT reported, even though 'memtomem' appears in text."""
+        self._seed_state_dir(home)
+        path = home / ".gemini" / "settings.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"gemini": {"version": "1.0", "description": "uses memtomem"}}),
+            encoding="utf-8",
+        )
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
+
+    def test_nonexistent_files_skipped_silently(self, home):
+        """Files that don't exist are simply skipped — no error, no output."""
+        self._seed_state_dir(home)
+        # No external files created → _probe must return empty list.
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert "External integrations" not in result.output
 
 
 # -------------------------------------------------------------------- 8
