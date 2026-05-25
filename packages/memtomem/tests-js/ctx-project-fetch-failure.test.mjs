@@ -136,3 +136,234 @@ describe('_ctxFetchProjects — failure-shape signal split (#1080)', () => {
     expect(toasts[0].msg.length).toBeGreaterThan(0);
   });
 });
+
+/* Regression guard for #1101 — ``_ctxFetchProjects`` runs from three
+ * independent panel-load paths (overview, settings projects, hooks sync), so
+ * a single persistent outage must not stack one toast per call. Symmetric
+ * pin: one cell proves identical failures collapse to a single toast, the
+ * other proves the memo clears on recovery so a *later* outage still notifies
+ * (a dedup with no clear would over-suppress). Mutation that bites: dropping
+ * the ``_ctxProjectsFetchWarnKey`` memo → the first cell sees 2 toasts.
+ */
+describe('_ctxFetchProjects — failure-toast de-dup across panel loads (#1101)', () => {
+  it('two consecutive identical 503s surface a single toast', async () => {
+    const { window, toasts } = await bootWithToastSpy();
+    installProjectsFetch(window, () => jsonRes({ detail: 'store unavailable' }, 503));
+    await window._ctxFetchProjects(); // e.g. overview panel
+    await window._ctxFetchProjects(); // e.g. settings / hooks-sync panel
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].msg).toContain('store unavailable');
+  });
+
+  it('re-notifies after the outage clears and a distinct failure returns', async () => {
+    const { window, toasts } = await bootWithToastSpy();
+    let respond = () => jsonRes({ detail: 'store unavailable' }, 503);
+    installProjectsFetch(window, () => respond());
+    await window._ctxFetchProjects();          // toast #1 (503)
+    respond = () => jsonRes({ scopes: REAL_SCOPES });
+    await window._ctxFetchProjects();          // recovery — clears the memo
+    respond = () => jsonRes({ detail: 'store unavailable' }, 503);
+    await window._ctxFetchProjects();          // toast #2 (fresh outage)
+    expect(toasts).toHaveLength(2);
+  });
+});
+
+/* Regression guard for #1102 — normalization runs only on an *authoritative*
+ * outcome, gated on the absence of a "loud" failure toast (``warn``):
+ *
+ *   - 5xx / parse (toast)  → NOT authoritative; skip normalize so a transient
+ *     failure can't persist a Server-CWD demotion. localStorage + the in-memory
+ *     active id survive and recovery restores the selection.
+ *   - 404 (silent)         → endpoint absent / older-deploy; normalize as
+ *     before so a now-stale ``proj-*`` id is cleared (other consumers such as
+ *     ``_ctxRestoreDraft`` key off ``_ctxActiveScopeId``).
+ *
+ * Symmetric pin per ``feedback_pin_invert_symmetric_assertion.md`` — the two
+ * cells pull in opposite directions, so gating on the wrong signal (skip-all
+ * or normalize-all) flips exactly one of them red. Mutation that bites the
+ * 503 cell: normalizing against the synthetic scope rewrites the persisted id
+ * to '' (post-503 assertion red).
+ */
+describe('_ctxFetchProjects — active scope normalize gated on failure shape (#1102)', () => {
+  function mountSelect(window) {
+    const wrap = window.document.createElement('label');
+    wrap.className = 'ctx-project-switcher';
+    wrap.dataset.type = 'overview';
+    const select = window.document.createElement('select');
+    select.className = 'ctx-project-select';
+    for (const scope of REAL_SCOPES) {
+      const opt = window.document.createElement('option');
+      opt.value = scope.scope_id;
+      opt.textContent = scope.label;
+      select.appendChild(opt);
+    }
+    wrap.appendChild(select);
+    window.document.body.appendChild(wrap);
+    window._ctxWireProjectControls();
+    return select;
+  }
+
+  function dispatchChange(select, value) {
+    select.value = value;
+    select.dispatchEvent(new select.ownerDocument.defaultView.Event('change', { bubbles: true }));
+  }
+
+  it('keeps the persisted active scope across a 503 and restores it on recovery', async () => {
+    const { window } = await bootWithToastSpy();
+    let respond = () => jsonRes({ scopes: REAL_SCOPES });
+    installProjectsFetch(window, () => respond());
+    // Selecting a scope triggers a section reload; stub it out.
+    window.loadCtxOverview = async () => {};
+
+    // Seed the active scope to a real added project via the same code path a
+    // user exercises — module-scoped ``_ctxActiveScopeId`` is not pokable from
+    // outside (mirrors ctx-project-switch-server-cwd.test.mjs).
+    await window._ctxFetchProjects();
+    const select = mountSelect(window);
+    dispatchChange(select, 'proj-abc');
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+
+    // Transient 5xx — the synthetic fallback must NOT overwrite the selection.
+    respond = () => jsonRes({ detail: 'store unavailable' }, 503);
+    await window._ctxFetchProjects();
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+
+    // Endpoint recovers — proj-abc is authoritative again and stays selected.
+    respond = () => jsonRes({ scopes: REAL_SCOPES });
+    const recovered = await window._ctxFetchProjects();
+    expect(recovered.scopes).toHaveLength(2);
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+  });
+
+  it('clears a now-stale active scope on a silent 404 fallback (older-deploy contract)', async () => {
+    const { window } = await bootWithToastSpy();
+    let respond = () => jsonRes({ scopes: REAL_SCOPES });
+    installProjectsFetch(window, () => respond());
+    window.loadCtxOverview = async () => {};
+
+    await window._ctxFetchProjects();
+    const select = mountSelect(window);
+    dispatchChange(select, 'proj-abc');
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+
+    // 404 is the silent older-deploy bucket — the endpoint is genuinely absent,
+    // not transiently failing, so the stale proj-abc selection must be cleared
+    // to Server-CWD (matches pre-#1099 behavior; keeps _ctxRestoreDraft & other
+    // active-id consumers from leaking a dangling scope). Opposite of the 503
+    // cell above: gating normalization on the wrong signal flips one of the two.
+    respond = () => jsonRes({ detail: 'not found' }, 404);
+    await window._ctxFetchProjects();
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('');
+  });
+
+  it('keys conflict drafts under the effective Server-CWD scope while the preserved id is uncached', async () => {
+    // Consequence of #1102 preserving the active id across a 503: requests
+    // collapse to Server-CWD (_ctxScopeParam omits scope_id for an uncached id)
+    // but the draft key must collapse too, or an outage draft cross-contaminates
+    // the real project after recovery. Both now route through _ctxEffectiveScopeId.
+    const { window } = await bootWithToastSpy();
+    let respond = () => jsonRes({ scopes: REAL_SCOPES });
+    installProjectsFetch(window, () => respond());
+    window.loadCtxOverview = async () => {};
+
+    await window._ctxFetchProjects();
+    const select = mountSelect(window);
+    dispatchChange(select, 'proj-abc');
+    // proj-abc is authoritative → draft keyed under it, and the request sends it.
+    expect(window._ctxStashKey('skills', 'foo')).toContain('proj-abc');
+
+    // Transient 503 — selection preserved in memory, cache is synthetic. The
+    // request silently falls back to Server-CWD, so the draft key must too.
+    // Mutation that bites: keying _ctxStashKey off the raw _ctxActiveScopeId
+    // leaves 'proj-abc' in the outage key and this flips red.
+    respond = () => jsonRes({ detail: 'store unavailable' }, 503);
+    await window._ctxFetchProjects();
+    expect(window._ctxScopeParam()).toBe('');                       // request → Server-CWD
+    expect(window._ctxStashKey('skills', 'foo')).not.toContain('proj-abc');
+    expect(window._ctxStashKey('skills', 'foo')).toContain('__default__'); // draft → Server-CWD too
+  });
+});
+
+/* Regression guard for the conflict-draft lifecycle consequence of #1102
+ * (Codex round-3 Major). Because the active id is preserved across a transient
+ * outage, the *effective* scope can flip back mid-editor-session when the
+ * projects endpoint recovers. Draft stash/restore/clear must therefore key off
+ * a value pinned once at editor mount (``detailEl.dataset.draftKey``), not a
+ * live recomputation — otherwise a draft stashed under Server-CWD during the
+ * outage is cleared under the recovered project's key and orphaned, only to
+ * resurrect after the user already discarded/saved. Mutation that bites:
+ * reverting any clear call site to recompute via the live scope flips the
+ * final assertion red (the __default__ draft survives the Cancel).
+ */
+describe('conflict-draft key pinned at editor mount (#1102 lifecycle)', () => {
+  function installCombinedFetch(window, getProjects) {
+    const upstream = window.fetch;
+    window.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.startsWith('/api/context/projects')) return getProjects();
+      if (url.endsWith('/diff')) return jsonRes({ runtimes: [], canonical_content: '# demo\n' });
+      if (url.match(/\/api\/context\/[^/]+\/[^/]+$/)) {
+        return jsonRes({ name: 'demo', content: '# demo\n', mtime_ns: '1', files: [], fields: {} });
+      }
+      return upstream(input);
+    };
+  }
+
+  function mountSelect(window) {
+    const wrap = window.document.createElement('label');
+    wrap.className = 'ctx-project-switcher';
+    wrap.dataset.type = 'overview';
+    const select = window.document.createElement('select');
+    select.className = 'ctx-project-select';
+    for (const scope of REAL_SCOPES) {
+      const opt = window.document.createElement('option');
+      opt.value = scope.scope_id;
+      opt.textContent = scope.label;
+      select.appendChild(opt);
+    }
+    wrap.appendChild(select);
+    window.document.body.appendChild(wrap);
+    window._ctxWireProjectControls();
+    return select;
+  }
+
+  function dispatchChange(select, value) {
+    select.value = value;
+    select.dispatchEvent(new select.ownerDocument.defaultView.Event('change', { bubbles: true }));
+  }
+
+  it('clears the draft under the mount-pinned key even after the effective scope recovers', async () => {
+    const { window } = await bootWithToastSpy();
+    let projectsResp = () => jsonRes({ scopes: REAL_SCOPES });
+    installCombinedFetch(window, () => projectsResp());
+    window.loadCtxOverview = async () => {};
+
+    // Enter the #1102 state: proj-abc selected, then a 503 collapses the
+    // effective scope to Server-CWD while the selection is preserved.
+    await window._ctxFetchProjects();
+    dispatchChange(mountSelect(window), 'proj-abc');
+    projectsResp = () => jsonRes({ detail: 'store unavailable' }, 503);
+    await window._ctxFetchProjects();
+    expect(window._ctxStashKey('skills', 'demo')).toContain('__default__');
+
+    // Mount the editor during the outage — the draft key is pinned now.
+    await window.loadCtxDetail('skills', 'demo');
+    const detailEl = window.document.getElementById('ctx-skills-detail');
+    const pinned = detailEl.dataset.draftKey;
+    expect(pinned).toContain('__default__');
+    window._ctxStashDraft(pinned, 'unsaved edits'); // simulate a 409 stash
+    expect(window.sessionStorage.getItem(pinned)).toBe('unsaved edits');
+
+    // Projects recovers mid-session — the *live* effective key is proj-abc now,
+    // but the editor's pinned key must not move.
+    projectsResp = () => jsonRes({ scopes: REAL_SCOPES });
+    await window._ctxFetchProjects();
+    expect(window._ctxStashKey('skills', 'demo')).toContain('proj-abc');
+    expect(detailEl.dataset.draftKey).toBe(pinned);
+
+    // Cancel cleanup must remove the pinned (__default__) draft, not the live
+    // proj-abc key — otherwise the outage draft is orphaned and resurrects.
+    detailEl.querySelector('.ctx-edit-cancel').click();
+    expect(window.sessionStorage.getItem(pinned)).toBeNull();
+  });
+});

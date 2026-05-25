@@ -126,6 +126,16 @@ const _CTX_ACTIVE_SCOPE_KEY = 'memtomem_ctx_active_scope_id';
 let _ctxActiveScopeId = '';
 let _ctxProjectsCache = [];
 
+// De-dup memo for the `/api/context/projects` failure toast (#1101).
+// ``_ctxFetchProjects`` runs from three independent panel-load paths
+// (overview, settings projects, hooks sync), so a single persistent outage
+// would otherwise stack one near-identical toast per path as the user
+// navigates. We remember the last fired ``kind:status:detail`` key and skip
+// re-toasting an identical failure; a successful (or silent-404) fetch clears
+// the memo so a *later*, distinct outage notifies again instead of being
+// swallowed by a stale key.
+let _ctxProjectsFetchWarnKey = null;
+
 try {
   _ctxActiveScopeId = localStorage.getItem(_CTX_ACTIVE_SCOPE_KEY) || '';
 } catch {
@@ -137,14 +147,29 @@ function _ctxTargetScopeParam() {
   return `target_scope=${encodeURIComponent(_ctxTargetScope)}`;
 }
 
-function _ctxScopeParam(scopeId = _ctxActiveScopeId) {
+// The scope a request *effectively* targets, as a bare id ('' === Server-CWD).
+// An active id that isn't an available, non-Server-CWD scope in the cache —
+// Server-CWD itself, a now-``missing`` scope, or a selection preserved across
+// a transient projects-fetch outage where only the synthetic Server-CWD scope
+// is cached (#1102) — collapses to Server-CWD. This is the single source of
+// truth for "what scope are we really on"; ``_ctxScopeParam`` (request URL) and
+// ``_ctxStashKey`` (conflict-draft key) both route through it so they can never
+// disagree — otherwise a draft saved while the request silently fell back to
+// Server-CWD would be keyed under the preserved project id and leak across
+// scopes after recovery.
+function _ctxEffectiveScopeId(scopeId = _ctxActiveScopeId) {
   if (!scopeId) return '';
   const activeScope = (_ctxProjectsCache || []).find(scope =>
     scope && scope.scope_id === scopeId && !scope.missing);
+  if (!activeScope || _ctxScopeIsServerCwd(activeScope)) return '';
+  return scopeId;
+}
+
+function _ctxScopeParam(scopeId = _ctxActiveScopeId) {
   // Server CWD is the route default. Leaving scope_id off preserves the
   // legacy single-project URL shape while still sending ids for added projects.
-  if (!activeScope || _ctxScopeIsServerCwd(activeScope)) return '';
-  return `scope_id=${encodeURIComponent(scopeId)}`;
+  const eff = _ctxEffectiveScopeId(scopeId);
+  return eff ? `scope_id=${encodeURIComponent(eff)}` : '';
 }
 
 function _ctxWithTargetScope(url, opts = {}) {
@@ -236,9 +261,37 @@ async function _ctxFetchProjects() {
     };
   }
   _ctxProjectsCache = data.scopes || [];
-  _ctxNormalizeActiveScope(_ctxProjectsCache);
-  if (warn && typeof showToast === 'function') {
-    showToast(t('settings.ctx.projects_fetch_failed', { error: warn.detail }), 'error');
+  // Normalize only when the outcome is *authoritative* — i.e. exactly when we
+  // did NOT raise a "loud" failure toast (``warn``). Three cases:
+  //   - success (real scopes)          → normalize against the real list.
+  //   - 404 / network throw (silent)   → endpoint absent / older deploy; the
+  //     project list genuinely isn't available, so clear a now-stale active id
+  //     to Server-CWD (preserves the pre-#1099 behavior — other consumers like
+  //     ``_ctxRestoreDraft`` key off ``_ctxActiveScopeId`` and would otherwise
+  //     leak a dangling ``proj-*`` selection).
+  //   - 5xx / non-404 4xx / parse error → "endpoint exists but failing"; the
+  //     synthetic one-element list is NOT authoritative about whether the
+  //     user's project still exists, so skip normalization. Otherwise a
+  //     transient failure would rewrite the active id to '' and persist that
+  //     demotion to localStorage — silently dropping a still-valid selection
+  //     the toast itself implied was temporary, that the next successful fetch
+  //     would restore (#1102). ``_ctxScopeParam`` already omits ``scope_id``
+  //     when the active id is absent from the cache, so requests during the
+  //     degraded window safely fall back to the Server-CWD default.
+  if (!warn) _ctxNormalizeActiveScope(_ctxProjectsCache);
+  if (warn) {
+    // De-dup so a persistent outage doesn't stack one toast per panel-load
+    // path (#1101). Key on the failure shape, not just the message, so a
+    // status change still surfaces.
+    const warnKey = `${warn.kind}:${warn.status || ''}:${warn.detail}`;
+    if (warnKey !== _ctxProjectsFetchWarnKey && typeof showToast === 'function') {
+      showToast(t('settings.ctx.projects_fetch_failed', { error: warn.detail }), 'error');
+    }
+    _ctxProjectsFetchWarnKey = warnKey;
+  } else {
+    // Clean fetch (real scopes) or a silent 404 fallback — reset the memo so a
+    // future, distinct failure is not suppressed by a stale key.
+    _ctxProjectsFetchWarnKey = null;
   }
   return data;
 }
@@ -1970,32 +2023,45 @@ async function loadCtxList(type) {
 // destroy work — the next mount of the same detail rehydrates it.
 
 function _ctxStashKey(type, name) {
-  return `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(_ctxActiveScopeId || '__default__')}:${encodeURIComponent(name)}`;
+  // Key drafts under the *effective* scope, not the raw active id, so the
+  // draft namespace always matches the scope the request actually used. During
+  // a transient outage the active id is preserved (#1102) but requests fall
+  // back to Server-CWD; keying off the raw id here would cross-contaminate the
+  // real project's drafts after recovery.
+  const scopeToken = _ctxEffectiveScopeId() || '__default__';
+  return `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(scopeToken)}:${encodeURIComponent(name)}`;
 }
-function _ctxStashDraft(type, name, content) {
-  try { sessionStorage.setItem(_ctxStashKey(type, name), content); } catch (_e) { /* quota / private mode */ }
+// Stash / restore / clear all take the *pinned* key the editor captured at
+// mount (``detailEl.dataset.draftKey``) rather than recomputing it live. The
+// effective scope can shift underneath an open editor — e.g. a transient
+// projects-fetch outage that preserved the selection (#1102) recovers
+// mid-conflict — and recomputing at clear time would target a different
+// namespace than stash time, orphaning the draft (and resurrecting it later
+// after the user already discarded/saved). One key per editor session.
+function _ctxStashDraft(key, content) {
+  try { sessionStorage.setItem(key, content); } catch (_e) { /* quota / private mode */ }
 }
-function _ctxRestoreDraft(type, name) {
+function _ctxRestoreDraft(key, type, name) {
   try {
-    const key = _ctxStashKey(type, name);
     const scopedDraft = sessionStorage.getItem(key);
     if (scopedDraft != null) return scopedDraft;
-    const activeScope = (_ctxProjectsCache || []).find(scope =>
-      scope && scope.scope_id === _ctxActiveScopeId && !scope.missing);
-    if (_ctxActiveScopeId && !_ctxScopeIsServerCwd(activeScope)) return null;
+    // Only fall back to the pre-scope legacy buffer when we are *effectively*
+    // on Server-CWD (the legacy unscoped key's origin). A real project — or an
+    // id that resolves to a real project — must not adopt the unscoped draft.
+    if (_ctxEffectiveScopeId()) return null;
     const legacyKey = `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
     return sessionStorage.getItem(legacyKey);
   } catch (_e) {
     return null;
   }
 }
-function _ctxClearDraft(type, name) {
+function _ctxClearDraft(key, type, name) {
   const legacyKey = `m2m-ctx-conflict-buffer:${type}:${encodeURIComponent(name)}`;
   try {
-    sessionStorage.removeItem(_ctxStashKey(type, name));
+    sessionStorage.removeItem(key);
     sessionStorage.removeItem(legacyKey);
   } catch (_e) {
-    /* */ 
+    /* */
   }
 }
 
@@ -2090,13 +2156,15 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
   // sending ``fresh.mtime_ns`` would make the two values nearly equal
   // and defeat the audit trail's "what was being overridden" purpose.
   //
-  // Stash early so the buffer survives an Escape-out / tab close.
-  _ctxStashDraft(type, name, userBuffer);
+  // Stash early so the buffer survives an Escape-out / tab close. Use the key
+  // pinned at editor mount so a mid-conflict scope shift can't orphan it.
+  const draftKey = detailEl.dataset.draftKey || _ctxStashKey(type, name);
+  _ctxStashDraft(draftKey, userBuffer);
   const fresh = await _ctxFetchFresh(type, name);
   if (fresh == null) return;
   const choice = await _ctxResolveConflict(userBuffer, fresh.content);
   if (choice === 'reload') {
-    _ctxClearDraft(type, name);
+    _ctxClearDraft(draftKey, type, name);
     loadCtxDetail(type, name);
     return;
   }
@@ -2132,7 +2200,7 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
       if (result.name) {
         showToast(t('settings.ctx.conflict_force_done'), 'warning');
         detailEl.dataset.mtimeNs = result.mtime_ns || '';
-        _ctxClearDraft(type, name);
+        _ctxClearDraft(draftKey, type, name);
         loadCtxDetail(type, name);
       }
     } catch (err) {
@@ -2365,12 +2433,19 @@ async function loadCtxDetail(type, name, opts = {}) {
     detailEl.innerHTML = html;
     // mtime_ns is a string (JS Number can't safely represent ns epochs).
     detailEl.dataset.mtimeNs = data.mtime_ns || '';
+    // Pin the conflict-draft key for this editor session. The effective scope
+    // can shift while the editor is open (a transient projects-fetch outage
+    // that preserved the selection recovers, #1102), so every stash/restore/
+    // clear below keys off this captured value instead of recomputing it —
+    // otherwise a draft stashed during the outage would be cleared under the
+    // recovered project's key and orphaned.
+    detailEl.dataset.draftKey = _ctxStashKey(type, name);
 
     // Draft restore (issue #763): if the user closed a conflict modal
     // without resolving (Escape / backdrop / tab close-and-reopen) their
     // unsaved buffer is in sessionStorage. Rehydrate the textarea, open
     // the edit pane, and toast so they know we kept their work.
-    const stashed = _ctxRestoreDraft(type, name);
+    const stashed = _ctxRestoreDraft(detailEl.dataset.draftKey, type, name);
     if (stashed != null) {
       const ta = detailEl.querySelector('#ctx-edit-content');
       if (ta) ta.value = stashed;
@@ -2449,7 +2524,7 @@ async function loadCtxDetail(type, name, opts = {}) {
       // mount doesn't re-restore a draft the user just walked away from.
       const banner = detailEl.querySelector('.ctx-conflict-banner');
       if (banner) { banner.hidden = true; banner.innerHTML = ''; }
-      _ctxClearDraft(type, name);
+      _ctxClearDraft(detailEl.dataset.draftKey, type, name);
     });
 
     // Save (issue #763: 409 opens conflict dialog instead of silent reload).
@@ -2485,7 +2560,7 @@ async function loadCtxDetail(type, name, opts = {}) {
           showToast(t('settings.ctx.save_success').replace('{name}', name));
           detailEl.dataset.mtimeNs = result.mtime_ns || '';
           // Clear any stashed draft now that the buffer is durable on disk.
-          _ctxClearDraft(type, name);
+          _ctxClearDraft(detailEl.dataset.draftKey, type, name);
           loadCtxDetail(type, name);
         }
       } catch (err) {
