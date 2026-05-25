@@ -166,7 +166,7 @@ Labels that affect triage:
   — exempt from the stale sweep.
 - `needs-cla` — the CLA workflow has not yet recorded a signature; merge is
   blocked until the workflow re-checks (see CLA section below).
-- `good-first-issue` — scoped to ≤3 files and no public API changes; check
+- `good first issue` — scoped to ≤3 files and no public API changes; check
   the comments for an existing claim before starting work.
 
 If your PR is time-sensitive (security, regression on `main`, release
