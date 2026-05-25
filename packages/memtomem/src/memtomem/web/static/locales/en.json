@@ -873,7 +873,7 @@
   "confirm.hooks_replace_title": "Replace hook rule",
   "confirm.hooks_replace_msg": "Replace your \"{label}\" rule with memtomem's version?",
   "confirm.hooks_sync_title": "Sync settings",
-  "confirm.hooks_sync_msg": "Merge .memtomem/settings.json hooks into the installed runtimes' settings files (Claude, Codex, and Gemini where present)? This writes user-level config under your home directory.",
+  "confirm.hooks_sync_msg": "Merge .memtomem/settings.json hooks into these runtime settings files?\n{targets}",
 
   "settings.exclude_patterns.builtin_title": "Built-in (read-only)",
   "settings.exclude_patterns.builtin_hint": "cannot be disabled",

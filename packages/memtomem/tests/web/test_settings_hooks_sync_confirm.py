@@ -8,12 +8,12 @@ it, the Web UI bypasses the host-write gate the audit P0 was designed to
 enforce. This spec pins the modal + the badge transition that follows a
 successful sync.
 
-The handler's contract (``static/settings-hooks-watchdog.js:158-188``):
+The handler's contract (``static/settings-hooks-watchdog.js``):
 
-* ``showConfirm`` first; cancel returns without firing the POST.
-* On confirm, ``POST /api/settings-sync`` (with CSRF if available).
-* The POST response is parsed for ``data.results[].warnings`` only —
-  ``status`` is **not** read from the POST body.
+* ``POST /api/settings-sync`` first with ``allow_host_writes: false``.
+* If the server returns host targets, ``showConfirm`` lists those targets.
+* On confirm, ``POST /api/settings-sync`` again with ``allow_host_writes: true``.
+* The POST response is parsed for per-runtime status, warnings, and targets.
 * After the POST, ``loadHooksSync()`` (line 184) fires a fresh
   ``GET /api/settings-sync`` and the badge is rendered from
   ``data.status`` of the GET response (line 36-43).
@@ -142,21 +142,40 @@ def _stub_settings_sync(
     return state
 
 
-def test_hooks_sync_cancel_fires_no_post(page, mm_web_url: str) -> None:
+def _needs_confirmation_payload(*targets: str) -> dict:
+    return {
+        "results": [
+            {
+                "name": f"runtime_{idx}",
+                "status": "needs_confirmation",
+                "reason": "Refusing host write outside the project root",
+                "warnings": [],
+                "target": target,
+            }
+            for idx, target in enumerate(targets)
+        ],
+        "duplicate_tier_warnings": [],
+    }
+
+
+def test_hooks_sync_cancel_fires_no_host_write_post(page, mm_web_url: str) -> None:
     """S2-a: clicking Cancel on the Hooks Sync confirm dialog must fire
-    zero ``POST /api/settings-sync`` requests. Audit P0 host-write trust
-    gate — without this guard, every Sync Now click writes to
-    ``~/.claude/settings.json`` unconditionally.
+    no ``allow_host_writes: true`` request. The initial probe POST is safe:
+    it asks the server for the exact host paths before the trust gate opens.
 
     Negative half of the symmetric cancel/confirm pair.
     """
     install_default_stubs(page)
 
-    post_calls: list[str] = []
+    post_bodies: list[dict] = []
 
     def _post(route):
-        post_calls.append(route.request.url)
-        route.fulfill(status=200, content_type="application/json", body="{}")
+        post_bodies.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_needs_confirmation_payload("/fake/.claude/settings.json")),
+        )
 
     # Cancel never POSTs, so the GET payload only ever needs to reflect the
     # cold-mount ``out_of_sync`` state.
@@ -183,8 +202,8 @@ def test_hooks_sync_cancel_fires_no_post(page, mm_web_url: str) -> None:
         timeout=2_000,
     )
 
-    assert post_calls == [], (
-        f"Cancel on Sync Now must not POST to /api/settings-sync, got {post_calls!r}"
+    assert post_bodies == [{"allow_host_writes": False}], (
+        f"Cancel must stop before an allow_host_writes POST, got {post_bodies!r}"
     )
 
 
@@ -205,9 +224,18 @@ def test_hooks_sync_confirm_transitions_badge_to_in_sync(page, mm_web_url: str) 
     install_default_stubs(page)
 
     post_calls: list[str] = []
+    post_count = {"n": 0}
 
     def _post(route):
+        post_count["n"] += 1
         post_calls.append(route.request.url)
+        if post_count["n"] == 1:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_needs_confirmation_payload("/fake/.claude/settings.json")),
+            )
+            return
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -312,19 +340,27 @@ def test_hooks_sync_confirm_transitions_badge_to_in_sync(page, mm_web_url: str) 
 
 
 def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -> None:
-    """Issue #962: the Sync Now confirm modal IS the host-write trust
-    gate, so the resulting POST must carry ``{"allow_host_writes": true}``
-    rather than an empty body. Without it the server returns
-    ``needs_confirmation`` for the user-scope ``~/.claude/settings.json``
-    write and the UI silently shows ``sync_success`` — the exact silent
-    failure #962 calls out.
+    """The confirm modal must disclose every returned host-write target and
+    only then retry with ``{"allow_host_writes": true}``.
     """
     install_default_stubs(page)
 
-    post_bodies: list[str] = []
+    targets = [
+        "/fake/.claude/settings.json",
+        "/fake/.codex/hooks.json",
+        "/fake/.gemini/settings.json",
+    ]
+    post_bodies: list[dict] = []
 
     def _post(route):
-        post_bodies.append(route.request.post_data or "")
+        post_bodies.append(json.loads(route.request.post_data or "{}"))
+        if len(post_bodies) == 1:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_needs_confirmation_payload(*targets)),
+            )
+            return
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -354,6 +390,11 @@ def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -
         "() => !document.getElementById('confirm-modal').hidden",
         timeout=2_000,
     )
+    confirm_text = page.locator("#confirm-message").text_content() or ""
+    for target in targets:
+        assert target in confirm_text, (
+            f"confirm modal must disclose host-write target {target!r}, got {confirm_text!r}"
+        )
     page.locator("#confirm-ok-btn").click()
     # Wait for the badge to transition to in_sync — this happens after
     # the POST + post-sync GET reload, so by then the route handler has
@@ -367,10 +408,11 @@ def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -
         timeout=5_000,
     )
 
-    assert post_bodies, "POST must have fired after confirm"
-    body = json.loads(post_bodies[0])
-    assert body == {"allow_host_writes": True}, (
-        f"Sync Now POST body must be {{'allow_host_writes': true}}, got {body!r}"
+    assert post_bodies == [
+        {"allow_host_writes": False},
+        {"allow_host_writes": True},
+    ], (
+        f"Sync Now must probe first, then retry with host writes after confirm; got {post_bodies!r}"
     )
 
 
@@ -418,25 +460,14 @@ def test_hooks_sync_needs_confirmation_surfaces_banner(page, mm_web_url: str) ->
     explicitly calls out.
     """
     install_default_stubs(page)
+    post_count = {"n": 0}
 
     def _post(route):
+        post_count["n"] += 1
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps(
-                {
-                    "results": [
-                        {
-                            "name": "claude_settings",
-                            "status": "needs_confirmation",
-                            "reason": "Refusing host write outside the project root",
-                            "warnings": [],
-                            "target": "/fake/.claude/settings.json",
-                        }
-                    ],
-                    "duplicate_tier_warnings": [],
-                }
-            ),
+            body=json.dumps(_needs_confirmation_payload("/fake/.claude/settings.json")),
         )
 
     _stub_settings_sync(page, _OUT_OF_SYNC_GET, post_handler=_post)
@@ -488,8 +519,17 @@ def test_hooks_sync_runtime_error_not_reported_as_success(page, mm_web_url: str)
     Codex/Gemini statuses (mirror of the needs_confirmation pin above).
     """
     install_default_stubs(page)
+    post_count = {"n": 0}
 
     def _post(route):
+        post_count["n"] += 1
+        if post_count["n"] == 1:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_needs_confirmation_payload("/fake/.claude/settings.json")),
+            )
+            return
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -546,26 +586,3 @@ def test_hooks_sync_runtime_error_not_reported_as_success(page, mm_web_url: str)
         assert msg != "Sync completed", (
             f"a runtime error must NOT show the sync_success toast, got {msg!r}"
         )
-
-
-def test_hooks_sync_confirm_discloses_multiruntime_targets(page, mm_web_url: str) -> None:
-    """ADR-0018: the confirm modal is the host-write trust gate, and the click
-    handler authorizes ``allow_host_writes`` for Codex + Gemini too — not just
-    ``~/.claude``. The modal copy must therefore disclose all three runtimes so
-    the user isn't approving a Claude-only write while silently getting three.
-    """
-    install_default_stubs(page)
-    _stub_settings_sync(page, _OUT_OF_SYNC_GET)
-
-    page.goto(mm_web_url)
-    _open_hooks_sync(page)
-
-    page.locator("#hooks-sync-btn").click()
-    page.wait_for_function(
-        "() => !document.getElementById('confirm-modal').hidden",
-        timeout=2_000,
-    )
-    msg = page.locator("#confirm-message").text_content() or ""
-    assert "Codex" in msg and "Gemini" in msg, (
-        f"consent modal must disclose all fan-out runtimes (Codex/Gemini), got {msg!r}"
-    )

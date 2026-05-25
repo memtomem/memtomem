@@ -873,7 +873,7 @@
   "confirm.hooks_replace_title": "훅 규칙 교체",
   "confirm.hooks_replace_msg": "\"{label}\" 규칙을 memtomem 버전으로 교체하시겠습니까?",
   "confirm.hooks_sync_title": "설정 동기화",
-  "confirm.hooks_sync_msg": ".memtomem/settings.json 훅을 설치된 런타임의 설정 파일(Claude, Codex, 그리고 있으면 Gemini)에 병합하시겠습니까? 홈 디렉터리의 사용자 레벨 설정에 기록됩니다.",
+  "confirm.hooks_sync_msg": ".memtomem/settings.json 훅을 다음 런타임 설정 파일에 병합하시겠습니까?\n{targets}",
 
   "settings.exclude_patterns.builtin_title": "기본 제공 (읽기 전용)",
   "settings.exclude_patterns.builtin_hint": "비활성화할 수 없습니다",

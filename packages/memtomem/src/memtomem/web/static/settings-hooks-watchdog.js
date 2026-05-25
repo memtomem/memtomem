@@ -694,35 +694,46 @@ async function loadHooksSync() {
 // Sync Now button
 document.getElementById('hooks-sync-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('hooks-sync-btn');
-  const ok = await showConfirm({
-    title: t('confirm.hooks_sync_title'),
-    message: t('confirm.hooks_sync_msg'),
-    confirmText: t('common.sync'),
-  });
-  if (!ok) return;
-  btnLoading(btn, true);
-  try {
+  const postSettingsSync = async (allowHostWrites) => {
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    // The confirm modal IS the host-write trust gate (issue #962). Its copy
-    // (``confirm.hooks_sync_msg``) discloses that the merge fans out to every
-    // installed runtime's user-scope settings file (Claude/Codex/Gemini,
-    // ADR-0018) — not just ``~/.claude``. Send ``allow_host_writes: true`` so
-    // the server doesn't re-prompt with ``needs_confirmation`` for those host
-    // paths — the same gate the CLI confirms interactively
-    // (``cli/context_cmd.py:_confirm_settings_host_writes``).
     const res = await fetch(_hooksScopedUrl('/api/settings-sync'), {
       method: 'POST',
       headers,
-      body: JSON.stringify({ allow_host_writes: true }),
+      body: JSON.stringify({ allow_host_writes: allowHostWrites }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Request failed: ${res.status}`);
     }
-    const data = await res.json();
+    return res.json();
+  };
+
+  const renderNeedsConfirmation = (needsConfirmation) => {
+    const targets = needsConfirmation.map(r => r.target).filter(Boolean);
+    const body = t('settings.hooks.needs_confirmation_body', {
+      targets: targets.join('\n'),
+    });
+    const statusEl = qs('hooks-sync-status');
+    if (statusEl) {
+      const banner = document.createElement('div');
+      banner.className = 'hooks-sync-needs-confirmation';
+      banner.setAttribute('role', 'alert');
+      const title = document.createElement('strong');
+      title.textContent = t('settings.hooks.needs_confirmation_title');
+      const detail = document.createElement('div');
+      detail.className = 'hooks-sync-needs-confirmation-body';
+      detail.textContent = body;
+      banner.appendChild(title);
+      banner.appendChild(detail);
+      statusEl.appendChild(banner);
+    }
+    showToast(t('settings.hooks.needs_confirmation_title'), 'warning');
+  };
+
+  const finishSyncResponse = (data) => {
     const results = Array.isArray(data.results) ? data.results : [];
     // Multi-runtime fan-out (Codex/Gemini, ADR-0018): a per-runtime
     // ``error`` (malformed target JSON) or ``aborted`` (concurrent write)
@@ -739,31 +750,10 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     }
     const needsConfirmation = results.filter(r => r.status === 'needs_confirmation');
     if (needsConfirmation.length) {
-      // Defensive branch: the first POST already carried
-      // ``allow_host_writes: true``. If the server still returns
-      // ``needs_confirmation`` a deeper trust-gate kicked in (e.g.
-      // unexpected scope resolution); surface the targets so the user
-      // can investigate via the CLI rather than silently retrying
-      // with the same flag (would loop).
-      const targets = needsConfirmation.map(r => r.target).filter(Boolean);
-      const body = t('settings.hooks.needs_confirmation_body', {
-        targets: targets.join('\n'),
-      });
-      const statusEl = qs('hooks-sync-status');
-      if (statusEl) {
-        const banner = document.createElement('div');
-        banner.className = 'hooks-sync-needs-confirmation';
-        banner.setAttribute('role', 'alert');
-        const title = document.createElement('strong');
-        title.textContent = t('settings.hooks.needs_confirmation_title');
-        const detail = document.createElement('div');
-        detail.className = 'hooks-sync-needs-confirmation-body';
-        detail.textContent = body;
-        banner.appendChild(title);
-        banner.appendChild(detail);
-        statusEl.appendChild(banner);
-      }
-      showToast(t('settings.hooks.needs_confirmation_title'), 'warning');
+      // Defensive branch: this should only happen after the user has
+      // confirmed the returned host targets. Surface the server's targets
+      // and stop; retrying with the same flag would loop.
+      renderNeedsConfirmation(needsConfirmation);
       // Do NOT show sync_success on this branch — silent failure 금지.
       return;
     }
@@ -774,6 +764,33 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
       showToast(t('settings.hooks.sync_success'));
     }
     loadHooksSync();
+  };
+
+  btnLoading(btn, true);
+  try {
+    // Probe first without host-write permission. For user-scope installs the
+    // server returns the exact host targets (Claude/Codex/Gemini) to disclose
+    // in the confirmation modal; project-scope writes proceed immediately.
+    const firstData = await postSettingsSync(false);
+    const firstResults = Array.isArray(firstData.results) ? firstData.results : [];
+    const needsConfirmation = firstResults.filter(r => r.status === 'needs_confirmation');
+    if (needsConfirmation.length) {
+      const targets = needsConfirmation.map(r => r.target).filter(Boolean);
+      btnLoading(btn, false);
+      const ok = await showConfirm({
+        title: t('confirm.hooks_sync_title'),
+        message: t('confirm.hooks_sync_msg', { targets: targets.join('\n') }),
+        confirmText: t('common.sync'),
+      });
+      if (!ok) {
+        loadHooksSync();
+        return;
+      }
+      btnLoading(btn, true);
+      finishSyncResponse(await postSettingsSync(true));
+      return;
+    }
+    finishSyncResponse(firstData);
   } catch (err) {
     showToast(t('toast.sync_failed', { error: err.message }), 'error');
   } finally { btnLoading(btn, false); }

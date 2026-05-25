@@ -5,6 +5,7 @@ import tomllib
 
 import pytest
 
+import memtomem.context.commands as commands_mod
 from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
     COMMAND_GENERATORS,
@@ -46,6 +47,13 @@ def _make_canonical_command(project_root, name, body=SAMPLE_FULL_COMMAND):
     path = root / f"{name}.md"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def test_module_docstring_does_not_claim_codex_command_fanout() -> None:
+    """Codex prompts are reserved/deprecated, not an active command target."""
+    doc = commands_mod.__doc__ or ""
+    assert "Codex commands are **not** fanned out" in doc
+    assert "passes through unchanged\nfor the Codex target" not in doc
 
 
 class TestParseCanonicalCommand:
