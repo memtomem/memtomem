@@ -411,8 +411,63 @@ def test_hooks_sync_post_body_carries_allow_host_writes(page, mm_web_url: str) -
     assert post_bodies == [
         {"allow_host_writes": False},
         {"allow_host_writes": True},
-    ], (
-        f"Sync Now must probe first, then retry with host writes after confirm; got {post_bodies!r}"
+    ], f"Sync Now must probe first, then retry with host writes after confirm; got {post_bodies!r}"
+
+
+def test_hooks_sync_scope_drift_aborts_before_host_write(page, mm_web_url: str) -> None:
+    """Trust gate: if the target scope changes between the probe (which
+    discloses the host targets) and the user's confirmation, the authorized
+    write must NOT fire — the disclosed targets no longer match the scope
+    being written. The flow aborts with a scope-changed toast and sends no
+    ``allow_host_writes: true`` POST (TOCTOU guard, Codex review on PR #1114).
+    """
+    install_default_stubs(page)
+
+    post_bodies: list[dict] = []
+
+    def _handler(route):
+        if route.request.method == "POST":
+            post_bodies.append(json.loads(route.request.post_data or "{}"))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_needs_confirmation_payload("/fake/.claude/settings.json")),
+            )
+            return
+        # GET (cold-mount + post-abort reload): always out_of_sync.
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_OUT_OF_SYNC_GET)
+        )
+
+    # Broad glob so the post-abort reload GET against the *drifted* URL
+    # (``?target_scope=user``) is stubbed too, not sent to a real backend.
+    page.route("**/api/settings-sync**", _handler)
+
+    page.goto(mm_web_url)
+    _open_hooks_sync(page)
+
+    # Baseline: project_shared emits no query param, so the snapshot URL is
+    # unscoped (``/api/settings-sync``).
+    page.evaluate("() => { _ctxTargetScope = 'project_shared'; }")
+
+    page.locator("#hooks-sync-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # Drift the scope while the modal is open: _hooksScopedUrl() now appends
+    # ``?target_scope=user``, diverging from the snapshot taken at click time.
+    page.evaluate("() => { _ctxTargetScope = 'user'; }")
+
+    page.locator("#confirm-ok-btn").click()
+
+    msg_el = page.wait_for_selector("#toast-container .toast.toast-error .toast-msg", timeout=3_000)
+    assert "Target scope changed" in (msg_el.text_content() or ""), (
+        "scope drift must surface the sync_scope_changed toast"
+    )
+    assert post_bodies == [{"allow_host_writes": False}], (
+        f"Scope drift must abort before an allow_host_writes POST, got {post_bodies!r}"
     )
 
 

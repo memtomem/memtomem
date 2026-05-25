@@ -849,6 +849,8 @@
   "toast.request_failed": "요청 실패",
   "toast.unexpected_response": "예상치 못한 응답",
   "toast.sync_failed": "동기화 실패: {error}",
+  "toast.sync_scope_changed": "확인 중 대상 범위가 변경되어 동기화를 취소했습니다. 현재 범위에서 동기화를 다시 실행하세요.",
+  "toast.sync_targets_unavailable": "동기화 취소됨 — 서버가 쓰기 대상 파일을 알려주지 않았습니다.",
   "toast.create_failed": "생성 실패: {error}",
   "toast.refresh_complete": "새로고침 완료",
   "toast.name_required": "이름을 입력해주세요",

@@ -694,12 +694,20 @@ async function loadHooksSync() {
 // Sync Now button
 document.getElementById('hooks-sync-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('hooks-sync-btn');
+  // Snapshot the scoped URL at click time and reuse it for BOTH the probe and
+  // the authorized write, so the targets disclosed in the confirm dialog and
+  // the files actually written belong to the SAME scope. The scope globals
+  // (`_ctxTargetScope` / `_ctxActiveScopeId`) are live; recomputing the URL per
+  // call would let a mid-flight scope change authorize a write against a
+  // different tier than was disclosed (TOCTOU). Before the write we re-derive
+  // the URL and abort if it drifted.
+  const scopedUrl = _hooksScopedUrl('/api/settings-sync');
   const postSettingsSync = async (allowHostWrites) => {
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    const res = await fetch(_hooksScopedUrl('/api/settings-sync'), {
+    const res = await fetch(scopedUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({ allow_host_writes: allowHostWrites }),
@@ -777,12 +785,27 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     if (needsConfirmation.length) {
       const targets = needsConfirmation.map(r => r.target).filter(Boolean);
       btnLoading(btn, false);
+      if (targets.length === 0) {
+        // Fail closed: never authorize a host write whose targets the server
+        // did not disclose. (The backend currently always populates ``target``.)
+        showToast(t('toast.sync_targets_unavailable'), 'error');
+        loadHooksSync();
+        return;
+      }
       const ok = await showConfirm({
         title: t('confirm.hooks_sync_title'),
         message: t('confirm.hooks_sync_msg', { targets: targets.join('\n') }),
         confirmText: t('common.sync'),
       });
       if (!ok) {
+        loadHooksSync();
+        return;
+      }
+      // Trust gate: the scope must not have drifted between the disclosure
+      // (probe) and this authorization. Re-derive the scoped URL and abort if
+      // it no longer matches the one the disclosed targets came from.
+      if (_hooksScopedUrl('/api/settings-sync') !== scopedUrl) {
+        showToast(t('toast.sync_scope_changed'), 'error');
         loadHooksSync();
         return;
       }
