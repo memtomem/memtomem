@@ -14,12 +14,89 @@ import pytest
 from memtomem.context.scope_resolver import (
     ContextScopeError,
     canonical_artifact_dir,
+    find_project_root,
     list_artifact_scopes_present,
     project_root_from_artifact_path,
 )
 
 
 ARTIFACTS = ("agents", "skills", "commands")
+
+
+# ---------------------------------------------------------------------------
+# find_project_root — shared CLI/MCP/web root detection (M4)
+# ---------------------------------------------------------------------------
+
+
+class TestFindProjectRoot:
+    def test_returns_cwd_when_marker_at_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        (tmp_path / ".git").mkdir()
+        monkeypatch.chdir(tmp_path)
+        assert find_project_root() == tmp_path
+
+    def test_walks_up_to_git_ancestor_from_subdir(self, tmp_path: Path, monkeypatch) -> None:
+        """The M4 bug scenario: launched from a project subdirectory, the root
+        must resolve to the repo root (so web/CLI/MCP target one .memtomem)."""
+        (tmp_path / ".git").mkdir()
+        subdir = tmp_path / "packages" / "foo"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+        assert find_project_root() == tmp_path
+
+    def test_walks_up_to_pyproject_ancestor(self, tmp_path: Path, monkeypatch) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        subdir = tmp_path / "src"
+        subdir.mkdir()
+        monkeypatch.chdir(subdir)
+        assert find_project_root() == tmp_path
+
+    def test_falls_back_to_origin_when_no_marker(self, tmp_path: Path, monkeypatch) -> None:
+        subdir = tmp_path / "a" / "b"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+        # No .git/pyproject.toml anywhere up the (tmp) tree → original cwd.
+        assert find_project_root() == subdir
+
+    def test_explicit_start_argument(self, tmp_path: Path) -> None:
+        (tmp_path / ".git").mkdir()
+        subdir = tmp_path / "x"
+        subdir.mkdir()
+        assert find_project_root(start=subdir) == tmp_path
+
+    def test_cli_and_mcp_helpers_delegate_to_shared(self, tmp_path: Path, monkeypatch) -> None:
+        """CLI and MCP ``_find_project_root`` now share one definition (dedup)."""
+        from memtomem.cli.context_cmd import _find_project_root as cli_root
+        from memtomem.server.tools.context import _find_project_root as mcp_root
+
+        (tmp_path / ".git").mkdir()
+        subdir = tmp_path / "deep" / "nested"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+        assert cli_root() == tmp_path
+        assert mcp_root() == tmp_path
+
+    def test_web_lifespan_resolves_root_via_shared_walk(self) -> None:
+        """Pin the actual M4 fix SITE, not just the helper.
+
+        ``find_project_root`` being correct does not prove the web app uses it:
+        a regression reverting ``app.state.project_root`` back to ``Path.cwd()``
+        would still pass the behavioral cases above and silently re-introduce
+        the subdir split-brain. The real lifespan is too heavy to run here
+        (``create_components`` + FileWatcher + embedding sync), so this is a
+        source-level pin in the same spirit as the static asserts elsewhere in
+        the web suite: the lifespan MUST resolve the root through the shared
+        walk and MUST NOT pin the bare cwd.
+        """
+        import inspect
+
+        from memtomem.web.app import _lifespan
+
+        src = inspect.getsource(_lifespan)
+        assert "find_project_root()" in src, "web lifespan no longer uses the shared walk"
+        assert "project_root = Path.cwd()" not in src, (
+            "web lifespan pins the bare cwd again — subdir launches will write to "
+            "<subdir>/.memtomem instead of the repo root (M4 regression)"
+        )
 
 
 # ---------------------------------------------------------------------------

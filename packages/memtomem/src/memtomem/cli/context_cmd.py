@@ -80,7 +80,7 @@ from memtomem.context.settings_migrate import (
     format_plan_summary,
     plan_migration,
 )
-from memtomem.context.scope_resolver import canonical_artifact_dir
+from memtomem.context.scope_resolver import canonical_artifact_dir, find_project_root
 from memtomem.context.skills import (
     diff_skills,
     extract_skills_to_canonical,
@@ -103,13 +103,12 @@ _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "se
 
 
 def _find_project_root() -> Path:
-    """Walk up from cwd to find project root (has .git or pyproject.toml)."""
-    p = Path.cwd()
-    for _ in range(10):
-        if (p / ".git").exists() or (p / "pyproject.toml").exists():
-            return p
-        p = p.parent
-    return Path.cwd()
+    """Walk up from cwd to find project root (has .git or pyproject.toml).
+
+    Thin wrapper over the shared ``scope_resolver.find_project_root`` so the
+    CLI, MCP tools, and web app share one definition of the project root.
+    """
+    return find_project_root()
 
 
 def _context_path(root: Path) -> Path:

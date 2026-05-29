@@ -9,6 +9,7 @@ from typing import cast
 import click
 
 from memtomem.config import TargetScope
+from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
@@ -20,13 +21,12 @@ _KNOWN_ARTIFACT_SCOPES: frozenset[str] = frozenset({"user", "project_shared", "p
 
 
 def _find_project_root() -> Path:
-    """Walk up from cwd to find project root."""
-    p = Path.cwd()
-    for _ in range(10):
-        if (p / ".git").exists() or (p / "pyproject.toml").exists():
-            return p
-        p = p.parent
-    return Path.cwd()
+    """Walk up from cwd to find project root.
+
+    Thin wrapper over the shared ``scope_resolver.find_project_root`` so the
+    MCP context tools, the CLI, and the web app share one definition.
+    """
+    return find_project_root()
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
