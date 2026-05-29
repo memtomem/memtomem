@@ -73,7 +73,7 @@ function renderImportResult(data) {
     }
   }
   if (data.skipped && data.skipped.length) {
-    html += `<h4 style="margin-top:8px">Skipped</h4>`;
+    html += `<h4 style="margin-top:8px">${escapeHtml(t('settings.ctx.import_skipped'))}</h4>`;
     for (const item of data.skipped) {
       html += `<div class="ctx-import-item">${escapeHtml(item.name)} <span class="badge badge-warning">${escapeHtml(item.reason)}</span></div>`;
     }
@@ -363,9 +363,9 @@ function _ctxBumpActiveScopeDetailSeq() {
 
 function _ctxTierControls(type) {
   return `<div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
-    <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">user</button>
-    <button type="button" data-scope="project_shared" class="${_ctxTargetScope === 'project_shared' ? 'active' : ''}">project_shared</button>
-    <button type="button" data-scope="project_local" class="${_ctxTargetScope === 'project_local' ? 'active' : ''}">project_local</button>
+    <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">${escapeHtml(t('settings.ctx.tier_option_user'))}</button>
+    <button type="button" data-scope="project_shared" class="${_ctxTargetScope === 'project_shared' ? 'active' : ''}">${escapeHtml(t('settings.ctx.tier_option_project_shared'))}</button>
+    <button type="button" data-scope="project_local" class="${_ctxTargetScope === 'project_local' ? 'active' : ''}">${escapeHtml(t('settings.ctx.tier_option_project_local'))}</button>
   </div>`;
 }
 
@@ -939,7 +939,11 @@ function _renderCtxOverview(data) {
     const filter = tileData ? _ctxTileDominantFilter(tileData) : null;
     const section = tile ? tile.dataset.section : '';
     navBtn.addEventListener('click', () => {
-      if (filter) {
+      // Only deposit a ``?filter=`` deep-link when the target section is an
+      // artifact list that actually consumes it. The settings tile navigates
+      // to ``hooks-sync`` (``_ctxSectionToType`` → ''), which never reads the
+      // filter, so setting one leaves a stale/misleading shareable URL.
+      if (filter && _ctxSectionToType(section)) {
         _ctxSetDeepLink({ section, filter, artifact: '' });
       } else {
         _ctxClearDeepLink();
@@ -965,6 +969,14 @@ function _renderCtxOverview(data) {
           syncAllBtn.click();
         }
       } else if (btn.dataset.action === 'leaf') {
+        // Mirror the tile nav-button guard: a pointer leaf carries no filter
+        // of its own, so a stale ``?filter=`` from a prior navigation must not
+        // survive into a section that cannot consume it (e.g. hooks-sync),
+        // which would make a reload/share land on the wrong, silently-filtered
+        // section. Clear it before navigating when the target has no consumer.
+        if (!_ctxSectionToType(btn.dataset.section)) {
+          _ctxClearDeepLink();
+        }
         switchSettingsSection(btn.dataset.section);
       }
     });
@@ -988,15 +1000,19 @@ async function loadCtxOverview() {
   try {
     await _ctxFetchProjects();
     const res = await fetch(_ctxWithTargetScope('/api/context/overview'));
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to load overview');
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || t('settings.ctx.load_overview_failed'));
     const data = await res.json();
     if (seq !== _ctxOverviewSeq) return;
+    // Shape guard (sibling of the #1100 projects-fetch hardening): a bare-null
+    // or non-object 200 would TypeError inside _renderCtxOverview; route it
+    // through the failure path instead.
+    if (data === null || typeof data !== 'object') throw new Error(t('settings.ctx.load_overview_failed'));
     _ctxOverviewCache = data;
     _renderCtxOverview(data);
   } catch (err) {
     if (seq !== _ctxOverviewSeq) return;
     _ctxOverviewCache = null;
-    el.innerHTML = emptyState('', 'Failed to load overview', err.message);
+    el.innerHTML = emptyState('', t('settings.ctx.load_overview_failed'), err.message);
   }
 }
 
@@ -1502,7 +1518,7 @@ function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
   const commands = _ctxMissingCanonicalCommands(scope)
     .map(cmd => `<code>${escapeHtml(cmd)}</code>`)
     .join('');
-  return `<div class="ctx-runtime-only-banner ctx-missing-canonical-remediation" data-tier="${escapeHtml(scope)}">
+  return `<div class="ctx-runtime-only-banner ctx-missing-canonical-remediation" role="status" data-tier="${escapeHtml(scope)}">
       <div class="ctx-missing-canonical-title">${escapeHtml(title)}</div>
       <div class="ctx-missing-canonical-body">${escapeHtml(body)}</div>
       <div class="ctx-missing-canonical-commands">${commands}</div>
@@ -1706,7 +1722,7 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // ``emptyState`` over the fresh container the newer ``loadCtxList``
     // rebuilt — same false-overwrite class as the success path above.
     if (seq !== _ctxListSeq[type]) return;
-    container.innerHTML = emptyState('', 'Failed to load ' + type, err.message);
+    container.innerHTML = emptyState('', t('settings.ctx.load_failed', { type }), err.message);
   }
 }
 
@@ -1846,6 +1862,8 @@ function _ctxRenderDeepLinkBanner(type, link, matchCount) {
 
   const banner = document.createElement('div');
   banner.className = 'ctx-deep-link-banner';
+  // Announce the filter/artifact narrowing to screen readers when it appears.
+  banner.setAttribute('role', 'status');
   // ``textContent`` for the label so escaped artifact names (e.g. with
   // ``&`` / ``<``) round-trip cleanly without an explicit escapeHtml
   // call. The reset link is a separate element so it can be a button.
@@ -1900,7 +1918,7 @@ async function loadCtxList(type) {
     if (!scopes.length) {
       // Should never happen — server cwd always present — but render
       // something instead of leaving the panel blank.
-      listEl.innerHTML = emptyState('', 'No project scopes', '');
+      listEl.innerHTML = emptyState('', t('settings.ctx.no_project_scopes'), '');
       return;
     }
 
@@ -1952,6 +1970,9 @@ async function loadCtxList(type) {
         : 'settings.ctx.write_blocked_user_banner';
       const banner = document.createElement('div');
       banner.className = 'ctx-write-blocked-banner';
+      // Announce to screen readers that writes are now blocked (and why) when
+      // the tier flip injects this banner.
+      banner.setAttribute('role', 'status');
       banner.dataset.tier = _ctxTargetScope;
       banner.textContent = t(bannerKey);
       listEl.insertBefore(banner, listEl.firstChild);
@@ -2015,7 +2036,7 @@ async function loadCtxList(type) {
     }
   } catch (err) {
     if (seq !== _ctxListSeq[type]) return;
-    listEl.innerHTML = emptyState('', 'Failed to load ' + type, err.message);
+    listEl.innerHTML = emptyState('', t('settings.ctx.load_failed', { type }), err.message);
   }
 }
 
@@ -2368,7 +2389,7 @@ async function loadCtxDetail(type, name, opts = {}) {
     );
     if (res.status === 404) {
       if (seq !== _ctxDetailSeq[type]) return;
-      detailEl.innerHTML = emptyState('', `"${name}" not found`, t('settings.ctx.no_artifacts_hint'));
+      detailEl.innerHTML = emptyState('', t('settings.ctx.not_found', { name }), t('settings.ctx.no_artifacts_hint'));
       return;
     }
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
@@ -2428,7 +2449,7 @@ async function loadCtxDetail(type, name, opts = {}) {
     }
     html += '</div>';
 
-    html += `<div class="ctx-detail-pane" id="ctx-pane-${type}-diff" role="tabpanel" aria-labelledby="ctx-tab-${type}-diff"><div class="text-muted">Click Diff tab to load...</div></div>`;
+    html += `<div class="ctx-detail-pane" id="ctx-pane-${type}-diff" role="tabpanel" aria-labelledby="ctx-tab-${type}-diff"><div class="text-muted">${escapeHtml(t('settings.ctx.diff_tab_hint'))}</div></div>`;
 
     // ``ctx-conflict-banner`` stays hidden in the normal edit flow. When a
     // 409 reaches the dialog and the user picks "Open diff editor", we
@@ -2638,7 +2659,7 @@ async function loadCtxDetail(type, name, opts = {}) {
 
   } catch (err) {
     if (seq !== _ctxDetailSeq[type]) return;
-    detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);
+    detailEl.innerHTML = emptyState('', t('settings.ctx.load_detail_failed'), err.message);
   }
 }
 
@@ -2708,7 +2729,7 @@ async function _ctxLoadDiff(type, name, detailEl) {
       ? _ctxFetchFieldMap(type, name)
       : Promise.resolve(null);
     const res = await diffPromise;
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Diff failed');
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || t('settings.ctx.diff_failed'));
     const data = await res.json();
     const fieldMapData = await fieldMapPromise;
 
@@ -2717,7 +2738,7 @@ async function _ctxLoadDiff(type, name, detailEl) {
       html += _ctxRenderFieldMapHtml(fieldMapData.fieldMap, fieldMapData.runtimes);
     }
     if (!data.runtimes || !data.runtimes.length) {
-      html += '<div class="text-muted">No runtime targets found.</div>';
+      html += `<div class="text-muted">${escapeHtml(t('settings.ctx.no_runtime_targets'))}</div>`;
     } else {
       for (const rt of data.runtimes) {
         html += `<div style="margin-bottom:12px">`;
@@ -2736,7 +2757,7 @@ async function _ctxLoadDiff(type, name, detailEl) {
     }
     pane.innerHTML = html;
   } catch (err) {
-    pane.innerHTML = `<div class="text-muted">Diff failed: ${escapeHtml(err.message)}</div>`;
+    pane.innerHTML = `<div class="text-muted">${escapeHtml(t('settings.ctx.diff_failed_detail', { error: err.message }))}</div>`;
   }
 }
 
@@ -2852,7 +2873,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     _ctxRefreshWriteBlockedState();
   } catch (err) {
     if (seq !== _ctxDetailSeq[type]) return;
-    detailEl.innerHTML = emptyState('', 'Failed to load detail', err.message);
+    detailEl.innerHTML = emptyState('', t('settings.ctx.load_detail_failed'), err.message);
   }
 }
 
@@ -2998,13 +3019,13 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
     const form = document.createElement('div');
     form.className = 'ctx-create-form';
     form.innerHTML = `
-      <label>Name</label>
+      <label>${escapeHtml(t('settings.ctx.create_name_label'))}</label>
       <input type="text" class="ctx-create-name" placeholder="my-${type.slice(0, -1)}" style="width:100%" />
-      <label style="margin-top:8px">Content</label>
-      <textarea class="ctx-edit-area ctx-create-content" rows="6" placeholder="# ${type.slice(0, -1).charAt(0).toUpperCase() + type.slice(0, -1).slice(1)} content..."></textarea>
+      <label style="margin-top:8px">${escapeHtml(t('settings.ctx.create_content_label'))}</label>
+      <textarea class="ctx-edit-area ctx-create-content" rows="6" placeholder="${escapeHtml(t('settings.ctx.create_content_placeholder'))}"></textarea>
       <div class="ctx-edit-actions">
-        <button class="btn-ghost ctx-create-cancel">${t('settings.ctx.cancel')}</button>
-        <button class="btn-primary ctx-create-submit">${t('settings.ctx.create')}</button>
+        <button class="btn-ghost ctx-create-cancel">${escapeHtml(t('settings.ctx.cancel'))}</button>
+        <button class="btn-primary ctx-create-submit">${escapeHtml(t('settings.ctx.create'))}</button>
       </div>`;
     listEl.prepend(form);
 
@@ -3026,7 +3047,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
           body: JSON.stringify({ name: nameInput, content }),
         });
         if (!r.ok) {
-          const err = await r.json();
+          const err = await r.json().catch(() => ({}));
           showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
