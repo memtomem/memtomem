@@ -1086,24 +1086,36 @@ def sync_cmd(
 
     if ctx_path.exists():
         sections = parse_context(ctx_path)
-        files = detect_agent_files(root)
-
-        if files:
-            agents_to_sync = {f.agent for f in files}
-
-            for agent_name in sorted(agents_to_sync):
-                gen = GENERATORS.get(agent_name)
-                if not gen:
-                    continue
-
-                content = gen.generate(sections)
-                out_path = root / gen.output_path
-                out_path.write_text(content, encoding="utf-8")
-                click.echo(f"  {agent_name:10s}  {gen.output_path}")
-        else:
-            click.echo(
-                "No agent files detected. Use 'mm context generate --agent all' to create them."
+        if not sections:
+            # Mirror generate_cmd's empty-guard (line ~932). parse_context
+            # returns {} for any context.md with content but no ``## Heading``
+            # delimiters (a stub, all-prose, or a mid-edit file). Without this
+            # guard, gen.generate({}) yields header-only/empty output that would
+            # overwrite the user's existing CLAUDE.md/GEMINI.md/.cursorrules —
+            # silent data loss with no backup. Refuse instead.
+            click.secho(
+                f"{CONTEXT_FILENAME} is empty — refusing to overwrite agent files.",
+                fg="yellow",
             )
+        else:
+            files = detect_agent_files(root)
+
+            if files:
+                agents_to_sync = {f.agent for f in files}
+
+                for agent_name in sorted(agents_to_sync):
+                    gen = GENERATORS.get(agent_name)
+                    if not gen:
+                        continue
+
+                    content = gen.generate(sections)
+                    out_path = root / gen.output_path
+                    out_path.write_text(content, encoding="utf-8")
+                    click.echo(f"  {agent_name:10s}  {gen.output_path}")
+            else:
+                click.echo(
+                    "No agent files detected. Use 'mm context generate --agent all' to create them."
+                )
     elif not inc:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
         return

@@ -709,23 +709,30 @@ async def mem_context_sync(
 
     if ctx_path.exists():
         sections = parse_context(ctx_path)
-        files = detect_agent_files(root)
+        if not sections:
+            # Mirror mem_context_generate's empty-guard. parse_context returns
+            # {} for a content-but-no-``## Heading`` context.md; syncing it would
+            # overwrite the user's existing agent files with header-only/empty
+            # output (silent data loss). Refuse, matching the CLI sync guard.
+            results.append(f"{CONTEXT_FILENAME} is empty — refusing to overwrite agent files.")
+        else:
+            files = detect_agent_files(root)
 
-        if files:
-            agents_synced: set[str] = set()
-            for f in files:
-                if f.agent in agents_synced:
-                    continue
-                gen = GENERATORS.get(f.agent)
-                if not gen:
-                    continue
-                content = gen.generate(sections)
-                out_path = root / gen.output_path
-                await asyncio.to_thread(out_path.write_text, content, encoding="utf-8")
-                results.append(f"{f.agent}: {gen.output_path}")
-                agents_synced.add(f.agent)
-        elif not inc:
-            return "No agent files detected. Use mem_context_generate to create them."
+            if files:
+                agents_synced: set[str] = set()
+                for f in files:
+                    if f.agent in agents_synced:
+                        continue
+                    gen = GENERATORS.get(f.agent)
+                    if not gen:
+                        continue
+                    content = gen.generate(sections)
+                    out_path = root / gen.output_path
+                    await asyncio.to_thread(out_path.write_text, content, encoding="utf-8")
+                    results.append(f"{f.agent}: {gen.output_path}")
+                    agents_synced.add(f.agent)
+            elif not inc:
+                return "No agent files detected. Use mem_context_generate to create them."
     elif not inc:
         return f"{CONTEXT_FILENAME} not found. Create it with 'mm context init'."
     else:
