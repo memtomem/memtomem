@@ -4123,4 +4123,8 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   }
   .ctx-header > div { flex-wrap: wrap; }
   .ctx-overview-grid { grid-template-columns: minmax(0, 1fr); }
+  /* Stack the conflict-modal "Your edits" / "Current on disk" panes so each
+     diff stays readable on narrow screens during the destructive
+     Reload-vs-Force choice (was two ~225px columns side by side). */
+  #ctx-conflict-preview-row { flex-direction: column; }
 }
