@@ -312,8 +312,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     comp = await create_components()
 
     from memtomem.search.dedup import DedupScanner
+    from memtomem.context.scope_resolver import find_project_root
 
-    app.state.project_root = Path.cwd()
+    # Walk up to the project root (.git / pyproject.toml) so launching
+    # ``mm web`` from a subdirectory resolves the same canonical .memtomem tree
+    # the CLI/MCP write to — not ``<subdir>/.memtomem``. Single shared helper.
+    app.state.project_root = find_project_root()
     app.state.config = comp.config
     app.state.storage = comp.storage
     app.state.embedder = comp.embedder

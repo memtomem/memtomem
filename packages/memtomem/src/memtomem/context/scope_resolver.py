@@ -45,6 +45,37 @@ class ContextScopeError(ValueError):
     """
 
 
+_PROJECT_MARKERS: tuple[str, ...] = (".git", "pyproject.toml")
+_PROJECT_ROOT_MAX_DEPTH = 10
+
+
+def find_project_root(start: Path | None = None) -> Path:
+    """Walk up from ``start`` (default cwd) to the nearest project root.
+
+    Looks up to :data:`_PROJECT_ROOT_MAX_DEPTH` ancestors for a ``.git`` or
+    ``pyproject.toml`` marker and returns the first match; falls back to the
+    original ``start`` when no marker is found.
+
+    This is the SINGLE definition of "what is the project root", shared by the
+    CLI (``mm context``), the MCP context tools, and the web-app lifespan, so a
+    launch from a project subdirectory resolves the same canonical ``.memtomem``
+    tree on every surface. Previously the web app pinned the bare ``cwd`` and so
+    wrote artifacts to ``<subdir>/.memtomem`` while the CLI/MCP walked up to the
+    repo root — silently targeting different canonical trees for one project.
+
+    The returned path is not resolved — callers that need symlink
+    canonicalisation should ``.resolve()`` themselves (matches the historical
+    ``cli/context_cmd.py`` / ``server/tools/context.py`` behavior).
+    """
+    origin = Path.cwd() if start is None else start
+    p = origin
+    for _ in range(_PROJECT_ROOT_MAX_DEPTH):
+        if any((p / marker).exists() for marker in _PROJECT_MARKERS):
+            return p
+        p = p.parent
+    return origin
+
+
 def canonical_artifact_dir(
     artifact: ArtifactKind,
     scope: TargetScope,
