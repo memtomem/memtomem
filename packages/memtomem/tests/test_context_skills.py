@@ -170,10 +170,10 @@ class TestUnreadableSources:
 
         real_stage = skills_module._stage_skill
 
-        def fake_stage(src, dst):
+        def fake_stage(src, dst, **kwargs):
             if src.name == "broken":
                 raise PermissionError("permission denied")
-            return real_stage(src, dst)
+            return real_stage(src, dst, **kwargs)
 
         monkeypatch.setattr(skills_module, "_stage_skill", fake_stage)
 
@@ -246,10 +246,10 @@ class TestUnreadableSources:
 
         real_stage = skills_module._stage_skill
 
-        def fake_stage(src, dst):
+        def fake_stage(src, dst, **kwargs):
             if src.name == "broken":
                 raise PermissionError("permission denied")
-            return real_stage(src, dst)
+            return real_stage(src, dst, **kwargs)
 
         monkeypatch.setattr(skills_module, "_stage_skill", fake_stage)
 

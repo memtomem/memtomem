@@ -39,10 +39,11 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from memtomem.context import _skip_reasons as skip_codes
+from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
-from memtomem.context._names import InvalidNameError, Layout, validate_name
+from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
 from memtomem.context._sync_atomic import (
     AtomicSyncAdapter,
@@ -771,13 +772,39 @@ def diff_commands(
             except CommandParseError:
                 results.append((gen_name, name, "parse error"))
                 continue
-            expected, _ = gen.render(cmd)
             # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
             # above guarantees this runtime+scope has a fan-out root, so
             # ``gen.target_file`` cannot return ``None`` for any name.
             # Earlier defensive ``if target is None: continue`` removed.
             target = gen.target_file(project_root, name, scope=scope)
             assert target is not None  # narrowed by upstream NO_FANOUT guard
+
+            # A per-vendor override replaces the rendered runtime file at sync
+            # time (``_sync_atomic`` Phase 2 / ADR-0008 Invariant 4) via
+            # ``atomic_write_bytes`` — raw bytes, no strip. Compare byte-exact
+            # against the same source so an override-carrying command isn't
+            # reported permanently "out of sync"; decoding as text would crash
+            # on a non-UTF-8 override and would mask whitespace-only byte drift.
+            vendor = GENERATOR_VENDOR.get(gen_name)
+            override_path = (
+                _override.resolve(project_root, "commands", name, vendor, scope=scope)
+                if vendor is not None
+                else None
+            )
+            if override_path is not None:
+                try:
+                    expected_bytes = override_path.read_bytes()
+                except OSError:
+                    # Sync skips an unreadable override (no effective fan-out),
+                    # so we can't assert parity — report drift, never mask it.
+                    results.append((gen_name, name, "out of sync"))
+                    continue
+                actual_bytes = target.read_bytes() if target.is_file() else b""
+                status = "in sync" if expected_bytes == actual_bytes else "out of sync"
+                results.append((gen_name, name, status))
+                continue
+
+            expected, _ = gen.render(cmd)
             actual = target.read_text(encoding="utf-8") if target.is_file() else ""
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
