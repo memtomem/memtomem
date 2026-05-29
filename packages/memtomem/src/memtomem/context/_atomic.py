@@ -155,7 +155,13 @@ def atomic_write_text(
     atomic_write_bytes(path, text.encode(encoding), mode=mode)
 
 
-def copy_tree_atomic(src: Path, dst: Path, *, mode: int = 0o644) -> int:
+def copy_tree_atomic(
+    src: Path,
+    dst: Path,
+    *,
+    mode: int = 0o644,
+    skip_top_level: frozenset[str] | None = None,
+) -> int:
     """Recursively mirror *src* → *dst*, each file via :func:`atomic_write_bytes`.
 
     Returns the number of files written. ``mode`` (default ``0o644``) is the
@@ -164,16 +170,23 @@ def copy_tree_atomic(src: Path, dst: Path, *, mode: int = 0o644) -> int:
     target runtimes), unlike the ``0o600`` default of ``atomic_write_bytes``
     which is tuned for state files.
 
-    Entries named in :data:`COPY_SKIP_NAMES` are skipped silently. Symlinks
-    are skipped with a warning — this helper promises a *byte-for-byte tree
-    mirror*, and silently dereferencing a symlink to ``/etc/passwd`` (or any
-    out-of-tree target) would violate that contract. Callers who want to
-    mirror symlinks must do so explicitly.
+    Entries named in :data:`COPY_SKIP_NAMES` are skipped silently at every
+    depth. ``skip_top_level`` names additional entries skipped ONLY at the
+    root of this call (it is deliberately not propagated into the recursion),
+    so e.g. a skill's top-level ``overrides/`` source can be excluded without
+    also dropping a legitimate nested ``scripts/overrides/``. Skipping during
+    the copy (rather than deleting afterwards) means those bytes never touch
+    *dst* — no crash window where they exist, no silent leak if a later delete
+    fails. Symlinks are skipped with a warning — this helper promises a
+    *byte-for-byte tree mirror*, and silently dereferencing a symlink to
+    ``/etc/passwd`` (or any out-of-tree target) would violate that contract.
+    Callers who want to mirror symlinks must do so explicitly.
     """
+    extra_skip = skip_top_level or frozenset()
     dst.mkdir(parents=True, exist_ok=True)
     written = 0
     for entry in src.iterdir():
-        if entry.name in COPY_SKIP_NAMES:
+        if entry.name in COPY_SKIP_NAMES or entry.name in extra_skip:
             continue
         if entry.is_symlink():
             logger.warning("copy_tree_atomic: skipping symlink %s", entry)
@@ -183,6 +196,7 @@ def copy_tree_atomic(src: Path, dst: Path, *, mode: int = 0o644) -> int:
             atomic_write_bytes(target, entry.read_bytes(), mode=mode)
             written += 1
         elif entry.is_dir():
+            # skip_top_level intentionally not threaded into the recursion.
             written += copy_tree_atomic(entry, target, mode=mode)
     return written
 

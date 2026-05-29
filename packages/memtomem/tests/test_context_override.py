@@ -15,11 +15,13 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from memtomem.context import override
-from memtomem.context.agents import generate_all_agents
-from memtomem.context.commands import generate_all_commands
+from memtomem.context.agents import diff_agents, generate_all_agents
+from memtomem.context.commands import diff_commands, generate_all_commands
 from memtomem.context.install import install_skill
-from memtomem.context.skills import SKILL_GENERATORS, generate_all_skills
+from memtomem.context.skills import SKILL_GENERATORS, diff_skills, generate_all_skills
 from memtomem.wiki.store import WikiStore
 
 
@@ -340,3 +342,175 @@ def test_override_only_touches_skill_md_not_scripts(wiki_root: Path, tmp_path: P
     assert (claude_dir / "SKILL.md").read_bytes() == b"# claude only\n"
     # The script came from canonical and was NOT replaced by any override.
     assert (claude_dir / "scripts" / "run.sh").read_bytes() == (b"#!/bin/bash\necho canonical\n")
+
+
+# ── M3: overrides/ source must NOT leak into runtime fan-out trees ─────
+
+
+def test_skills_fanout_does_not_leak_overrides_dir(wiki_root: Path, tmp_path: Path) -> None:
+    """The canonical top-level ``overrides/`` directory is the SOURCE of
+    per-vendor SKILL.md overrides — it must never be copied into a runtime tree
+    (doing so leaks every other vendor's override bytes into this vendor's
+    tree). A *nested* ``scripts/overrides/`` is legitimate payload and MUST
+    survive (the skip is top-level only)."""
+    _initialized_wiki()
+    _seed_skill(
+        wiki_root,
+        "hello",
+        {"SKILL.md": b"# canonical\n", "scripts/overrides/helper.md": b"# nested payload\n"},
+    )
+    project = tmp_path
+    install_skill(project, "hello")
+
+    overrides_dir = project / ".memtomem" / "skills" / "hello" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# claude\n")
+    (overrides_dir / "gemini.md").write_bytes(b"# gemini\n")
+
+    generate_all_skills(project)
+
+    claude_dir = SKILL_GENERATORS["claude_skills"].target_dir(project, "hello")
+    gemini_dir = SKILL_GENERATORS["gemini_skills"].target_dir(project, "hello")
+    # Neither runtime tree may carry the top-level override SOURCE directory.
+    assert not (claude_dir / "overrides").exists()
+    assert not (gemini_dir / "overrides").exists()
+    # A nested overrides/ that is real skill payload must NOT be stripped.
+    assert (
+        claude_dir / "scripts" / "overrides" / "helper.md"
+    ).read_bytes() == b"# nested payload\n"
+    # And each vendor's SKILL.md still carries its own override (M3 strip must
+    # not break override application, which reads from canonical).
+    assert (claude_dir / "SKILL.md").read_bytes() == b"# claude\n"
+    assert (gemini_dir / "SKILL.md").read_bytes() == b"# gemini\n"
+
+
+# ── M2: diff must apply overrides so synced artifacts report "in sync" ──
+
+
+def test_diff_skills_in_sync_after_override_fanout(wiki_root: Path, tmp_path: Path) -> None:
+    _initialized_wiki()
+    _seed_skill(wiki_root, "hello", {"SKILL.md": b"# canonical\n"})
+    project = tmp_path
+    install_skill(project, "hello")
+
+    overrides_dir = project / ".memtomem" / "skills" / "hello" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# claude override\n")
+
+    generate_all_skills(project)
+
+    rows = [r for r in diff_skills(project) if r[1] == "hello"]
+    assert ("claude_skills", "hello", "in sync") in rows
+    assert all(status != "out of sync" for _, _, status in rows)
+
+
+def test_diff_skills_in_sync_ignores_copy_skipped_entries(wiki_root: Path, tmp_path: Path) -> None:
+    """``copy_tree_atomic`` skips ``COPY_SKIP_NAMES`` (e.g. ``__pycache__``) at
+    sync time, so a canonical cache dir must NOT make diff report false drift —
+    the effective-tree comparison must mirror the same skip rules."""
+    _initialized_wiki()
+    _seed_skill(wiki_root, "hello", {"SKILL.md": b"# canonical\n"})
+    project = tmp_path
+    install_skill(project, "hello")
+
+    # A tool drops a bytecode cache into the canonical skill dir post-install.
+    cache = project / ".memtomem" / "skills" / "hello" / "__pycache__"
+    cache.mkdir()
+    (cache / "x.pyc").write_bytes(b"\x00not copied\n")
+
+    generate_all_skills(project)
+
+    rows = [r for r in diff_skills(project) if r[1] == "hello"]
+    assert rows
+    assert all(status != "out of sync" for _, _, status in rows)
+
+
+def test_diff_agents_in_sync_after_override_fanout(tmp_path: Path) -> None:
+    canonical_dir = tmp_path / ".memtomem" / "agents"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "bar.md").write_text(_SAMPLE_AGENT_BODY, encoding="utf-8")
+    overrides_dir = canonical_dir / "bar" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# OVERRIDE_MARKER_AGENT\nclaude body\n")
+
+    generate_all_agents(tmp_path)
+
+    rows = [r for r in diff_agents(tmp_path) if r[1] == "bar"]
+    assert ("claude_agents", "bar", "in sync") in rows
+    assert all(status != "out of sync" for _, _, status in rows)
+
+
+def test_diff_commands_in_sync_after_override_fanout(tmp_path: Path) -> None:
+    canonical_dir = tmp_path / ".memtomem" / "commands"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "baz.md").write_text(_SAMPLE_COMMAND_BODY, encoding="utf-8")
+    overrides_dir = canonical_dir / "baz" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# OVERRIDE_MARKER_COMMAND\nclaude body\n")
+
+    generate_all_commands(tmp_path)
+
+    rows = [r for r in diff_commands(tmp_path) if r[1] == "baz"]
+    assert ("claude_commands", "baz", "in sync") in rows
+    assert all(status != "out of sync" for _, _, status in rows)
+
+
+def test_diff_agents_byte_exact_with_non_utf8_override(tmp_path: Path) -> None:
+    """Sync writes override bytes verbatim (atomic_write_bytes); diff must
+    byte-compare, not decode as UTF-8 (which would crash on non-UTF-8 bytes)."""
+    canonical_dir = tmp_path / ".memtomem" / "agents"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "bar.md").write_text(_SAMPLE_AGENT_BODY, encoding="utf-8")
+    overrides_dir = canonical_dir / "bar" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# OVERRIDE\n\xff\xfe not utf-8\n")
+
+    generate_all_agents(tmp_path)
+
+    rows = [r for r in diff_agents(tmp_path) if r[1] == "bar"]  # must not raise
+    assert ("claude_agents", "bar", "in sync") in rows
+
+
+def test_diff_commands_byte_exact_with_non_utf8_override(tmp_path: Path) -> None:
+    canonical_dir = tmp_path / ".memtomem" / "commands"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "baz.md").write_text(_SAMPLE_COMMAND_BODY, encoding="utf-8")
+    overrides_dir = canonical_dir / "baz" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# OVERRIDE\n\xff\xfe not utf-8\n")
+
+    generate_all_commands(tmp_path)
+
+    rows = [r for r in diff_commands(tmp_path) if r[1] == "baz"]  # must not raise
+    assert ("claude_commands", "baz", "in sync") in rows
+
+
+def test_diff_agents_unreadable_override_reports_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If an override resolves but cannot be read, sync would skip it (no
+    effective fan-out), so diff must report drift rather than masking it as
+    "in sync" by falling back to the un-overridden render."""
+    canonical_dir = tmp_path / ".memtomem" / "agents"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "bar.md").write_text(_SAMPLE_AGENT_BODY, encoding="utf-8")
+    overrides_dir = canonical_dir / "bar" / "overrides"
+    overrides_dir.mkdir(parents=True)
+    (overrides_dir / "claude.md").write_bytes(b"# claude override\n")
+
+    generate_all_agents(tmp_path)
+
+    real_resolve = override.resolve
+
+    def fake_resolve(project_root, asset_type, name, vendor, *, scope=None):
+        p = real_resolve(project_root, asset_type, name, vendor, scope=scope)
+        # Return the overrides DIRECTORY for claude so read_bytes() raises
+        # IsADirectoryError (an OSError) — simulating an unreadable override.
+        if p is not None and vendor == "claude":
+            return overrides_dir
+        return p
+
+    monkeypatch.setattr(override, "resolve", fake_resolve)
+
+    rows = [r for r in diff_agents(tmp_path) if r == ("claude_agents", "bar", "out of sync")]
+    assert rows == [("claude_agents", "bar", "out of sync")]

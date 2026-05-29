@@ -30,6 +30,7 @@ from typing import Protocol
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
 from memtomem.context._atomic import (
+    COPY_SKIP_NAMES,
     _file_lock,
     _lock_path_for,
     atomic_write_bytes,
@@ -49,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_SKILL_ROOT = ".memtomem/skills"
 SKILL_MANIFEST = "SKILL.md"
+# Canonical-side subdirectory that holds per-vendor SKILL.md overrides
+# (``<canonical>/<name>/overrides/<vendor>.<ext>`` — see
+# :mod:`memtomem.context.override`). It is the SOURCE of overrides, never part
+# of a runtime fan-out payload, so it is stripped from the staged tree before
+# fan-out and excluded from diff comparison.
+_OVERRIDES_DIRNAME = "overrides"
 
 
 class SkillGenerator(Protocol):
@@ -190,7 +197,7 @@ def list_canonical_skills(
 # ── Copy primitive ────────────────────────────────────────────────────
 
 
-def _stage_skill(src: Path, dst: Path) -> Path:
+def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path:
     """Mirror ``src`` into a same-fs staging directory under ``dst.parent``.
 
     Picks ``dst.parent / .staging-<dst.name>-<pid>-<rand>.tmp`` so the
@@ -201,6 +208,14 @@ def _stage_skill(src: Path, dst: Path) -> Path:
 
     ``src`` MUST contain ``SKILL.md``. ``dst.parent`` is created if it
     does not yet exist.
+
+    ``strip_overrides`` removes the top-level ``overrides/`` directory from
+    the staged tree. Runtime fan-out passes ``True`` so the canonical
+    override SOURCE never lands in a runtime tree (which would leak every
+    other vendor's override bytes into this vendor's tree, and let one
+    vendor's override secret block the whole fan-out at scan time). Pure
+    canonical→canonical / runtime→canonical copies keep the default
+    (``False``) so the override source survives.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
@@ -214,13 +229,22 @@ def _stage_skill(src: Path, dst: Path) -> Path:
         # happens, the leftover tree is from us; safe to remove.
         shutil.rmtree(staging)
     staging.mkdir()
+    # ``strip_overrides`` excludes the top-level ``overrides/`` source DURING
+    # the copy (via ``skip_top_level``) so those bytes never reach the runtime
+    # staging tree — no crash window where they exist, no silent leak if a
+    # post-copy delete failed. The override itself is applied separately from
+    # the canonical source via ``_override.resolve`` (which reads canonical,
+    # not staging), so the skip never affects override application; and the
+    # scan therefore never sees (and cannot block on) an unrelated vendor's
+    # override.
+    skip = frozenset({_OVERRIDES_DIRNAME}) if strip_overrides else None
     # Codex review fold: if ``copy_tree_atomic`` raises after partial
     # copy, the caller would never see ``staging`` (no return value),
     # leaving an unscanned partial tree under the runtime fan-out root.
     # Clean up here before re-raising so Gate A's staging-dir-first
     # contract holds even on copy failure.
     try:
-        copy_tree_atomic(src, staging)
+        copy_tree_atomic(src, staging, skip_top_level=skip)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -360,7 +384,7 @@ def generate_all_skills(
                     # commands.py read_bytes failure handling. Privacy block
                     # is the only failure that still aborts the batch.
                     try:
-                        staging = _stage_skill(skill_dir, dst)
+                        staging = _stage_skill(skill_dir, dst, strip_overrides=True)
                     except OSError as exc:
                         skipped.append(
                             (skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR)
@@ -468,7 +492,7 @@ def generate_all_skills(
                 # an exception bubbling up — symmetric with agents.py /
                 # commands.py read_bytes failure handling.
                 try:
-                    staging = _stage_skill(skill_dir, dst)
+                    staging = _stage_skill(skill_dir, dst, strip_overrides=True)
                 except OSError as exc:
                     skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                     continue
@@ -685,21 +709,59 @@ def extract_skills_to_canonical(
 # ── Diff: canonical ↔ runtimes ────────────────────────────────────────
 
 
-def _skill_dirs_equal(a: Path, b: Path) -> bool:
-    """Shallow structural + byte-level equality between two skill directories."""
-    if not (a.is_dir() and b.is_dir()):
+def _skill_effective_equal(
+    canonical: Path,
+    runtime: Path,
+    override_bytes: bytes | None,
+    *,
+    top_level: bool = True,
+) -> bool:
+    """Whether ``runtime`` equals the tree ``generate_all_skills`` produces.
+
+    Must mirror :func:`copy_tree_atomic` exactly, else a skill that synced
+    perfectly reports false drift:
+
+    * :data:`COPY_SKIP_NAMES` (``.git`` / ``.DS_Store`` / ``__pycache__``) and
+      symlinks are excluded at EVERY depth — sync never copies them, so they
+      are ignored on both sides (a stray cache on either side is not drift).
+    * the top-level ``overrides/`` SOURCE directory is excluded from the
+      canonical side only (a leaked ``overrides/`` on the runtime side IS drift,
+      so re-sync is prompted to clean it).
+    * the top-level ``SKILL.md`` is replaced by ``override_bytes`` when a
+      per-vendor override exists; everything else is byte-compared verbatim.
+
+    Comparing the raw canonical directory instead (as the previous code did)
+    reported any override-carrying skill as permanently "out of sync".
+    """
+    if not (canonical.is_dir() and runtime.is_dir()):
         return False
-    a_entries = sorted(p.name for p in a.iterdir())
-    b_entries = sorted(p.name for p in b.iterdir())
-    if a_entries != b_entries:
+
+    def _entries(d: Path, *, is_canonical: bool) -> list[str]:
+        names = []
+        for p in d.iterdir():
+            if p.name in COPY_SKIP_NAMES or p.is_symlink():
+                continue
+            if top_level and is_canonical and p.name == _OVERRIDES_DIRNAME:
+                continue
+            names.append(p.name)
+        return sorted(names)
+
+    can_entries = _entries(canonical, is_canonical=True)
+    if can_entries != _entries(runtime, is_canonical=False):
         return False
-    for name in a_entries:
-        ap, bp = a / name, b / name
-        if ap.is_file() and bp.is_file():
-            if ap.read_bytes() != bp.read_bytes():
+    for name in can_entries:
+        cp, rp = canonical / name, runtime / name
+        if cp.is_file() and rp.is_file():
+            if top_level and name == SKILL_MANIFEST and override_bytes is not None:
+                expected = override_bytes
+            else:
+                expected = cp.read_bytes()
+            if expected != rp.read_bytes():
                 return False
-        elif ap.is_dir() and bp.is_dir():
-            if not _skill_dirs_equal(ap, bp):
+        elif cp.is_dir() and rp.is_dir():
+            # Aux subtrees (scripts/, references/, assets/) compare verbatim;
+            # only the top-level SKILL.md / overrides/ get special handling.
+            if not _skill_effective_equal(cp, rp, None, top_level=False):
                 return False
         else:
             return False
@@ -753,7 +815,26 @@ def diff_skills(
                 # Earlier defensive ``if dst is None: continue`` removed.
                 dst = gen.target_dir(project_root, name, scope=scope)
                 assert dst is not None  # narrowed by upstream NO_FANOUT guard
-                if _skill_dirs_equal(src, dst):
+                # Resolve the per-vendor override the sync path applies so the
+                # comparison reflects the effective fan-out tree, not the raw
+                # canonical (which would always report override skills as drift).
+                override_bytes: bytes | None = None
+                vendor = GENERATOR_VENDOR.get(gen_name)
+                if vendor is not None:
+                    override_path = _override.resolve(
+                        project_root, "skills", name, vendor, scope=scope
+                    )
+                    if override_path is not None:
+                        try:
+                            override_bytes = override_path.read_bytes()
+                        except OSError:
+                            # Sync skips an unreadable override (typed PARSE_ERROR,
+                            # no effective fan-out), so we cannot claim parity.
+                            # Report drift rather than comparing against the
+                            # un-overridden canonical (which could mask it).
+                            results.append((gen_name, name, "out of sync"))
+                            continue
+                if _skill_effective_equal(src, dst, override_bytes):
                     results.append((gen_name, name, "in sync"))
                 else:
                     results.append((gen_name, name, "out of sync"))
