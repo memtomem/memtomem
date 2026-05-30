@@ -79,11 +79,17 @@ def test_unknown_status_is_not_swallowed(tmp_path, monkeypatch):
 
 
 def test_ok_and_skipped_still_reported(tmp_path, monkeypatch):
+    # Build the target from ``tmp_path`` and expect the same ``str(target)`` the
+    # ok-branch renders (``_step_settings`` does ``f"Merged → {r.target}"``).
+    # A hardcoded ``"/tmp/claude.json"`` literal mismatched the backslash
+    # separator on Windows (``str(Path("/tmp/claude.json"))`` → ``\tmp\claude.json``),
+    # failing the assertion on windows-latest.
+    target = tmp_path / "claude.json"
     out = _drive_step_settings(
         tmp_path,
         monkeypatch,
         {
-            "claude": SettingsSyncResult(status="ok", target=Path("/tmp/claude.json")),
+            "claude": SettingsSyncResult(status="ok", target=target),
             "codex": SettingsSyncResult(status="skipped", reason="not installed"),
         },
     )
@@ -91,5 +97,5 @@ def test_ok_and_skipped_still_reported(tmp_path, monkeypatch):
     # merged into ~/.claude/settings.json additively.") which contains the word
     # "merged" regardless of whether the ``ok`` branch ran — a bare
     # ``"merged" in out.lower()`` would pass even if that branch regressed.
-    assert "Merged → /tmp/claude.json" in out
+    assert f"Merged → {target}" in out
     assert "skipped codex: not installed" in out
