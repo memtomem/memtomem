@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from memtomem.context.parser import iter_markdown_sections
 
 
 class AgentGenerator(Protocol):
@@ -269,21 +270,14 @@ def extract_sections_from_agent_file(content: str) -> dict[str, str]:
     }
 
     sections: dict[str, str] = {}
-    current: str | None = None
-    lines: list[str] = []
-
-    for line in content.splitlines():
-        m = re.match(r"^##\s+(.+)$", line)
-        if m:
-            if current is not None:
-                sections[current] = "\n".join(lines).strip()
-            heading = m.group(1).strip()
-            current = aliases.get(heading.lower(), heading)
-            lines = []
-        elif current is not None:
-            lines.append(line)
-
-    if current is not None:
-        sections[current] = "\n".join(lines).strip()
+    for heading, body in iter_markdown_sections(content):
+        key = aliases.get(heading.lower(), heading)
+        # Two source headings can alias to one canonical key (e.g. "Rules" and
+        # "Coding Rules" → "Rules"); merge rather than overwrite so the earlier
+        # block's content is not silently lost (#1123 B1-2).
+        if key in sections:
+            sections[key] = f"{sections[key]}\n\n{body}".strip()
+        else:
+            sections[key] = body
 
     return sections

@@ -1,6 +1,6 @@
 # ADR-0011: Canonical artifact scope hierarchy (user / project shared / project local)
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-09
 **Context:** ADR-0010 introduced a 3-tier `target_scope` axis for settings
 hooks. This ADR records whether and how to extend the same axis to the
@@ -168,7 +168,7 @@ Rationale:
   surface that confuses users coming in from the runtime side.
 - (a) is the cleanest semantic. The canonical lives under
   `<proj>/.memtomem/agents.local/`, gitignored, indexed by
-  `mm context list` for the user's own awareness, and explicitly
+  `mm context status` for the user's own awareness, and explicitly
   invisible to the runtime. Promotion to `project_shared` is
   `git mv agents.local/X.md → agents/X.md` followed by `mm context
   sync`, which fans out the new project_shared canonical normally.
@@ -419,7 +419,7 @@ Accepted flip — not the PR-A merge — as the unblock signal.
   not fan out to runtime. Users who expect "everything I author
   ships to .claude/" will be surprised by drafts staying invisible.
   The CLI surfaces this with a `(draft, no fan-out)` annotation in
-  `mm context list` output.
+  `mm context status` output.
 
 ## Considered & rejected
 
@@ -480,7 +480,8 @@ they do not block this ADR's acceptance.
 - The same-name conflict resolution for agents / skills / commands
   when one name appears in both project_shared and user scopes. §1
   notes Claude Code natively merges; for memtomem-managed views
-  (`mm context list`), highlight the conflict so the user knows.
+  (`mm context status --scope <tier>`, or the Web overview's per-tier
+  views), highlight the conflict so the user knows.
   The exact warning copy is implementation issue territory.
 - Orphan project chunk garbage collection. If a user indexes
   `/tmp/foo/.memtomem/memories/` then deletes the directory, stale
@@ -499,8 +500,16 @@ they do not block this ADR's acceptance.
 - MCP exposure for `mm context init` / `sync` / `migrate`.
   PR-E shipped through #889 / #890 / #893, with scope-tier moves
   consolidated into `mm context migrate <kind> <name> --to <scope>`.
-  v1 keeps these as CLI / authoring tools only. MCP parity is a
-  separate ask, tracked in #887.
+  #887 since landed MCP parity for `init` / `sync` / `generate` /
+  `diff` (the `mem_context_*` tools), and memory migration is exposed
+  as `mem_context_migrate` — a thin wrapper over `mm context
+  memory-migrate` (markdown memory files only). The **artifact**
+  scope-tier and flat→dir modes of `mm context migrate <kind> <name>`
+  remain **CLI-only by design**: there is no MCP path that migrates
+  agents / skills / commands between tiers. #1123 (B5-1 / B5-2) records
+  this as a deliberately-deferred gap rather than built — `migrate`'s
+  destructive, layout-aware semantics are an interactive/authoring
+  surface, not an agent-runtime one.
 
 ## References
 
