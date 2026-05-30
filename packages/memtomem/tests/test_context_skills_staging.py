@@ -169,6 +169,52 @@ class TestPromoteStaging:
         # Negative marker: dst was rolled back to ORIGINAL CONTENT.
         assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "ORIGINAL CONTENT\n"
 
+    def test_rollback_failure_preserves_original_and_logs_breadcrumb(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Both the staging→dst promote AND the old→dst rollback fail (issue
+        # #1123 B3-4). The ORIGINAL promote error must propagate (not the
+        # rollback error masking it), the original tree must survive at the
+        # move-aside ``.old-*`` path, and a logger.error breadcrumb must name
+        # it so an operator can recover manually.
+        src = _seed_canonical_skill(tmp_path, name="foo")
+        dst = tmp_path / ".claude" / "skills" / "foo"
+        dst.mkdir(parents=True)
+        (dst / SKILL_MANIFEST).write_text("ORIGINAL CONTENT\n", encoding="utf-8")
+        staging = _stage_skill(src, dst)
+
+        original_replace = os.replace
+        call_count = {"n": 0}
+
+        def fail_promote_and_rollback(a, b):
+            call_count["n"] += 1
+            # 1: dst→old (succeeds); 2: staging→dst (fails); 3: old→dst rollback (fails).
+            if call_count["n"] >= 2:
+                raise OSError(f"forced replace failure #{call_count['n']}")
+            return original_replace(a, b)
+
+        monkeypatch.setattr(os, "replace", fail_promote_and_rollback)
+        with caplog.at_level("ERROR", logger="memtomem.context.skills"):
+            with pytest.raises(OSError) as exc_info:
+                _promote_staging(staging, dst)
+
+        # The ORIGINAL promote failure (#2) propagates, chained from the
+        # rollback failure (#3) — the rollback error must not mask it.
+        assert "forced replace failure #2" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert "forced replace failure #3" in str(exc_info.value.__cause__)
+
+        # The original tree survives at the move-aside path (recoverable).
+        old_dirs = list(dst.parent.glob(".old-foo-*.tmp"))
+        assert len(old_dirs) == 1
+        assert (old_dirs[0] / SKILL_MANIFEST).read_text(encoding="utf-8") == "ORIGINAL CONTENT\n"
+
+        # A breadcrumb names the preserved tree so it can be recovered.
+        assert any(
+            "rollback failed" in r.getMessage() and old_dirs[0].name in r.getMessage()
+            for r in caplog.records
+        )
+
 
 class TestCopySkillBackCompat:
     def test_copy_skill_still_works(self, tmp_path: Path) -> None:

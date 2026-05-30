@@ -273,9 +273,24 @@ def _promote_staging(staging: Path, dst: Path) -> None:
         os.replace(dst, old)
         try:
             os.replace(staging, dst)
-        except BaseException:
-            # Roll back: put the original tree back.
-            os.replace(old, dst)
+        except BaseException as promote_exc:
+            # Roll back: put the original tree back. If the rollback rename
+            # ITSELF fails (e.g. ``dst`` was recreated by a racing writer, or an
+            # FS error), do not let it mask the original promotion error and do
+            # not leave ``old`` — the only surviving copy of the original tree —
+            # orphaned without a trace. Log a breadcrumb naming ``old`` and
+            # ``dst`` so an operator can recover the tree manually, then re-raise
+            # the ORIGINAL error with the rollback failure chained (#1123 B3-4).
+            try:
+                os.replace(old, dst)
+            except BaseException as rollback_exc:
+                logger.error(
+                    "skill promote rollback failed: %s is now missing; the "
+                    "original tree is preserved at %s — restore it manually",
+                    dst,
+                    old,
+                )
+                raise promote_exc from rollback_exc
             raise
         shutil.rmtree(old, ignore_errors=True)
     else:

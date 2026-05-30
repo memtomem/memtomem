@@ -6,8 +6,10 @@ Uses record-format hooks (Claude Code ≥ 2.1.104):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
 import pytest
@@ -561,6 +563,81 @@ class TestClaudeSettingsMergeConcurrent:
         assert "modified by another process" in r.reason
 
 
+class TestClaudeSettingsCrossProcessLock:
+    """B3-3 (#1123): the read-merge-recheck-write critical section runs under a
+    per-target portalocker sidecar ``_file_lock`` so a separate-process writer
+    cannot land between the mtime recheck and the atomic rename. The mtime
+    check is retained as a second layer against direct disk edits."""
+
+    def test_write_runs_inside_target_file_lock(self, claude_home, tmp_path, monkeypatch):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
+        )
+
+        import memtomem.context.settings as settings_mod
+        from memtomem.context._atomic import _lock_path_for
+
+        events: list[str] = []
+        orig_file_lock = settings_mod._file_lock
+        orig_write_json = settings_mod._write_json
+
+        @contextlib.contextmanager
+        def spy_file_lock(lock_path):
+            events.append(f"enter:{lock_path.name}")
+            with orig_file_lock(lock_path):
+                yield
+            events.append(f"exit:{lock_path.name}")
+
+        def spy_write_json(path, data):
+            events.append(f"write:{path.name}")
+            return orig_write_json(path, data)
+
+        monkeypatch.setattr(settings_mod, "_file_lock", spy_file_lock)
+        monkeypatch.setattr(settings_mod, "_write_json", spy_write_json)
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "ok"
+
+        # The write happened strictly between lock-enter and lock-exit on the
+        # target's sidecar — proving the critical section is lock-guarded.
+        lock_name = _lock_path_for(target).name
+        assert f"enter:{lock_name}" in events
+        assert f"write:{target.name}" in events
+        assert f"exit:{lock_name}" in events
+        assert (
+            events.index(f"enter:{lock_name}")
+            < events.index(f"write:{target.name}")
+            < events.index(f"exit:{lock_name}")
+        )
+
+    def test_concurrent_writers_never_leave_a_torn_file(self, claude_home, tmp_path):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
+        )
+
+        def _run():
+            return generate_all_settings(tmp_path, scope="user")["claude_settings"].status
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            statuses = [f.result() for f in [pool.submit(_run) for _ in range(8)]]
+
+        # Whatever the interleaving, every run resolves to a known terminal
+        # status (the lock + mtime recheck never produce a torn write) and at
+        # least one writer succeeds.
+        assert set(statuses) <= {"ok", "aborted"}
+        assert "ok" in statuses
+        # The final on-disk file is always complete, valid JSON with a hooks
+        # record — never empty or half-written.
+        final = json.loads(target.read_text(encoding="utf-8"))
+        assert isinstance(final.get("hooks"), dict)
+
+
 class TestClaudeSettingsAtomicWrite:
     """_write_json is atomic — a crash between open() and replace() leaves the
     pre-existing settings.json untouched instead of producing a truncated file
@@ -584,10 +661,17 @@ class TestClaudeSettingsAtomicWrite:
         with pytest.raises(OSError, match="simulated crash"):
             generate_all_settings(tmp_path, scope="user")
 
-        # Old file survives, no .tmp sibling leaked.
+        # Old file survives, no .tmp sibling leaked. The persistent
+        # ``.settings.json.lock`` sidecar (B3-3 cross-process lock, issue #1123)
+        # is expected to remain — ``_file_lock`` never unlinks its sidecar by
+        # design — so the leak check targets the mkstemp ``.tmp`` artifact only.
         assert json.loads(target.read_text(encoding="utf-8")) == original
-        siblings = [p for p in target.parent.iterdir() if p.name.startswith(".settings.json.")]
-        assert siblings == []
+        tmp_siblings = [
+            p
+            for p in target.parent.iterdir()
+            if p.name.startswith(".settings.json.") and p.name.endswith(".tmp")
+        ]
+        assert tmp_siblings == []
 
     @pytest.mark.skipif(
         sys.platform == "win32",

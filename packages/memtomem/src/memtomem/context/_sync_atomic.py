@@ -32,7 +32,7 @@ from typing import Generic, Literal, Protocol, TypeVar
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import GENERATOR_VENDOR, Layout
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 
@@ -336,6 +336,16 @@ def sync_atomic_artifact(
     # (``on_drop="error"`` or legacy ``strict=True``) and is an unrelated
     # atomicity boundary — pre-existing behavior pinned by
     # ``test_strict_drop_preserves_earlier_writes`` (#908).
+    #
+    # This engine deliberately takes NO cross-process lock — unlike
+    # :mod:`memtomem.context.skills`, which holds ``_file_lock`` across its
+    # dst→old→staging→dst swap. A lock is unnecessary here (not merely
+    # deadlock-free): (a) project_shared all-or-nothing is enforced in Phase 1,
+    # which raises before any write; (b) user / project_local partial writes are
+    # an intentional contract pinned by ``test_strict_drop_preserves_earlier_writes``
+    # (#908); and (c) each ``out_path`` is written exactly once via a single
+    # atomic ``os.replace`` (below), so per-file writes are idempotent /
+    # last-writer-wins with no torn cross-file state to protect (#1123 B3-1).
     for target, name, gen, item, out_path, override_bytes in pending:
         content, dropped_fields = gen.render(item)
         if dropped_fields:
@@ -345,12 +355,16 @@ def sync_atomic_artifact(
                 )
             if effective_drop == "warn":
                 adapter.logger.warning("%s dropped %s from '%s'", target, dropped_fields, name)
-        atomic_write_text(out_path, content)
-        # ADR-0008 Invariant 4: per-vendor override replaces the runtime file.
-        # Use the SAME captured buffer that passed Gate A — never
-        # re-read from disk (would re-open the TOCTOU window).
-        if override_bytes is not None:
-            atomic_write_bytes(out_path, override_bytes)
+        # ADR-0008 Invariant 4: a per-vendor override REPLACES the rendered
+        # runtime file, so write the final bytes exactly once. Writing the
+        # rendered ``content`` first and then overwriting it with
+        # ``override_bytes`` was wasted I/O and left a crash window where
+        # ``out_path`` briefly held the non-override rendered bytes a runtime
+        # could load (#1123 B3-5). Use the SAME captured override buffer that
+        # passed Gate A — never re-read from disk (would re-open the scan→write
+        # TOCTOU window).
+        final_bytes = override_bytes if override_bytes is not None else content.encode("utf-8")
+        atomic_write_bytes(out_path, final_bytes)
         generated.append((target, out_path))
         if dropped_fields:
             dropped.append((target, name, dropped_fields))

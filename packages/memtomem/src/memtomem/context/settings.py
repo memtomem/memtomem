@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from memtomem.context._atomic import atomic_write_text
+from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -929,38 +929,51 @@ def generate_all_settings(
             )
             continue
 
-        # Step 1: read existing + capture mtime (ns)
-        existing_raw, existing_mtime_ns = _read_with_mtime(target_path)
-        if existing_raw is _MALFORMED:
+        # Steps 1-4 run under a per-target cross-process lock so a separate
+        # process (a CLI ``mm context sync`` / the MCP server) or the Web UI
+        # cannot land a write between the mtime recheck (Step 3) and the atomic
+        # rename inside ``_write_json`` (Step 4) and silently drop a concurrent
+        # writer's hook rule (issue #1123 B3-3). This is the same sidecar-file
+        # ``portalocker`` primitive skills uses; ``_write_json`` →
+        # ``atomic_write_text`` is itself lock-free, so calling it under the held
+        # lock does not self-deadlock. Exactly one lock is held per iteration and
+        # released before the next target, so there is no cross-generator
+        # lock-ordering cycle. The ``st_mtime_ns`` recheck is KEPT as a second
+        # layer: it still catches a non-gateway direct disk edit that bypasses
+        # the sidecar lock entirely.
+        with _file_lock(_lock_path_for(target_path)):
+            # Step 1: read existing + capture mtime (ns)
+            existing_raw, existing_mtime_ns = _read_with_mtime(target_path)
+            if existing_raw is _MALFORMED:
+                results[name] = SettingsSyncResult(
+                    status="error",
+                    reason=f"{target_path} is not valid JSON. "
+                    f"Fix the file manually, then re-run "
+                    f"`mm context sync --include=settings`.",
+                )
+                continue
+            existing: dict | None = existing_raw  # type: ignore[assignment]
+
+            # Step 2: merge in memory
+            merged, warnings = gen.merge(existing, contributions)
+
+            # Step 3: mtime check (concurrent-write guard)
+            if target_path.is_file() and target_path.stat().st_mtime_ns != existing_mtime_ns:
+                results[name] = SettingsSyncResult(
+                    status="aborted",
+                    reason=f"{target_path} was modified by another "
+                    f"process during merge. Re-run "
+                    f"`mm context sync --include=settings` to retry.",
+                )
+                continue
+
+            # Step 4: write
+            _write_json(target_path, merged)
             results[name] = SettingsSyncResult(
-                status="error",
-                reason=f"{target_path} is not valid JSON. "
-                f"Fix the file manually, then re-run "
-                f"`mm context sync --include=settings`.",
+                status="ok",
+                warnings=warnings,
+                target=target_path,
             )
-            continue
-        existing: dict | None = existing_raw  # type: ignore[assignment]
-
-        # Step 2: merge in memory
-        merged, warnings = gen.merge(existing, contributions)
-
-        # Step 3: mtime check (concurrent-write guard)
-        if target_path.is_file() and target_path.stat().st_mtime_ns != existing_mtime_ns:
-            results[name] = SettingsSyncResult(
-                status="aborted",
-                reason=f"{target_path} was modified by another "
-                f"process during merge. Re-run "
-                f"`mm context sync --include=settings` to retry.",
-            )
-            continue
-
-        # Step 4: write
-        _write_json(target_path, merged)
-        results[name] = SettingsSyncResult(
-            status="ok",
-            warnings=warnings,
-            target=target_path,
-        )
 
     return results
 

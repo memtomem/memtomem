@@ -477,3 +477,22 @@ def test_config_lock_is_module_singleton():
     from memtomem.web.routes.system import _config_lock as sys_lock
 
     assert sys_lock is _locks._config_lock
+
+
+def test_gateway_lock_docstring_describes_two_layer_model():
+    """B3-2 (#1123): the ``_locks`` docstring must describe the accurate
+    per-engine two-layer model and record the rejected gateway-wide lock, so it
+    cannot silently drift back to over-claiming that this in-process asyncio
+    lock provides cross-process serialization."""
+    from memtomem.web.routes import _locks
+
+    doc = _locks.__doc__ or ""
+    # Layer 1 framing + the in-process caveat.
+    assert "two-layer" in doc
+    assert "in-process" in doc
+    # Layer 2 is asymmetric per engine — all three must be named distinctly.
+    assert "skills" in doc
+    assert "agents / commands" in doc
+    assert "settings" in doc
+    # The heavy alternative was considered and rejected — keep that on record.
+    assert "gateway-wide" in doc
