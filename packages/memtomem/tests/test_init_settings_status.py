@@ -87,5 +87,9 @@ def test_ok_and_skipped_still_reported(tmp_path, monkeypatch):
             "codex": SettingsSyncResult(status="skipped", reason="not installed"),
         },
     )
-    assert "merged" in out.lower()
-    assert "skipped" in out.lower()
+    # Assert on the loop's own output, not the static intro line ("Hooks are
+    # merged into ~/.claude/settings.json additively.") which contains the word
+    # "merged" regardless of whether the ``ok`` branch ran — a bare
+    # ``"merged" in out.lower()`` would pass even if that branch regressed.
+    assert "Merged → /tmp/claude.json" in out
+    assert "skipped codex: not installed" in out
