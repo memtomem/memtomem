@@ -810,12 +810,12 @@ def init_cmd(
         else:
             best = max(files, key=lambda f: f.size)
             click.echo(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
-            content = best.path.read_text(encoding="utf-8")
+            content = _read_agent_file(best.path)
             sections = extract_sections_from_agent_file(content)
             for f in files:
                 if f.path == best.path:
                     continue
-                other_content = f.path.read_text(encoding="utf-8")
+                other_content = _read_agent_file(f.path)
                 other_sections = extract_sections_from_agent_file(other_content)
                 for key, val in other_sections.items():
                     if key not in sections and val.strip():
@@ -889,6 +889,19 @@ def init_cmd(
         )
 
 
+def _read_agent_file(path: Path) -> str:
+    """Read a detected agent file, turning IO/decode errors into a clean CLI
+    error instead of a raw traceback (#1123 B2-3).
+
+    Agent files are auto-detected, so one may be binary, unreadable, or have
+    vanished between detection and read; surface that as a ``ClickException``.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise click.ClickException(f"Could not read {path}: {exc}") from exc
+
+
 @context.command("generate")
 @click.option("--agent", "-a", default="all", help="Agent name or 'all'")
 @_INCLUDE_OPTION
@@ -921,6 +934,11 @@ def generate_cmd(
     scope_flag: str | None,
 ) -> None:
     """Generate agent files from .memtomem/context.md."""
+    # Validate --agent up front so a typo fails loudly (exit 1) instead of
+    # printing a red line and still exiting 0 (#1123 B2-1). "all" expands to
+    # every registered generator, so it never needs validating.
+    if agent != "all" and agent not in GENERATORS:
+        raise click.ClickException(f"Unknown agent: {agent}. Available: {', '.join(GENERATORS)}")
     inc = _parse_include(include)
     root = _find_project_root()
     ctx_path = _context_path(root)
@@ -936,12 +954,6 @@ def generate_cmd(
             _warn_rules_style_merge(sections, targets)
 
             for name in targets:
-                if name not in GENERATORS:
-                    click.secho(
-                        f"Unknown agent: {name}. Available: {', '.join(GENERATORS)}", fg="red"
-                    )
-                    continue
-
                 gen = GENERATORS[name]
                 content = gen.generate(sections)
                 out_path = root / gen.output_path
@@ -994,14 +1006,15 @@ def generate_cmd(
     "--scope",
     "scope_flag",
     type=click.Choice(get_args(TargetScope)),
-    default="project_shared",
-    show_default=True,
+    default=None,
     help=(
-        "Canonical artifact tier for skills/agents/commands. "
-        "Use project_local to inspect local drafts with no runtime fan-out."
+        "Canonical artifact tier for skills/agents/commands "
+        "(default: project_shared). Use project_local to inspect local drafts "
+        "with no runtime fan-out. When omitted, the settings axis follows the "
+        "configured hooks.target_scope, matching generate/sync."
     ),
 )
-def diff_cmd(include: tuple[str, ...], scope_flag: TargetScope) -> None:
+def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     """Show differences between context.md and agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -1017,7 +1030,7 @@ def diff_cmd(include: tuple[str, ...], scope_flag: TargetScope) -> None:
                 if not gen:
                     continue
 
-                current = f.path.read_text(encoding="utf-8").strip()
+                current = _read_agent_file(f.path).strip()
                 expected = gen.generate(sections).strip()
 
                 if current == expected:
@@ -1032,21 +1045,32 @@ def diff_cmd(include: tuple[str, ...], scope_flag: TargetScope) -> None:
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # Dual-axis scope resolution, mirroring sync_cmd/generate_cmd. Resolving
+    # both axes off the same raw scope_flag (default None) keeps `diff`
+    # consistent with the commands whose drift it reports: artifacts default to
+    # project_shared via _resolve_artifact_cli_scope (ADR-0011 PR-E3), while the
+    # settings axis follows cfg.hooks.target_scope via _resolve_cli_scope when
+    # --scope is omitted (ADR-0010). The earlier "project_shared" option default
+    # made scope_flag never-None, so _resolve_cli_scope could not fall back to
+    # the configured target — diff compared a different settings tier than
+    # generate/sync wrote (#1123 B2-2).
+    artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+
     if "skills" in inc:
         click.echo("")
-        _print_skills_diff(root, scope=scope_flag)
+        _print_skills_diff(root, scope=artifact_scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_diff(root, scope=scope_flag)
+        _print_agents_diff(root, scope=artifact_scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_diff(root, scope=scope_flag)
+        _print_commands_diff(root, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
-        _print_settings_diff(root, scope=_resolve_cli_scope(None))
+        _print_settings_diff(root, scope=_resolve_cli_scope(scope_flag))
 
 
 @context.command("sync")
@@ -2122,8 +2146,8 @@ def _summarize_migrate_rows(rows: list[MigrateRow]) -> str:
     default=False,
     help=(
         "Flat→dir mode: migrate dirty flat files; each gets a .bak sibling. "
-        "Has no effect in scope-tier mode (--to) — destinations always "
-        "refuse on conflict in PR-E4. Requires --apply."
+        "Requires --apply. Not accepted with --to: scope-tier moves always "
+        "refuse on conflict (PR-E4), so passing --force there is an error."
     ),
 )
 @click.option(
@@ -2771,6 +2795,10 @@ def _resolve_memory_migrate_sources(source_arg: str) -> list[Path]:
 
     expanded = Path(source_arg).expanduser()
     if expanded.is_file():
+        # Even an explicit single-file source must be .md, matching the glob
+        # branch's filter and the documented `.md files` contract (#1123 B2-5).
+        if expanded.suffix != ".md":
+            raise click.ClickException(f"Memory source must be a .md file: {source_arg}")
         return [expanded.resolve()]
 
     matches = _glob.glob(str(expanded), recursive=True)
