@@ -59,7 +59,7 @@ from memtomem.context.migrate import (
 )
 from memtomem.context.projects import KnownProjectsStore
 from memtomem.context.lockfile import LockfileVersionError
-from memtomem.context.status import classify_status, load_with_recovery
+from memtomem.context.status import classify_status, load_with_recovery, scan_user_artifacts
 from memtomem.context.generator import (
     GENERATORS,
     extract_sections_from_agent_file,
@@ -1562,7 +1562,13 @@ def status_cmd(scope_flag: TargetScope) -> None:
 
     wiki = WikiStore.at_default()
     wiki_head, rows = classify_status(root, wiki=wiki)
-    rows = [row for row in rows if row.tier == scope_flag]
+    if scope_flag == "user":
+        # User-tier artifacts live in the global ~/.memtomem store, outside
+        # the project root classify_status walks; enumerate them on demand
+        # only when this scope is requested (#1123 B4-2).
+        rows = sorted(scan_user_artifacts(), key=lambda r: (r.asset_type, r.name))
+    else:
+        rows = [row for row in rows if row.tier == scope_flag]
 
     if lockfile_error is not None:
         click.secho(f"  ✗ lock.json: {lockfile_error}", fg="red", err=True)
@@ -1571,8 +1577,8 @@ def status_cmd(scope_flag: TargetScope) -> None:
     # Lockfile-tracked installs (project_shared) drive the "installed"
     # count; project_local rows are surfaced separately so the header
     # word ("installed") stays accurate for both groups.
-    installed_count = sum(1 for r in rows if r.tier != "project_local")
-    draft_count = sum(1 for r in rows if r.tier == "project_local")
+    installed_count = sum(1 for r in rows if r.state != "local-draft")
+    draft_count = sum(1 for r in rows if r.state == "local-draft")
     draft_suffix = (
         f" (+ {draft_count} local draft{'s' if draft_count != 1 else ''})" if draft_count else ""
     )
@@ -1592,6 +1598,8 @@ def status_cmd(scope_flag: TargetScope) -> None:
     if not rows and lockfile_error is None:
         if scope_flag == "project_local":
             click.echo("\nNo project_local draft assets in this project.")
+        elif scope_flag == "user":
+            click.echo("\nNo user-scope assets found under ~/.memtomem/.")
         else:
             click.echo(f"\nNo wiki assets installed in this project for scope {scope_flag}.")
         return
@@ -1618,7 +1626,7 @@ def status_cmd(scope_flag: TargetScope) -> None:
         # "?"/"—" placeholders the lockfile-tracked branches use, so
         # the visual distinction is obvious to a reader scanning the
         # column.
-        if row.tier == "project_local":
+        if row.state == "local-draft":
             line = f"  {glyph}  {row.name:24s}  {'—':<12}  {'(no install record)':<23}"
         else:
             installed_date = row.installed_at[:10] if row.installed_at else "—"
@@ -2522,7 +2530,7 @@ def settings_migrate_cmd(
     summary = format_plan_summary(plan)
 
     if json_out:
-        payload = {
+        payload: dict[str, Any] = {
             "status": "noop" if plan.is_noop else ("conflicts" if conflicts else "ok"),
             "applied": False,
             "from": plan.source_scope,
@@ -2612,11 +2620,18 @@ def settings_migrate_cmd(
             raise click.exceptions.Exit(1)
 
     result = apply_migration(plan)
+    # Drift the planner could not see — the target changed between plan and
+    # apply — surfaces as apply-time warnings (#1123 B4-3). Treat it like a
+    # plan-time conflict for reporting and the exit code.
+    apply_drift = bool(result.warnings)
 
     if json_out:
         payload["applied"] = True
         payload["target_written"] = result.target_written
         payload["source_written"] = result.source_written
+        if result.warnings:
+            payload["warnings"] = result.warnings
+            payload["status"] = "conflicts"
         click.echo(json.dumps(payload, indent=2))
     else:
         if result.target_written:
@@ -2629,7 +2644,9 @@ def settings_migrate_cmd(
                 f"  ✓ cleaned source {plan.source_path}",
                 fg="green",
             )
-        if not result.target_written and not result.source_written:
+        for warning in result.warnings:
+            click.secho(f"  ⚠ {warning}", fg="yellow", err=True)
+        if not result.target_written and not result.source_written and not result.warnings:
             if conflicts:
                 click.secho(
                     "  (no changes written — conflicts must be resolved first)",
@@ -2638,10 +2655,11 @@ def settings_migrate_cmd(
             else:
                 click.echo("  (no changes written — source was already clean)")
 
-    if conflicts:
-        # Conflicts left in source; user must resolve manually before
-        # re-running migrate. Match `mm context migrate`'s exit-1 on
-        # any partial failure.
+    if conflicts or apply_drift:
+        # Conflicts left in source — flagged at plan time, or drift
+        # discovered at apply time; the user must resolve manually before
+        # re-running migrate. Match `mm context migrate`'s exit-1 on any
+        # partial failure.
         raise click.exceptions.Exit(1)
 
 

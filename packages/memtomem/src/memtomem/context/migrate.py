@@ -1024,7 +1024,28 @@ def migrate_scope(
                     dst_path=dst_path,
                 ) from exc
 
-    # Lock released. Cleanup stale src runtime fan-out (best-effort).
+    # Lock released. The wiki-install lockfile (``lock.json``) only tracks
+    # project_shared installs; migrating an artifact OUT of project_shared
+    # leaves its entry dangling, and `mm context status` would then iterate
+    # that entry, find the canonical gone from the project_shared dest, and
+    # report the (now-moved) artifact as "missing" (#1123 B4-1). Drop the
+    # stale entry. Best-effort: the canonical move already committed inside
+    # the lock above, so a lock.json bookkeeping failure must NOT undo or
+    # fail the migration — log loudly and continue.
+    if src_scope == "project_shared":
+        try:
+            Lockfile.at(project_root).remove_entry(kind, name)
+        except Exception as exc:  # bookkeeping must never fail a committed move
+            logger.warning(
+                "migrate_scope: failed to drop stale lock.json entry for %s/%s "
+                "after moving out of project_shared (%s); `mm context status` may "
+                "report it as missing until the entry is removed.",
+                kind,
+                name,
+                exc,
+            )
+
+    # Cleanup stale src runtime fan-out (best-effort).
     fanout_cleaned = _remove_runtime_fanout_for(kind, name, src_scope, project_root)
 
     return MigrateScopeResult(

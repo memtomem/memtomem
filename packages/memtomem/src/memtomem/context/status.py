@@ -42,6 +42,7 @@ __all__ = [
     "StatusRow",
     "StatusState",
     "classify_status",
+    "scan_user_artifacts",
 ]
 
 
@@ -71,12 +72,18 @@ class StatusRow:
     not reachable"`` / ``"wiki not present"`` for stale-pin.
 
     ``tier`` distinguishes lockfile-tracked installs (``project_shared``)
-    from locally-authored drafts discovered by walking
-    ``<proj>/.memtomem/<artifact>.local/`` (``project_local``). The CLI
-    appends ``(draft, no fan-out)`` after project_local rows per ADR-0011
-    §3 / ADR-0016 §7. ``user`` tier is reserved for a future scan;
-    today's `mm context install` only writes project_shared, so no
-    ``user``-tier rows are produced.
+    from author-managed drafts. :func:`classify_status` walks the
+    project-rooted tiers — lockfile installs plus
+    ``<proj>/.memtomem/<artifact>.local/`` (``project_local``) drafts. The
+    global ``~/.memtomem/<artifact>/`` (``user``) tier is enumerated
+    separately by :func:`scan_user_artifacts`, which the CLI surfaces for
+    ``--scope user`` (folding it into ``classify_status`` would couple every
+    status read to the caller's real home). Both draft tiers carry
+    ``state="local-draft"`` and empty ``pin_commit``/``installed_at`` — not
+    lockfile-tracked, so no wiki pin to report. The CLI appends
+    ``(draft, no fan-out)`` after project_local rows per ADR-0011 §3 /
+    ADR-0016 §7; user-tier drafts DO fan out to runtime dirs, so they get no
+    such annotation.
     """
 
     asset_type: Literal["skills", "agents", "commands"]
@@ -201,12 +208,12 @@ _TIER_RENDER_ORDER: dict[str, int] = {
 }
 
 
-def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
-    """Yield ``StatusRow``s for every valid project_local draft on disk.
+def _scan_draft_tier(scope: TargetScope, project_root: Path | None) -> Iterator[StatusRow]:
+    """Yield ``local-draft`` ``StatusRow``s for every valid artifact in *scope*.
 
-    Walks ``<proj>/.memtomem/{agents,commands,skills}.local/`` and emits
-    one row per valid artifact. Both layouts that ``migrate._detect_source_scope``
-    accepts are recognised:
+    Shared walk for the two non-lockfile canonical tiers — ``project_local``
+    (``<proj>/.memtomem/{kind}.local/``) and ``user`` (``~/.memtomem/{kind}/``).
+    Both layouts that ``migrate._detect_source_scope`` accepts are recognised:
 
     - **Directory layout** (all three kinds): ``<root>/<name>/`` containing
       the kind-specific manifest file (``agent.md`` / ``command.md`` /
@@ -215,29 +222,26 @@ def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
       design — see ``migrate._detect_source_scope``): ``<root>/<name>.md``
       as a single file. ``<name>`` is the file stem.
 
-    When the same name exists in both layouts at the same tier the
-    directory wins (mirrors migrate's ``continue`` after a dir match),
-    so flat siblings of a directory artifact are silently shadowed.
+    When the same name exists in both layouts the directory wins (mirrors
+    migrate's ``continue`` after a dir match), so a flat sibling of a
+    directory artifact is silently shadowed.
 
-    Emitted rows carry ``tier="project_local"``, ``state="local-draft"``,
-    and empty ``pin_commit``/``installed_at`` — project_local artifacts
-    are not currently tracked in the lockfile (install path is
-    project_shared-only today; locally-authored drafts never enter
-    ``lock.json``). The CLI render layer appends ``(draft, no fan-out)``
-    to these rows per ADR-0011 §3 / ADR-0016 §7.
+    Emitted rows carry ``tier=scope``, ``state="local-draft"`` and empty
+    ``pin_commit``/``installed_at`` — neither tier is lockfile-tracked, so
+    there is no wiki pin to report.
     """
     for asset_type in ("agents", "commands", "skills"):
-        local_root = canonical_artifact_dir(
+        root = canonical_artifact_dir(
             asset_type,  # type: ignore[arg-type]
-            "project_local",
+            scope,
             project_root,
         )
-        if not local_root.is_dir():
+        if not root.is_dir():
             continue
         manifest = _LOCAL_DRAFT_MANIFEST[asset_type]
         seen_names: set[str] = set()
 
-        for entry in sorted(local_root.iterdir(), key=lambda p: p.name):
+        for entry in sorted(root.iterdir(), key=lambda p: p.name):
             if not entry.is_dir():
                 continue
             if not (entry / manifest).is_file():
@@ -254,13 +258,13 @@ def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
                 state="local-draft",
                 dirty_file_count=0,
                 reason=None,
-                tier="project_local",
+                tier=scope,
             )
 
         if asset_type == "skills":
             # Skills have no flat layout (migrate._detect_source_scope:792).
             continue
-        for entry in sorted(local_root.iterdir(), key=lambda p: p.name):
+        for entry in sorted(root.iterdir(), key=lambda p: p.name):
             if not entry.is_file() or entry.suffix != ".md":
                 continue
             name = entry.stem
@@ -277,8 +281,35 @@ def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
                 state="local-draft",
                 dirty_file_count=0,
                 reason=None,
-                tier="project_local",
+                tier=scope,
             )
+
+
+def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:
+    """Yield project_local draft rows (``<proj>/.memtomem/{kind}.local/``).
+
+    Thin wrapper over :func:`_scan_draft_tier`. The CLI render layer appends
+    ``(draft, no fan-out)`` to these rows per ADR-0011 §3 / ADR-0016 §7 —
+    project_local artifacts have no runtime fan-out path.
+    """
+    yield from _scan_draft_tier("project_local", project_root)
+
+
+def scan_user_artifacts() -> Iterator[StatusRow]:
+    """Yield user-tier (``~/.memtomem/{kind}/``) draft rows — #1123 B4-2.
+
+    Thin public wrapper over :func:`_scan_draft_tier` for the CLI's
+    ``mm context status --scope user`` view. The user tier is the global
+    ``~/.memtomem`` store, NOT under the project root that
+    :func:`classify_status` walks, so it is enumerated here on demand
+    rather than folded into ``classify_status`` — folding it in would make
+    every status call (and every test exercising one) depend on the
+    caller's real home directory. Without this, ``--scope user`` filtered an
+    all-empty row set and reported "nothing" even when ``~/.memtomem`` held
+    artifacts. Unlike project_local, user artifacts DO fan out to runtime
+    dirs, so the CLI must not tag them ``(no fan-out)``.
+    """
+    yield from _scan_draft_tier("user", None)
 
 
 def load_with_recovery(project_root: Path | str) -> tuple[dict, str | None]:

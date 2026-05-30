@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from memtomem.context._atomic import atomic_write_text
@@ -472,37 +472,97 @@ def _write_json(path: Path, data: dict) -> None:
     atomic_write_text(path, payload, mode=0o600)
 
 
+def _canonical_inner_of(move: MigrateMove) -> dict:
+    """Recover the canonical inner-hook dict from a move's target rule.
+
+    ``rule_to_write_at_target`` is the stamped ``{matcher, hooks: [inner]}``
+    rule; the single inner is what :func:`_classify_target` compares against
+    the live target tier at apply time. Ownership-marker fields are ignored
+    by that comparison (:func:`_inner_content_equal`), so the stamped inner
+    classifies identically to the raw canonical one the planner used.
+    """
+    rule = move.rule_to_write_at_target
+    if not isinstance(rule, dict):
+        return {}
+    inners = rule.get("hooks", [])
+    if isinstance(inners, list) and inners and isinstance(inners[0], dict):
+        return inners[0]
+    return {}
+
+
 def apply_migration(plan: MigratePlan) -> MigrateResult:
     """Apply *plan* to disk.
 
     Write order: **target first, then source.** A crash between the two
     leaves the user with a transient duplicate that the next plan run
     detects and heals (idempotent — target's inner hook now matches the
-    canonical signature, so ``already_at_target`` is True and only the
+    canonical signature, so it re-classifies as ``exact`` and only the
     source clean-up step runs).
+
+    The plan's per-move ``already_at_target`` / ``conflict_at_target`` flags
+    were frozen at *plan* time. ``apply`` therefore **re-reads and
+    re-classifies** the target tier against the live file before writing
+    (#1123 B4-3): between plan and apply the target can drift — another
+    writer, a manual edit, or a second ``settings-migrate`` run. Trusting
+    the stale flags would either append a canonical rule the target already
+    grew (a same-matcher duplicate Claude Code fires twice) or write past a
+    freshly introduced conflict. Re-classification closes that TOCTOU
+    window so a separated dry-run → apply workflow stays sound.
+
+    Drift discovered at apply time (a move that became a conflict) is
+    refused per-move: the target is not appended to and the source entry is
+    not cleaned, and a human-readable note is added to
+    :attr:`MigrateResult.warnings` for the CLI to surface.
     """
     result = MigrateResult(plan=plan)
     if plan.is_noop:
         return result
 
-    applicable = list(plan.applicable_moves)
+    # Re-read + re-classify the target against its current on-disk state,
+    # deriving the write-set and the source-clean-set from the LIVE target
+    # rather than the plan-time snapshot.
+    target_existing = _safe_load_json_dict(plan.target_path) or {}
+    target_index = _target_rule_lookup(target_existing.get("hooks", {}))
+
+    moves_to_write: list[MigrateMove] = []
+    sigs_to_drop: set[HookSignature] = set()
+    for move in plan.applicable_moves:
+        status, reason = _classify_target(target_index, move.signature, _canonical_inner_of(move))
+        if status == "conflict":
+            # Drift introduced after planning: refuse this move. Appending
+            # would duplicate the matcher; cleaning source would leave the
+            # target permanently drifted from the canonical contract.
+            result.warnings.append(reason)
+            continue
+        if status == "missing":
+            # No rule under (event, matcher) at target → append it.
+            moves_to_write.append(move)
+        # status == "exact": target already carries the canonical inner —
+        # skip the append, but still drop the now-redundant source entry.
+        sigs_to_drop.add(move.signature)
 
     # --- Target write ---------------------------------------------------
-    target_existing = _safe_load_json_dict(plan.target_path) or {}
-    target_new_inners = [m for m in applicable if not m.already_at_target]
-    if target_new_inners:
-        target_merged = _add_target_rules(target_existing, target_new_inners)
+    if moves_to_write:
+        # ``already_at_target`` is forced False so _add_target_rules appends
+        # every move we decided to write — including a plan-time "already"
+        # move that re-classified to "missing" because the target lost the
+        # entry between plan and apply.
+        target_merged = _add_target_rules(
+            target_existing,
+            [replace(m, already_at_target=False) for m in moves_to_write],
+        )
         _write_json(plan.target_path, target_merged)
         result.target_written = True
 
     # --- Source write ---------------------------------------------------
+    if not sigs_to_drop:
+        return result
     source_existing = _safe_load_json_dict(plan.source_path)
     if source_existing is None:
         # Source vanished between plan and apply (rare). Source is already
         # clean from this command's POV; leave as-is.
         return result
 
-    sigs_to_drop = {m.signature for m in applicable}
     source_new = _strip_source_inner_entries(source_existing, sigs_to_drop)
     if source_new != source_existing:
         _write_json(plan.source_path, source_new)

@@ -202,3 +202,32 @@ class Lockfile:
                 self._path,
                 json.dumps(doc, indent=2, ensure_ascii=False).encode("utf-8"),
             )
+
+    def remove_entry(self, asset_type: str, name: str) -> bool:
+        """Delete the ``(asset_type, name)`` entry if present.
+
+        Returns ``True`` when an entry was removed, ``False`` when there
+        was nothing to remove (no such section, or no such name) — in
+        which case the file is left untouched: no atomic write happens, so
+        ``mtime`` is unchanged and a concurrent reader sees no spurious
+        churn.
+
+        Holds the sidecar lock for the load → mutate → write triple,
+        mirroring :meth:`upsert_entry`. Only the targeted entry is
+        deleted; sibling entries and unknown top-level / per-entry fields
+        round-trip verbatim per ADR-0008. The (possibly now-empty) section
+        dict is left in place rather than pruned, so a section a newer
+        tool populated out-of-band is never dropped as a side effect of
+        removing one entry.
+        """
+        with _file_lock(_lock_path_for(self._path)):
+            doc = self.load()
+            section = doc.get(asset_type)
+            if not isinstance(section, dict) or name not in section:
+                return False
+            del section[name]
+            atomic_write_bytes(
+                self._path,
+                json.dumps(doc, indent=2, ensure_ascii=False).encode("utf-8"),
+            )
+            return True

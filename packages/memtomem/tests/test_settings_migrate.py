@@ -20,6 +20,7 @@ from memtomem.context.settings import CANONICAL_SETTINGS_FILE
 from memtomem.context.settings_migrate import (
     MigrateMove,
     MigratePlan,
+    MigrateResult,
     apply_migration,
     format_plan_summary,
     plan_migration,
@@ -661,3 +662,90 @@ class TestFormatPlanSummary:
 
         nums = [int(n) for n in re.findall(r"\b(\d+)\b", summary)]
         assert sum(nums) == len(plan.moves)
+
+
+class TestApplyTimeDrift:
+    """apply_migration re-reads + re-classifies the target at apply time, so a
+    target that drifts between plan and apply is handled against its live
+    state instead of the frozen plan-time snapshot (#1123 B4-3)."""
+
+    def test_refuses_target_that_drifted_to_conflict_after_plan(self, project_root, fake_home):
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert plan.applicable_moves  # planner saw a clean, applicable move
+
+        # Drift AFTER planning: target grows a DIFFERENT inner under the same
+        # (event, matcher) — what the planner classified "missing" is now a
+        # conflict.
+        drift = {"PostToolUse": [_rule("Edit|Write", inners=[_inner("other-command")])]}
+        _write_settings(project_root / ".claude" / "settings.local.json", _settings_doc(drift))
+
+        result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert result.warnings  # drift surfaced for the CLI to print + exit 1
+        # Source still carries the entry (NOT cleaned) so a re-plan retries.
+        user_doc = _read_settings(fake_home / ".claude" / "settings.json")
+        cmds = [
+            i.get("command") for r in user_doc["hooks"]["PostToolUse"] for i in r.get("hooks", [])
+        ]
+        assert "mm session start" in cmds
+        # Target's drifted rule was NOT duplicated (still exactly one rule).
+        target_doc = _read_settings(project_root / ".claude" / "settings.local.json")
+        assert len(target_doc["hooks"]["PostToolUse"]) == 1
+
+    def test_skips_redundant_write_when_target_gained_identical_entry(
+        self, project_root, fake_home
+    ):
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert plan.moves[0].already_at_target is False  # planner saw an empty target
+
+        # Drift AFTER planning: target now already carries the canonical rule.
+        _write_settings(
+            project_root / ".claude" / "settings.local.json",
+            _settings_doc(_bundled_hook()),
+        )
+
+        result = apply_migration(plan)
+
+        # Re-classified as exact → no redundant append, but source IS cleaned.
+        assert result.target_written is False
+        assert result.source_written is True
+        assert not result.warnings
+        # Exactly one rule under the matcher — no same-matcher duplicate.
+        target_doc = _read_settings(project_root / ".claude" / "settings.local.json")
+        assert len(target_doc["hooks"]["PostToolUse"]) == 1
+
+    def test_cli_surfaces_apply_drift_warning_and_exits_1(
+        self, monkeypatch, project_root, fake_home
+    ):
+        """The settings-migrate CLI prints apply-time drift warnings (stderr)
+        and exits 1 even when the plan itself was conflict-free."""
+        from memtomem.cli import context_cmd as ctx
+
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+
+        def _fake_apply(plan: MigratePlan) -> MigrateResult:
+            res = MigrateResult(plan=plan)
+            res.warnings.append(
+                "target tier already has a rule under 'PostToolUse:Edit|Write' "
+                "whose inner hooks differ from the canonical entry."
+            )
+            return res
+
+        monkeypatch.setattr(ctx, "apply_migration", _fake_apply)
+        monkeypatch.chdir(project_root)
+
+        result = CliRunner().invoke(
+            ctx.context,
+            ["settings-migrate", "--from", "user", "--to", "project_local", "--apply", "--yes"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 1
+        assert "PostToolUse:Edit|Write" in result.output

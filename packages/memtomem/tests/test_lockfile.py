@@ -201,3 +201,60 @@ def test_concurrent_upserts_keep_file_valid(tmp_path: Path) -> None:
         assert name in skills, f"missing entry for {name}; got {sorted(skills)}"
         assert "wiki_commit" in skills[name]
         assert "installed_at" in skills[name]
+
+
+# ── remove_entry (#1123 B4-1) ─────────────────────────────────────────────
+
+
+def test_remove_entry_deletes_and_returns_true(tmp_path: Path) -> None:
+    lock = Lockfile.at(tmp_path)
+    lock.upsert_entry(
+        "skills", "foo", wiki_commit="a" * 40, installed_at="2026-01-01T00:00:00.000000Z"
+    )
+    assert lock.read_entry("skills", "foo") is not None
+
+    assert lock.remove_entry("skills", "foo") is True
+    assert lock.read_entry("skills", "foo") is None
+
+
+def test_remove_entry_absent_returns_false_and_leaves_file_untouched(tmp_path: Path) -> None:
+    lock = Lockfile.at(tmp_path)
+    # No lockfile yet: removing is a no-op and must NOT create the file.
+    assert lock.remove_entry("skills", "ghost") is False
+    assert not lock.path.exists()
+
+    lock.upsert_entry(
+        "agents", "keep", wiki_commit="b" * 40, installed_at="2026-01-01T00:00:00.000000Z"
+    )
+    before = lock.path.read_bytes()
+    # Existing file, but neither the section nor the name matches → no rewrite.
+    assert lock.remove_entry("commands", "ghost") is False
+    assert lock.remove_entry("agents", "ghost") is False
+    assert lock.path.read_bytes() == before  # byte-identical: mtime/content untouched
+
+
+def test_remove_entry_preserves_siblings_and_unknown_fields(tmp_path: Path) -> None:
+    project = tmp_path
+    (project / ".memtomem").mkdir()
+    seed = {
+        "version": LOCKFILE_VERSION,
+        "future_root": "preserved",
+        "skills": {
+            "alpha": {"wiki_commit": "a" * 40, "installed_at": "2026-01-01T00:00:00.000000Z"},
+            "beta": {
+                "wiki_commit": "b" * 40,
+                "installed_at": "2026-01-02T00:00:00.000000Z",
+                "compat": "v2",
+            },
+        },
+    }
+    (project / ".memtomem" / "lock.json").write_text(json.dumps(seed), encoding="utf-8")
+
+    lock = Lockfile.at(project)
+    assert lock.remove_entry("skills", "alpha") is True
+
+    doc = lock.load()
+    assert "alpha" not in doc["skills"]
+    assert doc["skills"]["beta"]["wiki_commit"] == "b" * 40
+    assert doc["skills"]["beta"]["compat"] == "v2"  # unknown per-entry field kept
+    assert doc["future_root"] == "preserved"  # unknown top-level field kept

@@ -25,8 +25,11 @@ from click.testing import CliRunner
 from memtomem.cli.context_cmd import context as context_group
 from memtomem.context._atomic import atomic_write_bytes, installed_at_from_dest
 from memtomem.context.lockfile import Lockfile
-from memtomem.context.status import StatusRow, classify_status
+from memtomem.context.migrate import migrate_scope
+from memtomem.context.status import StatusRow, classify_status, scan_user_artifacts
 from memtomem.wiki.store import WikiStore
+
+from .helpers import set_home
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -642,3 +645,145 @@ def test_status_row_dataclass_shape() -> None:
     # (and the lockfile-walk branch in classify_status) remain valid
     # without explicit tier= updates.
     assert row.tier == "project_shared"
+
+
+# ── migrate drops the dangling lockfile entry (#1123 B4-1) ─────────────────
+
+
+def test_status_no_missing_after_scope_migration_drops_lockfile_entry(
+    monkeypatch, wiki_root: Path, tmp_path: Path
+) -> None:
+    """Migrating a project_shared install out of project_shared must drop
+    its lock.json entry, so status no longer iterates a stale entry and
+    reports the moved artifact as 'missing' (#1123 B4-1)."""
+    set_home(monkeypatch, tmp_path / "home")
+    _initialized_wiki(wiki_root)
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"v1\n"}, "a" * 40)
+    assert Lockfile.at(tmp_path).read_entry("skills", "foo") is not None
+
+    migrate_scope(
+        "skills",
+        "foo",
+        from_scope="project_shared",
+        to_scope="project_local",
+        project_root=tmp_path,
+        apply_=True,
+    )
+
+    # Lockfile entry is gone …
+    assert Lockfile.at(tmp_path).read_entry("skills", "foo") is None
+    # … and status surfaces only the project_local draft — no 'missing' row.
+    _, rows = classify_status(tmp_path)
+    foo_rows = [r for r in rows if r.asset_type == "skills" and r.name == "foo"]
+    assert [r.state for r in foo_rows] == ["local-draft"]
+    assert all(r.state != "missing" for r in rows)
+
+
+def test_status_no_missing_after_scope_migration_to_user_drops_lockfile_entry(
+    monkeypatch, wiki_root: Path, tmp_path: Path
+) -> None:
+    """The same lock.json cleanup must apply on the other project_shared exit
+    path — migrating project_shared → user (#1123 B4-1)."""
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    _initialized_wiki(wiki_root)
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"v1\n"}, "a" * 40)
+    assert Lockfile.at(tmp_path).read_entry("skills", "foo") is not None
+
+    migrate_scope(
+        "skills",
+        "foo",
+        from_scope="project_shared",
+        to_scope="user",
+        project_root=tmp_path,
+        apply_=True,
+    )
+
+    # Lockfile entry dropped; status surfaces no 'missing' row …
+    assert Lockfile.at(tmp_path).read_entry("skills", "foo") is None
+    _, rows = classify_status(tmp_path)
+    assert all(r.state != "missing" for r in rows)
+    # … and the artifact now lives in the user tier.
+    user_keys = {(r.asset_type, r.name) for r in scan_user_artifacts()}
+    assert ("skills", "foo") in user_keys
+
+
+# ── user-tier scan (#1123 B4-2) ────────────────────────────────────────────
+
+
+def _seed_user_artifact_dir(home: Path, asset_type: str, name: str, manifest: str) -> None:
+    """Create ``~/.memtomem/<asset_type>/<name>/<manifest>`` under *home*."""
+    d = home / ".memtomem" / asset_type / name
+    d.mkdir(parents=True)
+    (d / manifest).write_bytes(b"# user draft\n")
+
+
+def test_scan_user_artifacts_recognises_dir_and_flat_layout(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    _seed_user_artifact_dir(home, "agents", "dir-agent", "agent.md")
+    (home / ".memtomem" / "agents" / "flat-agent.md").write_bytes(b"# flat\n")
+    _seed_user_artifact_dir(home, "skills", "myskill", "SKILL.md")
+
+    rows = list(scan_user_artifacts())
+
+    keys = {(r.asset_type, r.name) for r in rows}
+    assert ("agents", "dir-agent") in keys
+    assert ("agents", "flat-agent") in keys  # flat .md recognised for agents
+    assert ("skills", "myskill") in keys
+    for r in rows:
+        assert r.tier == "user"
+        assert r.state == "local-draft"
+        assert r.pin_commit == "" and r.installed_at == ""
+
+
+def test_scan_user_artifacts_skills_flat_layout_not_recognised(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    (home / ".memtomem" / "skills").mkdir(parents=True)
+    (home / ".memtomem" / "skills" / "loose.md").write_bytes(b"# not a skill\n")
+
+    assert list(scan_user_artifacts()) == []
+
+
+def test_classify_status_stays_project_rooted_no_user_tier(monkeypatch, tmp_path: Path) -> None:
+    """classify_status must NOT scan ~/.memtomem — folding the global user
+    tier into it would couple every status read (and test) to the caller's
+    real home. User rows are the CLI's job (#1123 B4-2)."""
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    _seed_user_artifact_dir(home, "agents", "u", "agent.md")
+
+    _, rows = classify_status(tmp_path)
+
+    assert all(r.tier != "user" for r in rows)
+
+
+def test_cli_status_user_scope_lists_user_artifacts(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _seed_user_artifact_dir(home, "agents", "myagent", "agent.md")
+
+    result = CliRunner().invoke(
+        context_group, ["status", "--scope", "user"], catch_exceptions=False
+    )
+
+    assert result.exit_code == 0
+    assert "myagent" in result.output
+    assert "scope user" in result.output
+
+
+def test_cli_status_user_scope_empty_message(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    result = CliRunner().invoke(
+        context_group, ["status", "--scope", "user"], catch_exceptions=False
+    )
+
+    assert result.exit_code == 0
+    assert "No user-scope assets found" in result.output
