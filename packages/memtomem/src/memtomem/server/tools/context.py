@@ -79,6 +79,44 @@ def _parse_include(include: str) -> set[str]:
     return values
 
 
+def _validate_on_drop(on_drop: str) -> str:
+    """Validate the ``on_drop`` severity, mirroring the CLI ``--on-drop`` Choice.
+
+    The CLI exposes three drop severities (``ignore`` / ``warn`` / ``error``)
+    via ``click.Choice(ON_DROP_LEVELS)`` in ``cli/context_cmd.py``, with
+    ``--strict`` as a legacy alias for ``error``. The MCP tools only exposed
+    the boolean ``strict``, leaving ``warn`` unreachable — an MCP caller had
+    no way to request "report dropped fields but still write". This validator
+    lets ``mem_context_generate`` / ``mem_context_sync`` accept the same
+    vocabulary and reject bad values up front instead of silently downgrading
+    to ``ignore`` downstream.
+    """
+    from memtomem.context.agents import ON_DROP_LEVELS
+
+    if on_drop not in ON_DROP_LEVELS:
+        raise ValueError(f"Unknown on_drop value '{on_drop}'. Supported: {sorted(ON_DROP_LEVELS)}")
+    return on_drop
+
+
+def _settings_dup_tier_warnings(root: Path, active_scope: str) -> list[str]:
+    """Cross-tier duplicate-hook warning lines for the settings axis.
+
+    Mirrors the CLI's ``_print_duplicate_tier_warnings`` (ADR-0010 §4), which
+    fires inside the real generate / diff / sync workflow rather than behind a
+    separate ``settings-doctor`` command. The MCP settings branches dropped
+    these warnings entirely, so an MCP caller never learned that a
+    memtomem-managed hook was duplicated in a non-active tier. Surface them
+    here so the MCP and CLI settings surfaces agree. Non-blocking — duplicates
+    are informational.
+    """
+    from memtomem.context.settings_doctor import detect_duplicate_tiers, format_warning
+
+    return [
+        f"  warning: {format_warning(dup, active_scope=active_scope)}"
+        for dup in detect_duplicate_tiers(root, active_scope=active_scope)
+    ]
+
+
 @mcp.tool()
 @tool_handler
 @register("context")
@@ -397,6 +435,7 @@ async def mem_context_generate(
     agent: str = "all",
     include: str = "",
     strict: bool = False,
+    on_drop: str = "ignore",
     scope: str = "",
     allow_host_writes: bool = False,
     ctx: CtxType = None,
@@ -407,8 +446,14 @@ async def mem_context_generate(
         agent: Agent name (claude, cursor, gemini, codex, copilot) or "all".
         include: Comma-separated extra artifact kinds
             (``skills``, ``agents``, ``commands``, ``settings``).
-        strict: Promote dropped-field warnings to errors when converting
-            sub-agents or slash commands.
+        strict: Legacy alias for ``on_drop="error"``. Promotes dropped-field
+            warnings to errors when converting sub-agents or slash commands.
+            When both are supplied, ``on_drop`` wins unless it is still the
+            default ``"ignore"`` (mirrors ``generate_all_agents``).
+        on_drop: Severity when sub-agent / command fields are dropped during
+            conversion: ``ignore`` (default, silent), ``warn`` (report but
+            still write), or ``error`` (abort the kind). Mirrors the CLI
+            ``--on-drop`` option; ``warn`` was previously unreachable via MCP.
         scope: ADR-0011 canonical artifact tier for skills / agents /
             commands fan-out: ``project_shared`` (default), ``user``, or
             ``project_local``. The same value is also forwarded as the
@@ -432,6 +477,7 @@ async def mem_context_generate(
     from memtomem.context.skills import generate_all_skills
 
     inc = _parse_include(include)
+    on_drop = _validate_on_drop(on_drop)
     root = _find_project_root()
     artifact_scope = _resolve_artifact_mcp_scope(scope)
     ctx_path = root / CONTEXT_FILENAME
@@ -475,7 +521,9 @@ async def mem_context_generate(
 
     if "agents" in inc:
         try:
-            agent_result = generate_all_agents(root, strict=strict, scope=artifact_scope)
+            agent_result = generate_all_agents(
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+            )
         except StrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -496,7 +544,9 @@ async def mem_context_generate(
 
     if "commands" in inc:
         try:
-            command_result = generate_all_commands(root, strict=strict, scope=artifact_scope)
+            command_result = generate_all_commands(
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+            )
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -523,6 +573,9 @@ async def mem_context_generate(
         # on unrelated misconfiguration. Artifact-only callers must not
         # pay that cost or see that failure.
         settings_scope = _resolve_mcp_scope(scope.strip() or None)
+        # Surface cross-tier duplicate-hook warnings, matching the CLI
+        # ``_print_settings_generate`` which prints them before the results.
+        results.extend(_settings_dup_tier_warnings(root, settings_scope))
         settings_results = generate_all_settings(
             root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
@@ -642,11 +695,16 @@ async def mem_context_diff(
         # ``settings`` in ``include``) must not pay that cost or see
         # that failure. Mirrors mem_context_generate's lazy resolve at
         # lines 520-524.
-        settings_results = _diff_settings(root, scope=_resolve_mcp_scope(scope.strip() or None))
-        if settings_results:
+        settings_scope = _resolve_mcp_scope(scope.strip() or None)
+        # Cross-tier duplicate-hook warnings, matching the CLI
+        # ``_print_settings_diff`` which prints them before the rows.
+        dup_warnings = _settings_dup_tier_warnings(root, settings_scope)
+        settings_results = _diff_settings(root, scope=settings_scope)
+        if settings_results or dup_warnings:
             if lines:
                 lines.append("")
             lines.append("Settings:")
+            lines.extend(dup_warnings)
             for sname, sr in settings_results.items():
                 if sr.status in ("in sync", "out of sync", "missing target"):
                     lines.append(f"  {sname} [{sr.status}]")
@@ -666,6 +724,7 @@ async def mem_context_diff(
 async def mem_context_sync(
     include: str = "",
     strict: bool = False,
+    on_drop: str = "ignore",
     scope: str = "",
     allow_host_writes: bool = False,
     ctx: CtxType = None,
@@ -675,8 +734,11 @@ async def mem_context_sync(
     Pass ``include="skills,agents,commands,settings"`` to also fan out
     ``.memtomem/skills/``, ``.memtomem/agents/``, ``.memtomem/commands/``,
     and ``.memtomem/settings.json`` to their runtime targets (Claude Code,
-    Gemini CLI, Codex CLI).  ``strict=True`` turns dropped sub-agent /
-    command fields into errors.
+    Gemini CLI, Codex CLI).  ``on_drop`` controls the severity when
+    sub-agent / command fields are dropped during conversion: ``ignore``
+    (default), ``warn`` (report but still write), or ``error`` (abort the
+    kind). ``strict=True`` is a legacy alias for ``on_drop="error"``; when
+    both are supplied ``on_drop`` wins unless it is still the default.
 
     ``scope`` selects the ADR-0011 canonical artifact tier for
     ``skills``, ``agents``, and ``commands``: ``project_shared``
@@ -701,6 +763,7 @@ async def mem_context_sync(
     from memtomem.context.skills import generate_all_skills
 
     inc = _parse_include(include)
+    on_drop = _validate_on_drop(on_drop)
     root = _find_project_root()
     artifact_scope = _resolve_artifact_mcp_scope(scope)
     ctx_path = root / CONTEXT_FILENAME
@@ -755,7 +818,9 @@ async def mem_context_sync(
 
     if "agents" in inc:
         try:
-            agent_result = generate_all_agents(root, strict=strict, scope=artifact_scope)
+            agent_result = generate_all_agents(
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+            )
         except StrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -777,7 +842,9 @@ async def mem_context_sync(
 
     if "commands" in inc:
         try:
-            command_result = generate_all_commands(root, strict=strict, scope=artifact_scope)
+            command_result = generate_all_commands(
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+            )
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
         except PrivacyScanError as exc:
@@ -805,6 +872,9 @@ async def mem_context_sync(
         # overrides — artifact-only callers must not pay that cost or
         # see that failure.
         settings_scope = _resolve_mcp_scope(scope.strip() or None)
+        # Surface cross-tier duplicate-hook warnings, matching the CLI
+        # ``_print_settings_generate`` which prints them before the results.
+        results.extend(_settings_dup_tier_warnings(root, settings_scope))
         settings_results = generate_all_settings(
             root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
@@ -837,7 +907,7 @@ async def mem_context_migrate(
     source: str,
     from_scope: str,
     to_scope: str,
-    apply_: bool = False,
+    apply: bool = False,
     confirm_project_shared: bool = False,
     ctx: CtxType = None,
 ) -> str:
@@ -865,7 +935,7 @@ async def mem_context_migrate(
             or ``project_local``.
         to_scope: Target memory tier (same vocabulary). Must differ
             from ``from_scope``.
-        apply_: Execute the migration. Default ``False`` returns a
+        apply: Execute the migration. Default ``False`` returns a
             dry-run preview (the same plan output the CLI shows above
             its "Run with --apply to execute." footer).
         confirm_project_shared: Required when ``to_scope="project_shared"``;
@@ -930,7 +1000,7 @@ async def mem_context_migrate(
             sources,
             cast(TargetScope, from_scope),
             cast(TargetScope, to_scope),
-            apply_,
+            apply,
             # ``yes=True`` because the MCP wrapper has already gated
             # Gate B above via the explicit ``confirm_project_shared``
             # argument. ``yes`` only suppresses the ``click.confirm``

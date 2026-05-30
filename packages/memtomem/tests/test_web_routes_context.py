@@ -727,7 +727,9 @@ class TestCreateSkill:
             "/api/context/skills",
             json={"name": "existing", "content": "# Dup\n"},
         )
-        assert r.status_code == 400
+        # 409 Conflict, matching create_agent / create_command (a duplicate
+        # name is a conflict, not a malformed request).
+        assert r.status_code == 409
 
     @pytest.mark.anyio
     async def test_create_invalid_name(self, client: AsyncClient):

@@ -16,7 +16,7 @@ contract:
    ``click.exceptions.Exit`` translated for MCP).
 5. Dry-run captures the plan output via ``click.echo`` redirection and
    returns it as a string; the DB UPDATE is never called.
-6. ``apply_=True`` against a non-project_shared target calls the
+6. ``apply=True`` against a non-project_shared target calls the
    helper end-to-end and returns the success summary.
 
 Reuses the AsyncMock-based ``cli_components`` patching from
@@ -227,7 +227,7 @@ async def test_mem_context_migrate_project_shared_privacy_block_surfaces(
         source=str(src),
         from_scope="user",
         to_scope="project_shared",
-        apply_=True,
+        apply=True,
         confirm_project_shared=True,
     )
     assert out.startswith("privacy block:")
@@ -282,7 +282,7 @@ async def test_mem_context_migrate_apply_user_to_project_local_calls_helper(
     fake_project_layout,
 ) -> None:
     """End-to-end happy path through the wrapper: clean source, non-
-    project_shared target (so no Gate B prompt), ``apply_=True``. Asserts
+    project_shared target (so no Gate B prompt), ``apply=True``. Asserts
     the helper's DB UPDATE was called once and the success line is in
     the captured stdout.
     """
@@ -297,7 +297,7 @@ async def test_mem_context_migrate_apply_user_to_project_local_calls_helper(
         source=str(src),
         from_scope="user",
         to_scope="project_local",
-        apply_=True,
+        apply=True,
     )
     # The wrapper captures both stdout and stderr; the success secho
     # ("✓ moved ...") goes to stdout.
@@ -377,7 +377,7 @@ async def test_mem_context_migrate_mid_batch_db_failure_includes_partial_progres
         source=str(layout["user_tier"] / "*.md"),
         from_scope="user",
         to_scope="project_local",
-        apply_=True,
+        apply=True,
     )
     assert out.startswith("error:")
     # Bare ClickException message is present.

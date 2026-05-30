@@ -255,7 +255,11 @@ async def create_skill(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if skill_dir.exists():
-                    raise ValueError(f"Skill '{body.name}' already exists")
+                    # 409 Conflict, matching create_agent / create_command.
+                    # A bare ValueError here maps to HTTP 400 via the app's
+                    # value_error_handler, diverging from the sibling routes
+                    # (and from the Web UI's 409 conflict-resolution flow).
+                    raise HTTPException(409, detail=f"Skill '{body.name}' already exists")
                 skill_dir.mkdir(parents=True)
                 manifest = skill_dir / SKILL_MANIFEST
                 atomic_write_text(manifest, body.content)
