@@ -51,6 +51,11 @@ def _runner_in_project(tmp_path, monkeypatch):
     project.mkdir()
     _seed_project(project)
     set_home(monkeypatch, home)
+    # load_config_overrides gives MEMTOMEM_HOOKS__TARGET_SCOPE precedence over
+    # config.json (config.py: env wins), so a value inherited from the
+    # dev/CI environment would override the per-test hooks.target_scope and make
+    # the omitted-scope assertions non-hermetic. Scrub it for every CLI run here.
+    monkeypatch.delenv("MEMTOMEM_HOOKS__TARGET_SCOPE", raising=False)
     monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
     monkeypatch.chdir(project)
     return CliRunner(), project
@@ -99,6 +104,46 @@ class TestDiffSettingsHonoursScope:
         assert r.exit_code == 0, r.output
         assert seen.get("scope") == "user", (
             f"settings diff got scope={seen.get('scope')!r}, expected 'user'"
+        )
+
+    def test_diff_settings_omitted_scope_follows_config(self, tmp_path, monkeypatch):
+        """With ``--scope`` omitted, the settings differ must follow the
+        configured ``hooks.target_scope`` — like generate/sync — not a fixed
+        artifact-tier default.
+
+        Regression pin for the B2-2 fix: the ``diff`` ``--scope`` option default
+        was ``"project_shared"`` (never None), so ``_resolve_cli_scope`` was
+        handed a non-None override and could not fall back to config. Diff then
+        compared the project_shared settings tier while generate/sync wrote the
+        configured tier, producing misleading missing/out-of-sync output.
+        """
+        import memtomem.cli.context_cmd as ctx_cmd
+
+        runner, project = _runner_in_project(tmp_path, monkeypatch)
+        _ctx_with_sections(project)
+
+        # ``_runner_in_project`` points HOME at ``tmp_path / "home"`` via
+        # ``set_home``; ``load_config_overrides`` reads ``~/.memtomem/config.json``.
+        # Use a tier distinct from BOTH the old buggy option default
+        # ("project_shared") and the Mem2MemConfig field default ("user"), so a
+        # pass proves the configured value was actually consulted.
+        cfg_path = tmp_path / "home" / ".memtomem" / "config.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text('{"hooks": {"target_scope": "project_local"}}', encoding="utf-8")
+
+        seen: dict[str, object] = {}
+
+        def _fake_settings_diff(root, scope):
+            seen["scope"] = scope
+
+        monkeypatch.setattr(ctx_cmd, "_print_settings_diff", _fake_settings_diff)
+
+        r = runner.invoke(cli, ["context", "diff", "--include=settings"])
+        assert r.exit_code == 0, r.output
+        assert seen.get("scope") == "project_local", (
+            f"omitted --scope: settings diff got scope={seen.get('scope')!r}, "
+            "expected 'project_local' (configured hooks.target_scope), not the "
+            "artifact-tier default"
         )
 
 

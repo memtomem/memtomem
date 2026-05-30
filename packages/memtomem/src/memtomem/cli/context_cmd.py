@@ -1006,14 +1006,15 @@ def generate_cmd(
     "--scope",
     "scope_flag",
     type=click.Choice(get_args(TargetScope)),
-    default="project_shared",
-    show_default=True,
+    default=None,
     help=(
-        "Canonical artifact tier for skills/agents/commands. "
-        "Use project_local to inspect local drafts with no runtime fan-out."
+        "Canonical artifact tier for skills/agents/commands "
+        "(default: project_shared). Use project_local to inspect local drafts "
+        "with no runtime fan-out. When omitted, the settings axis follows the "
+        "configured hooks.target_scope, matching generate/sync."
     ),
 )
-def diff_cmd(include: tuple[str, ...], scope_flag: TargetScope) -> None:
+def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     """Show differences between context.md and agent files."""
     inc = _parse_include(include)
     root = _find_project_root()
@@ -1044,23 +1045,31 @@ def diff_cmd(include: tuple[str, ...], scope_flag: TargetScope) -> None:
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
+    # Dual-axis scope resolution, mirroring sync_cmd/generate_cmd. Resolving
+    # both axes off the same raw scope_flag (default None) keeps `diff`
+    # consistent with the commands whose drift it reports: artifacts default to
+    # project_shared via _resolve_artifact_cli_scope (ADR-0011 PR-E3), while the
+    # settings axis follows cfg.hooks.target_scope via _resolve_cli_scope when
+    # --scope is omitted (ADR-0010). The earlier "project_shared" option default
+    # made scope_flag never-None, so _resolve_cli_scope could not fall back to
+    # the configured target — diff compared a different settings tier than
+    # generate/sync wrote (#1123 B2-2).
+    artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+
     if "skills" in inc:
         click.echo("")
-        _print_skills_diff(root, scope=scope_flag)
+        _print_skills_diff(root, scope=artifact_scope)
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_diff(root, scope=scope_flag)
+        _print_agents_diff(root, scope=artifact_scope)
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_diff(root, scope=scope_flag)
+        _print_commands_diff(root, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
-        # Thread --scope into the settings axis like generate_cmd does (#1123
-        # B2-2); previously this passed None, so `diff --include=settings`
-        # silently ignored an explicit --scope.
         _print_settings_diff(root, scope=_resolve_cli_scope(scope_flag))
 
 
