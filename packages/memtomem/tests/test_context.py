@@ -2,7 +2,11 @@
 
 import pytest
 
-from memtomem.context.parser import parse_context, sections_to_markdown
+from memtomem.context.parser import (
+    iter_markdown_sections,
+    parse_context,
+    sections_to_markdown,
+)
 from memtomem.context.detector import detect_agent_files
 from memtomem.context.generator import (
     GENERATORS,
@@ -223,3 +227,83 @@ class TestSpecificSectionRoundTrip:
         regenerated = generate_for_agent(agent, sections)
         assert heading in regenerated
         assert marker in regenerated
+
+
+class TestParserHardening:
+    """Round-trip data-loss guards for the section parser (#1123 B1)."""
+
+    def test_fenced_code_hashes_not_treated_as_headings(self, tmp_path):
+        """`##` inside a fenced code block must not split the section (B1-1)."""
+        ctx = tmp_path / "context.md"
+        ctx.write_text(
+            "# Project Context\n\n"
+            "## Architecture\n\n"
+            "Run the example:\n\n"
+            "```python\n"
+            "## This looks like a heading but it is code\n"
+            "value = 1\n"
+            "```\n\n"
+            "Trailing prose under Architecture.\n\n"
+            "## Rules\n\n"
+            "- line-length 100\n",
+            encoding="utf-8",
+        )
+        sections = parse_context(ctx)
+
+        # No spurious section minted from the in-code `##` line.
+        assert set(sections) == {"Architecture", "Rules"}
+        # Both the code block and the prose after it stay under Architecture.
+        assert "## This looks like a heading but it is code" in sections["Architecture"]
+        assert "Trailing prose under Architecture." in sections["Architecture"]
+        assert sections["Rules"] == "- line-length 100"
+
+    def test_tilde_fence_also_guarded(self):
+        """`~~~` fences are guarded the same as backtick fences (B1-1)."""
+        text = "## Architecture\n~~~\n## not a heading\n~~~\nafter\n## Rules\n- r\n"
+        names = [name for name, _ in iter_markdown_sections(text)]
+        assert names == ["Architecture", "Rules"]
+
+    def test_duplicate_headings_merge_not_overwrite(self, tmp_path):
+        """A repeated `## Name` must concatenate, not drop the first (B1-2)."""
+        ctx = tmp_path / "context.md"
+        ctx.write_text(
+            "## Project\nfirst body line\n## Project\nsecond body line\n",
+            encoding="utf-8",
+        )
+        sections = parse_context(ctx)
+
+        assert list(sections) == ["Project"]
+        assert "first body line" in sections["Project"]
+        assert "second body line" in sections["Project"]
+
+    def test_aliased_duplicate_headings_merge_on_extract(self):
+        """Two headings aliasing to one canonical key must merge (B1-2)."""
+        content = "## Rules\n- from rules heading\n## Coding Rules\n- from coding-rules heading\n"
+        sections = extract_sections_from_agent_file(content)
+
+        assert "from rules heading" in sections["Rules"]
+        assert "from coding-rules heading" in sections["Rules"]
+
+    def test_whitespace_only_heading_not_a_section(self, tmp_path):
+        """`##` with no name must not create an empty-string key (B1-3)."""
+        ctx = tmp_path / "context.md"
+        ctx.write_text(
+            "## Project\nreal content\n##   \norphan content\n",
+            encoding="utf-8",
+        )
+        sections = parse_context(ctx)
+
+        assert "" not in sections
+        assert list(sections) == ["Project"]
+        # The malformed heading line and its body fold into the open section.
+        assert "orphan content" in sections["Project"]
+
+    def test_sample_context_still_round_trips(self, tmp_path):
+        """The happy-path round-trip is unchanged by the hardening."""
+        ctx = tmp_path / "context.md"
+        ctx.write_text(SAMPLE_CONTEXT, encoding="utf-8")
+        sections = parse_context(ctx)
+        out = tmp_path / "out.md"
+        out.write_text(sections_to_markdown(sections), encoding="utf-8")
+        reparsed = parse_context(out)
+        assert reparsed == sections
