@@ -964,6 +964,18 @@ def _step_settings(state: dict) -> None:
                 click.secho(f"  Merged → {r.target}", fg="green")
             elif r.status == "skipped":
                 click.secho(f"  skipped {name}: {r.reason}", fg="yellow")
+            elif r.status == "needs_confirmation":
+                # The host-write guard refused this target. Surface it instead
+                # of silently dropping the status (#1123 B7-4) — the user-scope
+                # fan-out can legitimately hit a host file that needs opt-in.
+                click.secho(
+                    f"  {name}: needs confirmation — re-run "
+                    "`mm context sync --include=settings` to apply",
+                    fg="yellow",
+                )
+            else:
+                # Defensive: never swallow an unrecognized status (e.g. error).
+                click.secho(f"  {name}: {r.status}: {r.reason}", fg="yellow")
 
         click.echo()
         click.echo("  Empty hooks file created. Add hooks to .memtomem/settings.json,")

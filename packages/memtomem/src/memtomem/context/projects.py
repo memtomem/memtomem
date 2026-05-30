@@ -85,7 +85,10 @@ class ProjectScope:
     scope_id: str
     label: str
     root: Path | None
-    tier: Literal["user", "project"]
+    # ``discover_project_scopes`` only ever emits "project"; the "user" arm was
+    # never constructed (#1123 B7-5). Narrowed to the real domain so the type
+    # stops advertising a tier the producer can't return.
+    tier: Literal["project"]
     sources: tuple[str, ...]
     missing: bool = False
     experimental: bool = False
