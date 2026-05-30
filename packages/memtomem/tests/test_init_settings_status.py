@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import memtomem.cli.init_cmd as init_cmd
 from memtomem.context.settings import SettingsSyncResult
 
