@@ -263,6 +263,48 @@ class TestParserHardening:
         names = [name for name, _ in iter_markdown_sections(text)]
         assert names == ["Architecture", "Rules"]
 
+    def test_nested_different_marker_fence_does_not_close_early(self):
+        """A nested fence of the *other* marker must not close the block (#1132).
+
+        A backtick-fenced markdown sample that itself shows a ``~~~`` snippet
+        (and vice versa) only closes on a matching-marker fence. The inner
+        marker must stay body so an in-sample ``##`` is not minted as a real
+        section, splitting or dropping content on round-trip. This pins the
+        opener-tracking fix that replaced the naive single-flag toggle.
+        """
+        backtick_outer = (
+            "## Commands\n"
+            "````markdown\n"  # opener: backtick run of 4
+            "~~~\n"  # inner tilde fence — must NOT close the backtick block
+            "## inside the sample, not a heading\n"
+            "~~~\n"  # inner tilde close — still inside the backtick block
+            "````\n"  # real close: matching backtick marker
+            "trailing prose under Commands\n"
+            "## Architecture\n"
+            "- a\n"
+        )
+        sections = dict(iter_markdown_sections(backtick_outer))
+        assert list(sections) == ["Commands", "Architecture"]
+        assert "## inside the sample, not a heading" in sections["Commands"]
+        assert "trailing prose under Commands" in sections["Commands"]
+
+        # Reverse: tilde-fenced block showing a backtick snippet.
+        tilde_outer = (
+            "## Commands\n"
+            "~~~~markdown\n"  # opener: tilde run of 4
+            "```\n"  # inner backtick fence — must NOT close the tilde block
+            "## inside the sample, not a heading\n"
+            "```\n"
+            "~~~~\n"  # real close: matching tilde marker
+            "trailing prose under Commands\n"
+            "## Architecture\n"
+            "- a\n"
+        )
+        sections = dict(iter_markdown_sections(tilde_outer))
+        assert list(sections) == ["Commands", "Architecture"]
+        assert "## inside the sample, not a heading" in sections["Commands"]
+        assert "trailing prose under Commands" in sections["Commands"]
+
     def test_duplicate_headings_merge_not_overwrite(self, tmp_path):
         """A repeated `## Name` must concatenate, not drop the first (B1-2)."""
         ctx = tmp_path / "context.md"
