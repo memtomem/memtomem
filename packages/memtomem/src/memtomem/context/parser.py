@@ -12,9 +12,11 @@ CONTEXT_FILENAME = ".memtomem/context.md"
 KNOWN_SECTIONS = {"project", "commands", "architecture", "rules", "style"}
 
 _HEADING_RE = re.compile(r"^##\s+(.+)$")
-# Opening/closing fence for a Markdown code block (``` or ~~~), allowing
-# leading indentation and a trailing language specifier.
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+# A Markdown code fence: 3+ backticks or tildes, indented up to 3 spaces
+# (CommonMark). group(1) is the fence run — its marker char and length
+# identify the block; group(2) is the trailing text, which is an info string
+# on an opening fence and must be blank on a closing fence.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def iter_markdown_sections(text: str) -> Iterator[tuple[str, str]]:
@@ -27,7 +29,9 @@ def iter_markdown_sections(text: str) -> Iterator[tuple[str, str]]:
 
     - ``##`` lines **inside fenced code blocks** are treated as body, not as
       section delimiters, so a code sample containing ``## ...`` no longer
-      truncates the real section (B1-1).
+      truncates the real section (B1-1). Fences are matched by marker *type*
+      and length (CommonMark): a ``~~~`` line inside a ``` ``` ``` block does
+      not close it, so nested fenced examples round-trip correctly.
     - **Whitespace-only headings** (``##   ``) are treated as body rather than
       opening a section with an empty-string key (B1-3).
 
@@ -38,16 +42,28 @@ def iter_markdown_sections(text: str) -> Iterator[tuple[str, str]]:
     """
     current: str | None = None
     lines: list[str] = []
-    in_code = False
+    # While inside a fenced code block these hold the opening fence's marker
+    # char ("`" or "~") and length; ``fence_char is None`` means "not in code".
+    fence_char: str | None = None
+    fence_len = 0
 
     for line in text.splitlines():
-        if _FENCE_RE.match(line):
-            in_code = not in_code
+        fence = _FENCE_RE.match(line)
+        if fence:
+            run, rest = fence.group(1), fence.group(2)
+            if fence_char is None:
+                # Opening fence — an info string after the run is allowed.
+                fence_char, fence_len = run[0], len(run)
+            elif run[0] == fence_char and len(run) >= fence_len and not rest.strip():
+                # Closing fence: same marker, at least as long, no info string.
+                # A non-matching fence (e.g. ``~~~`` inside a ``` ``` ``` block)
+                # leaves the block open and falls through to body (B1-1).
+                fence_char, fence_len = None, 0
             if current is not None:
                 lines.append(line)
             continue
 
-        m = None if in_code else _HEADING_RE.match(line)
+        m = None if fence_char is not None else _HEADING_RE.match(line)
         heading = m.group(1).strip() if m else ""
         if heading:
             if current is not None:
