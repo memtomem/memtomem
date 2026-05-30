@@ -5,11 +5,17 @@ from __future__ import annotations
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._atomic import (
+    _file_lock,
+    _lock_path_for,
+    atomic_write_bytes,
+    atomic_write_text,
+)
 
 
 def _list_tmp_siblings(path: Path) -> list[Path]:
@@ -142,3 +148,41 @@ def test_crash_with_no_preexisting_target_cleans_tempfile(
 
     assert not target.exists()
     assert _list_tmp_siblings(target) == []
+
+
+class TestFileLockTimeout:
+    """``_file_lock(timeout=...)`` bounds acquisition instead of blocking
+    forever (#1145 review) — needed where the lock is taken from a context that
+    must not hang (an async handler's worker thread)."""
+
+    def test_acquires_immediately_when_free(self, tmp_path: Path) -> None:
+        lock = _lock_path_for(tmp_path / "data.json")
+        # A free lock with a timeout acquires without raising.
+        with _file_lock(lock, timeout=5.0):
+            pass
+        # And again, proving it released cleanly.
+        with _file_lock(lock, timeout=5.0):
+            pass
+
+    def test_timeout_raises_when_held(self, tmp_path: Path) -> None:
+        # portalocker locks are per-open-file-description, so a second
+        # acquisition (separate fd) in the SAME process contends — mirroring the
+        # cross-process case the bound protects. Holding the lock and then
+        # requesting it with a short timeout must raise TimeoutError, not hang.
+        lock = _lock_path_for(tmp_path / "data.json")
+        with _file_lock(lock):
+            start = time.monotonic()
+            with pytest.raises(TimeoutError):
+                with _file_lock(lock, timeout=0.2):
+                    pass
+            elapsed = time.monotonic() - start
+        # It actually polled to the deadline (not an instant grant) and the
+        # bound fired (not an indefinite block).
+        assert 0.1 <= elapsed < 5.0
+
+    def test_default_is_still_blocking(self, tmp_path: Path) -> None:
+        # No timeout → unchanged behavior: a free lock acquires (the indefinite
+        # block only matters under contention, which the held-lock test covers).
+        lock = _lock_path_for(tmp_path / "data.json")
+        with _file_lock(lock):
+            pass

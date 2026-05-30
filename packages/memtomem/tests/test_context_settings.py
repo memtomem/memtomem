@@ -585,9 +585,9 @@ class TestClaudeSettingsCrossProcessLock:
         orig_write_json = settings_mod._write_json
 
         @contextlib.contextmanager
-        def spy_file_lock(lock_path):
+        def spy_file_lock(lock_path, *, timeout=None):
             events.append(f"enter:{lock_path.name}")
-            with orig_file_lock(lock_path):
+            with orig_file_lock(lock_path, timeout=timeout):
                 yield
             events.append(f"exit:{lock_path.name}")
 
@@ -626,8 +626,9 @@ class TestClaudeSettingsCrossProcessLock:
         source and merges the identical payload, and ``atomic_write_text``
         already yields complete JSON on its own, so this test would pass even
         without the lock. What it DOES guard is that introducing a blocking
-        ``portalocker`` ``LOCK_EX`` under 8-way contention does not hang
-        (deadlock / lock-ordering cycle) and never leaves a torn file."""
+        ``portalocker`` ``LOCK_EX`` under thread contention (4 workers across 8
+        submitted runs) does not hang (deadlock / lock-ordering cycle) and never
+        leaves a torn file."""
         target = claude_home / ".claude" / "settings.json"
         target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
         _make_canonical_settings(
@@ -649,6 +650,35 @@ class TestClaudeSettingsCrossProcessLock:
         # record — never empty or half-written.
         final = json.loads(target.read_text(encoding="utf-8"))
         assert isinstance(final.get("hooks"), dict)
+
+    def test_held_lock_aborts_within_bound_not_hangs(self, claude_home, tmp_path, monkeypatch):
+        """When the target's sidecar lock is held past the bound, the sync
+        ABORTS cleanly rather than blocking forever (#1145 review). This is what
+        lets the web handler offload to a worker thread without orphaning it:
+        the bounded acquisition self-terminates instead of writing after the
+        request's own timeout already returned."""
+        import memtomem.context.settings as settings_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
+        )
+
+        # Tiny bound so the test is fast; hold the sidecar from "another holder"
+        # (a separate fd — portalocker contends per open-file-description even
+        # in-process).
+        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_TIMEOUT_S", 0.2)
+        with _file_lock(_lock_path_for(target)):
+            results = generate_all_settings(tmp_path, scope="user")
+
+        assert results["claude_settings"].status == "aborted"
+        assert "lock held" in results["claude_settings"].reason
+        # The held lock blocked the write, so the target keeps its original
+        # (empty-hooks) content — no torn or partial write.
+        assert json.loads(target.read_text(encoding="utf-8")) == {"hooks": {}}
 
 
 class TestClaudeSettingsAtomicWrite:

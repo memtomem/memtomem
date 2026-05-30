@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,7 +75,7 @@ update until the user manually deletes the ``.bak``.
 
 
 @contextmanager
-def _file_lock(lock_path: Path) -> Iterator[None]:
+def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[None]:
     """Cross-process exclusive lock on a sidecar lockfile.
 
     Locking the data file directly does **not** survive ``os.replace`` —
@@ -84,11 +85,20 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
     lockfile itself is never renamed, so its inode is stable.
 
     Cross-platform via ``portalocker`` (POSIX ``fcntl.flock`` / Windows
-    ``LockFileEx``). Both backends block indefinitely on ``LOCK_EX``,
-    matching POSIX semantics; the call sites in
-    :mod:`memtomem.context.lockfile` / :mod:`memtomem.context.projects`
-    keep the lock window narrow (``load → mutate dict → atomic_write_bytes``)
-    so contention is bounded even without an explicit timeout.
+    ``LockFileEx``). Locks are per-open-file-description, so two acquisitions
+    in the *same* process (separate ``os.open`` fds) still contend — which is
+    what makes the in-process contention tests meaningful.
+
+    ``timeout`` (seconds): ``None`` (default) blocks indefinitely on
+    ``LOCK_EX``, matching POSIX semantics — correct for the narrow
+    ``load → mutate → atomic_write_bytes`` windows in
+    :mod:`memtomem.context.lockfile` / :mod:`memtomem.context.projects`. Pass a
+    bound when the lock is acquired from a context that must not block forever
+    — e.g. an async web handler offloading to a worker thread, where an
+    unbounded wait would leave an un-cancellable thread writing after the
+    handler's own timeout already returned (#1145 review). On expiry we raise
+    ``TimeoutError`` having acquired nothing, so the caller can surface a
+    clean "aborted, retry" instead of orphaning the thread.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # os.open + os.fdopen: pin 0o600 mode while still handing portalocker
@@ -101,7 +111,28 @@ def _file_lock(lock_path: Path) -> Iterator[None]:
         os.close(fd)
         raise
     try:
-        portalocker.lock(fp, portalocker.LOCK_EX)
+        if timeout is None:
+            portalocker.lock(fp, portalocker.LOCK_EX)
+        else:
+            # Non-blocking poll with exponential backoff until the deadline.
+            # On expiry we have NOT acquired the lock (every attempt used
+            # ``LOCK_NB``), so raising here skips the ``yield``/``unlock`` pair
+            # below — no spurious unlock of a lock we never held.
+            deadline = time.monotonic() + timeout
+            delay = 0.05
+            while True:
+                try:
+                    portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    break
+                except portalocker.LockException:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"could not acquire {lock_path} within {timeout:g}s "
+                            f"(held by another process)"
+                        ) from None
+                    time.sleep(min(delay, remaining))
+                    delay = min(delay * 2, 0.5)
         try:
             yield
         finally:
