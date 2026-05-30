@@ -2,7 +2,7 @@
 name: context
 description: Inject relevant memories as structured context for the current task. Use when starting complex work that may benefit from past decisions or notes.
 argument-hint: [topic or question]
-allowed-tools: mcp__memtomem__mem_search, mcp__memtomem__mem_related
+allowed-tools: mcp__memtomem__mem_search, mcp__memtomem__mem_do
 ---
 
 Search for relevant memories about: $ARGUMENTS
@@ -10,7 +10,7 @@ Search for relevant memories about: $ARGUMENTS
 ## Instructions
 
 1. Use `mem_search` with the topic as query (top_k=5)
-2. For each high-relevance result (score > 0.5), check `mem_related` for linked memories
+2. For each high-relevance result (score > 0.5), call `mem_do` with `action="related"` and `params={"chunk_id": <result's chunk_id>}` to find linked memories (`mem_related` is non-core; `mem_do` routes to it in the default `core` tool mode)
 3. Present results grouped by namespace, showing:
    - Source file and heading
    - Tags for quick categorization
