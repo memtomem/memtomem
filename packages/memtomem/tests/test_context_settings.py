@@ -613,7 +613,21 @@ class TestClaudeSettingsCrossProcessLock:
             < events.index(f"exit:{lock_name}")
         )
 
-    def test_concurrent_writers_never_leave_a_torn_file(self, claude_home, tmp_path):
+    def test_concurrent_writers_do_not_deadlock_or_corrupt_under_contention(
+        self, claude_home, tmp_path
+    ):
+        """Contention smoke for the new blocking ``_file_lock``: real thread
+        contention neither deadlocks nor corrupts the target file.
+
+        This is deliberately NOT the lock-efficacy pin — the genuine "the
+        critical section is lock-guarded" assertion is
+        :meth:`test_write_runs_inside_target_file_lock` above. A lost-update
+        race can't be observed here: every writer reads the same canonical
+        source and merges the identical payload, and ``atomic_write_text``
+        already yields complete JSON on its own, so this test would pass even
+        without the lock. What it DOES guard is that introducing a blocking
+        ``portalocker`` ``LOCK_EX`` under 8-way contention does not hang
+        (deadlock / lock-ordering cycle) and never leaves a torn file."""
         target = claude_home / ".claude" / "settings.json"
         target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
         _make_canonical_settings(
@@ -628,8 +642,7 @@ class TestClaudeSettingsCrossProcessLock:
             statuses = [f.result() for f in [pool.submit(_run) for _ in range(8)]]
 
         # Whatever the interleaving, every run resolves to a known terminal
-        # status (the lock + mtime recheck never produce a torn write) and at
-        # least one writer succeeds.
+        # status (no hang) and at least one writer succeeds.
         assert set(statuses) <= {"ok", "aborted"}
         assert "ok" in statuses
         # The final on-disk file is always complete, valid JSON with a hooks

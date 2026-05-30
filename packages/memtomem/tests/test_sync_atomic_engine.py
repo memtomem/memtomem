@@ -17,6 +17,7 @@ markdown parser entirely.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -364,61 +365,70 @@ class TestOverrideBytes:
     def test_override_writes_out_path_exactly_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """B3-5 (#1123): the override path writes ``out_path`` exactly once.
+        """B3-5 (#1123): the override path renames into ``out_path`` exactly once.
 
         Before the fix Phase 2 wrote the rendered ``content`` and then
         overwrote the same file with ``override_bytes`` — wasted I/O plus a
         crash window where ``out_path`` briefly held the non-override bytes a
-        runtime could load. The single write must carry the override payload.
+        runtime could load.
+
+        We spy ``os.replace`` (the atomic rename both ``atomic_write_text`` and
+        ``atomic_write_bytes`` funnel through), NOT ``engine.atomic_write_bytes``:
+        the pre-fix first write went through ``atomic_write_text`` →
+        ``_atomic.atomic_write_bytes`` (a different binding), so an
+        engine-level spy would not have seen it and this pin would pass on the
+        buggy code. Counting renames into ``out_path`` genuinely fails on the
+        old double-write (2 renames) and passes on the fix (1).
         """
         _seed_canonical(tmp_path, "alpha", "canonical body\n", scope="project_local")
         _seed_override(tmp_path, "alpha", "claude", "OVERRIDDEN\n", scope="project_local")
 
-        import memtomem.context._sync_atomic as engine
-
         out_file = tmp_path / ".stub-out" / "alpha.txt"
-        writes: list[bytes] = []
-        orig_write_bytes = engine.atomic_write_bytes
+        orig_replace = os.replace
+        renames_into_out: list[Path] = []
 
-        def spy_write_bytes(path: Path, data: bytes, *args: object, **kwargs: object) -> None:
-            if path == out_file:
-                writes.append(data)
-            return orig_write_bytes(path, data, *args, **kwargs)
+        def spy_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == out_file:
+                renames_into_out.append(Path(src))
+            return orig_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(engine, "atomic_write_bytes", spy_write_bytes)
+        monkeypatch.setattr(os, "replace", spy_replace)
 
         adapter = _make_adapter({"claude_agents": StubGenerator(".stub-out")})
         sync_atomic_artifact(adapter, tmp_path, scope="project_local")
 
-        # Exactly one write to out_path, and it carries the override bytes —
-        # the intermediate rendered-bytes write is gone.
-        assert writes == [b"OVERRIDDEN\n"]
+        # Exactly one atomic rename into out_path (the old code did two), and
+        # the final file carries the override payload. ``read_text`` normalizes
+        # newlines, so the content assertion is Windows-safe (CRLF on disk).
+        assert len(renames_into_out) == 1
         assert out_file.read_text(encoding="utf-8") == "OVERRIDDEN\n"
 
     def test_no_override_writes_render_bytes_once(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No-override case stays byte-equivalent: a single write of the
-        rendered content encoded as UTF-8 (regression pin for B3-5)."""
+        """No-override case stays byte-equivalent: a single atomic rename into
+        ``out_path`` carrying the rendered content (regression pin for B3-5).
+
+        Same ``os.replace`` spy rationale as
+        :meth:`test_override_writes_out_path_exactly_once`."""
         _seed_canonical(tmp_path, "alpha", "canonical body\n", scope="project_local")
 
-        import memtomem.context._sync_atomic as engine
-
         out_file = tmp_path / ".stub-out" / "alpha.txt"
-        writes: list[bytes] = []
-        orig_write_bytes = engine.atomic_write_bytes
+        orig_replace = os.replace
+        renames_into_out: list[Path] = []
 
-        def spy_write_bytes(path: Path, data: bytes, *args: object, **kwargs: object) -> None:
-            if path == out_file:
-                writes.append(data)
-            return orig_write_bytes(path, data, *args, **kwargs)
+        def spy_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == out_file:
+                renames_into_out.append(Path(src))
+            return orig_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
 
-        monkeypatch.setattr(engine, "atomic_write_bytes", spy_write_bytes)
+        monkeypatch.setattr(os, "replace", spy_replace)
 
         adapter = _make_adapter({"claude_agents": StubGenerator(".stub-out")})
         sync_atomic_artifact(adapter, tmp_path, scope="project_local")
 
-        assert writes == ["canonical body\n".encode("utf-8")]
+        # One rename, content equals the rendered body (newline-normalized read).
+        assert len(renames_into_out) == 1
         assert out_file.read_text(encoding="utf-8") == "canonical body\n"
 
     def test_override_secret_raises_under_project_shared(self, tmp_path: Path) -> None:

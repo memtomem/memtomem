@@ -411,7 +411,16 @@ async def apply_settings_sync(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                results = generate_all_settings(
+                # ``generate_all_settings`` now takes a blocking per-target
+                # ``portalocker`` lock (#1123 B3-3). Run it in a worker thread:
+                # a cross-process holder of ``.settings.json.lock`` would
+                # otherwise block this synchronous call ON the event loop
+                # thread, which both stalls every other request AND prevents
+                # the enclosing ``asyncio.timeout(60)`` from ever firing (its
+                # callback is scheduled on the blocked loop). Off-loading keeps
+                # the loop responsive and lets the timeout cancel the await.
+                results = await asyncio.to_thread(
+                    generate_all_settings,
                     project_root,
                     scope=target_scope,
                     allow_host_writes=allow_host_writes,
