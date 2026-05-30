@@ -204,11 +204,14 @@ Which surfaces actually perform a cross-tier read by default is **not**
 uniform; the precedence rule above applies only when the surface has
 chosen to span tiers. Three clarifications worth recording here:
 
-- **CLI and runtime spans by default.** `mm context list`, `mm mem
-  search` without an explicit `--scope`, and the Claude Code runtime
-  load span tiers by default and rank under the precedence rule above
-  (the runtime via Claude Code 2.x's tier-merge; CLI / memory via
-  ADR-0011 §6).
+- **Memory search and runtime span by default.** `mm mem search`
+  without an explicit `--scope` and the Claude Code runtime load span
+  tiers by default and rank under the precedence rule above (the
+  runtime via Claude Code 2.x's tier-merge; memory via ADR-0011 §6).
+  Canonical *artifact* reads have no all-tier span: `mm context
+  status` shows the project tiers (`--scope user` adds the user tier)
+  and the Web overview shows one tier at a time (next bullet) — no
+  single surface merges all three.
 - **Web defaults are single-tier, not cross-tier.** ADR-0015 §4a / §4f
   pins the Web overview and list views to **hide `project_local`** and
   **default `?target_scope=` to `project_shared`** when omitted.
@@ -285,10 +288,11 @@ field must reopen one of those ADRs, not this one.
 ### 6. Conflict resolution
 
 Within a single tier, conflicts on artifact name are an error
-(`mm context list` highlights; `mm context migrate --to <tier>`
+(`mm context status` surfaces them; `mm context migrate --to <tier>`
 refuses to overwrite without `--force`). Across tiers, the read
 merge order (§4) decides which entry wins at read time; both
-entries remain visible to `mm context list`. ADR-0011 §"Open
+entries remain visible by inspecting each tier (`mm context status
+--scope <tier>`, or the Web overview's per-tier views). ADR-0011 §"Open
 questions" item 2 owns the user-facing warning copy for the
 cross-tier collision case.
 
