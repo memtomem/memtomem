@@ -361,3 +361,236 @@ def test_has_runtime_marker_file_doesnt_count(tmp_path: Path) -> None:
     """A *file* named ``.claude`` should not satisfy the marker — only directories."""
     (tmp_path / ".claude").write_text("")
     assert has_runtime_marker(tmp_path) is False
+
+
+# ── FS-guided kebab-case decoder (#1147 B7-1) ────────────────────────────
+#
+# The encoded ``~/.claude/projects/<name>`` directory maps ``/``, ``.`` and
+# literal ``-`` all to ``-`` (lossy / many-to-one). These tests pin the
+# FS-guided reconstruction. Hermetic: ``_CLAUDE_PROJECTS_DIR`` (bound at import
+# via ``expanduser()``) is monkeypatched, and target dirs live under a real
+# ``tmp_path`` so the reconstruction's absolute ``is_dir()`` probes hit
+# fixtures. POSIX-only (the leading ``-`` → ``/`` root convention).
+
+_WIN_SKIP = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: the leading `-` → `/` root convention and the "
+    "claude-projects encoding are POSIX-oriented (see _decode_claude_project_dirname)",
+)
+
+
+def _claude_projects_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from memtomem.context import projects as proj_mod
+
+    cp = tmp_path / "fake_home" / ".claude" / "projects"
+    cp.mkdir(parents=True)
+    monkeypatch.setattr(proj_mod, "_CLAUDE_PROJECTS_DIR", cp)
+    return cp
+
+
+@_WIN_SKIP
+def test_decode_kebab_case_resolves_single_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A literal-dash component (``agent-harness``) resolves — the blind
+    ``replace('-', '/')`` decoder would have mis-decoded it to ``agent/harness``."""
+    from memtomem.context import projects as proj_mod
+
+    target = tmp_path / "work" / "agent-harness"
+    target.mkdir(parents=True)
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / proj_mod._encode_claude_project_path(target)).mkdir()
+
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    scopes = proj_mod.discover_project_scopes(
+        cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+    )
+    claude = [s for s in scopes if "claude-projects" in s.sources and "server-cwd" not in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == target.resolve()
+
+
+@_WIN_SKIP
+def test_decode_dot_hidden_dir_component(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hidden, dashed component (``.config-dir``, encoded ``--config-dir``)
+    reconstructs — the 3-way branch must consider ``.`` as well as separator
+    and literal dash (Codex blocker)."""
+    from memtomem.context import projects as proj_mod
+
+    target = tmp_path / "proj" / ".config-dir"
+    target.mkdir(parents=True)
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    encoded = proj_mod._encode_claude_project_path(target)
+    assert "--config-dir" in encoded  # the `/.` collapsed to `--`
+    (cp / encoded).mkdir()
+
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    scopes = proj_mod.discover_project_scopes(
+        cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+    )
+    claude = [s for s in scopes if "claude-projects" in s.sources and "server-cwd" not in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == target.resolve()
+
+
+@_WIN_SKIP
+def test_decode_no_match_skips_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from memtomem.context import projects as proj_mod
+
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / "-this-does-not-exist-anywhere-xyz").mkdir()
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    with caplog.at_level("WARNING"):
+        scopes = proj_mod.discover_project_scopes(
+            cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+        )
+    assert not [s for s in scopes if "claude-projects" in s.sources]
+    assert any("no matching directory" in r.message for r in caplog.records)
+
+
+@_WIN_SKIP
+def test_decode_ambiguous_two_real_dirs_skips_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``base/a-b/c`` and ``base/a/b-c`` encode to the *same* name; with both on
+    disk the decode is genuinely ambiguous → skip + warn (never guess)."""
+    from memtomem.context import projects as proj_mod
+
+    base = tmp_path / "base"
+    (base / "a-b" / "c").mkdir(parents=True)
+    (base / "a" / "b-c").mkdir(parents=True)
+    encoded = proj_mod._encode_claude_project_path(base / "a-b" / "c")
+    assert encoded == proj_mod._encode_claude_project_path(base / "a" / "b-c")
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / encoded).mkdir()
+
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    with caplog.at_level("WARNING"):
+        scopes = proj_mod.discover_project_scopes(
+            cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+        )
+    assert not [s for s in scopes if "claude-projects" in s.sources]
+    assert any("ambiguous decode" in r.message for r in caplog.records)
+
+
+@_WIN_SKIP
+def test_decode_known_root_anchor_resolves_ambiguity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registered known-project root is an authoritative anchor: it resolves
+    a name the pure-FS walk would flag ambiguous."""
+    from memtomem.context import projects as proj_mod
+
+    base = tmp_path / "base"
+    chosen = base / "a-b" / "c"
+    chosen.mkdir(parents=True)
+    (base / "a" / "b-c").mkdir(parents=True)  # the rival decode
+    encoded = proj_mod._encode_claude_project_path(chosen)
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / encoded).mkdir()
+
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(chosen)
+
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    scopes = proj_mod.discover_project_scopes(cwd, kp, experimental_claude_projects_scan=True)
+    resolved = [s for s in scopes if "claude-projects" in s.sources]
+    assert len(resolved) == 1
+    assert resolved[0].root == chosen.resolve()
+
+
+@_WIN_SKIP
+def test_decode_anchor_dedup_cwd_equals_known_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cwd that is ALSO a registered known-project root appears twice in the
+    anchor list; dedup by resolved path must not flag it ambiguous (#1151
+    review Minor)."""
+    from memtomem.context import projects as proj_mod
+
+    target = tmp_path / "work" / "agent-harness"
+    target.mkdir(parents=True)
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / proj_mod._encode_claude_project_path(target)).mkdir()
+
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(target)  # known-projects entry for cwd
+
+    # cwd == target → anchors = (target, target). Without dedup this looks like
+    # two ambiguous candidates and the entry is dropped.
+    scopes = proj_mod.discover_project_scopes(target, kp, experimental_claude_projects_scan=True)
+    claude = [s for s in scopes if "claude-projects" in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == target.resolve()
+
+
+@_WIN_SKIP
+def test_decode_budget_overflow_raises_distinct_from_no_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A frontier overflow must raise ``_DecodeBudgetError`` (distinct from a
+    no-match []) so the caller reports it as 'exceeded decode budget', not
+    'no matching directory' (#1151 review Major)."""
+    from memtomem.context import projects as proj_mod
+
+    base = tmp_path / "base"
+    (base / "a").mkdir(parents=True)  # forces a second branch at the 'a-' dash
+    (base / "a-b" / "c").mkdir(parents=True)
+    target = base / "a-b" / "c"
+    encoded = proj_mod._encode_claude_project_path(target)
+
+    # Tiny budget so the genuine multi-branch reconstruction overflows.
+    monkeypatch.setattr(proj_mod, "_MAX_DECODE_CANDIDATES", 1)
+
+    # Direct: overflow raises the distinct error rather than returning [].
+    with pytest.raises(proj_mod._DecodeBudgetError):
+        proj_mod._decode_claude_project_dirname(encoded)
+
+    # Discovery: the warning names the budget, NOT "no matching directory".
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / encoded).mkdir()
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    with caplog.at_level("WARNING"):
+        scopes = proj_mod.discover_project_scopes(
+            cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+        )
+    assert not [s for s in scopes if "claude-projects" in s.sources]
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "exceeded decode budget" in msgs
+    assert "no matching directory" not in msgs
+
+
+@_WIN_SKIP
+def test_decode_stale_colliding_anchor_does_not_drop_live_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale known-project root whose lossy encoding collides with the live
+    cwd must NOT make the live match look ambiguous (#1151 re-review): stale
+    candidates are filtered by is_dir() before the accept-one decision."""
+    from memtomem.context import projects as proj_mod
+
+    live = tmp_path / "work" / "agent-harness"
+    live.mkdir(parents=True)
+    stale = tmp_path / "work" / "agent" / "harness"  # same encoding, never created
+    assert proj_mod._encode_claude_project_path(live) == proj_mod._encode_claude_project_path(stale)
+
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / proj_mod._encode_claude_project_path(live)).mkdir()
+
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(stale)  # stale anchor (does not exist on disk)
+
+    # cwd == live, so the live anchor + the stale anchor both encode to the slug.
+    scopes = proj_mod.discover_project_scopes(live, kp, experimental_claude_projects_scan=True)
+    claude = [s for s in scopes if "claude-projects" in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == live.resolve()
