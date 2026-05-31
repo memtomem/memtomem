@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
@@ -652,7 +653,7 @@ class TestClaudeSettingsCrossProcessLock:
         assert isinstance(final.get("hooks"), dict)
 
     def test_held_lock_aborts_within_bound_not_hangs(self, claude_home, tmp_path, monkeypatch):
-        """When the target's sidecar lock is held past the bound, the sync
+        """When the target's sidecar lock is held past the budget, the sync
         ABORTS cleanly rather than blocking forever (#1145 review). This is what
         lets the web handler offload to a worker thread without orphaning it:
         the bounded acquisition self-terminates instead of writing after the
@@ -667,18 +668,61 @@ class TestClaudeSettingsCrossProcessLock:
             {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
         )
 
-        # Tiny bound so the test is fast; hold the sidecar from "another holder"
+        # Tiny budget so the test is fast; hold the sidecar from "another holder"
         # (a separate fd — portalocker contends per open-file-description even
         # in-process).
-        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", 0.2)
         with _file_lock(_lock_path_for(target)):
             results = generate_all_settings(tmp_path, scope="user")
 
         assert results["claude_settings"].status == "aborted"
-        assert "lock held" in results["claude_settings"].reason
+        assert "held the lock" in results["claude_settings"].reason
         # The held lock blocked the write, so the target keeps its original
         # (empty-hooks) content — no torn or partial write.
         assert json.loads(target.read_text(encoding="utf-8")) == {"hooks": {}}
+
+    def test_lock_budget_bounds_whole_call_not_per_target(self, claude_home, tmp_path, monkeypatch):
+        """The lock budget bounds the WHOLE call, not each target (#1145
+        re-review). With several runtimes available and multiple sidecar locks
+        held, the TOTAL wait stays within ~one budget — a per-target bound would
+        instead accumulate ``N_held × budget`` and could overrun the web
+        handler's 60s deadline, re-opening the orphaned-worker window."""
+        import memtomem.context.settings as settings_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        # Make codex + gemini available too. Their dirs live under the fake HOME,
+        # which is itself under project_root, so the host-write gate stays shut.
+        (claude_home / ".codex").mkdir()
+        (claude_home / ".gemini").mkdir()
+        claude_t = claude_home / ".claude" / "settings.json"
+        codex_t = claude_home / ".codex" / "hooks.json"
+        gemini_t = claude_home / ".gemini" / "settings.json"
+        for t in (claude_t, codex_t, gemini_t):
+            t.parent.mkdir(parents=True, exist_ok=True)
+            t.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
+        )
+
+        budget = 0.3
+        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", budget)
+
+        # Hold TWO of the three target locks. Per-target bounding would wait
+        # ~2×budget; the shared deadline caps the total at ~one budget (once it
+        # expires, the remaining targets get a 0s non-blocking attempt).
+        start = time.monotonic()
+        with _file_lock(_lock_path_for(claude_t)), _file_lock(_lock_path_for(codex_t)):
+            results = generate_all_settings(tmp_path, scope="user")
+        elapsed = time.monotonic() - start
+
+        # Whole call bounded by ~one budget — strictly less than the 2×budget a
+        # per-target bound would have spent.
+        assert elapsed < budget * 1.8
+        # Held targets aborted; the free one (gemini) still wrote ok.
+        assert results["claude_settings"].status == "aborted"
+        assert results["codex_settings"].status == "aborted"
+        assert results["gemini_settings"].status == "ok"
 
 
 class TestClaudeSettingsAtomicWrite:

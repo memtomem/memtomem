@@ -48,6 +48,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -61,13 +62,18 @@ CANONICAL_SETTINGS_FILE = ".memtomem/settings.json"
 # Sentinel for malformed JSON detection (identity-compared via ``is``)
 _MALFORMED = object()
 
-# Bound on the per-target sidecar-lock acquisition (#1145 review). The web
-# handler offloads ``generate_all_settings`` to a worker thread under a 60s
-# ``asyncio.timeout``; an unbounded ``portalocker`` wait there would leave an
-# un-cancellable thread writing after the handler already returned 503. A bound
-# comfortably under 60s lets the worker self-abort (status="aborted") instead.
-# The CLI path inherits the same bound, which is strictly better than hanging.
-_SETTINGS_LOCK_TIMEOUT_S = 30.0
+# Whole-call budget for sidecar-lock acquisition across ALL targets (#1145
+# review). The web handler offloads ``generate_all_settings`` to a worker
+# thread under a 60s ``asyncio.timeout``; an unbounded ``portalocker`` wait
+# there would leave an un-cancellable thread writing after the handler already
+# returned 503. This budget is shared across the per-target locks (claude /
+# codex / gemini), NOT per target — a single deadline is computed once and each
+# target waits only the remaining time — so the total wait can never approach
+# ``N_targets × bound`` and stays comfortably under the handler's 60s no matter
+# how many runtimes are registered. On exhaustion a target self-aborts
+# (status="aborted"). The CLI path inherits the same budget, strictly better
+# than hanging.
+_SETTINGS_LOCK_BUDGET_S = 30.0
 
 
 def resolve_scope_path(project_root: Path, scope: str) -> Path:
@@ -894,6 +900,14 @@ def generate_all_settings(
     """
     results: dict[str, SettingsSyncResult] = {}
 
+    # One shared deadline for ALL per-target sidecar-lock waits, so the whole
+    # call — not each target — is bounded by ``_SETTINGS_LOCK_BUDGET_S``. With
+    # N runtimes a per-target bound would let the cumulative wait reach
+    # ``N × bound`` and overrun the web handler's 60s ``asyncio.timeout``,
+    # re-opening the orphaned-worker window (#1145 review). Each target waits
+    # only the time left on this budget.
+    lock_deadline = time.monotonic() + _SETTINGS_LOCK_BUDGET_S
+
     for name, gen in SETTINGS_GENERATORS.items():
         if not gen.is_available(project_root):
             results[name] = SettingsSyncResult(
@@ -950,7 +964,11 @@ def generate_all_settings(
         # layer: it still catches a non-gateway direct disk edit that bypasses
         # the sidecar lock entirely.
         try:
-            with _file_lock(_lock_path_for(target_path), timeout=_SETTINGS_LOCK_TIMEOUT_S):
+            # Wait only the time left on the shared budget (not a fresh bound
+            # per target). A 0.0 here means the budget is spent → one
+            # non-blocking attempt: acquire iff instantly free, else abort.
+            lock_timeout = max(0.0, lock_deadline - time.monotonic())
+            with _file_lock(_lock_path_for(target_path), timeout=lock_timeout):
                 # Step 1: read existing + capture mtime (ns)
                 existing_raw, existing_mtime_ns = _read_with_mtime(target_path)
                 if existing_raw is _MALFORMED:
@@ -984,13 +1002,13 @@ def generate_all_settings(
                     target=target_path,
                 )
         except TimeoutError:
-            # The sidecar lock was held by another process past the bound. Abort
-            # this target cleanly so the (possibly thread-offloaded) caller never
+            # Another process held the lock past the shared budget. Abort this
+            # target cleanly so the (possibly thread-offloaded) caller never
             # blocks indefinitely and never orphans a late writer (#1145 review).
             results[name] = SettingsSyncResult(
                 status="aborted",
-                reason=f"{target_path} lock held by another process for "
-                f">{_SETTINGS_LOCK_TIMEOUT_S:g}s. Re-run "
+                reason=f"{target_path}: another process held the lock past the "
+                f"{_SETTINGS_LOCK_BUDGET_S:g}s acquisition budget. Re-run "
                 f"`mm context sync --include=settings` to retry.",
             )
             continue
