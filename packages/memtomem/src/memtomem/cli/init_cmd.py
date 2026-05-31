@@ -478,37 +478,21 @@ def _step_embedding(state: dict) -> None:
 
     elif choice == 3:
         provider = "ollama"
-        # Two orthogonal preconditions for Ollama: the runtime binary
-        # (``_ollama_available()`` = ``shutil.which("ollama")``) and the
-        # ``ollama`` Python client (``_have_module("ollama")``). The
-        # ``-y`` extras gate (#402) checks the Python client, not the
-        # binary — so the refuse-hint must fire whenever the Python
-        # client is missing, whether or not the binary is on PATH.
-        have_ollama_binary = _ollama_available()
-        have_ollama_module = _have_module("ollama")
-
-        if not have_ollama_binary:
+        # The only Ollama precondition that matters is the runtime SERVER (the
+        # ``ollama`` binary, ``_ollama_available()`` / ``_ollama_running()``):
+        # the embedder talks to it over HTTP via ``httpx`` (a core dependency).
+        # The ``ollama`` PyPI client is NOT imported by the embedder, so it is
+        # neither required nor gated — ``-y --provider ollama`` writes config
+        # and embedding runs once the server is up.
+        if not _ollama_available():
             click.secho("  Ollama not found.", fg="yellow")
             click.echo("  Install from https://ollama.com, then run 'mm index' to embed.")
             click.echo("  Saving Ollama config now so you're ready after install.")
-            if not have_ollama_module:
-                click.echo(_y_refuse_hint("--provider ollama", "ollama"))
-                state.setdefault("_extras_warned_inline", set()).add("ollama")
             click.echo()
             # Record intent — config is written, embedding runs when Ollama is available.
             model = "nomic-embed-text"
             dimension = 768
         else:
-            if not have_ollama_module:
-                # Binary is on PATH but the ``-y`` gate additionally
-                # requires the ``ollama`` Python client. Surface the
-                # install hint + refuse note up front so scripted
-                # retries don't surprise the user.
-                click.secho("  ollama Python client not installed.", fg="yellow")
-                click.echo(f"  Install with: {_extra_install_hint(['ollama'], state)}")
-                click.echo(_y_refuse_hint("--provider ollama", "ollama"))
-                click.echo()
-                state.setdefault("_extras_warned_inline", set()).add("ollama")
             # Server reachability + model selection + pull are guarded so
             # a failed step doesn't silently advance the wizard (#626).
             # ``StepRetry`` is caught locally so the user doesn't have to
@@ -579,17 +563,10 @@ def _step_embedding(state: dict) -> None:
 
     else:
         provider = "openai"
-        # Mirror the Ollama / ONNX / kiwipiepy probe pattern (#405 / #403):
-        # the ``-y`` extras gate (#402) refuses without the ``openai``
-        # Python client, so the wizard must hint before prompting for a
-        # key the user could otherwise spend effort validating.
-        if not _have_module("openai"):
-            click.secho("  openai Python client not installed.", fg="yellow")
-            click.echo(f"  Install with: {_extra_install_hint(['openai'], state)}")
-            click.echo("  Saving OpenAI config now so you're ready after install.")
-            click.echo(_y_refuse_hint("--provider openai", "openai"))
-            click.echo()
-            state.setdefault("_extras_warned_inline", set()).add("openai")
+        # The OpenAI embedder calls the HTTP API via ``httpx`` (a core
+        # dependency); the ``openai`` PyPI client is NOT imported, so it is not
+        # required. The real precondition is an API key, collected below /
+        # via ``--api-key``.
 
         click.echo("  Available models:")
         click.echo("    [1] text-embedding-3-small — balanced (1536d)")
@@ -1871,18 +1848,12 @@ def _collect_missing_extras(state: dict) -> list[str]:
         if importable is not None:
             have_fastembed = "fastembed" in importable
             have_web = {"fastapi", "uvicorn"}.issubset(importable)
-            have_ollama = "ollama" in importable
-            have_openai = "openai" in importable
             have_kiwipiepy = "kiwipiepy" in importable
         else:
             have_fastembed, have_web = _inproc_have_extras()
-            have_ollama = _have_module("ollama")
-            have_openai = _have_module("openai")
             have_kiwipiepy = _have_module("kiwipiepy")
     else:
         have_fastembed, have_web = _inproc_have_extras()
-        have_ollama = _have_module("ollama")
-        have_openai = _have_module("openai")
         have_kiwipiepy = _have_module("kiwipiepy")
 
     missing: list[str] = []
@@ -1894,13 +1865,13 @@ def _collect_missing_extras(state: dict) -> list[str]:
     )
     if needs_fastembed and not have_fastembed:
         missing.append("onnx")
-    # [ollama] / [openai] — provider-specific client libs. `mm init -y
-    # --provider <x>` previously wrote the choice to config without this
-    # check and the failure surfaced only at runtime (#396).
-    if provider == "ollama" and not have_ollama:
-        missing.append("ollama")
-    if provider == "openai" and not have_openai:
-        missing.append("openai")
+    # NOTE: the ``ollama`` / ``openai`` providers need NO extra. Their embedders
+    # call the Ollama server / OpenAI API over HTTP via ``httpx`` (a core
+    # dependency) and never import the ``ollama`` / ``openai`` PyPI clients, so
+    # gating them on those packages was a false failure path that aborted valid
+    # ``mm init -y --provider ollama|openai`` runs. The real preconditions are
+    # the Ollama server (binary) and an OpenAI API key, neither of which a
+    # package check proves.
     # [korean] = kiwipiepy. The tokenizer falls back to unicode61 at runtime
     # if kiwipiepy is absent, so missing it is not fatal — but `mm init -y
     # --tokenizer kiwipiepy` should still be caught up front (#396).
@@ -1916,12 +1887,13 @@ def _collect_missing_extras(state: dict) -> list[str]:
 # Extras that ``-y`` must refuse to write a config for when absent. ``web``
 # is excluded — scripted runs often use ``--mcp skip`` without any intention
 # to run the web UI, and the runtime fallback (clear ``mm web`` error on
-# missing fastapi) is already loud. Update this set alongside new provider/
-# tokenizer entries in ``_collect_missing_extras`` if they gain a runtime
-# fallback that silently flips the user-visible config.
-_REQUIRED_EXTRAS_FOR_NON_INTERACTIVE: frozenset[str] = frozenset(
-    {"onnx", "ollama", "openai", "korean"}
-)
+# missing fastapi) is already loud. ``ollama`` / ``openai`` are excluded too:
+# their providers run on ``httpx`` (core) without the PyPI clients, so a
+# missing client never blocks a valid config (see ``_collect_missing_extras``).
+# Update this set alongside new provider/tokenizer entries in
+# ``_collect_missing_extras`` if they gain a runtime fallback that silently
+# flips the user-visible config.
+_REQUIRED_EXTRAS_FOR_NON_INTERACTIVE: frozenset[str] = frozenset({"onnx", "korean"})
 
 
 def _emit_cwd_runtime_mismatch_banner(state: dict) -> None:

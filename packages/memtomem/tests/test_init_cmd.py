@@ -5538,12 +5538,13 @@ class TestInitialSeedThreshold:
 class TestNonInteractiveExtrasValidation:
     """Issue #396: ``mm init -y`` must refuse to write a config when the
     requested ``--provider`` / ``--tokenizer`` needs an extra that is not
-    importable. Previously ``-y`` accepted the flag values as given and
-    the mismatch surfaced only at runtime (embedder falls back to 0d,
-    kiwipiepy falls back to unicode61, etc.). Scripted workflows prefer
-    a non-zero exit here over a silently-stale config."""
+    importable AND has no working runtime fallback — e.g. ``onnx`` (fastembed),
+    whose absence leaves the embedder at dimension 0. (``kiwipiepy`` falls back
+    to unicode61, so it warns rather than aborts.) The ``ollama`` / ``openai``
+    HTTP providers need NO extra — their embedders run on httpx — so they must
+    NOT be gated on the PyPI clients."""
 
-    def test_collect_missing_extras_ollama_when_client_absent(
+    def test_collect_missing_extras_ollama_needs_no_client_package(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from memtomem.cli import init_cmd
@@ -5554,9 +5555,10 @@ class TestNonInteractiveExtrasValidation:
         )
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
         state = {"provider": "ollama", "rerank_enabled": False}
-        assert init_cmd._collect_missing_extras(state) == ["ollama"]
+        # Ollama embedder uses httpx, not the ``ollama`` PyPI client.
+        assert init_cmd._collect_missing_extras(state) == []
 
-    def test_collect_missing_extras_openai_when_client_absent(
+    def test_collect_missing_extras_openai_needs_no_client_package(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from memtomem.cli import init_cmd
@@ -5567,7 +5569,8 @@ class TestNonInteractiveExtrasValidation:
         )
         monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
         state = {"provider": "openai", "rerank_enabled": False}
-        assert init_cmd._collect_missing_extras(state) == ["openai"]
+        # OpenAI embedder uses httpx + an API key, not the ``openai`` PyPI client.
+        assert init_cmd._collect_missing_extras(state) == []
 
     def test_collect_missing_extras_kiwipiepy_when_tokenizer_chose(
         self, monkeypatch: pytest.MonkeyPatch
@@ -5645,9 +5648,14 @@ class TestNonInteractiveExtrasValidation:
         assert "korean" in result.output
         assert not (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_provider_ollama_missing_client_exits_non_zero(
+    def test_yes_flag_provider_ollama_missing_client_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The Ollama embedder runs on httpx, not the ``ollama`` PyPI client, so
+        a missing client must NOT block ``-y --provider ollama`` — the config is
+        written and embedding runs once the server is up. (Previously this
+        aborted with "Missing required extras", a false failure for valid
+        configs.)"""
         from click.testing import CliRunner
 
         from memtomem.cli import cli, init_cmd
@@ -5674,10 +5682,9 @@ class TestNonInteractiveExtrasValidation:
             ],
         )
 
-        assert result.exit_code != 0, result.output
-        assert "Missing required extras" in result.output
-        assert "ollama" in result.output
-        assert not (tmp_path / ".memtomem" / "config.json").exists()
+        assert result.exit_code == 0, result.output
+        assert "Missing required extras" not in result.output
+        assert (tmp_path / ".memtomem" / "config.json").exists()
 
     def test_yes_flag_web_only_missing_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5723,14 +5730,16 @@ class TestNonInteractiveExtrasValidation:
         assert result.exit_code == 0, result.output
         assert (tmp_path / ".memtomem" / "config.json").exists()
 
-    def test_yes_flag_provider_openai_missing_client_exits_non_zero(
+    def test_yes_flag_provider_openai_missing_client_still_writes_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--provider openai`` is shaped the same as ollama/onnx at the
-        extras-gate layer, but ``--api-key`` plumbing sits alongside in
-        ``_override_from_flags``. Exercising the full CLI path proves the
-        two don't accidentally interact — the gate fires before the key
-        handling runs."""
+        """The OpenAI embedder runs on httpx + an API key, not the ``openai``
+        PyPI client, so a missing client must NOT block ``-y --provider openai``
+        when a key is supplied — the config is written. (Previously this aborted
+        with "Missing required extras" even with ``--api-key`` present, a false
+        failure for valid configs.) ``--api-key`` plumbing sits alongside in
+        ``_override_from_flags``; exercising the full CLI path proves the key
+        handling still runs."""
         from click.testing import CliRunner
 
         from memtomem.cli import cli, init_cmd
@@ -5759,10 +5768,9 @@ class TestNonInteractiveExtrasValidation:
             ],
         )
 
-        assert result.exit_code != 0, result.output
-        assert "Missing required extras" in result.output
-        assert "openai" in result.output
-        assert not (tmp_path / ".memtomem" / "config.json").exists()
+        assert result.exit_code == 0, result.output
+        assert "Missing required extras" not in result.output
+        assert (tmp_path / ".memtomem" / "config.json").exists()
 
     def test_yes_flag_multi_extra_missing_reports_both(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -5900,17 +5908,14 @@ class TestYRefuseHintParity:
         assert _count_calls(embedding_src, "--provider onnx", "onnx") >= 1, (
             "ONNX fallback must surface -y refuse hint (#403)"
         )
-        # Ollama has two orthogonal preconditions (binary + Python client),
-        # so the wizard must hint in both branches — binary-missing and
-        # binary-present-but-module-missing — to cover what ``-y`` refuses
-        # (#405 follow-up to #403).
-        assert _count_calls(embedding_src, "--provider ollama", "ollama") >= 2, (
-            "Ollama fallback must surface -y refuse hint in both "
-            "binary-missing and module-missing branches (#405)"
+        # ollama / openai are HTTP providers (httpx) that need NO PyPI client,
+        # so ``-y`` no longer refuses on a missing client — the wizard must NOT
+        # print a (now false) "-y will refuse" hint for them.
+        assert _count_calls(embedding_src, "--provider ollama", "ollama") == 0, (
+            "ollama needs no client package; -y does not refuse, so no refuse hint"
         )
-        assert _count_calls(embedding_src, "--provider openai", "openai") >= 1, (
-            "OpenAI fallback must surface -y refuse hint when the openai "
-            "Python client is missing (#407)"
+        assert _count_calls(embedding_src, "--provider openai", "openai") == 0, (
+            "openai needs no client package; -y does not refuse, so no refuse hint"
         )
         assert _count_calls(language_src, "--tokenizer kiwipiepy", "korean") >= 1, (
             "kiwipiepy fallback must surface -y refuse hint (#403)"
