@@ -90,28 +90,36 @@ def _default_project_root(request: Request) -> Path:
 
 def resolve_scope_root(
     request: Request,
+    project_scope_id: str | None = Query(default=None),
     scope_id: str | None = Query(default=None),
 ) -> Path:
-    """FastAPI dependency that maps an optional ``?scope_id=`` to a project root.
+    """FastAPI dependency that maps an optional project selector to a root.
 
-    No ``scope_id`` → server cwd (legacy single-project behavior preserved
-    so PR1's mutating cwd flow keeps working). Unknown ``scope_id`` →
-    404. Stale ``scope_id`` (registered but root no longer exists) → 404
-    too — read endpoints can't usefully serve from a missing dir.
+    No selector → server cwd (legacy single-project behavior preserved so PR1's
+    mutating cwd flow keeps working). ``project_scope_id`` is the canonical
+    query name; ``scope_id`` stays accepted as a permanent alias per ADR-0015.
+    Unknown selectors → 404. Stale selectors (registered but root no longer
+    exists) → 404 too — read endpoints can't usefully serve from a missing dir.
     """
-    if scope_id is None:
+    if project_scope_id is not None and scope_id is not None and project_scope_id != scope_id:
+        raise HTTPException(
+            status_code=400,
+            detail="project_scope_id and scope_id must match when both are provided",
+        )
+    selected_scope_id = project_scope_id or scope_id
+    if selected_scope_id is None:
         return _default_project_root(request)
 
     for scope in _discover_for(request):
-        if scope.scope_id != scope_id:
+        if scope.scope_id != selected_scope_id:
             continue
         if scope.root is None or scope.missing:
             raise HTTPException(
                 status_code=404,
-                detail=f"scope {scope_id!r} is registered but its root is missing",
+                detail=f"scope {selected_scope_id!r} is registered but its root is missing",
             )
         return scope.root
-    raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
+    raise HTTPException(status_code=404, detail=f"unknown project_scope_id: {selected_scope_id!r}")
 
 
 # ── GET /context/projects ────────────────────────────────────────────────
@@ -182,6 +190,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
 
 def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: TargetScope) -> dict:
     return {
+        "project_scope_id": scope.scope_id,
         "scope_id": scope.scope_id,
         "label": scope.label,
         "root": str(scope.root) if scope.root is not None else None,
@@ -255,9 +264,11 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
     cfg = _gateway_config(request)
     store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
     entry = store.add(candidate, label=body.label)
+    project_scope_id = compute_scope_id(entry.root)
 
     response: dict = {
-        "scope_id": compute_scope_id(entry.root),
+        "project_scope_id": project_scope_id,
+        "scope_id": project_scope_id,
         "root": str(entry.root),
         "label": entry.label,
     }

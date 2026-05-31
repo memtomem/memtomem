@@ -2,7 +2,7 @@
 
 Covers:
 - ``GET /api/context/projects`` shape with cwd-only and cwd+known scopes.
-- ``?scope_id=`` query on context overview, list, detail, and write routes.
+- ``?project_scope_id=`` / ``?scope_id=`` queries on scoped routes.
 - ``POST /api/context/known-projects`` validation + marker warning.
 - ``DELETE /api/context/known-projects/{scope_id}`` success / 404.
 """
@@ -79,6 +79,7 @@ async def test_get_projects_cwd_only(client) -> None:
     assert "scopes" in data
     assert len(data["scopes"]) == 1
     scope = data["scopes"][0]
+    assert scope["project_scope_id"] == scope["scope_id"]
     assert scope["label"] == "Server CWD"
     assert scope["sources"] == ["server-cwd"]
     assert scope["tier"] == "project"
@@ -290,6 +291,34 @@ async def test_skills_with_scope_id_serves_other_scope(client, tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_project_scope_id_alias_serves_other_scope(client, tmp_path: Path) -> None:
+    other = tmp_path / "canonical-selector"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    skill_dir = other / ".memtomem" / "skills" / "from_project_scope_id"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# from project_scope_id\n", encoding="utf-8")
+
+    add_resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    sid = add_resp.json()["project_scope_id"]
+    assert sid == add_resp.json()["scope_id"]
+
+    resp = await client.get("/api/context/skills", params={"project_scope_id": sid})
+    assert resp.status_code == 200, resp.text
+    names = {s["name"] for s in resp.json()["skills"]}
+    assert "from_project_scope_id" in names
+
+
+@pytest.mark.asyncio
+async def test_conflicting_project_scope_aliases_400(client) -> None:
+    resp = await client.get(
+        "/api/context/skills",
+        params={"project_scope_id": "p-111111111111", "scope_id": "p-222222222222"},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_overview_with_scope_id_serves_other_scope(client, tmp_path: Path) -> None:
     """The dashboard overview follows the selected project scope."""
     other = tmp_path / "overview-scope"
@@ -391,6 +420,7 @@ async def test_post_warns_on_missing_marker(client, tmp_path: Path) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "scope_id" in data
+    assert data["project_scope_id"] == data["scope_id"]
     # Both human prose and the machine-readable code (PR1 pattern) must be present.
     assert "warning" in data
     assert ".claude" in data["warning"]

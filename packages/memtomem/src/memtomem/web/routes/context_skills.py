@@ -101,11 +101,12 @@ async def list_skills(
 ) -> dict:
     """List canonical skills with per-runtime sync status.
 
-    Without ``?scope_id=``, lists for the server cwd (legacy single-project
-    path). With ``?scope_id=`` from ``GET /api/context/projects``, lists
-    for that scope's root. The detail and write routes use the same scope
-    resolver, so the Web UI's active-project switcher can manage any
-    registered project without restarting ``mm web``.
+    Without a project selector, lists for the server cwd (legacy single-project
+    path). With ``?project_scope_id=`` from ``GET /api/context/projects``
+    (or its permanent ``?scope_id=`` alias), lists for that scope's root.
+    The detail and write routes use the same scope resolver, so the Web UI's
+    active-project switcher can manage any registered project without
+    restarting ``mm web``.
     """
     canonicals = list_canonical_skills(project_root, scope=target_scope)
     diffs = diff_skills(project_root, scope=target_scope)
