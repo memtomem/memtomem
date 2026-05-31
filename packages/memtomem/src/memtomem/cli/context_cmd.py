@@ -63,6 +63,7 @@ from memtomem.context.status import classify_status, load_with_recovery, scan_us
 from memtomem.context.generator import (
     GENERATORS,
     extract_sections_from_agent_file,
+    preamble_source,
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
 from memtomem.context.privacy_scan import PrivacyScanError, scan_artifact_tree
@@ -811,12 +812,16 @@ def init_cmd(
             best = max(files, key=lambda f: f.size)
             click.echo(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
             content = _read_agent_file(best.path)
-            sections = extract_sections_from_agent_file(content)
+            sections = extract_sections_from_agent_file(
+                content, source=preamble_source(best.agent, best.path)
+            )
             for f in files:
                 if f.path == best.path:
                     continue
                 other_content = _read_agent_file(f.path)
-                other_sections = extract_sections_from_agent_file(other_content)
+                other_sections = extract_sections_from_agent_file(
+                    other_content, source=preamble_source(f.agent, f.path)
+                )
                 for key, val in other_sections.items():
                     if key not in sections and val.strip():
                         sections[key] = val

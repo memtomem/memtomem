@@ -161,7 +161,7 @@ async def mem_context_init(
     )
     from memtomem.context.commands import extract_commands_to_canonical
     from memtomem.context.detector import detect_agent_files
-    from memtomem.context.generator import extract_sections_from_agent_file
+    from memtomem.context.generator import extract_sections_from_agent_file, preamble_source
     from memtomem.context.parser import CONTEXT_FILENAME, sections_to_markdown
     from memtomem.context.privacy_scan import PrivacyScanError
     from memtomem.context.scope_resolver import canonical_artifact_dir
@@ -227,12 +227,16 @@ async def mem_context_init(
             best = max(files, key=lambda f: f.size)
             results.append(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
             content = await asyncio.to_thread(best.path.read_text, encoding="utf-8")
-            sections = extract_sections_from_agent_file(content)
+            sections = extract_sections_from_agent_file(
+                content, source=preamble_source(best.agent, best.path)
+            )
             for f in files:
                 if f.path == best.path:
                     continue
                 other_content = await asyncio.to_thread(f.path.read_text, encoding="utf-8")
-                other_sections = extract_sections_from_agent_file(other_content)
+                other_sections = extract_sections_from_agent_file(
+                    other_content, source=preamble_source(f.agent, f.path)
+                )
                 for key, val in other_sections.items():
                     if key not in sections and val.strip():
                         sections[key] = val

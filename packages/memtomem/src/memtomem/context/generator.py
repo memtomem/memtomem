@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from memtomem.context.parser import iter_markdown_sections
+from memtomem.context.parser import iter_markdown_sections, split_preamble
 
 
 class AgentGenerator(Protocol):
@@ -244,10 +244,86 @@ def generate_all(sections: dict[str, str]) -> dict[str, str]:
     return {name: gen.generate(sections) for name, gen in GENERATORS.items()}
 
 
-def extract_sections_from_agent_file(content: str) -> dict[str, str]:
+# Boilerplate each generator's generate() emits *before* the first "##"
+# heading. On reverse-import we strip it so it is not re-imported as project
+# text. MUST stay in lock-step with the generate() methods above and with
+# parser.sections_to_markdown's "# Project Context" wrapper (_WRAPPER_H1).
+# cursor/copilot emit the Project body directly as leading text with no H1 —
+# nothing to strip; for them the preamble *is* the Project section (the
+# round-trip loss this fixes, #1147 B1-3).
+_SOURCE_BOILERPLATE: dict[str, tuple[str, ...]] = {
+    "claude": (
+        "# CLAUDE.md",
+        "This file provides guidance to Claude Code (claude.ai/code) "
+        "when working with code in this repository.",
+    ),
+    "gemini": (
+        "# GEMINI.md",
+        "This file provides guidance to Gemini CLI when working with code in this repository.",
+    ),
+    "codex": ("# AGENTS.md",),
+    "cursor": (),
+    "copilot": (),
+}
+
+# Wrapper H1 emitted by parser.sections_to_markdown, regardless of source.
+_WRAPPER_H1 = "# Project Context"
+
+
+def _clean_preamble(preamble: str, source: str) -> str:
+    """Drop generated boilerplate lines from a reverse-import preamble.
+
+    Removes the canonical wrapper H1 plus ``source``'s known boilerplate
+    lines, then returns the remaining real project prose (stripped). An empty
+    return means the preamble was pure boilerplate (the claude/gemini/codex
+    case) and contributes nothing.
+    """
+    drop = {_WRAPPER_H1, *_SOURCE_BOILERPLATE.get(source, ())}
+    kept = [line for line in preamble.splitlines() if line.strip() not in drop]
+    return "\n".join(kept).strip()
+
+
+def preamble_source(agent: str | None, path: Path) -> str | None:
+    """Return *agent* as a reverse-import preamble source only when *path* is
+    that agent's canonical Project-bearing file (its generator ``output_path``).
+
+    ``detect_agent_files`` reports rule fragments such as ``.cursor/rules/*.mdc``
+    with ``agent="cursor"`` too; those are not Project prose, so importing them
+    via ``extract_sections_from_agent_file(..., source="cursor")`` would wrongly
+    seed ``Project`` with rule-fragment content. Gating on the generator's own
+    ``output_path`` keeps fragments on the ``source=None`` (drop-preamble) path,
+    while ``.cursorrules`` / ``CLAUDE.md`` / ``GEMINI.md`` / ``AGENTS.md`` /
+    ``copilot-instructions.md`` still capture their leading Project prose
+    (#1147 B1-3 review).
+    """
+    if agent is None:
+        return None
+    gen = GENERATORS.get(agent)
+    if gen is None:
+        return None
+    return agent if path.name == Path(gen.output_path).name else None
+
+
+def extract_sections_from_agent_file(content: str, source: str | None = None) -> dict[str, str]:
     """Reverse-extract sections from an existing agent file (CLAUDE.md, etc.).
 
     Maps agent-specific headings back to canonical section names.
+
+    ``source`` is the detecting generator's name (``"claude"``, ``"cursor"``,
+    ``"gemini"``, ``"codex"``, ``"copilot"``). When given, leading text before
+    the first ``##`` heading — which is real project prose for the
+    cursor/copilot targets that emit the Project body with no H1 — is captured
+    into the canonical ``Project`` section after stripping the source's
+    generated boilerplate (#1147 B1-3). Every ``##`` starts a section, so a
+    captured ``Project`` body never contains a ``##`` that would re-split on
+    the next round-trip; keep subheadings inside a section with ``###``. When
+    ``source`` is ``None`` the preamble is dropped exactly as before
+    (back-compat): the canonical parser contract is unchanged.
+
+    Pass ``source`` only for a generator's *canonical* Project-bearing file
+    (see :func:`preamble_source`); rule fragments such as ``.cursor/rules/*``
+    are also detected as ``agent="cursor"`` but are not Project prose, so they
+    must reach this function with ``source=None``.
     """
     # Heading aliases → canonical section name
     aliases: dict[str, str] = {
@@ -269,8 +345,14 @@ def extract_sections_from_agent_file(content: str) -> dict[str, str]:
         "copilot-specific": "Copilot",
     }
 
+    # Every ## heading starts a section; the text before the first one is the
+    # preamble (captured into Project for known sources below). A section's own
+    # subheadings must use ### so they are not mis-read as separate sections —
+    # this keeps the captured Project body free of round-trip-unstable ## lines.
+    preamble, rest = split_preamble(content)
+
     sections: dict[str, str] = {}
-    for heading, body in iter_markdown_sections(content):
+    for heading, body in iter_markdown_sections(rest):
         key = aliases.get(heading.lower(), heading)
         # Two source headings can alias to one canonical key (e.g. "Rules" and
         # "Coding Rules" → "Rules"); merge rather than overwrite so the earlier
@@ -279,5 +361,15 @@ def extract_sections_from_agent_file(content: str) -> dict[str, str]:
             sections[key] = f"{sections[key]}\n\n{body}".strip()
         else:
             sections[key] = body
+
+    # Capture non-boilerplate leading prose into Project for known sources,
+    # prepended to any existing ## Project body to preserve document order.
+    if source is not None:
+        leading = _clean_preamble(preamble, source)
+        if leading:
+            if "Project" in sections:
+                sections["Project"] = f"{leading}\n\n{sections['Project']}".strip()
+            else:
+                sections["Project"] = leading
 
     return sections

@@ -1,11 +1,14 @@
 """Tests for agent context management module."""
 
+from pathlib import Path
+
 import pytest
 
 from memtomem.context.parser import (
     iter_markdown_sections,
     parse_context,
     sections_to_markdown,
+    split_preamble,
 )
 from memtomem.context.detector import detect_agent_files
 from memtomem.context.generator import (
@@ -13,6 +16,7 @@ from memtomem.context.generator import (
     generate_for_agent,
     generate_all,
     extract_sections_from_agent_file,
+    preamble_source,
 )
 
 
@@ -349,3 +353,195 @@ class TestParserHardening:
         out.write_text(sections_to_markdown(sections), encoding="utf-8")
         reparsed = parse_context(out)
         assert reparsed == sections
+
+
+class TestSplitPreamble:
+    """`split_preamble` finds the first real heading, fence/whitespace aware."""
+
+    def test_no_heading_is_all_preamble(self):
+        preamble, rest = split_preamble("just prose\nmore prose")
+        assert preamble == "just prose\nmore prose"
+        assert rest == ""
+
+    def test_basic_split(self):
+        preamble, rest = split_preamble("intro line\n\n## A\n\nbody")
+        assert "intro line" in preamble
+        assert rest.startswith("## A")
+        assert "body" in rest
+
+    def test_fence_in_preamble_is_not_a_boundary(self):
+        # A ``##``-lookalike inside a fenced code block must NOT end the
+        # preamble early (B1-1 fence awareness, shared with the iterator).
+        text = "intro\n```\n## fake heading\n```\n\n## Real\n\nbody"
+        preamble, rest = split_preamble(text)
+        assert "## fake heading" in preamble
+        assert rest.startswith("## Real")
+
+    def test_whitespace_only_heading_is_not_a_boundary(self):
+        # ``##   `` is not a heading (B1-3); the first real boundary is ## Real.
+        preamble, rest = split_preamble("intro\n##   \n\n## Real\nbody")
+        assert "##   " in preamble
+        assert rest.startswith("## Real")
+
+
+class TestPreambleReverseImport:
+    """Source-aware reverse-import captures leading project prose (#1147 B1-3)."""
+
+    @pytest.mark.parametrize("source", ["claude", "gemini", "codex", "cursor", "copilot"])
+    def test_generate_import_generate_is_idempotent(self, source):
+        # No Rules/Style here so the B1-4 merge lossiness (a separate item)
+        # does not confound the B1-3 round-trip.
+        original = {"Project": "Proj prose line.", "Commands": "- run: x"}
+        gen = generate_for_agent(source, original)
+        result = extract_sections_from_agent_file(gen, source=source)
+
+        # The project prose survives reverse-import...
+        assert "Project" in result
+        assert "Proj prose line." in result["Project"]
+        # ...and no generated boilerplate leaks into the captured sections.
+        for value in result.values():
+            assert "# Project Context" not in value
+            assert "# CLAUDE.md" not in value
+            assert "# GEMINI.md" not in value
+            assert "# AGENTS.md" not in value
+            assert "This file provides guidance" not in value
+        # Full round-trip is stable.
+        assert generate_for_agent(source, result) == gen
+
+    def test_cursor_user_prose_is_captured(self):
+        # The exact bug: a hand-authored .cursorrules has leading prose with
+        # no H1 — previously dropped, now mapped to Project.
+        content = "We build a CLI in Rust.\n\n## Rules\n\n- be fast\n"
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert result["Project"] == "We build a CLI in Rust."
+        assert "- be fast" in result["Rules"]
+
+    def test_collision_prepends_preamble_to_existing_project(self):
+        # codex emits "# AGENTS.md" then "## Project"; extra prose after the H1
+        # must prepend to (not clobber) the ## Project body, preserving order.
+        content = "# AGENTS.md\n\nExtra note.\n\n## Project\n\nBody text.\n"
+        result = extract_sections_from_agent_file(content, source="codex")
+        assert result["Project"].startswith("Extra note.")
+        assert "Body text." in result["Project"]
+        assert "# AGENTS.md" not in result["Project"]
+
+    def test_wrapper_h1_is_stripped_for_known_source(self):
+        content = sections_to_markdown({"Project": "P", "Commands": "C"})
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert "# Project Context" not in result["Project"]
+        assert result["Project"] == "P"
+
+    def test_source_none_preserves_old_drop_behavior(self):
+        # Back-compat: with no source, leading prose is dropped exactly as
+        # before — the canonical contract is unchanged.
+        content = "# CLAUDE.md\n\nThis file...\n\nLeftover prose.\n\n## Project\n\nBody\n"
+        result = extract_sections_from_agent_file(content)
+        assert "Leftover prose." not in result.get("Project", "")
+        assert result["Project"] == "Body"
+
+
+class TestPreambleSourceGuard:
+    """`preamble_source` gates capture to a generator's canonical file (#1147
+    B1-3 review): rule fragments detected as agent='cursor' must NOT import as
+    Project."""
+
+    def test_canonical_cursorrules_gets_source(self):
+        assert preamble_source("cursor", Path("/proj/.cursorrules")) == "cursor"
+
+    @pytest.mark.parametrize(
+        "agent,name",
+        [
+            ("claude", "CLAUDE.md"),
+            ("gemini", "GEMINI.md"),
+            ("codex", "AGENTS.md"),
+            ("copilot", "copilot-instructions.md"),
+        ],
+    )
+    def test_canonical_files_get_source(self, agent, name):
+        assert preamble_source(agent, Path(f"/proj/{name}")) == agent
+
+    def test_cursor_rules_fragment_gets_no_source(self):
+        # .cursor/rules/*.mdc is detected as agent='cursor' but is a rule
+        # fragment, not Project prose — must fall back to source=None.
+        assert preamble_source("cursor", Path("/proj/.cursor/rules/style.mdc")) is None
+        assert preamble_source("cursor", Path("/proj/.cursor/rules/style.md")) is None
+
+    def test_none_agent_is_none(self):
+        assert preamble_source(None, Path("/proj/whatever.md")) is None
+
+    def test_fragment_content_not_imported_as_project(self):
+        # End-to-end: a Cursor MDC rule fragment routed with the guarded source
+        # (None) drops its prose instead of seeding Project.
+        fragment = "---\ndescription: Python style\nglobs: **/*.py\n---\nUse type hints.\n"
+        src = preamble_source("cursor", Path("/proj/.cursor/rules/py.mdc"))
+        result = extract_sections_from_agent_file(fragment, source=src)
+        assert "Use type hints." not in result.get("Project", "")
+
+
+class TestPreambleProjectSubheadings:
+    """Reverse-import contract: every ## starts a section, so a captured
+    Project body never embeds a ## that would re-split on the next round-trip;
+    keep subheadings inside a section body with ### (#1147 B1-3 review)."""
+
+    def test_h2_in_flat_body_splits_into_its_own_section(self):
+        # A hand-authored flat file with a ## heading: that heading starts a
+        # section rather than folding into Project as an unsound embedded ##
+        # (which would re-split on the next generate->import cycle).
+        content = "Intro line.\n\n## Goals\n\nBe fast.\n\n## Rules\n\n- be terse\n"
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert result["Project"] == "Intro line."
+        assert result["Goals"] == "Be fast."
+        assert "- be terse" in result["Rules"]
+        # Soundness invariant: no captured section body contains a ## heading.
+        assert all("## " not in body for body in result.values())
+
+    def test_persisted_context_md_round_trip_is_idempotent(self, tmp_path):
+        # The user-visible contract is the *persisted* round-trip: extracted
+        # sections are written to context.md (sections_to_markdown) and re-read
+        # (parse_context) on every later `generate`/`sync`. Pin that this is
+        # stable — a flat-file `## Deployment` survives as its own section and
+        # the persisted form re-parses to the identical dict, with no `## `
+        # embedded in any section body (the soundness win of the section model).
+        #
+        # NB: whether a *generator* re-emits the unknown `Deployment` section is
+        # a separate, pre-existing concern (generators only emit canonical
+        # sections; true on main and for source=None alike) tracked outside
+        # B1-3 — this test deliberately pins the parser/persistence layer only.
+        content = "Intro line.\n\n## Deployment\n\nShip it.\n\n## Rules\n\n- be terse\n"
+        sections = extract_sections_from_agent_file(content, source="cursor")
+
+        ctx = tmp_path / "context.md"
+        ctx.write_text(sections_to_markdown(sections), encoding="utf-8")
+        reparsed = parse_context(ctx)
+
+        # The non-canonical heading persists as its own section, not lost.
+        assert reparsed["Project"] == "Intro line."
+        assert reparsed["Deployment"] == "Ship it."
+        assert reparsed["Rules"] == "- be terse"
+        # No section body smuggles a ## that would re-split on the next read.
+        assert all("## " not in body for body in reparsed.values())
+        # Persisted form is a fixed point: re-serialize → re-parse is stable.
+        ctx.write_text(sections_to_markdown(reparsed), encoding="utf-8")
+        assert parse_context(ctx) == reparsed
+
+    @pytest.mark.parametrize("source", ["cursor", "copilot"])
+    def test_h3_subheading_stays_in_project_and_round_trips(self, source):
+        # ### is the documented escape hatch: it is not a section boundary, so a
+        # Project body keeps its ### subheadings and round-trips byte-for-byte.
+        original = {
+            "Project": "Intro line.\n\n### Goals\n\nBe fast.",
+            "Rules": "- be terse",
+        }
+        gen = generate_for_agent(source, original)
+        result = extract_sections_from_agent_file(gen, source=source)
+        assert "### Goals" in result["Project"]
+        assert "Be fast." in result["Project"]
+        assert "Goals" not in result  # not a separate section
+        assert generate_for_agent(source, result) == gen
+
+    def test_known_section_heading_splits(self):
+        # A canonical section heading (Rules) is a boundary; preamble -> Project.
+        content = "Project prose.\n\n## Rules\n\n- foo\n"
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert result["Project"] == "Project prose."
+        assert "- foo" in result["Rules"]
