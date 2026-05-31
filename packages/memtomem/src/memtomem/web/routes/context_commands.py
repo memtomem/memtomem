@@ -104,7 +104,7 @@ async def list_commands(
         ),
     ),
 ) -> dict:
-    """List canonical commands. Accepts ``?scope_id=`` like list_skills."""
+    """List canonical commands. Accepts project selector aliases like list_skills."""
     canonicals = list_canonical_commands(project_root, scope=target_scope)
     diffs = diff_commands(project_root, scope=target_scope)
 

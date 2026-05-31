@@ -117,7 +117,7 @@ async def list_agents(
         ),
     ),
 ) -> dict:
-    """List canonical agents. Accepts ``?scope_id=`` like list_skills."""
+    """List canonical agents. Accepts project selector aliases like list_skills."""
     canonicals = list_canonical_agents(project_root, scope=target_scope)
     diffs = diff_agents(project_root, scope=target_scope)
 
