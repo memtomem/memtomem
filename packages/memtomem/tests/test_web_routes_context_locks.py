@@ -496,3 +496,63 @@ def test_gateway_lock_docstring_describes_two_layer_model():
     assert "settings" in doc
     # The heavy alternative was considered and rejected — keep that on record.
     assert "gateway-wide" in doc
+
+
+# ---------------------------------------------------------------------------
+# Event-loop binding — the proxy must not bind to the first loop (de-flake)
+# ---------------------------------------------------------------------------
+
+
+def test_locks_survive_distinct_event_loops():
+    """Acquiring a gateway/config lock from two independent loops must not raise.
+
+    A bare module-level ``asyncio.Lock`` binds to an event loop the first time
+    it takes its *contended* slow path (the uncontended fast path never calls
+    ``_get_loop()``), then raises ``RuntimeError: ... is bound to a different
+    event loop`` when contended again from another loop — the root cause of the
+    order-dependent flake in ``test_settings_sync_and_skills_sync_share_lock``,
+    which contends the lock via ``asyncio.gather``. ``_LoopLocalLock`` keys the
+    underlying lock per running loop, so each ``asyncio.run`` — a fresh loop
+    that closes on exit — gets its own. Deterministic where the original symptom
+    was not: with a bare ``asyncio.Lock`` the second ``asyncio.run`` raises.
+    """
+    from memtomem.web.routes import _locks
+
+    async def _contend(lock):
+        # Force the slow path: while one holder sleeps inside the lock, a second
+        # waiter must create a future via _get_loop(), binding/checking the loop.
+        async def hold():
+            async with lock:
+                await asyncio.sleep(0)
+
+        await asyncio.gather(hold(), hold())
+
+    for lock in (_locks._gateway_lock, _locks._config_lock):
+        asyncio.run(_contend(lock))  # binds to loop #1, which then closes
+        asyncio.run(_contend(lock))  # loop #2 — a bare asyncio.Lock raises here
+
+
+def test_loop_local_lock_registry_prunes_closed_loops():
+    """The per-loop registry must not accumulate entries for closed loops.
+
+    Each stored ``asyncio.Lock`` strongly references its bound loop, so a
+    ``WeakKeyDictionary`` could never reclaim finished-loop entries (the value
+    keeps the weak key alive). The registry instead prunes closed loops when a
+    new loop is seen, so running many short-lived contended loops leaves at most
+    the most-recent entry — not one per loop.
+    """
+    from memtomem.web.routes import _locks
+
+    async def _contend(lock):
+        async def hold():
+            async with lock:
+                await asyncio.sleep(0)
+
+        await asyncio.gather(hold(), hold())
+
+    lock = _locks._gateway_lock
+    for _ in range(5):
+        asyncio.run(_contend(lock))  # fresh loop each iteration, closed on exit
+
+    # Without pruning this would be 5 (one stranded lock per closed loop).
+    assert len(lock._locks) <= 1
