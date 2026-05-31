@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-31
+
+Patch release on top of 0.2.1: adds network MCP transports, a `mm web`
+background daemon, hooks fan-out to the Codex and Gemini runtimes, and a new
+artifact-migration MCP tool, alongside broad Context Gateway / Web UI
+accessibility and reliability hardening.
+
 - **New `mem_context_artifact_migrate` MCP tool (#1147, B5-1).** Exposes the
   CLI `mm context migrate` verb over MCP for agents / commands / skills: flat→dir
   layout normalization (`to_scope` omitted) and ADR-0011 scope-tier moves
@@ -28,7 +35,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   exposing publicly.
 - **`memtomem-server` direct TTY launches now exit with guidance.** Running the
   stdio MCP server directly in a terminal prints MCP-client setup and
-  network-transport examples instead of waiting on stdin.
+  network-transport examples instead of waiting on stdin. Network transport
+  defaults are also tightened and the startup banner ordering fixed (#1092).
+- **`mm web` can run as a background daemon (#1028).** Lets the Web UI keep
+  running detached from the launching shell.
+- **Hooks now fan out to the Codex and Gemini runtimes (ADR-0018, #1109).**
+  memtomem-owned hook rules are marked so re-sync can update them in place
+  (ADR-0019, #1111), duplicate same-matcher conflicts resolve by exact rule
+  identity (#1115), and the sync confirmation discloses the actual runtime
+  target files with a scope-drift guard (#1114).
+- **Custom Commands are promoted to the production tier in Context Gateway
+  (#1108).**
+- **LLM and embedding requests retry on HTTP 429 (#1056).** Adds shared
+  `RateLimitError` handling with `Retry-After` parsing (#1084) and validates
+  `max_delay` before sleeping to avoid negative sleeps (#1041).
+- **`mem_dedup_merge` defaults to `dry_run=True` for safety parity (#1045).**
+  Dedup scan timeout is aligned to 120s and the 408 path is covered (#1085).
+- **`mm init` no longer gates HTTP embedding providers on unused client
+  packages (#1148).**
+- **Context Gateway and Web UI accessibility + reliability hardening.** Focus
+  trap/restore and `aria-modal` across modals, a skip-to-main link, polite
+  `aria-live` results, reduced-motion support, accessible names for icon-only
+  buttons and form inputs, and modal-aware shortcut gating (#1053 series);
+  plus project-switch scope/draft race fixes, deep-link cold-load routing,
+  single-column mobile layout, and localized error / empty / diff text
+  (#1116, #1117, #1120–#1122).
+- **Section parser hardened against round-trip data loss; settings TOCTOU and
+  the skill-promote rollback leak closed (#1132, #1145).**
+- **`/api/reindex` no longer 500s** when index roots need path coercion
+  (#1058).
 
 ## [0.2.1] — 2026-05-13
 
