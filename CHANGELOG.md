@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **New `mem_context_artifact_migrate` MCP tool (#1147, B5-1).** Exposes the
+  CLI `mm context migrate` verb over MCP for agents / commands / skills: flat→dir
+  layout normalization (`to_scope` omitted) and ADR-0011 scope-tier moves
+  (`to_scope` set). Dry-run by default (`apply=True` to execute); `force=True`
+  migrates dirty flat files (flat→dir only); `confirm_project_shared=True` is
+  required to write the git-tracked tier. Reuses the same pure functions and
+  gate semantics as the CLI; memory-tier migration stays on
+  `mem_context_memory_migrate`.
 - **`mem_context_migrate` renamed to `mem_context_memory_migrate` (#1147, B5-2).**
   The tool only ever covered *memory*-tier migration, but its bare name implied
   parity with the full CLI `mm context migrate` (which also does artifact

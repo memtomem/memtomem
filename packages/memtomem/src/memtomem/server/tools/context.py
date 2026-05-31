@@ -1,10 +1,10 @@
-"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_memory_migrate."""
+"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_memory_migrate, context_artifact_migrate."""
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import click
 
@@ -14,6 +14,10 @@ from memtomem.server import mcp
 from memtomem.server.context import CtxType
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+
+if TYPE_CHECKING:
+    from memtomem.context.migrate import MigrateRow, MigrateScopeResult
+    from memtomem.context.scope_resolver import ArtifactKind
 
 # Known --include values (mirrors cli.context_cmd._KNOWN_INCLUDES).
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
@@ -1087,3 +1091,274 @@ async def mem_context_migrate(
         confirm_project_shared=confirm_project_shared,
         ctx=ctx,
     )
+
+
+# ── Artifact migration (flat→dir + scope-tier) ──────────────────────────────
+
+
+def _format_artifact_flat_preview(rows: list[MigrateRow], *, skills_section: bool) -> str:
+    """Plain-text dry-run preview for flat→dir migration (mirrors the CLI's
+    ``_print_migrate_preview`` content without click colour)."""
+    from memtomem.cli.context_cmd import _summarize_migrate_rows
+
+    lines = ["Will migrate (review; re-call with apply=True to execute):"]
+    last_type: str | None = None
+    for row in rows:
+        if row.asset_type != last_type:
+            lines.append(f"\n{row.asset_type}")
+            last_type = row.asset_type
+        lines.append(f"  {row.name}  [{row.state}]  ({row.reason})")
+    if skills_section:
+        lines.append("\nskills\n  (always directory layout — no migration needed.)")
+    lines.append(f"\nSummary: {_summarize_migrate_rows(rows)}.")
+    lines.append("\nRe-call with apply=True to execute.")
+    if any(r.state == "refuse_dirty" for r in rows):
+        lines.append(
+            "Dirty/collision assets need apply=True + force=True (creates a .bak per dirty file)."
+        )
+    return "\n".join(lines)
+
+
+def _run_artifact_flat_apply(project_root: Path, rows: list[MigrateRow], *, force: bool) -> str:
+    """Execute each row via ``migrate_one`` and format a plain-text summary."""
+    from memtomem.context.migrate import migrate_one
+
+    out: list[str] = []
+    successes = failures = skipped = 0
+    for row in rows:
+        if row.state in {"noop", "skip_manual", "skip_orphan"}:
+            out.append(f"  - {row.asset_type}/{row.name}: {row.reason}")
+            skipped += 1
+            continue
+        if row.state == "refuse_dirty" and not force:
+            out.append(f"  x {row.asset_type}/{row.name}: dirty without force=True")
+            failures += 1
+            continue
+        result = migrate_one(project_root, row, force=force)
+        if result.ok:
+            tag = "migrated"
+            if row.state == "cleanup_flat" or (row.state == "refuse_dirty" and row.dir_exists):
+                tag = "flat removed (dir wins)"
+            bak = f" (.bak: {result.bak_path.name})" if result.bak_path is not None else ""
+            out.append(f"  ✓ {row.asset_type}/{row.name}: {tag}{bak}")
+            successes += 1
+        else:
+            out.append(f"  x {row.asset_type}/{row.name}: {result.error}")
+            failures += 1
+
+    parts: list[str] = []
+    if successes:
+        parts.append(f"{successes} migrated")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    if failures:
+        parts.append(f"{failures} failed")
+    summary = ", ".join(parts) if parts else "0 actions"
+    return "\n".join(out) + f"\n\nSummary: {summary}."
+
+
+def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -> str:
+    """Plain-text summary for one scope-tier move (mirrors the CLI's
+    ``_print_migrate_scope_result``)."""
+    layout_note = " (flat layout)" if result.layout == "flat" else ""
+    lines = [
+        f"Plan: migrate {result.kind}/{result.name}{layout_note}",
+        f"  from {result.from_scope}: {result.src_path}",
+        f"  to   {result.to_scope}: {result.dst_path}",
+    ]
+    if not apply_:
+        lines.append("\nRe-call with apply=True to execute.")
+        lines.append(
+            f"After apply, run mem_context_sync(scope='{result.to_scope}') "
+            "to refresh runtime fan-out."
+        )
+        return "\n".join(lines)
+
+    lines.append(f"\n✓ moved {result.kind}/{result.name}: {result.from_scope} → {result.to_scope}")
+    if result.fanout_cleaned:
+        lines.append(f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out target(s):")
+        lines.extend(f"    - {path}" for path in result.fanout_cleaned)
+    lines.append(
+        f"\nNext: run mem_context_sync(scope='{result.to_scope}') "
+        "to regenerate runtime fan-out at the new tier."
+    )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_artifact_migrate(
+    asset_type: str = "",
+    name: str = "",
+    from_scope: str = "",
+    to_scope: str = "",
+    apply: bool = False,
+    force: bool = False,
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Migrate canonical context artifacts (agents / commands / skills).
+
+    Mirrors the CLI ``mm context migrate`` verb's two modes, selected by
+    whether ``to_scope`` is set (``cli/context_cmd.py:migrate_cmd``). Reuses the
+    same pure functions (``classify_migrate`` / ``migrate_one`` /
+    ``migrate_scope``) and the SAME gate semantics as the CLI — no logic is
+    re-implemented. For *memory*-tier migration use ``mem_context_memory_migrate``.
+
+    Two modes:
+
+    * **Flat→dir layout** (``to_scope`` omitted) — converts pre-PR-C
+      ``agents/<name>.md`` to ``agents/<name>/agent.md``. ``asset_type=""``
+      (the default) batches agents + commands; ``"skills"`` is an informational
+      no-op (skills are always directory layout). ``force=True`` (apply only)
+      migrates dirty flat files, writing a ``.bak`` sibling each.
+    * **Scope-tier move** (``to_scope`` set) — moves the canonical between
+      ADR-0011 tiers (``user`` / ``project_shared`` / ``project_local``).
+      Requires ``asset_type`` and ``name``. ``from_scope`` is auto-detected when
+      omitted. Destinations always refuse on conflict (``force`` does not apply).
+
+    Args:
+        asset_type: ``agents`` | ``commands`` | ``skills``. Empty batches
+            agents + commands (flat→dir mode only).
+        name: Artifact name. Required for a scope-tier move; an optional filter
+            for flat→dir.
+        from_scope: Source tier for a scope-tier move (auto-detected if empty).
+        to_scope: Target tier. Empty selects flat→dir mode; set selects
+            scope-tier mode.
+        apply: Execute the migration. Default ``False`` returns a dry-run
+            preview, matching the context-tool family (``mem_context_sync`` /
+            ``mem_context_memory_migrate``) rather than ``mem_ingest``'s
+            ``dry_run`` convention.
+        force: Flat→dir only — migrate dirty flat files (apply only). Rejected
+            together with ``to_scope`` (scope-tier always refuses on conflict).
+        confirm_project_shared: Required when ``to_scope='project_shared'`` and
+            ``apply=True``; MCP cannot prompt, so a missing confirmation returns
+            a ``needs confirmation`` message instead of touching disk.
+
+    Refusals are prefixed (``error:`` / ``needs confirmation:`` / ``refused:`` /
+    ``privacy block:``) so callers can branch on the prefix.
+    """
+    from memtomem.context.migrate import (
+        MigratePartialError,
+        SCOPE_MIGRATABLE_KINDS,
+        classify_migrate,
+        migrate_scope,
+    )
+    from memtomem.context.privacy_scan import PrivacyScanError
+
+    asset = asset_type or None
+    nm = name or None
+    frm = from_scope or None
+    to = to_scope or None
+
+    # ── Shared validation gates (mirror cli migrate_cmd, including the
+    #    flat-mode gates so scope inputs are never silently ignored). ──
+    if force and not apply:
+        return "error: force=True is only valid with apply=True."
+    if nm is not None and asset is None:
+        return "error: name requires asset_type."
+    if asset == "memory":
+        return (
+            "error: memory migration is not handled here — use "
+            "mem_context_memory_migrate(source=..., from_scope=..., to_scope=...)."
+        )
+    for label, value in (("from_scope", frm), ("to_scope", to)):
+        if value is not None and value not in _KNOWN_ARTIFACT_SCOPES:
+            return f"error: Unknown {label}='{value}'. Supported: {sorted(_KNOWN_ARTIFACT_SCOPES)}"
+
+    project_root = await asyncio.to_thread(_find_project_root)
+
+    # ── Scope-tier mode (to_scope set) ──
+    if to is not None:
+        if asset is None:
+            return "error: to_scope requires asset_type."
+        if asset not in SCOPE_MIGRATABLE_KINDS:
+            return (
+                f"error: to_scope is not supported for asset_type='{asset}' "
+                f"(use one of {list(SCOPE_MIGRATABLE_KINDS)})."
+            )
+        if nm is None:
+            return "error: name is required with to_scope."
+        if force:
+            return (
+                "error: force does not apply to scope-tier moves "
+                "(destinations always refuse on conflict)."
+            )
+        # Gate B: project_shared opt-in (apply only — dry-run never mutates).
+        if to == "project_shared" and apply and not confirm_project_shared:
+            return (
+                "needs confirmation: to_scope='project_shared' moves the canonical "
+                "into the git-tracked tier. Re-call with confirm_project_shared=True "
+                "to proceed."
+            )
+        try:
+            result = await asyncio.to_thread(
+                migrate_scope,
+                cast("ArtifactKind", asset),
+                nm,
+                from_scope=cast("TargetScope | None", frm),
+                to_scope=cast(TargetScope, to),
+                project_root=project_root,
+                apply_=apply,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return f"error: {exc}"
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
+        except MigratePartialError as exc:
+            return f"error: {exc.message}"
+        except click.ClickException as exc:
+            return f"error: {exc.message}"
+
+        out = _format_artifact_scope_result(result, apply_=apply)
+        # project_local first-landing needs the gitignore marker (parity with
+        # the CLI dispatch) so the local tier is not accidentally committed.
+        if apply and to == "project_local":
+            from memtomem.cli.context_cmd import _append_gitignore_marker
+
+            wrote, _msg = await asyncio.to_thread(_append_gitignore_marker, project_root)
+            if wrote:
+                out += "\n  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)."
+        return out
+
+    # ── Flat→dir mode (to_scope omitted) ──
+    if frm is not None:
+        return "error: from_scope requires to_scope (scope-tier mode)."
+    if confirm_project_shared:
+        return "error: confirm_project_shared requires to_scope."
+    if asset == "skills":
+        return "skills are always directory layout (Agent Skills spec) — no migration needed."
+
+    try:
+        rows = await asyncio.to_thread(classify_migrate, project_root, asset, nm)
+    except (FileNotFoundError, ValueError) as exc:
+        return f"error: {exc}"
+
+    skills_section = asset is None
+    if not rows:
+        note = (
+            "\n(skills are always directory layout — no migration needed.)"
+            if skills_section
+            else ""
+        )
+        if nm is not None:
+            return f"No matching asset to migrate (checked {asset}/{nm}).{note}"
+        return f"No flat-layout assets to migrate.{note}"
+
+    needs_force = [r for r in rows if r.state == "refuse_dirty"]
+    actionable = [r for r in rows if r.state in {"migrate", "cleanup_flat"}]
+
+    if not apply:
+        return _format_artifact_flat_preview(rows, skills_section=skills_section)
+
+    if needs_force and not force:
+        return (
+            f"refused: {len(needs_force)} entry(ies) have local edits since install; "
+            "re-call with force=True to migrate (each dirty flat file gets a .bak sibling). "
+            "No entry was written."
+        )
+    if not actionable and not (force and needs_force):
+        return "Nothing to migrate."
+
+    return await asyncio.to_thread(_run_artifact_flat_apply, project_root, rows, force=force)
