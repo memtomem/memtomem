@@ -52,6 +52,11 @@ _RESERVED_SECTION_KEYS = {
     "Gemini",
     "Codex",
     "Copilot",
+    "Claude-Specific",
+    "Cursor-Specific",
+    "Gemini-Specific",
+    "Codex-Specific",
+    "Copilot-Specific",
 }
 
 
