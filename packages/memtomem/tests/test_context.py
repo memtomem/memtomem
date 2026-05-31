@@ -180,18 +180,19 @@ class TestGenerator:
         assert "## Cursor" not in content
         assert "## Deployment" in content
 
-    def test_generate_does_not_emit_literal_agent_specific_headings_as_unknown(self):
+    @pytest.mark.parametrize("heading", ["Claude-Specific", "claude-specific"])
+    def test_generate_does_not_emit_literal_agent_specific_headings_as_unknown(self, heading):
         content = generate_for_agent(
             "cursor",
             {
                 "Project": "Intro line.",
-                "Claude-Specific": "Claude-only override.",
+                heading: "Claude-only override.",
                 "Deployment": "Ship it.",
             },
         )
 
         assert "Claude-only override." not in content
-        assert "## Claude-Specific" not in content
+        assert heading not in content
         assert "## Deployment" in content
 
     def test_unknown_agent_raises(self):

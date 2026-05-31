@@ -42,27 +42,27 @@ def _section_block(heading: str, content: str) -> str:
 
 
 _RESERVED_SECTION_KEYS = {
-    "Project",
-    "Commands",
-    "Architecture",
-    "Rules",
-    "Style",
-    "Claude",
-    "Cursor",
-    "Gemini",
-    "Codex",
-    "Copilot",
-    "Claude-Specific",
-    "Cursor-Specific",
-    "Gemini-Specific",
-    "Codex-Specific",
-    "Copilot-Specific",
+    "project",
+    "commands",
+    "architecture",
+    "rules",
+    "style",
+    "claude",
+    "cursor",
+    "gemini",
+    "codex",
+    "copilot",
+    "claude-specific",
+    "cursor-specific",
+    "gemini-specific",
+    "codex-specific",
+    "copilot-specific",
 }
 
 
 def _append_unknown_sections(lines: list[str], sections: dict[str, str]) -> None:
     for heading, content in sections.items():
-        if heading not in _RESERVED_SECTION_KEYS:
+        if heading.lower() not in _RESERVED_SECTION_KEYS:
             lines.append(_section_block(heading, content))
 
 
