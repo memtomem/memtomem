@@ -365,17 +365,21 @@ def test_has_runtime_marker_file_doesnt_count(tmp_path: Path) -> None:
 
 # ── FS-guided kebab-case decoder (#1147 B7-1) ────────────────────────────
 #
-# The encoded ``~/.claude/projects/<name>`` directory maps ``/``, ``.`` and
-# literal ``-`` all to ``-`` (lossy / many-to-one). These tests pin the
-# FS-guided reconstruction. Hermetic: ``_CLAUDE_PROJECTS_DIR`` (bound at import
-# via ``expanduser()``) is monkeypatched, and target dirs live under a real
-# ``tmp_path`` so the reconstruction's absolute ``is_dir()`` probes hit
-# fixtures. POSIX-only (the leading ``-`` → ``/`` root convention).
+# The encoder collapses *every* non-ASCII-alphanumeric char to ``-`` (lossy /
+# many-to-one); these tests pin the FS-guided reconstruction, which reverses each
+# ``-`` to the real on-disk char (``/``, ``.``, ``_``, literal ``-``, …). Note
+# pytest's ``tmp_path`` leaf carries ``_`` from the test name, so these fixtures
+# exercise the underscore round-trip too. Hermetic: ``_CLAUDE_PROJECTS_DIR``
+# (bound at import via ``expanduser()``) is monkeypatched, and target dirs live
+# under a real ``tmp_path`` so the reconstruction's absolute ``is_dir()`` probes
+# hit fixtures. POSIX-only because the *reconstruction* assumes the leading
+# ``-`` → ``/`` root convention — the encoder itself is platform-agnostic.
 
 _WIN_SKIP = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: the leading `-` → `/` root convention and the "
-    "claude-projects encoding are POSIX-oriented (see _decode_claude_project_dirname)",
+    reason="POSIX-only: the decoder slow-path's leading `-` → `/` root walk "
+    "assumes a POSIX absolute root (see _decode_claude_project_dirname). The "
+    "encoder is cross-platform; only this reconstruction is POSIX-leaning.",
 )
 
 
@@ -409,6 +413,50 @@ def test_decode_kebab_case_resolves_single_match(
     claude = [s for s in scopes if "claude-projects" in s.sources and "server-cwd" not in s.sources]
     assert len(claude) == 1
     assert claude[0].root == target.resolve()
+
+
+@_WIN_SKIP
+def test_decode_underscore_and_non_ascii_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_`` and non-ASCII chars both encode to ``-`` (Claude Code's real rule,
+    anthropics/claude-code#19972). The FS-guided decoder reverses each ``-`` to
+    the actual on-disk char, so an underscored / non-Latin path still
+    reconstructs — the old hardcoded (``.``, ``-``) branch could not."""
+    from memtomem.context import projects as proj_mod
+
+    target = tmp_path / "my_proj" / "데이터"  # underscore + Hangul component
+    target.mkdir(parents=True)
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    encoded = proj_mod._encode_claude_project_path(target)
+    assert "_" not in encoded and "데이터" not in encoded  # both collapsed to "-"
+    (cp / encoded).mkdir()
+
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    scopes = proj_mod.discover_project_scopes(
+        cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+    )
+    claude = [s for s in scopes if "claude-projects" in s.sources and "server-cwd" not in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == target.resolve()
+
+
+def test_decode_windows_slug_resolves_via_anchor() -> None:
+    """A Windows ``C--…`` slug has no leading ``-``, so the POSIX FS walk can't
+    reconstruct it — but a registered anchor (cwd / known_projects) re-encodes to
+    the same slug and must still resolve. Regression: the ``startswith("-")`` gate
+    used to run BEFORE the anchor loop and silently dropped Windows roots (Codex
+    review). Cross-platform (PureWindowsPath + anchors only, no filesystem), so it
+    runs on the windows job too."""
+    from pathlib import PureWindowsPath
+
+    from memtomem.context import projects as proj_mod
+
+    anchor = PureWindowsPath(r"C:\Users\foo")
+    name = proj_mod._encode_claude_project_path(anchor)
+    assert name == "C--Users-foo" and not name.startswith("-")  # the bug condition
+    assert proj_mod._decode_claude_project_dirname(name, anchors=(anchor,)) == [anchor]
 
 
 @_WIN_SKIP

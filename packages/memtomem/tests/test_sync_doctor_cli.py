@@ -42,14 +42,16 @@ def _set_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
 
 
 def _claude_slug_for(cwd: Path) -> str:
-    """Encode ``cwd`` into a Claude-style hyphenated slug, cross-platform.
+    """Encode ``cwd`` into Claude Code's hyphenated slug for test fixtures.
 
-    POSIX cwd ``/Users/foo/bar`` → ``-Users-foo-bar``.
-    Windows cwd ``C:\\Users\\foo\\bar`` → ``CUsers-foo-bar`` (drive colon
-    dropped) — matches the Windows-no-colon candidate the doctor's
-    ``check_claude_slug`` fast path looks up.
+    Delegates to the production encoder so fixtures always match the real rule
+    (every character outside ASCII ``[A-Za-z0-9]`` → ``-``, incl. ``_`` and the
+    Windows drive ``:``). POSIX ``/Users/foo/bar`` → ``-Users-foo-bar``; Windows
+    ``C:\\Users\\foo\\bar`` → ``C--Users-foo-bar``.
     """
-    return str(cwd.resolve()).replace("\\", "-").replace(":", "").replace("/", "-")
+    from memtomem.context.projects import _encode_claude_project_path
+
+    return _encode_claude_project_path(cwd.resolve())
 
 
 # ---- cloud_mount_prefix helper ---------------------------------------------
@@ -298,6 +300,38 @@ class TestCheckClaudeSlug:
         (projects / proj_mod._encode_claude_project_path(cwd.resolve())).mkdir()
         r = check_claude_slug(cwd, home=home)
         assert r.status == "pass"
+
+
+class TestEncodeClaudeProjectPath:
+    """Pin Claude Code's slug rule (anthropics/claude-code#19972): every char
+    outside ASCII ``[A-Za-z0-9]`` becomes a single ``-``. Expected values are
+    literals checked against the production encoder — never recomputed with
+    ``re.sub`` (that would be tautological and could not catch a revert)."""
+
+    def test_posix_collapses_slash_dot_and_underscore(self) -> None:
+        # The old ``replace("/","-").replace(".","-")`` left ``_`` intact (and
+        # only ran on POSIX); this literal fails on that old body.
+        from memtomem.context.projects import _encode_claude_project_path
+
+        assert _encode_claude_project_path(Path("/a/b_c.d")) == "-a-b-c-d"
+
+    def test_windows_drive_and_backslash(self) -> None:
+        # PureWindowsPath renders backslashes + the drive colon even on a POSIX
+        # CI host, so this exercises the real ``C--`` slug without a Windows box.
+        # The drive colon is not special-cased: ``C:\`` → ``C--``.
+        from pathlib import PureWindowsPath
+
+        from memtomem.context.projects import _encode_claude_project_path
+
+        assert _encode_claude_project_path(PureWindowsPath(r"C:\Users\foo")) == "C--Users-foo"
+
+    def test_non_ascii_becomes_single_dash(self) -> None:
+        # Korean/CJK/accented chars are replaced, not preserved (#19972) — one
+        # dash per char. ``가`` is the Hangul syllable 가 (single codepoint,
+        # so this does not depend on the source file's NFC/NFD normalization).
+        from memtomem.context.projects import _encode_claude_project_path
+
+        assert _encode_claude_project_path(Path("/a/b가c")) == "-a-b-c"
 
 
 # ---- CLI end-to-end --------------------------------------------------------

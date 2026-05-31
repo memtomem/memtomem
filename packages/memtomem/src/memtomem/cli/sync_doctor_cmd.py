@@ -228,16 +228,18 @@ def check_claude_slug(cwd: Path, *, home: Path | None = None) -> CheckResult:
     Skipped silently when ``~/.claude/projects/`` is absent (user doesn't run
     Claude Code). Two-tier match:
 
-    1. **Fast path** — encode ``cwd`` (POSIX ``/`` → ``-``, Windows ``\\`` /
-       drive ``:`` → ``-``) and look up the resulting directory directly. The
-       previous one-shot ``str(cwd).replace("/", "-")`` only handled POSIX
-       and produced an invalid slug on Windows (drive prefix + backslashes
-       remained), causing false failures for valid Windows layouts.
+    1. **Fast path** — encode ``cwd`` to Claude Code's slug via
+       :func:`memtomem.context.projects._encode_claude_project_path` (every
+       character outside ASCII ``[A-Za-z0-9]`` → ``-``, so POSIX ``/``/``.``/``_``
+       and Windows ``\\`` / drive ``:`` all collapse — ``C:\\dev\\repo`` →
+       ``C--dev-repo``) and look up that directory directly. This single encoder
+       is the source of truth, so the slug matches on every platform.
     2. **Slow path** — iterate real entries and FS-guided-decode-then-
        ``samefile`` each against ``cwd`` via
        :func:`memtomem.context.projects._decode_claude_project_dirname`, which
-       reconstructs ``/``, ``.`` and literal-``-`` segments (so kebab-case and
-       dotted directories round-trip, unlike the old blind ``-`` → ``/``).
+       reverses each ``-`` to the real character on disk (``/``, ``.``, ``_``,
+       literal ``-``, space, non-ASCII, …) so kebab-case, dotted and
+       underscored directories round-trip, unlike the old blind ``-`` → ``/``.
     """
     projects = (home or Path.home()) / ".claude" / "projects"
     if not projects.is_dir():
@@ -252,27 +254,16 @@ def check_claude_slug(cwd: Path, *, home: Path | None = None) -> CheckResult:
         _encode_claude_project_path,
     )
 
-    cwd_str = str(cwd_resolved)
-    encoded_candidates = {
-        # Authoritative POSIX encoding — Claude Code collapses BOTH "/" and "."
-        # to "-" (so a dotted segment like ``.config-dir`` round-trips), which
-        # the bare ``replace("/", "-")`` below misses.
-        _encode_claude_project_path(cwd_resolved),
-        cwd_str.replace("/", "-"),  # POSIX absolute (dot-less)
-        cwd_str.replace("\\", "-").replace(":", ""),  # Windows: drop drive colon
-        cwd_str.replace("\\", "-").replace(":", "-"),  # Windows: encode drive colon as "-"
-    }
-    for cand in encoded_candidates:
-        # Skip candidates that still contain a path separator — the encoding
-        # didn't fully strip them (wrong platform), and ``projects / cand``
-        # would silently resolve to ``cand`` itself when it's absolute.
-        if "/" in cand or "\\" in cand:
-            continue
-        if (projects / cand).is_dir():
-            return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
+    # Claude Code's encoder maps every non-ASCII-alphanumeric char (incl. "/",
+    # ".", "_", Windows "\\" and the drive ":") to "-", so the slug never
+    # contains a path separator and ``projects / encoded`` stays under
+    # ``projects`` on every platform (anthropics/claude-code#19972).
+    encoded = _encode_claude_project_path(cwd_resolved)
+    if (projects / encoded).is_dir():
+        return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
     # Slow path: FS-guided decode of existing entries, then samefile-compare.
-    # Shares ``_decode_claude_project_dirname`` (the 3-way reconstruction that
-    # handles "/", "." and literal "-") so a dotted/dashed cwd the UI can
+    # Shares ``_decode_claude_project_dirname`` (which reverses each "-" to the
+    # real on-disk char) so a dotted / dashed / underscored cwd the UI can
     # discover is not falsely failed here.
     for child in projects.iterdir():
         if not child.is_dir():
