@@ -255,8 +255,9 @@ class TestClaudeSettingsMergeWarningContent:
         # (a) rule label
         assert "PostToolUse:Write" in w
         # (b) reason
-        assert "already exists" in w
+        assert "user-owned rule with the same event+matcher" in w
         # (c) concrete remediation step
+        assert "Change one matcher" in w
         assert "remove" in w
         assert "mm context sync --include=settings" in w
 

@@ -407,10 +407,11 @@ def _merge_hooks_record(
                 )
             else:
                 warnings.append(
-                    f"Hook rule '{label}' already exists in the target "
-                    f"settings with different config. To use memtomem's "
-                    f"version, remove the existing rule, then re-run "
-                    f"`mm context sync --include=settings`."
+                    f"Skipped memtomem hook '{label}': the target settings "
+                    f"already contain a user-owned rule with the same "
+                    f"event+matcher. Change one matcher to keep both rules, "
+                    f"or remove the user rule and re-run "
+                    f"`mm context sync --include=settings` to replace it."
                 )
 
         if replaced_any:

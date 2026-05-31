@@ -72,15 +72,6 @@ def _append_unknown_sections(lines: list[str], sections: dict[str, str]) -> None
             lines.append(_section_block(heading, content))
 
 
-def _compact_rules(sections: dict[str, str]) -> str:
-    """Extract Rules + Style as compact bullet points."""
-    parts = []
-    for key in ("Rules", "Style"):
-        if key in sections:
-            parts.append(sections[key])
-    return "\n\n".join(parts)
-
-
 # ── Claude Code ────────────────────────────────────────────────────────
 
 
@@ -136,10 +127,13 @@ class CursorGenerator:
             lines.append("## Commands\n")
             lines.append(sections["Commands"])
             lines.append("")
-        rules = _compact_rules(sections)
-        if rules:
+        if "Rules" in sections:
             lines.append("## Rules\n")
-            lines.append(rules)
+            lines.append(sections["Rules"])
+            lines.append("")
+        if "Style" in sections:
+            lines.append("## Style\n")
+            lines.append(sections["Style"])
             lines.append("")
         if "Architecture" in sections:
             lines.append("## Architecture\n")
@@ -213,9 +207,10 @@ class CodexGenerator:
             lines.append(_section_block("Commands", sections["Commands"]))
         if "Architecture" in sections:
             lines.append(_section_block("Architecture", sections["Architecture"]))
-        rules = _compact_rules(sections)
-        if rules:
-            lines.append(_section_block("Rules", rules))
+        if "Rules" in sections:
+            lines.append(_section_block("Rules", sections["Rules"]))
+        if "Style" in sections:
+            lines.append(_section_block("Style", sections["Style"]))
         if "Codex" in sections:
             lines.append(_section_block("Codex-Specific", sections["Codex"]))
         _append_unknown_sections(lines, sections)
@@ -242,10 +237,13 @@ class CopilotGenerator:
         if "Project" in sections:
             lines.append(sections["Project"])
             lines.append("")
-        rules = _compact_rules(sections)
-        if rules:
+        if "Rules" in sections:
             lines.append("## Rules\n")
-            lines.append(rules)
+            lines.append(sections["Rules"])
+            lines.append("")
+        if "Style" in sections:
+            lines.append("## Style\n")
+            lines.append(sections["Style"])
             lines.append("")
         if "Commands" in sections:
             lines.append("## Commands\n")

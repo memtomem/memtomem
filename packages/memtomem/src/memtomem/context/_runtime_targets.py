@@ -40,10 +40,14 @@ Design rules:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from memtomem.config import TargetScope
+from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.scope_resolver import ArtifactKind
+
+logger = logging.getLogger(__name__)
 
 
 # Sentinel for "no fan-out by design — caller should emit
@@ -196,7 +200,28 @@ def runtime_artifact_names(
     root = runtime_fanout_root(artifact, runtime, scope, project_root)
     if root is None or not root.is_dir():
         return set()
+    kind = f"{artifact[:-1]} name"
+    names: set[str] = set()
     if file_suffix is not None:
-        return {p.stem for p in root.iterdir() if p.is_file() and p.suffix == file_suffix}
-    assert dir_manifest is not None  # mypy narrow
-    return {p.name for p in root.iterdir() if p.is_dir() and (p / dir_manifest).is_file()}
+        entries = ((p.stem, p) for p in root.iterdir() if p.is_file() and p.suffix == file_suffix)
+    else:
+        assert dir_manifest is not None  # mypy narrow
+        entries = (
+            (p.name, p) for p in root.iterdir() if p.is_dir() and (p / dir_manifest).is_file()
+        )
+    for raw_name, path in entries:
+        try:
+            names.add(validate_name(raw_name, kind=kind))
+        except InvalidNameError as exc:
+            logger.warning(
+                "Skipping invalid runtime artifact name",
+                extra={
+                    "artifact": artifact,
+                    "runtime": runtime,
+                    "scope": scope,
+                    "runtime_path": str(path),
+                    "artifact_name": raw_name,
+                    "reason": str(exc),
+                },
+            )
+    return names

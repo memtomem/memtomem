@@ -1,15 +1,4 @@
-"""Tests for the Rules+Style merge stderr warning in ``mm context generate``.
-
-Cursor / Codex / Copilot generators concatenate the ``Rules`` and ``Style``
-context.md sections under a single heading via ``_compact_rules`` (see
-:mod:`memtomem.context.generator`). When both sections are populated and at
-least one merging runtime is targeted, the CLI should emit a single stderr
-warning naming only the affected runtimes — generated file format itself
-is unchanged.
-
-Click 8.3 keeps ``result.stderr`` separate from ``result.output`` (stdout) by
-default; assertions below pin both surfaces.
-"""
+"""Tests for Rules/Style generation through ``mm context generate``."""
 
 from __future__ import annotations
 
@@ -44,17 +33,16 @@ def project_with_rules_and_style(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_generate_warns_on_rules_style_merge_for_cursor(project_with_rules_and_style):
-    """Positive: --agent=cursor with both sections → warning on stderr."""
+def test_generate_preserves_rules_and_style_for_cursor(project_with_rules_and_style):
     runner = CliRunner()
     result = runner.invoke(context, ["generate", "--agent=cursor"])
 
     assert result.exit_code == 0, result.output
-    assert "Rules and Style" in result.stderr
-    assert "cursor" in result.stderr
-    # Stdout must not contain the warning (Click 8.3 separates streams;
-    # ``result.output`` is interleaved, ``result.stdout`` is stdout-only).
+    assert "Rules and Style" not in result.stderr
     assert "Rules and Style" not in result.stdout
+    generated = project_with_rules_and_style.joinpath(".cursorrules").read_text(encoding="utf-8")
+    assert "## Rules" in generated
+    assert "## Style" in generated
 
 
 def test_generate_no_warning_when_only_rules(tmp_path, monkeypatch):
@@ -74,7 +62,6 @@ def test_generate_no_warning_when_only_rules(tmp_path, monkeypatch):
 
 
 def test_generate_no_warning_for_claude_only_target(project_with_rules_and_style):
-    """Negative: --agent=claude does not use ``_compact_rules`` → no warning."""
     runner = CliRunner()
     result = runner.invoke(context, ["generate", "--agent=claude"])
 
@@ -82,16 +69,22 @@ def test_generate_no_warning_for_claude_only_target(project_with_rules_and_style
     assert "Rules and Style" not in result.stderr
 
 
-def test_generate_warning_lists_only_intersecting_runtimes(project_with_rules_and_style):
-    """The warning names only runtimes that intersect with the target set.
-
-    With ``--agent=cursor``, codex and copilot must NOT appear — otherwise
-    the message implies the user is generating files they did not request.
-    """
+@pytest.mark.parametrize(
+    ("agent", "path"),
+    [
+        ("cursor", ".cursorrules"),
+        ("codex", "AGENTS.md"),
+        ("copilot", ".github/copilot-instructions.md"),
+    ],
+)
+def test_generate_preserves_rules_style_for_markdown_targets(
+    project_with_rules_and_style, agent, path
+):
     runner = CliRunner()
-    result = runner.invoke(context, ["generate", "--agent=cursor"])
+    result = runner.invoke(context, ["generate", f"--agent={agent}"])
 
     assert result.exit_code == 0, result.output
-    assert "cursor" in result.stderr
-    assert "codex" not in result.stderr
-    assert "copilot" not in result.stderr
+    assert result.stderr == ""
+    generated = project_with_rules_and_style.joinpath(path).read_text(encoding="utf-8")
+    assert "## Rules" in generated
+    assert "## Style" in generated
