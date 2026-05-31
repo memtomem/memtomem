@@ -220,35 +220,138 @@ class KnownProjectsStore:
 _CLAUDE_PROJECTS_DIR = Path("~/.claude/projects").expanduser()
 
 
-def _decode_claude_project_dirname(name: str) -> Path | None:
-    """Decode a ``~/.claude/projects/<encoded>`` directory name into a path.
+# Frontier cap: a runaway backstop so a pathologically dashed name cannot
+# explode the reconstruction. Real names collapse to a handful of FS-confirmed
+# branches well under this.
+_MAX_DECODE_CANDIDATES = 64
 
-    The encoding is "every ``/`` becomes ``-``", so paths with literal
-    dashes round-trip to the wrong spelling. The caller filters via
-    ``Path.is_dir()`` to drop misdecoded entries (RFC §Decision 2).
+
+def _encode_claude_project_path(root: Path) -> str:
+    """Encode an absolute path the way Claude Code names ``~/.claude/projects/<dir>``.
+
+    Verified empirically against a live ``~/.claude/projects/``: every ``/`` and
+    ``.`` becomes ``-`` (e.g. ``/a/.config`` → ``-a--config``). Literal dashes
+    are also ``-`` — exactly the many-to-one lossiness this module reconstructs
+    around. Best-effort / POSIX-oriented: other characters are left as-is.
+    """
+    return str(root).replace("/", "-").replace(".", "-")
+
+
+def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) -> list[Path]:
+    """Reconstruct candidate absolute paths from a ``~/.claude/projects/<name>``.
+
+    The on-disk encoding maps ``/``, ``.`` AND literal ``-`` all to ``-`` (see
+    :func:`_encode_claude_project_path`), so it is lossy / many-to-one. We
+    reconstruct **FS-guided**: each encoded ``-`` is a 3-way choice — path
+    separator, ``.``, or a literal dash — and only branches whose committed
+    directory prefix actually exists survive, so the filesystem prunes the
+    otherwise ``3**k`` partition space down to the paths that really exist.
+
+    Returns the FS-confirmed candidate directories (``[]`` if none). The caller
+    applies the accept-one-match rule. ``anchors`` (the ``known_projects.json``
+    roots, plus the server cwd) are tried first: any whose encoding equals
+    ``name`` are authoritative and returned directly — but *all* matches are
+    returned (the encoding is many-to-one, so two distinct roots can collide),
+    leaving the accept-one decision to the caller. Only when no anchor matches
+    do we walk the filesystem.
+
+    POSIX-oriented: the leading ``-`` → ``/`` root convention assumes a POSIX
+    absolute root, and the feature is experimental / off by default.
     """
     if not name.startswith("-"):
-        return None
-    decoded = name.replace("-", "/")
-    return Path(decoded)
+        return []
+
+    # Anchors first — authoritative and cheap. Collect ALL matches (not
+    # first-match): the encoding is many-to-one so distinct roots can collide.
+    anchor_hits = [a for a in anchors if _encode_claude_project_path(a) == name]
+    if anchor_hits:
+        return anchor_hits
+
+    body = name[1:]  # the leading "-" is the root "/"
+    children_cache: dict[Path, set[str]] = {}
+
+    def children(d: Path) -> set[str]:
+        cached = children_cache.get(d)
+        if cached is None:
+            try:
+                cached = {e.name for e in os.scandir(d) if e.is_dir()}
+            except OSError:
+                cached = set()
+            children_cache[d] = cached
+        return cached
+
+    def viable_prefix(d: Path, prefix: str) -> bool:
+        return any(c == prefix or c.startswith(prefix) for c in children(d))
+
+    # Frontier of (committed_dir, pending_segment): committed_dir is the
+    # deepest confirmed-existing directory; pending_segment is the partial
+    # component built since the last separator.
+    frontier: list[tuple[Path, str]] = [(Path("/"), "")]
+    for ch in body:
+        if ch != "-":
+            frontier = [(committed, pending + ch) for committed, pending in frontier]
+            continue
+        nxt: list[tuple[Path, str]] = []
+        for committed, pending in frontier:
+            # Separator: pending is a complete component that must exist.
+            if pending and pending in children(committed):
+                nxt.append((committed / pending, ""))
+            # Dot / literal-dash: keep building the component, pruned to viable
+            # prefixes so the branch factor cannot explode.
+            for sep in (".", "-"):
+                extended = pending + sep
+                if viable_prefix(committed, extended):
+                    nxt.append((committed, extended))
+        frontier = nxt
+        if not frontier or len(frontier) > _MAX_DECODE_CANDIDATES:
+            return []
+
+    results: list[Path] = []
+    seen: set[str] = set()
+    for committed, pending in frontier:
+        if not pending:
+            continue
+        full = committed / pending
+        key = _normalize_for_scope_id(full)
+        if key in seen:
+            continue
+        if full.is_dir():
+            seen.add(key)
+            results.append(full)
+    return results
 
 
-def _discover_claude_projects() -> list[Path]:
+def _discover_claude_projects(anchors: tuple[Path, ...] = ()) -> list[Path]:
     if not _CLAUDE_PROJECTS_DIR.is_dir():
         return []
-    candidates: list[Path] = []
+    found: list[Path] = []
     for child in _CLAUDE_PROJECTS_DIR.iterdir():
         if not child.is_dir():
             continue
-        decoded = _decode_claude_project_dirname(child.name)
-        if decoded is None:
+        candidates = _decode_claude_project_dirname(child.name, anchors)
+        if not candidates:
+            logger.warning(
+                "claude-projects: skip %r: no matching directory on disk; "
+                "register the project in known_projects.json to surface it.",
+                child.name,
+            )
             continue
-        # Filter: only paths that actually resolve to a directory.
-        # The decoder is fragile around dashes so most non-cwd hits drop here.
+        if len(candidates) > 1:
+            logger.warning(
+                "claude-projects: skip %r: ambiguous decode (%d matches: %s); "
+                "register the project in known_projects.json to disambiguate.",
+                child.name,
+                len(candidates),
+                ", ".join(str(c) for c in candidates),
+            )
+            continue
+        decoded = candidates[0]
+        # Re-assert the fail-closed guarantee at the call site (an anchor hit
+        # could be a stale known-project root that no longer exists).
         if not decoded.is_dir():
             continue
-        candidates.append(decoded)
-    return candidates
+        found.append(decoded)
+    return found
 
 
 def _label_for(root: Path) -> str:
@@ -296,13 +399,18 @@ def discover_project_scopes(
 
     # 2. User-registered roots from known_projects.json.
     store = KnownProjectsStore(known_projects_file)
-    for entry in store.load():
+    known_entries = store.load()
+    for entry in known_entries:
         _add(entry.root, "known-projects", missing=not entry.root.is_dir())
 
     # 3. Opt-in scan of ~/.claude/projects/ — silently skipped when the flag is
-    #    False so the default discovery path stays cheap.
+    #    False so the default discovery path stays cheap. The cwd and the
+    #    user-registered roots are passed as authoritative decode anchors so a
+    #    kebab-case project resolves unambiguously even where the FS walk would
+    #    flag it ambiguous.
     if experimental_claude_projects_scan:
-        for decoded in _discover_claude_projects():
+        anchors = (cwd, *(entry.root for entry in known_entries))
+        for decoded in _discover_claude_projects(anchors):
             _add(decoded, "claude-projects", missing=False)
 
     scopes: list[ProjectScope] = []
