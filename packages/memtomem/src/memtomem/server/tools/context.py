@@ -1314,12 +1314,27 @@ async def mem_context_artifact_migrate(
         out = _format_artifact_scope_result(result, apply_=apply)
         # project_local first-landing needs the gitignore marker (parity with
         # the CLI dispatch) so the local tier is not accidentally committed.
+        # Surface the non-write states too: a caller MUST learn when .gitignore
+        # protection was skipped, since project_local is meant to stay local.
         if apply and to == "project_local":
             from memtomem.cli.context_cmd import _append_gitignore_marker
 
-            wrote, _msg = await asyncio.to_thread(_append_gitignore_marker, project_root)
+            wrote, msg = await asyncio.to_thread(_append_gitignore_marker, project_root)
             if wrote:
                 out += "\n  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)."
+            elif msg == "no_git_repo_pyproject_only":
+                out += (
+                    "\n  warning: project root resolved via pyproject.toml but `.git` "
+                    "missing — .gitignore not appended. Run `git init` first to "
+                    "git-protect the local tier."
+                )
+            elif msg == "no_project_signal":
+                out += (
+                    "\n  warning: no .git and no pyproject.toml in project root — "
+                    ".gitignore append skipped; the project_local tier is not "
+                    "git-protected."
+                )
+            # ``already_present`` is silent (marker already in place).
         return out
 
     # ── Flat→dir mode (to_scope omitted) ──

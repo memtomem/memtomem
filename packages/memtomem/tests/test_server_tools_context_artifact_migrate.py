@@ -222,3 +222,54 @@ async def test_scope_refuses_on_destination_conflict(layout):
 async def test_validation_gates(layout, kwargs, needle):
     out = await mem_context_artifact_migrate(**kwargs)
     assert needle in out
+
+
+# ── project_local gitignore-marker warning states (#1152 review) ─────────
+
+
+def _no_git_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, pyproject: bool) -> Path:
+    """A project root WITHOUT .git (optionally with pyproject.toml) + a fake
+    HOME holding a user-tier agent 'foo'. Returns the project root."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    if pyproject:
+        (project_root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    user_home = tmp_path / "home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    monkeypatch.chdir(project_root)
+    d = user_home / ".memtomem" / "agents" / "foo"
+    d.mkdir(parents=True)
+    (d / "agent.md").write_text("a harmless agent body\n", encoding="utf-8")
+    return project_root
+
+
+@pytest.mark.anyio
+async def test_project_local_warns_when_no_git_pyproject_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """pyproject but no .git: the move succeeds but the MCP tool must surface
+    that .gitignore protection was skipped (parity with the CLI)."""
+    _no_git_layout(tmp_path, monkeypatch, pyproject=True)
+    out = await mem_context_artifact_migrate(
+        asset_type="agents", name="foo", to_scope="project_local", apply=True
+    )
+    assert "moved agents/foo" in out
+    assert "git init" in out
+    assert ".gitignore not appended" in out
+
+
+@pytest.mark.anyio
+async def test_project_local_warns_when_no_project_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """No .git and no pyproject: the move succeeds but the tool must warn that
+    the project_local tier is not git-protected."""
+    _no_git_layout(tmp_path, monkeypatch, pyproject=False)
+    out = await mem_context_artifact_migrate(
+        asset_type="agents", name="foo", to_scope="project_local", apply=True
+    )
+    assert "moved agents/foo" in out
+    assert "no .git and no pyproject" in out
+    assert "not git-protected" in out
