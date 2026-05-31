@@ -77,13 +77,21 @@ def iter_markdown_sections(text: str) -> Iterator[tuple[str, str]]:
         yield current, "\n".join(lines).strip()
 
 
-def split_preamble(text: str) -> tuple[str, str]:
+def split_preamble(text: str, boundary_headings: set[str] | None = None) -> tuple[str, str]:
     """Split ``text`` at the first real ``## Heading`` line.
 
     Returns ``(preamble, rest)`` where ``rest`` begins at the first heading
     that :func:`iter_markdown_sections` would recognise and ``preamble`` is
     everything before it. If there is no real heading, the whole text is the
     preamble and ``rest`` is empty.
+
+    ``boundary_headings`` (lower-cased) narrows what counts as the split
+    boundary: when given, a heading splits only if its lower-cased text is in
+    the set; other (unknown) headings are treated as preamble content. This
+    lets source-aware reverse-import keep a Project body's own ``##``
+    subheadings inside Project instead of mis-splitting at the first one — the
+    boundary is the first *generated* section heading, not any heading (#1147
+    B1-3). When ``None``, every real heading is a boundary (the default).
 
     The fence/heading rules are kept in lock-step with
     :func:`iter_markdown_sections` so a ``##`` inside a fenced code block is
@@ -107,7 +115,8 @@ def split_preamble(text: str) -> tuple[str, str]:
             continue
         m = None if fence_char is not None else _HEADING_RE.match(line)
         if m and m.group(1).strip():
-            return "\n".join(lines[:i]), "\n".join(lines[i:])
+            if boundary_headings is None or m.group(1).strip().lower() in boundary_headings:
+                return "\n".join(lines[:i]), "\n".join(lines[i:])
 
     return text, ""
 

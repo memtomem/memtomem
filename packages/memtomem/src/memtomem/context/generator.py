@@ -283,6 +283,27 @@ def _clean_preamble(preamble: str, source: str) -> str:
     return "\n".join(kept).strip()
 
 
+def preamble_source(agent: str | None, path: Path) -> str | None:
+    """Return *agent* as a reverse-import preamble source only when *path* is
+    that agent's canonical Project-bearing file (its generator ``output_path``).
+
+    ``detect_agent_files`` reports rule fragments such as ``.cursor/rules/*.mdc``
+    with ``agent="cursor"`` too; those are not Project prose, so importing them
+    via ``extract_sections_from_agent_file(..., source="cursor")`` would wrongly
+    seed ``Project`` with rule-fragment content. Gating on the generator's own
+    ``output_path`` keeps fragments on the ``source=None`` (drop-preamble) path,
+    while ``.cursorrules`` / ``CLAUDE.md`` / ``GEMINI.md`` / ``AGENTS.md`` /
+    ``copilot-instructions.md`` still capture their leading Project prose
+    (#1147 B1-3 review).
+    """
+    if agent is None:
+        return None
+    gen = GENERATORS.get(agent)
+    if gen is None:
+        return None
+    return agent if path.name == Path(gen.output_path).name else None
+
+
 def extract_sections_from_agent_file(content: str, source: str | None = None) -> dict[str, str]:
     """Reverse-extract sections from an existing agent file (CLAUDE.md, etc.).
 
@@ -290,12 +311,19 @@ def extract_sections_from_agent_file(content: str, source: str | None = None) ->
 
     ``source`` is the detecting generator's name (``"claude"``, ``"cursor"``,
     ``"gemini"``, ``"codex"``, ``"copilot"``). When given, leading text before
-    the first ``##`` heading — which is real project prose for the
+    the first *generated* section heading — which is real project prose for the
     cursor/copilot targets that emit the Project body with no H1 — is captured
     into the canonical ``Project`` section after stripping the source's
-    generated boilerplate (#1147 B1-3). When ``source`` is ``None`` the
-    preamble is dropped exactly as before (back-compat): the canonical parser
-    contract is unchanged.
+    generated boilerplate (#1147 B1-3). The split boundary is the first heading
+    that aliases to a known section, so a Project body's own ``##`` subheadings
+    stay inside Project rather than mis-splitting at the first one. When
+    ``source`` is ``None`` the preamble is dropped exactly as before
+    (back-compat): the canonical parser contract is unchanged.
+
+    Pass ``source`` only for a generator's *canonical* Project-bearing file
+    (see :func:`preamble_source`); rule fragments such as ``.cursor/rules/*``
+    are also detected as ``agent="cursor"`` but are not Project prose, so they
+    must reach this function with ``source=None``.
     """
     # Heading aliases → canonical section name
     aliases: dict[str, str] = {
@@ -317,7 +345,10 @@ def extract_sections_from_agent_file(content: str, source: str | None = None) ->
         "copilot-specific": "Copilot",
     }
 
-    preamble, rest = split_preamble(content)
+    # For a known source the boundary is the first *generated* heading (a known
+    # alias), so unknown Project subheadings stay in the preamble → Project.
+    boundary = set(aliases) if source is not None else None
+    preamble, rest = split_preamble(content, boundary)
 
     sections: dict[str, str] = {}
     for heading, body in iter_markdown_sections(rest):

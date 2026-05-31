@@ -1,5 +1,7 @@
 """Tests for agent context management module."""
 
+from pathlib import Path
+
 import pytest
 
 from memtomem.context.parser import (
@@ -14,6 +16,7 @@ from memtomem.context.generator import (
     generate_for_agent,
     generate_all,
     extract_sections_from_agent_file,
+    preamble_source,
 )
 
 
@@ -435,3 +438,68 @@ class TestPreambleReverseImport:
         result = extract_sections_from_agent_file(content)
         assert "Leftover prose." not in result.get("Project", "")
         assert result["Project"] == "Body"
+
+
+class TestPreambleSourceGuard:
+    """`preamble_source` gates capture to a generator's canonical file (#1147
+    B1-3 review): rule fragments detected as agent='cursor' must NOT import as
+    Project."""
+
+    def test_canonical_cursorrules_gets_source(self):
+        assert preamble_source("cursor", Path("/proj/.cursorrules")) == "cursor"
+
+    @pytest.mark.parametrize(
+        "agent,name",
+        [
+            ("claude", "CLAUDE.md"),
+            ("gemini", "GEMINI.md"),
+            ("codex", "AGENTS.md"),
+            ("copilot", "copilot-instructions.md"),
+        ],
+    )
+    def test_canonical_files_get_source(self, agent, name):
+        assert preamble_source(agent, Path(f"/proj/{name}")) == agent
+
+    def test_cursor_rules_fragment_gets_no_source(self):
+        # .cursor/rules/*.mdc is detected as agent='cursor' but is a rule
+        # fragment, not Project prose — must fall back to source=None.
+        assert preamble_source("cursor", Path("/proj/.cursor/rules/style.mdc")) is None
+        assert preamble_source("cursor", Path("/proj/.cursor/rules/style.md")) is None
+
+    def test_none_agent_is_none(self):
+        assert preamble_source(None, Path("/proj/whatever.md")) is None
+
+    def test_fragment_content_not_imported_as_project(self):
+        # End-to-end: a Cursor MDC rule fragment routed with the guarded source
+        # (None) drops its prose instead of seeding Project.
+        fragment = "---\ndescription: Python style\nglobs: **/*.py\n---\nUse type hints.\n"
+        src = preamble_source("cursor", Path("/proj/.cursor/rules/py.mdc"))
+        result = extract_sections_from_agent_file(fragment, source=src)
+        assert "Use type hints." not in result.get("Project", "")
+
+
+class TestPreambleProjectSubheadings:
+    """A Project body's own ## subheading must survive cursor/copilot
+    round-trip — the split boundary is the first *generated* heading, not any
+    heading (#1147 B1-3 review, Major 2)."""
+
+    @pytest.mark.parametrize("source", ["cursor", "copilot"])
+    def test_project_with_h2_round_trips(self, source):
+        original = {
+            "Project": "Intro line.\n\n## Goals\n\nBe fast.",
+            "Rules": "- be terse",
+        }
+        gen = generate_for_agent(source, original)
+        result = extract_sections_from_agent_file(gen, source=source)
+        # The unknown '## Goals' subheading stays inside Project (not split out).
+        assert "## Goals" in result["Project"]
+        assert "Be fast." in result["Project"]
+        assert "Goals" not in result  # not a separate section
+        assert generate_for_agent(source, result) == gen
+
+    def test_known_heading_still_splits(self):
+        # A generated section heading (Rules) is still a boundary.
+        content = "Project prose.\n\n## Rules\n\n- foo\n"
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert result["Project"] == "Project prose."
+        assert "- foo" in result["Rules"]
