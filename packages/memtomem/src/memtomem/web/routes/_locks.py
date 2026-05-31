@@ -53,5 +53,79 @@ from __future__ import annotations
 
 import asyncio
 
-_config_lock = asyncio.Lock()
-_gateway_lock = asyncio.Lock()
+
+class _LoopLocalLock:
+    """An ``asyncio.Lock`` proxy that resolves to a per-event-loop lock.
+
+    A bare module-level ``asyncio.Lock`` binds to the first event loop that
+    acquires it and then raises ``RuntimeError: ... is bound to a different
+    event loop`` when reused from another loop. In production this never
+    happens — the web server runs a single long-lived loop — but pytest gives
+    each ``async`` test its own loop, so whichever test acquires the lock first
+    binds it and a later test on a fresh loop fails non-deterministically.
+
+    Keying the underlying lock by the running loop keeps the contract intact:
+    *within* one loop every caller shares the same lock (so two concurrent
+    gateway mutators still serialise), while distinct loops get distinct locks.
+    Call sites use the proxy exactly like a lock — ``async with _gateway_lock:``
+    and ``.locked()`` — so nothing downstream changes, and ``is`` identity (the
+    module singleton) still holds because the proxy object itself is the shared
+    singleton.
+
+    A :class:`weakref.WeakKeyDictionary` cannot bound the registry here: once a
+    lock takes its contended slow path it strongly references its bound loop
+    (``lock._loop``), so the loop value keeps the weak key alive and entries for
+    closed loops never collect. Instead the registry is a plain dict pruned of
+    closed-loop entries each time a new loop is seen — in production it holds
+    exactly one entry; across pytest's per-test loops it stays bounded.
+    """
+
+    __slots__ = ("_locks",)
+
+    def __init__(self) -> None:
+        self._locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+
+    def _current(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        lock = self._locks.get(loop)
+        if lock is None:
+            # Each stored lock strongly references its bound loop, so closed
+            # loops must be pruned explicitly (a WeakKeyDictionary would never
+            # reclaim them). Sweep on the new-loop path — cheap and bounded.
+            for dead in [lp for lp in self._locks if lp.is_closed()]:
+                del self._locks[dead]
+            lock = asyncio.Lock()
+            self._locks[loop] = lock
+        return lock
+
+    async def __aenter__(self) -> asyncio.Lock:
+        lock = self._current()
+        await lock.acquire()
+        return lock
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._current().release()
+
+    def locked(self) -> bool:
+        """Whether the gateway lock is held.
+
+        A single shared ``asyncio.Lock`` answered ``.locked()`` the same way
+        from any thread. Handlers offload the synchronous engine call to a
+        worker thread (no running loop) while holding the lock, and the
+        lock-held tests probe from inside that thread — so when no loop is
+        current we report whether *any* per-loop lock is held (in production
+        that is the one lock; in tests it is the request loop's). With a running
+        loop we report that loop's lock without creating one as a side effect.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Snapshot first: the registry may be mutated on the loop thread
+            # (a first contended acquire) while we iterate on a worker thread.
+            return any(lock.locked() for lock in list(self._locks.values()))
+        lock = self._locks.get(loop)
+        return lock.locked() if lock is not None else False
+
+
+_config_lock = _LoopLocalLock()
+_gateway_lock = _LoopLocalLock()
