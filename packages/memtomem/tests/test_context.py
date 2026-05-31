@@ -166,6 +166,18 @@ class TestGenerator:
         reparsed = extract_sections_from_agent_file(content, source=agent)
         assert reparsed["Deployment"] == "Ship it."
 
+    def test_generate_preserves_case_variant_canonical_headings_as_unknown(self):
+        content = generate_for_agent(
+            "cursor",
+            {
+                "Project": "Intro line.",
+                "rules": "- lower-case hand-authored rules",
+            },
+        )
+
+        assert "## rules" in content
+        assert "- lower-case hand-authored rules" in content
+
     def test_generate_does_not_emit_other_agent_overrides_as_unknown(self):
         content = generate_for_agent(
             "claude",
