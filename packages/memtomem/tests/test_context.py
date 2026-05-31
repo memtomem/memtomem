@@ -130,6 +130,8 @@ class TestGenerator:
     def test_cursor_generate(self):
         content = generate_for_agent("cursor", self._sections())
         assert "line-length 100" in content
+        assert "## Style" in content
+        assert content.index("## Rules") < content.index("## Style")
         assert "pytest" in content
 
     def test_gemini_generate(self):
@@ -140,10 +142,13 @@ class TestGenerator:
     def test_codex_generate(self):
         content = generate_for_agent("codex", self._sections())
         assert "AGENTS.md" in content
+        assert "line-length 100" in content
+        assert "## Style" in content
 
     def test_copilot_generate(self):
         content = generate_for_agent("copilot", self._sections())
         assert "line-length 100" in content
+        assert "## Style" in content
 
     def test_generate_all(self):
         result = generate_all(self._sections())

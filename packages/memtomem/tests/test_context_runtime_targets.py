@@ -14,6 +14,7 @@ import pytest
 from memtomem.context._runtime_targets import (
     KNOWN_RUNTIMES,
     RUNTIME_FANOUT_TABLE,
+    runtime_artifact_names,
     runtime_fanout_root,
 )
 
@@ -120,3 +121,51 @@ def test_project_local_without_root_returns_none_first() -> None:
     """project_local entries are None — that branch wins before the
     project_root check, so passing None is harmless for project_local."""
     assert runtime_fanout_root("agents", "claude", "project_local", project_root=None) is None
+
+
+def test_runtime_artifact_names_skips_invalid_file_names(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / ".claude" / "agents"
+    root.mkdir(parents=True)
+    (root / "ok.md").write_text("", encoding="utf-8")
+    (root / "-bad.md").write_text("", encoding="utf-8")
+
+    names = runtime_artifact_names(
+        "agents", "claude", tmp_path, "project_shared", file_suffix=".md"
+    )
+
+    assert names == {"ok"}
+    assert any(
+        record.message == "Skipping invalid runtime artifact name"
+        and record.name == "memtomem.context._runtime_targets"
+        and getattr(record, "artifact") == "agents"
+        and getattr(record, "runtime") == "claude"
+        and getattr(record, "scope") == "project_shared"
+        and getattr(record, "artifact_name") == "-bad"
+        for record in caplog.records
+    )
+
+
+def test_runtime_artifact_names_skips_invalid_manifest_dirs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    good = tmp_path / ".agents" / "skills" / "ok"
+    bad = tmp_path / ".agents" / "skills" / "-bad"
+    good.mkdir(parents=True)
+    bad.mkdir()
+    (good / "SKILL.md").write_text("", encoding="utf-8")
+    (bad / "SKILL.md").write_text("", encoding="utf-8")
+
+    names = runtime_artifact_names(
+        "skills", "codex", tmp_path, "project_shared", dir_manifest="SKILL.md"
+    )
+
+    assert names == {"ok"}
+    assert any(
+        record.message == "Skipping invalid runtime artifact name"
+        and getattr(record, "artifact") == "skills"
+        and getattr(record, "runtime") == "codex"
+        and getattr(record, "artifact_name") == "-bad"
+        for record in caplog.records
+    )
