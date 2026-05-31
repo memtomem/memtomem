@@ -151,6 +151,35 @@ class TestGenerator:
         for name, content in result.items():
             assert len(content) > 0
 
+    @pytest.mark.parametrize("agent", ["claude", "cursor", "gemini", "codex", "copilot"])
+    def test_generate_preserves_unknown_sections(self, agent):
+        sections = {
+            "Project": "Intro line.",
+            "Deployment": "Ship it.",
+            "Rules": "- be terse",
+        }
+
+        content = generate_for_agent(agent, sections)
+
+        assert "## Deployment" in content
+        assert "Ship it." in content
+        reparsed = extract_sections_from_agent_file(content, source=agent)
+        assert reparsed["Deployment"] == "Ship it."
+
+    def test_generate_does_not_emit_other_agent_overrides_as_unknown(self):
+        content = generate_for_agent(
+            "claude",
+            {
+                "Project": "Intro line.",
+                "Cursor": "Cursor-only override.",
+                "Deployment": "Ship it.",
+            },
+        )
+
+        assert "Cursor-only override." not in content
+        assert "## Cursor" not in content
+        assert "## Deployment" in content
+
     def test_unknown_agent_raises(self):
         with pytest.raises(KeyError):
             generate_for_agent("unknown", self._sections())
@@ -503,10 +532,6 @@ class TestPreambleProjectSubheadings:
         # the persisted form re-parses to the identical dict, with no `## `
         # embedded in any section body (the soundness win of the section model).
         #
-        # NB: whether a *generator* re-emits the unknown `Deployment` section is
-        # a separate, pre-existing concern (generators only emit canonical
-        # sections; true on main and for source=None alike) tracked outside
-        # B1-3 — this test deliberately pins the parser/persistence layer only.
         content = "Intro line.\n\n## Deployment\n\nShip it.\n\n## Rules\n\n- be terse\n"
         sections = extract_sections_from_agent_file(content, source="cursor")
 
@@ -523,6 +548,11 @@ class TestPreambleProjectSubheadings:
         # Persisted form is a fixed point: re-serialize → re-parse is stable.
         ctx.write_text(sections_to_markdown(reparsed), encoding="utf-8")
         assert parse_context(ctx) == reparsed
+
+        # Runtime generation is also no longer lossy for non-canonical sections.
+        generated = generate_for_agent("cursor", reparsed)
+        extracted = extract_sections_from_agent_file(generated, source="cursor")
+        assert extracted["Deployment"] == "Ship it."
 
     @pytest.mark.parametrize("source", ["cursor", "copilot"])
     def test_h3_subheading_stays_in_project_and_round_trips(self, source):

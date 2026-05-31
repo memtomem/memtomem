@@ -41,6 +41,26 @@ def _section_block(heading: str, content: str) -> str:
     return f"## {heading}\n\n{content}\n"
 
 
+_RESERVED_SECTION_KEYS = {
+    "Project",
+    "Commands",
+    "Architecture",
+    "Rules",
+    "Style",
+    "Claude",
+    "Cursor",
+    "Gemini",
+    "Codex",
+    "Copilot",
+}
+
+
+def _append_unknown_sections(lines: list[str], sections: dict[str, str]) -> None:
+    for heading, content in sections.items():
+        if heading not in _RESERVED_SECTION_KEYS:
+            lines.append(_section_block(heading, content))
+
+
 def _compact_rules(sections: dict[str, str]) -> str:
     """Extract Rules + Style as compact bullet points."""
     parts = []
@@ -77,6 +97,7 @@ class ClaudeGenerator:
         # Include any agent-specific overrides
         if "Claude" in sections:
             lines.append(_section_block("Claude-Specific", sections["Claude"]))
+        _append_unknown_sections(lines, sections)
         return "\n".join(lines)
 
     def detect(self, project_root: Path) -> Path | None:
@@ -117,6 +138,7 @@ class CursorGenerator:
             lines.append("## Cursor-Specific\n")
             lines.append(sections["Cursor"])
             lines.append("")
+        _append_unknown_sections(lines, sections)
         return "\n".join(lines)
 
     def detect(self, project_root: Path) -> Path | None:
@@ -153,6 +175,7 @@ class GeminiGenerator:
             lines.append(_section_block("Style", sections["Style"]))
         if "Gemini" in sections:
             lines.append(_section_block("Gemini-Specific", sections["Gemini"]))
+        _append_unknown_sections(lines, sections)
         return "\n".join(lines)
 
     def detect(self, project_root: Path) -> Path | None:
@@ -184,6 +207,7 @@ class CodexGenerator:
             lines.append(_section_block("Rules", rules))
         if "Codex" in sections:
             lines.append(_section_block("Codex-Specific", sections["Codex"]))
+        _append_unknown_sections(lines, sections)
         return "\n".join(lines)
 
     def detect(self, project_root: Path) -> Path | None:
@@ -220,6 +244,7 @@ class CopilotGenerator:
             lines.append("## Copilot-Specific\n")
             lines.append(sections["Copilot"])
             lines.append("")
+        _append_unknown_sections(lines, sections)
         return "\n".join(lines)
 
     def detect(self, project_root: Path) -> Path | None:
