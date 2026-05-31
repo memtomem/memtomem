@@ -19,10 +19,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Literal
 
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_bytes
@@ -237,26 +238,45 @@ class _DecodeBudgetError(Exception):
     """
 
 
-def _encode_claude_project_path(root: Path) -> str:
+def _encode_claude_project_path(root: PurePath) -> str:
     """Encode an absolute path the way Claude Code names ``~/.claude/projects/<dir>``.
 
-    Verified empirically against a live ``~/.claude/projects/``: every ``/`` and
-    ``.`` becomes ``-`` (e.g. ``/a/.config`` → ``-a--config``). Literal dashes
-    are also ``-`` — exactly the many-to-one lossiness this module reconstructs
-    around. Best-effort / POSIX-oriented: other characters are left as-is.
+    Claude Code replaces **every character outside ASCII** ``[A-Za-z0-9]`` in the
+    absolute path with a single ``-`` — equivalent to
+    ``re.sub(r"[^A-Za-z0-9]", "-", …)`` (anthropics/claude-code issue #19972).
+    This is platform-agnostic and broader than it looks:
+
+    * POSIX ``/`` and ``.`` collapse to ``-`` — AND so does ``_`` (verified
+      empirically against a live ``~/.claude/projects/``; e.g. ``/a/.config`` →
+      ``-a--config`` and a ``foo_bar`` segment → ``foo-bar``).
+    * On Windows the ``\\`` separators and the drive ``:`` also become ``-``
+      (``C:\\dev\\repo`` → ``C--dev-repo``); the drive colon is not special-cased.
+    * Non-ASCII characters (Korean / CJK / accented) each become ``-`` too — so a
+      Unicode letter, which ``str.isalnum()`` would count as alphanumeric, is NOT
+      preserved.
+
+    Literal dashes are also ``-`` — exactly the many-to-one lossiness that
+    :func:`_decode_claude_project_dirname` reconstructs around. Accepts any
+    ``PurePath`` (only ``str(root)`` is used) so a ``PureWindowsPath`` can be
+    encoded for testing on a POSIX host.
     """
-    return str(root).replace("/", "-").replace(".", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", str(root))
 
 
 def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) -> list[Path]:
     """Reconstruct candidate absolute paths from a ``~/.claude/projects/<name>``.
 
-    The on-disk encoding maps ``/``, ``.`` AND literal ``-`` all to ``-`` (see
-    :func:`_encode_claude_project_path`), so it is lossy / many-to-one. We
-    reconstruct **FS-guided**: each encoded ``-`` is a 3-way choice — path
-    separator, ``.``, or a literal dash — and only branches whose committed
-    directory prefix actually exists survive, so the filesystem prunes the
-    otherwise ``3**k`` partition space down to the paths that really exist.
+    The on-disk encoding collapses *every* non-ASCII-alphanumeric character to
+    ``-`` (see :func:`_encode_claude_project_path`), so it is lossy / many-to-one.
+    We reconstruct **FS-guided**: at each encoded ``-`` a branch may either treat
+    it as a path separator (commit the pending component if it exists as a real
+    child) or keep building the component — and the non-separator case reads the
+    *actual* next character from each existing child, so a ``-`` is reversed to
+    whatever the real path holds there (``.``, ``_``, a literal ``-``, a space, a
+    non-ASCII char, …). Only branches whose committed directory prefix actually
+    exists survive, so the filesystem prunes the otherwise exponential partition
+    space down to the paths that really exist. The anchor fast-path below is exact
+    for any character because it re-encodes candidates through the same encoder.
 
     Returns the FS-confirmed candidate directories (``[]`` if none). The caller
     applies the accept-one-match rule. ``anchors`` (the ``known_projects.json``
@@ -266,16 +286,19 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
     leaving the accept-one decision to the caller. Only when no anchor matches
     do we walk the filesystem.
 
-    POSIX-oriented: the leading ``-`` → ``/`` root convention assumes a POSIX
-    absolute root, and the feature is experimental / off by default.
+    The slow-path FS walk is POSIX-oriented: its leading ``-`` → ``/`` root
+    convention assumes a POSIX absolute root (a Windows ``C--…`` slug does not
+    start with ``-``), so on Windows only the anchor fast-path resolves. The
+    feature is experimental / off by default. (The *encoder* is platform-agnostic
+    — only this reconstruction is POSIX-leaning.)
     """
-    if not name.startswith("-"):
-        return []
-
-    # Anchors first — authoritative and cheap. Collect ALL matches (not
-    # first-match): the encoding is many-to-one so distinct roots can collide.
-    # Dedup by resolved path so the same root reached via cwd AND a
-    # known-project entry is not mistaken for two ambiguous candidates.
+    # Anchors first — authoritative, cheap, and platform-agnostic: they
+    # re-encode through the same encoder, so a Windows ``C--…`` slug resolves
+    # here even though the POSIX FS walk below cannot. Tried BEFORE the
+    # leading-``-`` gate so registered Windows roots are not dropped. Collect
+    # ALL matches (not first-match): the encoding is many-to-one so distinct
+    # roots can collide. Dedup by resolved path so the same root reached via cwd
+    # AND a known-project entry is not mistaken for two ambiguous candidates.
     anchor_hits: list[Path] = []
     seen_anchors: set[str] = set()
     for a in anchors:
@@ -287,6 +310,12 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
             anchor_hits.append(a)
     if anchor_hits:
         return anchor_hits
+
+    # FS walk slow path is POSIX-rooted: the leading "-" is the "/" root, so a
+    # Windows "C--…" slug (no leading "-") cannot be walked — only the anchor
+    # fast-path above resolves it.
+    if not name.startswith("-"):
+        return []
 
     body = name[1:]  # the leading "-" is the root "/"
     children_cache: dict[Path, set[str]] = {}
@@ -301,9 +330,6 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
             children_cache[d] = cached
         return cached
 
-    def viable_prefix(d: Path, prefix: str) -> bool:
-        return any(c == prefix or c.startswith(prefix) for c in children(d))
-
     # Frontier of (committed_dir, pending_segment): committed_dir is the
     # deepest confirmed-existing directory; pending_segment is the partial
     # component built since the last separator.
@@ -317,12 +343,17 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
                 # Separator: pending is a complete component that must exist.
                 if pending and pending in children(committed):
                     nxt.append((committed / pending, ""))
-                # Dot / literal-dash: keep building the component, pruned to
-                # viable prefixes so the branch factor cannot explode.
-                for sep in (".", "-"):
-                    extended = pending + sep
-                    if viable_prefix(committed, extended):
-                        nxt.append((committed, extended))
+                # Non-separator: the encoded "-" stands for some character the
+                # encoder collapsed (".", "_", a literal "-", a space, a
+                # non-ASCII char, …). FS-guided: read the actual next character
+                # from each existing child that extends ``pending`` — it must be
+                # a char the encoder maps to "-" (i.e. NOT ASCII-alphanumeric).
+                # Bounded by the child count, so the branch factor cannot explode.
+                for child_name in children(committed):
+                    if len(child_name) > len(pending) and child_name.startswith(pending):
+                        real_char = child_name[len(pending)]
+                        if not (real_char.isascii() and real_char.isalnum()):
+                            nxt.append((committed, pending + real_char))
             frontier = nxt
         # Collapse convergent states so the budget reflects DISTINCT
         # reconstructions, not duplicate (committed, pending) paths.
