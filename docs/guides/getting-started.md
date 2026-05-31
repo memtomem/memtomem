@@ -133,7 +133,7 @@ mm init         # PyPI global install
 uv run mm init  # Project or source install
 ```
 
-`mm init` starts with a preset picker — pick one of three bundled setups (**Minimal**, **English (Recommended)**, **Korean-optimized**) or choose **Advanced** for the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration.
+`mm init` starts with a preset picker — pick one of three bundled setups (**Minimal**, **English (Recommended)**, **Korean-optimized**) or choose **Advanced** for the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration. Minimal adds no provider folders; English and Korean-optimized auto-add detected Claude Code memory, Claude plans, and Codex memory folders and print a summary.
 
 ### Choose your setup
 
@@ -175,7 +175,7 @@ Selecting **Advanced** (from the picker or `--advanced`) runs all ten steps:
 1. **Embedding provider** — BM25-only (default, zero-dependency), Local ONNX (no server), Ollama (local server), or OpenAI (cloud)
 2. **Reranker (optional)** — off by default; opt-in to a local fastembed cross-encoder. Korean/Chinese/Japanese/mixed content should pick the multilingual model
 3. **Memory directory** — where your notes live (e.g., `~/notes`, `~/memories`)
-4. **Provider memory folders** — opt in (per category) to indexing Claude Code per-project memory (`~/.claude/projects/*/memory/`), Claude plans (`~/.claude/plans/`), and/or Codex memories (`~/.codex/memories/`). Skipped silently if none are present. Nothing is added without your confirmation
+4. **Provider memory folders** — opt in (per category) to indexing Claude Code per-project memory (`~/.claude/projects/*/memory/`), Claude plans (`~/.claude/plans/`), and/or Codex memories (`~/.codex/memories/`). Skipped silently if none are present. In preset mode, English and Korean-optimized apply this discovery automatically; Minimal applies none.
 5. **Storage** — SQLite database path (default: `~/.memtomem/memtomem.db`)
 6. **Namespace** — auto-assign namespace from folder name (e.g., `~/docs` → `docs`)
 7. **Search** — number of results per query (default: 10), time-decay toggle
@@ -349,6 +349,13 @@ Use the copy/paste flow in
 for the personal-memory repo. That guide also lists the files to keep out of
 git (`*.db`, `config.json`, caches, local tiers, and the Web UI's
 `known_projects.json`).
+
+Claude Code auto-memory indexing is separate from Context Gateway project
+discovery. Indexing `~/.claude/projects/*/memory/` makes memory notes
+searchable; the optional `~/.claude/projects/` gateway scan discovers
+project roots for Skills, Commands, Subagents, and project-tier artifacts.
+Because Claude Code project slugs are lossy, prefer Web UI Add Project when
+a project is ambiguous.
 
 ---
 

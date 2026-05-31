@@ -369,12 +369,14 @@ JSON — no `//` comments, no trailing commas, no `jsonc` extensions.
 >   root. When in doubt, add both root-relative (`oauth_creds.json`) and
 >   `**/X` (`**/oauth_creds.json`) forms.
 
-### Provider memory folders (opt-in via `mm init`)
+### Provider memory folders (via `mm init`)
 
-memtomem can index AI tool memory folders alongside `~/.memtomem/memories`,
-but only when you explicitly opt in during `mm init`. The wizard's
-"Provider memory folders" step shows whichever of these are detected on
-your machine and lets you accept them per category:
+memtomem can index AI tool memory folders alongside `~/.memtomem/memories`
+during `mm init`. The Minimal preset adds none. The English and
+Korean-optimized presets auto-add detected provider folders and print a
+summary. The Advanced wizard's "Provider memory folders" step shows
+whichever of these are detected on your machine and lets you accept them per
+category:
 
 | Category | Source | Scope |
 |----------|--------|-------|

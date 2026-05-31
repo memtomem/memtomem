@@ -63,6 +63,8 @@ mm init                               # preset picker, then memory_dir + MCP
 
 The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `bge-small-en-v1.5` + English reranker + auto-discover providers), **Korean-optimized** (ONNX `bge-m3` + `kiwipiepy` tokenizer + multilingual reranker) — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
 
+Provider memory folders are handled during setup. **Minimal** adds none. **English** and **Korean-optimized** auto-add detected Claude Code memory, Claude plans, and Codex memory folders and print a summary; **Advanced** lets you choose per category. This only affects indexing. Context Gateway project discovery from `~/.claude/projects/` is a separate, opt-in web setting because Claude Code project slugs can be lossy.
+
 For automation / CI:
 
 ```bash
@@ -161,6 +163,8 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Multi-device sync](docs/guides/multi-device-sync.md) | Sync markdown memories across personal devices via a private git repo |
 | [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
+
+For Claude Code users, the [Configuration guide](docs/guides/configuration.md#context-gateway) explains the difference between indexing Claude memory files and discovering Claude project roots for Skills, Commands, Subagents, and Context Gateway artifacts.
 
 ---
 

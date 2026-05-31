@@ -37,7 +37,7 @@ The picker offers three presets and an Advanced fallback:
 | Korean-optimized | ONNX `bge-m3` (~1.2 GB, 1024d) | Multilingual (`jina-reranker-v2`) | `kiwipiepy` |
 | Advanced | — | — | — (full 10-step wizard, all options) |
 
-Pick a preset interactively, or use `mm init -y` (minimal), `mm init --preset korean -y`, or `mm init --advanced` for scripted runs. See [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) for the full model matrix.
+Pick a preset interactively, or use `mm init -y` (minimal), `mm init --preset korean -y`, or `mm init --advanced` for scripted runs. Minimal adds only your primary memory directory; English and Korean-optimized auto-add detected Claude Code memory, Claude plans, and Codex memory folders; Advanced lets you choose provider folders per category. See [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) for the full model matrix.
 
 Then in your AI editor, ask:
 
@@ -57,7 +57,7 @@ For full setup, OpenAI configuration, and troubleshooting, see the [Getting Star
 <details>
 <summary><b>Prefer no install? (uvx direct, MCP only)</b></summary>
 
-If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed; for AI tool memory folders (Claude Code per-project memory, Claude plans, Codex memories), run `mm init` once and pick the surfaces you want indexed — nothing is added silently. Set `MEMTOMEM_INDEXING__MEMORY_DIRS` to add custom paths.
+If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed; for AI tool memory folders (Claude Code per-project memory, Claude plans, Codex memories), run `uvx --from memtomem mm init` once so the chosen preset can add detected folders, or use Advanced mode to choose categories manually. Set `MEMTOMEM_INDEXING__MEMORY_DIRS` to add custom paths.
 
 ```bash
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
@@ -108,6 +108,8 @@ Full documentation lives in the [memtomem GitHub repo](https://github.com/memtom
 | [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI providers, model dimensions, switching models |
 | [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [memtomem-stm](https://github.com/memtomem/memtomem-stm) | Optional STM proxy for proactive memory surfacing (separate package) |
+
+Claude Code note: indexing `~/.claude/projects/*/memory/` is separate from the optional Context Gateway scan that discovers project roots for Skills, Commands, Subagents, and project-tier artifacts. See the [Context Gateway configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#context-gateway) section for the opt-in behavior and slug caveats.
 
 ## License
 

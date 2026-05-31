@@ -329,9 +329,11 @@ not enforcement.
 ## Auto-memory (Claude Code)
 
 Claude Code stores per-project memory at `~/.claude/projects/<slug>/memory/`,
-where `<slug>` is the absolute working-directory path with `/` → `-`
-(e.g. `-Users-alice-Work-project`). The slug is computed at session-open
-time from `cwd`, not configurable.
+where `<slug>` is derived from the absolute working-directory path by
+replacing every character outside ASCII `[A-Za-z0-9]` with `-` (for example,
+`/Users/alice/Work/project` becomes `-Users-alice-Work-project`). The slug is
+computed at session-open time from `cwd`, not configurable, and it can be
+lossy for dotted, dashed, underscored, non-ASCII, or Windows paths.
 
 Two workable strategies, both out of memtomem's control:
 
