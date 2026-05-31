@@ -263,6 +263,49 @@ def _encode_claude_project_path(root: PurePath) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(root))
 
 
+# A Windows drive-rooted slug: the drive letter survives (ASCII-alnum) and the
+# ``:`` + ``\`` of ``<letter>:\`` both collapse to ``-``, so ``C:\dev`` encodes to
+# ``C--dev``. Anchored at the start; a POSIX absolute slug always leads with ``-``
+# (the ``/`` root) so it never matches here. UNC slugs (``\\host\share`` →
+# ``--host-share``) DO lead with ``-`` and fall through to the POSIX branch — they
+# are out of scope for the drive-root walk and simply fail closed there.
+_WIN_DRIVE_SLUG_RE = re.compile(r"([A-Za-z])--")
+
+
+def _decode_seed(name: str) -> tuple[Path, str] | None:
+    """Return the ``(root, body)`` seed for the FS-walk, or ``None`` if *name* is
+    not a walkable absolute slug.
+
+    Two absolute-root encodings are recognized:
+
+    * **POSIX** — a leading ``-`` is the ``/`` root (``-home-foo`` ← ``/home/foo``).
+    * **Windows** — a drive-rooted slug ``<letter>--…`` ← ``<letter>:\\…`` (the
+      drive ``:`` and the ``\\`` separator both collapsed to ``-``). The walk is
+      seeded at the drive root and the drive prefix is consumed from the body.
+
+    ``Path(...)`` is the native flavor, so on a Windows host the drive seed is a
+    ``WindowsPath`` whose ``os.scandir`` / ``/`` join / ``is_dir`` all hit the real
+    drive. On a non-Windows host ``Path("C:\\")`` is a *relative* ``PosixPath`` (a
+    one-component name, ``is_absolute()`` is False), not a drive root — so the drive
+    branch is gated on ``is_absolute()`` and returns ``None`` there, failing closed
+    by construction rather than depending on the cwd not happening to contain a
+    literal ``C:\\`` child. This is harmless either way: Claude Code never emits a
+    drive-rooted slug for a POSIX path (and vice versa).
+    """
+    if name.startswith("-"):
+        return Path("/"), name[1:]  # the leading "-" is the root "/"
+    m = _WIN_DRIVE_SLUG_RE.match(name)
+    if m:
+        # "C--rest" ← "C:\rest": seed at the drive root, walk "rest". Only honor
+        # it when the seed is a genuine absolute root on THIS host — a real
+        # ``WindowsPath`` drive on Windows; on POSIX ``Path("C:\\")`` is a relative
+        # name, so we fail closed instead of walking it relative to cwd.
+        seed_root = Path(f"{m.group(1)}:\\")
+        if seed_root.is_absolute():
+            return seed_root, name[m.end() :]
+    return None
+
+
 def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) -> list[Path]:
     """Reconstruct candidate absolute paths from a ``~/.claude/projects/<name>``.
 
@@ -286,11 +329,13 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
     leaving the accept-one decision to the caller. Only when no anchor matches
     do we walk the filesystem.
 
-    The slow-path FS walk is POSIX-oriented: its leading ``-`` → ``/`` root
-    convention assumes a POSIX absolute root (a Windows ``C--…`` slug does not
-    start with ``-``), so on Windows only the anchor fast-path resolves. The
-    feature is experimental / off by default. (The *encoder* is platform-agnostic
-    — only this reconstruction is POSIX-leaning.)
+    The slow-path FS walk seeds from :func:`_decode_seed`, which recognizes both a
+    POSIX absolute root (leading ``-`` → ``/``) and a Windows drive-rooted slug
+    (``C--…`` ← ``C:\\…``). The walk itself is platform-agnostic; the drive seed
+    only resolves on a Windows host (where the real drive exists) and fails closed
+    elsewhere, mirroring the anchor fast-path which already resolves registered
+    Windows roots on any host. The feature is experimental / off by default. (The
+    *encoder* is platform-agnostic too — see :func:`_encode_claude_project_path`.)
     """
     # Anchors first — authoritative, cheap, and platform-agnostic: they
     # re-encode through the same encoder, so a Windows ``C--…`` slug resolves
@@ -311,29 +356,44 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
     if anchor_hits:
         return anchor_hits
 
-    # FS walk slow path is POSIX-rooted: the leading "-" is the "/" root, so a
-    # Windows "C--…" slug (no leading "-") cannot be walked — only the anchor
-    # fast-path above resolves it.
-    if not name.startswith("-"):
+    # FS walk slow path. The seed is the absolute root the body is relative to:
+    # "/" for a POSIX slug, the drive root for a Windows "C--…" slug. A slug that
+    # is neither (no leading "-" and no drive prefix) is not a walkable absolute
+    # path → fail closed.
+    seed = _decode_seed(name)
+    if seed is None:
         return []
-
-    body = name[1:]  # the leading "-" is the root "/"
+    seed_root, body = seed
     children_cache: dict[Path, set[str]] = {}
 
     def children(d: Path) -> set[str]:
         cached = children_cache.get(d)
         if cached is None:
+            names: set[str] = set()
             try:
-                cached = {e.name for e in os.scandir(d) if e.is_dir()}
+                with os.scandir(d) as it:
+                    for e in it:
+                        # Skip a single unreadable entry rather than dropping the
+                        # whole directory's listing — the Windows drive-root walk
+                        # scans busy system dirs (``C:\``, ``C:\Users`` with its
+                        # ``Default User`` / ``All Users`` junctions) where one
+                        # entry's ``is_dir()`` can raise while its siblings (the
+                        # real project ancestors) are fine.
+                        try:
+                            if e.is_dir():
+                                names.add(e.name)
+                        except OSError:
+                            continue
             except OSError:
-                cached = set()
+                pass  # the directory itself is unreadable / gone
+            cached = names
             children_cache[d] = cached
         return cached
 
     # Frontier of (committed_dir, pending_segment): committed_dir is the
     # deepest confirmed-existing directory; pending_segment is the partial
     # component built since the last separator.
-    frontier: list[tuple[Path, str]] = [(Path("/"), "")]
+    frontier: list[tuple[Path, str]] = [(seed_root, "")]
     for ch in body:
         if ch != "-":
             frontier = [(committed, pending + ch) for committed, pending in frontier]

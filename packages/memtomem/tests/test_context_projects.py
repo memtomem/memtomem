@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import os
 import sys
 from pathlib import Path
 
@@ -275,9 +276,10 @@ def test_discover_experimental_scan_disabled(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: relies on `/tmp` existing as a real directory and on "
-    "the claude-projects encoding (`-tmp` → `/tmp` via `replace('-', '/')`) "
-    "which is POSIX-only by production design (see _decode_claude_project_dirname)",
+    reason="POSIX-only fixture: the `-tmp` slug decodes to `/tmp`, which exists "
+    "as a real directory on Unix hosts but not on Windows (the decoder itself is "
+    "cross-platform since #1157 — this skip is about the `/tmp` fixture, not the "
+    "encoding).",
 )
 def test_discover_experimental_scan_enabled_filters_misdecoded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -314,8 +316,9 @@ def test_discover_experimental_scan_enabled_filters_misdecoded(
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: uses cwd=Path('/tmp') and the `-tmp` → `/tmp` encoding; "
-    "/tmp does not exist on Windows and the encoding scheme is POSIX-only",
+    reason="POSIX-only fixture: uses cwd=Path('/tmp') and the `-tmp` → `/tmp` "
+    "slug; `/tmp` does not exist on Windows (the decoder is cross-platform since "
+    "#1157 — this skip is about the `/tmp` fixture, not the encoding).",
 )
 def test_discover_experimental_dedup_with_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -363,7 +366,7 @@ def test_has_runtime_marker_file_doesnt_count(tmp_path: Path) -> None:
     assert has_runtime_marker(tmp_path) is False
 
 
-# ── FS-guided kebab-case decoder (#1147 B7-1) ────────────────────────────
+# ── FS-guided kebab-case decoder (#1147 B7-1, Windows #1157) ──────────────
 #
 # The encoder collapses *every* non-ASCII-alphanumeric char to ``-`` (lossy /
 # many-to-one); these tests pin the FS-guided reconstruction, which reverses each
@@ -372,14 +375,25 @@ def test_has_runtime_marker_file_doesnt_count(tmp_path: Path) -> None:
 # exercise the underscore round-trip too. Hermetic: ``_CLAUDE_PROJECTS_DIR``
 # (bound at import via ``expanduser()``) is monkeypatched, and target dirs live
 # under a real ``tmp_path`` so the reconstruction's absolute ``is_dir()`` probes
-# hit fixtures. POSIX-only because the *reconstruction* assumes the leading
-# ``-`` → ``/`` root convention — the encoder itself is platform-agnostic.
+# hit fixtures.
+#
+# These ``@_WIN_SKIP`` cases stay POSIX-only because of the FIXTURE, not the
+# decoder: each creates ``~/.claude/projects/<full-encoded-absolute-path>`` — a
+# directory whose *name* re-encodes the deep ``tmp_path`` — which on Windows risks
+# bumping the legacy ``MAX_PATH`` (260) limit and makes the ``C:\``→target walk
+# environment-sensitive (sibling ambiguity), neither of which is decoder
+# correctness. The decoder itself IS cross-platform since #1157; its Windows path
+# is covered directly by ``test_decode_seed_recognizes_posix_and_windows_roots``
+# (string logic, every host) and ``test_decode_windows_drive_root_walk`` (the real
+# drive-root walk, Windows-only, no long-named fixture dir).
 
 _WIN_SKIP = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="POSIX-only: the decoder slow-path's leading `-` → `/` root walk "
-    "assumes a POSIX absolute root (see _decode_claude_project_dirname). The "
-    "encoder is cross-platform; only this reconstruction is POSIX-leaning.",
+    reason="POSIX-only FIXTURE: builds `~/.claude/projects/<full-encoded-abspath>` "
+    "from a deep tmp_path, which risks MAX_PATH (260) on Windows and an "
+    "environment-sensitive C:\\-rooted walk. The decoder is cross-platform since "
+    "#1157 — Windows coverage is in test_decode_seed_* and "
+    "test_decode_windows_drive_root_walk.",
 )
 
 
@@ -443,20 +457,88 @@ def test_decode_underscore_and_non_ascii_component(
 
 
 def test_decode_windows_slug_resolves_via_anchor() -> None:
-    """A Windows ``C--…`` slug has no leading ``-``, so the POSIX FS walk can't
-    reconstruct it — but a registered anchor (cwd / known_projects) re-encodes to
-    the same slug and must still resolve. Regression: the ``startswith("-")`` gate
-    used to run BEFORE the anchor loop and silently dropped Windows roots (Codex
-    review). Cross-platform (PureWindowsPath + anchors only, no filesystem), so it
-    runs on the windows job too."""
+    """A Windows ``C--…`` slug is resolved by a registered anchor (cwd /
+    known_projects) that re-encodes to the same slug — the authoritative,
+    filesystem-free resolution path that works on every host. (The FS walk also
+    reconstructs an *unregistered* drive dir, but only on a real Windows drive,
+    #1157; here we pass anchors and no filesystem, so the anchor returns first.)
+    Regression: the ``startswith("-")`` gate used to run BEFORE the anchor loop
+    and silently dropped Windows roots (Codex review). Cross-platform
+    (PureWindowsPath + anchors only, no filesystem), so it runs on every job."""
     from pathlib import PureWindowsPath
 
     from memtomem.context import projects as proj_mod
 
     anchor = PureWindowsPath(r"C:\Users\foo")
     name = proj_mod._encode_claude_project_path(anchor)
-    assert name == "C--Users-foo" and not name.startswith("-")  # the bug condition
+    assert name == "C--Users-foo" and not name.startswith("-")  # no leading "-"
     assert proj_mod._decode_claude_project_dirname(name, anchors=(anchor,)) == [anchor]
+
+
+def test_decode_seed_recognizes_posix_and_windows_roots() -> None:
+    """``_decode_seed`` maps an absolute slug to its ``(root, body)`` walk seed.
+    Pure string logic (no filesystem), so the Windows drive-root detection added
+    in #1157 is pinned on every platform — not just the windows job."""
+    from memtomem.context import projects as proj_mod
+
+    # POSIX absolute root: leading "-" is "/" — identical on every host.
+    assert proj_mod._decode_seed("-home-foo") == (Path("/"), "home-foo")
+    # A UNC slug ("\\host\share" → "--host-share") leads with "-", so it falls
+    # through to the POSIX branch (out of scope for the drive-root walk).
+    assert proj_mod._decode_seed("--host-share") == (Path("/"), "-host-share")
+    # Slugs that are no absolute root at all → None on every host (fail closed):
+    assert proj_mod._decode_seed("C-foo") is None  # drive-relative "C:foo", not "C:\"
+    assert proj_mod._decode_seed("Ca--b") is None  # two leading letters ≠ a drive
+    assert proj_mod._decode_seed("foo-bar") is None  # neither root encoding
+
+    # The drive branch only yields a seed where "C:\" is a genuine absolute root,
+    # i.e. on Windows. On POSIX "C:\" is a relative PosixPath, so the slug fails
+    # closed — proving the contract instead of relying on cwd contents (#1157
+    # review). The drive prefix (and its ":" + "\") is consumed from the body.
+    if os.name == "nt":
+        assert proj_mod._decode_seed("C--Users-foo") == (Path("C:\\"), "Users-foo")
+        assert proj_mod._decode_seed("d--data") == (Path("d:\\"), "data")  # lowercase
+        assert proj_mod._decode_seed("C--") == (Path("C:\\"), "")  # bare drive root
+    else:
+        assert proj_mod._decode_seed("C--Users-foo") is None
+        assert proj_mod._decode_seed("C--") is None
+
+    # End-to-end: a drive-rooted slug with no anchors and no matching dir resolves
+    # to [] on every host — on POSIX via the None seed, on Windows via a walk that
+    # finds nothing. (Cross-platform fail-closed guarantee.)
+    assert proj_mod._decode_claude_project_dirname("C--Zzqq-nope-xyzplace") == []
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Windows-only: exercises the real C:\\-rooted FS walk for an "
+    "unregistered drive slug (#1157). Passes the slug straight to the decoder — no "
+    "~/.claude/projects/<long-name> fixture dir — so it avoids the MAX_PATH limit "
+    "that keeps the @_WIN_SKIP reconstruction cases POSIX-only.",
+)
+def test_decode_windows_drive_root_walk(tmp_path: Path) -> None:
+    """On Windows, an *unregistered* ``C--…`` slug reconstructs via the drive-root
+    FS walk (the gap #1157 closes). No anchors, no ``~/.claude/projects`` fixture:
+    the encoded slug goes straight to the decoder, so the only on-disk artifact is
+    the short real ``tmp_path`` target — no long-named directory, no MAX_PATH."""
+    from memtomem.context import projects as proj_mod
+
+    target = tmp_path / "agent-harness"  # literal-dash leaf, like a real repo
+    target.mkdir()
+    # Canonicalize BEFORE encoding: GitHub's hosted Windows runners can expose the
+    # temp dir via an 8.3 short alias (e.g. ``C:\Users\RUNNER~1\...``) while
+    # ``os.scandir`` reports the long name (``runneradmin``). The decoder matches
+    # entries with a case-sensitive ``startswith``, so the slug must be spelled the
+    # way the filesystem lists it — ``resolve()`` gives that canonical long form.
+    target = target.resolve(strict=True)
+    slug = proj_mod._encode_claude_project_path(target)
+    assert not slug.startswith("-")  # drive-rooted: no leading "-" to strip
+
+    result = proj_mod._decode_claude_project_dirname(slug)
+    # Membership, not equality: a deep tmp_path walk could surface a
+    # sibling-ambiguous candidate, but the real target must always be among the
+    # FS-confirmed results — proving the drive-root walk reaches it.
+    assert target in {r.resolve() for r in result}
 
 
 @_WIN_SKIP
