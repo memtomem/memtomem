@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`mem_context_migrate` renamed to `mem_context_memory_migrate` (#1147, B5-2).**
+  The tool only ever covered *memory*-tier migration, but its bare name implied
+  parity with the full CLI `mm context migrate` (which also does artifact
+  flat→dir and scope-tier moves). `mem_context_migrate` remains as a deprecated
+  alias that forwards every argument unchanged and will be removed in a future
+  major release; the `mem_do` action `context_migrate` likewise resolves to
+  `context_memory_migrate`.
 - **`memtomem-server` now supports network MCP transports.** Adds
   `--transport sse|http` plus `--host`, `--port`, `--url`, `--allowed-host`,
   `--allowed-origin`, and `--disable-dns-rebinding-protection` for deployments

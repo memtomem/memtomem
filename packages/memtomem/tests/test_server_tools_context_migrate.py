@@ -1,4 +1,4 @@
-"""MCP parity pins for ``mem_context_migrate`` wrapping the CLI
+"""MCP parity pins for ``mem_context_memory_migrate`` wrapping the CLI
 ``mm context memory-migrate`` verb.
 
 Closes the second half of #887. The underlying migration semantics
@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from memtomem import privacy
-from memtomem.server.tools.context import mem_context_migrate
+from memtomem.server.tools.context import mem_context_memory_migrate
 
 
 _SECRET = "api_key=AKIA1234567890ABCDEF"
@@ -112,7 +112,7 @@ def _stub_components(layout):
         ("user", "bogus", "to_scope='bogus'"),
     ],
 )
-async def test_mem_context_migrate_unknown_scope_rejected_without_helper(
+async def test_mem_context_memory_migrate_unknown_scope_rejected_without_helper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     from_scope: str,
@@ -135,7 +135,7 @@ async def test_mem_context_migrate_unknown_scope_rejected_without_helper(
 
     monkeypatch.setattr("memtomem.cli.context_cmd._memory_migrate_run", _sentinel)
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(src),
         from_scope=from_scope,
         to_scope=to_scope,
@@ -147,13 +147,13 @@ async def test_mem_context_migrate_unknown_scope_rejected_without_helper(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_from_equals_to_rejected(
+async def test_mem_context_memory_migrate_from_equals_to_rejected(
     tmp_path: Path,
 ) -> None:
     src = tmp_path / "rule.md"
     src.write_text("body", encoding="utf-8")
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(src),
         from_scope="user",
         to_scope="user",
@@ -167,7 +167,7 @@ async def test_mem_context_migrate_from_equals_to_rejected(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_project_shared_requires_confirmation(
+async def test_mem_context_memory_migrate_project_shared_requires_confirmation(
     monkeypatch: pytest.MonkeyPatch,
     fake_project_layout,
 ) -> None:
@@ -184,7 +184,7 @@ async def test_mem_context_migrate_project_shared_requires_confirmation(
 
     monkeypatch.setattr("memtomem.cli.context_cmd._memory_migrate_run", _sentinel)
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(layout["src"]),
         from_scope="user",
         to_scope="project_shared",
@@ -203,7 +203,7 @@ async def test_mem_context_migrate_project_shared_requires_confirmation(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_project_shared_privacy_block_surfaces(
+async def test_mem_context_memory_migrate_project_shared_privacy_block_surfaces(
     monkeypatch: pytest.MonkeyPatch,
     fake_project_layout,
 ) -> None:
@@ -223,7 +223,7 @@ async def test_mem_context_migrate_project_shared_privacy_block_surfaces(
     _patch_cli_components(monkeypatch, comp)
     monkeypatch.chdir(layout["project_root"])
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(src),
         from_scope="user",
         to_scope="project_shared",
@@ -244,7 +244,7 @@ async def test_mem_context_migrate_project_shared_privacy_block_surfaces(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_dry_run_returns_plan_and_does_not_mutate(
+async def test_mem_context_memory_migrate_dry_run_returns_plan_and_does_not_mutate(
     monkeypatch: pytest.MonkeyPatch,
     fake_project_layout,
 ) -> None:
@@ -255,7 +255,7 @@ async def test_mem_context_migrate_dry_run_returns_plan_and_does_not_mutate(
     _patch_cli_components(monkeypatch, comp)
     monkeypatch.chdir(layout["project_root"])
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(src),
         from_scope="user",
         to_scope="project_local",
@@ -277,7 +277,7 @@ async def test_mem_context_migrate_dry_run_returns_plan_and_does_not_mutate(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_apply_user_to_project_local_calls_helper(
+async def test_mem_context_memory_migrate_apply_user_to_project_local_calls_helper(
     monkeypatch: pytest.MonkeyPatch,
     fake_project_layout,
 ) -> None:
@@ -293,7 +293,7 @@ async def test_mem_context_migrate_apply_user_to_project_local_calls_helper(
     _patch_cli_components(monkeypatch, comp)
     monkeypatch.chdir(layout["project_root"])
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(src),
         from_scope="user",
         to_scope="project_local",
@@ -315,7 +315,7 @@ async def test_mem_context_migrate_apply_user_to_project_local_calls_helper(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_no_glob_match_returns_clean_error(
+async def test_mem_context_memory_migrate_no_glob_match_returns_clean_error(
     tmp_path: Path,
 ) -> None:
     """A typo'd glob would normally raise ``ClickException`` inside the
@@ -324,7 +324,7 @@ async def test_mem_context_migrate_no_glob_match_returns_clean_error(
     ``internal error``.
     """
     bogus_glob = str(tmp_path / "does-not-exist" / "**" / "*.md")
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=bogus_glob,
         from_scope="user",
         to_scope="project_local",
@@ -339,7 +339,7 @@ async def test_mem_context_migrate_no_glob_match_returns_clean_error(
 
 
 @pytest.mark.anyio
-async def test_mem_context_migrate_mid_batch_db_failure_includes_partial_progress(
+async def test_mem_context_memory_migrate_mid_batch_db_failure_includes_partial_progress(
     monkeypatch: pytest.MonkeyPatch,
     fake_project_layout,
 ) -> None:
@@ -373,7 +373,7 @@ async def test_mem_context_migrate_mid_batch_db_failure_includes_partial_progres
     _patch_cli_components(monkeypatch, comp)
     monkeypatch.chdir(layout["project_root"])
 
-    out = await mem_context_migrate(
+    out = await mem_context_memory_migrate(
         source=str(layout["user_tier"] / "*.md"),
         from_scope="user",
         to_scope="project_local",

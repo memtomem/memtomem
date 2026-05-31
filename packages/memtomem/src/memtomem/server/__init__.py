@@ -130,7 +130,8 @@ from memtomem.server.tools.context import (
     mem_context_generate,
     mem_context_diff,
     mem_context_sync,
-    mem_context_migrate,
+    mem_context_memory_migrate,
+    mem_context_migrate,  # deprecated alias for mem_context_memory_migrate (#1147 B5-2)
 )  # noqa: E402, F401
 from memtomem.server.tools.ingest import mem_ingest  # noqa: E402, F401  — no @mcp.tool; import triggers @register("ingest") for mem_do routing
 from memtomem.server.tools.watchdog import mem_watchdog  # noqa: E402, F401

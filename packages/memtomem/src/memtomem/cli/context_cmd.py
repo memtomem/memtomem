@@ -2827,7 +2827,7 @@ async def _memory_migrate_run(
     error message that the CLI would emit via ``click.echo`` /
     ``click.secho`` is appended to the corresponding list INSTEAD of
     being written to the global ``sys.stdout`` / ``sys.stderr``. Used by
-    the MCP wrapper (``mem_context_migrate``) to capture per-call
+    the MCP wrapper (``mem_context_memory_migrate``) to capture per-call
     output without ``contextlib.redirect_stdout`` — which would leak
     output from other concurrent MCP tool calls into the migrate
     response while this coroutine is suspended on I/O. When both

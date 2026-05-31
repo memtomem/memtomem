@@ -1,4 +1,4 @@
-"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_migrate."""
+"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_memory_migrate."""
 
 from __future__ import annotations
 
@@ -903,7 +903,7 @@ _KNOWN_MEMORY_SCOPES: frozenset[str] = frozenset({"user", "project_shared", "pro
 @mcp.tool()
 @tool_handler
 @register("context")
-async def mem_context_migrate(
+async def mem_context_memory_migrate(
     source: str,
     from_scope: str,
     to_scope: str,
@@ -912,6 +912,12 @@ async def mem_context_migrate(
     ctx: CtxType = None,
 ) -> str:
     """Move markdown memory file(s) between ADR-0011 memory scope tiers.
+
+    Renamed from ``mem_context_migrate`` in #1147 (B5-2): this tool only
+    ever covered *memory*-tier migration, but the bare name implied it
+    mirrored the full CLI ``mm context migrate`` (which also does artifact
+    flat→dir and scope-tier moves — see ``mem_context_artifact_migrate``).
+    The old name remains as a deprecated alias.
 
     Mirrors the CLI ``mm context memory-migrate <SOURCE> --from <scope>
     --to <scope> [--apply] [--confirm-project-shared]``
@@ -1041,3 +1047,39 @@ async def mem_context_migrate(
     if stderr_tail:
         stdout_text = f"{stdout_text}\n{stderr_tail}" if stdout_text else stderr_tail
     return stdout_text or "Nothing to migrate."
+
+
+@mcp.tool()
+@tool_handler
+async def mem_context_migrate(
+    source: str,
+    from_scope: str,
+    to_scope: str,
+    apply: bool = False,
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """DEPRECATED alias for ``mem_context_memory_migrate``.
+
+    Renamed in #1147 (B5-2): ``mem_context_migrate`` only ever covered
+    *memory*-tier migration, but its bare name implied parity with the
+    full CLI ``mm context migrate`` (which also does artifact flat→dir and
+    scope-tier moves, now exposed as ``mem_context_artifact_migrate``).
+    Use ``mem_context_memory_migrate`` instead; this alias forwards every
+    argument unchanged and will be removed in a future major release.
+
+    The explicit signature is repeated (rather than ``**kwargs``) because
+    the MCP schema is built by inspecting the function signature — a
+    ``**kwargs`` alias would publish an empty parameter schema. Not
+    routed through ``mem_do`` directly: the registry alias
+    ``"context_migrate" → "context_memory_migrate"`` (``tools/meta.py``)
+    keeps the old ``mem_do`` action name working.
+    """
+    return await mem_context_memory_migrate(
+        source=source,
+        from_scope=from_scope,
+        to_scope=to_scope,
+        apply=apply,
+        confirm_project_shared=confirm_project_shared,
+        ctx=ctx,
+    )
