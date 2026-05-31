@@ -221,9 +221,20 @@ _CLAUDE_PROJECTS_DIR = Path("~/.claude/projects").expanduser()
 
 
 # Frontier cap: a runaway backstop so a pathologically dashed name cannot
-# explode the reconstruction. Real names collapse to a handful of FS-confirmed
-# branches well under this.
-_MAX_DECODE_CANDIDATES = 64
+# explode the reconstruction. With per-step dedup, real names collapse to a
+# handful of FS-confirmed branches far under this; the cap only fires on
+# adversarial inputs, and hitting it raises ``_DecodeBudgetError`` (NOT a silent
+# no-match) so the caller reports it distinctly.
+_MAX_DECODE_CANDIDATES = 512
+
+
+class _DecodeBudgetError(Exception):
+    """FS-guided reconstruction exceeded the frontier budget.
+
+    The encoded name is too ambiguous to reconstruct safely. Kept distinct from
+    an empty (no-match) result so the caller does not misreport overflow as
+    "no matching directory" and can point the user at ``known_projects.json``.
+    """
 
 
 def _encode_claude_project_path(root: Path) -> str:
@@ -263,7 +274,17 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
 
     # Anchors first — authoritative and cheap. Collect ALL matches (not
     # first-match): the encoding is many-to-one so distinct roots can collide.
-    anchor_hits = [a for a in anchors if _encode_claude_project_path(a) == name]
+    # Dedup by resolved path so the same root reached via cwd AND a
+    # known-project entry is not mistaken for two ambiguous candidates.
+    anchor_hits: list[Path] = []
+    seen_anchors: set[str] = set()
+    for a in anchors:
+        if _encode_claude_project_path(a) != name:
+            continue
+        key = _normalize_for_scope_id(a)
+        if key not in seen_anchors:
+            seen_anchors.add(key)
+            anchor_hits.append(a)
     if anchor_hits:
         return anchor_hits
 
@@ -290,21 +311,28 @@ def _decode_claude_project_dirname(name: str, anchors: tuple[Path, ...] = ()) ->
     for ch in body:
         if ch != "-":
             frontier = [(committed, pending + ch) for committed, pending in frontier]
-            continue
-        nxt: list[tuple[Path, str]] = []
-        for committed, pending in frontier:
-            # Separator: pending is a complete component that must exist.
-            if pending and pending in children(committed):
-                nxt.append((committed / pending, ""))
-            # Dot / literal-dash: keep building the component, pruned to viable
-            # prefixes so the branch factor cannot explode.
-            for sep in (".", "-"):
-                extended = pending + sep
-                if viable_prefix(committed, extended):
-                    nxt.append((committed, extended))
-        frontier = nxt
-        if not frontier or len(frontier) > _MAX_DECODE_CANDIDATES:
+        else:
+            nxt: list[tuple[Path, str]] = []
+            for committed, pending in frontier:
+                # Separator: pending is a complete component that must exist.
+                if pending and pending in children(committed):
+                    nxt.append((committed / pending, ""))
+                # Dot / literal-dash: keep building the component, pruned to
+                # viable prefixes so the branch factor cannot explode.
+                for sep in (".", "-"):
+                    extended = pending + sep
+                    if viable_prefix(committed, extended):
+                        nxt.append((committed, extended))
+            frontier = nxt
+        # Collapse convergent states so the budget reflects DISTINCT
+        # reconstructions, not duplicate (committed, pending) paths.
+        frontier = list(dict.fromkeys(frontier))
+        if not frontier:
             return []
+        if len(frontier) > _MAX_DECODE_CANDIDATES:
+            # Genuine overflow — raise rather than return [] so the caller
+            # does not misreport it as "no matching directory".
+            raise _DecodeBudgetError(name)
 
     results: list[Path] = []
     seen: set[str] = set()
@@ -328,7 +356,16 @@ def _discover_claude_projects(anchors: tuple[Path, ...] = ()) -> list[Path]:
     for child in _CLAUDE_PROJECTS_DIR.iterdir():
         if not child.is_dir():
             continue
-        candidates = _decode_claude_project_dirname(child.name, anchors)
+        try:
+            candidates = _decode_claude_project_dirname(child.name, anchors)
+        except _DecodeBudgetError:
+            logger.warning(
+                "claude-projects: skip %r: too ambiguous to reconstruct safely "
+                "(exceeded decode budget); register the project in "
+                "known_projects.json to resolve it.",
+                child.name,
+            )
+            continue
         if not candidates:
             logger.warning(
                 "claude-projects: skip %r: no matching directory on disk; "

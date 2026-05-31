@@ -505,3 +505,65 @@ def test_decode_known_root_anchor_resolves_ambiguity(
     resolved = [s for s in scopes if "claude-projects" in s.sources]
     assert len(resolved) == 1
     assert resolved[0].root == chosen.resolve()
+
+
+@_WIN_SKIP
+def test_decode_anchor_dedup_cwd_equals_known_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cwd that is ALSO a registered known-project root appears twice in the
+    anchor list; dedup by resolved path must not flag it ambiguous (#1151
+    review Minor)."""
+    from memtomem.context import projects as proj_mod
+
+    target = tmp_path / "work" / "agent-harness"
+    target.mkdir(parents=True)
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / proj_mod._encode_claude_project_path(target)).mkdir()
+
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(target)  # known-projects entry for cwd
+
+    # cwd == target → anchors = (target, target). Without dedup this looks like
+    # two ambiguous candidates and the entry is dropped.
+    scopes = proj_mod.discover_project_scopes(target, kp, experimental_claude_projects_scan=True)
+    claude = [s for s in scopes if "claude-projects" in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == target.resolve()
+
+
+@_WIN_SKIP
+def test_decode_budget_overflow_raises_distinct_from_no_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A frontier overflow must raise ``_DecodeBudgetError`` (distinct from a
+    no-match []) so the caller reports it as 'exceeded decode budget', not
+    'no matching directory' (#1151 review Major)."""
+    from memtomem.context import projects as proj_mod
+
+    base = tmp_path / "base"
+    (base / "a").mkdir(parents=True)  # forces a second branch at the 'a-' dash
+    (base / "a-b" / "c").mkdir(parents=True)
+    target = base / "a-b" / "c"
+    encoded = proj_mod._encode_claude_project_path(target)
+
+    # Tiny budget so the genuine multi-branch reconstruction overflows.
+    monkeypatch.setattr(proj_mod, "_MAX_DECODE_CANDIDATES", 1)
+
+    # Direct: overflow raises the distinct error rather than returning [].
+    with pytest.raises(proj_mod._DecodeBudgetError):
+        proj_mod._decode_claude_project_dirname(encoded)
+
+    # Discovery: the warning names the budget, NOT "no matching directory".
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / encoded).mkdir()
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    with caplog.at_level("WARNING"):
+        scopes = proj_mod.discover_project_scopes(
+            cwd, tmp_path / "kp.json", experimental_claude_projects_scan=True
+        )
+    assert not [s for s in scopes if "claude-projects" in s.sources]
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "exceeded decode budget" in msgs
+    assert "no matching directory" not in msgs
