@@ -698,28 +698,57 @@ class TestClaudeSettingsCrossProcessLock:
         claude_t = claude_home / ".claude" / "settings.json"
         codex_t = claude_home / ".codex" / "hooks.json"
         gemini_t = claude_home / ".gemini" / "settings.json"
-        for t in (claude_t, codex_t, gemini_t):
-            t.parent.mkdir(parents=True, exist_ok=True)
-            t.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+
+        def _reset_targets() -> None:
+            for t in (claude_t, codex_t, gemini_t):
+                t.parent.mkdir(parents=True, exist_ok=True)
+                t.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+
+        _reset_targets()
         _make_canonical_settings(
             tmp_path,
             {"hooks": {"PostToolUse": [_rule("Write", "echo")]}},
         )
 
-        budget = 0.3
-        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", budget)
+        budget = 0.5
 
-        # Hold TWO of the three target locks. Per-target bounding would wait
-        # ~2×budget; the shared deadline caps the total at ~one budget (once it
-        # expires, the remaining targets get a 0s non-blocking attempt).
+        # An absolute wall-clock bound was flaky: it folds the lock wait together
+        # with fixed I/O + portalocker overhead, which on a slow/loaded runner
+        # (the Windows CI runner) can dwarf the budget. Isolate the lock wait by
+        # subtracting a *symmetric* baseline — the SAME two locks held, but with a
+        # 0s budget so the contended targets abort immediately. That baseline runs
+        # the identical work profile (two aborts + one Gemini write) minus only
+        # the budgeted wait, so the subtraction removes overhead without the
+        # asymmetry of a no-lock 3-write fan-out (which would over-subtract and
+        # could mask a per-target regression).
+        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", 0.0)
+        start = time.monotonic()
+        with _file_lock(_lock_path_for(claude_t)), _file_lock(_lock_path_for(codex_t)):
+            base_results = generate_all_settings(tmp_path, scope="user")
+        baseline = time.monotonic() - start
+        _reset_targets()
+        # The 0s baseline already shows the abort/ok split — both held targets
+        # abort and the free one writes, identical to the measured run's profile;
+        # its only difference is the budgeted wait.
+        assert base_results["claude_settings"].status == "aborted"
+        assert base_results["codex_settings"].status == "aborted"
+        assert base_results["gemini_settings"].status == "ok"
+
+        # Now the real budget. Hold the same TWO locks: per-target bounding waits
+        # ~2×budget; the shared deadline caps the *total* lock wait at ~one budget
+        # (once it expires the remaining held target gets a 0s non-blocking
+        # attempt).
+        monkeypatch.setattr(settings_mod, "_SETTINGS_LOCK_BUDGET_S", budget)
         start = time.monotonic()
         with _file_lock(_lock_path_for(claude_t)), _file_lock(_lock_path_for(codex_t)):
             results = generate_all_settings(tmp_path, scope="user")
-        elapsed = time.monotonic() - start
+        held_elapsed = time.monotonic() - start
 
-        # Whole call bounded by ~one budget — strictly less than the 2×budget a
-        # per-target bound would have spent.
-        assert elapsed < budget * 1.8
+        # The wait added over the symmetric baseline reflects ONE shared budget
+        # (~1×budget), strictly less than the ~2×budget a per-target bound would
+        # accumulate — discriminated without a fragile absolute threshold.
+        lock_wait = held_elapsed - baseline
+        assert lock_wait < budget * 1.8, (held_elapsed, baseline, lock_wait)
         # Held targets aborted; the free one (gemini) still wrote ok.
         assert results["claude_settings"].status == "aborted"
         assert results["codex_settings"].status == "aborted"
