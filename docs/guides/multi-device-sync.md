@@ -476,13 +476,13 @@ What each check means:
 | `no *.db files staged` | The git index does not contain `*.db` / `*.db-wal` / `*.db-shm`. If it does, your `.gitignore` is wrong — propagating these between devices corrupts SQLite under WAL. |
 | `config.json absent from worktree` | `~/.memtomem/config.json` is not staged. It's machine-local; only `config.d/` is portable. |
 | `config.d/ fragments present` | `~/.memtomem/config.d/` exists on this machine and contains at least one `*.json` fragment. If missing, the synced fragment was never bridged into the canonical location. |
-| `~/.claude/projects/ slug` | The current working tree corresponds to a `~/.claude/projects/<slug>/` entry that matches your cwd. Skipped silently when `~/.claude/projects/` is absent. |
+| `~/.claude/projects/ slug` | The current working tree corresponds to a `~/.claude/projects/<slug>/` entry that matches your repo root. Claude Code replaces every non-ASCII-alphanumeric path character with `-`, so dashed, dotted, underscored, non-ASCII, and Windows drive paths can be lossy. Skipped silently when `~/.claude/projects/` is absent; if it fails, open Claude Code from the repo root or register the project explicitly in the Web UI Add Project list. |
 | `memory_dir paths resolve under $HOME` | All `indexing.memory_dirs` entries sit under your home dir. Outside-`$HOME` paths are not portable across users. |
 | `cloud-sync mount detected` | One of your `memory_dirs` is under a known cloud-sync mount (`~/Library/CloudStorage/`, `~/Library/Mobile Documents/com~apple~CloudDocs/`, `~/Dropbox/`, `~/OneDrive*/`). Watcher reliability there is best-effort — flip `startup_backfill` on, or trigger `mem_index` manually. |
 
-`mm sync-doctor` does not push, pull, or auto-fix. It only reports. Wire it
-into a `pre-push` git hook if you want the staged-`*.db` check to gate
-pushes.
+`mm sync-doctor` does not push, pull, auto-fix, or rewrite
+`~/.memtomem/config.json`. It only reports. Wire it into a `pre-push` git
+hook if you want the staged-`*.db` check to gate pushes.
 
 ## Anti-patterns
 

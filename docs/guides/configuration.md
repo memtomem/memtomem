@@ -434,6 +434,12 @@ the wider scan, run `mm index --rebuild` after the migration.
 > on top of indexing — useful when you want richer metadata than the plain
 > `memory_dirs` path-based indexing provides.
 
+Provider memory indexing is separate from Context Gateway project discovery:
+`claude-memory` adds existing `~/.claude/projects/*/memory/` directories to
+`indexing.memory_dirs`, while the Context Gateway's optional
+`~/.claude/projects/` scan discovers project roots for skills, commands,
+subagents, and project-tier context artifacts.
+
 > **Cloud-sync mounts** (Google Drive Stream, OneDrive Files-On-Demand ON,
 > iCloud Optimize Storage) generally do **not** emit fs watcher events to
 > macOS/Linux, so the indexer will not auto-pick-up new files placed there
@@ -785,6 +791,18 @@ from `~/.claude/projects/`. These project roots populate `project_shared`
 and `project_local` tier entries; the `user` tier (per ADR-0011 §1) is a
 separate axis gated by `USER_TIER_ENABLED` below.
 
+The `~/.claude/projects/` scan is intentionally opt-in because Claude Code's
+project directory name is lossy. Claude Code encodes an absolute project path
+by replacing every character outside ASCII `[A-Za-z0-9]` with `-`, so `/`,
+`.`, `_`, spaces, literal dashes, non-ASCII characters, Windows `\`, and the
+Windows drive `:` all collapse to the same marker (`C:\dev\repo` becomes
+`C--dev-repo`). memtomem first trusts explicit anchors — the server cwd and
+roots already registered in `known_projects.json` — then falls back to a
+filesystem-guided decode. If a Claude project slug is stale, ambiguous, or too
+lossy to reconstruct safely, the gateway skips that slug and logs a warning
+instead of guessing. Use the Web UI Add Project action (or edit
+`known_projects.json`) to register the project root explicitly.
+
 When an artifact row is `Not yet imported`, the Web Context Gateway shows a
 scope-aware remediation block. `project_shared` can be bootstrapped with the
 web Import action or with `mm context init --include=agents,commands,skills
@@ -799,12 +817,16 @@ the project repo: commit `<project>/.memtomem/context.md`,
 `<project>/.memtomem/{agents,skills,commands}/`, and
 `<project>/.memtomem/settings.json` when you want them shared. Do not sync
 `~/.memtomem/known_projects.json`; it is the Web UI's per-machine Add Project
-registry and stores local absolute paths.
+registry and stores local absolute paths. Run
+[`mm sync-doctor`](multi-device-sync.md#mm-sync-doctor--read-only-validator)
+from the synced private repo when you want a read-only check for staged
+SQLite files, machine-local config, missing `config.d/` bridges, Claude Code
+slug drift, and cloud-sync watcher caveats.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered project root. |
-| `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered roots. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
+| `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces the unambiguous matches as discovered roots. Off by default because Claude Code's path encoding is lossy; register the project explicitly when a slug cannot be decoded safely. |
 | `MEMTOMEM_CONTEXT_GATEWAY__USER_TIER_ENABLED` | `false` | Forward-compat flag for the `user`-tier canonical artifact surface (ADR-0011 §1; canonical lives under `~/.memtomem/<artifact>/`). While `false`, `user`-tier entries are hidden from discovery responses entirely. |
 
 ## Querying and Modifying at Runtime
