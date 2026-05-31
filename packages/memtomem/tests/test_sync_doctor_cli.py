@@ -283,6 +283,22 @@ class TestCheckClaudeSlug:
         r = check_claude_slug(cwd, home=home)
         assert r.status == "fail"
 
+    def test_dotted_cwd_slug_matches(self, tmp_path: Path) -> None:
+        # Claude Code collapses '.' to '-' too; the old '/'-only encode + blind
+        # '-'->'/' decode falsely failed a dotted cwd the UI can now resolve
+        # (#1151 re-review). The shared encoder/decoder must make it pass.
+        from memtomem.context import projects as proj_mod
+
+        home = tmp_path / "home"
+        home.mkdir()
+        cwd = home / "work" / ".config-dir"
+        cwd.mkdir(parents=True)
+        projects = home / ".claude" / "projects"
+        projects.mkdir(parents=True)
+        (projects / proj_mod._encode_claude_project_path(cwd.resolve())).mkdir()
+        r = check_claude_slug(cwd, home=home)
+        assert r.status == "pass"
+
 
 # ---- CLI end-to-end --------------------------------------------------------
 

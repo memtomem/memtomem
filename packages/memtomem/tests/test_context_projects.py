@@ -567,3 +567,30 @@ def test_decode_budget_overflow_raises_distinct_from_no_match(
     msgs = " ".join(r.message for r in caplog.records)
     assert "exceeded decode budget" in msgs
     assert "no matching directory" not in msgs
+
+
+@_WIN_SKIP
+def test_decode_stale_colliding_anchor_does_not_drop_live_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale known-project root whose lossy encoding collides with the live
+    cwd must NOT make the live match look ambiguous (#1151 re-review): stale
+    candidates are filtered by is_dir() before the accept-one decision."""
+    from memtomem.context import projects as proj_mod
+
+    live = tmp_path / "work" / "agent-harness"
+    live.mkdir(parents=True)
+    stale = tmp_path / "work" / "agent" / "harness"  # same encoding, never created
+    assert proj_mod._encode_claude_project_path(live) == proj_mod._encode_claude_project_path(stale)
+
+    cp = _claude_projects_dir(tmp_path, monkeypatch)
+    (cp / proj_mod._encode_claude_project_path(live)).mkdir()
+
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(stale)  # stale anchor (does not exist on disk)
+
+    # cwd == live, so the live anchor + the stale anchor both encode to the slug.
+    scopes = proj_mod.discover_project_scopes(live, kp, experimental_claude_projects_scan=True)
+    claude = [s for s in scopes if "claude-projects" in s.sources]
+    assert len(claude) == 1
+    assert claude[0].root == live.resolve()

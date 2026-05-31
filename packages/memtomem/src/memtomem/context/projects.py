@@ -366,6 +366,14 @@ def _discover_claude_projects(anchors: tuple[Path, ...] = ()) -> list[Path]:
                 child.name,
             )
             continue
+        # Drop stale candidates BEFORE the accept-one decision. Anchor hits are
+        # not is_dir()-checked inside the decoder, so a stale known-project root
+        # whose lossy encoding collides with a live cwd/project root would
+        # otherwise make a valid live match look ambiguous and get skipped. (FS
+        # walk candidates are already is_dir()-confirmed; this also preserves
+        # the fail-closed guarantee.) Stale known-projects still surface through
+        # the known-projects source in discover_project_scopes.
+        candidates = [c for c in candidates if c.is_dir()]
         if not candidates:
             logger.warning(
                 "claude-projects: skip %r: no matching directory on disk; "
@@ -382,12 +390,7 @@ def _discover_claude_projects(anchors: tuple[Path, ...] = ()) -> list[Path]:
                 ", ".join(str(c) for c in candidates),
             )
             continue
-        decoded = candidates[0]
-        # Re-assert the fail-closed guarantee at the call site (an anchor hit
-        # could be a stale known-project root that no longer exists).
-        if not decoded.is_dir():
-            continue
-        found.append(decoded)
+        found.append(candidates[0])
     return found
 
 

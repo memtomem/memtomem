@@ -233,11 +233,11 @@ def check_claude_slug(cwd: Path, *, home: Path | None = None) -> CheckResult:
        previous one-shot ``str(cwd).replace("/", "-")`` only handled POSIX
        and produced an invalid slug on Windows (drive prefix + backslashes
        remained), causing false failures for valid Windows layouts.
-    2. **Slow path** — iterate real entries and decode-then-``samefile`` each
-       against ``cwd``. Catches cases where the encoded form isn't
-       predictable (e.g., the entry on disk uses an encoding variant we
-       didn't enumerate) but skips entries whose name has literal dashes
-       and so doesn't round-trip to a real directory.
+    2. **Slow path** — iterate real entries and FS-guided-decode-then-
+       ``samefile`` each against ``cwd`` via
+       :func:`memtomem.context.projects._decode_claude_project_dirname`, which
+       reconstructs ``/``, ``.`` and literal-``-`` segments (so kebab-case and
+       dotted directories round-trip, unlike the old blind ``-`` → ``/``).
     """
     projects = (home or Path.home()) / ".claude" / "projects"
     if not projects.is_dir():
@@ -246,9 +246,19 @@ def check_claude_slug(cwd: Path, *, home: Path | None = None) -> CheckResult:
         cwd_resolved = cwd.resolve()
     except OSError:
         return CheckResult("info", "cwd resolution failed — Claude slug check skipped")
+    from memtomem.context.projects import (
+        _DecodeBudgetError,
+        _decode_claude_project_dirname,
+        _encode_claude_project_path,
+    )
+
     cwd_str = str(cwd_resolved)
     encoded_candidates = {
-        cwd_str.replace("/", "-"),  # POSIX absolute
+        # Authoritative POSIX encoding — Claude Code collapses BOTH "/" and "."
+        # to "-" (so a dotted segment like ``.config-dir`` round-trips), which
+        # the bare ``replace("/", "-")`` below misses.
+        _encode_claude_project_path(cwd_resolved),
+        cwd_str.replace("/", "-"),  # POSIX absolute (dot-less)
         cwd_str.replace("\\", "-").replace(":", ""),  # Windows: drop drive colon
         cwd_str.replace("\\", "-").replace(":", "-"),  # Windows: encode drive colon as "-"
     }
@@ -260,18 +270,23 @@ def check_claude_slug(cwd: Path, *, home: Path | None = None) -> CheckResult:
             continue
         if (projects / cand).is_dir():
             return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
-    # Slow path: decode existing entries and samefile-compare.
+    # Slow path: FS-guided decode of existing entries, then samefile-compare.
+    # Shares ``_decode_claude_project_dirname`` (the 3-way reconstruction that
+    # handles "/", "." and literal "-") so a dotted/dashed cwd the UI can
+    # discover is not falsely failed here.
     for child in projects.iterdir():
         if not child.is_dir():
             continue
-        # Decode follows ``_decode_claude_project_dirname`` in
-        # ``memtomem.context.projects``: every ``-`` becomes ``/``.
-        decoded = Path(child.name.replace("-", "/"))
         try:
-            if decoded.is_dir() and decoded.samefile(cwd):
-                return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
-        except OSError:
+            decoded_candidates = _decode_claude_project_dirname(child.name)
+        except _DecodeBudgetError:
             continue
+        for decoded in decoded_candidates:
+            try:
+                if decoded.samefile(cwd):
+                    return CheckResult("pass", "~/.claude/projects/ slug matches synced layout")
+            except OSError:
+                continue
     return CheckResult(
         "fail",
         "~/.claude/projects/ slug differs from synced layout — see doc",
