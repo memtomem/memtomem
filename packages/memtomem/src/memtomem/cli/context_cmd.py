@@ -811,12 +811,12 @@ def init_cmd(
             best = max(files, key=lambda f: f.size)
             click.echo(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
             content = _read_agent_file(best.path)
-            sections = extract_sections_from_agent_file(content)
+            sections = extract_sections_from_agent_file(content, source=best.agent)
             for f in files:
                 if f.path == best.path:
                     continue
                 other_content = _read_agent_file(f.path)
-                other_sections = extract_sections_from_agent_file(other_content)
+                other_sections = extract_sections_from_agent_file(other_content, source=f.agent)
                 for key, val in other_sections.items():
                     if key not in sections and val.strip():
                         sections[key] = val

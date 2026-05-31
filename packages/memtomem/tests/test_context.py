@@ -6,6 +6,7 @@ from memtomem.context.parser import (
     iter_markdown_sections,
     parse_context,
     sections_to_markdown,
+    split_preamble,
 )
 from memtomem.context.detector import detect_agent_files
 from memtomem.context.generator import (
@@ -349,3 +350,88 @@ class TestParserHardening:
         out.write_text(sections_to_markdown(sections), encoding="utf-8")
         reparsed = parse_context(out)
         assert reparsed == sections
+
+
+class TestSplitPreamble:
+    """`split_preamble` finds the first real heading, fence/whitespace aware."""
+
+    def test_no_heading_is_all_preamble(self):
+        preamble, rest = split_preamble("just prose\nmore prose")
+        assert preamble == "just prose\nmore prose"
+        assert rest == ""
+
+    def test_basic_split(self):
+        preamble, rest = split_preamble("intro line\n\n## A\n\nbody")
+        assert "intro line" in preamble
+        assert rest.startswith("## A")
+        assert "body" in rest
+
+    def test_fence_in_preamble_is_not_a_boundary(self):
+        # A ``##``-lookalike inside a fenced code block must NOT end the
+        # preamble early (B1-1 fence awareness, shared with the iterator).
+        text = "intro\n```\n## fake heading\n```\n\n## Real\n\nbody"
+        preamble, rest = split_preamble(text)
+        assert "## fake heading" in preamble
+        assert rest.startswith("## Real")
+
+    def test_whitespace_only_heading_is_not_a_boundary(self):
+        # ``##   `` is not a heading (B1-3); the first real boundary is ## Real.
+        preamble, rest = split_preamble("intro\n##   \n\n## Real\nbody")
+        assert "##   " in preamble
+        assert rest.startswith("## Real")
+
+
+class TestPreambleReverseImport:
+    """Source-aware reverse-import captures leading project prose (#1147 B1-3)."""
+
+    @pytest.mark.parametrize("source", ["claude", "gemini", "codex", "cursor", "copilot"])
+    def test_generate_import_generate_is_idempotent(self, source):
+        # No Rules/Style here so the B1-4 merge lossiness (a separate item)
+        # does not confound the B1-3 round-trip.
+        original = {"Project": "Proj prose line.", "Commands": "- run: x"}
+        gen = generate_for_agent(source, original)
+        result = extract_sections_from_agent_file(gen, source=source)
+
+        # The project prose survives reverse-import...
+        assert "Project" in result
+        assert "Proj prose line." in result["Project"]
+        # ...and no generated boilerplate leaks into the captured sections.
+        for value in result.values():
+            assert "# Project Context" not in value
+            assert "# CLAUDE.md" not in value
+            assert "# GEMINI.md" not in value
+            assert "# AGENTS.md" not in value
+            assert "This file provides guidance" not in value
+        # Full round-trip is stable.
+        assert generate_for_agent(source, result) == gen
+
+    def test_cursor_user_prose_is_captured(self):
+        # The exact bug: a hand-authored .cursorrules has leading prose with
+        # no H1 — previously dropped, now mapped to Project.
+        content = "We build a CLI in Rust.\n\n## Rules\n\n- be fast\n"
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert result["Project"] == "We build a CLI in Rust."
+        assert "- be fast" in result["Rules"]
+
+    def test_collision_prepends_preamble_to_existing_project(self):
+        # codex emits "# AGENTS.md" then "## Project"; extra prose after the H1
+        # must prepend to (not clobber) the ## Project body, preserving order.
+        content = "# AGENTS.md\n\nExtra note.\n\n## Project\n\nBody text.\n"
+        result = extract_sections_from_agent_file(content, source="codex")
+        assert result["Project"].startswith("Extra note.")
+        assert "Body text." in result["Project"]
+        assert "# AGENTS.md" not in result["Project"]
+
+    def test_wrapper_h1_is_stripped_for_known_source(self):
+        content = sections_to_markdown({"Project": "P", "Commands": "C"})
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert "# Project Context" not in result["Project"]
+        assert result["Project"] == "P"
+
+    def test_source_none_preserves_old_drop_behavior(self):
+        # Back-compat: with no source, leading prose is dropped exactly as
+        # before — the canonical contract is unchanged.
+        content = "# CLAUDE.md\n\nThis file...\n\nLeftover prose.\n\n## Project\n\nBody\n"
+        result = extract_sections_from_agent_file(content)
+        assert "Leftover prose." not in result.get("Project", "")
+        assert result["Project"] == "Body"

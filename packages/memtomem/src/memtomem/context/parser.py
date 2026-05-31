@@ -77,12 +77,54 @@ def iter_markdown_sections(text: str) -> Iterator[tuple[str, str]]:
         yield current, "\n".join(lines).strip()
 
 
+def split_preamble(text: str) -> tuple[str, str]:
+    """Split ``text`` at the first real ``## Heading`` line.
+
+    Returns ``(preamble, rest)`` where ``rest`` begins at the first heading
+    that :func:`iter_markdown_sections` would recognise and ``preamble`` is
+    everything before it. If there is no real heading, the whole text is the
+    preamble and ``rest`` is empty.
+
+    The fence/heading rules are kept in lock-step with
+    :func:`iter_markdown_sections` so a ``##`` inside a fenced code block is
+    not a false boundary (B1-1) and a whitespace-only ``##`` is not treated
+    as a heading (B1-3). Callers that want the preamble (e.g.
+    :func:`memtomem.context.generator.extract_sections_from_agent_file`)
+    use this; the section iterator itself still drops it.
+    """
+    lines = text.splitlines()
+    fence_char: str | None = None
+    fence_len = 0
+
+    for i, line in enumerate(lines):
+        fence = _FENCE_RE.match(line)
+        if fence:
+            run, rest = fence.group(1), fence.group(2)
+            if fence_char is None:
+                fence_char, fence_len = run[0], len(run)
+            elif run[0] == fence_char and len(run) >= fence_len and not rest.strip():
+                fence_char, fence_len = None, 0
+            continue
+        m = None if fence_char is not None else _HEADING_RE.match(line)
+        if m and m.group(1).strip():
+            return "\n".join(lines[:i]), "\n".join(lines[i:])
+
+    return text, ""
+
+
 def parse_context(path: Path) -> dict[str, str]:
     """Parse context.md into {section_name: content} dict.
 
     Sections are delimited by `## SectionName` headings.
     Unknown sections are preserved as-is. Repeated headings are merged
     (content concatenated) rather than the earlier copy being overwritten.
+
+    Text before the first `## SectionName` heading is not a section and is
+    not preserved — put project description under `## Project`. (Runtime-file
+    reverse-import via
+    :func:`memtomem.context.generator.extract_sections_from_agent_file` does
+    capture such leading prose for known sources; canonical-parser preamble
+    capture is deferred — see #1147 B1-3.)
     """
     if not path.exists():
         return {}

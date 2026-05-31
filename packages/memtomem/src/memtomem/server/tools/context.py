@@ -227,12 +227,12 @@ async def mem_context_init(
             best = max(files, key=lambda f: f.size)
             results.append(f"Extracting from {best.agent}: {best.path.name} ({best.size} bytes)")
             content = await asyncio.to_thread(best.path.read_text, encoding="utf-8")
-            sections = extract_sections_from_agent_file(content)
+            sections = extract_sections_from_agent_file(content, source=best.agent)
             for f in files:
                 if f.path == best.path:
                     continue
                 other_content = await asyncio.to_thread(f.path.read_text, encoding="utf-8")
-                other_sections = extract_sections_from_agent_file(other_content)
+                other_sections = extract_sections_from_agent_file(other_content, source=f.agent)
                 for key, val in other_sections.items():
                     if key not in sections and val.strip():
                         sections[key] = val
