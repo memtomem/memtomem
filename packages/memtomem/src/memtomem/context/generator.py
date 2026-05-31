@@ -311,12 +311,12 @@ def extract_sections_from_agent_file(content: str, source: str | None = None) ->
 
     ``source`` is the detecting generator's name (``"claude"``, ``"cursor"``,
     ``"gemini"``, ``"codex"``, ``"copilot"``). When given, leading text before
-    the first *generated* section heading — which is real project prose for the
+    the first ``##`` heading — which is real project prose for the
     cursor/copilot targets that emit the Project body with no H1 — is captured
     into the canonical ``Project`` section after stripping the source's
-    generated boilerplate (#1147 B1-3). The split boundary is the first heading
-    that aliases to a known section, so a Project body's own ``##`` subheadings
-    stay inside Project rather than mis-splitting at the first one. When
+    generated boilerplate (#1147 B1-3). Every ``##`` starts a section, so a
+    captured ``Project`` body never contains a ``##`` that would re-split on
+    the next round-trip; keep subheadings inside a section with ``###``. When
     ``source`` is ``None`` the preamble is dropped exactly as before
     (back-compat): the canonical parser contract is unchanged.
 
@@ -345,10 +345,11 @@ def extract_sections_from_agent_file(content: str, source: str | None = None) ->
         "copilot-specific": "Copilot",
     }
 
-    # For a known source the boundary is the first *generated* heading (a known
-    # alias), so unknown Project subheadings stay in the preamble → Project.
-    boundary = set(aliases) if source is not None else None
-    preamble, rest = split_preamble(content, boundary)
+    # Every ## heading starts a section; the text before the first one is the
+    # preamble (captured into Project for known sources below). A section's own
+    # subheadings must use ### so they are not mis-read as separate sections —
+    # this keeps the captured Project body free of round-trip-unstable ## lines.
+    preamble, rest = split_preamble(content)
 
     sections: dict[str, str] = {}
     for heading, body in iter_markdown_sections(rest):

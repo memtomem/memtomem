@@ -479,26 +479,68 @@ class TestPreambleSourceGuard:
 
 
 class TestPreambleProjectSubheadings:
-    """A Project body's own ## subheading must survive cursor/copilot
-    round-trip — the split boundary is the first *generated* heading, not any
-    heading (#1147 B1-3 review, Major 2)."""
+    """Reverse-import contract: every ## starts a section, so a captured
+    Project body never embeds a ## that would re-split on the next round-trip;
+    keep subheadings inside a section body with ### (#1147 B1-3 review)."""
+
+    def test_h2_in_flat_body_splits_into_its_own_section(self):
+        # A hand-authored flat file with a ## heading: that heading starts a
+        # section rather than folding into Project as an unsound embedded ##
+        # (which would re-split on the next generate->import cycle).
+        content = "Intro line.\n\n## Goals\n\nBe fast.\n\n## Rules\n\n- be terse\n"
+        result = extract_sections_from_agent_file(content, source="cursor")
+        assert result["Project"] == "Intro line."
+        assert result["Goals"] == "Be fast."
+        assert "- be terse" in result["Rules"]
+        # Soundness invariant: no captured section body contains a ## heading.
+        assert all("## " not in body for body in result.values())
+
+    def test_persisted_context_md_round_trip_is_idempotent(self, tmp_path):
+        # The user-visible contract is the *persisted* round-trip: extracted
+        # sections are written to context.md (sections_to_markdown) and re-read
+        # (parse_context) on every later `generate`/`sync`. Pin that this is
+        # stable — a flat-file `## Deployment` survives as its own section and
+        # the persisted form re-parses to the identical dict, with no `## `
+        # embedded in any section body (the soundness win of the section model).
+        #
+        # NB: whether a *generator* re-emits the unknown `Deployment` section is
+        # a separate, pre-existing concern (generators only emit canonical
+        # sections; true on main and for source=None alike) tracked outside
+        # B1-3 — this test deliberately pins the parser/persistence layer only.
+        content = "Intro line.\n\n## Deployment\n\nShip it.\n\n## Rules\n\n- be terse\n"
+        sections = extract_sections_from_agent_file(content, source="cursor")
+
+        ctx = tmp_path / "context.md"
+        ctx.write_text(sections_to_markdown(sections), encoding="utf-8")
+        reparsed = parse_context(ctx)
+
+        # The non-canonical heading persists as its own section, not lost.
+        assert reparsed["Project"] == "Intro line."
+        assert reparsed["Deployment"] == "Ship it."
+        assert reparsed["Rules"] == "- be terse"
+        # No section body smuggles a ## that would re-split on the next read.
+        assert all("## " not in body for body in reparsed.values())
+        # Persisted form is a fixed point: re-serialize → re-parse is stable.
+        ctx.write_text(sections_to_markdown(reparsed), encoding="utf-8")
+        assert parse_context(ctx) == reparsed
 
     @pytest.mark.parametrize("source", ["cursor", "copilot"])
-    def test_project_with_h2_round_trips(self, source):
+    def test_h3_subheading_stays_in_project_and_round_trips(self, source):
+        # ### is the documented escape hatch: it is not a section boundary, so a
+        # Project body keeps its ### subheadings and round-trips byte-for-byte.
         original = {
-            "Project": "Intro line.\n\n## Goals\n\nBe fast.",
+            "Project": "Intro line.\n\n### Goals\n\nBe fast.",
             "Rules": "- be terse",
         }
         gen = generate_for_agent(source, original)
         result = extract_sections_from_agent_file(gen, source=source)
-        # The unknown '## Goals' subheading stays inside Project (not split out).
-        assert "## Goals" in result["Project"]
+        assert "### Goals" in result["Project"]
         assert "Be fast." in result["Project"]
         assert "Goals" not in result  # not a separate section
         assert generate_for_agent(source, result) == gen
 
-    def test_known_heading_still_splits(self):
-        # A generated section heading (Rules) is still a boundary.
+    def test_known_section_heading_splits(self):
+        # A canonical section heading (Rules) is a boundary; preamble -> Project.
         content = "Project prose.\n\n## Rules\n\n- foo\n"
         result = extract_sections_from_agent_file(content, source="cursor")
         assert result["Project"] == "Project prose."

@@ -77,7 +77,7 @@ def iter_markdown_sections(text: str) -> Iterator[tuple[str, str]]:
         yield current, "\n".join(lines).strip()
 
 
-def split_preamble(text: str, boundary_headings: set[str] | None = None) -> tuple[str, str]:
+def split_preamble(text: str) -> tuple[str, str]:
     """Split ``text`` at the first real ``## Heading`` line.
 
     Returns ``(preamble, rest)`` where ``rest`` begins at the first heading
@@ -85,13 +85,12 @@ def split_preamble(text: str, boundary_headings: set[str] | None = None) -> tupl
     everything before it. If there is no real heading, the whole text is the
     preamble and ``rest`` is empty.
 
-    ``boundary_headings`` (lower-cased) narrows what counts as the split
-    boundary: when given, a heading splits only if its lower-cased text is in
-    the set; other (unknown) headings are treated as preamble content. This
-    lets source-aware reverse-import keep a Project body's own ``##``
-    subheadings inside Project instead of mis-splitting at the first one — the
-    boundary is the first *generated* section heading, not any heading (#1147
-    B1-3). When ``None``, every real heading is a boundary (the default).
+    Every ``## Heading`` is a section boundary: on reverse-import the text
+    before the first one is the preamble (mapped to ``Project`` for known
+    sources) and each heading starts its own section. This keeps a captured
+    ``Project`` body free of ``##`` headings that would re-split on the next
+    round-trip — to keep a subheading inside a section body, use ``###``
+    (#1147 B1-3).
 
     The fence/heading rules are kept in lock-step with
     :func:`iter_markdown_sections` so a ``##`` inside a fenced code block is
@@ -115,8 +114,7 @@ def split_preamble(text: str, boundary_headings: set[str] | None = None) -> tupl
             continue
         m = None if fence_char is not None else _HEADING_RE.match(line)
         if m and m.group(1).strip():
-            if boundary_headings is None or m.group(1).strip().lower() in boundary_headings:
-                return "\n".join(lines[:i]), "\n".join(lines[i:])
+            return "\n".join(lines[:i]), "\n".join(lines[i:])
 
     return text, ""
 
