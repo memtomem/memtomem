@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`mm memory doctor` — read-only hygiene report for memory stores.** A
+  registered `memory_dir` can be barely indexed (the fs watcher only reacts to
+  live events, so files that landed while the server was down stay invisible
+  until a forced re-walk) and its index/TOC file can drift from what's on disk
+  — `mem_search` then silently can't find the un-indexed files. The new
+  `mm memory doctor` makes the 3-way drift between disk, the agent index file
+  (e.g. `MEMORY.md`), and the searchable DB visible: per configured dir it
+  reports DB coverage gaps, DB chunks whose source file was deleted, index/meta
+  files indexed as content, broken index links (classified
+  `missing_target`/`outside_root`, leaving `url`/`anchor` alone), files absent
+  from the TOC, hot-cache budget overruns, and never-accessed "cold" files.
+  Human output by default, `--json` for CI; exits `1` only on definite
+  inconsistencies (deleted-source chunks, convention violations, broken links).
+  Report-only — it never writes disk, DB, or config (loads config with
+  `migrate=False` so it can't trigger the legacy auto-discover rewrite). The
+  curation `--fix` path lands later behind its own ADR.
+
 - **Provider index-file conventions enforced on every index path (fixes
   `MEMORY.md` pollution).** The exclude set for agent index/TOC files — Claude
   Code's `MEMORY.md`/`README.md` and Codex's `README.md` — was previously
