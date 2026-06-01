@@ -18,6 +18,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   configs, and reverse import are deferred to a follow-up that needs stronger
   host-write and secret-handling policy.
 
+- **Antigravity CLI (`agy`) documented as an MCP target; Gemini CLI marked
+  deprecated (#1167).** Google is replacing Gemini CLI with the Go-based
+  Antigravity CLI; Gemini CLI stops serving free/Pro/Ultra individual tiers on
+  2026-06-18 (enterprise Gemini Code Assist keeps it). Antigravity CLI registers
+  MCP servers in its own `~/.gemini/antigravity-cli/mcp_config.json` (key
+  `mcpServers`, stdio entries with `"type": "stdio"`) — distinct from both Gemini
+  CLI's `~/.gemini/settings.json` and the Antigravity IDE's
+  `~/.gemini/antigravity/mcp_config.json`. The `mm init` paste-hints plus the
+  getting-started, mcp-clients, uninstall, llm-providers, and PyPI README guides
+  now surface this path and the deprecation date. The shared Gemini-compatible
+  surfaces are intentionally unchanged: Antigravity CLI reads `~/.gemini/GEMINI.md`,
+  so `mm ingest gemini-memory` and the `.gemini/` context fan-out keep working —
+  no runtime removed, no config repathed.
+
 - **`mm init` splits Codex memories into per-subdir namespaces (#1164).** The provider
   preset for `~/.codex/memories/` now generates three ordered namespace rules
   instead of one flat `codex` rule: `codex:rollout_summaries` (per-session
