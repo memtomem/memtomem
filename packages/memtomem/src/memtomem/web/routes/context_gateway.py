@@ -136,6 +136,7 @@ def _compute_last_synced_at(project_root: Path, target_scope: TargetScope) -> st
     """
     from memtomem.context.agents import list_canonical_agents
     from memtomem.context.commands import list_canonical_commands
+    from memtomem.context.mcp_servers import list_canonical_mcp_servers
     from memtomem.context.skills import SKILL_MANIFEST, list_canonical_skills
 
     latest: float | None = None
@@ -172,6 +173,13 @@ def _compute_last_synced_at(project_root: Path, target_scope: TargetScope) -> st
             _bump(path)
     except Exception:
         logger.exception("list_canonical_agents failed during last_synced_at")
+
+    if target_scope == "project_shared":
+        try:
+            for path in list_canonical_mcp_servers(project_root):
+                _bump(path)
+        except Exception:
+            logger.exception("list_canonical_mcp_servers failed during last_synced_at")
 
     if latest is None:
         return None
@@ -263,6 +271,7 @@ async def context_overview(
         list_canonical_commands,
     )
     from memtomem.context.settings import diff_settings
+    from memtomem.context.mcp_servers import diff_mcp_servers, list_canonical_mcp_servers
     from memtomem.context.skills import diff_skills, list_canonical_skills
 
     result: dict[str, dict[str, int | bool | str]] = {}
@@ -299,6 +308,18 @@ async def context_overview(
     except Exception as exc:
         logger.exception("diff_agents failed")
         result["agents"] = _error_payload(exc, shape="total")
+
+    try:
+        if target_scope == "project_shared":
+            result["mcp_servers"] = _count_context_statuses(
+                diff_mcp_servers(project_root),
+                {p.stem for p in list_canonical_mcp_servers(project_root)},
+            )
+        else:
+            result["mcp_servers"] = {"total": 0, "local_draft": 0}
+    except Exception as exc:
+        logger.exception("diff_mcp_servers failed")
+        result["mcp_servers"] = _error_payload(exc, shape="total")
 
     try:
         settings_diff = diff_settings(project_root, scope=target_scope)

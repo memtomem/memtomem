@@ -624,6 +624,7 @@ function _renderCtxOverview(data) {
     { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
     { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands' },
     { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
+    { key: 'mcp_servers', label: t('settings.ctx.mcp_servers_title'), section: 'ctx-mcp-servers' },
     { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
   ];
 
@@ -884,7 +885,7 @@ function _renderCtxOverview(data) {
       syncAllBtn.title = t('settings.ctx.project_local_no_fanout_tooltip');
       syncAllBtn.setAttribute('aria-disabled', 'true');
     } else {
-      const syncKinds = ['skills', 'commands', 'agents'];
+      const syncKinds = ['skills', 'commands', 'agents', 'mcp_servers'];
       const totals = syncKinds.reduce((acc, k) => {
         const d = data[k] || {};
         acc.total += d.total || 0;
@@ -1099,7 +1100,7 @@ window.addEventListener('langchange', () => {
     return;
   }
 
-  for (const type of ['skills', 'commands', 'agents']) {
+  for (const type of ['skills', 'commands', 'agents', 'mcp-servers']) {
     const sec = document.getElementById(`settings-ctx-${type}`);
     if (!sec || !sec.classList.contains('active')) continue;
     // Capture detail state *before* ``loadCtxList`` resets it (see the
@@ -1247,7 +1248,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    const types = ['skills', 'commands', 'agents'];
+    const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
       let resp;
@@ -1333,7 +1334,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     // that landed so the user can map the toast to what disk actually
     // changed; a bare "Sync failed: X" after a half-completed run is
     // the failure mode the issue calls out.
-    const phaseLabel = (p) => t(`settings.ctx.${p}_phase_title`);
+    const phaseLabel = (p) => t(`settings.ctx.${String(p).replace(/-/g, '_')}_phase_title`);
     if (failed) {
       if (succeeded.length === 0) {
         showToast(t('toast.sync_failed', { error: failed.reason }), 'error');
@@ -1402,7 +1403,7 @@ document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () =
 // ``_loadScopeGroupItems`` (which writes ``container.innerHTML`` and the
 // runtime-only banner) so its async writes are gated by the parent
 // ``loadCtxList`` invocation that originated them.
-let _ctxListSeq = { skills: 0, commands: 0, agents: 0 };
+let _ctxListSeq = { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 };
 
 // Sibling guard for ``loadCtxDetail`` and ``_ctxLoadRuntimeOnlyDetail``
 // races. Both write to the same ``detailEl``, so they share one
@@ -1411,7 +1412,7 @@ let _ctxListSeq = { skills: 0, commands: 0, agents: 0 };
 // response paints into the live DOM, both for the locale-stale window
 // and the Edit-mode buffer-restore race (where an older fetch would
 // otherwise overwrite a textarea that the listener just rehydrated).
-let _ctxDetailSeq = { skills: 0, commands: 0, agents: 0 };
+let _ctxDetailSeq = { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 };
 
 // Module-level pending Edit-mode buffer that needs to be restored
 // after the next detail mount. Set when a langchange fires while the
@@ -3018,11 +3019,14 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
     if (listEl.querySelector('.ctx-create-form')) return;
     const form = document.createElement('div');
     form.className = 'ctx-create-form';
+    const contentPlaceholder = type === 'mcp-servers'
+      ? '{\n  "command": "uvx",\n  "args": ["--from", "example", "example-server"]\n}'
+      : t('settings.ctx.create_content_placeholder');
     form.innerHTML = `
       <label>${escapeHtml(t('settings.ctx.create_name_label'))}</label>
       <input type="text" class="ctx-create-name" placeholder="my-${type.slice(0, -1)}" style="width:100%" />
       <label style="margin-top:8px">${escapeHtml(t('settings.ctx.create_content_label'))}</label>
-      <textarea class="ctx-edit-area ctx-create-content" rows="6" placeholder="${escapeHtml(t('settings.ctx.create_content_placeholder'))}"></textarea>
+      <textarea class="ctx-edit-area ctx-create-content" rows="6" placeholder="${escapeHtml(contentPlaceholder)}"></textarea>
       <div class="ctx-edit-actions">
         <button class="btn-ghost ctx-create-cancel">${escapeHtml(t('settings.ctx.cancel'))}</button>
         <button class="btn-primary ctx-create-submit">${escapeHtml(t('settings.ctx.create'))}</button>

@@ -36,6 +36,7 @@ from memtomem.context.projects import (
     discover_project_scopes,
     has_runtime_marker,
 )
+from memtomem.context.mcp_servers import diff_mcp_servers, list_canonical_mcp_servers
 from memtomem.context.skills import diff_skills, list_canonical_skills
 from memtomem.config import TargetScope
 from memtomem.web.deps import get_project_root
@@ -185,6 +186,17 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
         logger.warning("counts: agents failed for %s", root, exc_info=True)
         counts["agents"] = 0
 
+    try:
+        if target_scope == "project_shared":
+            names = {name for _runtime, name, _status in diff_mcp_servers(root)}
+            names.update(p.stem for p in list_canonical_mcp_servers(root))
+            counts["mcp-servers"] = len(names)
+        else:
+            counts["mcp-servers"] = 0
+    except Exception:
+        logger.warning("counts: mcp-servers failed for %s", root, exc_info=True)
+        counts["mcp-servers"] = 0
+
     return counts
 
 
@@ -201,7 +213,7 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
         "counts": (
             _counts_for(scope.root, target_scope=target_scope)
             if (with_counts and scope.root is not None and not scope.missing)
-            else {"skills": 0, "commands": 0, "agents": 0}
+            else {"skills": 0, "commands": 0, "agents": 0, "mcp-servers": 0}
         ),
     }
 

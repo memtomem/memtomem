@@ -2550,7 +2550,8 @@ class TestFreshFlag:
 class TestMcpPasteHints:
     """The wizard's MCP step writes a Claude-Code-scoped ``.mcp.json`` and must
     surface what the user still has to do for Cursor / Windsurf / Claude
-    Desktop / Gemini CLI / Kimi CLI (none of which auto-load the project file).
+    Desktop / Antigravity CLI / Gemini CLI / Kimi CLI (none of which auto-load
+    the project file).
 
     Regression for #246: earlier wording implied ``.mcp.json`` is the config
     file for those editors, which it isn't — each has its own canonical path."""
@@ -2578,6 +2579,10 @@ class TestMcpPasteHints:
         assert "Windsurf" in out and "~/.codeium/windsurf/mcp_config.json" in out
         assert "Claude Desktop" in out
         assert _claude_desktop_config_hint() in out
+        assert "Antigravity CLI → paste into ~/.gemini/antigravity-cli/mcp_config.json" in out
+        # Antigravity CLI's mcp_config.json carries "type": "stdio" on each entry,
+        # which the generated .mcp.json omits — the hint must flag it.
+        assert '(add "type": "stdio" to the memtomem entry)' in out
         assert "Gemini CLI" in out and "~/.gemini/settings.json" in out
         assert "Kimi CLI" in out and "~/.kimi/mcp.json" in out
         assert "Claude Code picks up ./.mcp.json in this project automatically" in out
@@ -2730,8 +2735,8 @@ class TestMcpChoiceOneClaudeAddBranches:
         # user-scope entry covering it.
         assert not (tmp_path / ".mcp.json").exists()
         assert "MCP config: wrote ./.mcp.json" not in out
-        # And paste-hints (Cursor / Windsurf / Claude Desktop / Gemini CLI)
-        # must NOT fire either — the user opted for "auto-register Claude
+        # And paste-hints (Cursor / Windsurf / Claude Desktop / Antigravity CLI
+        # / Gemini CLI) must NOT fire either — the user opted for "auto-register Claude
         # Code", and the existing user-scope entry already covers it. A
         # future refactor that hoists _emit_mcp_paste_hints() out of the
         # generic-failure block would silently spam unrelated paste paths

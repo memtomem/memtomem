@@ -404,8 +404,9 @@ error.
 Gemini CLI's memory surface is the single file `~/.gemini/GEMINI.md`,
 which doesn't fit a `memory_dirs` (directory) abstraction, and the parent
 `~/.gemini/` directory contains secrets like `oauth_creds.json`. For
-Gemini users, run `mm ingest gemini-memory` for a one-shot import — it
-applies tool-specific tags and skips the noise.
+Gemini users — and Antigravity CLI (`agy`) users, which read the same
+`~/.gemini/GEMINI.md` — run `mm ingest gemini-memory` for a one-shot import;
+it applies tool-specific tags and skips the noise.
 
 #### Migrating from `auto_discover` (legacy)
 

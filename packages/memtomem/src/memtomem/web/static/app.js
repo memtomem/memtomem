@@ -1362,7 +1362,7 @@ const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
 // CTA, settings-namespaces.js Quick Links — auto-redirects without
 // per-call-site updates.
 const GATEWAY_SECTIONS = new Set([
-  'ctx-overview', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'hooks-sync',
+  'ctx-overview', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers', 'hooks-sync',
 ]);
 
 function loadNavCollapseState() {
@@ -1471,6 +1471,7 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'ctx-skills') loadCtxList('skills');
   if (sectionName === 'ctx-commands') loadCtxList('commands');
   if (sectionName === 'ctx-agents') loadCtxList('agents');
+  if (sectionName === 'ctx-mcp-servers') loadCtxList('mcp-servers');
 }
 
 // Settings nav buttons

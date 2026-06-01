@@ -206,7 +206,7 @@ claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem
 
 Use `-s user` to make memtomem available in all projects. Use `-s project` for one project only.
 
-### Cursor, Windsurf, Claude Desktop, Gemini CLI
+### Cursor, Windsurf, Claude Desktop, Antigravity CLI, Gemini CLI
 
 Add to your MCP config file:
 
@@ -245,9 +245,19 @@ Add to your MCP config file:
 | Cursor | `~/.cursor/mcp.json` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Gemini CLI | `~/.gemini/settings.json` |
+| Antigravity CLI (`agy`) | `~/.gemini/antigravity-cli/mcp_config.json` |
+| Gemini CLI (deprecated 2026-06-18) | `~/.gemini/settings.json` |
 
 > **Note**: Claude Code stores its MCP config in `~/.claude.json`, not a separate file.
+>
+> **Gemini CLI → Antigravity CLI.** Google is replacing Gemini CLI with the
+> Antigravity CLI (`agy`); Gemini CLI stops serving free/Pro/Ultra individual
+> tiers on 2026-06-18 (enterprise keeps it). Antigravity CLI uses its own
+> `mcp_config.json` above but still reads `~/.gemini/GEMINI.md`, so memory
+> indexed with `mm ingest gemini-memory` keeps working. In that file each
+> server object also carries `"type": "stdio"` — see the
+> [Antigravity section](mcp-clients.md#7-antigravity) of the MCP client guide
+> for the exact CLI shape.
 
 ### Verify connection
 
@@ -383,7 +393,7 @@ mm watchdog status         # show latest health check results
 mm watchdog run            # run health checks immediately
 mm watchdog history        # view historical health check results
 mm ingest claude-memory    # index Claude Code auto-memory
-mm ingest gemini-memory    # index Gemini CLI memory
+mm ingest gemini-memory    # index Gemini CLI / Antigravity CLI memory (GEMINI.md)
 mm ingest codex-memory     # index Codex CLI memory
 mm shell                   # interactive REPL
 mm web                     # launch Web UI (http://localhost:8080)
