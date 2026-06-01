@@ -1,10 +1,18 @@
-"""CLI: ``mm memory doctor`` — read-only hygiene report for memory stores.
+"""CLI: ``mm memory doctor`` — hygiene report (+ narrow ``--fix``) for memory stores.
 
 Tier 1 of the ``mm memory doctor`` plan: surface 3-way drift between what's
 on disk, what the agent-managed index file (e.g. Claude Code's ``MEMORY.md``)
-points at, and what's actually indexed in the searchable DB. Report-only — no
-writes to disk, the DB, or config. The curation write contract (``--fix``)
-lands later behind its own ADR.
+points at, and what's actually indexed in the searchable DB. The default
+command is report-only — no writes to disk, the DB, or config.
+
+Tier 2 adds an opt-in ``--fix`` (ADR-0020): a *subtractive-only* curation that
+deletes index-file pointer lines the doctor classifies as ``broken_link`` with
+link-class ``missing_target`` (a ``- [title](target)`` whose target resolves
+inside the memory root but points at a file that no longer exists). It never
+adds, reorders, reformats, or budget-trims, and never touches the DB —
+removing a provably-dead pointer is the one curation move that cannot conflict
+with the agent's own intent. ``--fix`` is dry-run by default; ``--apply``
+writes. See :func:`_run_fix` for the write contract.
 
 Why this exists: a ``memory_dir`` can be *registered* yet barely indexed (the
 fs watcher only reacts to live events, so files that landed while the server
@@ -758,6 +766,227 @@ def _emit_json(reports: list[DirReport]) -> None:
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+# ── Tier 2: subtractive --fix (ADR-0020) ────────────────────────────
+#
+# ``--fix`` deletes index-file pointer lines whose link-class is
+# ``missing_target`` and nothing else. The contract (ADR-0020):
+#   §1 subtractive-only, missing_target-only (outside_root et al. excluded);
+#   §2 byte-exact preservation of every surviving line via a line *splice*
+#      (keepends) of the ORIGINAL text — never a reconstruction from parsed
+#      fields, which would lose CRLF / trailing-newline state;
+#   §4 dry-run by default, ``--apply`` to write;
+#   §5 atomic write (mode-preserving) under the sidecar lock, re-validating
+#      each candidate against fresh content so concurrent agent edits survive.
+
+
+@dataclass
+class FixFileResult:
+    """Per-index-file outcome of a ``--fix`` run (preview or applied)."""
+
+    path: str  # the resolved memory_dir
+    index_file: str  # the index filename (e.g. MEMORY.md)
+    applied: bool
+    removed: list[tuple[int, str]]  # (1-based line_no, raw line text)
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "index_file": self.index_file,
+            "removed": [{"line": n, "text": t} for n, t in self.removed],
+        }
+
+
+def _missing_target_entries(text: str, *, root: Path) -> list[IndexEntry]:
+    """Pointer entries in *text* whose target classifies as ``missing_target``.
+
+    The single link-class ``--fix`` removes (ADR-0020 §1): a pointer that
+    resolves *inside* the memory root but points at a file that does not exist.
+    ``outside_root`` / ``url`` / ``anchor`` / ``ok`` are all left untouched —
+    only a provably-dead in-root reference is safe to delete subtractively.
+    """
+    parsed = parse_memory_index(text)
+    return [
+        e
+        for e in parsed.entries
+        if classify_link(e.target, root=root, source_dir=root) == "missing_target"
+    ]
+
+
+def _splice_lines(original_text: str, remove_line_nos: set[int]) -> str:
+    """Return *original_text* with the given 1-based lines removed, byte-exact.
+
+    ADR-0020 §2: every surviving line keeps its exact end-of-line terminator
+    (LF vs CRLF) and the file's trailing-newline state is untouched. The
+    mechanism is a *splice* of the original text — ``splitlines(keepends=True)``
+    has the same 1-based line indexing as the parser's terminator-stripped
+    ``splitlines()``, so a parser ``line_no`` maps directly to an index here —
+    NOT a reconstruction from ``IndexEntry.raw`` / ``other_lines`` (which are
+    terminator-stripped and could not round-trip CRLF or the EOF newline).
+    """
+    return "".join(
+        line
+        for i, line in enumerate(original_text.splitlines(keepends=True), start=1)
+        if i not in remove_line_nos
+    )
+
+
+def _apply_fix(index_path: Path, root: Path, candidate_raws: list[str]) -> list[tuple[int, str]]:
+    """Under the sidecar lock, splice still-dead candidate lines out of *index_path*.
+
+    Implements ADR-0020 §5's concurrency-aware write. All work happens while
+    holding the ``_file_lock`` sidecar lock so a concurrent *memtomem* writer is
+    serialized; the agent (the memory hook) does not honor the lock, so a
+    residual sub-``os.replace`` race remains and is accepted as bounded — see
+    the ADR.
+
+    1. **Fresh, newline-preserving re-read** (``read_bytes().decode`` — NOT
+       ``read_text``, which would normalize CRLF→LF before the splice could
+       preserve it).
+    2. **Re-validate** each candidate against the fresh content + current disk.
+       A fresh entry is removed only if it still classifies as ``missing_target``
+       (so a target that reappeared on disk is spared) AND its raw line text is
+       still "owed" by *candidate_raws*. Matching is *count-bounded*:
+       ``candidate_raws`` carries one entry per occurrence analysis (T1) saw, and
+       each fresh removal consumes one, so removals never exceed the
+       analysis-time count of a given line. Distinct entries the agent added
+       after T1 are therefore never removed, and an agent *edit* to a candidate
+       line spares it (its raw no longer matches). The one residual case is an
+       agent that added an *exact byte-duplicate* of a still-dead candidate: the
+       budget keeps the right number of copies (the net of the addition is
+       preserved), but because the duplicates are byte-identical, *which*
+       physical line survives is unspecified — and irrelevant, since the spliced
+       result is byte-identical either way. The budget bounds removals to what
+       was provably dead at analysis time.
+    3. **Splice** the still-qualifying lines out of the fresh text, carrying
+       through everything the agent added before the lock.
+    4. **Atomically replace**, preserving the file's existing mode (``mkstemp``
+       defaults to ``0o600``, which would silently downgrade a ``0o644`` TOC).
+
+    Returns the removed lines as ``(line_no, raw)`` for the audit report.
+    """
+    import stat
+    from collections import Counter
+
+    from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
+
+    with _file_lock(_lock_path_for(index_path)):
+        # §5.1 — fresh, newline-preserving read (NOT read_text()).
+        fresh_text = index_path.read_bytes().decode("utf-8")
+        fresh = parse_memory_index(fresh_text)
+        # §5.2 — re-validate against a count-bounded budget: remove at most as
+        # many occurrences of each raw line as analysis (T1) saw. Distinct agent
+        # additions are never touched; for a byte-identical duplicate of a dead
+        # candidate the net addition is preserved (one fewer copy), though which
+        # equal copy survives is unspecified (they're identical, so the spliced
+        # result is the same either way).
+        budget: Counter[str] = Counter(candidate_raws)
+        removed: list[tuple[int, str]] = []
+        for e in fresh.entries:
+            if budget[e.raw] <= 0:
+                continue  # not a candidate, or its analysis-time count is exhausted
+            if classify_link(e.target, root=root, source_dir=root) != "missing_target":
+                continue  # target reappeared since analysis — leave it alone
+            budget[e.raw] -= 1
+            removed.append((e.line_no, e.raw))
+        if not removed:
+            return []
+        # §5.3 — splice out of the FRESH text (agent additions carried through).
+        new_text = _splice_lines(fresh_text, {n for n, _ in removed})
+        # §5.4 — atomic replace, preserving the original file mode.
+        original_mode = stat.S_IMODE(index_path.stat().st_mode)
+        atomic_write_text(index_path, new_text, mode=original_mode)
+    return removed
+
+
+def _collect_fixable(inspect_dirs: list[Path]) -> list[tuple[Path, Path, str]]:
+    """Find inspected dirs with a readable index file. Returns ``(dir, index_path, name)``.
+
+    Only providers with a TOC convention (``provider_index_file``) and an index
+    file actually on disk are fixable; everything else is skipped silently
+    (there is nothing for a subtractive fix to act on).
+    """
+    from memtomem.config import categorize_memory_dir, provider_index_file
+
+    out: list[tuple[Path, Path, str]] = []
+    for d in inspect_dirs:
+        resolved = d.expanduser().resolve()
+        index_file_name = provider_index_file(categorize_memory_dir(d))
+        if not index_file_name:
+            continue
+        index_path = resolved / index_file_name
+        if not index_path.is_file():
+            continue
+        out.append((resolved, index_path, index_file_name))
+    return out
+
+
+def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
+    """Drive ``--fix`` over every inspected dir's index file (preview or apply).
+
+    Per file the analysis-time read (T1) collects the ``missing_target``
+    candidates; ``--apply`` then hands their raw line text to :func:`_apply_fix`,
+    which re-reads fresh under the lock (T2) and re-validates before writing.
+    Dry-run reports the T1 candidates directly. Each removed line is reported
+    (ADR-0020 §5 — even on ``--apply``, the removal must be auditable).
+    """
+    results: list[FixFileResult] = []
+    for resolved, index_path, index_file_name in _collect_fixable(inspect_dirs):
+        try:
+            # T1 (analysis snapshot). Terminator-stripped ``raw`` is CRLF-agnostic,
+            # so this read need not be newline-preserving — only the apply splice is.
+            text = index_path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        candidates = _missing_target_entries(text, root=resolved)
+        if not candidates:
+            results.append(FixFileResult(str(resolved), index_file_name, applied=apply, removed=[]))
+            continue
+        if apply:
+            removed = _apply_fix(index_path, resolved, [e.raw for e in candidates])
+        else:
+            removed = [(e.line_no, e.raw) for e in candidates]
+        results.append(
+            FixFileResult(str(resolved), index_file_name, applied=apply, removed=removed)
+        )
+
+    if json_out:
+        _emit_fix_json(results, applied=apply)
+    else:
+        _emit_fix_human(results, applied=apply)
+
+
+def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
+    total = sum(len(r.removed) for r in results)
+    if total == 0:
+        click.secho("No missing_target links to remove.", fg="green")
+        return
+    verb = "Removed" if applied else "Would remove"
+    for r in results:
+        if not r.removed:
+            continue
+        click.secho(f"\n■ {r.path} · {r.index_file}", bold=True)
+        click.echo(f"  {verb} {len(r.removed)} missing_target link(s):")
+        for line_no, raw in r.removed:
+            click.echo(f"      - L{line_no}: {raw}")
+    n_files = sum(1 for r in results if r.removed)
+    if applied:
+        click.secho(f"\n{total} line(s) removed across {n_files} file(s).", fg="green")
+    else:
+        click.echo(f"\n{total} line(s) across {n_files} file(s). Run with --apply to write.")
+
+
+def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
+    total = sum(len(r.removed) for r in results)
+    status = "clean" if total == 0 else ("fixed" if applied else "would-fix")
+    payload = {
+        "status": status,
+        "applied": applied,
+        "files": [r.to_json() for r in results if r.removed],
+        "summary": {"files": sum(1 for r in results if r.removed), "lines": total},
+    }
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
 # ── Click entry point ───────────────────────────────────────────────
 
 
@@ -775,7 +1004,24 @@ def memory() -> None:
     default=False,
     help="Emit a structured JSON result instead of human-readable output.",
 )
-def memory_doctor(path: str | None, json_out: bool) -> None:
+@click.option(
+    "--fix",
+    "fix",
+    is_flag=True,
+    default=False,
+    help=(
+        "Subtractively remove broken `missing_target` links from the index file "
+        "(ADR-0020). Dry-run unless --apply. Other findings are left untouched."
+    ),
+)
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    default=False,
+    help="With --fix, actually rewrite the index file. Without it, --fix is a dry-run.",
+)
+def memory_doctor(path: str | None, json_out: bool, fix: bool, apply_: bool) -> None:
     """Report drift between disk, the index file, and the searchable DB (read-only).
 
     With no PATH, inspects every configured ``memory_dir``. Pass a PATH to
@@ -784,7 +1030,16 @@ def memory_doctor(path: str | None, json_out: bool) -> None:
     Exit codes: ``0`` clean (or advisory-only findings), ``1`` when any
     error-severity finding exists (stale DB sources, convention violations,
     or broken index links).
+
+    ``--fix`` switches to a subtractive curation mode: it removes index-file
+    pointer lines whose target is missing on disk (``broken_link`` /
+    ``missing_target``) and nothing else (ADR-0020). It is a dry-run preview
+    unless ``--apply`` is also passed. The default report is read-only and
+    unchanged.
     """
+    if apply_ and not fix:
+        raise click.UsageError("--apply only applies with --fix. See: mm memory doctor --help")
+
     config = _load_config_read_only()
     memory_dirs = config.indexing.all_index_roots()
 
@@ -801,6 +1056,10 @@ def memory_doctor(path: str | None, json_out: bool) -> None:
 
     if not inspect_dirs:
         click.secho("No memory_dirs configured. Run `mm init`.", fg="yellow")
+        return
+
+    if fix:
+        _run_fix(inspect_dirs=inspect_dirs, apply=apply_, json_out=json_out)
         return
 
     reports = _gather_reports(config=config, inspect_dirs=inspect_dirs)
