@@ -5,7 +5,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
-- **`mm init` splits Codex memories into per-subdir namespaces.** The provider
+- **`mm init` splits Codex memories into per-subdir namespaces (#1164).** The provider
   preset for `~/.codex/memories/` now generates three ordered namespace rules
   instead of one flat `codex` rule: `codex:rollout_summaries` (per-session
   episodic recaps), `codex:extensions` (the ad-hoc note inbox), and
