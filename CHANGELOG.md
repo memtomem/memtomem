@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-06-01
+
 - **`mm memory doctor` — read-only hygiene report for memory stores.** A
   registered `memory_dir` can be barely indexed (the fs watcher only reacts to
   live events, so files that landed while the server was down stay invisible
@@ -18,9 +20,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   from the TOC, hot-cache budget overruns, and never-accessed "cold" files.
   Human output by default, `--json` for CI; exits `1` only on definite
   inconsistencies (deleted-source chunks, convention violations, broken links).
-  Report-only — it never writes disk, DB, or config (loads config with
-  `migrate=False` so it can't trigger the legacy auto-discover rewrite). The
-  curation `--fix` path lands later behind its own ADR.
+  Report-only by default — the report never writes disk, DB, or config (loads
+  config with `migrate=False` so it can't trigger the legacy auto-discover
+  rewrite). A narrow, opt-in `--fix` then removes *only* broken
+  `missing_target` index links (`outside_root`/`url`/`anchor` left alone),
+  dry-run by default with `--apply` to write — byte-exact line-splice under a
+  sidecar lock with fresh re-validation, removals count-bounded to what the
+  report saw, per the ADR-0020 subtractive write contract (#1172, #1173).
 
 - **Provider index-file conventions enforced on every index path (fixes
   `MEMORY.md` pollution).** The exclude set for agent index/TOC files — Claude
