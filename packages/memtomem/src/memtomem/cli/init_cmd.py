@@ -1090,8 +1090,9 @@ def _claude_desktop_config_hint() -> str:
     """Return the Claude Desktop config path for the current OS.
 
     Claude Desktop is the only editor in ``_emit_mcp_paste_hints`` whose
-    config location is OS-specific; Cursor / Windsurf / Gemini CLI all use
-    a single ``~/<dot-dir>/...`` layout that works on every platform."""
+    config location is OS-specific; Cursor / Windsurf / Antigravity CLI /
+    Gemini CLI all use a single ``~/<dot-dir>/...`` layout that works on
+    every platform."""
     if sys.platform == "darwin":
         return "~/Library/Application Support/Claude/claude_desktop_config.json"
     if sys.platform == "win32":
@@ -1105,11 +1106,22 @@ def _emit_mcp_paste_hints() -> None:
     Claude Code auto-loads a project-root ``.mcp.json``; other editors do not
     and expect their own config file. Shown after every path that writes the
     file so users know the generated JSON is a template, not a drop-in config
-    for Cursor/Windsurf/Claude Desktop/Gemini CLI."""
+    for Cursor/Windsurf/Claude Desktop/Antigravity CLI/Gemini CLI.
+
+    Antigravity CLI (``agy``, Google's successor to Gemini CLI) reads MCP
+    servers from its own ``~/.gemini/antigravity-cli/mcp_config.json`` (key
+    ``mcpServers``) — distinct from the Antigravity IDE's
+    ``~/.gemini/antigravity/mcp_config.json``. Each server entry carries
+    ``"type": "stdio"`` there; the generated ``.mcp.json`` omits it, so the
+    hint reminds users to add it when pasting. Gemini CLI's
+    ``~/.gemini/settings.json`` is deprecated upstream on 2026-06-18 for
+    free/Pro/Ultra tiers (enterprise Gemini Code Assist keeps it)."""
     click.echo("    Cursor          → paste into ~/.cursor/mcp.json")
     click.echo("    Windsurf        → paste into ~/.codeium/windsurf/mcp_config.json")
     click.echo(f"    Claude Desktop  → paste into {_claude_desktop_config_hint()}")
-    click.echo("    Gemini CLI      → paste into ~/.gemini/settings.json")
+    click.echo("    Antigravity CLI → paste into ~/.gemini/antigravity-cli/mcp_config.json")
+    click.echo('                      (add "type": "stdio" to the memtomem entry)')
+    click.echo("    Gemini CLI      → paste into ~/.gemini/settings.json (deprecated 2026-06-18)")
     click.echo("  (Claude Code picks up ./.mcp.json in this project automatically.)")
 
 

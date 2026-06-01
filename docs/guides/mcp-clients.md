@@ -166,6 +166,12 @@ Restart Claude Desktop after configuration.
 
 ## 5. Gemini CLI
 
+> **Deprecated upstream.** Google is transitioning Gemini CLI to the
+> Antigravity CLI (see [§7](#7-antigravity)). Gemini CLI stops serving
+> free/Pro/Ultra individual tiers on **2026-06-18** (enterprise Gemini Code
+> Assist Standard/Enterprise keep it). New setups should prefer the
+> **Antigravity CLI (`agy`)** instructions in §7.
+
 Create or edit the `~/.gemini/settings.json` file:
 
 ```json
@@ -223,6 +229,17 @@ Call mem_status to check the memtomem connection status
 
 ## 7. Antigravity
 
+"Antigravity" ships as two distinct surfaces with **separate** MCP config
+files — register memtomem in whichever you actually use:
+
+- **Antigravity IDE** (the desktop app / VS Code fork) — configured through
+  the Agent panel UI below.
+- **Antigravity CLI** (`agy`, Google's terminal-native successor to Gemini
+  CLI) — configured by editing `~/.gemini/antigravity-cli/mcp_config.json`
+  directly; see [Antigravity CLI (`agy`)](#antigravity-cli-agy) below.
+
+### Antigravity IDE
+
 1. Click the `...` menu at the top of the Agent panel > **MCP Servers**
 2. Click **Manage MCP Servers** at the top of the MCP Store
 3. Select **View raw config** > `mcp_config.json` will open
@@ -256,6 +273,33 @@ Call mem_status to check the memtomem connection status
 > `Application Support/<AppName>/User/` directory. Register memtomem in
 > whichever file matches the agent you plan to call it from — or both, if
 > you use both.
+
+### Antigravity CLI (`agy`)
+
+The Antigravity CLI is a **separate** surface from the IDE above: it reads
+MCP servers from `~/.gemini/antigravity-cli/mcp_config.json` (key
+`mcpServers`), **not** the IDE's `~/.gemini/antigravity/mcp_config.json`.
+Create or edit that file:
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"],
+      "env": {
+        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
+      }
+    }
+  }
+}
+```
+
+Restart the `agy` session after editing. The CLI also reads your existing
+`~/.gemini/GEMINI.md` context and can pull in Gemini/Claude plugins via
+`agy plugin import`, so memory indexed with `mm ingest gemini-memory` keeps
+working unchanged.
 
 ---
 
