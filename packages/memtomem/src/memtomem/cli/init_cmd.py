@@ -784,15 +784,27 @@ def _superseded_category(rule: dict, proposed_categories: set[str]) -> str | Non
     return None
 
 
+def _normalize_glob_for_prefix(path_glob: str) -> str:
+    """Expand ``~``, fold case, and unify separators for prefix comparison.
+
+    Crucially normalises ``\\`` → ``/``: ``_expand_glob_for_compare`` runs
+    ``Path.expanduser()``, which on Windows yields backslash separators
+    (``C:\\Users\\me\\.codex\\memories\\**``). The prefix/suffix logic below
+    is separator-sensitive, so without this the ``/**`` check silently fails
+    on Windows and shadowing is never detected.
+    """
+    return _expand_glob_for_compare(path_glob).replace("\\", "/").lower().rstrip("/")
+
+
 def _recursive_glob_prefix(path_glob: str) -> str | None:
     """Return the directory prefix of a recursive ``BASE/**`` glob, else None.
 
-    ``~`` is expanded and case is folded so the result is comparable across
-    the tilde/absolute forms a config may store. Returns ``None`` for
-    non-recursive globs (``BASE/*`` or a bare path), which never act as a
-    catch-all over a nested subtree.
+    ``~`` is expanded, separators unified, and case folded so the result is
+    comparable across the tilde/absolute/Windows forms a config may store.
+    Returns ``None`` for non-recursive globs (``BASE/*`` or a bare path),
+    which never act as a catch-all over a nested subtree.
     """
-    g = _expand_glob_for_compare(path_glob).lower().rstrip("/")
+    g = _normalize_glob_for_prefix(path_glob)
     if g.endswith("/**"):
         return g[: -len("/**")]
     return None
@@ -811,9 +823,7 @@ def _glob_shadows(outer_glob: str, inner_glob: str) -> bool:
     if outer is None:
         return False
     inner = _recursive_glob_prefix(inner_glob)
-    inner_base = (
-        inner if inner is not None else _expand_glob_for_compare(inner_glob).lower().rstrip("/")
-    )
+    inner_base = inner if inner is not None else _normalize_glob_for_prefix(inner_glob)
     return inner_base == outer or inner_base.startswith(outer + "/")
 
 

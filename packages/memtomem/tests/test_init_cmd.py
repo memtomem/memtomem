@@ -3691,6 +3691,30 @@ class TestProviderPresetRules:
         assert _rule_matches_existing("~/.codex/memories/**", existing) is True
         assert _rule_matches_existing("~/.claude/plans/**", existing) is False
 
+    def test_glob_shadows_is_separator_agnostic(self) -> None:
+        """``_glob_shadows`` must handle backslash separators — on Windows
+        ``Path.expanduser()`` yields ``C:\\Users\\…\\**``, and a separator-naive
+        ``/**`` check silently stops detecting shadowing there (regression: the
+        codex split shipped subdir rules behind a user catch-all on Windows)."""
+        from memtomem.cli.init_cmd import _glob_shadows
+
+        # Windows-style backslash globs (already expanded, no tilde).
+        outer_win = r"C:\Users\me\.codex\memories\**"
+        inner_win = r"C:\Users\me\.codex\memories\rollout_summaries\**"
+        assert _glob_shadows(outer_win, inner_win) is True
+        # POSIX equivalents still shadow.
+        assert (
+            _glob_shadows(
+                "/Users/me/.codex/memories/**",
+                "/Users/me/.codex/memories/rollout_summaries/**",
+            )
+            is True
+        )
+        # An unrelated tree never shadows, on either separator.
+        assert _glob_shadows(r"C:\Users\me\.gemini\**", inner_win) is False
+        # A non-recursive outer glob never acts as a catch-all.
+        assert _glob_shadows(r"C:\Users\me\.codex\memories\*", inner_win) is False
+
     def test_include_provider_flag_writes_rule_when_dirs_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
