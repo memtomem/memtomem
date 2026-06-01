@@ -3430,7 +3430,6 @@ class TestProviderPresetRules:
         [
             ("claude-memory", "~/.claude/projects/*/memory/**", "claude:{ancestor:1}"),
             ("claude-plans", "~/.claude/plans/**", "claude-plans"),
-            ("codex", "~/.codex/memories/**", "codex"),
         ],
     )
     def test_step_collects_rule_for_accepted_category(
@@ -3458,6 +3457,38 @@ class TestProviderPresetRules:
         cat, rule = rules[0]
         assert cat == category
         assert rule == {"path_glob": expected_glob, "namespace": expected_ns}
+
+    def test_step_collects_codex_split_rules(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Codex maps to an ordered 3-rule split: the per-subdir rules
+        (rollout_summaries, extensions) MUST precede the ``codex:global``
+        catch-all so first-match-wins routes each subtree correctly."""
+        from memtomem.cli import init_cmd
+
+        target = tmp_path / "codex"
+        target.mkdir()
+        monkeypatch.setattr(
+            "memtomem.config._detect_provider_dirs",
+            lambda: {"claude-memory": [], "claude-plans": [], "codex": [target]},
+        )
+        monkeypatch.setattr(init_cmd, "nav_confirm", lambda *a, **kw: True)
+
+        state: dict = {}
+        init_cmd._step_provider_dirs(state)
+
+        rules = state.get("provider_rules", [])
+        assert [(cat, r["namespace"]) for cat, r in rules] == [
+            ("codex", "codex:rollout_summaries"),
+            ("codex", "codex:extensions"),
+            ("codex", "codex:global"),
+        ]
+        globs = [r["path_glob"] for _, r in rules]
+        # catch-all is last; subdir rules precede it (first-match-wins)
+        assert globs[-1] == "~/.codex/memories/**"
+        assert globs.index("~/.codex/memories/rollout_summaries/**") < globs.index(
+            "~/.codex/memories/**"
+        )
 
     def test_step_skips_rule_when_category_declined(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3490,7 +3521,7 @@ class TestProviderPresetRules:
                 "claude-memory",
                 {"path_glob": "~/.claude/projects/*/memory/**", "namespace": "claude:{ancestor:1}"},
             ),
-            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"}),
         ]
         _write_config_and_summary(state, tmp_path)
 
@@ -3500,7 +3531,7 @@ class TestProviderPresetRules:
             "path_glob": "~/.claude/projects/*/memory/**",
             "namespace": "claude:{ancestor:1}",
         } in rules
-        assert {"path_glob": "~/.codex/memories/**", "namespace": "codex"} in rules
+        assert {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"} in rules
 
     def test_write_is_idempotent_on_rerun(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3512,7 +3543,18 @@ class TestProviderPresetRules:
         set_home(monkeypatch, tmp_path)
         state = _make_init_state(tmp_path)
         state["provider_rules"] = [
-            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+            (
+                "codex",
+                {
+                    "path_glob": "~/.codex/memories/rollout_summaries/**",
+                    "namespace": "codex:rollout_summaries",
+                },
+            ),
+            (
+                "codex",
+                {"path_glob": "~/.codex/memories/extensions/**", "namespace": "codex:extensions"},
+            ),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"}),
         ]
 
         _write_config_and_summary(state, tmp_path)
@@ -3520,8 +3562,71 @@ class TestProviderPresetRules:
 
         data = json.loads((tmp_path / ".memtomem" / "config.json").read_text(encoding="utf-8"))
         rules = data["namespace"]["rules"]
-        matching = [r for r in rules if r.get("path_glob") == "~/.codex/memories/**"]
-        assert len(matching) == 1, f"expected one codex rule, got {matching}"
+        # each codex glob appears exactly once — dedup by path_glob, and the
+        # re-run's ``codex:global`` is not mistaken for the legacy flat rule.
+        for glob in (
+            "~/.codex/memories/rollout_summaries/**",
+            "~/.codex/memories/extensions/**",
+            "~/.codex/memories/**",
+        ):
+            matching = [r for r in rules if r.get("path_glob") == glob]
+            assert len(matching) == 1, f"expected one {glob} rule, got {matching}"
+
+    def test_write_migrates_legacy_flat_codex_rule(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Upgrade path: a config written by the old flat-``codex`` preset is
+        migrated on re-run. The stale ``~/.codex/memories/** -> codex`` rule is
+        removed and the per-subdir split takes its place — in order, with no
+        dead/duplicate catch-all (Codex review Blocker #1)."""
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        set_home(monkeypatch, tmp_path)
+        # Seed a config carrying the exact legacy flat codex preset.
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "namespace": {
+                        "rules": [{"path_glob": "~/.codex/memories/**", "namespace": "codex"}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            (
+                "codex",
+                {
+                    "path_glob": "~/.codex/memories/rollout_summaries/**",
+                    "namespace": "codex:rollout_summaries",
+                },
+            ),
+            (
+                "codex",
+                {"path_glob": "~/.codex/memories/extensions/**", "namespace": "codex:extensions"},
+            ),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"}),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        data = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+        rules = data["namespace"]["rules"]
+        namespaces = [r["namespace"] for r in rules]
+        globs = [r["path_glob"] for r in rules]
+
+        # Legacy flat codex is gone; the split is present.
+        assert "codex" not in namespaces
+        assert {"codex:rollout_summaries", "codex:extensions", "codex:global"} <= set(namespaces)
+        # Exactly one catch-all, and subdir rules precede it (first-match-wins).
+        assert globs.count("~/.codex/memories/**") == 1
+        assert globs.index("~/.codex/memories/rollout_summaries/**") < globs.index(
+            "~/.codex/memories/**"
+        )
+        assert globs.index("~/.codex/memories/extensions/**") < globs.index("~/.codex/memories/**")
 
     def test_write_preserves_user_rule_on_same_glob_diff_namespace(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3546,14 +3651,30 @@ class TestProviderPresetRules:
         )
 
         state = _make_init_state(tmp_path)
+        # Propose the real codex split. The custom catch-all wins for the
+        # ``**`` glob, AND the subdir rules must NOT be appended behind it —
+        # they would be unreachable (first-match-wins) and dead config.
         state["provider_rules"] = [
-            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+            (
+                "codex",
+                {
+                    "path_glob": "~/.codex/memories/rollout_summaries/**",
+                    "namespace": "codex:rollout_summaries",
+                },
+            ),
+            (
+                "codex",
+                {"path_glob": "~/.codex/memories/extensions/**", "namespace": "codex:extensions"},
+            ),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"}),
         ]
         _write_config_and_summary(state, tmp_path)
 
         data = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
         rules = data["namespace"]["rules"]
-        assert len(rules) == 1
+        # Only the user's custom catch-all remains: codex:global deduped away,
+        # the two subdir rules dropped as shadowed (not written behind it).
+        assert len(rules) == 1, f"no shadowed subdir rules should be written, got {rules}"
         assert rules[0]["namespace"] == "my-codex", "user override should be preserved"
 
     def test_dedup_expanduser_normalizes_both_sides(
@@ -3569,6 +3690,30 @@ class TestProviderPresetRules:
         ]
         assert _rule_matches_existing("~/.codex/memories/**", existing) is True
         assert _rule_matches_existing("~/.claude/plans/**", existing) is False
+
+    def test_glob_shadows_is_separator_agnostic(self) -> None:
+        """``_glob_shadows`` must handle backslash separators — on Windows
+        ``Path.expanduser()`` yields ``C:\\Users\\…\\**``, and a separator-naive
+        ``/**`` check silently stops detecting shadowing there (regression: the
+        codex split shipped subdir rules behind a user catch-all on Windows)."""
+        from memtomem.cli.init_cmd import _glob_shadows
+
+        # Windows-style backslash globs (already expanded, no tilde).
+        outer_win = r"C:\Users\me\.codex\memories\**"
+        inner_win = r"C:\Users\me\.codex\memories\rollout_summaries\**"
+        assert _glob_shadows(outer_win, inner_win) is True
+        # POSIX equivalents still shadow.
+        assert (
+            _glob_shadows(
+                "/Users/me/.codex/memories/**",
+                "/Users/me/.codex/memories/rollout_summaries/**",
+            )
+            is True
+        )
+        # An unrelated tree never shadows, on either separator.
+        assert _glob_shadows(r"C:\Users\me\.gemini\**", inner_win) is False
+        # A non-recursive outer glob never acts as a catch-all.
+        assert _glob_shadows(r"C:\Users\me\.codex\memories\*", inner_win) is False
 
     def test_include_provider_flag_writes_rule_when_dirs_present(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3647,7 +3792,50 @@ class TestProviderPresetRules:
         from memtomem.cli.init_cmd import _write_config_and_summary
 
         set_home(monkeypatch, tmp_path)
-        # Seed: codex rule already present, claude-plans not.
+        # Seed: claude-plans rule already present, codex not. (A pre-existing
+        # rule with a namespace that is *not* a superseded preset is kept and
+        # reported as skipped, not replaced.)
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "namespace": {
+                        "rules": [{"path_glob": "~/.claude/plans/**", "namespace": "claude-plans"}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            ("claude-plans", {"path_glob": "~/.claude/plans/**", "namespace": "claude-plans"}),
+            (
+                "codex",
+                {
+                    "path_glob": "~/.codex/memories/rollout_summaries/**",
+                    "namespace": "codex:rollout_summaries",
+                },
+            ),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "Namespace rules:" in out
+        assert "+ ~/.codex/memories/rollout_summaries/**" in out
+        assert "⏭ ~/.claude/plans/**" in out
+
+    def test_banner_reports_replaced_legacy_rule(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Migrating the flat codex preset surfaces a ``↻`` replaced line so
+        the rewrite is not silent."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
         (config_dir / "config.json").write_text(
@@ -3660,18 +3848,55 @@ class TestProviderPresetRules:
             ),
             encoding="utf-8",
         )
-
         state = _make_init_state(tmp_path)
         state["provider_rules"] = [
-            ("claude-plans", {"path_glob": "~/.claude/plans/**", "namespace": "claude-plans"}),
-            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"}),
         ]
         _write_config_and_summary(state, tmp_path)
 
         out = unstyle(capsys.readouterr().out)
-        assert "Namespace rules:" in out
-        assert "+ ~/.claude/plans/**" in out
-        assert "⏭ ~/.codex/memories/**" in out
+        assert "↻ ~/.codex/memories/**" in out
+        assert "replaced legacy 'codex'" in out
+
+    def test_banner_reports_shadowed_subdir_rule(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A subdir rule made unreachable by a user's custom catch-all is
+        surfaced with a ``⚠`` line rather than silently appended as dead
+        config (Codex review Major)."""
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        set_home(monkeypatch, tmp_path)
+        config_dir = tmp_path / ".memtomem"
+        config_dir.mkdir()
+        (config_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "namespace": {
+                        "rules": [{"path_glob": "~/.codex/memories/**", "namespace": "my-codex"}]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = _make_init_state(tmp_path)
+        state["provider_rules"] = [
+            (
+                "codex",
+                {
+                    "path_glob": "~/.codex/memories/rollout_summaries/**",
+                    "namespace": "codex:rollout_summaries",
+                },
+            ),
+            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex:global"}),
+        ]
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        assert "⚠ ~/.codex/memories/rollout_summaries/**" in out
+        assert "shadowed by an existing rule" in out
 
     def test_banner_silent_when_no_proposals(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -3702,11 +3927,13 @@ class TestProviderPresetRules:
         set_home(monkeypatch, tmp_path)
         config_dir = tmp_path / ".memtomem"
         config_dir.mkdir()
+        # Use a non-superseded preset (claude-plans) so the proposed rule is
+        # skipped (already present), not migrated.
         (config_dir / "config.json").write_text(
             json.dumps(
                 {
                     "namespace": {
-                        "rules": [{"path_glob": "~/.codex/memories/**", "namespace": "codex"}]
+                        "rules": [{"path_glob": "~/.claude/plans/**", "namespace": "claude-plans"}]
                     }
                 }
             ),
@@ -3714,7 +3941,7 @@ class TestProviderPresetRules:
         )
         state = _make_init_state(tmp_path)
         state["provider_rules"] = [
-            ("codex", {"path_glob": "~/.codex/memories/**", "namespace": "codex"}),
+            ("claude-plans", {"path_glob": "~/.claude/plans/**", "namespace": "claude-plans"}),
         ]
         _write_config_and_summary(state, tmp_path)
 
@@ -3731,13 +3958,14 @@ class TestProviderPresetRules:
             _VALID_PRESET_PLACEHOLDERS,
         )
 
-        for _category, (_glob, namespace) in _PROVIDER_RULE_TEMPLATES.items():
-            if "{" in namespace or "}" in namespace:
-                # If placeholders are used, they must be one of the allowed set.
-                assert any(p in namespace for p in _VALID_PRESET_PLACEHOLDERS), (
-                    f"namespace {namespace!r} uses a placeholder outside "
-                    f"_VALID_PRESET_PLACEHOLDERS={_VALID_PRESET_PLACEHOLDERS}"
-                )
+        for _category, rules in _PROVIDER_RULE_TEMPLATES.items():
+            for _glob, namespace in rules:
+                if "{" in namespace or "}" in namespace:
+                    # If placeholders are used, they must be one of the allowed set.
+                    assert any(p in namespace for p in _VALID_PRESET_PLACEHOLDERS), (
+                        f"namespace {namespace!r} uses a placeholder outside "
+                        f"_VALID_PRESET_PLACEHOLDERS={_VALID_PRESET_PLACEHOLDERS}"
+                    )
 
 
 def test_valid_presets_frozenset_matches_literal() -> None:

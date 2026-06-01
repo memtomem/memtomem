@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`mm init` splits Codex memories into per-subdir namespaces (#1164).** The provider
+  preset for `~/.codex/memories/` now generates three ordered namespace rules
+  instead of one flat `codex` rule: `codex:rollout_summaries` (per-session
+  episodic recaps), `codex:extensions` (the ad-hoc note inbox), and
+  `codex:global` (the consolidated top-level memory) as the catch-all. Folding
+  those three distinct memory classes into one namespace defeated per-class
+  search and time-decay. Rules use literal namespaces only, so the RFC #304
+  placeholder lock is unaffected. Re-running `mm init` after upgrading migrates
+  an existing flat `codex` rule in place: the stale catch-all is removed and the
+  split takes its position (reported with a `↻` line), so the new subdir rules
+  resolve correctly under first-match-wins instead of being shadowed. A
+  hand-edited codex rule (custom namespace) is never touched. Existing indexed
+  data is migrated by re-running `mm index ~/.codex/memories --force`.
+
 ## [0.2.2] — 2026-05-31
 
 Patch release on top of 0.2.1: adds network MCP transports, a `mm web`
