@@ -27,6 +27,7 @@ pointer so a maintainer can scan due dates without opening each ADR.
 | 0012 §"Shape A" | Cross-DB memory migration — team onboarding export | Onboarding flow blocked on `scope`/`project_root` serialization OR gate plumbing on import (full criteria in ADR §"Shape A — Trigger criteria") | [#911](https://github.com/memtomem/memtomem/issues/911) | (event-driven) |
 | 0012 §"Shape B" | Cross-DB memory migration — project archive | User reports `~/.memtomem/memtomem.db` size pain that existing compaction / orphan-GC remedies do not solve (full criteria in ADR §"Shape B — Trigger criteria") | [#911](https://github.com/memtomem/memtomem/issues/911) | (event-driven) |
 | 0007 §"Trigger criteria" | PR-C: Namespace rename / bulk delete prod exposure (PR-A/B already shipped) | "≥ 2 prod user reports" along the rename/bulk-delete axis OR namespace rules surfacing in the onboarding flow | (none — tracked in ADR) | (event-driven) |
+| 0020 §"Open questions" | Tier 3 index-file curation (`budget` trim / `index_orphan` add / `outside_root`) beyond the subtractive `missing_target`-only `--fix` | A user report (or repeated doctor findings) that the `missing_target`-only fix demonstrably cannot resolve (criteria in ADR §"Open questions") | (none — tracked in ADR) | (event-driven) |
 
 ## Adding a row
 
