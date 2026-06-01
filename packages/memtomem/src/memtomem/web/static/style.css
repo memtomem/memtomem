@@ -1098,7 +1098,7 @@ button:active { opacity: 0.7; }
 .tags-stats-label { font-weight: 600; color: var(--text); }
 .tags-stats-sep { opacity: 0.4; }
 .tag-row {
-  display: grid; grid-template-columns: minmax(100px, auto) 1fr 44px;
+  display: grid; grid-template-columns: minmax(80px, auto) 1fr 44px auto;
   align-items: center; gap: 12px; padding: 7px 4px;
   border-bottom: 1px solid var(--border);
   border-radius: 2px; transition: background 0.1s;
@@ -1108,10 +1108,49 @@ button:active { opacity: 0.7; }
 .tag-name {
   font-family: var(--mono); font-size: 0.82rem; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* Let the auto grid track shrink below content so a long unbroken tag name
+     truncates with an ellipsis instead of pushing the actions column to
+     overflow the row (#688). */
+  min-width: 0;
 }
 .tag-bar-wrap { background: var(--border); border-radius: 3px; height: 8px; overflow: hidden; }
 .tag-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s; }
 .tag-count { font-size: 0.8rem; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Per-tag manage actions — hover/focus revealed (#688) */
+.tag-actions {
+  display: flex; gap: 2px; opacity: 0; transition: opacity 0.12s;
+}
+.tag-row:hover .tag-actions, .tag-row:focus-within .tag-actions { opacity: 1; }
+.tag-action-btn {
+  background: none; border: none; cursor: pointer; padding: 2px 6px;
+  font-size: 0.72rem; color: var(--muted); border-radius: 3px;
+  font-family: inherit; white-space: nowrap;
+}
+.tag-action-btn:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--accent); }
+.tag-action-btn.tag-action-danger:hover { background: rgba(var(--danger-rgb, 220, 60, 60), 0.12); color: var(--danger); }
+/* Keep actions reachable by keyboard even before hover reveals them. */
+.tag-action-btn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Tag-manage modal (#688) */
+.tag-manage-input-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.tag-manage-input-row span { font-size: 0.8rem; color: var(--muted); }
+.tag-manage-input-row input {
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); color: var(--text); font-size: 0.85rem; font-family: var(--mono);
+  width: 100%; box-sizing: border-box;
+}
+.tag-manage-samples { max-height: 180px; overflow-y: auto; margin: 4px 0 0; }
+.tag-manage-sample {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 5px 0; border-top: 1px solid var(--border);
+}
+.tag-manage-sample-src { font-family: var(--mono); font-size: 0.72rem; color: var(--accent); }
+.tag-manage-sample-preview {
+  font-size: 0.75rem; color: var(--muted); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tag-manage-error { color: var(--danger); font-size: 0.8rem; margin: 6px 0 0; }
 
 /* Tag cloud view */
 .tags-cloud {

@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=91" />
+  <link rel="stylesheet" href="/style.css?v=92" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1383,6 +1383,28 @@
     </div>
   </div>
 
+  <!-- Tag management (rename / merge / delete) — #688. Two-phase: rename and
+       merge collect a value first, then every action runs a dry-run preview
+       (authoritative affected count + sample) before the OK button applies. -->
+  <div id="tag-manage-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="tag-manage-title">
+    <div class="modal-inner confirm-dialog tag-manage-dialog">
+      <div class="modal-header">
+        <span id="tag-manage-title" class="modal-title"></span>
+      </div>
+      <label id="tag-manage-input-row" class="tag-manage-input-row" hidden>
+        <span id="tag-manage-input-label"></span>
+        <input type="text" id="tag-manage-input" autocomplete="off" spellcheck="false" />
+      </label>
+      <p id="tag-manage-impact" class="confirm-message"></p>
+      <div id="tag-manage-samples" class="tag-manage-samples"></div>
+      <p id="tag-manage-error" class="tag-manage-error" hidden></p>
+      <div class="confirm-actions">
+        <button id="tag-manage-cancel-btn" class="btn-ghost" data-i18n="modal.cancel_btn">Cancel</button>
+        <button id="tag-manage-ok-btn" class="btn-primary"></button>
+      </div>
+    </div>
+  </div>
+
   <!-- Context Gateway 409 mtime conflict dialog (issue #763). Three buttons:
        Reload (discard buffer), Open diff (switch to diff tab with user-buffer
        vs on-disk), Force save (overwrite — backend logs WARNING). -->
@@ -1435,7 +1457,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=118"></script>
+  <script src="/app.js?v=119"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=9"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>

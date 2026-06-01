@@ -5727,9 +5727,24 @@ function _renderTagViews() {
       <div class="tag-bar-wrap">
         <div class="tag-bar" style="width:${pct}%;background:${color}"></div>
       </div>
-      <span class="tag-count">${count}</span>`;
+      <span class="tag-count">${count}</span>
+      <div class="tag-actions">
+        <button type="button" class="tag-action-btn" data-act="rename"
+          aria-label="${escapeAttr(t('tags.manage_rename') + ': ' + tag)}" data-i18n="tags.manage_rename">${escapeHtml(t('tags.manage_rename'))}</button>
+        <button type="button" class="tag-action-btn" data-act="merge"
+          aria-label="${escapeAttr(t('tags.manage_merge') + ': ' + tag)}" data-i18n="tags.manage_merge">${escapeHtml(t('tags.manage_merge'))}</button>
+        <button type="button" class="tag-action-btn tag-action-danger" data-act="delete"
+          aria-label="${escapeAttr(t('tags.manage_delete') + ': ' + tag)}" data-i18n="tags.manage_delete">${escapeHtml(t('tags.manage_delete'))}</button>
+      </div>`;
     row.style.cursor = 'pointer';
     row.addEventListener('click', () => _searchByTag(tag));
+    // Manage actions must not also trigger the row's search-by-tag click.
+    row.querySelectorAll('.tag-action-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        manageTag(btn.dataset.act, tag);
+      });
+    });
     listEl.appendChild(row);
   });
 
@@ -5772,6 +5787,223 @@ function _renderTagCloud(tags, maxCount) {
   cloud.querySelectorAll('.tag-cloud-item').forEach(el => {
     el.addEventListener('click', () => _searchByTag(el.dataset.tag));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Tag management — rename / delete / merge (#688)
+//
+// Every action runs a dry-run first (authoritative affected count + sample,
+// global across scopes — see #1175) and only writes on an explicit confirm.
+// rename and merge collect a value (new name / merge target) in a first
+// "input" phase, then transition to the shared "preview" phase; delete goes
+// straight to preview. All three call the shared tag-management service via
+// /api/tags/* so Web, MCP, and the `mm tags` CLI stay symmetric.
+// ---------------------------------------------------------------------------
+const _TAG_ACTIONS = {
+  rename: {
+    needsInput: true, danger: false,
+    titleKey: 'tags.manage_rename_title',
+    inputLabelKey: 'tags.manage_new_name_label',
+    applyKey: 'tags.manage_rename',
+    dryRun: (tag, v) => api('PUT', `/api/tags/${encodeURIComponent(tag)}?dry_run=true`, { new_name: v }),
+    apply: (tag, v) => api('PUT', `/api/tags/${encodeURIComponent(tag)}`, { new_name: v }),
+    doneToast: (tag, v, n) => t('tags.manage_rename_done', { old: tag, new: v, count: n }),
+  },
+  merge: {
+    needsInput: true, danger: false,
+    titleKey: 'tags.manage_merge_title',
+    inputLabelKey: 'tags.manage_target_label',
+    applyKey: 'tags.manage_merge',
+    dryRun: (tag, v) => api('POST', '/api/tags/merge?dry_run=true', { sources: [tag], target: v }),
+    apply: (tag, v) => api('POST', '/api/tags/merge', { sources: [tag], target: v }),
+    doneToast: (tag, v, n) => t('tags.manage_merge_done', { source: tag, target: v, count: n }),
+  },
+  delete: {
+    needsInput: false, danger: true,
+    titleKey: 'tags.manage_delete_title',
+    applyKey: 'tags.manage_delete',
+    dryRun: tag => api('DELETE', `/api/tags/${encodeURIComponent(tag)}?dry_run=true`),
+    apply: tag => api('DELETE', `/api/tags/${encodeURIComponent(tag)}`),
+    doneToast: (tag, _v, n) => t('tags.manage_delete_done', { tag, count: n }),
+  },
+};
+
+// Monotonic token shared across tag-manage modal opens: every dry-run / apply
+// captures the current value and bails on return if a later edit, close, or
+// reopen has advanced it. Keeps apply pinned to the previewed value.
+let _tagReqSeq = 0;
+
+function manageTag(action, tag) {
+  const cfg = _TAG_ACTIONS[action];
+  if (!cfg) return;
+
+  const modal = qs('tag-manage-modal');
+  const inputRow = qs('tag-manage-input-row');
+  const input = qs('tag-manage-input');
+  const inputLabel = qs('tag-manage-input-label');
+  const impactEl = qs('tag-manage-impact');
+  const samplesEl = qs('tag-manage-samples');
+  const errEl = qs('tag-manage-error');
+  const okBtn = qs('tag-manage-ok-btn');
+  const cancelBtn = qs('tag-manage-cancel-btn');
+
+  qs('tag-manage-title').textContent = t(cfg.titleKey, { tag });
+  okBtn.className = cfg.danger ? 'btn-danger' : 'btn-primary';
+  impactEl.textContent = '';
+  samplesEl.innerHTML = '';
+  errEl.hidden = true; errEl.textContent = '';
+  input.disabled = false;
+
+  let phase = cfg.needsInput ? 'input' : 'preview';
+  // The value whose dry-run preview is currently shown. apply() may only run
+  // for this exact value, so an edit in flight can never write an un-previewed
+  // value. ``_tagReqSeq`` (module-level) tags every async request; a response
+  // that returns after a later edit, a close, or a reopen no longer matches
+  // the live seq and is dropped — preventing a stale dry-run/apply from
+  // mutating a reused modal.
+  let previewedValue = null;
+
+  if (cfg.needsInput) {
+    inputLabel.textContent = t(cfg.inputLabelKey);
+    input.value = '';
+    inputRow.hidden = false;
+  } else {
+    inputRow.hidden = true;
+  }
+
+  function setOk(label, disabled) { okBtn.textContent = label; okBtn.disabled = !!disabled; }
+  function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
+  function value() { return cfg.needsInput ? input.value.trim() : null; }
+
+  function renderPreview(res) {
+    impactEl.textContent = res.affected_chunks > 0
+      ? t('tags.manage_impact', { count: res.affected_chunks })
+      : t('tags.manage_impact_none');
+    samplesEl.innerHTML = '';
+    (res.samples || []).forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'tag-manage-sample';
+      const src = document.createElement('span');
+      src.className = 'tag-manage-sample-src';
+      src.textContent = s.source_file;
+      const prev = document.createElement('span');
+      prev.className = 'tag-manage-sample-preview';
+      prev.textContent = s.content_preview;
+      div.appendChild(src); div.appendChild(prev);
+      samplesEl.appendChild(div);
+    });
+  }
+
+  async function enterPreview() {
+    if (cfg.needsInput && !value()) { showError(t('tags.manage_input_required')); return; }
+    const submitted = value();
+    const myReq = ++_tagReqSeq;
+    errEl.hidden = true;
+    setOk('…', true);
+    let res;
+    try {
+      res = await cfg.dryRun(tag, submitted);
+    } catch (err) {
+      if (myReq !== _tagReqSeq) return; // superseded by an edit / close / reopen
+      // Backend 400 (empty / same-name / etc.) — stay in input phase so the
+      // user can correct the value without reopening.
+      showError(err.message || String(err));
+      phase = 'input';
+      setOk(cfg.needsInput ? t('tags.manage_preview') : t(cfg.applyKey), false);
+      return;
+    }
+    if (myReq !== _tagReqSeq) return;   // a newer request (or a close) won
+    renderPreview(res);
+    phase = 'preview';
+    previewedValue = submitted;
+    // affected_chunks === 0 ⇒ nothing to apply; keep OK disabled. The input
+    // stays editable; any edit reverts to the input phase via onInput().
+    setOk(t(cfg.applyKey), res.affected_chunks === 0);
+    if (!cfg.danger && res.affected_chunks > 0) okBtn.focus();
+  }
+
+  async function applyOp() {
+    // Defence in depth: never write a value that differs from the previewed
+    // one — onInput() already reverts to the input phase on any edit.
+    if (cfg.needsInput && value() !== previewedValue) { onInput(); return; }
+    const myReq = ++_tagReqSeq;
+    const applied = cfg.needsInput ? previewedValue : null;
+    setOk('…', true);
+    let res;
+    try {
+      res = await cfg.apply(tag, applied);
+    } catch (err) {
+      if (myReq !== _tagReqSeq) return;
+      showError(err.message || String(err));
+      setOk(t(cfg.applyKey), false);
+      return;
+    }
+    if (myReq !== _tagReqSeq) return;   // modal closed mid-apply
+    cleanup();
+    showToast(cfg.doneToast(tag, cfg.needsInput ? applied : tag, res.affected_chunks), 'success');
+    loadTags();
+  }
+
+  function onOk() {
+    if (okBtn.disabled) return;          // in-flight, or nothing to apply
+    (phase === 'input' ? enterPreview : applyOp)();
+  }
+
+  // Any edit invalidates the last preview — whether it is already shown or
+  // still in flight. Bump the request seq (so a pending dry-run is dropped on
+  // return rather than rendering against the new value) and reset to a clean
+  // input phase. Runs on every keystroke; that is fine — it is just an int
+  // bump plus idempotent DOM clears.
+  function onInput() {
+    _tagReqSeq++;
+    phase = 'input';
+    previewedValue = null;
+    impactEl.textContent = '';
+    samplesEl.innerHTML = '';
+    setOk(t('tags.manage_preview'), false);
+  }
+
+  // --- show + a11y (mirrors showConfirm) ---
+  show(modal);
+  const focusables = () =>
+    [input, cancelBtn, okBtn].filter(
+      el => el && !el.disabled && !(el === input && inputRow.hidden)
+    );
+  const releaseA11y = openModalA11y(modal);
+  (cfg.needsInput ? input : cancelBtn).focus();
+  registerModalCloser(modal, () => cleanup());
+
+  function cleanup() {
+    _tagReqSeq++;            // invalidate any in-flight dry-run / apply
+    hide(modal);
+    releaseA11y();
+    _MODAL_CLOSERS.delete(modal);
+    inputRow.hidden = true;
+    input.disabled = false;
+    modal.removeEventListener('click', onBackdrop);
+    document.removeEventListener('keydown', onKey, true);
+    okBtn.onclick = null; cancelBtn.onclick = null;
+    input.oninput = null; input.onkeydown = null;
+  }
+  function onBackdrop(e) { if (e.target === modal) cleanup(); }
+  function onKey(e) {
+    if (e.key === 'Escape') { e.stopPropagation(); cleanup(); return; }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const f = focusables();
+      const idx = f.indexOf(document.activeElement);
+      f[(idx + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+    }
+  }
+  modal.addEventListener('click', onBackdrop);
+  document.addEventListener('keydown', onKey, true);
+  okBtn.onclick = onOk;
+  cancelBtn.onclick = () => cleanup();
+  input.oninput = onInput;
+  input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); onOk(); } };
+
+  if (phase === 'input') setOk(t('tags.manage_preview'), false);
+  else enterPreview(); // delete: fetch the preview immediately
 }
 
 function _searchByTag(tag) {
