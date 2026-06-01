@@ -104,7 +104,7 @@ class TestOverview:
         # One entry per ``KNOWN_RUNTIMES``; greyed chips for absent runtimes
         # are part of the contract — the frontend renders them as undetected.
         names = [r["name"] for r in runtimes]
-        assert names == ["claude", "gemini", "codex"]
+        assert names == ["claude", "gemini", "codex", "kimi"]
         for entry in runtimes:
             assert isinstance(entry["available"], bool)
 
@@ -121,7 +121,19 @@ class TestOverview:
 
         r = await client.get("/api/context/overview")
         runtimes = {r["name"]: r["available"] for r in r.json()["detected_runtimes"]}
-        assert runtimes == {"claude": True, "gemini": True, "codex": False}
+        assert runtimes == {"claude": True, "gemini": True, "codex": False, "kimi": False}
+
+    @pytest.mark.anyio
+    async def test_overview_detects_kimi_runtime_config_without_importing_as_context(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        kimi_dir = tmp_path / ".kimi"
+        kimi_dir.mkdir()
+        (kimi_dir / "config.toml").write_text("[hooks]\n", encoding="utf-8")
+
+        r = await client.get("/api/context/overview")
+        runtimes = {r["name"]: r["available"] for r in r.json()["detected_runtimes"]}
+        assert runtimes["kimi"] is True
 
     @pytest.mark.anyio
     async def test_project_local_overview_visible_only_with_explicit_target_scope(

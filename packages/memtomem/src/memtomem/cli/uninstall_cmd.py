@@ -296,6 +296,12 @@ def _probe_external_integrations() -> list[_External]:
         home / ".kimi" / "mcp.json",
         home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
     ]
+    kimi_share_dir = os.environ.get("KIMI_SHARE_DIR")
+    if kimi_share_dir:
+        kimi_share_mcp = Path(kimi_share_dir).expanduser() / "mcp.json"
+        if kimi_share_mcp not in candidates:
+            candidates.append(kimi_share_mcp)
+
     cwd_local = Path.cwd() / ".mcp.json"
     if cwd_local.exists():
         candidates.append(cwd_local)

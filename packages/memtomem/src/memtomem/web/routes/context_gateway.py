@@ -190,6 +190,7 @@ def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
     Returns one entry per runtime in :data:`KNOWN_RUNTIMES` with an
     ``available`` flag that is the OR across:
       * top-level agent file (``CLAUDE.md`` / ``GEMINI.md`` / ``AGENTS.md``),
+      * non-import runtime marker file (for example Kimi ``.kimi/config.toml``),
       * project-scope skill dir (``.claude/skills`` etc.),
       * project-scope sub-agent dir (``.claude/agents`` etc.),
       * project-scope command dir (``.claude/commands`` etc., Codex omitted).
@@ -206,6 +207,7 @@ def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
         AGENT_DIRS,
         AGENT_FILES,
         COMMAND_DIRS,
+        RUNTIME_MARKER_FILES,
         SKILL_DIRS,
     )
 
@@ -213,6 +215,8 @@ def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
     for rt in KNOWN_RUNTIMES:
         probes: list[bool] = []
         for rel in AGENT_FILES.get(rt, []):
+            probes.append((project_root / rel).exists())
+        for rel in RUNTIME_MARKER_FILES.get(rt, []):
             probes.append((project_root / rel).exists())
         for rel in SKILL_DIRS.get(f"{rt}_skills", []):
             probes.append((project_root / rel).is_dir())

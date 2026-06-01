@@ -23,8 +23,13 @@ AGENT_FILES: dict[str, list[str]] = {
     "cursor": [".cursorrules", ".cursor/rules"],
     "gemini": ["GEMINI.md"],
     "codex": ["AGENTS.md"],
-    "kimi": [".kimi/config.toml"],
     "copilot": [".github/copilot-instructions.md"],
+}
+
+# Runtime marker files that are enough to show a runtime as available, but are
+# not Markdown context sources for ``detect_agent_files`` / ``mm context init``.
+RUNTIME_MARKER_FILES: dict[str, list[str]] = {
+    "kimi": [".kimi/config.toml"],
 }
 
 
@@ -276,6 +281,7 @@ __all__ = [
     "COMMAND_DIRS",
     "DetectedFile",
     "DetectedKind",
+    "RUNTIME_MARKER_FILES",
     "SKILL_DIRS",
     "detect_agent_dirs",
     "detect_agent_files",
