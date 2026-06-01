@@ -26,6 +26,15 @@ def test_parse_requires_command_string(tmp_path: Path) -> None:
         parse_canonical_mcp_server(path)
 
 
+def test_rejects_network_transport_definition(tmp_path: Path) -> None:
+    """v1 accepts only stdio servers. A network (type/url SSE/HTTP) definition
+    is rejected, and the message names the stdio limitation so it does not read
+    as a generic schema bug."""
+    path = _canonical(tmp_path, "remote", {"type": "http", "url": "https://example.com/mcp"})
+    with pytest.raises(McpServerParseError, match="stdio"):
+        parse_canonical_mcp_server(path)
+
+
 def test_sync_merges_project_mcp_json_without_clobbering_other_entries(tmp_path: Path) -> None:
     _canonical(
         tmp_path,

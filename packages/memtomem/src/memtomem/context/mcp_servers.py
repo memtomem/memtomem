@@ -1,10 +1,16 @@
 """Canonical MCP server definitions for the Context Gateway.
 
-v1 is intentionally narrow: canonical definitions live under
-``.memtomem/mcp-servers/<name>.json`` and fan out only to the project
-``.mcp.json`` file's ``mcpServers`` object. User-home client configs and
-reverse import are left to a follow-up because they need stronger
-host-write and secret-handling policy.
+v1 is intentionally narrow on two axes:
+
+- **Residency.** Canonical definitions live under
+  ``.memtomem/mcp-servers/<name>.json`` and fan out only to the project
+  ``.mcp.json`` file's ``mcpServers`` object. User-home client configs and
+  reverse import are left to a follow-up because they need stronger
+  host-write and secret-handling policy.
+- **Transport.** Only stdio servers (a non-empty ``command`` field) are
+  accepted. Network transports — the ``type``/``url`` SSE/HTTP shape added
+  in v0.2.2 — are rejected by :func:`validate_mcp_server_definition` and are
+  a deliberate follow-up, not an oversight.
 """
 
 from __future__ import annotations
@@ -61,11 +67,22 @@ def list_canonical_mcp_servers(project_root: Path) -> list[Path]:
 
 
 def validate_mcp_server_definition(data: object, *, name: str) -> dict[str, Any]:
+    """Validate a stdio MCP server definition.
+
+    v1 accepts only stdio servers (a non-empty ``command``, optional ``args`` /
+    ``env``). Network ``type``/``url`` SSE/HTTP definitions are rejected here by
+    design — see the module docstring; the error names the limitation so the
+    user does not read it as a generic schema bug.
+    """
     if not isinstance(data, dict):
         raise McpServerParseError(f"MCP server '{name}' must be a JSON object")
     command = data.get("command")
     if not isinstance(command, str) or not command.strip():
-        raise McpServerParseError(f"MCP server '{name}' requires non-empty string field 'command'")
+        raise McpServerParseError(
+            f"MCP server '{name}' requires a non-empty string field 'command'. "
+            "Only stdio servers are supported in this release; network "
+            "(SSE/HTTP) transports with 'type'/'url' are not yet accepted."
+        )
     args = data.get("args")
     if args is not None and (
         not isinstance(args, list) or any(not isinstance(item, str) for item in args)
