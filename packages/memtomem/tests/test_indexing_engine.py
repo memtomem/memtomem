@@ -13,9 +13,11 @@ from pydantic import ValidationError
 from memtomem.config import NamespaceConfig, NamespacePolicyRule
 from memtomem.indexing.engine import (
     IndexEngine,
+    _build_exclude_spec,
     _merge_short_chunks,
     _add_overlap,
     _estimate_tokens,
+    _path_is_excluded,
 )
 from memtomem.models import Chunk, ChunkMetadata
 from .helpers import set_home
@@ -40,6 +42,61 @@ def _make_chunk_with(
             namespace=namespace,
         ),
     )
+
+
+# ===========================================================================
+# 0. _path_is_excluded — provider index-file conventions
+# ===========================================================================
+
+
+class TestPathIsExcludedProviderConventions:
+    """The single exclude funnel for ``_discover_files``, ``_index_file``,
+    and ``mm purge`` must honor provider index-file conventions.
+
+    Regression for the drift where the general engine walk (and watcher)
+    indexed a ``claude-memory`` dir's ``MEMORY.md`` — a pointer-only TOC —
+    while ``mm ingest claude-memory`` skipped it, so the index file surfaced
+    as a high-score duplicate on every query. The convention is now sourced
+    from ``config._PROVIDER_INDEX_CONVENTIONS`` and enforced here, on the
+    path every indexing caller funnels through.
+    """
+
+    def test_claude_memory_index_and_meta_excluded(self, tmp_path):
+        root = tmp_path / ".claude" / "projects" / "slug" / "memory"
+        root.mkdir(parents=True)
+        spec = _build_exclude_spec([])
+        assert _path_is_excluded(root / "MEMORY.md", [root], spec)
+        assert _path_is_excluded(root / "README.md", [root], spec)
+        assert not _path_is_excluded(root / "feedback_x.md", [root], spec)
+
+    def test_user_dir_memory_md_is_kept(self, tmp_path):
+        """``MEMORY.md`` in a plain user dir is real content — convention is
+        provider-scoped, not a global filename ban."""
+        root = tmp_path / "notes"
+        root.mkdir()
+        spec = _build_exclude_spec([])
+        assert not _path_is_excluded(root / "MEMORY.md", [root], spec)
+
+    def test_codex_readme_excluded(self, tmp_path):
+        root = tmp_path / ".codex" / "memories"
+        root.mkdir(parents=True)
+        spec = _build_exclude_spec([])
+        assert _path_is_excluded(root / "README.md", [root], spec)
+        assert not _path_is_excluded(root / "rollout.md", [root], spec)
+
+    def test_nested_root_uses_most_specific_convention(self, tmp_path):
+        """Nested configured roots resolve by longest prefix: a plain subdir
+        explicitly configured as its own root keeps its files, rather than
+        inheriting the parent provider root's exclude set."""
+        codex_root = tmp_path / ".codex" / "memories"
+        nested = codex_root / "project-docs"  # own (user-category) root under Codex
+        nested.mkdir(parents=True)
+        spec = _build_exclude_spec([])
+        roots = [codex_root, nested]
+        # Owned by the deeper `nested` (user) root → README kept.
+        assert not _path_is_excluded(nested / "README.md", roots, spec)
+        # Owned directly by the Codex root → still excluded.
+        assert _path_is_excluded(codex_root / "README.md", roots, spec)
 
 
 # ===========================================================================

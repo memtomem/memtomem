@@ -1459,6 +1459,68 @@ def categorize_memory_dir(path: str | Path) -> ProviderCategory:
     return "user"
 
 
+# ── Provider index-file conventions ─────────────────────────────────
+# Per-category rules for the agent-managed index/TOC file that lives
+# inside a memory dir. ``index_file`` is the table-of-contents the agent
+# maintains and loads into its context each session (e.g. Claude Code's
+# ``MEMORY.md``). ``exclude_filenames`` are meta files that must never be
+# indexed as searchable content: the TOC is just pointers, so indexing it
+# surfaces a high-score duplicate on every query, and READMEs are
+# how-to-read meta. Centralized here (previously hardcoded in
+# ``cli/ingest_cmd.py``) so EVERY index path — ``mm ingest``, the general
+# engine walk, the file watcher, and ``mm purge`` — honors one set.
+@dataclass(frozen=True)
+class ProviderIndexConvention:
+    """Index-file convention for a single :data:`ProviderCategory`."""
+
+    index_file: str | None
+    exclude_filenames: frozenset[str]
+
+
+_PROVIDER_INDEX_CONVENTIONS: dict[ProviderCategory, ProviderIndexConvention] = {
+    "user": ProviderIndexConvention(index_file=None, exclude_filenames=frozenset()),
+    "claude-memory": ProviderIndexConvention(
+        index_file="MEMORY.md",
+        exclude_filenames=frozenset({"MEMORY.md", "README.md"}),
+    ),
+    "claude-plans": ProviderIndexConvention(index_file=None, exclude_filenames=frozenset()),
+    "codex": ProviderIndexConvention(index_file=None, exclude_filenames=frozenset({"README.md"})),
+}
+
+# Lock: every category must declare a convention. Mirrors the
+# ``_PROVIDER_CATEGORY_PATTERNS`` vocabulary lock above — adding a category
+# to the ``ProviderCategory`` Literal without a convention here trips at
+# import, not silently at the first index of the new provider's dir.
+_INDEX_CONVENTION_LOCK_MESSAGE = (
+    "_PROVIDER_INDEX_CONVENTIONS keys out of sync with ProviderCategory. "
+    "Add the matching convention when adding a category. See RFC #304."
+)
+assert set(_PROVIDER_INDEX_CONVENTIONS.keys()) == _VALID_PROVIDER_CATEGORIES, (
+    _INDEX_CONVENTION_LOCK_MESSAGE
+)
+
+
+def index_excluded_filenames(category: str) -> frozenset[str]:
+    """Filenames never indexed as content for a ``memory_dir`` *category*.
+
+    Accepts ``str`` (not ``ProviderCategory``) so callers can pass the
+    result of :func:`categorize_memory_dir` without narrowing. Unknown
+    categories return the empty set (index everything).
+    """
+    conv = _PROVIDER_INDEX_CONVENTIONS.get(cast(ProviderCategory, category))
+    return conv.exclude_filenames if conv else frozenset()
+
+
+def provider_index_file(category: str) -> str | None:
+    """The agent-managed index/TOC filename for *category*, or ``None``.
+
+    Companion to :func:`index_excluded_filenames` — consumed by the
+    memory-index doctor to locate the per-provider hot-cache index.
+    """
+    conv = _PROVIDER_INDEX_CONVENTIONS.get(cast(ProviderCategory, category))
+    return conv.index_file if conv else None
+
+
 # Pattern matchers for project-tier scope dirs. ``project_local`` MUST
 # precede ``project_shared`` here because ``.local`` is a strict suffix
 # of ``memories`` after the leading-dir match — match the more specific

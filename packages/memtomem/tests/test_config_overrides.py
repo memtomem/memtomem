@@ -628,6 +628,40 @@ def test_categorize_memory_dir_accepts_windows_separators(
     assert _cfg.categorize_memory_dir(path) == expected
 
 
+def test_provider_index_conventions_cover_every_category() -> None:
+    """Lock: every ProviderCategory declares an index convention.
+
+    Mirrors the ``_PROVIDER_CATEGORY_PATTERNS`` vocabulary lock — a new
+    category added to the ``ProviderCategory`` Literal without a matching
+    convention trips the module-level assert at import. Pinned here too so
+    the intent is visible in the test suite.
+    """
+    assert set(_cfg._PROVIDER_INDEX_CONVENTIONS) == _cfg._VALID_PROVIDER_CATEGORIES
+
+
+@pytest.mark.parametrize(
+    ("category", "expected"),
+    [
+        ("claude-memory", frozenset({"MEMORY.md", "README.md"})),
+        ("codex", frozenset({"README.md"})),
+        ("claude-plans", frozenset()),
+        ("user", frozenset()),
+        ("unknown-category", frozenset()),
+    ],
+)
+def test_index_excluded_filenames(category: str, expected: frozenset) -> None:
+    """The centralized exclude set per category (replaces the constants that
+    used to live in cli/ingest_cmd.py). Unknown categories index everything."""
+    assert _cfg.index_excluded_filenames(category) == expected
+
+
+def test_provider_index_file() -> None:
+    assert _cfg.provider_index_file("claude-memory") == "MEMORY.md"
+    assert _cfg.provider_index_file("codex") is None
+    assert _cfg.provider_index_file("user") is None
+    assert _cfg.provider_index_file("unknown-category") is None
+
+
 def test_detect_provider_dirs_excludes_gemini(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
