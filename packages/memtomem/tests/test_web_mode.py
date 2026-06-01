@@ -207,6 +207,7 @@ def test_prod_keeps_polished_routes_mounted() -> None:
         "/api/context/skills",
         "/api/context/commands",
         "/api/context/agents",
+        "/api/context/mcp-servers",
         "/api/context/settings",
     ):
         assert expected in prod_paths, (
@@ -363,14 +364,14 @@ def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
 def test_other_integration_leaves_lack_landing_modifier() -> None:
     """Symmetric negative pin: only ctx-overview is the landing card. The
     other Agent Integrations leaves (Skills / Custom Commands / Subagents /
-    Hooks) must not carry the ``--landing`` modifier, otherwise the visual
+    MCP Servers / Hooks) must not carry the ``--landing`` modifier, otherwise the visual
     hierarchy collapses again.
 
     Also pins that each leaf lives under ``#tab-context-gateway`` so a
     partial revert doesn't silently leave the section back under Settings.
     """
     html = _read_static("index.html")
-    for section in ("ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
+    for section in ("ctx-skills", "ctx-commands", "ctx-agents", "ctx-mcp-servers", "hooks-sync"):
         tag = re.search(rf'<button[^>]*data-section="{section}"[^>]*>', html)
         assert tag is not None, f"{section} button not found in markup"
         assert "settings-nav-btn--landing" not in tag.group(0), (
@@ -495,7 +496,14 @@ def test_settings_sidebar_no_longer_holds_gateway_buttons() -> None:
         # bounded slice around Settings only.
         settings_close = len(html)
     settings_slice = html[settings_open:settings_close]
-    for section in ("ctx-overview", "ctx-skills", "ctx-commands", "ctx-agents", "hooks-sync"):
+    for section in (
+        "ctx-overview",
+        "ctx-skills",
+        "ctx-commands",
+        "ctx-agents",
+        "ctx-mcp-servers",
+        "hooks-sync",
+    ):
         assert f'data-section="{section}"' not in settings_slice, (
             f"Settings sidebar must not retain {section} button after #962 Gateway promotion."
         )

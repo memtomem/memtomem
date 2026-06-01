@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **MCP server definitions in the Context Gateway (#1165).** A new **MCP Servers**
+  gateway section manages canonical definitions under
+  `.memtomem/mcp-servers/<name>.json` and fans them out to the project
+  `.mcp.json` `mcpServers` object (create / read / update / delete / diff /
+  Sync All, with an overview tile and EN/KO i18n). Writes and sync run through
+  the privacy write-guard, so a secret-shaped `env` value is refused rather than
+  copied into the shared `.mcp.json` — use `${VAR}` references for secrets. v1 is
+  intentionally narrow: only the `project_shared` tier is writable (reads on
+  other tiers return empty, never an error), and only stdio servers (a non-empty
+  `command` field) are accepted — network (SSE/HTTP) transports, user-home client
+  configs, and reverse import are deferred to a follow-up that needs stronger
+  host-write and secret-handling policy.
+
 - **`mm init` splits Codex memories into per-subdir namespaces (#1164).** The provider
   preset for `~/.codex/memories/` now generates three ordered namespace rules
   instead of one flat `codex` rule: `codex:rollout_summaries` (per-session

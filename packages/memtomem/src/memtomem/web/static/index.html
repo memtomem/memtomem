@@ -523,6 +523,13 @@
             <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Specialized agents</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-mcp-servers" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">🔌</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_mcp_servers">MCP Servers</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_mcp_servers_sub">Project tool servers</span>
+          </span>
+        </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="hooks-sync" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">📎</span>
           <span class="nav-labels">
@@ -637,6 +644,31 @@
           <div id="ctx-agents-status"></div>
           <div id="ctx-agents-list"></div>
           <div id="ctx-agents-detail" hidden></div>
+        </div>
+
+        <!-- Context Gateway: MCP Servers -->
+        <div class="settings-section" id="settings-ctx-mcp-servers">
+          <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">Project-scoped MCP server definitions synced to .mcp.json.</p>
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.mcp_servers_title">MCP Servers</h2>
+            <div>
+              <button class="btn-ghost ctx-add-project-btn" data-type="mcp-servers"
+                      data-i18n="settings.ctx.add_project"
+                      data-i18n-title="settings.ctx.mcp_servers_add_project_tooltip"
+                      data-i18n-aria-label="settings.ctx.mcp_servers_add_project_aria">Add Project</button>
+              <button class="btn-ghost ctx-create-btn" data-type="mcp-servers"
+                      data-i18n="settings.ctx.create"
+                      data-i18n-title="settings.ctx.mcp_servers_create_tooltip"
+                      data-i18n-aria-label="settings.ctx.mcp_servers_create_aria">Create</button>
+              <button class="btn-primary ctx-sync-btn" data-type="mcp-servers"
+                      data-i18n="settings.ctx.sync"
+                      data-i18n-title="settings.ctx.mcp_servers_sync_tooltip"
+                      data-i18n-aria-label="settings.ctx.mcp_servers_sync_aria">Sync</button>
+            </div>
+          </div>
+          <div id="ctx-mcp-servers-status"></div>
+          <div id="ctx-mcp-servers-list"></div>
+          <div id="ctx-mcp-servers-detail" hidden></div>
         </div>
 
         <!-- Hooks Sync section -->
@@ -1412,7 +1444,7 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=13"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=47"></script>
+  <script src="/context-gateway.js?v=48"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>
 </html>
