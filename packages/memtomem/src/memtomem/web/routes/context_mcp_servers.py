@@ -40,6 +40,13 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 
 
 def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
+    """Guard a *write* (create/update/delete/sync) to project_shared only.
+
+    Writes reject non-shared tiers because an MCP server canonical can only
+    live in project_shared. Reads intentionally do NOT call this — they return
+    an empty/absent result for other tiers instead (see ``list_mcp_servers``),
+    so a tier switch never turns the panel into a load-failed state.
+    """
     if target_scope != "project_shared":
         raise HTTPException(
             status_code=400,
@@ -58,7 +65,18 @@ async def list_mcp_servers(
         description="Canonical-residency tier to list. Only project_shared is supported in v1.",
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "List MCP servers")
+    # Reads (unlike writes) must never 400 on a tier switch — that turns the
+    # generic ``loadCtxList`` panel into a load-failed state. MCP server
+    # canonicals only ever reside in project_shared (``.memtomem/mcp-servers/``),
+    # so for other tiers there is simply nothing to list: return empty, mirroring
+    # the overview / projects-counts path (``mcp_servers: 0`` for non-shared) and
+    # the skills/commands/agents read convention (only their writes reject).
+    if target_scope != "project_shared":
+        return {
+            "mcp-servers": [],
+            "canonical_root": CANONICAL_MCP_SERVER_ROOT,
+            "scanned_dirs": [".mcp.json"],
+        }
     diff_by_name = {
         name: [{"runtime": runtime, "status": status}]
         for runtime, name, status in diff_mcp_servers(project_root)
@@ -90,8 +108,12 @@ async def read_mcp_server(
         description="Canonical-residency tier to read from. Only project_shared is supported in v1.",
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Read MCP server")
     name = validate_name(name, kind="MCP server")
+    # No MCP server canonical exists outside project_shared — surface it as a
+    # plain 404 (KeyError) rather than a 400, keeping reads tier-tolerant like
+    # the list route above and the skills/commands/agents read endpoints.
+    if target_scope != "project_shared":
+        raise KeyError(name)
     path = canonical_mcp_server_path(project_root, name)
     if not path.is_file():
         raise KeyError(name)
@@ -283,8 +305,19 @@ async def diff_mcp_server(
         description="Canonical-residency tier to diff. Only project_shared is supported in v1.",
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Diff MCP server")
     name = validate_name(name, kind="MCP server")
+    # Tier-tolerant read (see ``list_mcp_servers``): outside project_shared
+    # there is no canonical to compare, so report ``missing canonical`` rather
+    # than 400. The UI never reaches this in a non-shared tier (the list is
+    # empty there), but a direct call stays consistent with the read routes.
+    if target_scope != "project_shared":
+        return {
+            "name": name,
+            "canonical_content": None,
+            "runtimes": [
+                {"runtime": MCP_RUNTIME, "status": "missing canonical", "runtime_content": None}
+            ],
+        }
     path = canonical_mcp_server_path(project_root, name)
     canonical_content = None
     canonical_definition = None

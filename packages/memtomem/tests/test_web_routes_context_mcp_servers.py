@@ -74,10 +74,48 @@ async def test_create_list_read_sync_and_overview(client: AsyncClient, tmp_path:
 
 
 @pytest.mark.anyio
-async def test_rejects_non_project_shared_scope(client: AsyncClient) -> None:
-    r = await client.get("/api/context/mcp-servers", params={"target_scope": "user"})
-    assert r.status_code == 400
-    assert "project_shared" in r.json()["detail"]
+async def test_non_shared_tier_reads_empty_but_blocks_writes(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    """Reads stay tier-tolerant; only writes reject non-shared tiers.
+
+    A canonical server exists in project_shared, but listing/diffing on a
+    ``user`` or ``project_local`` tier must report it as absent (empty / missing
+    canonical), matching the overview & projects-counts path (``mcp_servers: 0``
+    for non-shared). Previously the list route 400'd here, turning the UI panel
+    into a load-failed state instead of the empty/disabled state the counts
+    imply. Writes still reject — canonical residency is project_shared only.
+    """
+    server_dir = tmp_path / ".memtomem" / "mcp-servers"
+    server_dir.mkdir(parents=True)
+    (server_dir / "demo.json").write_text(_definition(), encoding="utf-8")
+
+    for scope in ("user", "project_local"):
+        listing = await client.get("/api/context/mcp-servers", params={"target_scope": scope})
+        assert listing.status_code == 200, scope
+        assert listing.json()["mcp-servers"] == [], scope
+
+        diff = await client.get(
+            "/api/context/mcp-servers/demo/diff", params={"target_scope": scope}
+        )
+        assert diff.status_code == 200, scope
+        assert diff.json()["runtimes"][0]["status"] == "missing canonical", scope
+
+        read = await client.get("/api/context/mcp-servers/demo", params={"target_scope": scope})
+        assert read.status_code == 404, scope
+
+    # Writes still reject on non-shared tiers.
+    create = await client.post(
+        "/api/context/mcp-servers",
+        params={"target_scope": "user"},
+        json={"name": "demo2", "content": _definition()},
+    )
+    assert create.status_code == 400
+    assert "project_shared" in create.json()["detail"]
+
+    sync = await client.post("/api/context/mcp-servers/sync", params={"target_scope": "user"})
+    assert sync.status_code == 400
+    assert "project_shared" in sync.json()["detail"]
 
 
 @pytest.mark.anyio
