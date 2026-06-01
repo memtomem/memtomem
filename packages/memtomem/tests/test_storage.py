@@ -1,5 +1,6 @@
 """Tests for storage backend operations."""
 
+import dataclasses
 import unicodedata
 from pathlib import Path
 from uuid import uuid4
@@ -164,6 +165,44 @@ class TestTags:
         assert await storage.count_chunks_by_tag("python") == 2
         assert await storage.count_chunks_by_tag("rust") == 1
         assert await storage.count_chunks_by_tag("absent") == 0
+
+    @pytest.mark.asyncio
+    async def test_list_chunks_by_tag_samples_globally_across_scopes(self, storage):
+        # Regression (#688): the dry-run sample must draw from the same global
+        # row set that count/apply use. It previously routed through
+        # ``recall_chunks``, which appends the ADR-0011 scope fragment — with no
+        # project context pinned that narrowed samples to ``scope='user'``, so a
+        # tag living only on project-tier chunks previewed as "N affected, 0
+        # samples" while the global rename/delete/merge still mutated all N rows.
+        proj_root = Path("/tmp/proj-x")
+        user_chunk = _make_chunk(content="u", tags=("curate",))
+        base_local = _make_chunk(content="p1", source="p1.md", tags=("curate",))
+        proj_local = dataclasses.replace(
+            base_local,
+            metadata=dataclasses.replace(
+                base_local.metadata, scope="project_local", project_root=proj_root
+            ),
+        )
+        base_shared = _make_chunk(content="p2", source="p2.md", tags=("curate",))
+        proj_shared = dataclasses.replace(
+            base_shared,
+            metadata=dataclasses.replace(
+                base_shared.metadata, scope="project_shared", project_root=proj_root
+            ),
+        )
+        await storage.upsert_chunks([user_chunk, proj_local, proj_shared])
+
+        count = await storage.count_chunks_by_tag("curate")
+        sample = await storage.list_chunks_by_tag("curate", limit=10)
+        sample_ids = {c.id for c in sample}
+
+        # Sample membership must match the global count — no scope narrowing.
+        assert count == 3
+        assert len(sample) == count
+        # The project-tier rows the global apply would mutate must show up in
+        # the preview; these are exactly the rows the old user-only sample
+        # dropped, leaving a destructive op with a misleadingly empty preview.
+        assert {user_chunk.id, proj_local.id, proj_shared.id} == sample_ids
 
     @pytest.mark.asyncio
     async def test_merge_tags(self, storage):

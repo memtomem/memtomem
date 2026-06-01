@@ -1426,12 +1426,25 @@ class SqliteBackend(
         return int(row[0]) if row else 0
 
     async def list_chunks_by_tag(self, tag: str, limit: int = 10) -> list[Chunk]:
-        # Thin wrapper over ``recall_chunks(tag_filter=...)`` — the post-fusion
-        # tag-filter path (#750) already implements the json_each EXISTS match
-        # and ORDER BY created_at DESC LIMIT shape this helper needs. Keeping
-        # the SQL in one place means the dry-run sample path inherits any
-        # future correctness fixes for free.
-        return await self.recall_chunks(tag_filter=tag, limit=limit)
+        # Dry-run sample for the global tag-management ops (rename / delete /
+        # merge). Those ops mutate EVERY chunk carrying the tag regardless of
+        # scope tier, and ``count_chunks_by_tag`` counts globally to match, so
+        # the sample must draw from the same global row set. Routing through
+        # ``recall_chunks`` looked tidy (#750) but it always appends the
+        # ADR-0011 §6 scope-context fragment, which silently narrowed samples
+        # to ``scope='user'`` when no project context was pinned — a
+        # project-only tag then previewed as "N affected, 0 samples" while the
+        # apply still wiped N rows. Mirror ``count_chunks_by_tag``'s
+        # ``EXISTS(json_each)`` membership here so sample / count / apply agree
+        # on one row set (#688). ``id`` breaks created_at ties deterministically.
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT * FROM chunks WHERE EXISTS "
+            "(SELECT 1 FROM json_each(chunks.tags) WHERE value = ?) "
+            "ORDER BY created_at DESC, id LIMIT ?",
+            (tag, limit),
+        ).fetchall()
+        return [self._row_to_chunk(row) for row in rows]
 
     async def count_chunks_by_tag(self, tag: str) -> int:
         db = self._get_read_db()
