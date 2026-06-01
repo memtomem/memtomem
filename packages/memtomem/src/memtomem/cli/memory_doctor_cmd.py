@@ -1,0 +1,814 @@
+"""CLI: ``mm memory doctor`` — read-only hygiene report for memory stores.
+
+Tier 1 of the ``mm memory doctor`` plan: surface 3-way drift between what's
+on disk, what the agent-managed index file (e.g. Claude Code's ``MEMORY.md``)
+points at, and what's actually indexed in the searchable DB. Report-only — no
+writes to disk, the DB, or config. The curation write contract (``--fix``)
+lands later behind its own ADR.
+
+Why this exists: a ``memory_dir`` can be *registered* yet barely indexed (the
+fs watcher only reacts to live events, so files that landed while the server
+was down stay invisible until a forced re-walk), and the index/TOC file can
+drift from the files on disk. ``mem_search`` silently can't find the
+un-indexed files; this command makes that visible.
+
+Checks (per configured ``memory_dir``):
+
+* **db_coverage** — files on disk the engine would index but that have zero
+  chunks in the DB ("indexed N/M"). The headline signal.
+* **stale_source** — DB chunks whose ``source_file`` is gone from disk (the
+  file was deleted but its chunks linger; there is no single-file delete CLI).
+* **convention_violation** — an index/meta file (``MEMORY.md`` / ``README.md``
+  for a ``claude-memory`` dir) indexed as searchable content despite the
+  provider convention.
+* **broken_link** — links in the index file that don't resolve:
+  ``missing_target`` (file gone) or ``outside_root`` (escapes the memory
+  root). ``url`` and ``anchor`` links are classified and *not* reported.
+* **index_orphan** — files on disk that the index file (``MEMORY.md``) does
+  not list. Distinct from ``db_coverage``: "not in the TOC" ≠ "not indexed".
+* **budget** — the index file exceeds its byte / line / per-line-char budget
+  (the hot cache loaded into the agent's context each session).
+* **cold_candidate** — indexed files never accessed since indexing
+  (``access_count`` sum 0 and ``last_accessed_at`` NULL). Informational.
+
+Output: human glyphs by default, ``--json`` for a structured payload. Exit
+``1`` when any *error*-severity finding exists (``stale_source``,
+``convention_violation``, ``broken_link``), else ``0``. Coverage gaps,
+orphans, budget and cold candidates are advisory (a partially-indexed dir is
+a legitimate steady state) so they warn without failing the exit code —
+mirrors ``mm sync-doctor`` (warns don't fail) while exposing a JSON + exit
+code for CI like ``mm context settings-doctor``.
+
+Read-only contract: config is read via ``Mem2MemConfig`` +
+``load_config_d(quiet=True)`` + ``load_config_overrides(migrate=False)`` so
+the diagnostic never triggers the legacy ``auto_discover`` config rewrite
+(see PR #838 / #873). The DB is opened through a bare ``sqlite3`` connection
+in URI ``mode=ro`` — never the full ``SqliteBackend``, which on
+``initialize()`` would create the file/parent dir, run schema migration, and
+checkpoint the WAL on close. ``mode=ro`` still surfaces committed rows in a
+live writer's WAL (unlike ``immutable=1``); a missing or too-old DB degrades
+to disk/index-only checks instead of being created. Discovery reuses the
+engine's own ``discover_indexable_files`` (via a storage-less, model-less
+engine) so the "should be indexed" set can't drift from what the real indexer
+does.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+import click
+
+if TYPE_CHECKING:
+    from memtomem.config import Mem2MemConfig
+
+# ── Index-file budget ───────────────────────────────────────────────
+# Hot-cache ceiling for an agent-managed index file (``MEMORY.md``). The
+# TOC is loaded into the agent's context every session, so it has a budget
+# the curation process targets. These live here, not in
+# ``ProviderIndexConvention``, because Tier 1 is the only consumer; the
+# write-contract ADR promotes them to config when ``--fix`` needs to enforce
+# them. Per-line cap is measured in characters (not bytes) so CJK prose isn't
+# double-counted.
+_INDEX_MAX_BYTES = 24_400
+_INDEX_MAX_LINES = 200
+_INDEX_MAX_LINE_CHARS = 200
+
+Severity = Literal["error", "warn", "info"]
+
+_GLYPH: dict[Severity, str] = {"error": "✗", "warn": "!", "info": "·"}
+_COLOR: dict[Severity, str | None] = {"error": "red", "warn": "yellow", "info": None}
+
+# The exit code flips to 1 when any finding carries ``severity="error"`` (see
+# ``memory_doctor``). Today that's ``stale_source`` / ``convention_violation``
+# / ``broken_link``; severity is assigned per-finding so the exit logic needs
+# no separate check allowlist to stay in sync.
+
+# Max sample items echoed per finding in human output (JSON carries all).
+_SAMPLE_LIMIT = 8
+
+
+# ── Pure: index-file parsing ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class IndexEntry:
+    """One pointer line from an index file: ``- [title](target) — hook``."""
+
+    line_no: int  # 1-based
+    title: str
+    target: str
+    raw: str
+
+
+@dataclass(frozen=True)
+class ParsedIndex:
+    """Parsed index file: pointer entries plus every other (preserved) line.
+
+    ``other_lines`` keeps prose / comments / blanks verbatim with their line
+    numbers so a future write phase can round-trip the file; Tier 1 only reads
+    them for the budget measurement.
+    """
+
+    entries: tuple[IndexEntry, ...]
+    other_lines: tuple[tuple[int, str], ...]
+
+
+# ``- [Title](target)`` with optional leading whitespace and bullet. The
+# title is non-greedy up to the first ``]`` so nested brackets in a hook (the
+# trailing prose) don't get pulled into the title. Anything after ``)`` is
+# ignored here (it's the hook); link classification handles the target.
+_ENTRY_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
+
+
+def parse_memory_index(text: str) -> ParsedIndex:
+    """Parse an index file into pointer entries + preserved other lines."""
+    entries: list[IndexEntry] = []
+    other: list[tuple[int, str]] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        m = _ENTRY_RE.match(line)
+        if m is None:
+            other.append((i, line))
+            continue
+        entries.append(
+            IndexEntry(
+                line_no=i,
+                title=m.group("title").strip(),
+                target=m.group("target").strip(),
+                raw=line,
+            )
+        )
+    return ParsedIndex(entries=tuple(entries), other_lines=tuple(other))
+
+
+# ── Pure: link classification ───────────────────────────────────────
+
+LinkClass = Literal["ok", "missing_target", "outside_root", "url", "anchor"]
+
+# A URL needs an explicit ``scheme://`` (so a Windows drive ``C:\…`` isn't
+# misread as a scheme) plus the ``mailto:`` special case.
+_URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+
+def _is_url(target: str) -> bool:
+    return bool(_URL_RE.match(target)) or target.startswith("mailto:")
+
+
+def classify_link(target: str, *, root: Path, source_dir: Path) -> LinkClass:
+    """Classify an index/markdown link target.
+
+    ``root`` is the memory dir (links may not escape it); ``source_dir`` is
+    the directory of the file the link lives in (for resolving relatives).
+    Resolution is path-only — ``Path.resolve()`` is strict=False so a missing
+    target still resolves and is then existence-checked, separating
+    ``missing_target`` from ``outside_root``.
+    """
+    t = target.strip()
+    if not t or t.startswith("#"):
+        return "anchor"  # in-page anchor or empty — not a file reference
+    if _is_url(t):
+        return "url"
+    path_part = t.split("#", 1)[0]  # strip ``file.md#section`` anchor suffix
+    if not path_part:
+        return "anchor"
+    raw = Path(path_part).expanduser()
+    base = raw if raw.is_absolute() else (source_dir / raw)
+    try:
+        resolved = base.resolve()
+        root_resolved = root.resolve()
+    except (OSError, RuntimeError):
+        return "missing_target"
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        return "outside_root"
+    return "ok" if resolved.exists() else "missing_target"
+
+
+# ── Pure: budget measurement ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class BudgetMeasure:
+    byte_len: int
+    line_count: int
+    overlong_lines: tuple[int, ...]  # 1-based line numbers exceeding the char cap
+
+    @property
+    def over_budget(self) -> bool:
+        return (
+            self.byte_len > _INDEX_MAX_BYTES
+            or self.line_count > _INDEX_MAX_LINES
+            or bool(self.overlong_lines)
+        )
+
+
+def measure_budget(text: str) -> BudgetMeasure:
+    """Measure an index file against the hot-cache budget.
+
+    Bytes are UTF-8 encoded length; lines are counted from ``splitlines``;
+    per-line length is character count (``len``) so a CJK line isn't penalised
+    for its multi-byte encoding.
+    """
+    lines = text.splitlines()
+    overlong = tuple(
+        i for i, line in enumerate(lines, start=1) if len(line) > _INDEX_MAX_LINE_CHARS
+    )
+    return BudgetMeasure(
+        byte_len=len(text.encode("utf-8")),
+        line_count=len(lines),
+        overlong_lines=overlong,
+    )
+
+
+# ── Finding + report model ──────────────────────────────────────────
+
+
+@dataclass
+class Finding:
+    check: str
+    severity: Severity
+    summary: str
+    items: list[str] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.items)
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "check": self.check,
+            "severity": self.severity,
+            "count": self.count,
+            "summary": self.summary,
+            "items": self.items,
+        }
+
+
+@dataclass
+class DirReport:
+    path: str
+    category: str
+    index_file: str | None
+    exists: bool
+    disk_indexable: int
+    db_covered: int
+    findings: list[Finding] = field(default_factory=list)
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "category": self.category,
+            "index_file": self.index_file,
+            "exists": self.exists,
+            "disk_indexable": self.disk_indexable,
+            "db_covered": self.db_covered,
+            "findings": [f.to_json() for f in self.findings],
+        }
+
+
+# ── Read-only config + engine plumbing ──────────────────────────────
+
+
+def _load_config_read_only() -> Mem2MemConfig:
+    """Load config without triggering the legacy auto-discover migration.
+
+    Mirrors ``mm sync-doctor``: a read-only diagnostic must not rewrite
+    ``config.json`` as a side effect (``migrate=False``).
+    """
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+    config = Mem2MemConfig()
+    load_config_d(config, quiet=True)
+    load_config_overrides(config, migrate=False)
+    return config
+
+
+def _build_discovery_engine(config: Mem2MemConfig) -> object:
+    """Build an ``IndexEngine`` purely for its file-discovery method.
+
+    ``discover_indexable_files`` reads only ``config`` (supported extensions,
+    index roots, exclude rules) — it never touches storage or the embedder —
+    so both are passed as inert stand-ins (``None`` storage, a model-less
+    ``NoopEmbedder``). Reusing the engine's own discovery is deliberate: the
+    doctor's "should be indexed" set is then guaranteed identical to what the
+    real indexer produces, so coverage / orphan counts can't drift from
+    reality.
+    """
+    from memtomem.embedding.noop import NoopEmbedder
+    from memtomem.indexing.engine import IndexEngine
+
+    return IndexEngine(
+        storage=None,  # type: ignore[arg-type]
+        embedder=NoopEmbedder(),  # type: ignore[arg-type]
+        config=config.indexing,
+        namespace_config=config.namespace,
+    )
+
+
+# Per-source aggregate the cold-candidate / coverage checks consume.
+# ``MAX(last_accessed_at)`` over ISO-8601 text sorts chronologically and
+# SQLite's ``MAX`` ignores NULL, so a never-accessed multi-chunk file reports
+# ``(…, None, 0, …)``. ``COALESCE`` guards an all-NULL importance column.
+_SOURCE_SIGNALS_SQL = (
+    "SELECT source_file, COUNT(*), MAX(last_accessed_at),"
+    " COALESCE(SUM(access_count), 0),"
+    " COALESCE(MAX(importance_score), 0.0),"
+    " COALESCE(AVG(importance_score), 0.0)"
+    " FROM chunks GROUP BY source_file ORDER BY source_file"
+)
+
+
+def _read_source_signals(
+    db_path: Path,
+) -> list[tuple[Path, int, str | None, int, float, float]] | None:
+    """Read per-source signal rows from an *existing* DB, strictly read-only.
+
+    Opens the SQLite file with ``mode=ro`` (URI) so the doctor can never
+    create the file, run a schema migration, or checkpoint the WAL — the
+    report-only contract. Unlike ``immutable=1``, ``mode=ro`` still surfaces
+    committed rows sitting in an active writer's WAL (e.g. while ``mm web`` is
+    up), so the report reflects live state. Returns ``None`` — not an empty
+    list — when the DB is absent, its schema predates the aggregate's columns
+    (a fresh or very old install), or the file is corrupt / not a database;
+    the caller then degrades to disk/index-only checks rather than crashing or
+    creating the DB. ``sqlite3.DatabaseError`` is the parent of
+    ``OperationalError`` (missing table/column) and also covers the
+    "file is not a database" / malformed-image cases, so one except clause
+    handles every "can't read this DB" path.
+    """
+    db = db_path.expanduser()
+    if not db.is_absolute():
+        db = db.absolute()
+    if not db.exists():
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=5)
+        conn.execute("PRAGMA query_only=ON")
+        rows = conn.execute(_SOURCE_SIGNALS_SQL).fetchall()
+    except sqlite3.DatabaseError:
+        return None  # missing/old-schema/corrupt — degrade to disk-only checks
+    finally:
+        if conn is not None:
+            conn.close()
+    return [(Path(r[0]), int(r[1]), r[2], int(r[3]), float(r[4]), float(r[5])) for r in rows]
+
+
+# ── Analysis ────────────────────────────────────────────────────────
+
+
+def _analyze_dir(
+    *,
+    dir_path: Path,
+    config: Mem2MemConfig,
+    engine: object,
+    db_rows: list[tuple[Path, int, str | None, int, float, float]],
+    memory_dirs: list[Path],
+) -> DirReport:
+    """Run every check for one configured ``memory_dir``. Pure given inputs.
+
+    ``memory_dirs`` is the full set of configured roots — needed to attribute
+    each discovered disk file to its *most-specific* owning root, the same
+    longest-prefix rule the DB rows are bucketed by. Without that, a recursive
+    walk of a parent root would pull in files that belong to a nested child
+    root (whose DB rows are bucketed to the child), making the parent falsely
+    report the child's already-indexed files as uncovered.
+    """
+    from memtomem.config import (
+        categorize_memory_dir,
+        index_excluded_filenames,
+        provider_index_file,
+    )
+    from memtomem.indexing.engine import resolve_owning_memory_dir
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    resolved_dir = dir_path.expanduser().resolve()
+    exists = resolved_dir.is_dir()
+    category = categorize_memory_dir(dir_path)
+    index_file_name = provider_index_file(category)
+    excluded = index_excluded_filenames(category)
+    dir_key = norm_path(dir_path.expanduser())
+
+    # Disk side: files the engine would index (post-exclusion, recursive —
+    # faithful to the real indexer), keeping only the files this dir is the
+    # most-specific owner of (symmetry with the DB bucketing in
+    # ``_gather_reports`` — a nested child root owns its own subtree).
+    disk_files = engine.discover_indexable_files(resolved_dir)  # type: ignore[attr-defined]
+    disk_norm: dict[str, Path] = {}
+    for p in disk_files:
+        owning = resolve_owning_memory_dir(p, memory_dirs)
+        if owning is not None and norm_path(owning) == dir_key:
+            disk_norm[norm_path(p)] = p
+
+    # DB side: source-file signal rows already bucketed to this dir.
+    db_norm: dict[str, tuple[Path, int, str | None, int, float, float]] = {
+        norm_path(row[0]): row for row in db_rows
+    }
+
+    report = DirReport(
+        path=str(resolved_dir),
+        category=category,
+        index_file=index_file_name,
+        exists=exists,
+        disk_indexable=len(disk_norm),
+        db_covered=len(disk_norm.keys() & db_norm.keys()),
+    )
+
+    # 1. db_coverage — on disk, no chunks.
+    uncovered = sorted(p for k, p in disk_norm.items() if k not in db_norm)
+    if uncovered:
+        report.findings.append(
+            Finding(
+                check="db_coverage",
+                severity="warn",
+                summary=(
+                    f"{len(uncovered)}/{len(disk_norm)} indexable file(s) have no DB "
+                    "chunks — `mem_search` can't find them (run `mm index <dir> --force`)"
+                ),
+                items=[p.name for p in uncovered],
+            )
+        )
+
+    # 2/3. DB-only sources — split into stale (deleted), convention violation
+    # (meta file indexed), and an unexpected residue.
+    stale: list[str] = []
+    violations: list[str] = []
+    unexpected: list[str] = []
+    for k, row in db_norm.items():
+        if k in disk_norm:
+            continue
+        src = row[0]
+        if not Path(src).exists():
+            stale.append(str(src))
+        elif Path(src).name in excluded:
+            violations.append(str(src))
+        else:
+            unexpected.append(str(src))
+    if stale:
+        report.findings.append(
+            Finding(
+                check="stale_source",
+                severity="error",
+                summary=(
+                    f"{len(stale)} DB source file(s) no longer exist on disk — "
+                    "chunks linger after the file was deleted"
+                ),
+                items=sorted(stale),
+            )
+        )
+    if violations:
+        report.findings.append(
+            Finding(
+                check="convention_violation",
+                severity="error",
+                summary=(
+                    f"{len(violations)} index/meta file(s) indexed as content despite the "
+                    f"{category} convention (run `mm purge --matching-excluded --apply`)"
+                ),
+                items=sorted(violations),
+            )
+        )
+    if unexpected:
+        report.findings.append(
+            Finding(
+                check="db_extra",
+                severity="warn",
+                summary=(
+                    f"{len(unexpected)} DB source file(s) exist on disk but fall outside the "
+                    "current indexable set (unsupported extension or excluded path)"
+                ),
+                items=sorted(unexpected),
+            )
+        )
+
+    # 4. cold_candidate — covered files never accessed since indexing.
+    cold = [
+        (row[0], row[1])  # (path, chunk_count)
+        for k, row in db_norm.items()
+        if k in disk_norm and row[3] == 0 and row[2] is None
+    ]
+    if cold:
+        cold.sort(key=lambda pc: (-pc[1], str(pc[0])))
+        report.findings.append(
+            Finding(
+                check="cold_candidate",
+                severity="info",
+                summary=(
+                    f"{len(cold)} indexed file(s) never accessed since indexing "
+                    "(access_count 0, last_accessed_at unset)"
+                ),
+                items=[f"{p.name} ({c} chunk{'s' if c != 1 else ''})" for p, c in cold],
+            )
+        )
+
+    # 5/6/7. Index-file checks (only for providers with a TOC convention).
+    if index_file_name:
+        _analyze_index_file(
+            report=report,
+            root=resolved_dir,
+            index_file_name=index_file_name,
+            disk_norm=disk_norm,
+            norm_path=norm_path,
+        )
+
+    return report
+
+
+def _analyze_index_file(
+    *,
+    report: DirReport,
+    root: Path,
+    index_file_name: str,
+    disk_norm: dict[str, Path],
+    norm_path: object,
+) -> None:
+    """Broken-link, index-orphan and budget checks against the TOC file."""
+    index_path = root / index_file_name
+    try:
+        text = index_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        report.findings.append(
+            Finding(
+                check="index_missing",
+                severity="warn",
+                summary=f"index file {index_file_name} not found in {root}",
+            )
+        )
+        return
+    except OSError as exc:
+        report.findings.append(
+            Finding(
+                check="index_missing",
+                severity="warn",
+                summary=f"could not read {index_file_name}: {exc}",
+            )
+        )
+        return
+
+    parsed = parse_memory_index(text)
+
+    # broken_link — classify every pointer target; report only the broken
+    # classes. ``listed_norm`` collects the resolvable targets for the orphan
+    # check below.
+    broken: list[str] = []
+    listed_norm: set[str] = set()
+    for entry in parsed.entries:
+        cls = classify_link(entry.target, root=root, source_dir=root)
+        if cls in ("missing_target", "outside_root"):
+            broken.append(f"L{entry.line_no} [{cls}] {entry.target}")
+        elif cls == "ok":
+            resolved = (root / entry.target.split("#", 1)[0]).resolve()
+            listed_norm.add(norm_path(resolved))  # type: ignore[operator]
+    if broken:
+        report.findings.append(
+            Finding(
+                check="broken_link",
+                severity="error",
+                summary=f"{len(broken)} broken link(s) in {index_file_name}",
+                items=broken,
+            )
+        )
+
+    # index_orphan — indexable files on disk the TOC doesn't point at. The
+    # index file itself / excluded meta files are not in ``disk_norm`` (the
+    # engine excludes them), so they're never flagged here.
+    orphans = sorted(p for k, p in disk_norm.items() if k not in listed_norm)
+    if orphans:
+        report.findings.append(
+            Finding(
+                check="index_orphan",
+                severity="warn",
+                summary=(
+                    f"{len(orphans)} file(s) on disk not listed in {index_file_name} "
+                    "(index orphans — present and indexable but absent from the TOC)"
+                ),
+                items=[p.name for p in orphans],
+            )
+        )
+
+    # budget — hot-cache size.
+    budget = measure_budget(text)
+    if budget.over_budget:
+        parts = [f"{budget.byte_len} bytes (cap {_INDEX_MAX_BYTES})"]
+        parts.append(f"{budget.line_count} lines (cap {_INDEX_MAX_LINES})")
+        if budget.overlong_lines:
+            shown = ", ".join(f"L{n}" for n in budget.overlong_lines[:_SAMPLE_LIMIT])
+            parts.append(
+                f"{len(budget.overlong_lines)} line(s) over {_INDEX_MAX_LINE_CHARS} chars ({shown})"
+            )
+        report.findings.append(
+            Finding(
+                check="budget",
+                severity="warn",
+                summary=f"{index_file_name} over budget: " + "; ".join(parts),
+                items=[f"L{n}" for n in budget.overlong_lines],
+            )
+        )
+
+
+def _gather_reports(
+    *,
+    config: Mem2MemConfig,
+    inspect_dirs: list[Path],
+) -> list[DirReport]:
+    """Read DB signals read-only, bucket by owning dir, analyze each inspected dir.
+
+    Fully synchronous: the only DB access is the read-only aggregate in
+    :func:`_read_source_signals`, and discovery is a sync disk walk — no
+    embedder, no async storage backend, no writes.
+    """
+    from collections import defaultdict
+
+    from memtomem.indexing.engine import resolve_owning_memory_dir
+    from memtomem.storage.sqlite_helpers import norm_path
+
+    raw_signals = _read_source_signals(Path(config.storage.sqlite_path))
+    db_unreadable = raw_signals is None
+    signals = raw_signals or []
+    memory_dirs = config.indexing.all_index_roots()
+
+    # Bucket every DB source row to the configured dir that owns it
+    # (longest-prefix), keyed by the resolved dir string so it matches the
+    # per-dir loop below. Unowned rows are surfaced separately.
+    by_dir: dict[str, list[tuple[Path, int, str | None, int, float, float]]] = defaultdict(list)
+    unowned = 0
+    for row in signals:
+        owning = resolve_owning_memory_dir(row[0], memory_dirs)
+        if owning is None:
+            unowned += 1
+        else:
+            by_dir[norm_path(owning)].append(row)
+
+    engine = _build_discovery_engine(config)
+
+    reports: list[DirReport] = []
+    for d in inspect_dirs:
+        key = norm_path(d.expanduser())
+        reports.append(
+            _analyze_dir(
+                dir_path=d,
+                config=config,
+                engine=engine,
+                db_rows=by_dir.get(key, []),
+                memory_dirs=memory_dirs,
+            )
+        )
+
+    if db_unreadable:
+        # Top-level note: no readable DB, so coverage/stale/cold are unknown
+        # and every disk file shows as uncovered. Info — never fails the exit.
+        db_report = _note_report("(database)")
+        db_report.findings.append(
+            Finding(
+                check="db_unavailable",
+                severity="info",
+                summary=(
+                    f"no readable memtomem DB at {Path(config.storage.sqlite_path).expanduser()} "
+                    "— reporting disk/index-only checks (run `mm index` to build it)"
+                ),
+            )
+        )
+        reports.append(db_report)
+
+    if unowned:
+        # Top-level info: chunks attributed to no configured memory_dir
+        # (e.g. a dir was removed from config, or content added elsewhere).
+        # Never affects the exit code.
+        unowned_report = _note_report("(unowned)")
+        unowned_report.findings.append(
+            Finding(
+                check="unowned_chunks",
+                severity="info",
+                summary=(
+                    f"{unowned} DB source file(s) under no configured memory_dir "
+                    "(removed dir, or content added outside the registry)"
+                ),
+            )
+        )
+        reports.append(unowned_report)
+
+    return reports
+
+
+# ── Rendering ───────────────────────────────────────────────────────
+
+
+# A "note" report is a synthetic top-level entry (not a real ``memory_dir``):
+# its parenthesized path is the sentinel. Carries only top-level findings.
+def _note_report(label: str) -> DirReport:
+    return DirReport(
+        path=label, category="", index_file=None, exists=False, disk_indexable=0, db_covered=0
+    )
+
+
+def _is_note(report: DirReport) -> bool:
+    return report.path.startswith("(")
+
+
+def _severity_totals(reports: list[DirReport]) -> dict[str, int]:
+    totals = {"error": 0, "warn": 0, "info": 0}
+    for r in reports:
+        for f in r.findings:
+            totals[f.severity] += 1
+    return totals
+
+
+def _emit_human(reports: list[DirReport]) -> None:
+    for r in reports:
+        if _is_note(r):
+            for f in r.findings:
+                click.secho(f"{_GLYPH[f.severity]} {f.summary}", fg=_COLOR[f.severity])
+            continue
+        header = f"{r.path}"
+        suffix = []
+        if not r.exists:
+            suffix.append("missing")
+        if r.index_file:
+            suffix.append(f"index={r.index_file}")
+        suffix.append(f"indexed {r.db_covered}/{r.disk_indexable}")
+        click.secho(f"\n■ {header}", bold=True)
+        click.echo(f"  {r.category} · " + " · ".join(suffix))
+        if not r.findings:
+            click.secho("  ✓ no issues", fg="green")
+            continue
+        for f in r.findings:
+            click.secho(f"  {_GLYPH[f.severity]} {f.summary}", fg=_COLOR[f.severity])
+            for item in f.items[:_SAMPLE_LIMIT]:
+                click.echo(f"      - {item}")
+            if f.count > _SAMPLE_LIMIT:
+                click.echo(f"      … and {f.count - _SAMPLE_LIMIT} more")
+
+    totals = _severity_totals(reports)
+    click.echo(f"\nSummary: {totals['error']} error, {totals['warn']} warn, {totals['info']} info.")
+
+
+def _emit_json(reports: list[DirReport]) -> None:
+    totals = _severity_totals(reports)
+    payload = {
+        "status": "issues" if totals["error"] or totals["warn"] else "ok",
+        "dirs": [r.to_json() for r in reports],
+        "summary": totals,
+    }
+    click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+# ── Click entry point ───────────────────────────────────────────────
+
+
+@click.group("memory")
+def memory() -> None:
+    """Memory-store hygiene: inspect index/DB/disk consistency."""
+
+
+@memory.command("doctor")
+@click.argument("path", required=False, type=click.Path())
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    default=False,
+    help="Emit a structured JSON result instead of human-readable output.",
+)
+def memory_doctor(path: str | None, json_out: bool) -> None:
+    """Report drift between disk, the index file, and the searchable DB (read-only).
+
+    With no PATH, inspects every configured ``memory_dir``. Pass a PATH to
+    scope the report to one configured dir.
+
+    Exit codes: ``0`` clean (or advisory-only findings), ``1`` when any
+    error-severity finding exists (stale DB sources, convention violations,
+    or broken index links).
+    """
+    config = _load_config_read_only()
+    memory_dirs = config.indexing.all_index_roots()
+
+    if path is not None:
+        target = Path(path).expanduser().resolve()
+        inspect_dirs = [d for d in memory_dirs if d.expanduser().resolve() == target]
+        if not inspect_dirs:
+            raise click.ClickException(
+                f"{path} is not a configured memory_dir. Run without PATH to inspect all, "
+                "or `mm config` to see the configured dirs."
+            )
+    else:
+        inspect_dirs = list(memory_dirs)
+
+    if not inspect_dirs:
+        click.secho("No memory_dirs configured. Run `mm init`.", fg="yellow")
+        return
+
+    reports = _gather_reports(config=config, inspect_dirs=inspect_dirs)
+
+    if json_out:
+        _emit_json(reports)
+    else:
+        _emit_human(reports)
+
+    if _severity_totals(reports)["error"] > 0:
+        raise click.exceptions.Exit(1)
