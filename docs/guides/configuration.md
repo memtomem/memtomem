@@ -566,7 +566,9 @@ Example `~/.memtomem/config.d/10-namespace-rules.json`:
     "rules": [
       { "path_glob": "~/.claude/projects/*/memory/**",      "namespace": "claude:memory" },
       { "path_glob": "~/.claude/projects/*/*/subagents/**", "namespace": "claude:subagents" },
-      { "path_glob": "~/.codex/memories/**",                "namespace": "codex:memories" },
+      { "path_glob": "~/.codex/memories/rollout_summaries/**", "namespace": "codex:rollout_summaries" },
+      { "path_glob": "~/.codex/memories/extensions/**",        "namespace": "codex:extensions" },
+      { "path_glob": "~/.codex/memories/**",                   "namespace": "codex:global" },
       { "path_glob": "~/.gemini/**",                        "namespace": "gemini:{parent}" },
       { "path_glob": "~/Library/CloudStorage/GoogleDrive-*/**/memtomem-memories/*/**",
         "namespace": "gdrive:{parent}" }

@@ -667,15 +667,27 @@ def _step_memory_dir(state: dict) -> None:
 # wizard step so auto_ns doesn't collapse ``~/.claude/projects/FOO/memory/**``
 # to the generic ``default`` namespace (issue #296).
 #
+# Each category maps to an ORDERED tuple of ``(path_glob, namespace)`` rules.
+# Order is significant: the indexer resolves the first matching rule
+# (``_resolve_namespace``), so per-subdir rules MUST precede the catch-all.
+#
 # ``claude-memory`` uses ``{ancestor:1}`` (the project-id folder above the
-# generic ``memory`` basename); single-dir categories use literal namespaces.
-# The flat ``claude-plans`` / ``codex`` labels are deliberately conservative:
-# RFC #304 may migrate these into a vendor/product hierarchy later. Re-visit
-# when that issue settles a wire format.
-_PROVIDER_RULE_TEMPLATES: dict[str, tuple[str, str]] = {
-    "claude-memory": ("~/.claude/projects/*/memory/**", "claude:{ancestor:1}"),
-    "claude-plans": ("~/.claude/plans/**", "claude-plans"),
-    "codex": ("~/.codex/memories/**", "codex"),
+# generic ``memory`` basename). ``codex`` splits ``~/.codex/memories/`` by its
+# first-level subdir: that tree mixes three distinct memory classes —
+# ``rollout_summaries/`` (per-session episodic recaps) and ``extensions/``
+# (ad-hoc note inbox) alongside the consolidated top-level memory — and
+# folding all of them into one ``codex`` namespace defeats per-class
+# search/decay. The split uses literal namespaces (no new placeholder), so the
+# ``_VALID_PRESET_PLACEHOLDERS`` lock below stays satisfied; RFC #304's broader
+# vendor/product hierarchy can still supersede these later.
+_PROVIDER_RULE_TEMPLATES: dict[str, tuple[tuple[str, str], ...]] = {
+    "claude-memory": (("~/.claude/projects/*/memory/**", "claude:{ancestor:1}"),),
+    "claude-plans": (("~/.claude/plans/**", "claude-plans"),),
+    "codex": (
+        ("~/.codex/memories/rollout_summaries/**", "codex:rollout_summaries"),
+        ("~/.codex/memories/extensions/**", "codex:extensions"),
+        ("~/.codex/memories/**", "codex:global"),
+    ),
 }
 
 # Lock placeholders permitted in the preset table until RFC #304 settles the
@@ -685,8 +697,22 @@ _VALID_PRESET_PLACEHOLDERS: frozenset[str] = frozenset({"{ancestor:1}"})
 
 assert all(
     not any(tok in ns for tok in ("{", "}")) or any(tok in ns for tok in _VALID_PRESET_PLACEHOLDERS)
-    for _, ns in _PROVIDER_RULE_TEMPLATES.values()
+    for rules in _PROVIDER_RULE_TEMPLATES.values()
+    for _, ns in rules
 ), "preset namespaces may only use _VALID_PRESET_PLACEHOLDERS until #304 decides the hierarchy"
+
+# Legacy wizard presets that a newer preset replaces. When a prior ``mm init``
+# wrote one of these and the user re-runs after upgrading, the exact old rule
+# is dropped during merge so its replacement lands in the correct
+# first-match-wins position instead of shadowing (or being shadowed by) the
+# stale rule. Keyed by provider category; a rule is only removed when that
+# category's preset is being (re-)applied this run. Matching is exact on BOTH
+# namespace and path_glob (after ``~`` expansion), so a hand-edited rule is
+# never touched.
+_SUPERSEDED_PRESET_RULES: dict[str, tuple[tuple[str, str], ...]] = {
+    # codex was a single flat ``codex`` catch-all before the per-subdir split.
+    "codex": (("~/.codex/memories/**", "codex"),),
+}
 
 
 def _expand_glob_for_compare(path_glob: str) -> str:
@@ -723,30 +749,99 @@ def _rule_matches_existing(new_path_glob: str, existing_rules: list[dict]) -> bo
     return False
 
 
-def _proposed_rule_for_category(category: str) -> dict | None:
-    """Return the ``{path_glob, namespace}`` dict for a category, or None."""
-    template = _PROVIDER_RULE_TEMPLATES.get(category)
-    if template is None:
+def _proposed_rules_for_category(category: str) -> list[dict]:
+    """Return the ordered ``{path_glob, namespace}`` rule dicts for a category.
+
+    A category may map to multiple rules (e.g. Codex splits its memories
+    directory into per-subdir namespaces). Returns an empty list for
+    categories with no preset. Order is preserved and significant: callers
+    MUST keep it so first-match-wins resolution places specific subdir rules
+    before the catch-all.
+    """
+    return [
+        {"path_glob": path_glob, "namespace": namespace}
+        for path_glob, namespace in _PROVIDER_RULE_TEMPLATES.get(category, ())
+    ]
+
+
+def _superseded_category(rule: dict, proposed_categories: set[str]) -> str | None:
+    """Return the category whose superseded-preset list contains *rule*.
+
+    Only categories in *proposed_categories* (the ones whose preset is being
+    applied this run) are considered. Matches exactly on namespace and on
+    path_glob after ``~`` expansion, so a user's customised rule is never
+    removed. Returns ``None`` when *rule* is not a superseded legacy preset.
+    """
+    pg = rule.get("path_glob")
+    ns = rule.get("namespace")
+    if not isinstance(pg, str) or not isinstance(ns, str):
         return None
-    path_glob, namespace = template
-    return {"path_glob": path_glob, "namespace": namespace}
+    target = _expand_glob_for_compare(pg)
+    for cat in proposed_categories:
+        for old_glob, old_ns in _SUPERSEDED_PRESET_RULES.get(cat, ()):
+            if old_ns == ns and _expand_glob_for_compare(old_glob) == target:
+                return cat
+    return None
+
+
+def _recursive_glob_prefix(path_glob: str) -> str | None:
+    """Return the directory prefix of a recursive ``BASE/**`` glob, else None.
+
+    ``~`` is expanded and case is folded so the result is comparable across
+    the tilde/absolute forms a config may store. Returns ``None`` for
+    non-recursive globs (``BASE/*`` or a bare path), which never act as a
+    catch-all over a nested subtree.
+    """
+    g = _expand_glob_for_compare(path_glob).lower().rstrip("/")
+    if g.endswith("/**"):
+        return g[: -len("/**")]
+    return None
+
+
+def _glob_shadows(outer_glob: str, inner_glob: str) -> bool:
+    """True if recursive *outer_glob* covers everything *inner_glob* matches.
+
+    Pure prefix logic on the expanded directory bases — enough to catch a
+    user-kept ``~/.codex/memories/** -> custom`` catch-all shadowing a freshly
+    proposed ``~/.codex/memories/<subdir>/**`` rule (first-match-wins would
+    leave the subdir rule dead). Conservative: only recognises the recursive
+    catch-all case, so it never drops a rule that would actually be reachable.
+    """
+    outer = _recursive_glob_prefix(outer_glob)
+    if outer is None:
+        return False
+    inner = _recursive_glob_prefix(inner_glob)
+    inner_base = (
+        inner if inner is not None else _expand_glob_for_compare(inner_glob).lower().rstrip("/")
+    )
+    return inner_base == outer or inner_base.startswith(outer + "/")
 
 
 def _emit_rules_banner(
     proposed: list[tuple[str, dict]],
     skipped: list[tuple[str, dict]],
+    replaced: list[tuple[str, dict]] | None = None,
+    shadowed: list[tuple[str, dict]] | None = None,
 ) -> None:
     """Print the pre-write rules banner.
 
-    ``proposed`` and ``skipped`` carry ``(category, rule_dict)`` pairs.
-    Banner is emitted only when at least one rule was offered; an
-    all-skipped run still prints a one-liner so the user knows the wizard
-    looked at rules but decided existing ones covered them.
+    ``proposed``, ``skipped``, ``replaced``, and ``shadowed`` carry
+    ``(category, rule_dict)`` pairs. ``replaced`` lists legacy preset rules
+    being removed so a newer preset can take their place (e.g. the codex
+    flat→split migration); each ``rule_dict`` there is the *old* rule.
+    ``shadowed`` lists proposed rules that were *not* written because an
+    existing rule already covers their tree (first-match-wins) — surfaced so
+    the wizard never silently drops a rule it would otherwise claim to add.
+    Banner is emitted only when there is something to report; an all-skipped
+    run still prints a one-liner so the user knows the wizard looked at rules
+    but decided existing ones covered them.
     """
-    if not proposed and not skipped:
+    replaced = replaced or []
+    shadowed = shadowed or []
+    if not proposed and not skipped and not replaced and not shadowed:
         return
     click.echo("  Namespace rules:")
-    if not proposed and skipped:
+    if not proposed and not replaced and not shadowed and skipped:
         n = len(skipped)
         click.secho(
             f"    {n} rule(s) already managed, nothing to add.",
@@ -754,11 +849,17 @@ def _emit_rules_banner(
         )
         click.echo()
         return
+    for _, rule in replaced:
+        line = f"    ↻ {rule['path_glob']:<40} (replaced legacy '{rule['namespace']}' rule)"
+        click.secho(line, fg="cyan")
     for _, rule in proposed:
         line = f"    + {rule['path_glob']:<40} → {rule['namespace']}"
         click.secho(line, fg="green")
     for _, rule in skipped:
         line = f"    ⏭ {rule['path_glob']:<40} (existing rule kept)"
+        click.secho(line, fg="yellow")
+    for _, rule in shadowed:
+        line = f"    ⚠ {rule['path_glob']:<40} (shadowed by an existing rule — not added)"
         click.secho(line, fg="yellow")
     click.echo()
 
@@ -827,9 +928,7 @@ def _step_provider_dirs(state: dict) -> None:
 
     state["provider_dirs"] = [str(p) for p in selected]
     state["provider_rules"] = [
-        (cat, _proposed_rule_for_category(cat))
-        for cat in accepted_categories
-        if _proposed_rule_for_category(cat) is not None
+        (cat, rule) for cat in accepted_categories for rule in _proposed_rules_for_category(cat)
     ]
     if selected:
         click.secho(f"  Added {len(selected)} provider folder(s) to memory_dirs.", fg="green")
@@ -2105,6 +2204,24 @@ def _write_config_and_summary(
         existing_ns = existing.setdefault("namespace", {})
         raw_rules = existing_ns.get("rules")
         existing_rules: list[dict] = raw_rules if isinstance(raw_rules, list) else []
+
+        # Drop superseded legacy presets for the categories being applied so a
+        # re-run after upgrading replaces — rather than shadows — the stale
+        # rule (e.g. the codex flat ``codex`` catch-all that the per-subdir
+        # split supersedes). Without this, the new subdir rules would land
+        # *after* the old catch-all and never match (first-match-wins).
+        proposed_cats = {cat for cat, _ in proposed_rules}
+        replaced: list[tuple[str, dict]] = []
+        if existing_rules:
+            kept: list[dict] = []
+            for r in existing_rules:
+                cat = _superseded_category(r, proposed_cats)
+                if cat is not None:
+                    replaced.append((cat, r))
+                else:
+                    kept.append(r)
+            existing_rules = kept
+
         to_append: list[tuple[str, dict]] = []
         to_skip: list[tuple[str, dict]] = []
         for cat, rule in proposed_rules:
@@ -2112,8 +2229,27 @@ def _write_config_and_summary(
                 to_skip.append((cat, rule))
             else:
                 to_append.append((cat, rule))
-        _emit_rules_banner(to_append, to_skip)
-        if to_append:
+
+        # Drop proposals made unreachable by a surviving existing rule whose
+        # recursive glob already covers their tree (first-match-wins). Without
+        # this, a user-kept custom catch-all (e.g. ``~/.codex/memories/** ->
+        # my-ns``) would get the proposed subdir rules appended after it —
+        # dead config the banner would falsely report as added.
+        existing_globs = [
+            r["path_glob"] for r in existing_rules if isinstance(r.get("path_glob"), str)
+        ]
+        shadowed: list[tuple[str, dict]] = []
+        if existing_globs and to_append:
+            reachable: list[tuple[str, dict]] = []
+            for cat, rule in to_append:
+                if any(_glob_shadows(g, rule["path_glob"]) for g in existing_globs):
+                    shadowed.append((cat, rule))
+                else:
+                    reachable.append((cat, rule))
+            to_append = reachable
+
+        _emit_rules_banner(to_append, to_skip, replaced, shadowed)
+        if replaced or to_append:
             merged_rules = list(existing_rules)
             for _, rule in to_append:
                 merged_rules.append(dict(rule))
@@ -2546,9 +2682,7 @@ def _step_provider_dirs_auto(state: dict) -> None:
 
     state["provider_dirs"] = [str(p) for p in selected]
     state["provider_rules"] = [
-        (cat, _proposed_rule_for_category(cat))
-        for cat in accepted_categories
-        if _proposed_rule_for_category(cat) is not None
+        (cat, rule) for cat in accepted_categories for rule in _proposed_rules_for_category(cat)
     ]
     click.secho(
         f"  Auto-added {len(selected)} provider folder(s) "
@@ -2593,8 +2727,7 @@ def _resolve_provider_dirs_non_interactive(
         if cat in categories_to_add:
             for d in grouped.get(cat, []):
                 provider_dirs.append(str(d))
-            rule = _proposed_rule_for_category(cat)
-            if rule is not None:
+            for rule in _proposed_rules_for_category(cat):
                 provider_rules.append((cat, rule))
     state["provider_dirs"] = provider_dirs
     state["provider_rules"] = provider_rules
