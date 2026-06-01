@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import click
 
+from memtomem.config import index_excluded_filenames
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
 if TYPE_CHECKING:
@@ -39,10 +40,12 @@ class IngestComponents(Protocol):
 
 
 # Files that sit inside a Claude memory directory but should never be
-# indexed as memory content. MEMORY.md is an index (table of contents) whose
-# text is just pointers to the other files — indexing it would surface a
-# high-score duplicate on every query. README.md is usually meta/how-to-read.
-_EXCLUDE_FILENAMES = frozenset({"MEMORY.md", "README.md"})
+# indexed as memory content (MEMORY.md is a pointer-only index whose text
+# would surface a high-score duplicate on every query; README.md is
+# how-to-read meta). Sourced from the single convention table in ``config``
+# so the general engine walk, the file watcher, and ``mm purge`` all enforce
+# the exact same set — see ``_PROVIDER_INDEX_CONVENTIONS``.
+_EXCLUDE_FILENAMES = index_excluded_filenames("claude-memory")
 
 # Filename prefix → tag. Trailing underscore is required so we only match
 # the prefix component, not any substring (``feedbackXYZ.md`` is not a
@@ -85,7 +88,8 @@ _GEMINI_BASE_TAG = "gemini-memory"
 
 _CODEX_NAMESPACE_PREFIX = "codex-memory:"
 _CODEX_BASE_TAG = "codex-memory"
-_CODEX_EXCLUDE_FILENAMES = frozenset({"README.md"})
+# Sourced from the central convention table — see ``_EXCLUDE_FILENAMES`` above.
+_CODEX_EXCLUDE_FILENAMES = index_excluded_filenames("codex")
 
 
 @click.group()

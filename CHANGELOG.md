@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Provider index-file conventions enforced on every index path (fixes
+  `MEMORY.md` pollution).** The exclude set for agent index/TOC files — Claude
+  Code's `MEMORY.md`/`README.md` and Codex's `README.md` — was previously
+  honored only by `mm ingest`, so the general `memory_dirs` walk, the file
+  watcher, and `mm index <dir>` indexed `MEMORY.md` as searchable content: a
+  pointer-only table of contents that then surfaced as a high-score duplicate
+  on every query. The conventions now live in one table
+  (`config._PROVIDER_INDEX_CONVENTIONS`) consulted by the shared
+  `_path_is_excluded` funnel, so ingest, the engine walk, the watcher, and
+  `mm purge --matching-excluded` all skip the same files. `mm purge
+  --matching-excluded --apply` consequently reclaims `MEMORY.md` chunks indexed
+  before this fix. The convention is provider-scoped — a `MEMORY.md` in a plain
+  user folder is still indexed as real content.
+
 - **MCP server definitions in the Context Gateway (#1165).** A new **MCP Servers**
   gateway section manages canonical definitions under
   `.memtomem/mcp-servers/<name>.json` and fans them out to the project

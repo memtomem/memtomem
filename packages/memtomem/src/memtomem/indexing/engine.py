@@ -26,6 +26,7 @@ from memtomem.config import (
     NamespacePolicyRule,
     categorize_memory_dir,
     classify_scope,
+    index_excluded_filenames,
     memory_dir_kind,
     provider_for_category,
 )
@@ -99,7 +100,30 @@ def _path_is_excluded(
     memory_dirs: Iterable[str | Path],
     user_spec: pathspec.GitIgnoreSpec,
 ) -> bool:
-    """True if ``file_path`` matches any built-in or user exclude pattern."""
+    """True if ``file_path`` matches any exclude rule.
+
+    Three layers, any of which excludes: (1) the provider index-file
+    convention for the ``memory_dir`` root that *owns* the file — e.g. a
+    ``claude-memory`` root's ``MEMORY.md``/``README.md`` is an index/meta
+    file, never content; (2) the built-in secret/noise denylist; (3) the
+    user's ``indexing.exclude_patterns``. Layer (1) is the single
+    enforcement point shared by ``_discover_files`` (dir walk),
+    ``_index_file`` (per-file funnel for watcher/CLI/MCP), and
+    ``mm purge`` — so the convention can't be honored on one path and
+    bypassed on another (the bug where the general walk indexed
+    ``MEMORY.md`` while ``mm ingest`` skipped it).
+
+    Ownership uses :func:`resolve_owning_memory_dir` (most-specific,
+    longest-prefix root), so a nested configured root overrides its
+    parent's convention — a plain ``project-docs/`` root configured under
+    ``~/.codex/memories`` keeps its own ``README.md`` rather than
+    inheriting Codex's exclude.
+    """
+    owning = resolve_owning_memory_dir(file_path, memory_dirs)
+    if owning is not None and Path(file_path).name in index_excluded_filenames(
+        categorize_memory_dir(owning)
+    ):
+        return True
     for key in _exclude_match_keys(file_path, memory_dirs):
         if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
             return True

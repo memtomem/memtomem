@@ -13,7 +13,7 @@ from memtomem.cli import cli
 from memtomem.cli.purge_cmd import find_sources_matching_excluded
 
 
-def _mock_components(matched_sources, indexing_exclude_patterns=()):
+def _mock_components(matched_sources, indexing_exclude_patterns=(), memory_dirs=()):
     """Build a fake Components-like object where storage returns the given sources."""
     storage = SimpleNamespace(
         get_all_source_files=AsyncMock(return_value=set(matched_sources)),
@@ -22,8 +22,12 @@ def _mock_components(matched_sources, indexing_exclude_patterns=()):
         ),
         delete_by_source=AsyncMock(return_value=2),
     )
+    roots = list(memory_dirs)
     config = SimpleNamespace(
-        indexing=SimpleNamespace(exclude_patterns=list(indexing_exclude_patterns))
+        indexing=SimpleNamespace(
+            exclude_patterns=list(indexing_exclude_patterns),
+            all_index_roots=lambda: roots,
+        )
     )
     return SimpleNamespace(storage=storage, config=config)
 
@@ -44,7 +48,7 @@ class TestFindSourcesMatchingExcluded:
             Path("/home/u/.gemini/oauth_creds.json"),
             Path("/home/u/notes/day.md"),
         }
-        matched = find_sources_matching_excluded(sources, user_patterns=[])
+        matched = find_sources_matching_excluded(sources, user_patterns=[], memory_dirs=[])
         assert Path("/home/u/.gemini/oauth_creds.json") in matched
         assert Path("/home/u/notes/day.md") not in matched
 
@@ -53,25 +57,45 @@ class TestFindSourcesMatchingExcluded:
             Path("/home/u/.claude/projects/abc/subagents/x.meta.json"),
             Path("/home/u/notes/day.md"),
         }
-        matched = find_sources_matching_excluded(sources, user_patterns=[])
+        matched = find_sources_matching_excluded(sources, user_patterns=[], memory_dirs=[])
         assert Path("/home/u/.claude/projects/abc/subagents/x.meta.json") in matched
 
     def test_user_pattern_matches(self):
         sources = {Path("/home/u/drafts/todo.md"), Path("/home/u/notes/day.md")}
-        matched = find_sources_matching_excluded(sources, user_patterns=["**/drafts/**"])
+        matched = find_sources_matching_excluded(
+            sources, user_patterns=["**/drafts/**"], memory_dirs=[]
+        )
         assert Path("/home/u/drafts/todo.md") in matched
         assert Path("/home/u/notes/day.md") not in matched
 
     def test_user_negation_cannot_unset_builtin(self):
         """Security regression: user cannot whitelist a built-in secret."""
         sources = {Path("/home/u/.gemini/oauth_creds.json")}
-        matched = find_sources_matching_excluded(sources, user_patterns=["!**/oauth_creds.json"])
+        matched = find_sources_matching_excluded(
+            sources, user_patterns=["!**/oauth_creds.json"], memory_dirs=[]
+        )
         assert Path("/home/u/.gemini/oauth_creds.json") in matched
 
     def test_case_insensitive(self):
         sources = {Path("/home/u/OAuth_Creds.JSON")}
-        matched = find_sources_matching_excluded(sources, user_patterns=[])
+        matched = find_sources_matching_excluded(sources, user_patterns=[], memory_dirs=[])
         assert Path("/home/u/OAuth_Creds.JSON") in matched
+
+    def test_provider_index_convention_matches(self):
+        """A claude-memory root's MEMORY.md/README.md are index/meta, not content."""
+        root = Path("/home/u/.claude/projects/slug/memory")
+        sources = {root / "MEMORY.md", root / "README.md", root / "feedback_note.md"}
+        matched = find_sources_matching_excluded(sources, user_patterns=[], memory_dirs=[root])
+        assert root / "MEMORY.md" in matched
+        assert root / "README.md" in matched
+        assert root / "feedback_note.md" not in matched
+
+    def test_memory_md_outside_provider_root_not_excluded(self):
+        """MEMORY.md in a plain user dir is real content — the convention is provider-scoped."""
+        root = Path("/home/u/notes")
+        sources = {root / "MEMORY.md"}
+        matched = find_sources_matching_excluded(sources, user_patterns=[], memory_dirs=[root])
+        assert root / "MEMORY.md" not in matched
 
 
 class TestPurgeCLI:

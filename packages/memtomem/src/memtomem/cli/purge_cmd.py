@@ -12,20 +12,23 @@ import click
 def find_sources_matching_excluded(
     sources: Iterable[Path],
     user_patterns: Iterable[str],
+    memory_dirs: Iterable[str | Path],
 ) -> list[Path]:
-    """Return source paths matching the current exclude set (built-in + user).
+    """Return source paths the indexer would now exclude.
 
-    Exposed for testing — the CLI calls this with storage.get_all_source_files().
+    Routes through the indexer's own :func:`_path_is_excluded` so purge
+    targets exactly what indexing skips: provider index-file conventions
+    (e.g. a ``claude-memory`` root's ``MEMORY.md``/``README.md``), the
+    built-in secret/noise denylist, and ``indexing.exclude_patterns``.
+    Sharing the predicate is what lets ``mm purge --matching-excluded``
+    reclaim chunks that were indexed before a convention/exclude was
+    added. Exposed for testing — the CLI calls this with
+    ``storage.get_all_source_files()`` and the configured index roots.
     """
-    from memtomem.indexing.engine import _BUILTIN_EXCLUDE_SPEC, _build_exclude_spec
+    from memtomem.indexing.engine import _build_exclude_spec, _path_is_excluded
 
     user_spec = _build_exclude_spec(user_patterns)
-    matched: list[Path] = []
-    for sf in sources:
-        key = sf.as_posix().lower()
-        if _BUILTIN_EXCLUDE_SPEC.match_file(key) or user_spec.match_file(key):
-            matched.append(sf)
-    return matched
+    return [sf for sf in sources if _path_is_excluded(sf, memory_dirs, user_spec)]
 
 
 @click.command("purge")
@@ -33,7 +36,11 @@ def find_sources_matching_excluded(
     "--matching-excluded",
     "matching_excluded",
     is_flag=True,
-    help="Target chunks whose source_path matches built-in denylist or indexing.exclude_patterns.",
+    help=(
+        "Target chunks whose source_path matches built-in denylist, "
+        "indexing.exclude_patterns, or a provider index-file convention "
+        "(e.g. claude-memory MEMORY.md/README.md)."
+    ),
 )
 @click.option(
     "--apply",
@@ -52,8 +59,11 @@ def purge(matching_excluded: bool, apply_: bool, sample_size: int) -> None:
     """Remove stored chunks matching a selector.
 
     Currently one selector is supported: ``--matching-excluded`` scans every
-    source_file in storage and deletes chunks whose path matches the current
-    exclude set (built-in secret/noise patterns + indexing.exclude_patterns).
+    source_file in storage and deletes chunks whose path the indexer would
+    now exclude — built-in secret/noise patterns, ``indexing.exclude_patterns``,
+    and provider index-file conventions (e.g. a ``claude-memory`` root's
+    ``MEMORY.md``/``README.md``). Use it to reclaim chunks indexed before a
+    convention/exclude was added.
 
     Default is dry-run. Pass ``--apply`` to execute deletion.
     """
@@ -67,7 +77,11 @@ async def _run_matching_excluded(*, apply_: bool, sample_size: int) -> None:
 
     async with cli_components() as comp:
         sources: set[Path] = await comp.storage.get_all_source_files()
-        matched = find_sources_matching_excluded(sources, comp.config.indexing.exclude_patterns)
+        matched = find_sources_matching_excluded(
+            sources,
+            comp.config.indexing.exclude_patterns,
+            comp.config.indexing.all_index_roots(),
+        )
 
         if not matched:
             click.secho("No stored chunks match the current exclude set.", fg="green")
