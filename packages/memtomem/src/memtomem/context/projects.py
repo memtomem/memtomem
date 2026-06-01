@@ -568,7 +568,7 @@ def discover_project_scopes(
 # ── Validation helpers ──────────────────────────────────────────────────
 
 
-_MARKER_DIRS = (".claude", ".gemini", ".agents", ".memtomem")
+_MARKER_DIRS = (".claude", ".gemini", ".agents", ".kimi", ".memtomem")
 
 
 def has_runtime_marker(root: Path) -> bool:

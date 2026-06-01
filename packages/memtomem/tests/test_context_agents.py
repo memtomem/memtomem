@@ -236,13 +236,14 @@ class TestCodexRendering:
 
 
 class TestGenerateAllAgents:
-    def test_fans_out_to_all_three_runtimes(self, tmp_path, codex_home):
+    def test_fans_out_to_all_runtimes(self, tmp_path, codex_home):
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
         result = generate_all_agents(tmp_path)
-        assert len(result.generated) == 3
+        assert len(result.generated) == 4
         assert (tmp_path / ".claude/agents/helper.md").is_file()
         assert (tmp_path / ".gemini/agents/helper.md").is_file()
         assert (tmp_path / ".codex/agents/helper.toml").is_file()
+        assert (tmp_path / ".kimi/agents/helper.yaml").is_file()
         # Defensive: nothing leaked into HOME.
         assert not (codex_home / ".codex/agents").exists()
 
@@ -255,6 +256,7 @@ class TestGenerateAllAgents:
         assert "claude_agents" in AGENT_GENERATORS
         assert "gemini_agents" in AGENT_GENERATORS
         assert "codex_agents" in AGENT_GENERATORS
+        assert "kimi_agents" in AGENT_GENERATORS
 
     def test_unknown_runtime_skipped(self, tmp_path):
         _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)

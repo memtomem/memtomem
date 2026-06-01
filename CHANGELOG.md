@@ -18,6 +18,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   resolve correctly under first-match-wins instead of being shadowed. A
   hand-edited codex rule (custom namespace) is never touched. Existing indexed
   data is migrated by re-running `mm index ~/.codex/memories --force`.
+- **Context Gateway adds Kimi CLI runtime support.** Skills now fan out to
+  `.kimi/skills/`, agents render to Kimi `agent-file` YAML under `.kimi/agents/`,
+  hooks sync into Kimi `config.toml` through a memtomem-managed TOML block, and
+  `mm init --mcp kimi` writes `~/.kimi/mcp.json` (or `$KIMI_SHARE_DIR/mcp.json`).
+  Kimi custom commands stay explicitly unsupported until Kimi documents a
+  file-backed custom-command format.
 
 ## [0.2.2] — 2026-05-31
 

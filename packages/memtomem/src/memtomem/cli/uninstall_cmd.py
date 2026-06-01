@@ -293,6 +293,7 @@ def _probe_external_integrations() -> list[_External]:
         home / ".cursor" / "mcp.json",
         home / ".codeium" / "windsurf" / "mcp_config.json",
         home / ".gemini" / "settings.json",
+        home / ".kimi" / "mcp.json",
         home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
     ]
     cwd_local = Path.cwd() / ".mcp.json"

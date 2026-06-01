@@ -23,6 +23,7 @@ AGENT_FILES: dict[str, list[str]] = {
     "cursor": [".cursorrules", ".cursor/rules"],
     "gemini": ["GEMINI.md"],
     "codex": ["AGENTS.md"],
+    "kimi": [".kimi/config.toml"],
     "copilot": [".github/copilot-instructions.md"],
 }
 
@@ -41,6 +42,7 @@ SKILL_DIRS: dict[str, list[str]] = {
     "claude_skills": [".claude/skills"],
     "gemini_skills": [".gemini/skills"],
     "codex_skills": [".agents/skills"],
+    "kimi_skills": [".kimi/skills"],
 }
 
 # Sub-agent-runtime name → project-scope directories containing sub-agent files.
@@ -50,6 +52,7 @@ AGENT_DIRS: dict[str, list[str]] = {
     "claude_agents": [".claude/agents"],
     "gemini_agents": [".gemini/agents"],
     "codex_agents": [".codex/agents"],
+    "kimi_agents": [".kimi/agents"],
 }
 
 # Per-runtime suffix used by ``detect_agent_dirs`` when scanning ``AGENT_DIRS``.
@@ -57,6 +60,7 @@ AGENT_FILE_SUFFIX: dict[str, str] = {
     "claude_agents": ".md",
     "gemini_agents": ".md",
     "codex_agents": ".toml",
+    "kimi_agents": ".yaml",
 }
 
 # Lock the two dicts to the same key set so a future runtime added to

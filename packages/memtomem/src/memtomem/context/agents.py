@@ -8,6 +8,7 @@ canonical source we fan out to:
 * ``.claude/agents/<name>.md`` — Claude Code (project-scope)
 * ``.gemini/agents/<name>.md`` — Gemini CLI (project-scope)
 * ``.codex/agents/<name>.toml`` — OpenAI Codex CLI (project-scope)
+* ``.kimi/agents/<name>.yaml`` — Kimi CLI agent-file YAML (project-scope)
 
 Codex CLI accepts both ``~/.codex/agents/`` (user-scope) and ``.codex/agents/``
 (project-scope) per the official subagents docs. memtomem fans out to the
@@ -33,6 +34,7 @@ scope for Phase 2 — the canonical frontmatter is intentionally flat.
 from __future__ import annotations
 
 import logging
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -489,6 +491,52 @@ def _subagent_to_codex_toml(agent: SubAgent) -> tuple[str, list[str]]:
     return "\n".join(parts) + "\n", dropped
 
 
+def _yaml_json_scalar(value: str) -> str:
+    """Return a YAML-compatible quoted scalar without adding a dependency."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _yaml_block(value: str, indent: int) -> str:
+    value = value.rstrip("\n")
+    pad = " " * indent
+    if not value:
+        return f"{pad}\n"
+    return "\n".join(f"{pad}{line}" if line else pad for line in value.split("\n")) + "\n"
+
+
+def _subagent_to_kimi_yaml(agent: SubAgent) -> tuple[str, list[str]]:
+    dropped: list[str] = []
+    if agent.tools:
+        dropped.append("tools")
+    if agent.model:
+        dropped.append("model")
+    if agent.skills:
+        dropped.append("skills")
+    if agent.isolation is not None:
+        dropped.append("isolation")
+    if agent.kind is not None:
+        dropped.append("kind")
+    if agent.temperature is not None:
+        dropped.append("temperature")
+
+    role_lines: list[str] = []
+    if agent.description:
+        role_lines.append(f"Description: {agent.description}")
+        role_lines.append("")
+    role_lines.append(agent.body.rstrip())
+    role_additional = "\n".join(role_lines).rstrip()
+    return (
+        "version: 1\n"
+        "agent:\n"
+        "  extend: default\n"
+        f"  name: {_yaml_json_scalar(agent.name)}\n"
+        "  system_prompt_args:\n"
+        "    ROLE_ADDITIONAL: |-\n"
+        f"{_yaml_block(role_additional, 6)}",
+        dropped,
+    )
+
+
 # ── Generator registry ───────────────────────────────────────────────
 
 
@@ -585,9 +633,29 @@ class CodexAgentsGenerator:
         return _subagent_to_codex_toml(agent)
 
 
+@dataclass
+class KimiAgentsGenerator:
+    name: str = "kimi_agents"
+    output_root: str = ".kimi/agents"
+
+    def target_file(
+        self,
+        project_root: Path,
+        agent_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("agents", "kimi", scope, project_root)
+        return None if root is None else root / f"{agent_name}.yaml"
+
+    def render(self, agent: SubAgent) -> tuple[str, list[str]]:
+        return _subagent_to_kimi_yaml(agent)
+
+
 _register(ClaudeAgentsGenerator())
 _register(GeminiAgentsGenerator())
 _register(CodexAgentsGenerator())
+_register(KimiAgentsGenerator())
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
@@ -864,6 +932,7 @@ _AGENT_RUNTIME_SUFFIX: dict[str, str] = {
     "claude": ".md",
     "gemini": ".md",
     "codex": ".toml",
+    "kimi": ".yaml",
 }
 
 
@@ -984,6 +1053,7 @@ __all__ = [
     "ClaudeAgentsGenerator",
     "CodexAgentsGenerator",
     "GeminiAgentsGenerator",
+    "KimiAgentsGenerator",
     "Layout",
     "ON_DROP_LEVELS",
     "StrictDropError",

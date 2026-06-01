@@ -118,7 +118,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 ```
 
-See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claude Desktop / Gemini CLI.
+See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi CLI.
 
 </details>
 

@@ -49,6 +49,7 @@ import json
 import logging
 import re
 import time
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -61,6 +62,9 @@ CANONICAL_SETTINGS_FILE = ".memtomem/settings.json"
 
 # Sentinel for malformed JSON detection (identity-compared via ``is``)
 _MALFORMED = object()
+_KIMI_TOML_TEXT_KEY = "__memtomem_kimi_config_toml__"
+_KIMI_BEGIN = "# BEGIN memtomem managed hooks"
+_KIMI_END = "# END memtomem managed hooks"
 
 # Whole-call budget for sidecar-lock acquisition across ALL targets (#1145
 # review). The web handler offloads ``generate_all_settings`` to a worker
@@ -558,6 +562,17 @@ def _gemini_target_file(project_root: Path, scope: str) -> Path | None:
     raise ValueError(f"Unknown target_scope: {scope!r}")
 
 
+def _kimi_target_file(project_root: Path, scope: str) -> Path | None:
+    """Kimi config file per scope. ``project_local`` has no fan-out."""
+    if scope == "user":
+        return Path.home() / ".kimi" / "config.toml"
+    if scope == "project_shared":
+        return project_root / ".kimi" / "config.toml"
+    if scope == "project_local":
+        return None
+    raise ValueError(f"Unknown target_scope: {scope!r}")
+
+
 def _filter_codex_events(contributions: dict) -> tuple[dict, list[str]]:
     """Drop canonical events Codex doesn't support (Notification, SessionEnd).
 
@@ -580,6 +595,113 @@ def _filter_codex_events(contributions: dict) -> tuple[dict, list[str]]:
             continue
         out[event] = rules
     return {"hooks": out}, warnings
+
+
+_KIMI_EVENT_MAP: dict[str, str] = {
+    "SessionStart": "SessionStart",
+    "PreToolUse": "PreToolUse",
+    "PostToolUse": "PostToolUse",
+    "UserPromptSubmit": "UserPromptSubmit",
+    "Stop": "Stop",
+}
+
+_KIMI_TOOL_EVENTS: frozenset[str] = frozenset({"PreToolUse", "PostToolUse"})
+
+_KIMI_TOOL_MAP: dict[str, str] = {
+    "Bash": "Shell",
+    "Read": "ReadFile",
+    "Write": "WriteFile",
+    "Edit": "StrReplaceFile",
+    "MultiEdit": "StrReplaceFile",
+}
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _map_kimi_matcher(matcher: str) -> tuple[str | None, list[str]]:
+    matcher = matcher.strip()
+    if not matcher:
+        return "*", []
+    mapped: list[str] = []
+    unmapped: list[str] = []
+    for raw in matcher.split("|"):
+        token = raw.strip()
+        if not token:
+            continue
+        kimi_tool = _KIMI_TOOL_MAP.get(token)
+        if kimi_tool is None:
+            unmapped.append(token)
+        elif kimi_tool not in mapped:
+            mapped.append(kimi_tool)
+    if unmapped:
+        return None, unmapped
+    return "|".join(mapped) if mapped else "*", []
+
+
+def _render_kimi_hooks(contributions: dict) -> tuple[str, list[str]]:
+    warnings: list[str] = []
+    src_hooks = contributions.get("hooks", {})
+    if not isinstance(src_hooks, dict):
+        return "", warnings
+    chunks: list[str] = []
+    for event, rules in src_hooks.items():
+        kimi_event = _KIMI_EVENT_MAP.get(event)
+        if kimi_event is None:
+            warnings.append(f"Hook event '{event}' has no Kimi equivalent and was dropped.")
+            continue
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            matcher = str(rule.get("matcher", ""))
+            if kimi_event in _KIMI_TOOL_EVENTS:
+                mapped_matcher, unmapped = _map_kimi_matcher(matcher)
+                if mapped_matcher is None:
+                    warnings.append(
+                        f"Hook '{event}:{matcher}' matcher token(s) "
+                        f"{', '.join(unmapped)} have no Kimi tool equivalent; rule dropped."
+                    )
+                    continue
+                matcher = mapped_matcher
+            handlers = rule.get("hooks", [])
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                if not isinstance(handler, dict) or handler.get("type") != "command":
+                    continue
+                command = handler.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    continue
+                rows = [
+                    "[[hooks]]",
+                    f"event = {_toml_string(kimi_event)}",
+                    f"matcher = {_toml_string(matcher)}",
+                    f"command = {_toml_string(command)}",
+                ]
+                timeout = handler.get("timeout")
+                if isinstance(timeout, (int, float)):
+                    rows.append(f"timeout = {timeout}")
+                chunks.append("\n".join(rows))
+    return "\n\n".join(chunks), warnings
+
+
+def _replace_kimi_managed_block(existing: str, body: str) -> str:
+    block_body = body.strip()
+    block = f"{_KIMI_BEGIN}\n{block_body}\n{_KIMI_END}\n" if block_body else ""
+    pattern = re.compile(
+        r"(?ms)^# BEGIN memtomem managed hooks\n.*?^# END memtomem managed hooks\n?"
+    )
+    if pattern.search(existing):
+        updated = pattern.sub(block, existing)
+    else:
+        updated = existing.rstrip()
+        if updated and block:
+            updated += "\n\n"
+        updated += block
+    return updated.rstrip() + ("\n" if updated.rstrip() else "")
 
 
 def _map_gemini_matcher(matcher: str) -> tuple[str | None, list[str]]:
@@ -788,6 +910,41 @@ class GeminiSettingsGenerator:
 _register(GeminiSettingsGenerator())
 
 
+@dataclass
+class KimiSettingsGenerator:
+    """Fan out canonical hooks into Kimi CLI's ``config.toml``.
+
+    Kimi uses TOML rather than JSON, so the shared settings sync path preserves
+    the user's config and replaces only a memtomem-managed hooks block.
+    """
+
+    name: str = "kimi_settings"
+
+    def is_available(self, project_root: Path) -> bool:
+        return (Path.home() / ".kimi").is_dir() or (project_root / ".kimi").is_dir()
+
+    def target_file(self, project_root: Path, scope: str) -> Path | None:
+        return _kimi_target_file(project_root, scope)
+
+    def canonical_source(self, project_root: Path) -> Path:
+        return project_root / CANONICAL_SETTINGS_FILE
+
+    def merge(
+        self,
+        existing: dict | None,
+        contributions: dict,
+    ) -> tuple[dict, list[str]]:
+        existing_text = ""
+        if existing and isinstance(existing.get(_KIMI_TOML_TEXT_KEY), str):
+            existing_text = existing[_KIMI_TOML_TEXT_KEY]
+        hooks_body, warnings = _render_kimi_hooks(contributions)
+        merged_text = _replace_kimi_managed_block(existing_text, hooks_body)
+        return {_KIMI_TOML_TEXT_KEY: merged_text}, warnings
+
+
+_register(KimiSettingsGenerator())
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
 
 
@@ -863,10 +1020,42 @@ def _read_with_mtime(path: Path) -> tuple[dict | None | object, int]:
     return data, mtime_ns
 
 
+def _read_settings_target(name: str, path: Path) -> tuple[dict | None | object, int]:
+    """Read a runtime settings target using that runtime's on-disk format."""
+    if name != "kimi_settings":
+        return _read_with_mtime(path)
+    if not path.is_file():
+        return None, 0
+    mtime_ns = path.stat().st_mtime_ns
+    text = path.read_text(encoding="utf-8")
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return _MALFORMED, mtime_ns
+    return {_KIMI_TOML_TEXT_KEY: text}, mtime_ns
+
+
 def _write_json(path: Path, data: dict) -> None:
     """Write *data* as formatted JSON with trailing newline (atomic)."""
     payload = json.dumps(data, indent=2, sort_keys=False, ensure_ascii=False) + "\n"
     atomic_write_text(path, payload, mode=0o600)
+
+
+def _write_settings_target(name: str, path: Path, data: dict) -> None:
+    if name == "kimi_settings":
+        payload = data.get(_KIMI_TOML_TEXT_KEY)
+        if not isinstance(payload, str):
+            raise TypeError("kimi_settings merge did not return TOML payload")
+        atomic_write_text(path, payload, mode=0o600)
+        return
+    _write_json(path, data)
+
+
+def _normalize_settings_target(name: str, data: dict) -> str:
+    if name == "kimi_settings":
+        payload = data.get(_KIMI_TOML_TEXT_KEY)
+        return payload if isinstance(payload, str) else ""
+    return json.dumps(data, sort_keys=True)
 
 
 # ── Fan-out: canonical → runtimes ───────────────────────────────────
@@ -971,11 +1160,12 @@ def generate_all_settings(
             lock_timeout = max(0.0, lock_deadline - time.monotonic())
             with _file_lock(_lock_path_for(target_path), timeout=lock_timeout):
                 # Step 1: read existing + capture mtime (ns)
-                existing_raw, existing_mtime_ns = _read_with_mtime(target_path)
+                existing_raw, existing_mtime_ns = _read_settings_target(name, target_path)
                 if existing_raw is _MALFORMED:
+                    syntax_label = "TOML" if name == "kimi_settings" else "JSON"
                     results[name] = SettingsSyncResult(
                         status="error",
-                        reason=f"{target_path} is not valid JSON. "
+                        reason=f"{target_path} is not valid {syntax_label}. "
                         f"Fix the file manually, then re-run "
                         f"`mm context sync --include=settings`.",
                     )
@@ -996,7 +1186,7 @@ def generate_all_settings(
                     continue
 
                 # Step 4: write
-                _write_json(target_path, merged)
+                _write_settings_target(name, target_path, merged)
                 results[name] = SettingsSyncResult(
                     status="ok",
                     warnings=warnings,
@@ -1062,11 +1252,12 @@ def diff_settings(
                 reason=f"{name} has no fan-out target for scope {scope!r}",
             )
             continue
-        existing_raw, _ = _read_with_mtime(target_path)
+        existing_raw, _ = _read_settings_target(name, target_path)
         if existing_raw is _MALFORMED:
+            syntax_label = "TOML" if name == "kimi_settings" else "JSON"
             results[name] = SettingsSyncResult(
                 status="error",
-                reason=f"{target_path} is not valid JSON",
+                reason=f"{target_path} is not valid {syntax_label}",
             )
             continue
         existing: dict | None = existing_raw  # type: ignore[assignment]
@@ -1074,8 +1265,8 @@ def diff_settings(
         merged, warnings = gen.merge(existing, contributions)
 
         if existing is not None:
-            existing_norm = json.dumps(existing, sort_keys=True)
-            merged_norm = json.dumps(merged, sort_keys=True)
+            existing_norm = _normalize_settings_target(name, existing)
+            merged_norm = _normalize_settings_target(name, merged)
             if existing_norm == merged_norm:
                 status = "in sync"
             else:
@@ -1101,6 +1292,7 @@ __all__ = [
     "ClaudeSettingsGenerator",
     "CodexSettingsGenerator",
     "GeminiSettingsGenerator",
+    "KimiSettingsGenerator",
     "SETTINGS_GENERATORS",
     "SettingsGenerator",
     "SettingsSyncResult",

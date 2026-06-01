@@ -16,6 +16,7 @@ from memtomem.context.agents import (
     ClaudeAgentsGenerator,
     CodexAgentsGenerator,
     GeminiAgentsGenerator,
+    KimiAgentsGenerator,
 )
 from memtomem.context.commands import (
     COMMAND_GENERATORS,
@@ -27,6 +28,7 @@ from memtomem.context.skills import (
     ClaudeSkillsGenerator,
     CodexSkillsGenerator,
     GeminiSkillsGenerator,
+    KimiSkillsGenerator,
 )
 
 from .helpers import set_home
@@ -95,6 +97,11 @@ def test_codex_agents_project_shared_uses_toml(tmp_path: Path) -> None:
     assert out == (tmp_path / ".codex" / "agents" / "foo.toml").resolve()
 
 
+def test_kimi_agents_project_shared_uses_yaml(tmp_path: Path) -> None:
+    out = KimiAgentsGenerator().target_file(tmp_path, "foo", scope="project_shared")
+    assert out == (tmp_path / ".kimi" / "agents" / "foo.yaml").resolve()
+
+
 # ---------------------------------------------------------------------------
 # Per-runtime concrete path pins — skills (directories, no file suffix)
 # ---------------------------------------------------------------------------
@@ -110,6 +117,11 @@ def test_codex_skills_project_uses_dot_agents(tmp_path: Path) -> None:
     """Confirm codex skills project-scope is .agents/skills, NOT .codex/skills."""
     out = CodexSkillsGenerator().target_dir(tmp_path, "skill1", scope="project_shared")
     assert out == (tmp_path / ".agents" / "skills" / "skill1").resolve()
+
+
+def test_kimi_skills_project_uses_dot_kimi(tmp_path: Path) -> None:
+    out = KimiSkillsGenerator().target_dir(tmp_path, "skill1", scope="project_shared")
+    assert out == (tmp_path / ".kimi" / "skills" / "skill1").resolve()
 
 
 def test_gemini_skills_project_local_returns_none(tmp_path: Path) -> None:

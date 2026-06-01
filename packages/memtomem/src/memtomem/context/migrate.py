@@ -672,7 +672,7 @@ def _promote_move(staging: Path, dst: Path) -> None:
 # two-way agreement so a future runtime addition cannot drift the cleanup
 # silently.
 _NON_SKILL_FANOUT_SUFFIX: dict[ArtifactKind, dict[str, str]] = {
-    "agents": {"claude": ".md", "gemini": ".md", "codex": ".toml"},
+    "agents": {"claude": ".md", "gemini": ".md", "codex": ".toml", "kimi": ".yaml"},
     "commands": {"claude": ".md", "gemini": ".toml", "codex": ".md"},
 }
 
@@ -691,7 +691,7 @@ def _remove_runtime_fanout_for(
     do not linger as orphans. Returns the list of removed paths for
     telemetry / verification.
 
-    Walks every known runtime (claude / gemini / codex). Tuples that
+    Walks every known runtime (claude / gemini / codex / kimi). Tuples that
     :func:`runtime_fanout_root` reports as ``NO_FANOUT`` are skipped
     (project_local entries, codex commands at project tiers, etc.).
     KeyError surfaces a programming error in the table — fail-loud.
@@ -703,7 +703,7 @@ def _remove_runtime_fanout_for(
     invoke the moved-away command/agent (#895 P2 review #2).
     """
     removed: list[Path] = []
-    for runtime in ("claude", "gemini", "codex"):
+    for runtime in ("claude", "gemini", "codex", "kimi"):
         try:
             root = runtime_fanout_root(kind, runtime, scope, project_root)
         except KeyError:

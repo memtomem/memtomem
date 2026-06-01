@@ -245,7 +245,7 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
 
     Validation:
     - ``root`` must be an absolute path that resolves to an existing directory.
-    - Without a recognized runtime marker (``.claude``/``.gemini``/``.agents``/``.memtomem``)
+    - Without a recognized runtime marker (``.claude``/``.gemini``/``.agents``/``.kimi``/``.memtomem``)
       the registration still succeeds (HTTP 200) but carries a ``warning`` field
       so the user can intentionally pre-register an empty checkout.
     """
@@ -278,7 +278,7 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
         # for back-compat; new clients should switch on the code.
         response["warning_code"] = "no_runtime_marker"
         response["warning"] = (
-            "No .claude/.gemini/.agents/.memtomem directory found under this root."
+            "No .claude/.gemini/.agents/.kimi/.memtomem directory found under this root."
         )
     return response
 
