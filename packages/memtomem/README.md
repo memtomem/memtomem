@@ -67,7 +67,9 @@ Or add the following to your MCP client config file — the path depends on
 the editor: `~/.cursor/mcp.json` (Cursor),
 `~/.codeium/windsurf/mcp_config.json` (Windsurf),
 `~/Library/Application Support/Claude/claude_desktop_config.json`
-(Claude Desktop), or `~/.gemini/settings.json` (Gemini CLI):
+(Claude Desktop), `~/.gemini/antigravity-cli/mcp_config.json`
+(Antigravity CLI — entries also carry `"type": "stdio"`), or
+`~/.gemini/settings.json` (Gemini CLI, deprecated 2026-06-18):
 
 ```json
 {

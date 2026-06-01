@@ -415,7 +415,7 @@ Yes. Auto-memory automatically extracts from conversations, while memtomem only 
 
 ## Cross-runtime agent context with `mm context`
 
-If you also use Gemini CLI or Codex CLI on the same repo, treat `.memtomem/` as the single source of truth and let memtomem fan it out. Claude Code is the richest target — it preserves every canonical sub-agent field (`name`, `description`, `tools`, `model`, `skills`, `isolation`) without loss, so Claude is the natural place to author canonical agents and skills.
+If you also use Gemini CLI (or its Antigravity CLI successor) or Codex CLI on the same repo, treat `.memtomem/` as the single source of truth and let memtomem fan it out. Claude Code is the richest target — it preserves every canonical sub-agent field (`name`, `description`, `tools`, `model`, `skills`, `isolation`) without loss, so Claude is the natural place to author canonical agents and skills.
 
 ```bash
 # Mirror .memtomem/skills/<name>/SKILL.md to .claude/skills/, .gemini/skills/, .agents/skills/

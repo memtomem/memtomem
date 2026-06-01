@@ -679,7 +679,8 @@ Per-slug results are printed individually, followed by an aggregate total.
 
 `mm ingest gemini-memory` indexes a Gemini CLI `GEMINI.md` file. Global
 memories live at `~/.gemini/GEMINI.md`; per-project memories sit in the
-project root.
+project root. The Antigravity CLI (`agy`, Gemini CLI's successor) reads the
+same `GEMINI.md`, so this command serves Antigravity users unchanged.
 
 ```
 mm ingest gemini-memory --source ~/.gemini/GEMINI.md --dry-run

@@ -44,8 +44,9 @@ config file, then restart the editor.
 | Cursor | `~/.cursor/mcp.json` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) |
-| Gemini CLI | `~/.gemini/settings.json` |
-| Antigravity | MCP Servers panel → remove the memtomem entry |
+| Antigravity CLI (`agy`) | `~/.gemini/antigravity-cli/mcp_config.json` |
+| Antigravity IDE | MCP Servers panel → remove the memtomem entry |
+| Gemini CLI (deprecated 2026-06-18) | `~/.gemini/settings.json` |
 
 Also delete any project-level `.mcp.json` files that contain a memtomem server
 block.
