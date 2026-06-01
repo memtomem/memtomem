@@ -659,6 +659,20 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
           "count": 3,
           "summary": "3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir> --force`)",
           "items": ["project_roadmap.md", "feedback_review_style.md", "user_role.md"]
+        },
+        {
+          "check": "stale_source",
+          "severity": "error",
+          "count": 1,
+          "summary": "1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted",
+          "items": ["/Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md"]
+        },
+        {
+          "check": "budget",
+          "severity": "warn",
+          "count": 2,
+          "summary": "MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)",
+          "items": ["L8", "L40"]
         }
       ]
     }
