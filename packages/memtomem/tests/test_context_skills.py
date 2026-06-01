@@ -122,9 +122,9 @@ class TestGenerateAllSkills:
         _make_canonical_skill(tmp_path, "code-review", with_scripts=True)
         result = generate_all_skills(tmp_path)
         assert isinstance(result, SkillSyncResult)
-        # 3 runtimes × 1 skill (claude + gemini + codex)
-        assert len(result.generated) == 3
-        for runtime_root in (".claude/skills", ".gemini/skills", ".agents/skills"):
+        # 4 runtimes × 1 skill (claude + gemini + codex + kimi)
+        assert len(result.generated) == 4
+        for runtime_root in (".claude/skills", ".gemini/skills", ".agents/skills", ".kimi/skills"):
             assert (tmp_path / runtime_root / "code-review/SKILL.md").exists()
             assert (tmp_path / runtime_root / "code-review/scripts/run.sh").exists()
 

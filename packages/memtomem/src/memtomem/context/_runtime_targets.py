@@ -60,10 +60,12 @@ NO_FANOUT: None = None
 _CLAUDE_AGENTS_REL = Path(".claude/agents")
 _GEMINI_AGENTS_REL = Path(".gemini/agents")
 _CODEX_AGENTS_REL = Path(".codex/agents")
+_KIMI_AGENTS_REL = Path(".kimi/agents")
 
 _CLAUDE_SKILLS_REL = Path(".claude/skills")
 _GEMINI_SKILLS_REL = Path(".gemini/skills")
 _CODEX_SKILLS_REL = Path(".agents/skills")  # NOT .codex/skills — see skills.py module docstring
+_KIMI_SKILLS_REL = Path(".kimi/skills")
 
 _CLAUDE_COMMANDS_REL = Path(".claude/commands")
 _GEMINI_COMMANDS_REL = Path(".gemini/commands")
@@ -83,6 +85,9 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
     ("agents", "codex", "user"): Path("~/.codex/agents"),  # agents.py:12
     ("agents", "codex", "project_shared"): _CODEX_AGENTS_REL,
     ("agents", "codex", "project_local"): NO_FANOUT,
+    ("agents", "kimi", "user"): Path("~/.kimi/agents"),
+    ("agents", "kimi", "project_shared"): _KIMI_AGENTS_REL,
+    ("agents", "kimi", "project_local"): NO_FANOUT,
     # ── skills ───────────────────────────────────────────────────────
     ("skills", "claude", "user"): Path("~/.claude/skills"),
     ("skills", "claude", "project_shared"): _CLAUDE_SKILLS_REL,
@@ -95,6 +100,9 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
     ),  # Agent Skills Open Spec — see docstring rule 5
     ("skills", "codex", "project_shared"): _CODEX_SKILLS_REL,
     ("skills", "codex", "project_local"): NO_FANOUT,
+    ("skills", "kimi", "user"): Path("~/.kimi/skills"),
+    ("skills", "kimi", "project_shared"): _KIMI_SKILLS_REL,
+    ("skills", "kimi", "project_local"): NO_FANOUT,
     # ── commands ─────────────────────────────────────────────────────
     ("commands", "claude", "user"): Path("~/.claude/commands"),
     ("commands", "claude", "project_shared"): _CLAUDE_COMMANDS_REL,
@@ -108,12 +116,17 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
     ("commands", "codex", "user"): Path("~/.codex/prompts"),
     ("commands", "codex", "project_shared"): NO_FANOUT,
     ("commands", "codex", "project_local"): NO_FANOUT,
+    # Kimi CLI has file-backed skills and agent files, but the linked Kimi
+    # docs do not define a project/user custom-command file format.
+    ("commands", "kimi", "user"): NO_FANOUT,
+    ("commands", "kimi", "project_shared"): NO_FANOUT,
+    ("commands", "kimi", "project_local"): NO_FANOUT,
 }
 
 
 # Closed set of runtime keys this module knows about. Callers can use
 # this to iterate when they need "every runtime for this artifact".
-KNOWN_RUNTIMES: tuple[str, ...] = ("claude", "gemini", "codex")
+KNOWN_RUNTIMES: tuple[str, ...] = ("claude", "gemini", "codex", "kimi")
 
 
 def runtime_fanout_root(

@@ -96,6 +96,13 @@ class TestDetector:
         files = detect_agent_files(tmp_path)
         assert files[0].agent == "codex"
 
+    def test_detect_ignores_kimi_runtime_config(self, tmp_path):
+        kimi_dir = tmp_path / ".kimi"
+        kimi_dir.mkdir()
+        (kimi_dir / "config.toml").write_text("[hooks]\n", encoding="utf-8")
+        files = detect_agent_files(tmp_path)
+        assert files == []
+
     def test_detect_copilot(self, tmp_path):
         gh = tmp_path / ".github"
         gh.mkdir()

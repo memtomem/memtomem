@@ -2550,8 +2550,8 @@ class TestFreshFlag:
 class TestMcpPasteHints:
     """The wizard's MCP step writes a Claude-Code-scoped ``.mcp.json`` and must
     surface what the user still has to do for Cursor / Windsurf / Claude
-    Desktop / Antigravity CLI / Gemini CLI (none of which auto-load the
-    project file).
+    Desktop / Antigravity CLI / Gemini CLI / Kimi CLI (none of which auto-load
+    the project file).
 
     Regression for #246: earlier wording implied ``.mcp.json`` is the config
     file for those editors, which it isn't — each has its own canonical path."""
@@ -2584,6 +2584,7 @@ class TestMcpPasteHints:
         # which the generated .mcp.json omits — the hint must flag it.
         assert '(add "type": "stdio" to the memtomem entry)' in out
         assert "Gemini CLI" in out and "~/.gemini/settings.json" in out
+        assert "Kimi CLI" in out and "~/.kimi/mcp.json" in out
         assert "Claude Code picks up ./.mcp.json in this project automatically" in out
 
     def test_choice_3_skip_emits_no_hints(
@@ -2628,6 +2629,34 @@ class TestMcpPasteHints:
         assert "(for Cursor, Windsurf, etc.)" not in out, "old auto-compat wording leaked back in"
         assert "Claude Code project scope" in out
         assert "copy into your editor's config file" in out
+        assert "Kimi CLI" in out
+
+    def test_choice_4_writes_kimi_mcp_json(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from click import unstyle
+
+        from memtomem.cli.init_cmd import _write_config_and_summary
+
+        share_dir = tmp_path / "kimi-share"
+        monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+
+        state = _make_init_state(tmp_path)
+        state["mcp_choice"] = 4
+        _write_config_and_summary(state, tmp_path)
+
+        out = unstyle(capsys.readouterr().out)
+        mcp_path = share_dir / "mcp.json"
+        assert f"Kimi CLI MCP config: wrote {mcp_path}" in out
+        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["memtomem"]["command"] in {"uvx", "uv"}
+        assert "memtomem-server" in data["mcpServers"]["memtomem"]["args"]
+        assert not (tmp_path / ".mcp.json").exists()
 
 
 class TestMcpChoiceOneClaudeAddBranches:

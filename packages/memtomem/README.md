@@ -7,7 +7,7 @@ Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + s
 **Core philosophy**: `.md` files are the source of truth and the vector database is a derived cache. Manage memories as plain text files — memtomem makes them instantly searchable.
 
 **Built for:**
-- AI agents (Claude Code, Cursor, Windsurf, Claude Desktop) that need to *remember* between sessions
+- AI agents (Claude Code, Cursor, Windsurf, Claude Desktop, Kimi CLI) that need to *remember* between sessions
 - Developers who want a searchable knowledge base built from their existing markdown notes — no proprietary database, no vendor lock-in
 - Multilingual content (English, Korean, Japanese, Chinese) via `bge-m3` embeddings
 
@@ -68,8 +68,9 @@ the editor: `~/.cursor/mcp.json` (Cursor),
 `~/.codeium/windsurf/mcp_config.json` (Windsurf),
 `~/Library/Application Support/Claude/claude_desktop_config.json`
 (Claude Desktop), `~/.gemini/antigravity-cli/mcp_config.json`
-(Antigravity CLI — entries also carry `"type": "stdio"`), or
-`~/.gemini/settings.json` (Gemini CLI, deprecated 2026-06-18):
+(Antigravity CLI — entries also carry `"type": "stdio"`),
+`~/.gemini/settings.json` (Gemini CLI, deprecated 2026-06-18), or
+`~/.kimi/mcp.json` (Kimi CLI):
 
 ```json
 {

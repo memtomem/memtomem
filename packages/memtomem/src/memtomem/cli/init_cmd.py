@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1082,7 +1083,8 @@ def _step_mcp(state: dict) -> None:
     click.echo("    [2] Generate .mcp.json here (Claude Code project scope;")
     click.echo("        copy into your editor's config file for Cursor / Windsurf / others)")
     click.echo("    [3] Skip — I'll configure it manually")
-    state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 3), default=1)
+    click.echo("    [4] Kimi CLI (write ~/.kimi/mcp.json or $KIMI_SHARE_DIR/mcp.json)")
+    state["mcp_choice"] = nav_prompt("  Select", type=click.IntRange(1, 4), default=1)
     click.echo()
 
 
@@ -1091,8 +1093,8 @@ def _claude_desktop_config_hint() -> str:
 
     Claude Desktop is the only editor in ``_emit_mcp_paste_hints`` whose
     config location is OS-specific; Cursor / Windsurf / Antigravity CLI /
-    Gemini CLI all use a single ``~/<dot-dir>/...`` layout that works on
-    every platform."""
+    Gemini CLI / Kimi CLI all use a single ``~/<dot-dir>/...`` layout that
+    works on every platform."""
     if sys.platform == "darwin":
         return "~/Library/Application Support/Claude/claude_desktop_config.json"
     if sys.platform == "win32":
@@ -1106,7 +1108,7 @@ def _emit_mcp_paste_hints() -> None:
     Claude Code auto-loads a project-root ``.mcp.json``; other editors do not
     and expect their own config file. Shown after every path that writes the
     file so users know the generated JSON is a template, not a drop-in config
-    for Cursor/Windsurf/Claude Desktop/Antigravity CLI/Gemini CLI.
+    for Cursor/Windsurf/Claude Desktop/Antigravity CLI/Gemini CLI/Kimi CLI.
 
     Antigravity CLI (``agy``, Google's successor to Gemini CLI) reads MCP
     servers from its own ``~/.gemini/antigravity-cli/mcp_config.json`` (key
@@ -1122,6 +1124,7 @@ def _emit_mcp_paste_hints() -> None:
     click.echo("    Antigravity CLI → paste into ~/.gemini/antigravity-cli/mcp_config.json")
     click.echo('                      (add "type": "stdio" to the memtomem entry)')
     click.echo("    Gemini CLI      → paste into ~/.gemini/settings.json (deprecated 2026-06-18)")
+    click.echo("    Kimi CLI        → paste into ~/.kimi/mcp.json")
     click.echo("  (Claude Code picks up ./.mcp.json in this project automatically.)")
 
 
@@ -2383,6 +2386,9 @@ def _write_config_and_summary(
         _write_mcp_json(server_cmd, server_args, mcp_env)
         click.echo("  MCP config: wrote ./.mcp.json")
         _emit_mcp_paste_hints()
+    elif mcp_choice == 4:
+        kimi_path = _write_kimi_mcp_json(server_cmd, server_args, mcp_env)
+        click.echo(f"  Kimi CLI MCP config: wrote {kimi_path}")
 
     # Summary
     click.echo()
@@ -2569,6 +2575,26 @@ def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, 
         mcp_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     else:
         mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+
+
+def _write_kimi_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> Path:
+    """Write or update Kimi CLI's MCP config file."""
+    server_entry: dict = {
+        "command": server_cmd,
+        "args": server_args,
+    }
+    if mcp_env:
+        server_entry["env"] = mcp_env
+    base = Path(os.environ.get("KIMI_SHARE_DIR", "~/.kimi")).expanduser()
+    mcp_path = base / "mcp.json"
+    mcp_path.parent.mkdir(parents=True, exist_ok=True)
+    if mcp_path.exists():
+        existing = json.loads(mcp_path.read_text(encoding="utf-8"))
+    else:
+        existing = {}
+    existing.setdefault("mcpServers", {})["memtomem"] = server_entry
+    mcp_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    return mcp_path
 
 
 # ── Preset quick-setup helpers ────────────────────────────────────────
@@ -2820,7 +2846,7 @@ def _override_from_flags(
     if api_key is not None:
         state["api_key"] = api_key
     if mcp_mode is not None:
-        state["mcp_choice"] = {"claude": 1, "json": 2, "skip": 3}.get(mcp_mode, 3)
+        state["mcp_choice"] = {"claude": 1, "json": 2, "skip": 3, "kimi": 4}.get(mcp_mode, 3)
 
 
 # ── CLI entry point ───────────────────────────────────────────────────
@@ -2850,7 +2876,12 @@ _MODEL_DIMS: dict[str, int] = {
 @click.option("--tokenizer", type=click.Choice(["unicode61", "kiwipiepy"]), default=None)
 @click.option("--decay", is_flag=True, default=False, help="Enable time-decay")
 @click.option("--api-key", default=None, help="OpenAI API key")
-@click.option("--mcp", "mcp_mode", type=click.Choice(["claude", "json", "skip"]), default=None)
+@click.option(
+    "--mcp",
+    "mcp_mode",
+    type=click.Choice(["claude", "kimi", "json", "skip"]),
+    default=None,
+)
 @click.option(
     "--include-provider",
     "include_providers",
@@ -2983,7 +3014,7 @@ def init(
         if "memory_dir" not in state:
             state["memory_dir"] = "~/memories"
         if "mcp_choice" not in state:
-            state["mcp_choice"] = 3  # skip — scripted runs don't touch Claude
+            state["mcp_choice"] = 3  # skip — scripted runs don't touch editor configs
 
         _resolve_provider_dirs_non_interactive(state, effective_preset, include_providers)
 

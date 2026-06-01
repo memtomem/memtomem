@@ -26,6 +26,12 @@ AGENT_FILES: dict[str, list[str]] = {
     "copilot": [".github/copilot-instructions.md"],
 }
 
+# Runtime marker files that are enough to show a runtime as available, but are
+# not Markdown context sources for ``detect_agent_files`` / ``mm context init``.
+RUNTIME_MARKER_FILES: dict[str, list[str]] = {
+    "kimi": [".kimi/config.toml"],
+}
+
 
 # Skill-runtime name → list of possible skill root directories (relative to project root).
 # Each entry points at a directory that contains one sub-directory per skill; every valid
@@ -41,6 +47,7 @@ SKILL_DIRS: dict[str, list[str]] = {
     "claude_skills": [".claude/skills"],
     "gemini_skills": [".gemini/skills"],
     "codex_skills": [".agents/skills"],
+    "kimi_skills": [".kimi/skills"],
 }
 
 # Sub-agent-runtime name → project-scope directories containing sub-agent files.
@@ -50,6 +57,7 @@ AGENT_DIRS: dict[str, list[str]] = {
     "claude_agents": [".claude/agents"],
     "gemini_agents": [".gemini/agents"],
     "codex_agents": [".codex/agents"],
+    "kimi_agents": [".kimi/agents"],
 }
 
 # Per-runtime suffix used by ``detect_agent_dirs`` when scanning ``AGENT_DIRS``.
@@ -57,6 +65,7 @@ AGENT_FILE_SUFFIX: dict[str, str] = {
     "claude_agents": ".md",
     "gemini_agents": ".md",
     "codex_agents": ".toml",
+    "kimi_agents": ".yaml",
 }
 
 # Lock the two dicts to the same key set so a future runtime added to
@@ -272,6 +281,7 @@ __all__ = [
     "COMMAND_DIRS",
     "DetectedFile",
     "DetectedKind",
+    "RUNTIME_MARKER_FILES",
     "SKILL_DIRS",
     "detect_agent_dirs",
     "detect_agent_files",

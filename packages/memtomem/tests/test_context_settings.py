@@ -10,6 +10,7 @@ import contextlib
 import json
 import sys
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
@@ -69,6 +70,16 @@ def claude_home_missing(tmp_path, monkeypatch):
     """Redirect HOME **without** creating ``~/.claude/``."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
+    set_home(monkeypatch, fake_home)
+    return fake_home
+
+
+@pytest.fixture
+def kimi_home(tmp_path, monkeypatch):
+    """Redirect HOME so writes target a temp Kimi config dir."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".kimi").mkdir()
     set_home(monkeypatch, fake_home)
     return fake_home
 
@@ -517,6 +528,60 @@ class TestClaudeSettingsMergeMalformed:
         r = results["claude_settings"]
         assert r.status == "error"
         assert "not valid JSON" in r.reason
+
+
+class TestKimiSettingsMerge:
+    def test_writes_managed_toml_block_and_preserves_existing_config(self, kimi_home, tmp_path):
+        target = kimi_home / ".kimi" / "config.toml"
+        target.write_text('theme = "dark"\n', encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [_rule("Bash", "mm search context")],
+                    "Notification": [_rule("", "echo ignored")],
+                }
+            },
+        )
+
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["kimi_settings"]
+
+        assert r.status == "ok"
+        assert any("Notification" in w for w in r.warnings)
+        text = target.read_text(encoding="utf-8")
+        assert 'theme = "dark"' in text
+        assert "# BEGIN memtomem managed hooks" in text
+        assert 'event = "PreToolUse"' in text
+        assert 'matcher = "Shell"' in text
+        assert 'command = "mm search context"' in text
+        parsed = tomllib.loads(text)
+        assert parsed["theme"] == "dark"
+        assert parsed["hooks"][0]["matcher"] == "Shell"
+
+    def test_replaces_existing_managed_block(self, kimi_home, tmp_path):
+        target = kimi_home / ".kimi" / "config.toml"
+        target.write_text(
+            'theme = "dark"\n\n'
+            "# BEGIN memtomem managed hooks\n"
+            "[[hooks]]\n"
+            'event = "Old"\n'
+            "# END memtomem managed hooks\n",
+            encoding="utf-8",
+        )
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PostToolUse": [_rule("Write", "mm index ~/memories")]}},
+        )
+
+        r = generate_all_settings(tmp_path, scope="user")["kimi_settings"]
+
+        assert r.status == "ok"
+        text = target.read_text(encoding="utf-8")
+        assert 'event = "Old"' not in text
+        assert 'event = "PostToolUse"' in text
+        assert 'matcher = "WriteFile"' in text
+        assert tomllib.loads(text)["hooks"][0]["command"] == "mm index ~/memories"
 
 
 class TestClaudeSettingsMergeConcurrent:

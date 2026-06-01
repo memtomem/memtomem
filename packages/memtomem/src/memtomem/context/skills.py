@@ -8,6 +8,7 @@ runtime-specific directories:
 * Claude Code → ``.claude/skills/``
 * Gemini CLI → ``.gemini/skills/``
 * OpenAI Codex CLI → ``.agents/skills/``
+* Kimi CLI → ``.kimi/skills/``
 
 Anthropic released the Agent Skills spec as an open standard in 2025-12 and
 OpenAI adopted the same SKILL.md format for Codex CLI, so the on-disk payload
@@ -140,9 +141,26 @@ class CodexSkillsGenerator:
         return None if root is None else root / skill_name
 
 
+@dataclass
+class KimiSkillsGenerator:
+    name: str = "kimi_skills"
+    output_root: str = ".kimi/skills"
+
+    def target_dir(
+        self,
+        project_root: Path,
+        skill_name: str,
+        *,
+        scope: TargetScope = "project_shared",
+    ) -> Path | None:
+        root = runtime_fanout_root("skills", "kimi", scope, project_root)
+        return None if root is None else root / skill_name
+
+
 _register(ClaudeSkillsGenerator())
 _register(GeminiSkillsGenerator())
 _register(CodexSkillsGenerator())
+_register(KimiSkillsGenerator())
 
 
 # ── Canonical helpers ─────────────────────────────────────────────────
@@ -863,6 +881,7 @@ __all__ = [
     "ExtractResult",
     "CodexSkillsGenerator",
     "GeminiSkillsGenerator",
+    "KimiSkillsGenerator",
     "SKILL_GENERATORS",
     "SKILL_MANIFEST",
     "SkillGenerator",

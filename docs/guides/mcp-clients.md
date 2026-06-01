@@ -192,7 +192,33 @@ Restart Gemini CLI after configuration.
 
 ---
 
-## 6. Codex CLI
+## 6. Kimi CLI
+
+Kimi CLI reads MCP servers from `~/.kimi/mcp.json` by default. If
+`KIMI_SHARE_DIR` is set, write `mcp.json` under that directory instead.
+
+```json
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"]
+    }
+  }
+}
+```
+
+You can also let `mm init` write the file:
+
+```bash
+mm init --mcp kimi
+```
+
+Restart Kimi CLI after configuration.
+
+---
+
+## 7. Codex CLI
 
 Codex CLI reads MCP servers from `~/.codex/config.toml` under the
 `[mcp_servers.<id>]` section header — TOML, not JSON. Add a section for
@@ -227,7 +253,7 @@ Call mem_status to check the memtomem connection status
 
 ---
 
-## 7. Antigravity
+## 8. Antigravity
 
 "Antigravity" ships as two distinct surfaces with **separate** MCP config
 files — register memtomem in whichever you actually use:
