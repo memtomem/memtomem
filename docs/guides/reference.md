@@ -583,14 +583,18 @@ source file is deleted. `mm memory doctor` surfaces this **3-way drift** between
 what's on disk, what the index file points at, and what's actually in the
 searchable DB.
 
-It is **read-only** — it never writes to disk, the DB, or `config.json`. The DB
-is opened in SQLite `mode=ro`; a missing or too-old DB degrades to disk/index
-checks instead of being created.
+It is **read-only by default** — without `--fix` it never writes to disk, the
+DB, or `config.json`. The DB is opened in SQLite `mode=ro`; a missing or too-old
+DB degrades to disk/index checks instead of being created. The one opt-in write
+path is `--fix --apply` (see [Fixing broken links](#fixing-broken-links)), which
+touches only the index file and never the DB or config.
 
 ```
 mm memory doctor                 # inspect every configured memory_dir
 mm memory doctor <dir>           # scope to one configured memory_dir
 mm memory doctor --json          # structured output for scripting / CI
+mm memory doctor --fix           # preview removable broken links (dry-run)
+mm memory doctor --fix --apply   # remove them from the index file
 ```
 
 #### Example output
@@ -624,7 +628,7 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 | `db_coverage` | warn | On disk and indexable, but zero chunks in the DB — `mem_search` can't find it. | `mm index <dir> --force` |
 | `stale_source` | **error** | A DB chunk's source file no longer exists on disk (deleted; chunks linger). | `mem_do(action="cleanup_orphans", params={"dry_run": false})` (see [Orphan cleanup](#orphan-cleanup)) |
 | `convention_violation` | **error** | An index/meta file (`MEMORY.md` / `README.md` for a `claude-memory` dir) was indexed as searchable content. | `mm purge --matching-excluded --apply` |
-| `broken_link` | **error** | A pointer in the index file resolves to a missing target or escapes the memory root. | Fix or remove the link in the index file. |
+| `broken_link` | **error** | A pointer in the index file resolves to a missing target or escapes the memory root. | `mm memory doctor --fix --apply` removes the `missing_target` subset (see [Fixing broken links](#fixing-broken-links)); fix or remove `outside_root` links by hand. |
 | `db_extra` | warn | A DB source exists on disk but falls outside the current indexable set (unsupported extension or excluded path). | Usually expected. If the path is now excluded, `mm purge --matching-excluded --apply` reclaims it; unsupported-extension residue has no targeted fix yet. |
 | `index_orphan` | warn | An indexable file on disk is not listed in the index file (`MEMORY.md`). | Add a pointer line, or leave it — the TOC is curated. |
 | `budget` | warn | The index file exceeds its hot-cache budget: 24,400 bytes / 200 lines / 200 chars per line. | Trim the index file. |
@@ -681,7 +685,22 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
 }
 ```
 
-> **Read-only by design.** `mm memory doctor` reports; it does not fix. Apply the per-check remediation above — most commonly `mm index <dir> --force` to close a coverage gap. An opt-in `--fix` for the safe, mechanical cases is planned behind its own design note.
+> **Read-only by default.** Without `--fix`, `mm memory doctor` reports and never writes. Apply the per-check remediation above — most commonly `mm index <dir> --force` to close a coverage gap.
+
+#### Fixing broken links
+
+`--fix` is the one opt-in write path (contract: [ADR-0020](../adr/0020-memory-index-write-contract.md)). It is **subtractive only**: it removes index-file pointer lines whose target is a `missing_target` — a `- [title](target)` link that resolves *inside* the memory root but points at a file that no longer exists on disk — and nothing else. Removing a provably-dead pointer is the one curation move that can't conflict with the agent that owns the index file, so it is the only thing `--fix` does. It never adds, reorders, reformats, or trims for budget, and never edits the DB.
+
+```
+mm memory doctor --fix           # dry-run: print the lines that would be removed
+mm memory doctor --fix --apply   # rewrite the index file (atomic, mode-preserving)
+```
+
+Scope and guarantees:
+
+- **`missing_target` only.** `outside_root` links (those escaping the memory root) are left alone — the intent is ambiguous (a typo'd path vs. a deliberate out-of-tree reference), so removing them is your call. `budget` (which entries to cut is prose judgement), `index_orphan` (adding a pointer needs a generated title/hook), and the DB-side `stale_source` / `convention_violation` are also out of scope — use their own remediation.
+- **Byte-exact otherwise.** Every surviving line keeps its exact content and end-of-line terminator (LF/CRLF) and the file's trailing-newline state is untouched; a `--fix --apply` on a file with no `missing_target` links is a byte-for-byte no-op.
+- **Concurrency-aware, not race-free.** `--apply` re-reads the file fresh under a sidecar lock and re-validates each candidate (still present *and* still dead) before an atomic replace, so a pointer the agent edited or whose target reappeared is spared. Removals are **count-bounded to the links present and dead at analysis time**: distinct pointers the agent added since are never removed, and an exact byte-duplicate of a dead link keeps the right number of copies (which identical copy survives is unspecified, since they're equal). Because the agent (the memory hook) doesn't take memtomem's lock, a residual sub-rename window remains; it is accepted as bounded (the agent writes `MEMORY.md` at session boundaries, the edit is a small subtraction) — **`--fix` does not claim "never clobbers."** Every removed line is printed (in both dry-run and `--apply`) so any churn is auditable from your editor / VCS / agent history.
 
 ---
 

@@ -1,6 +1,6 @@
-"""Tests for ``mm memory doctor`` (Tier 1 report-only hygiene report).
+"""Tests for ``mm memory doctor`` (Tier 1 report-only + Tier 2 ``--fix``).
 
-Four layers:
+Layers:
 
 * ``TestParser`` / ``TestClassifyLink`` / ``TestBudget`` — pure functions, no
   DB or disk-config side effects.
@@ -15,12 +15,18 @@ Four layers:
   ``docs/guides/reference.md`` (check/severity table, error-severity set,
   budget caps, ``--json`` status rule, help text) against the implementation
   so the two can't drift.
+* ``TestSpliceRoundTrip`` / ``TestMissingTargetGuard`` / ``TestApplyFix`` /
+  ``TestFixCli`` — Tier 2 ``--fix`` (ADR-0020): byte-exact line splicing across
+  LF/CRLF ± trailing newline, the missing_target-only subtractive guard, the
+  locked re-validate/atomic-write apply path against a real on-disk index file,
+  and the CLI dry-run/apply/exit-code surface.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,7 +34,10 @@ from click.testing import CliRunner
 
 from memtomem.cli import cli
 from memtomem.cli.memory_doctor_cmd import (
+    _apply_fix,
     _gather_reports,
+    _missing_target_entries,
+    _splice_lines,
     classify_link,
     measure_budget,
     parse_memory_index,
@@ -626,6 +635,28 @@ class TestDocsParity:
         assert "doctor" in result.output
         assert "hygiene" in result.output
 
+    def test_help_documents_fix_flags(self):
+        # The Tier 2 write path (ADR-0020) must be discoverable from --help.
+        # Click hard-wraps and breaks on hyphens, so assert only on the option
+        # names and the underscore-joined (break-safe) scope token.
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--help"])
+        assert result.exit_code == 0
+        out = " ".join(result.output.split())
+        assert "--fix" in out
+        assert "--apply" in out
+        assert "missing_target" in out  # the subtractive scope is documented
+
+    def test_reference_documents_fix(self):
+        # reference.md §5 gains the --fix surface when Tier 2 ships (ADR-0020
+        # consequence). Pin the usage examples + the subtractive-scope wording
+        # so docs can't silently drift from the shipped flags.
+        ref = Path(__file__).resolve().parents[3] / "docs" / "guides" / "reference.md"
+        text = ref.read_text(encoding="utf-8")
+        assert "mm memory doctor --fix --apply" in text
+        assert "Fixing broken links" in text  # the subsection heading
+        assert "subtractive" in text.lower()
+        assert "0020-memory-index-write-contract" in text  # ADR link
+
     def test_json_status_rule_matches_summary(self, capsys):
         # Documented rule: status is "issues" when any error/warn finding
         # exists; an info-only report stays "ok".
@@ -646,3 +677,319 @@ class TestDocsParity:
         report.findings.append(Finding(check="db_coverage", severity="warn", summary="y"))
         _emit_json([report])
         assert json.loads(capsys.readouterr().out)["status"] == "issues"
+
+
+# ── Tier 2: --fix line splice (ADR-0020 §2 — byte-exact preservation) ─
+#
+# The splice is the load-bearing primitive of the write contract: it must keep
+# every surviving line's exact terminator (LF vs CRLF) and the file's
+# trailing-newline state, and a no-removal splice must be a byte-for-byte
+# identity. These cases are the round-trip proof ADR-0020 §2 requires.
+
+
+class TestSpliceRoundTrip:
+    # Each fixture varies the EOL style and trailing-newline state; the identity
+    # case (no removal) must return the input unchanged byte-for-byte.
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "- [A](a.md)\n- [B](b.md)\n- [C](c.md)\n",  # LF, trailing newline
+            "- [A](a.md)\n- [B](b.md)\n- [C](c.md)",  # LF, no trailing newline
+            "- [A](a.md)\r\n- [B](b.md)\r\n- [C](c.md)\r\n",  # CRLF, trailing
+            "- [A](a.md)\r\n- [B](b.md)\r\n- [C](c.md)",  # CRLF, no trailing
+            "",  # empty file
+            "\n\n",  # blank lines only
+        ],
+    )
+    def test_no_removal_is_byte_identity(self, text):
+        assert _splice_lines(text, set()) == text
+
+    def test_removes_only_targeted_line_lf(self):
+        text = "- [A](a.md)\n- [B](b.md)\n- [C](c.md)\n"
+        # Drop line 2 (B); A and C survive with their LF terminators.
+        assert _splice_lines(text, {2}) == "- [A](a.md)\n- [C](c.md)\n"
+
+    def test_removes_only_targeted_line_crlf_preserved(self):
+        text = "- [A](a.md)\r\n- [B](b.md)\r\n- [C](c.md)\r\n"
+        # Survivors keep CRLF — the splice never normalizes to LF.
+        out = _splice_lines(text, {2})
+        assert out == "- [A](a.md)\r\n- [C](c.md)\r\n"
+        assert "\r\n" in out and out.count("\n") == 2
+
+    def test_remove_last_line_without_trailing_newline(self):
+        # Removing the final (un-terminated) line leaves the prior line's
+        # terminator intact; no spurious newline is added or removed.
+        text = "- [A](a.md)\n- [B](b.md)"
+        assert _splice_lines(text, {2}) == "- [A](a.md)\n"
+
+    def test_remove_first_of_no_trailing(self):
+        text = "- [A](a.md)\n- [B](b.md)"
+        assert _splice_lines(text, {1}) == "- [B](b.md)"
+
+
+# ── Tier 2: missing_target-only subtractive guard (ADR-0020 §1) ───────
+
+
+class TestMissingTargetGuard:
+    def _index(self, tmp_path):
+        """A claude-style index with one of every link-class + an existing file."""
+        (tmp_path / "exists.md").write_text("x", encoding="utf-8")
+        text = (
+            "- [Ok](exists.md) — present\n"
+            "- [Dead](gone.md) — missing target\n"
+            "- [Escape](../../../etc/passwd) — outside root\n"
+            "- [Web](https://example.com) — url\n"
+            "- [Anchor](#section) — anchor\n"
+        )
+        return text
+
+    def test_selects_only_missing_target(self, tmp_path):
+        text = self._index(tmp_path)
+        entries = _missing_target_entries(text, root=tmp_path)
+        # ONLY the missing-target line — outside_root/url/anchor/ok excluded.
+        assert [e.target for e in entries] == ["gone.md"]
+        assert entries[0].line_no == 2
+
+    def test_reappeared_target_not_selected(self, tmp_path):
+        text = "- [Dead](gone.md) — x\n"
+        assert _missing_target_entries(text, root=tmp_path)  # gone.md absent → selected
+        (tmp_path / "gone.md").write_text("back", encoding="utf-8")
+        assert _missing_target_entries(text, root=tmp_path) == []  # now present → spared
+
+
+# ── Tier 2: locked apply path (ADR-0020 §5) ──────────────────────────
+
+
+def _candidate_raws(text, root):
+    # A list, not a set — multiplicity matters: the apply budget removes at most
+    # as many occurrences of each raw as analysis saw (ADR-0020 §5).
+    return [e.raw for e in _missing_target_entries(text, root=root)]
+
+
+class TestApplyFix:
+    def _setup(self, tmp_path):
+        root = tmp_path / "mem"
+        root.mkdir()
+        (root / "exists.md").write_text("x", encoding="utf-8")
+        return root
+
+    def test_removes_missing_keeps_other_classes(self, tmp_path):
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = (
+            "# TOC\n"
+            "- [Ok](exists.md) — keep\n"
+            "- [Dead](gone.md) — drop\n"
+            "- [Escape](../../etc/passwd) — keep (outside_root, ambiguous)\n"
+            "- [Web](https://x.com) — keep\n"
+        )
+        index.write_text(text, encoding="utf-8")
+        removed = _apply_fix(index, root, _candidate_raws(text, root))
+        assert [r[1] for r in removed] == ["- [Dead](gone.md) — drop"]
+        out = index.read_text(encoding="utf-8")
+        assert "gone.md" not in out
+        # Every non-missing_target line — including outside_root — survives.
+        for keep in ("# TOC", "exists.md", "etc/passwd", "https://x.com"):
+            assert keep in out
+
+    def test_crlf_survivors_preserved(self, tmp_path):
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Ok](exists.md) — keep\r\n- [Dead](gone.md) — drop\r\n"
+        index.write_bytes(text.encode("utf-8"))  # write CRLF bytes verbatim
+        _apply_fix(index, root, _candidate_raws(text, root))
+        raw = index.read_bytes()
+        # Survivor keeps CRLF; the dropped line is gone; no LF normalization.
+        assert raw == b"- [Ok](exists.md) \xe2\x80\x94 keep\r\n"
+
+    def test_no_trailing_newline_preserved(self, tmp_path):
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Ok](exists.md) — a\n- [Dead](gone.md) — b"  # no EOF newline
+        index.write_text(text, encoding="utf-8")
+        _apply_fix(index, root, _candidate_raws(text, root))
+        # Dropping the un-terminated last line leaves the survivor's LF intact.
+        assert index.read_text(encoding="utf-8") == "- [Ok](exists.md) — a\n"
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX mode bits; NTFS ignores them (atomic_write preserves access via ACL inheritance)",
+    )
+    def test_file_mode_preserved_not_downgraded(self, tmp_path):
+        import os
+        import stat
+
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Dead](gone.md) — x\n- [Ok](exists.md) — y\n"
+        index.write_text(text, encoding="utf-8")
+        os.chmod(index, 0o644)  # a typical TOC mode, NOT atomic_write's 0o600
+        _apply_fix(index, root, _candidate_raws(text, root))
+        assert stat.S_IMODE(index.stat().st_mode) == 0o644
+
+    def test_revalidate_target_reappeared_is_spared(self, tmp_path):
+        # Candidate collected while gone.md is absent; the target reappears
+        # before apply (the locked re-classify sees it as ok → spares the line).
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Dead](gone.md) — x\n- [Ok](exists.md) — y\n"
+        index.write_text(text, encoding="utf-8")
+        candidates = _candidate_raws(text, root)
+        (root / "gone.md").write_text("resurrected", encoding="utf-8")
+        removed = _apply_fix(index, root, candidates)
+        assert removed == []
+        assert index.read_text(encoding="utf-8") == text  # untouched
+
+    def test_revalidate_agent_edited_candidate_line_is_spared(self, tmp_path):
+        # The agent rewrote the candidate line's hook since analysis. Its raw no
+        # longer matches the candidate set, so the fix leaves it alone.
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) — old hook\n"
+        candidates = _candidate_raws(analysis_text, root)
+        index.write_text("- [Dead](gone.md) — NEW hook\n", encoding="utf-8")
+        removed = _apply_fix(index, root, candidates)
+        assert removed == []
+        assert index.read_text(encoding="utf-8") == "- [Dead](gone.md) — NEW hook\n"
+
+    def test_agent_additions_carried_through_new_dead_spared(self, tmp_path):
+        # Between analysis and apply the agent appended two lines: a real pointer
+        # and a *new* dead pointer that was never a candidate. The fix removes
+        # only the original candidate; both additions survive (the new dead one
+        # is spared because it isn't in the candidate set — it may precede a file
+        # the agent is about to create).
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) — drop\n"
+        candidates = _candidate_raws(analysis_text, root)
+        fresh = (
+            "- [Dead](gone.md) — drop\n"
+            "- [Real](exists.md) — agent added\n"
+            "- [Fresh](alsogone.md) — agent added, not yet on disk\n"
+        )
+        index.write_text(fresh, encoding="utf-8")
+        removed = _apply_fix(index, root, candidates)
+        assert [r[1] for r in removed] == ["- [Dead](gone.md) — drop"]
+        out = index.read_text(encoding="utf-8")
+        assert "- [Dead](gone.md) — drop" not in out
+        assert "- [Real](exists.md) — agent added" in out
+        assert "- [Fresh](alsogone.md) — agent added, not yet on disk" in out
+
+    def test_revalidate_duplicate_dead_removes_only_analysis_count(self, tmp_path):
+        # Count-bounded guard (ADR-0020 §5): analysis (T1) saw ONE dead line; the
+        # agent added an *identical* dead pointer before apply (fresh has two).
+        # The fix removes at most the analysis-time count — exactly one — so the
+        # net of the agent's addition is preserved (one copy survives). Which
+        # byte-identical copy survives is irrelevant; the spliced result is the
+        # same either way. (Regression for the frozenset-membership bug that
+        # removed every identical match, emptying the file.)
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        candidates = _candidate_raws("- [Dead](gone.md) — drop\n", root)
+        assert len(candidates) == 1
+        index.write_text("- [Dead](gone.md) — drop\n- [Dead](gone.md) — drop\n", encoding="utf-8")
+        removed = _apply_fix(index, root, candidates)
+        assert len(removed) == 1  # bounded by the analysis-time count, not "all matches"
+        assert index.read_text(encoding="utf-8") == "- [Dead](gone.md) — drop\n"
+
+    def test_apply_does_not_create_lock_artifacts_in_tree(self, tmp_path):
+        # The sidecar lock lives next to the index file; it must be the only
+        # extra artifact (no stray .tmp left behind after a successful replace).
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Dead](gone.md) — x\n"
+        index.write_text(text, encoding="utf-8")
+        _apply_fix(index, root, _candidate_raws(text, root))
+        leftovers = {p.name for p in root.iterdir()} - {"MEMORY.md", "exists.md"}
+        # Only the sidecar lockfile may remain; no .tmp residue from mkstemp.
+        assert not any(name.endswith(".tmp") for name in leftovers)
+
+
+# ── Tier 2: --fix CLI surface ────────────────────────────────────────
+
+
+def _fix_env(tmp_path, monkeypatch, *, body):
+    """A claude-memory dir with an existing file + a MEMORY.md *body*.
+
+    Returns ``(config, mem_dir)``. The path classifies as ``claude-memory`` so
+    ``--fix`` resolves the MEMORY.md index convention.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-fix-proj" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "exists.md").write_text("x", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text(body, encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "fix.db"
+    config.indexing.memory_dirs = [mem_dir]
+    return config, mem_dir
+
+
+class TestFixCli:
+    def _patch_loader(self, monkeypatch, config):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+
+    _BODY = "- [Ok](exists.md) — keep\n- [Dead](gone.md) — drop\n"
+
+    def test_dry_run_previews_without_writing(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+        assert result.exit_code == 0
+        assert "Would remove" in result.output
+        assert "gone.md" in result.output
+        assert "--apply" in result.output
+        # Dry-run must not touch the file.
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_apply_writes_and_removes_only_missing(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+        assert result.exit_code == 0
+        assert "Removed" in result.output
+        out = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert out == "- [Ok](exists.md) — keep\n"
+
+    def test_apply_without_fix_errors(self, tmp_path, monkeypatch):
+        config, _ = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--apply"])
+        assert result.exit_code != 0
+        assert "--apply only applies with --fix" in result.output
+
+    def test_clean_index_reports_nothing_to_remove(self, tmp_path, monkeypatch):
+        config, _ = _fix_env(tmp_path, monkeypatch, body="- [Ok](exists.md) — keep\n")
+        self._patch_loader(monkeypatch, config)
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+        assert result.exit_code == 0
+        assert "No missing_target links to remove" in result.output
+
+    def test_fix_json_shape(self, tmp_path, monkeypatch):
+        config, _ = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
+        payload = json.loads(result.output)
+        assert payload["status"] == "would-fix"
+        assert payload["applied"] is False
+        assert payload["summary"] == {"files": 1, "lines": 1}
+        f = payload["files"][0]
+        assert f["index_file"] == "MEMORY.md"
+        assert f["removed"] == [{"line": 2, "text": "- [Dead](gone.md) — drop"}]
+
+    def test_fix_json_apply_status(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+        payload = json.loads(result.output)
+        assert payload["status"] == "fixed"
+        assert payload["applied"] is True
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
