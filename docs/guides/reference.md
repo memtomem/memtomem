@@ -573,6 +573,102 @@ mem_do(action="cleanup_orphans")                    # preview (dry_run=True)
 mem_do(action="cleanup_orphans", params={"dry_run": false})  # delete
 ```
 
+### Memory hygiene — `mm memory doctor`
+
+A `memory_dir` can be *registered* yet barely indexed: the filesystem watcher
+only reacts to live events, so files that landed while the server was down stay
+invisible to `mem_search` until a forced re-walk. The index/TOC file
+(`MEMORY.md`) can also drift from what's on disk, and chunks can linger after a
+source file is deleted. `mm memory doctor` surfaces this **3-way drift** between
+what's on disk, what the index file points at, and what's actually in the
+searchable DB.
+
+It is **read-only** — it never writes to disk, the DB, or `config.json`. The DB
+is opened in SQLite `mode=ro`; a missing or too-old DB degrades to disk/index
+checks instead of being created.
+
+```
+mm memory doctor                 # inspect every configured memory_dir
+mm memory doctor <dir>           # scope to one configured memory_dir
+mm memory doctor --json          # structured output for scripting / CI
+```
+
+#### Example output
+
+```
+■ /Users/you/.claude/projects/-Users-you-Work-myproj/memory
+  claude-memory · index=MEMORY.md · indexed 12/15
+  ! 3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir> --force`)
+      - project_roadmap.md
+      - feedback_review_style.md
+      - user_role.md
+  ✗ 1 DB source file(s) no longer exist on disk — chunks linger after the file was deleted
+      - /Users/you/.claude/projects/-Users-you-Work-myproj/memory/old_notes.md
+  ! MEMORY.md over budget: 25600 bytes (cap 24400); 212 lines (cap 200); 2 line(s) over 200 chars (L8, L40)
+      - L8
+      - L40
+
+■ /Users/you/notes
+  user · indexed 40/40
+  ✓ no issues
+
+Summary: 1 error, 2 warn, 0 info.
+```
+
+Each dir header line reads `{category} · [index={index_file} ·] indexed {db_covered}/{disk_indexable}`. Glyphs mark severity: `✗` error, `!` warn, `·` info. Up to 8 sample items are listed per finding (`--json` carries them all).
+
+#### Checks
+
+| Check | Severity | What it means | Remediation |
+|-------|----------|---------------|-------------|
+| `db_coverage` | warn | On disk and indexable, but zero chunks in the DB — `mem_search` can't find it. | `mm index <dir> --force` |
+| `stale_source` | **error** | A DB chunk's source file no longer exists on disk (deleted; chunks linger). | `mem_do(action="cleanup_orphans", params={"dry_run": false})` (see [Orphan cleanup](#orphan-cleanup)) |
+| `convention_violation` | **error** | An index/meta file (`MEMORY.md` / `README.md` for a `claude-memory` dir) was indexed as searchable content. | `mm purge --matching-excluded --apply` |
+| `broken_link` | **error** | A pointer in the index file resolves to a missing target or escapes the memory root. | Fix or remove the link in the index file. |
+| `db_extra` | warn | A DB source exists on disk but falls outside the current indexable set (unsupported extension or excluded path). | Usually expected. If the path is now excluded, `mm purge --matching-excluded --apply` reclaims it; unsupported-extension residue has no targeted fix yet. |
+| `index_orphan` | warn | An indexable file on disk is not listed in the index file (`MEMORY.md`). | Add a pointer line, or leave it — the TOC is curated. |
+| `budget` | warn | The index file exceeds its hot-cache budget: 24,400 bytes / 200 lines / 200 chars per line. | Trim the index file. |
+| `index_missing` | warn | The provider's index file (e.g. `MEMORY.md`) is absent or unreadable. | Create it, or ignore if the dir has no TOC convention. |
+| `cold_candidate` | info | An indexed file never accessed since indexing (`access_count` 0, `last_accessed_at` unset). | Advisory — a future decay/curation candidate. |
+| `db_unavailable` | info | No readable memtomem DB at the configured path — only disk/index checks ran. | `mm index` to build the DB. |
+| `unowned_chunks` | info | DB sources under no configured `memory_dir` (a dir was removed, or content was added elsewhere). | Re-add the dir to keep it indexed; for a project root that was deleted from disk, `mm gc orphan-projects`. |
+
+`db_unavailable` and `unowned_chunks` are store-wide, so they print as top-level lines (`(database)` / `(unowned)`) rather than under a dir header.
+
+#### Exit codes and JSON
+
+The exit code is `0` when clean or when only advisory (warn/info) findings exist, and `1` when any **error**-severity finding is present (`stale_source`, `convention_violation`, `broken_link`) — so a coverage gap or budget overflow won't fail CI, but a deleted-source leak or broken TOC link will.
+
+`--json` emits a stable payload: a top-level `{status, dirs, summary}`, where `status` is `"issues"` when any error- or warn-severity finding exists and `"ok"` otherwise (info-only stays `"ok"`).
+
+```json
+{
+  "status": "issues",
+  "dirs": [
+    {
+      "path": "/Users/you/.claude/projects/-Users-you-Work-myproj/memory",
+      "category": "claude-memory",
+      "index_file": "MEMORY.md",
+      "exists": true,
+      "disk_indexable": 15,
+      "db_covered": 12,
+      "findings": [
+        {
+          "check": "db_coverage",
+          "severity": "warn",
+          "count": 3,
+          "summary": "3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir> --force`)",
+          "items": ["project_roadmap.md", "feedback_review_style.md", "user_role.md"]
+        }
+      ]
+    }
+  ],
+  "summary": { "error": 1, "warn": 2, "info": 0 }
+}
+```
+
+> **Read-only by design.** `mm memory doctor` reports; it does not fix. Apply the per-check remediation above — most commonly `mm index <dir> --force` to close a coverage gap. An opt-in `--fix` for the safe, mechanical cases is planned behind its own design note.
+
 ---
 
 ## 6. Data — `mem_export`, `mem_import`

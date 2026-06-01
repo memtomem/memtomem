@@ -1,6 +1,6 @@
 """Tests for ``mm memory doctor`` (Tier 1 report-only hygiene report).
 
-Three layers:
+Four layers:
 
 * ``TestParser`` / ``TestClassifyLink`` / ``TestBudget`` — pure functions, no
   DB or disk-config side effects.
@@ -11,11 +11,16 @@ Three layers:
   ``feedback_mocked_storage_hides_sql_bugs``).
 * ``TestCli`` — Click ``CliRunner`` end-to-end with the read-only config
   loader stubbed, pinning the exit code and the ``--json`` payload shape.
+* ``TestDocsParity`` — pins the contract documented in
+  ``docs/guides/reference.md`` (check/severity table, error-severity set,
+  budget caps, ``--json`` status rule, help text) against the implementation
+  so the two can't drift.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -507,3 +512,137 @@ class TestCli:
         result = CliRunner().invoke(cli, ["memory", "doctor", str(tmp_path / "nope")])
         assert result.exit_code != 0
         assert "not a configured memory_dir" in result.output
+
+
+# ── Docs-as-tests parity ────────────────────────────────────────────
+#
+# These guards bind the public contract published in
+# ``docs/guides/reference.md`` (§5 "Memory hygiene — `mm memory doctor`")
+# directly to the implementation, so neither can drift unnoticed: the
+# check/severity table is **parsed out of the markdown** and compared to the
+# check/severity pairs **extracted from the command's own ``Finding(...)`` call
+# sites via AST**. Adding, renaming, or re-classifying a check fails here until
+# the reference table is edited to match — and vice versa. The budget caps
+# quoted in the table, the ``--json`` status rule, and the help text are pinned
+# too (memory ``feedback_docs_as_tests`` / ``feedback_docs_parity_canonical_fixture``).
+
+
+def _docs_check_severities() -> dict[str, str]:
+    """Parse the published check→severity table from ``reference.md``.
+
+    Matches table rows whose first cell is a backticked identifier and whose
+    second cell is a (optionally bold) severity word, so only the checks table
+    rows are picked up — not the Glossary or other tables.
+    """
+    ref = Path(__file__).resolve().parents[3] / "docs" / "guides" / "reference.md"
+    assert ref.is_file(), f"reference guide not found at {ref}"
+    row = re.compile(r"^\|\s*`(\w+)`\s*\|\s*\*{0,2}(warn|error|info)\*{0,2}\s*\|")
+    table: dict[str, str] = {}
+    for line in ref.read_text(encoding="utf-8").splitlines():
+        m = row.match(line)
+        if m:
+            table[m.group(1)] = m.group(2)
+    return table
+
+
+def _source_check_severities() -> dict[str, str]:
+    """Extract the check→severity map from every ``Finding(...)`` call site in
+    the command module via AST.
+
+    Fails loudly if any ``Finding`` call omits a string-literal ``check`` /
+    ``severity`` (e.g. a future check moved to a named constant) so a new check
+    cannot slip past the parity guard by being non-literal.
+    """
+    import ast
+
+    import memtomem.cli.memory_doctor_cmd as mod
+
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
+    calls = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        if node.func.id != "Finding":
+            continue
+        calls += 1
+        kw = {k.arg: k.value for k in node.keywords}
+        check_node, sev_node = kw.get("check"), kw.get("severity")
+        assert isinstance(check_node, ast.Constant) and isinstance(check_node.value, str), (
+            f"Finding at line {node.lineno} has a non-literal/missing check= — "
+            "the docs-parity guard requires string literals"
+        )
+        assert isinstance(sev_node, ast.Constant) and isinstance(sev_node.value, str), (
+            f"Finding at line {node.lineno} has a non-literal/missing severity="
+        )
+        check, sev = check_node.value, sev_node.value
+        # Same check at two call sites (index_missing) must agree on severity.
+        assert found.get(check, sev) == sev, f"{check} has conflicting severities"
+        found[check] = sev
+    assert calls > 0, "no Finding(...) call sites found — was the symbol renamed?"
+    return found
+
+
+class TestDocsParity:
+    def test_docs_table_matches_source(self):
+        docs = _docs_check_severities()
+        assert docs, "no check rows parsed from reference.md — did the table format change?"
+        # The published markdown table must equal the implementation's checks.
+        assert docs == _source_check_severities()
+
+    def test_error_severity_set_documented(self):
+        # The reference guide names exactly these three as the exit-1 drivers
+        # (independent anchor: catches docs+source drifting together).
+        errors = {c for c, s in _docs_check_severities().items() if s == "error"}
+        assert errors == {"stale_source", "convention_violation", "broken_link"}
+
+    def test_budget_caps_match_documented_numbers(self):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        # Quoted in the checks table: "24,400 bytes / 200 lines / 200 chars".
+        assert mod._INDEX_MAX_BYTES == 24_400
+        assert mod._INDEX_MAX_LINES == 200
+        assert mod._INDEX_MAX_LINE_CHARS == 200
+
+    def test_help_documents_usage_flags_and_exit_codes(self):
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--help"])
+        assert result.exit_code == 0
+        # Click hard-wraps help to the terminal width and breaks on hyphens, so
+        # collapse whitespace and assert on non-hyphenated prose tokens.
+        out = " ".join(result.output.split())
+        for token in (
+            "PATH",  # optional dir argument
+            "--json",  # structured-output flag
+            "Exit codes",  # exit-code documentation
+            "stale DB sources",  # the three documented error-severity checks…
+            "convention violations",
+            "broken index links",
+        ):
+            assert token in out, f"help text missing {token!r}"
+
+    def test_memory_group_lists_doctor(self):
+        result = CliRunner().invoke(cli, ["memory", "--help"])
+        assert result.exit_code == 0
+        assert "doctor" in result.output
+        assert "hygiene" in result.output
+
+    def test_json_status_rule_matches_summary(self, capsys):
+        # Documented rule: status is "issues" when any error/warn finding
+        # exists; an info-only report stays "ok".
+        from memtomem.cli.memory_doctor_cmd import DirReport, Finding, _emit_json
+
+        report = DirReport(
+            path="/d",
+            category="user",
+            index_file=None,
+            exists=True,
+            disk_indexable=1,
+            db_covered=1,
+        )
+        report.findings.append(Finding(check="cold_candidate", severity="info", summary="x"))
+        _emit_json([report])
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+
+        report.findings.append(Finding(check="db_coverage", severity="warn", summary="y"))
+        _emit_json([report])
+        assert json.loads(capsys.readouterr().out)["status"] == "issues"
