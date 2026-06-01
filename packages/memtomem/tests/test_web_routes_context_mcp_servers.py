@@ -42,7 +42,10 @@ async def test_create_list_read_sync_and_overview(client: AsyncClient, tmp_path:
         json={"name": "demo", "content": _definition()},
     )
     assert create.status_code == 200
-    assert create.json()["canonical_path"] == ".memtomem/mcp-servers/demo.json"
+    # ``_safe_rel`` returns OS-native separators (matching the skills/commands/
+    # agents routes), so compare component-wise rather than against a literal
+    # forward-slash string — ``.memtomem\\mcp-servers\\demo.json`` on Windows.
+    assert Path(create.json()["canonical_path"]) == Path(".memtomem/mcp-servers/demo.json")
 
     listing = await client.get("/api/context/mcp-servers")
     assert listing.status_code == 200
