@@ -16,8 +16,12 @@ maintenance subcommands (#884 review point 1).
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import click
+
+if TYPE_CHECKING:
+    from memtomem.storage.orphan_gc import OrphanProjectReport
 
 
 @click.group("gc")
@@ -111,7 +115,7 @@ async def _run(*, apply_: bool, assume_yes: bool) -> None:
         )
 
 
-def _print_report(report) -> None:  # type: ignore[no-untyped-def]
+def _print_report(report: OrphanProjectReport) -> None:
     """Render one ``OrphanProjectReport`` to stdout."""
     scope_summary = ", ".join(
         f"{scope}={count}" for scope, count in sorted(report.scope_counts.items())
