@@ -3134,7 +3134,13 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
           _ctxActiveScopeId = data.scope_id;
           try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
         }
-        loadCtxList(type);
+        // The Portal board (ADR-0021 PR4) shares this Add Project button but has
+        // no per-type ``loadCtxList`` — route it to its own loader.
+        if (type === 'projects') {
+          loadCtxProjects();
+        } else {
+          loadCtxList(type);
+        }
       } catch (err) {
         showToast(t('toast.request_failed', { error: err.message }), 'error');
       } finally {

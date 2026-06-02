@@ -3814,6 +3814,87 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 }
 .ctx-scope-badge--experimental { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 .ctx-scope-badge--missing { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
+.ctx-scope-badge--stale { background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
+
+/* Context Portal (ADR-0021 PR4) — multi-project board */
+.ctx-portal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.ctx-portal-search {
+  flex: 1 1 220px;
+  min-width: 160px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+.ctx-portal-sort { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.85rem; }
+.ctx-portal-sort select {
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+.ctx-portal-rows { display: flex; flex-direction: column; gap: 8px; }
+.ctx-portal-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.ctx-portal-row--active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+/* Non-color cue in addition to the dimming + the "(missing)" text badge, so the
+ * missing state isn't conveyed by opacity alone (WCAG 1.4.1). */
+.ctx-portal-row--missing { opacity: 0.6; border-left: 3px dashed var(--danger); }
+.ctx-portal-row-main { min-width: 0; flex: 1 1 auto; }
+.ctx-portal-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctx-portal-label { color: var(--text); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.ctx-portal-label-input {
+  padding: 3px 7px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font: inherit;
+}
+.ctx-portal-root {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-portal-counts { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.ctx-portal-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.ctx-portal-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.ctx-portal-active-badge {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent);
+  font-weight: 600;
+}
 .ctx-scope-remove {
   margin-left: auto;
   background: transparent;

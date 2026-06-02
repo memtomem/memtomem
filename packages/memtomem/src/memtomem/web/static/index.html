@@ -502,6 +502,13 @@
             <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">📁</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_projects">Projects</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_projects_sub">Multi-project portal</span>
+          </span>
+        </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-skills" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🧩</span>
           <span class="nav-labels">
@@ -557,6 +564,25 @@
             </div>
           </div>
           <div id="ctx-overview-content"></div>
+        </div>
+
+        <!-- Context Gateway: Projects (Portal) -->
+        <div class="settings-section" id="settings-ctx-projects">
+          <p class="settings-section-desc" data-i18n="settings.ctx.portal_desc">Browse, switch, rename, and unregister the projects memtomem tracks. Health shows which roots are missing or not yet initialized.</p>
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.portal_title">Projects</h2>
+            <div>
+              <button id="ctx-projects-refresh-btn" class="btn-ghost"
+                      data-i18n="settings.ctx.refresh"
+                      data-i18n-title="settings.ctx.refresh_tooltip"
+                      data-i18n-aria-label="settings.ctx.refresh_aria">Refresh</button>
+              <button class="btn-ghost ctx-add-project-btn" data-type="projects"
+                      data-i18n="settings.ctx.add_project"
+                      data-i18n-title="settings.ctx.portal_add_project_tooltip"
+                      data-i18n-aria-label="settings.ctx.portal_add_project_aria">Add Project</button>
+            </div>
+          </div>
+          <div id="ctx-projects-list"></div>
         </div>
 
         <!-- Context Gateway: Skills -->
@@ -1466,7 +1492,8 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=13"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=49"></script>
+  <script src="/context-gateway.js?v=50"></script>
+  <script src="/context-portal.js?v=1"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>
 </html>
