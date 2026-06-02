@@ -85,7 +85,7 @@ class TestInitFromUrl:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        git_identity: None,  # noqa: ARG002
+        git_identity: None,
     ) -> None:
         # Set up a source wiki at one path…
         source = tmp_path / "source-wiki"

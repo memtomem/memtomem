@@ -248,7 +248,7 @@ def test_install_project_root_missing(wiki_root: Path, tmp_path: Path) -> None:
 def test_install_wiki_missing_invariant3(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    git_identity: None,  # noqa: ARG001
+    git_identity: None,
 ) -> None:
     """Invariant 3: precise message including path and `mm wiki init`."""
     monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(tmp_path / "no-wiki"))
@@ -394,7 +394,7 @@ def test_cli_install_wiki_missing_message(
     monkeypatch: pytest.MonkeyPatch,
     project_cwd: Path,
     tmp_path: Path,
-    git_identity: None,  # noqa: ARG001
+    git_identity: None,
 ) -> None:
     monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(tmp_path / "no-wiki"))
     runner = CliRunner()

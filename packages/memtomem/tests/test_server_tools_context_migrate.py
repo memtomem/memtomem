@@ -130,7 +130,7 @@ async def test_mem_context_memory_migrate_unknown_scope_rejected_without_helper(
     # Sentinel pins that the helper is never reached.
     invoked = []
 
-    async def _sentinel(*args, **kwargs):  # noqa: ANN001
+    async def _sentinel(*args, **kwargs):
         invoked.append((args, kwargs))
 
     monkeypatch.setattr("memtomem.cli.context_cmd._memory_migrate_run", _sentinel)
@@ -179,7 +179,7 @@ async def test_mem_context_memory_migrate_project_shared_requires_confirmation(
     layout = fake_project_layout
     invoked = []
 
-    async def _sentinel(*args, **kwargs):  # noqa: ANN001
+    async def _sentinel(*args, **kwargs):
         invoked.append((args, kwargs))
 
     monkeypatch.setattr("memtomem.cli.context_cmd._memory_migrate_run", _sentinel)
