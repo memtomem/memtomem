@@ -253,6 +253,8 @@
   "index.browse_btn": "📁 Browse",
   "index.browse_aria": "Open folder picker",
   "index.progress_label": "0 / 0 files",
+  "index.progress_files": "{done} / {total} files",
+  "index.progress_done": "Done — {count} files",
   "index.indicator": "⏳ Indexing…",
   "index.result.files": "Files scanned",
   "index.result.chunks": "Total chunks",

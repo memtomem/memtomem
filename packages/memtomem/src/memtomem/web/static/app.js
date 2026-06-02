@@ -6231,12 +6231,15 @@ async function runIndexStream() {
       const pct = event.files_total > 0
         ? Math.round((event.files_done / event.files_total) * 100) : 0;
       barEl.style.width = pct + '%';
-      labelEl.textContent = `${event.files_done} / ${event.files_total} files`;
+      labelEl.textContent = t('index.progress_files', {
+        done: event.files_done,
+        total: event.files_total,
+      });
       fileEl.textContent  = basename(event.file);
     } else if (event.type === 'complete') {
       es.close();
       barEl.style.width = '100%';
-      labelEl.textContent = `Done — ${event.total_files} files`;
+      labelEl.textContent = t('index.progress_done', { count: event.total_files });
       fileEl.textContent  = '';
 
       qs('r-files').textContent   = event.total_files;
