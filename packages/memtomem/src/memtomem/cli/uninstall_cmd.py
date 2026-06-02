@@ -125,7 +125,7 @@ def _load_config_safely() -> tuple[Path, str | None]:
         load_config_overrides(cfg)
         db_path = Path(cfg.storage.sqlite_path).expanduser()
         return db_path, None
-    except Exception as exc:  # noqa: BLE001 — uninstall must never abort on config
+    except Exception as exc:  # broad: uninstall must never abort on config
         return _DEFAULT_STATE_DIR / _DEFAULT_DB_NAME, f"{type(exc).__name__}: {exc}"
 
 

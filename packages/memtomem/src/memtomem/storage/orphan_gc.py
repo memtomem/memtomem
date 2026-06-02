@@ -181,11 +181,11 @@ def sweep_orphan_project_root(
         for i in range(0, len(rowids), _BATCH_SIZE):
             batch = rowids[i : i + _BATCH_SIZE]
             ph = placeholders(len(batch))
-            cursor = db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({ph})", batch)  # noqa: S608
+            cursor = db.execute(f"DELETE FROM chunks_fts WHERE rowid IN ({ph})", batch)
             fts_deleted += cursor.rowcount or 0
             if has_vec_table:
                 cursor = db.execute(
-                    f"DELETE FROM chunks_vec WHERE rowid IN ({ph})",  # noqa: S608
+                    f"DELETE FROM chunks_vec WHERE rowid IN ({ph})",
                     batch,
                 )
                 vec_deleted += cursor.rowcount or 0
@@ -199,7 +199,7 @@ def sweep_orphan_project_root(
             batch = ids[i : i + _BATCH_SIZE]
             ph = placeholders(len(batch))
             cursor = db.execute(
-                f"DELETE FROM chunks "  # noqa: S608
+                f"DELETE FROM chunks "
                 f"WHERE id IN ({ph}) "
                 f"  AND scope IN ('project_shared', 'project_local') "
                 f"  AND project_root = ?",

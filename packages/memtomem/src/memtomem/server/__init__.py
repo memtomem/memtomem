@@ -1,4 +1,3 @@
-# ruff: noqa: E402, F401
 """MCP server package — facade and tool registration.
 
 All public symbols are re-exported here for backward compatibility:
@@ -59,17 +58,17 @@ from memtomem import __version__ as _memtomem_version
 mcp._mcp_server.version = _memtomem_version
 
 # ── Register ALL tools (decorators bind to `mcp` on import) ───────────
-from memtomem.server.tools.ask import mem_ask  # noqa: E402, F401
-from memtomem.server.tools.indexing import mem_index  # noqa: E402, F401
-from memtomem.server.tools.memory_crud import (  # noqa: E402, F401
+from memtomem.server.tools.ask import mem_ask
+from memtomem.server.tools.indexing import mem_index
+from memtomem.server.tools.memory_crud import (
     mem_add,
     mem_add_redaction_stats,
     mem_batch_add,
     mem_delete,
     mem_edit,
 )
-from memtomem.server.tools.recall import mem_recall  # noqa: E402, F401
-from memtomem.server.tools.search import mem_search, mem_expand  # noqa: E402, F401
+from memtomem.server.tools.recall import mem_recall
+from memtomem.server.tools.search import mem_search, mem_expand
 from memtomem.server.tools.status_config import (
     mem_config,
     mem_embedding_reset,
@@ -77,7 +76,7 @@ from memtomem.server.tools.status_config import (
     mem_stats,
     mem_status,
     mem_version,
-)  # noqa: E402, F401
+)
 from memtomem.server.tools.namespace import (
     mem_ns_assign,
     mem_ns_list,
@@ -86,44 +85,44 @@ from memtomem.server.tools.namespace import (
     mem_ns_get,
     mem_ns_rename,
     mem_ns_update,
-)  # noqa: E402, F401
+)
 from memtomem.server.tools.dedup_decay import (
     mem_cleanup_orphans,
     mem_dedup_scan,
     mem_dedup_merge,
     mem_decay_scan,
     mem_decay_expire,
-)  # noqa: E402, F401
-from memtomem.server.tools.export_import import mem_export, mem_import  # noqa: E402, F401
-from memtomem.server.tools.auto_tag import mem_auto_tag  # noqa: E402, F401
-from memtomem.server.tools.browse import mem_list, mem_read  # noqa: E402, F401
+)
+from memtomem.server.tools.export_import import mem_export, mem_import
+from memtomem.server.tools.auto_tag import mem_auto_tag
+from memtomem.server.tools.browse import mem_list, mem_read
 from memtomem.server.tools.tag_management import (
     mem_tag_list,
     mem_tag_rename,
     mem_tag_delete,
     mem_tag_merge,
-)  # noqa: E402, F401
-from memtomem.server.tools.url_index import mem_fetch  # noqa: E402, F401
-from memtomem.server.tools.cross_ref import mem_link, mem_unlink, mem_related  # noqa: E402, F401
-from memtomem.server.tools.session import mem_session_start, mem_session_end, mem_session_list  # noqa: E402, F401
-from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote  # noqa: E402, F401
-from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list  # noqa: E402, F401
-from memtomem.server.tools.multi_agent import mem_agent_register, mem_agent_search, mem_agent_share  # noqa: E402, F401
-from memtomem.server.tools.evaluation import mem_eval  # noqa: E402, F401
-from memtomem.server.tools.consolidation import mem_consolidate, mem_consolidate_apply  # noqa: E402, F401
-from memtomem.server.tools.reflection import mem_reflect, mem_reflect_save  # noqa: E402, F401
-from memtomem.server.tools.search_history import mem_search_history, mem_search_suggest  # noqa: E402, F401
-from memtomem.server.tools.conflict import mem_conflict_check  # noqa: E402, F401
-from memtomem.server.tools.importance import mem_importance_scan  # noqa: E402, F401
-from memtomem.server.tools.importers import mem_import_notion, mem_import_obsidian  # noqa: E402, F401
-from memtomem.server.tools.entity import mem_entity_scan, mem_entity_search  # noqa: E402, F401
-from memtomem.server.tools.temporal import mem_timeline, mem_activity  # noqa: E402, F401
+)
+from memtomem.server.tools.url_index import mem_fetch
+from memtomem.server.tools.cross_ref import mem_link, mem_unlink, mem_related
+from memtomem.server.tools.session import mem_session_start, mem_session_end, mem_session_list
+from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote
+from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list
+from memtomem.server.tools.multi_agent import mem_agent_register, mem_agent_search, mem_agent_share
+from memtomem.server.tools.evaluation import mem_eval
+from memtomem.server.tools.consolidation import mem_consolidate, mem_consolidate_apply
+from memtomem.server.tools.reflection import mem_reflect, mem_reflect_save
+from memtomem.server.tools.search_history import mem_search_history, mem_search_suggest
+from memtomem.server.tools.conflict import mem_conflict_check
+from memtomem.server.tools.importance import mem_importance_scan
+from memtomem.server.tools.importers import mem_import_notion, mem_import_obsidian
+from memtomem.server.tools.entity import mem_entity_scan, mem_entity_search
+from memtomem.server.tools.temporal import mem_timeline, mem_activity
 from memtomem.server.tools.policy import (
     mem_policy_add,
     mem_policy_list,
     mem_policy_delete,
     mem_policy_run,
-)  # noqa: E402, F401
+)
 from memtomem.server.tools.context import (
     mem_context_detect,
     mem_context_init,
@@ -133,17 +132,19 @@ from memtomem.server.tools.context import (
     mem_context_memory_migrate,
     mem_context_migrate,  # deprecated alias for mem_context_memory_migrate (#1147 B5-2)
     mem_context_artifact_migrate,
-)  # noqa: E402, F401
-from memtomem.server.tools.ingest import mem_ingest  # noqa: E402, F401  — no @mcp.tool; import triggers @register("ingest") for mem_do routing
-from memtomem.server.tools.watchdog import mem_watchdog  # noqa: E402, F401
-from memtomem.server.tools.schedule import (  # noqa: E402, F401
+)
+from memtomem.server.tools.ingest import (
+    mem_ingest,  # no @mcp.tool; import triggers @register("ingest") for mem_do routing
+)
+from memtomem.server.tools.watchdog import mem_watchdog
+from memtomem.server.tools.schedule import (
     mem_schedule_delete,
     mem_schedule_list,
     mem_schedule_register,
     mem_schedule_run_now,
 )
-from memtomem.server.tools.meta import mem_do  # noqa: E402, F401
-import memtomem.server.resources  # noqa: E402, F401  — register MCP resources
+from memtomem.server.tools.meta import mem_do
+import memtomem.server.resources  # side-effect import: registers MCP resources
 
 # ── Tool mode: core | standard | full ─────────────────────────────────
 # Set MEMTOMEM_TOOL_MODE env var to control which tools are exposed.
@@ -657,7 +658,7 @@ def main(argv: list[str] | None = None) -> None:
     # ``MsvcrtLocker`` backend calls ``msvcrt.locking``, which the C runtime
     # rejects on read-only handles with ``EACCES``. ``cli/_liveness.py`` uses
     # ``"rb+"`` for the same reason. Don't simplify this to ``"w"``.
-    _lock_fp = open(pid_file, "a+")  # noqa: SIM115
+    _lock_fp = open(pid_file, "a+")
     try:
         portalocker.lock(_lock_fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
     except (portalocker.LockException, BlockingIOError, OSError):
