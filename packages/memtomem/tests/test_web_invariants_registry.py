@@ -75,6 +75,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_mcp_servers.update_mcp_server",
         "context_projects.add_known_project",
         "context_projects.delete_known_project",
+        "context_projects.update_known_project",
         "context_skills.create_skill",
         "context_skills.delete_skill",
         "context_skills.import_skill",
@@ -180,6 +181,7 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_skills.import_skills": "bulk structured artifact import",
     "context_skills.sync_skills": "filesystem-driven sync",
     "context_projects.add_known_project": "path/label only, no prose",
+    "context_projects.update_known_project": "label-only rename, no prose",
     # Tag mutations: short labels, separate validation at ingest.
     "chunks.update_chunk_tags": "tags are short labels; redaction not applicable to tag strings",
     "tags.run_auto_tag": "auto-tag operates on already-stored chunks; "

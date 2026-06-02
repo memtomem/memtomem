@@ -232,7 +232,11 @@ async function _ctxFetchProjects() {
   //     same "endpoint exists but failing" class, surface a toast (#1100).
   let warn = null;
   try {
-    const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
+    // ``?include=counts`` is opt-in server-side (ADR-0021 PR2): the scope
+    // picker renders a per-scope count badge, so this shared loader must
+    // request counts. ``_ctxWithTargetScope`` appends ``&target_scope=`` after
+    // the existing ``?``.
+    const res = await fetch(_ctxWithTargetScope('/api/context/projects?include=counts', { includeScope: false }));
     if (!res.ok) {
       const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
@@ -269,8 +273,13 @@ async function _ctxFetchProjects() {
         tier: 'project',
         sources: ['server-cwd'],
         missing: false,
+        // Match the API scope shape: ``stale`` (ADR-0021 PR2) and the full
+        // four-key counts dict. The synthetic fallback is a safe default
+        // (never stale → no spurious "Initialize" prompt) so a fetch outage
+        // can't desync the rendered shape from a real response.
+        stale: false,
         experimental: false,
-        counts: { skills: 0, commands: 0, agents: 0 },
+        counts: { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 },
       }],
     };
   }

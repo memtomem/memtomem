@@ -18,6 +18,9 @@ import pytest
 
 from memtomem.context.projects import (
     KnownProjectsStore,
+    ProjectHealth,
+    ProjectScope,
+    annotate_project_health,
     compute_scope_id,
     discover_project_scopes,
     has_runtime_marker,
@@ -120,6 +123,82 @@ def test_store_remove_stale_entry(tmp_path: Path) -> None:
     sid = compute_scope_id(project)
     project.rmdir()
     assert store.remove_by_scope_id(sid) is True
+
+
+def test_store_update_label_by_scope_id(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project)
+    sid = compute_scope_id(project)
+
+    updated = store.update_label_by_scope_id(sid, "Alpha Prod")
+    assert updated is not None
+    assert updated.label == "Alpha Prod"
+    assert updated.root == project
+    # Reload from disk to confirm the write persisted.
+    reloaded = store.load()
+    assert len(reloaded) == 1
+    assert reloaded[0].label == "Alpha Prod"
+
+
+def test_store_update_label_preserves_added_at(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    added_at = store.add(project).added_at
+    sid = compute_scope_id(project)
+
+    updated = store.update_label_by_scope_id(sid, "renamed")
+    assert updated is not None
+    assert updated.added_at == added_at  # rename never touches the registration time
+
+
+def test_store_update_label_clear_to_none(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project, label="Custom")
+    sid = compute_scope_id(project)
+
+    updated = store.update_label_by_scope_id(sid, None)
+    assert updated is not None
+    assert updated.label is None
+    assert store.load()[0].label is None
+
+
+def test_store_update_label_unknown_returns_none(tmp_path: Path) -> None:
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    assert store.update_label_by_scope_id("p-deadbeefcafe", "x") is None
+
+
+def test_store_update_label_updates_all_duplicate_rows(tmp_path: Path) -> None:
+    """A manually corrupted file with duplicate scope_id rows must not leave a
+    stale label behind a success (mirrors remove_by_scope_id's all-matching
+    semantics). ``add`` dedups by path, so the API never produces this."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    kp = tmp_path / "kp.json"
+    kp.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [
+                    {"root": str(project), "added_at": "2026-01-01T00:00:00Z", "label": "old1"},
+                    {"root": str(project), "added_at": "2026-01-02T00:00:00Z", "label": "old2"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = KnownProjectsStore(kp)
+    sid = compute_scope_id(project)
+
+    updated = store.update_label_by_scope_id(sid, "new")
+    assert updated is not None
+    entries = store.load()
+    assert len(entries) == 2
+    assert all(e.label == "new" for e in entries)
 
 
 def test_store_corrupt_json_recovers_to_empty(tmp_path: Path) -> None:
@@ -248,6 +327,98 @@ def test_discover_missing_known_project(tmp_path: Path) -> None:
     ghost_scopes = [s for s in scopes if s.label == "ghost"]
     assert len(ghost_scopes) == 1
     assert ghost_scopes[0].missing is True
+    # A missing root is never also stale — the two flags are exclusive.
+    assert ghost_scopes[0].stale is False
+
+
+def test_discover_uses_stored_label(tmp_path: Path) -> None:
+    """A known-projects entry registered with a label surfaces that label,
+    not the directory basename."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    other = tmp_path / "inflearn"
+    other.mkdir()
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(other, label="Inflearn Prod")
+
+    scopes = discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
+    labeled = next(s for s in scopes if "known-projects" in s.sources)
+    assert labeled.label == "Inflearn Prod"
+
+
+def test_discover_stored_label_overrides_server_cwd(tmp_path: Path) -> None:
+    """An explicit label wins even when the cwd is also a registered project —
+    the user's deliberate name beats the 'Server CWD' auto-label."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(cwd, label="My Main Tree")
+
+    scopes = discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
+    assert len(scopes) == 1
+    assert set(scopes[0].sources) == {"server-cwd", "known-projects"}
+    assert scopes[0].label == "My Main Tree"
+
+
+def test_discover_stale_without_memtomem(tmp_path: Path) -> None:
+    """A present root with no ``.memtomem/`` store is reported stale."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()  # no .memtomem
+    kp = tmp_path / "kp.json"
+    scopes = discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
+    assert scopes[0].missing is False
+    assert scopes[0].stale is True
+
+
+def test_discover_not_stale_with_memtomem(tmp_path: Path) -> None:
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    (cwd / ".memtomem").mkdir()
+    kp = tmp_path / "kp.json"
+    scopes = discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
+    assert scopes[0].stale is False
+
+
+# ── annotate_project_health ──────────────────────────────────────────────
+
+
+def _scope(root: Path | None) -> ProjectScope:
+    return ProjectScope(
+        scope_id="p-000000000000",
+        label="x",
+        root=root,
+        tier="project",
+        sources=("server-cwd",),
+    )
+
+
+def test_annotate_health_missing_when_root_none() -> None:
+    health = annotate_project_health(_scope(None))
+    assert health == ProjectHealth(missing=True, stale=False)
+
+
+def test_annotate_health_missing_when_root_absent(tmp_path: Path) -> None:
+    health = annotate_project_health(_scope(tmp_path / "does_not_exist"))
+    assert health == ProjectHealth(missing=True, stale=False)
+
+
+def test_annotate_health_stale_without_memtomem(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    root.mkdir()
+    assert annotate_project_health(_scope(root)) == ProjectHealth(missing=False, stale=True)
+
+
+def test_annotate_health_healthy_with_memtomem(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / ".memtomem").mkdir(parents=True)
+    assert annotate_project_health(_scope(root)) == ProjectHealth(missing=False, stale=False)
+
+
+def test_annotate_health_file_root_is_missing_not_stale(tmp_path: Path) -> None:
+    """A root that exists but is a *file* (not a directory) is missing, not stale."""
+    f = tmp_path / "afile"
+    f.write_text("x")
+    assert annotate_project_health(_scope(f)) == ProjectHealth(missing=True, stale=False)
 
 
 def test_discover_experimental_scan_disabled(

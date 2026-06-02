@@ -32,9 +32,11 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ProjectScope",
+    "ProjectHealth",
     "KnownProjectsStore",
     "compute_scope_id",
     "discover_project_scopes",
+    "annotate_project_health",
 ]
 
 
@@ -91,7 +93,12 @@ class ProjectScope:
     # stops advertising a tier the producer can't return.
     tier: Literal["project"]
     sources: tuple[str, ...]
+    # ``missing`` — the root is gone (registered but no longer a directory);
+    # ``stale`` — the root exists but has no ``.memtomem/`` store (never
+    # initialized as a memtomem project). Mutually exclusive: a missing root is
+    # never also stale. See ``annotate_project_health``.
     missing: bool = False
+    stale: bool = False
     experimental: bool = False
 
 
@@ -196,6 +203,41 @@ class KnownProjectsStore:
                 return False
             self._write(kept)
             return True
+
+    def update_label_by_scope_id(
+        self, scope_id: str, label: str | None
+    ) -> _KnownProjectEntry | None:
+        """Set (or clear, when *label* is None) the label of the entry whose
+        computed scope_id matches. Returns the updated entry, or None if no
+        entry matched.
+
+        Label-only: ``root`` and ``added_at`` are preserved (the registration's
+        identity is path-derived, so a rename never changes the scope_id). Holds
+        the same exclusive sidecar lock and atomic ``tmp + os.replace`` as
+        ``add`` / ``remove_by_scope_id``.
+
+        Updates *every* entry whose scope_id matches — mirroring
+        ``remove_by_scope_id``'s all-matching semantics — so a manually corrupted
+        file with duplicate rows can't leave a stale label behind a "success".
+        ``add`` dedups by resolved path, so duplicates never arise via the API.
+        Returns the first updated entry.
+        """
+        with _file_lock(_lock_path_for(self._path)):
+            entries = self.load()
+            first_updated: _KnownProjectEntry | None = None
+            new_entries: list[_KnownProjectEntry] = []
+            for e in entries:
+                if compute_scope_id(e.root) == scope_id:
+                    replacement = _KnownProjectEntry(root=e.root, added_at=e.added_at, label=label)
+                    new_entries.append(replacement)
+                    if first_updated is None:
+                        first_updated = replacement
+                else:
+                    new_entries.append(e)
+            if first_updated is None:
+                return None
+            self._write(new_entries)
+            return first_updated
 
     def _write(self, entries: list[_KnownProjectEntry]) -> None:
         doc = {
@@ -490,6 +532,69 @@ def _label_for(root: Path) -> str:
     return name
 
 
+# ── Project health ───────────────────────────────────────────────────────
+
+
+# A scope is *stale* iff its root exists but lacks this directory — i.e. the
+# tree is there but was never initialized as a memtomem project. It is the
+# memtomem-specific subset of ``_MARKER_DIRS`` (which also recognizes runtime
+# markers like ``.claude``); the Portal's "Initialize" affordance keys off
+# *this* marker, not the broader set.
+_MEMTOMEM_MARKER = ".memtomem"
+
+
+@dataclass(frozen=True)
+class ProjectHealth:
+    """The (``missing``, ``stale``) pair the Portal renders for one scope.
+
+    Mirrors the same-named ``ProjectScope`` fields; ``annotate_project_health``
+    is the single source that computes both from a root on disk.
+    """
+
+    missing: bool
+    stale: bool
+
+
+def _root_stale(root: Path) -> bool:
+    """True when *root* exists but has no ``.memtomem/`` store.
+
+    Only meaningful for a present root; the caller gates on ``missing`` first.
+    An unreadable root reads as stale (uninitialized from our vantage) rather
+    than crashing discovery.
+    """
+    try:
+        return not (root / _MEMTOMEM_MARKER).is_dir()
+    except OSError:
+        return True
+
+
+def annotate_project_health(scope: ProjectScope) -> ProjectHealth:
+    """Compute the Portal health pair (``missing``, ``stale``) for *scope*.
+
+    ``missing`` — the root is None / absent / not a directory: the tree is gone,
+    so the Portal greys the row out and offers only *unregister*. ``stale`` —
+    the root exists but has no ``.memtomem/`` store: registered or discovered
+    but never initialized, so the Portal offers *Initialize*. The two are
+    mutually exclusive — a missing root is never reported stale (there is
+    nothing to initialize until the tree returns).
+
+    Re-derives ``missing`` from disk so the pair is internally coherent; the
+    value agrees with the ``missing`` ``discover_project_scopes`` already sets
+    (its source union flags a known-project root missing iff it is not a
+    directory).
+    """
+    root = scope.root
+    if root is None:
+        return ProjectHealth(missing=True, stale=False)
+    try:
+        is_dir = root.is_dir()
+    except OSError:
+        is_dir = False
+    if not is_dir:
+        return ProjectHealth(missing=True, stale=False)
+    return ProjectHealth(missing=False, stale=_root_stale(root))
+
+
 def discover_project_scopes(
     cwd: Path,
     known_projects_file: Path,
@@ -503,11 +608,11 @@ def discover_project_scopes(
     resolved path coalesce; ``sources`` then carries the union of every
     place each scope was discovered.
     """
-    # Resolved-path → (display_path, sources, missing)
-    by_resolved: dict[str, tuple[Path, set[str], bool]] = {}
+    # Resolved-path → (display_path, sources, missing, stored_label)
+    by_resolved: dict[str, tuple[Path, set[str], bool, str | None]] = {}
     order: list[str] = []
 
-    def _add(display: Path, source: str, *, missing: bool) -> None:
+    def _add(display: Path, source: str, *, missing: bool, label: str | None = None) -> None:
         # Resolve aggressively — strict=False so a stale known-project root
         # that no longer exists still gets a scope_id (so the user can
         # DELETE it via the UI).
@@ -517,12 +622,15 @@ def discover_project_scopes(
             resolved = display
         key = _normalize_for_scope_id(resolved)
         if key in by_resolved:
-            _, sources, was_missing = by_resolved[key]
+            _, sources, was_missing, prev_label = by_resolved[key]
             sources.add(source)
             # `missing` only stays true if every source flagged it missing.
-            by_resolved[key] = (resolved, sources, was_missing and missing)
+            # The first non-empty stored label wins (only known-projects carries
+            # one; cwd / claude-projects pass None).
+            merged_label = prev_label if prev_label else label
+            by_resolved[key] = (resolved, sources, was_missing and missing, merged_label)
         else:
-            by_resolved[key] = (resolved, {source}, missing)
+            by_resolved[key] = (resolved, {source}, missing, label)
             order.append(key)
 
     # 1. Server cwd — always first, never missing (the process is running there).
@@ -532,7 +640,12 @@ def discover_project_scopes(
     store = KnownProjectsStore(known_projects_file)
     known_entries = store.load()
     for entry in known_entries:
-        _add(entry.root, "known-projects", missing=not entry.root.is_dir())
+        _add(
+            entry.root,
+            "known-projects",
+            missing=not entry.root.is_dir(),
+            label=entry.label,
+        )
 
     # 3. Opt-in scan of ~/.claude/projects/ — silently skipped when the flag is
     #    False so the default discovery path stays cheap. The cwd and the
@@ -546,19 +659,33 @@ def discover_project_scopes(
 
     scopes: list[ProjectScope] = []
     for key in order:
-        resolved, sources, missing = by_resolved[key]
+        resolved, sources, missing, stored_label = by_resolved[key]
         # ``experimental`` is true iff the *only* source is the opt-in scan.
         # cwd / known-projects unions clear the flag so the most-trusted
         # source wins for display purposes.
         experimental = sources == {"claude-projects"}
+        # Label precedence: an explicit stored label (set via Add Project or the
+        # rename PATCH) wins — it is the user's deliberate name, so it overrides
+        # even the "Server CWD" auto-label when the cwd was also registered.
+        # Otherwise the server cwd shows "Server CWD"; everything else falls back
+        # to the directory basename.
+        if stored_label:
+            label = stored_label
+        elif "server-cwd" in sources:
+            label = "Server CWD"
+        else:
+            label = _label_for(resolved)
         scopes.append(
             ProjectScope(
                 scope_id=compute_scope_id(resolved),
-                label="Server CWD" if "server-cwd" in sources else _label_for(resolved),
+                label=label,
                 root=resolved,
                 tier="project",
                 sources=tuple(sorted(sources)),
                 missing=missing,
+                # A missing root cannot be inspected for a ``.memtomem/`` marker
+                # and is never reported stale — the two flags are exclusive.
+                stale=(not missing) and _root_stale(resolved),
                 experimental=experimental,
             )
         )

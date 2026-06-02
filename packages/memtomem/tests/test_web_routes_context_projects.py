@@ -85,8 +85,11 @@ async def test_get_projects_cwd_only(client) -> None:
     assert scope["tier"] == "project"
     assert scope["missing"] is False
     assert scope["experimental"] is False
-    assert "counts" in scope
-    assert set(scope["counts"].keys()) == {"skills", "commands", "agents", "mcp-servers"}
+    # cwd_root has a .claude marker but no .memtomem store → reported stale.
+    assert scope["stale"] is True
+    # Counts are opt-in now (ADR-0021 PR2): the default response omits them
+    # (``null``, distinct from a real zero) so the project list stays cheap.
+    assert scope["counts"] is None
 
 
 @pytest.mark.asyncio
@@ -114,7 +117,7 @@ async def test_get_projects_counts_directory_layout_commands_agents(client, cwd_
     agent_dir.mkdir(parents=True)
     (agent_dir / "agent.md").write_text("# reviewer\n", encoding="utf-8")
 
-    resp = await client.get("/api/context/projects")
+    resp = await client.get("/api/context/projects", params={"include": "counts"})
     assert resp.status_code == 200
     scope = resp.json()["scopes"][0]
     counts = scope["counts"]
@@ -167,14 +170,14 @@ async def test_get_projects_project_local_counts_only_with_explicit_target_scope
     local_dir.mkdir(parents=True)
     (local_dir / "SKILL.md").write_text("# draft\n", encoding="utf-8")
 
-    default = await client.get("/api/context/projects")
+    default = await client.get("/api/context/projects", params={"include": "counts"})
     assert default.status_code == 200
     assert default.json()["target_scope"] == "project_shared"
     assert default.json()["scopes"][0]["counts"]["skills"] == 0
 
     explicit = await client.get(
         "/api/context/projects",
-        params={"target_scope": "project_local"},
+        params={"target_scope": "project_local", "include": "counts"},
     )
     assert explicit.status_code == 200
     data = explicit.json()
@@ -213,7 +216,7 @@ async def test_get_projects_project_local_dir_layout_commands_agents_count_disti
 
     resp = await client.get(
         "/api/context/projects",
-        params={"target_scope": "project_local"},
+        params={"target_scope": "project_local", "include": "counts"},
     )
     assert resp.status_code == 200
     counts = resp.json()["scopes"][0]["counts"]
@@ -248,11 +251,72 @@ async def test_get_projects_project_shared_dir_layout_commands_agents_count_dist
         agent_dir.mkdir(parents=True)
         (agent_dir / "agent.md").write_text(f"# {name}\n", encoding="utf-8")
 
-    resp = await client.get("/api/context/projects")
+    resp = await client.get("/api/context/projects", params={"include": "counts"})
     assert resp.status_code == 200
     counts = resp.json()["scopes"][0]["counts"]
     assert counts["commands"] == 2, counts
     assert counts["agents"] == 2, counts
+
+
+# ── ?include=counts opt-in + health (ADR-0021 PR2) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_projects_default_omits_counts(client) -> None:
+    """Without ``?include=counts`` every scope reports ``counts: null``."""
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    for scope in resp.json()["scopes"]:
+        assert scope["counts"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_projects_include_counts_present(client) -> None:
+    """``?include=counts`` restores the full per-type count dict."""
+    resp = await client.get("/api/context/projects", params={"include": "counts"})
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    assert scope["counts"] is not None
+    assert set(scope["counts"].keys()) == {"skills", "commands", "agents", "mcp-servers"}
+
+
+@pytest.mark.asyncio
+async def test_get_projects_unknown_include_token_ignored(client) -> None:
+    """Unrecognized include tokens are ignored (forward-compatible), so a
+    stray token neither errors nor accidentally turns counts on."""
+    resp = await client.get("/api/context/projects", params={"include": "bogus"})
+    assert resp.status_code == 200
+    assert resp.json()["scopes"][0]["counts"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_projects_stale_flips_when_memtomem_present(client, cwd_root: Path) -> None:
+    """A root without ``.memtomem/`` is stale; creating it clears the flag."""
+    # cwd_root has only a .claude marker → stale.
+    first = await client.get("/api/context/projects")
+    assert first.json()["scopes"][0]["stale"] is True
+
+    (cwd_root / ".memtomem").mkdir()
+    second = await client.get("/api/context/projects")
+    scope = second.json()["scopes"][0]
+    assert scope["stale"] is False
+    assert scope["missing"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_projects_missing_is_not_stale(client, tmp_path: Path) -> None:
+    """A registered-but-deleted root reports missing=True, stale=False
+    (the two health flags are mutually exclusive)."""
+    gone = tmp_path / "ghost"
+    gone.mkdir()
+    add = await client.post("/api/context/known-projects", json={"root": str(gone)})
+    sid = add.json()["scope_id"]
+    gone.rmdir()
+
+    resp = await client.get("/api/context/projects")
+    ghost = next(s for s in resp.json()["scopes"] if s["scope_id"] == sid)
+    assert ghost["missing"] is True
+    assert ghost["stale"] is False
 
 
 # ── ?scope_id= on /context/skills ───────────────────────────────────────
@@ -440,6 +504,24 @@ async def test_post_no_warning_when_marker_present(client, tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_post_blank_label_falls_back_to_basename(client, tmp_path: Path) -> None:
+    """A whitespace-only POST label is normalized to None at ingest (matching
+    PATCH), so a stored blank can't suppress the basename via label precedence."""
+    proj = tmp_path / "inflearn"
+    proj.mkdir()
+    (proj / ".claude").mkdir()
+    resp = await client.post(
+        "/api/context/known-projects", json={"root": str(proj), "label": "   "}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["label"] is None
+
+    listing = await client.get("/api/context/projects")
+    scope = next(s for s in listing.json()["scopes"] if s["scope_id"] == resp.json()["scope_id"])
+    assert scope["label"] == "inflearn"
+
+
+@pytest.mark.asyncio
 async def test_post_idempotent(client, tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -495,3 +577,66 @@ async def test_delete_removes_stale_entry(client, tmp_path: Path) -> None:
 
     resp = await client.delete(f"/api/context/known-projects/{sid}")
     assert resp.status_code == 200
+
+
+# ── PATCH /context/known-projects/{scope_id} (label rename) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_patch_label_round_trip(client, tmp_path: Path) -> None:
+    """PATCH sets the label and echoes it back; root/scope_id are unchanged."""
+    proj = tmp_path / "inflearn"
+    proj.mkdir()
+    (proj / ".claude").mkdir()
+    add = await client.post("/api/context/known-projects", json={"root": str(proj)})
+    sid = add.json()["scope_id"]
+
+    resp = await client.patch(f"/api/context/known-projects/{sid}", json={"label": "Inflearn Prod"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["scope_id"] == sid
+    assert body["project_scope_id"] == sid
+    assert body["root"] == str(proj)
+    assert body["label"] == "Inflearn Prod"
+
+
+@pytest.mark.asyncio
+async def test_patch_label_reflected_in_discovery(client, tmp_path: Path) -> None:
+    """A renamed project shows its custom label in the GET listing, not the
+    directory basename."""
+    proj = tmp_path / "inflearn"
+    proj.mkdir()
+    (proj / ".claude").mkdir()
+    add = await client.post("/api/context/known-projects", json={"root": str(proj)})
+    sid = add.json()["scope_id"]
+
+    await client.patch(f"/api/context/known-projects/{sid}", json={"label": "Renamed"})
+
+    listing = await client.get("/api/context/projects")
+    scope = next(s for s in listing.json()["scopes"] if s["scope_id"] == sid)
+    assert scope["label"] == "Renamed"
+
+
+@pytest.mark.asyncio
+async def test_patch_blank_label_clears_to_basename(client, tmp_path: Path) -> None:
+    """A whitespace-only label clears the custom label → falls back to basename."""
+    proj = tmp_path / "inflearn"
+    proj.mkdir()
+    (proj / ".claude").mkdir()
+    add = await client.post("/api/context/known-projects", json={"root": str(proj)})
+    sid = add.json()["scope_id"]
+
+    await client.patch(f"/api/context/known-projects/{sid}", json={"label": "Custom"})
+    cleared = await client.patch(f"/api/context/known-projects/{sid}", json={"label": "   "})
+    assert cleared.status_code == 200
+    assert cleared.json()["label"] is None
+
+    listing = await client.get("/api/context/projects")
+    scope = next(s for s in listing.json()["scopes"] if s["scope_id"] == sid)
+    assert scope["label"] == "inflearn"
+
+
+@pytest.mark.asyncio
+async def test_patch_unknown_scope_id_404(client) -> None:
+    resp = await client.patch("/api/context/known-projects/p-deadbeefcafe", json={"label": "x"})
+    assert resp.status_code == 404
