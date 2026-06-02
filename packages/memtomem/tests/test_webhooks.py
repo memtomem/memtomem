@@ -70,6 +70,14 @@ class TestValidateWebhookUrl:
         err = _validate_webhook_url("file:///etc/passwd")
         assert err is not None and "scheme" in err
 
+    def test_rejects_malformed_url(self):
+        from memtomem.server.webhooks import _validate_webhook_url
+
+        # An unclosed IPv6 bracket makes urlparse() raise ValueError; the helper
+        # catches it and returns the malformed-URL reason (the try/except branch).
+        err = _validate_webhook_url("http://[::1")
+        assert err is not None and "malformed" in err
+
     @pytest.mark.parametrize(
         "url",
         [
