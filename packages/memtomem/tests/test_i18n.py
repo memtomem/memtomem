@@ -322,6 +322,47 @@ class TestNoHardcodedStrings:
             "Use t('tags.empty_msg') / t('tags.empty_hint') instead."
         )
 
+    def test_embedding_mismatch_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The embedding-mismatch banner (#976) must route through locale
+        keys with their interpolation placeholders intact. Deleting a key or
+        dropping a placeholder would leak the raw key / break the {detail}
+        substitution into the banner ``checkEmbeddingMismatch()`` builds."""
+        required = {
+            "banner.emb_mismatch": {"details"},
+            "banner.emb_mismatch_dimension": {"db", "config"},
+            "banner.emb_mismatch_model": {"db", "config"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Embedding-mismatch keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Embedding-mismatch keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Embedding-mismatch placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_embedding_mismatch(self) -> None:
+        """``app.js`` ``checkEmbeddingMismatch()`` must not re-introduce the
+        English banner literals (#976). The banner facts are now built from
+        ``t('banner.emb_mismatch*')`` — these substrings would mean the text
+        regressed to an inline template literal that never localizes."""
+        text = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        forbidden = [
+            "Embedding mismatch",
+            "Search may not work until resolved",
+            "dimension: DB",
+            "model: DB",
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #976 embedding-mismatch literals in app.js: {bad}. "
+            "Use t('banner.emb_mismatch') / t('banner.emb_mismatch_dimension') / "
+            "t('banner.emb_mismatch_model') instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the

@@ -31,6 +31,9 @@
   "banner.model_error": "Model failed to load — check Settings.",
   "banner.model_fallback_embedder": "embedder",
   "banner.model_fallback_reranker": "reranker",
+  "banner.emb_mismatch": "Embedding mismatch — {details}. Search may not work until resolved.",
+  "banner.emb_mismatch_dimension": "dimension: DB {db} ≠ config {config}",
+  "banner.emb_mismatch_model": "model: DB {db} ≠ config {config}",
 
   "home.quick_search_placeholder": "Quick search memories...",
   "home.search_btn": "Search",

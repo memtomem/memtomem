@@ -1592,7 +1592,7 @@ loadStats();
 checkEmbeddingMismatch();
 
 // ---------------------------------------------------------------------------
-// Embedding mismatch banner
+// Embedding-mismatch banner (localized via banner.emb_mismatch* locale keys)
 // ---------------------------------------------------------------------------
 
 async function checkEmbeddingMismatch() {
@@ -1608,12 +1608,18 @@ async function checkEmbeddingMismatch() {
 
     const parts = [];
     if (data.dimension_mismatch) {
-      parts.push(`dimension: DB ${data.stored.dimension} ≠ config ${data.configured.dimension}`);
+      parts.push(t('banner.emb_mismatch_dimension', {
+        db: data.stored.dimension,
+        config: data.configured.dimension,
+      }));
     }
     if (data.model_mismatch) {
-      parts.push(`model: DB ${data.stored.provider}/${data.stored.model} ≠ config ${data.configured.provider}/${data.configured.model}`);
+      parts.push(t('banner.emb_mismatch_model', {
+        db: `${data.stored.provider}/${data.stored.model}`,
+        config: `${data.configured.provider}/${data.configured.model}`,
+      }));
     }
-    msgEl.textContent = `Embedding mismatch — ${parts.join(' / ')}. Search may not work until resolved.`;
+    msgEl.textContent = t('banner.emb_mismatch', { details: parts.join(' / ') });
     show(banner);
 
     // Dismiss button

@@ -31,6 +31,9 @@
   "banner.model_error": "모델 로드 실패 — 설정 확인.",
   "banner.model_fallback_embedder": "임베더",
   "banner.model_fallback_reranker": "리랭커",
+  "banner.emb_mismatch": "임베딩 불일치 — {details}. 해결될 때까지 검색이 작동하지 않을 수 있습니다.",
+  "banner.emb_mismatch_dimension": "차원: DB {db} ≠ 설정 {config}",
+  "banner.emb_mismatch_model": "모델: DB {db} ≠ 설정 {config}",
 
   "home.quick_search_placeholder": "기억 빠른 검색...",
   "home.search_btn": "검색",
