@@ -613,37 +613,37 @@ _renderNsChart = function(namespaces) {
 
 function _buildCommands() {
   const tabs = [
-    { icon: '🏠', label: 'Go to Home', action: () => activateTab('home'), hint: '1' },
-    { icon: '🔍', label: 'Go to Search', action: () => activateTab('search'), hint: '2' },
-    { icon: '📁', label: 'Go to Sources', action: () => activateTab('sources'), hint: '3' },
-    { icon: '📥', label: 'Go to Index', action: () => activateTab('index'), hint: '4' },
-    { icon: '🏷', label: 'Go to Tags', action: () => activateTab('tags'), hint: '5' },
-    { icon: '📅', label: 'Go to Timeline', action: () => activateTab('timeline'), hint: '6' },
-    { icon: '⚙', label: 'Go to Settings', action: () => activateTab('settings'), hint: '7' },
+    { icon: '🏠', label: t('cmd.nav.home'), action: () => activateTab('home'), hint: '1' },
+    { icon: '🔍', label: t('cmd.nav.search'), action: () => activateTab('search'), hint: '2' },
+    { icon: '📁', label: t('cmd.nav.sources'), action: () => activateTab('sources'), hint: '3' },
+    { icon: '📥', label: t('cmd.nav.index'), action: () => activateTab('index'), hint: '4' },
+    { icon: '🏷', label: t('cmd.nav.tags'), action: () => activateTab('tags'), hint: '5' },
+    { icon: '📅', label: t('cmd.nav.timeline'), action: () => activateTab('timeline'), hint: '6' },
+    { icon: '⚙', label: t('cmd.nav.settings'), action: () => activateTab('settings'), hint: '7' },
   ];
 
   const settings = [
-    { icon: '🔧', label: 'Open Config', action: () => { activateTab('settings'); switchSettingsSection('config'); } },
-    { icon: '📋', label: 'Open Dedup', action: () => { activateTab('settings'); switchSettingsSection('dedup'); } },
-    { icon: '📦', label: 'Open Export/Import', action: () => { activateTab('settings'); switchSettingsSection('export'); } },
+    { icon: '🔧', label: t('cmd.open.config'), action: () => { activateTab('settings'); switchSettingsSection('config'); } },
+    { icon: '📋', label: t('cmd.open.dedup'), action: () => { activateTab('settings'); switchSettingsSection('dedup'); } },
+    { icon: '📦', label: t('cmd.open.export_import'), action: () => { activateTab('settings'); switchSettingsSection('export'); } },
   ];
 
   const actions = [
-    { icon: '🔍', label: 'Focus Search', action: () => { activateTab('search'); qs('search-input').focus(); }, hint: '/' },
-    { icon: '🌗', label: 'Toggle Theme', action: () => qs('theme-toggle').click() },
-    { icon: '⌨', label: 'Keyboard Shortcuts', action: () => window.openShortcutsModal(), hint: '?' },
+    { icon: '🔍', label: t('cmd.action.focus_search'), action: () => { activateTab('search'); qs('search-input').focus(); }, hint: '/' },
+    { icon: '🌗', label: t('cmd.action.toggle_theme'), action: () => qs('theme-toggle').click() },
+    { icon: '⌨', label: t('cmd.action.keyboard_shortcuts'), action: () => window.openShortcutsModal(), hint: '?' },
   ];
 
   // Dynamic: recent sources
   const sources = (STATE.allSources || []).slice(0, 5).map(s => ({
-    icon: '📄', label: `Open ${basename(s.path)}`, action: () => _navigateToSource(s.path), hint: 'source',
+    icon: '📄', label: t('cmd.open_source', { name: basename(s.path) }), action: () => _navigateToSource(s.path), hint: 'source',
   }));
 
   return [
-    { group: 'Navigation', items: tabs },
-    { group: 'Settings', items: settings },
-    { group: 'Actions', items: actions },
-    ...(sources.length ? [{ group: 'Recent Sources', items: sources }] : []),
+    { group: t('cmd.group.navigation'), items: tabs },
+    { group: t('cmd.group.settings'), items: settings },
+    { group: t('cmd.group.actions'), items: actions },
+    ...(sources.length ? [{ group: t('cmd.group.recent_sources'), items: sources }] : []),
   ];
 }
 
@@ -697,7 +697,7 @@ function _renderCmdList(filter) {
     });
   });
 
-  list.innerHTML = html || '<div class="cmd-item" style="color:var(--muted)">No matching commands</div>';
+  list.innerHTML = html || `<div class="cmd-item" style="color:var(--muted)">${t('cmd.no_match')}</div>`;
 
   // Store flat command list for execution
   list._commands = [];

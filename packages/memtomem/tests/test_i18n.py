@@ -556,6 +556,64 @@ class TestNoHardcodedStrings:
             "Use t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) })."
         )
 
+    def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The Cmd+K command palette labels (#1026) — nav/settings/action
+        commands, group headers, the open-source label, and the empty state —
+        must all come from ``cmd.*`` locale keys, with ``cmd.open_source``
+        keeping its ``{name}`` placeholder."""
+        required = {
+            "cmd.group.navigation": set(),
+            "cmd.group.settings": set(),
+            "cmd.group.actions": set(),
+            "cmd.group.recent_sources": set(),
+            "cmd.nav.home": set(),
+            "cmd.nav.search": set(),
+            "cmd.nav.sources": set(),
+            "cmd.nav.index": set(),
+            "cmd.nav.tags": set(),
+            "cmd.nav.timeline": set(),
+            "cmd.nav.settings": set(),
+            "cmd.open.config": set(),
+            "cmd.open.dedup": set(),
+            "cmd.open.export_import": set(),
+            "cmd.action.focus_search": set(),
+            "cmd.action.toggle_theme": set(),
+            "cmd.action.keyboard_shortcuts": set(),
+            "cmd.open_source": {"name"},
+            "cmd.no_match": set(),
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Command-palette keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Command-palette keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Command-palette placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_command_palette(self) -> None:
+        """``settings-namespaces.js`` ``_buildCommands()`` / ``_renderCmdList()``
+        must not rebuild the palette labels (#1026) as English literals."""
+        text = (_STATIC_JS_DIR / "settings-namespaces.js").read_text(encoding="utf-8")
+        forbidden = [
+            "label: 'Go to Home'",
+            "label: 'Open Config'",
+            "label: 'Focus Search'",
+            "label: 'Toggle Theme'",
+            "group: 'Navigation'",
+            "group: 'Recent Sources'",
+            "`Open ${basename(s.path)}`",
+            "No matching commands",
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #1026 command-palette literals in settings-namespaces.js: {bad}. "
+            "Use the cmd.* locale keys via t(...) instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the
