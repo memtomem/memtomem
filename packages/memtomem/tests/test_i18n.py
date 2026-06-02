@@ -496,6 +496,37 @@ class TestNoHardcodedStrings:
             "Use t('common.done') / t('toast.fts_rebuilt', {count}) instead."
         )
 
+    def test_search_history_chip_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Search history / recent-chip labels (#1021) must come from locale
+        keys (no interpolation)."""
+        required = {
+            "search.history_remove_title",
+            "search.history_clear",
+            "search.recent_label",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"Search-history keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Search-history keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_no_hardcoded_search_history_chips(self) -> None:
+        """``app.js`` ``renderHistoryDropdown()`` / ``renderRecentChips()`` must
+        not re-introduce the English history/recent literals (#1021). Substrings
+        are scoped to these widgets — the upload and saved-chip ``title="Remove"``
+        buttons are out of scope and intentionally not matched."""
+        text = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        forbidden = [
+            "'Clear history'",
+            'history-remove" title="Remove"',
+            'recent-chips-label">Recent:',
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #1021 search-history literals in app.js: {bad}. Use "
+            "t('search.history_clear') / t('search.history_remove_title') / "
+            "t('search.recent_label') instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the

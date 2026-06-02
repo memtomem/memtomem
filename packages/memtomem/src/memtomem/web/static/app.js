@@ -6441,7 +6441,7 @@ function renderHistoryDropdown() {
   history.forEach(q => {
     const item = document.createElement('div');
     item.className = 'history-item';
-    item.innerHTML = `<span class="history-text">${escapeHtml(q)}</span><button class="history-remove" title="Remove">✕</button>`;
+    item.innerHTML = `<span class="history-text">${escapeHtml(q)}</span><button class="history-remove" title="${t('search.history_remove_title')}">✕</button>`;
     item.querySelector('.history-text').addEventListener('mousedown', e => {
       e.preventDefault(); // keep focus on input
       qs('search-input').value = q;
@@ -6458,7 +6458,7 @@ function renderHistoryDropdown() {
 
   const clearAll = document.createElement('div');
   clearAll.className = 'history-clear-all';
-  clearAll.textContent = 'Clear history';
+  clearAll.textContent = t('search.history_clear');
   clearAll.addEventListener('mousedown', e => {
     e.preventDefault();
     localStorage.removeItem(HISTORY_KEY);
@@ -6473,7 +6473,7 @@ function renderRecentChips() {
   if (!container) return;
   const history = _loadHistory();
   if (!history.length) { hide(container); return; }
-  container.innerHTML = '<span class="recent-chips-label">Recent:</span>' +
+  container.innerHTML = `<span class="recent-chips-label">${t('search.recent_label')}</span>` +
     history.slice(0, 6).map(q =>
       `<button class="recent-chip" title="${escapeAttr(q)}">${escapeHtml(truncate(q, 24))}</button>`
     ).join('');
