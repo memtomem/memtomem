@@ -1587,6 +1587,11 @@ window.addEventListener('langchange', () => {
   if (typeof I18N !== 'undefined') I18N.applyDOM();
   loadStats();
   if (qs('tab-home') && !qs('tab-home').hidden) loadDashboard();
+  // checkEmbeddingMismatch() fires at module load and can win the race
+  // against I18N.init(), so re-render the banner text once the locale
+  // cache is ready (and on every later toggle). No-op if no mismatch is
+  // showing. See feedback_i18n_init_order_race.
+  renderEmbMismatchBanner();
 });
 loadStats();
 checkEmbeddingMismatch();
@@ -1594,6 +1599,38 @@ checkEmbeddingMismatch();
 // ---------------------------------------------------------------------------
 // Embedding-mismatch banner (localized via banner.emb_mismatch* locale keys)
 // ---------------------------------------------------------------------------
+
+// Cached ``/api/embedding-status`` payload, kept so the banner text can be
+// re-rendered in the current locale on ``langchange``. The initial
+// checkEmbeddingMismatch() runs at module load and may resolve before
+// I18N.init() populates the locale cache; without a re-render the banner
+// would show raw ``banner.emb_mismatch*`` keys. See
+// feedback_i18n_init_order_race.
+let _embMismatchData = null;
+
+/** Build the banner message from the cached payload using the current
+ *  locale. Safe to call repeatedly (langchange); no-op when no mismatch
+ *  is showing or the banner DOM isn't present. */
+function renderEmbMismatchBanner() {
+  if (!_embMismatchData) return;
+  const msgEl = qs('emb-banner-msg');
+  if (!msgEl) return;
+  const data = _embMismatchData;
+  const parts = [];
+  if (data.dimension_mismatch) {
+    parts.push(t('banner.emb_mismatch_dimension', {
+      db: data.stored.dimension,
+      config: data.configured.dimension,
+    }));
+  }
+  if (data.model_mismatch) {
+    parts.push(t('banner.emb_mismatch_model', {
+      db: `${data.stored.provider}/${data.stored.model}`,
+      config: `${data.configured.provider}/${data.configured.model}`,
+    }));
+  }
+  msgEl.textContent = t('banner.emb_mismatch', { details: parts.join(' / ') });
+}
 
 async function checkEmbeddingMismatch() {
   try {
@@ -1604,22 +1641,10 @@ async function checkEmbeddingMismatch() {
     if (sessionStorage.getItem('m2m-emb-banner-dismissed')) return;
 
     const banner = qs('embedding-mismatch-banner');
-    const msgEl = qs('emb-banner-msg');
 
-    const parts = [];
-    if (data.dimension_mismatch) {
-      parts.push(t('banner.emb_mismatch_dimension', {
-        db: data.stored.dimension,
-        config: data.configured.dimension,
-      }));
-    }
-    if (data.model_mismatch) {
-      parts.push(t('banner.emb_mismatch_model', {
-        db: `${data.stored.provider}/${data.stored.model}`,
-        config: `${data.configured.provider}/${data.configured.model}`,
-      }));
-    }
-    msgEl.textContent = t('banner.emb_mismatch', { details: parts.join(' / ') });
+    // Cache + render now; re-rendered on langchange if init wins the race.
+    _embMismatchData = data;
+    renderEmbMismatchBanner();
     show(banner);
 
     // Dismiss button

@@ -363,6 +363,32 @@ class TestNoHardcodedStrings:
             "t('banner.emb_mismatch_model') instead."
         )
 
+    def test_emb_mismatch_rerenders_on_langchange(self) -> None:
+        """The embedding banner fires at module load (``checkEmbeddingMismatch()``)
+        and can resolve before ``I18N.init()`` populates the locale cache, so
+        ``t()`` would render raw ``banner.emb_mismatch*`` keys. The fix caches
+        the payload and re-renders on ``langchange`` (init dispatches a one-shot
+        langchange once the cache is ready). Pin that wiring so a refactor can't
+        silently reintroduce the race. See feedback_i18n_init_order_race.md.
+        """
+        text = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        assert "function renderEmbMismatchBanner" in text, (
+            "renderEmbMismatchBanner() helper missing — the banner text must be "
+            "re-renderable independent of the initial fetch so langchange can refresh it."
+        )
+        # Slice the first langchange listener: from its registration to the
+        # stable ``checkEmbeddingMismatch();`` call that immediately follows the
+        # listener block. Sentinel slice (not a lazy ``});`` regex) per
+        # feedback_listener_body_lazy_regex_trips_inline_objects.md.
+        start = text.find("window.addEventListener('langchange'")
+        end = text.find("checkEmbeddingMismatch();", start)
+        assert 0 <= start < end, "could not locate the langchange listener block in app.js"
+        assert "renderEmbMismatchBanner()" in text[start:end], (
+            "the langchange listener must call renderEmbMismatchBanner() so the banner "
+            "doesn't show raw locale keys when checkEmbeddingMismatch() wins the race "
+            "against I18N.init() (feedback_i18n_init_order_race.md)."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the
