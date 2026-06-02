@@ -617,6 +617,8 @@
   "settings.decay.result.total": "Total chunks",
   "settings.decay.result.expired": "Expired candidates",
   "settings.decay.result.deleted": "Deleted chunks",
+  "settings.decay.no_expire": "No chunks to expire.",
+  "settings.decay.scan_failed": "Scan failed: {error}",
 
   "settings.reset.desc": "Permanently delete all memory data and reinitialize the database. Embedding config is kept.",
   "settings.reset.warning_title": "Danger Zone",

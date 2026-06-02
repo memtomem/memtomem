@@ -426,6 +426,41 @@ class TestNoHardcodedStrings:
             "t('index.progress_done', {count}) instead."
         )
 
+    def test_decay_scan_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The Decay scan status messages (#1024) must route through locale keys,
+        with the scan-failed key keeping its ``{error}`` detail placeholder."""
+        required = {
+            "settings.decay.no_expire": set(),
+            "settings.decay.scan_failed": {"error"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Decay keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Decay keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Decay placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_decay_messages(self) -> None:
+        """``settings-maintenance.js`` ``runDecayScan()`` must not rebuild its
+        status messages (#1024) as English literals. Substrings are scoped to
+        the decay strings — the dedup ``'Scan failed'`` empty state (no colon)
+        is a separate concern (#1025) and intentionally not matched here."""
+        text = (_STATIC_JS_DIR / "settings-maintenance.js").read_text(encoding="utf-8")
+        forbidden = [
+            "'No chunks to expire.'",
+            "'Scan failed: ' +",
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #1024 decay-scan literals in settings-maintenance.js: {bad}. "
+            "Use t('settings.decay.no_expire') / t('settings.decay.scan_failed', {error}) instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the

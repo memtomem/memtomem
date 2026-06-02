@@ -617,6 +617,8 @@
   "settings.decay.result.total": "전체 청크",
   "settings.decay.result.expired": "만료 후보",
   "settings.decay.result.deleted": "삭제된 청크",
+  "settings.decay.no_expire": "만료할 청크가 없습니다.",
+  "settings.decay.scan_failed": "스캔 실패: {error}",
 
   "settings.reset.desc": "모든 기억 데이터를 영구 삭제하고 데이터베이스를 초기화합니다. 임베딩 설정은 보존됩니다.",
   "settings.reset.warning_title": "위험 구역",

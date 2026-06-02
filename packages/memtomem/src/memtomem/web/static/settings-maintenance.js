@@ -194,10 +194,10 @@ async function runDecayScan() {
     show(qs('decay-result'));
     qs('decay-expire-btn').disabled = data.expired_chunks === 0;
     if (data.expired_chunks === 0) {
-      setMsg(qs('decay-msg'), 'No chunks to expire.', false);
+      setMsg(qs('decay-msg'), t('settings.decay.no_expire'), false);
     }
   } catch (err) {
-    setMsg(qs('decay-msg'), 'Scan failed: ' + err.message, true);
+    setMsg(qs('decay-msg'), t('settings.decay.scan_failed', { error: err.message }), true);
   } finally {
     btnLoading(scanBtn, false);
   }
