@@ -46,6 +46,65 @@ class TestWebhookManager:
         assert mgr._client is None
 
 
+class TestValidateWebhookUrl:
+    """Pin the URL safety checks in ``_validate_webhook_url`` (#1030).
+
+    Assertions stay at the rejection-reason level (scheme vs IP) rather than
+    pinning the exact message, so wording can change without churning tests.
+    """
+
+    def test_accepts_https_url(self):
+        from memtomem.server.webhooks import _validate_webhook_url
+
+        assert _validate_webhook_url("https://example.com/hook") is None
+
+    def test_accepts_http_dns_host(self):
+        from memtomem.server.webhooks import _validate_webhook_url
+
+        # A public DNS name over http is allowed — only IP literals are checked.
+        assert _validate_webhook_url("http://example.com/hook") is None
+
+    def test_rejects_unsupported_scheme(self):
+        from memtomem.server.webhooks import _validate_webhook_url
+
+        err = _validate_webhook_url("file:///etc/passwd")
+        assert err is not None and "scheme" in err
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1/hook",  # loopback
+            "http://10.0.0.1/hook",  # private
+            "http://[::1]/hook",  # loopback (IPv6)
+        ],
+    )
+    def test_rejects_private_or_reserved_ip(self, url):
+        from memtomem.server.webhooks import _validate_webhook_url
+
+        err = _validate_webhook_url(url)
+        assert err is not None and "private/reserved" in err
+
+    def test_manager_disables_on_rejected_url(self):
+        """A rejected URL flips the manager's effective config to disabled."""
+        from memtomem.config import WebhookConfig
+        from memtomem.server.webhooks import WebhookManager
+
+        mgr = WebhookManager(WebhookConfig(enabled=True, url="http://127.0.0.1/hook"))
+        assert mgr._config.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_manager_does_not_fire_on_rejected_url(self):
+        """Self-disabled manager is inert even for a configured event."""
+        from memtomem.config import WebhookConfig
+        from memtomem.server.webhooks import WebhookManager
+
+        mgr = WebhookManager(
+            WebhookConfig(enabled=True, url="http://10.0.0.1/hook", events=["add"])
+        )
+        await mgr.fire("add", {})
+        assert mgr._client is None
+
+
 class TestRerankerFactory:
     def test_disabled_returns_none(self):
         from memtomem.config import RerankConfig
