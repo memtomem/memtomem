@@ -253,6 +253,8 @@
   "index.browse_btn": "📁 둘러보기",
   "index.browse_aria": "폴더 선택 창 열기",
   "index.progress_label": "0 / 0 파일",
+  "index.progress_files": "{done} / {total} 파일",
+  "index.progress_done": "완료 — {count} 파일",
   "index.indicator": "⏳ 인덱싱 중…",
   "index.result.files": "스캔된 파일",
   "index.result.chunks": "전체 청크",

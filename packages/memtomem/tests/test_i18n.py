@@ -389,6 +389,43 @@ class TestNoHardcodedStrings:
             "against I18N.init() (feedback_i18n_init_order_race.md)."
         )
 
+    def test_index_progress_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The Index streaming progress labels (#1027) must route through locale
+        keys with their interpolation placeholders intact, so the SSE handler's
+        in-progress / complete labels localize."""
+        required = {
+            "index.progress_files": {"done", "total"},
+            "index.progress_done": {"count"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Index-progress keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Index-progress keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Index-progress placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_index_progress(self) -> None:
+        """``app.js`` SSE indexing handler must not rebuild the streaming
+        progress labels (#1027) as inline template literals. These interpolated
+        substrings only existed in the pre-i18n labels; their return means the
+        text regressed off ``t('index.progress_*')``."""
+        text = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        forbidden = [
+            "${event.files_total} files",
+            "${event.total_files} files",
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #1027 streaming-label literals in app.js: {bad}. "
+            "Use t('index.progress_files', {done, total}) / "
+            "t('index.progress_done', {count}) instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the
