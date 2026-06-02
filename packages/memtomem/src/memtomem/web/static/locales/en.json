@@ -437,6 +437,7 @@
   "settings.ctx.create_name_label": "Name",
   "settings.ctx.create_content_label": "Content",
   "settings.ctx.create_content_placeholder": "# Content...",
+  "settings.ctx.create_name_placeholder": "my-{type}",
   "settings.ctx.import_skipped": "Skipped",
   "settings.ctx.empty_hint": "Place {type} under {canonical}/<name>/ then click Sync, or click Import to pull existing {type} from {scan_dirs} within this project.",
   "settings.ctx.empty_hint_user": "Place {type} under {canonical}/<name>/ then click Sync. User canonical is shared across all projects.",

@@ -437,6 +437,7 @@
   "settings.ctx.create_name_label": "이름",
   "settings.ctx.create_content_label": "내용",
   "settings.ctx.create_content_placeholder": "# 내용...",
+  "settings.ctx.create_name_placeholder": "my-{type}",
   "settings.ctx.import_skipped": "건너뜀",
   "settings.ctx.empty_hint": "{canonical}/<이름>/ 아래에 {type} 폴더를 두고 동기화를 누르거나, 이 프로젝트의 {scan_dirs} 에서 기존 {type} 폴더를 가져오기로 불러올 수 있습니다.",
   "settings.ctx.empty_hint_user": "{canonical}/<이름>/ 아래에 {type} 폴더를 두고 동기화를 누르세요. 사용자 canonical 은 모든 프로젝트에서 공유됩니다.",
