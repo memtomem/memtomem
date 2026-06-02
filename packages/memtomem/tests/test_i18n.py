@@ -461,6 +461,41 @@ class TestNoHardcodedStrings:
             "Use t('settings.decay.no_expire') / t('settings.decay.scan_failed', {error}) instead."
         )
 
+    def test_settings_recovery_done_key_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The settings recovery flow (#1023) localizes its completion buttons
+        via ``common.done`` and reuses the existing ``toast.fts_rebuilt`` key
+        (with its ``{count}``) for the FTS-rebuild fallback toast."""
+        required = {"common.done": set(), "toast.fts_rebuilt": {"count"}}
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Recovery keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Recovery keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Recovery placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_settings_recovery(self) -> None:
+        """``settings-config.js`` recovery handlers must not rebuild the
+        completion labels / FTS fallback toast as English literals (#1023).
+        ``res.message`` (API-provided text) is intentionally preserved as the
+        primary, so only the fallback literal and the button text are pinned."""
+        text = (_STATIC_JS_DIR / "settings-config.js").read_text(encoding="utf-8")
+        forbidden = [
+            "btn.textContent = 'Done'",
+            "FTS rebuilt: ${res.rebuilt_rows}",
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #1023 recovery literals in settings-config.js: {bad}. "
+            "Use t('common.done') / t('toast.fts_rebuilt', {count}) instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the

@@ -788,6 +788,7 @@
   "common.merge": "병합",
   "common.expire": "만료",
   "common.sync": "동기화",
+  "common.done": "완료",
   "common.dismiss_help": "도움말 닫기",
   "common.file_chunk_progress": "{file} — {done}/{total} 청크",
 

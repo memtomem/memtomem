@@ -788,6 +788,7 @@
   "common.merge": "Merge",
   "common.expire": "Expire",
   "common.sync": "Sync",
+  "common.done": "Done",
   "common.dismiss_help": "Dismiss help",
   "common.file_chunk_progress": "{file} — {done}/{total} chunks",
 

@@ -1456,8 +1456,8 @@ function _showReindexWarning(applied) {
       btnLoading(btn, true);
       try {
         const res = await api('POST', '/api/fts-rebuild', undefined, { timeout: 120_000 });
-        showToast(res.message || `FTS rebuilt: ${res.rebuilt_rows} chunks`, 'success');
-        btn.textContent = 'Done';
+        showToast(res.message || t('toast.fts_rebuilt', { count: res.rebuilt_rows }), 'success');
+        btn.textContent = t('common.done');
         btn.disabled = true;
       } catch (err) {
         showToast(t('toast.fts_rebuild_failed', { error: err.message }), 'error');
@@ -1478,7 +1478,7 @@ function _showReindexWarning(applied) {
           const total = (res.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
           showToast(t('toast.reindex_complete', { count: total }), 'success');
         }
-        btn.textContent = 'Done';
+        btn.textContent = t('common.done');
         btn.disabled = true;
         _markDataStale();
         loadStats();
