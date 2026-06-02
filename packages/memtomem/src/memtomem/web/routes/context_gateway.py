@@ -218,6 +218,17 @@ def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
         RUNTIME_MARKER_FILES,
         SKILL_DIRS,
     )
+    from memtomem.context.runtime_registry import RUNTIME_TO_CLIENT, probe_all_runtimes
+
+    # ADR-0021 §B: additively enrich each entry with the provider client's
+    # read-only registration status, mapped via RUNTIME_TO_CLIENT (the `gemini`
+    # runtime <-> the Antigravity client). `available` (artifact OR-probe) is
+    # unchanged. Registry failure must not break the chip strip.
+    try:
+        statuses = {s.name: s for s in probe_all_runtimes(project_root)}
+    except Exception:
+        logger.exception("probe_all_runtimes failed during detected_runtimes")
+        statuses = {}
 
     out: list[dict[str, object]] = []
     for rt in KNOWN_RUNTIMES:
@@ -233,7 +244,12 @@ def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
         cmd = COMMAND_DIRS.get(f"{rt}_commands")
         if cmd is not None:
             probes.append((project_root / cmd[0]).is_dir())
-        out.append({"name": rt, "available": any(probes)})
+        entry: dict[str, object] = {"name": rt, "available": any(probes)}
+        st = statuses.get(RUNTIME_TO_CLIENT.get(rt, ""))
+        if st is not None:
+            entry["installed"] = st.installed
+            entry["memtomem_registered"] = st.memtomem_registered
+        out.append(entry)
     return out
 
 
@@ -388,3 +404,26 @@ async def context_overview(
         "last_synced_at": last_synced_at,
         **result,
     }
+
+
+@router.get("/context/runtimes")
+async def context_runtimes(
+    project_root: Path = Depends(resolve_scope_root),
+) -> dict:
+    """Read-only provider-client registration status (ADR-0021 §B).
+
+    Reports per-client install + ``memtomem``/``mms`` registration for the
+    in-scope provider clients (Claude, Antigravity, Codex, Kimi). This is the
+    client/provider axis — distinct from ``overview.detected_runtimes`` (the
+    artifact fan-out chip strip). Read-only; returns no raw config contents
+    (the registry's trust boundary returns only booleans, location kinds, and
+    ``$HOME``-collapsed paths).
+    """
+    from memtomem.context.runtime_registry import probe_all_runtimes
+
+    try:
+        runtimes = [s.to_dict() for s in probe_all_runtimes(project_root)]
+    except Exception:
+        logger.exception("probe_all_runtimes failed")
+        runtimes = []
+    return {"project_root": str(project_root), "runtimes": runtimes}

@@ -355,6 +355,7 @@ async def mem_context_init(
 @register("context")
 async def mem_context_detect(
     include: str = "",
+    include_runtimes: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Detect agent configuration files in the current project.
@@ -363,6 +364,12 @@ async def mem_context_detect(
     and .github/copilot-instructions.md. Pass
     ``include="skills,agents,commands"`` to also list runtime skill
     directories, sub-agent files, and slash-command files.
+
+    Pass ``include_runtimes=True`` to also report read-only provider-client
+    registration status (Claude / Antigravity / Codex / Kimi; ADR-0021 §B).
+    This is a separate boolean — it is intentionally NOT part of the ``include``
+    set, so the shared sync/generate/init/diff include contract is never
+    widened (``mem_context_sync(include="runtimes")`` still rejects).
     """
     from memtomem.context.detector import (
         detect_agent_dirs,
@@ -381,7 +388,7 @@ async def mem_context_detect(
         for f in files:
             rel = f.path.relative_to(root) if f.path.is_relative_to(root) else f.path
             lines.append(f"  {f.agent}: {rel} ({f.size} bytes)")
-    elif not inc:
+    elif not inc and not include_runtimes:
         return "No agent configuration files found."
 
     if "skills" in inc:
@@ -433,6 +440,28 @@ async def mem_context_detect(
                 lines.append(f"  {s.agent}: {s.path} {status}")
         else:
             lines.append("No settings files detected.")
+
+    if include_runtimes:
+        from memtomem.context.runtime_registry import probe_all_runtimes
+
+        if lines:
+            lines.append("")
+        lines.append("Provider-client registration:")
+        for st in probe_all_runtimes(root):
+            if st.memtomem_registered or st.mms_registered:
+                ids = "+".join(
+                    n
+                    for n, on in (("memtomem", st.memtomem_registered), ("mms", st.mms_registered))
+                    if on
+                )
+                locs = f" [{', '.join(st.registered_locations)}]" if st.registered_locations else ""
+                state = f"{ids} registered{locs}"
+            elif st.installed:
+                state = "installed, not registered"
+            else:
+                state = "not detected"
+            suffix = f" (error: {st.error_kind})" if st.error_kind else ""
+            lines.append(f"  {st.name}: {state}{suffix}")
 
     return "\n".join(lines) if lines else "Nothing detected."
 
