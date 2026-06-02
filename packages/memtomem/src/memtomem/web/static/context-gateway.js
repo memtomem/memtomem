@@ -3024,7 +3024,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       : t('settings.ctx.create_content_placeholder');
     form.innerHTML = `
       <label>${escapeHtml(t('settings.ctx.create_name_label'))}</label>
-      <input type="text" class="ctx-create-name" placeholder="my-${type.slice(0, -1)}" style="width:100%" />
+      <input type="text" class="ctx-create-name" placeholder="${escapeHtml(t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) }))}" style="width:100%" />
       <label style="margin-top:8px">${escapeHtml(t('settings.ctx.create_content_label'))}</label>
       <textarea class="ctx-edit-area ctx-create-content" rows="6" placeholder="${escapeHtml(contentPlaceholder)}"></textarea>
       <div class="ctx-edit-actions">

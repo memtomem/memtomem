@@ -527,6 +527,35 @@ class TestNoHardcodedStrings:
             "t('search.recent_label') instead."
         )
 
+    def test_ctx_create_name_placeholder_key_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The Context Gateway create-form name placeholder (#1022) routes
+        through a key with a ``{type}`` placeholder so the same example works
+        across locales (skill/agent/command/mcp-server). The Name/Content
+        labels and content placeholder were already localized."""
+        required = {"settings.ctx.create_name_placeholder": {"type"}}
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Ctx create-name key missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Ctx create-name key missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Ctx create-name placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_ctx_create_name_placeholder(self) -> None:
+        """``context-gateway.js`` create form must not rebuild the name input
+        placeholder as a raw ``my-${type...}`` template literal (#1022)."""
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        assert 'placeholder="my-${type' not in text, (
+            "Found re-introduced #1022 hardcoded name placeholder in context-gateway.js. "
+            "Use t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) })."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the
