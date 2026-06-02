@@ -472,7 +472,8 @@ def _resolve_artifact_cli_scope(scope_flag: str | None) -> TargetScope:
     pre-PR-E2 import behavior — implicit invocation stays back-compat.
     """
     if scope_flag is not None:
-        return scope_flag  # type: ignore[return-value]
+        # Validated upstream by the click.Choice on --scope; cast for mypy.
+        return cast(TargetScope, scope_flag)
     return "project_shared"
 
 

@@ -65,7 +65,8 @@ def _resolve_artifact_mcp_scope(scope: str | None) -> TargetScope:
         raise ValueError(
             f"Unknown scope value '{scope}'. Supported: {sorted(_KNOWN_ARTIFACT_SCOPES)}"
         )
-    return scope  # type: ignore[return-value]
+    # Narrowed against _KNOWN_ARTIFACT_SCOPES above; cast expresses that to mypy.
+    return cast(TargetScope, scope)
 
 
 def _parse_include(include: str) -> set[str]:
