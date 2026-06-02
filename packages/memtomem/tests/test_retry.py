@@ -202,3 +202,63 @@ class TestWithRetryBackoff:
 
         # delay should be max(base_delay=1.0, retry_after=10) = 10
         assert mock_sleep.call_args_list[0].args[0] == 10.0
+
+
+# ── with_retry — string retry_after (#1029) ──────────────────────────
+
+
+def _raise_with_retry_after(retry_after):
+    """Build a decorated fn that raises OSError carrying ``retry_after``."""
+
+    @with_retry(max_attempts=2, base_delay=1.0)
+    async def fn():
+        exc = OSError("rate limited")
+        exc.retry_after = retry_after  # type: ignore[attr-defined]
+        raise exc
+
+    return fn
+
+
+class TestWithRetryStringRetryAfter:
+    @pytest.mark.asyncio
+    async def test_numeric_string_honored(self):
+        """retry_after="5" parses to 5.0 and wins over the 1.0 backoff."""
+        mock_sleep = AsyncMock()
+        with patch("memtomem.embedding.retry.asyncio.sleep", mock_sleep):
+            with pytest.raises(OSError):
+                await _raise_with_retry_after("5")()
+        assert mock_sleep.call_args_list[0].args[0] == 5.0
+
+    @pytest.mark.asyncio
+    async def test_http_date_string_parsed(self):
+        """An HTTP-date string is routed through parse_retry_after."""
+        from datetime import datetime, timedelta, timezone
+        from email.utils import format_datetime
+
+        future = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=10)
+        mock_sleep = AsyncMock()
+        with patch("memtomem.embedding.retry.asyncio.sleep", mock_sleep):
+            with pytest.raises(OSError):
+                await _raise_with_retry_after(format_datetime(future))()
+        # ~10s in the future and larger than the 1.0 backoff
+        slept = mock_sleep.call_args_list[0].args[0]
+        assert 1.0 < slept <= 11.0
+
+    @pytest.mark.asyncio
+    async def test_invalid_string_falls_back_to_backoff(self):
+        """Unparseable strings are ignored; exponential backoff (1.0) stands."""
+        mock_sleep = AsyncMock()
+        with patch("memtomem.embedding.retry.asyncio.sleep", mock_sleep):
+            with pytest.raises(OSError):
+                await _raise_with_retry_after("not-a-number")()
+        assert mock_sleep.call_args_list[0].args[0] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_small_string_loses_to_backoff(self):
+        """A string smaller than the backoff does not shrink the delay."""
+        mock_sleep = AsyncMock()
+        with patch("memtomem.embedding.retry.asyncio.sleep", mock_sleep):
+            with pytest.raises(OSError):
+                # base_delay=1.0 backoff vs retry_after="0.2" → max keeps 1.0
+                await _raise_with_retry_after("0.2")()
+        assert mock_sleep.call_args_list[0].args[0] == 1.0

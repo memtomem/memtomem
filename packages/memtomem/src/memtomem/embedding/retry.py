@@ -72,10 +72,19 @@ def with_retry(
                     last_exc = exc
                     if attempt < max_attempts - 1:
                         delay = min(base_delay * (2**attempt), max_delay)
-                        # Honour Retry-After from rate-limit responses
+                        # Honour Retry-After from rate-limit responses. The
+                        # attribute may be numeric (seconds) or a string (a raw
+                        # Retry-After header: seconds or an RFC 7231 HTTP-date);
+                        # strings go through parse_retry_after, which returns
+                        # None for unparseable values so we fall back to backoff.
                         ra = getattr(exc, "retry_after", None)
-                        if ra is not None and isinstance(ra, (int, float)):
-                            delay = max(delay, float(ra))
+                        ra_delay: float | None = None
+                        if isinstance(ra, (int, float)):
+                            ra_delay = float(ra)
+                        elif isinstance(ra, str):
+                            ra_delay = parse_retry_after(ra)
+                        if ra_delay is not None:
+                            delay = max(delay, ra_delay)
                         logger.warning(
                             "Retry %d/%d for %s after %.1fs: %s",
                             attempt + 1,
