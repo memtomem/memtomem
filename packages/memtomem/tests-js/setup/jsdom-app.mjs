@@ -36,7 +36,7 @@ function jsonResponse(body, ok = true, status = 200) {
   };
 }
 
-function makeFetchStub() {
+function makeFetchStub(apiResponses = {}) {
   return async function fetchStub(input) {
     const url = typeof input === 'string' ? input : input?.url;
     if (url && url.startsWith('/locales/')) {
@@ -46,6 +46,15 @@ function makeFetchStub() {
         return jsonResponse(fs.readFileSync(file, 'utf-8'));
       }
       return jsonResponse('{}', false, 404);
+    }
+    // Test-supplied API payloads, keyed by pathname (query string ignored)
+    // so a test can seed e.g. ``/api/embedding-status`` before app.js's
+    // module-load fetch fires. Falls through to the empty-200 default.
+    if (url) {
+      const pathname = url.split('?')[0];
+      if (Object.prototype.hasOwnProperty.call(apiResponses, pathname)) {
+        return jsonResponse(JSON.stringify(apiResponses[pathname]));
+      }
     }
     // Any other URL — return an empty 200 so app.js init paths that
     // happen to be triggered (e.g. a langchange listener that calls
@@ -83,11 +92,16 @@ function shimBrowserAPIs(window) {
  *   to inject, in order. Defaults to ``['i18n.js', 'app.js']``.
  * @param {object} [opts.state] — properties merged into ``window.STATE``
  *   after scripts load (e.g. ``{ memoryDirs: [...] }``).
+ * @param {object} [opts.apiResponses] — map of pathname → JSON payload the
+ *   fetch stub returns for matching requests (query string ignored), e.g.
+ *   ``{ '/api/embedding-status': { has_mismatch: true, ... } }``. Lets a
+ *   test seed an endpoint before app.js's module-load fetches fire.
  * @returns {Promise<JSDOM>}
  */
 export async function bootApp({
   scripts = ['i18n.js', 'app.js'],
   state = {},
+  apiResponses = {},
 } = {}) {
   let html = readStatic('index.html');
   // Strip every <script ...>...</script> element so JSDOM's loader
@@ -103,7 +117,7 @@ export async function bootApp({
   const { window } = dom;
 
   shimBrowserAPIs(window);
-  window.fetch = makeFetchStub();
+  window.fetch = makeFetchStub(apiResponses);
 
   for (const filename of scripts) {
     const code = readStatic(filename);
