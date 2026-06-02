@@ -18,7 +18,7 @@ from memtomem.server.component_factory import Components, create_components, clo
 # ``git_identity`` / ``wiki_root`` as a parameter without per-file imports.
 # Keeping the definitions in ``_wiki_fixtures.py`` avoids bloating this
 # already-heavy conftest with unrelated git-env plumbing.
-from _wiki_fixtures import git_identity, wiki_root  # noqa: E402, F401
+from _wiki_fixtures import git_identity, wiki_root  # noqa: F401
 
 
 def _ollama_available() -> bool:

@@ -96,7 +96,7 @@ def _set_ai_summary(backend: SqliteBackend, source_file: str) -> None:
 
 
 def _row_count(backend: SqliteBackend, table: str) -> int:
-    return backend._get_db().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+    return backend._get_db().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
 def _meta_count(backend: SqliteBackend, prefix: str = "ai_summary:") -> int:

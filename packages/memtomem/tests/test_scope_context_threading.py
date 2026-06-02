@@ -66,7 +66,7 @@ class _CallVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.offenders: list[tuple[int, str, str]] = []
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - ast hook
+    def visit_Call(self, node: ast.Call) -> None:  # ast.NodeVisitor dispatch hook
         # Match ``something.<method>(...)`` for the ADR-0011 read surfaces.
         if isinstance(node.func, ast.Attribute) and node.func.attr in _TARGET_METHODS:
             method = node.func.attr

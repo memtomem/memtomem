@@ -38,7 +38,7 @@ class TestInitCmd:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        git_identity: None,  # noqa: ARG002
+        git_identity: None,
     ) -> None:
         source = tmp_path / "source"
         monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(source))
