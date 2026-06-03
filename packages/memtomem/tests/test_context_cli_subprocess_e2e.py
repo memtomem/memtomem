@@ -220,6 +220,77 @@ class TestContextVersionCliInline:
         assert r.exit_code != 0
         assert "migrate" in r.output.lower()
 
+    def test_version_create_blocks_secret_in_project_shared(self, tmp_path, monkeypatch):
+        # Gate A: creating a version is a new git-tracked write for the default
+        # project_shared scope, so a secret in the working canonical must
+        # hard-refuse before versions/v1.md lands (Codex review).
+        from memtomem.cli import _bootstrap
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+
+        adir = project / ".memtomem" / "agents" / "leaky"
+        adir.mkdir(parents=True, exist_ok=True)
+        # Real AKIA fixture — generic placeholders do not trip Gate A.
+        (adir / "agent.md").write_text(
+            "---\nname: leaky\ndescription: d\n---\n\napi_key=AKIA1234567890ABCDEF\n",
+            encoding="utf-8",
+        )
+
+        r = runner.invoke(cli, ["context", "version", "create", "agents", "leaky"])
+        assert r.exit_code != 0, r.output
+        assert not (adir / "versions" / "v1.md").exists()  # refused before write
+
+    def test_command_version_roundtrip(self, tmp_path, monkeypatch):
+        # Commands have distinct parse/render paths — pin the CLI version flow
+        # for them too (Codex review).
+        from memtomem.cli import _bootstrap
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+
+        cdir = project / ".memtomem" / "commands" / "my-cmd"
+        cdir.mkdir(parents=True, exist_ok=True)
+        working = cdir / "command.md"
+        working.write_text("---\ndescription: c\n---\n\nDo $ARGUMENTS. M:A\n", encoding="utf-8")
+
+        r = runner.invoke(cli, ["context", "version", "create", "commands", "my-cmd"])
+        assert r.exit_code == 0, r.output
+        working.write_text("---\ndescription: c\n---\n\nDo $ARGUMENTS. M:B\n", encoding="utf-8")
+        r = runner.invoke(
+            cli,
+            [
+                "context",
+                "version",
+                "promote",
+                "commands",
+                "my-cmd",
+                "--to",
+                "production",
+                "--version",
+                "v1",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+        r = runner.invoke(cli, ["context", "sync", "--include=commands", "--label", "production"])
+        assert r.exit_code == 0, r.output
+        out = (project / ".claude/commands/my-cmd.md").read_text(encoding="utf-8")
+        assert "M:A" in out and "M:B" not in out
+
 
 class TestContextInitGenerateSubprocess:
     """Out-of-process ``mm`` round-trip — process-boundary regressions

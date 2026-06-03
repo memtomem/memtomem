@@ -15,6 +15,7 @@ import pytest
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import versioning as v
 from memtomem.context.agents import CANONICAL_AGENT_ROOT, generate_all_agents
+from memtomem.context.commands import CANONICAL_COMMAND_ROOT, generate_all_commands
 
 # A dir-layout canonical agent whose rendered body carries a distinctive marker
 # so we can tell which version's bytes reached the runtime.
@@ -47,6 +48,19 @@ def _make_flat_agent(project_root, name="flat-agent", *, marker="A"):
         encoding="utf-8",
     )
     return path
+
+
+_COMMAND_TEMPLATE = "---\ndescription: a command\n---\n\nDo $ARGUMENTS. MARKER: {marker}\n"
+
+
+def _make_dir_command(project_root, name="my-cmd", *, marker="A"):
+    """Create a directory-layout canonical command and return its dir +
+    working file."""
+    artifact_dir = project_root / CANONICAL_COMMAND_ROOT / name
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    working = artifact_dir / "command.md"
+    working.write_text(_COMMAND_TEMPLATE.format(marker=marker), encoding="utf-8")
+    return artifact_dir, working
 
 
 # ── Pure versioning module ───────────────────────────────────────────
@@ -87,6 +101,21 @@ class TestCreateVersion:
         artifact_dir, working = _make_dir_agent(tmp_path)
         v.create_version(artifact_dir, working, note="stable release")
         assert v.load_manifest(artifact_dir).versions["v1"].note == "stable release"
+
+    def test_orphan_version_file_does_not_wedge(self, tmp_path):
+        # Crash between the vN.md write and the manifest save leaves an orphan
+        # file absent from the manifest. The next create must skip past it
+        # (allocate v2), not recompute v1 and wedge forever (Codex review).
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)  # v1.md + manifest{v1}
+        # Simulate the crash: manifest forgets v1, but v1.md stays on disk.
+        (artifact_dir / "versions.json").write_text(
+            json.dumps({"versions": {}, "labels": {}}), encoding="utf-8"
+        )
+        rec = v.create_version(artifact_dir, working)
+        assert rec.tag == "v2"
+        assert (artifact_dir / "versions" / "v2.md").is_file()
+        assert (artifact_dir / "versions" / "v1.md").is_file()  # orphan preserved
 
 
 class TestPromoteLabel:
@@ -359,3 +388,41 @@ class TestLabelAwareSync:
         result = generate_all_agents(tmp_path, runtimes=["claude_agents"], label="latest")
         assert result.generated
         assert (tmp_path / ".claude/agents/flat-agent.md").is_file()
+
+    def test_malformed_manifest_isolated_as_skip(self, tmp_path):
+        # A malformed/tampered versions.json during a labeled sync must not
+        # raise a raw traceback — the VersionError family is caught and isolated
+        # as a parse-class skip per artifact (Codex review).
+        artifact_dir, _ = _make_dir_agent(tmp_path, marker="A")
+        (artifact_dir / "versions.json").write_text("[]", encoding="utf-8")  # wrong shape
+        result = generate_all_agents(tmp_path, runtimes=["claude_agents"], label="production")
+        codes = {code for _, _, code in result.skipped}
+        assert skip_codes.PARSE_ERROR in codes
+        assert not result.generated
+
+
+class TestLabelAwareSyncCommands:
+    """Commands have distinct parse/render paths from agents — pin that the
+    label-aware sync works end to end for them too (Codex review)."""
+
+    def test_label_fans_out_frozen_command_version(self, tmp_path):
+        artifact_dir, working = _make_dir_command(tmp_path, marker="A")
+        v.create_version(artifact_dir, working)  # v1 = A
+        v.promote_label(artifact_dir, "production", "v1")
+        working.write_text(_COMMAND_TEMPLATE.format(marker="B"), encoding="utf-8")
+
+        result = generate_all_commands(tmp_path, runtimes=["claude_commands"], label="production")
+        assert result.generated
+        out = (tmp_path / ".claude/commands/my-cmd.md").read_text(encoding="utf-8")
+        assert "MARKER: A" in out and "MARKER: B" not in out
+
+    def test_command_label_latest_equals_no_label(self, tmp_path):
+        artifact_dir, working = _make_dir_command(tmp_path, marker="A")
+        v.create_version(artifact_dir, working)
+        working.write_text(_COMMAND_TEMPLATE.format(marker="WORKING"), encoding="utf-8")
+        generate_all_commands(tmp_path, runtimes=["claude_commands"], label="latest")
+        latest_out = (tmp_path / ".claude/commands/my-cmd.md").read_text(encoding="utf-8")
+        generate_all_commands(tmp_path, runtimes=["claude_commands"])
+        nolabel_out = (tmp_path / ".claude/commands/my-cmd.md").read_text(encoding="utf-8")
+        assert latest_out == nolabel_out
+        assert "MARKER: WORKING" in latest_out
