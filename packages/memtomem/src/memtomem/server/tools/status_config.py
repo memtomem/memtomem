@@ -243,13 +243,27 @@ async def mem_config(
             if persist:
                 from memtomem.config import save_config_overrides
 
-                save_config_overrides(app.config)
-                result += " (persisted to config.json)"
+                try:
+                    save_config_overrides(app.config)
+                    result += " (persisted to config.json)"
+                except ValueError as e:
+                    # Rollback the runtime mutation by reloading the configuration from disk
+                    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+                    fresh = Mem2MemConfig()
+                    load_config_d(fresh, quiet=True)
+                    load_config_overrides(fresh)
+                    app.config = fresh
+                    return f"Failed to persist config: {e}. Runtime change rolled back."
             else:
                 result += " (runtime only — not persisted)"
         return result
 
     config_dict = app.config.model_dump()
+    if config_dict.get("embedding", {}).get("api_key"):
+        config_dict["embedding"]["api_key"] = "***"
+    if config_dict.get("session_trace", {}).get("langfuse_secret_key"):
+        config_dict["session_trace"]["langfuse_secret_key"] = "***"
 
     if key:
         parts = key.split(".")

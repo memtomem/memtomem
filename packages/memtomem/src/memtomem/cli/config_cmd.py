@@ -45,6 +45,8 @@ def config_show(fmt: str, *, as_json: bool = False) -> None:
     # Mask sensitive fields
     if data.get("embedding", {}).get("api_key"):
         data["embedding"]["api_key"] = "***"
+    if data.get("session_trace", {}).get("langfuse_secret_key"):
+        data["session_trace"]["langfuse_secret_key"] = "***"
 
     if fmt == "json":
         click.echo(json.dumps(data, indent=2, default=str))
@@ -89,9 +91,18 @@ def config_set(key: str, value: str) -> None:
     section_obj = getattr(cfg, section_name)
     old_val = getattr(section_obj, field_name)
     setattr(section_obj, field_name, coerced)
+    try:
+        save_config_overrides(cfg)
+    except ValueError as e:
+        click.echo(click.style(f"{key}: {e}", fg="red"))
+        raise SystemExit(1)
 
-    save_config_overrides(cfg)
-    click.echo(f"{key}: {old_val} -> {coerced}")
+    old_show = old_val
+    new_show = coerced
+    if field_name == "langfuse_secret_key":
+        old_show = "***" if old_val else ""
+        new_show = "***" if coerced else ""
+    click.echo(f"{key}: {old_show} -> {new_show}")
 
     # Rebuild FTS index when tokenizer changes (matches Web UI / MCP behaviour)
     if key == "search.tokenizer":

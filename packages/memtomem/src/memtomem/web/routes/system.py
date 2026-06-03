@@ -481,11 +481,16 @@ async def patch_config(
                         rerank_changed = True
 
                         for key, old_val, coerced in pending_changes:
+                            old_show = str(old_val)
+                            new_show = str(coerced)
+                            if "api_key" in key or "secret_key" in key:
+                                old_show = "***" if old_val else ""
+                                new_show = "***" if coerced else ""
                             applied.append(
                                 ConfigPatchChange(
                                     field=f"{section_name}.{key}",
-                                    old_value=str(old_val),
-                                    new_value=str(coerced),
+                                    old_value=old_show,
+                                    new_value=new_show,
                                 )
                             )
                         continue
@@ -507,11 +512,18 @@ async def patch_config(
                         setattr(section_obj, key, coerced)
                         if full_key == "search.tokenizer" and old_val != coerced:
                             tokenizer_changed = True
+
+                        old_show = str(old_val)
+                        new_show = str(coerced)
+                        if "api_key" in key or "secret_key" in key:
+                            old_show = "***" if old_val else ""
+                            new_show = "***" if coerced else ""
+
                         applied.append(
                             ConfigPatchChange(
                                 field=full_key,
-                                old_value=str(old_val),
-                                new_value=str(coerced),
+                                old_value=old_show,
+                                new_value=new_show,
                             )
                         )
 
@@ -538,7 +550,14 @@ async def patch_config(
                     search_pipeline.invalidate_cache()
 
                 if persist:
-                    save_config_overrides(config)
+                    try:
+                        save_config_overrides(config)
+                    except ValueError as e:
+                        request.app.state.config = _hot_reload._build_fresh_config()
+                        _hot_reload._set_last_signature(
+                            request.app, _hot_reload.current_signature()
+                        )
+                        raise HTTPException(400, detail=str(e))
                     # Self-write mtime bump — otherwise the next GET sees
                     # our own edit as "external" and reloads spuriously.
                     _hot_reload.commit_writer_signature(request.app)
@@ -562,7 +581,12 @@ async def save_config(
                     request.app, storage=storage, search_pipeline=search_pipeline
                 )
                 _check_reload_block(request)
-                save_config_overrides(request.app.state.config)
+                try:
+                    save_config_overrides(request.app.state.config)
+                except ValueError as e:
+                    request.app.state.config = _hot_reload._build_fresh_config()
+                    _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                    raise HTTPException(400, detail=str(e))
                 _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config save timed out — another update may be in progress")

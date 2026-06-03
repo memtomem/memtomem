@@ -48,7 +48,8 @@ web = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
 ]
-all = ["memtomem[onnx,ollama,openai,korean,code,web]"]
+langfuse = ["langfuse>=4.0"]
+all = ["memtomem[onnx,ollama,openai,korean,code,web,langfuse]"]
 
 [project.scripts]
 memtomem = "memtomem.cli:cli"
