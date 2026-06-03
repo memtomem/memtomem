@@ -43,6 +43,19 @@ function _hooksCurrentProjectScope() {
   return '';
 }
 
+// Trampoline to context-gateway.js's ``_ctxErrDetail`` (which owns the #1210
+// ``reason_code`` → i18n mapping). ``_ctxErrDetail`` is a hoisted top-level
+// function declaration and this trampoline only runs inside async error
+// handlers (long after both files have parsed), so it resolves regardless of
+// <script> order. The fallback below — a plain string / ``.message`` extract —
+// only matters if this file is loaded standalone (e.g. an isolated unit test).
+function _hooksErrDetail(detail, fallback) {
+  if (typeof _ctxErrDetail === 'function') return _ctxErrDetail(detail, fallback);
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message;
+  return fallback;
+}
+
 function _hooksScopedUrl(path) {
   if (typeof _ctxWithTargetScope === 'function') {
     return _ctxWithTargetScope(path);
@@ -174,7 +187,7 @@ async function _hooksPostRuleAction(action, entry, confirmPrivateToShared) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
   }
   return res.json();
 }
@@ -455,18 +468,50 @@ async function loadHooksSync() {
     if (syncBtn) {
       const isNoSource = data.status === 'no_source';
       const isNoHooks = data.status === 'no_hooks';
-      syncBtn.disabled = isNoSource || isNoHooks;
+      // Proactively disable Sync Now when the active project is sync-ineligible
+      // (paused / not enrolled) — the backend 409s such a settings-sync push
+      // (#1210). Mirror the backend's tier exemption: only project-tier writes
+      // are gated. ``resolve_writable_scope_root`` skips ``target_scope ==
+      // 'user'`` (the user tier writes global ~/.claude, NOT the project
+      // runtime), so a user-tier sync must stay enabled even when the active
+      // project is paused — otherwise we'd block a write the backend allows and
+      // show a misleading "resume on the Projects board" tooltip. ``typeof``
+      // guards keep the watchdog fail-open when context-gateway.js's
+      // helpers/cache aren't loaded (standalone unit test) → button stays enabled
+      // → the §2b error handler catches any 409. A server-cwd active scope DOES
+      // match the cache but ``_ctxScopeSyncEligible`` reports it eligible, so it
+      // stays enabled too.
+      const _hScope = (typeof _ctxProjectsCache !== 'undefined'
+        ? (_ctxProjectsCache || []).find(
+            s => s && !s.missing && s.scope_id === _hooksCurrentProjectScope())
+        : null);
+      const _hIneligible = _hooksCurrentTargetScope() !== 'user'
+        && !!_hScope
+        && typeof _ctxScopeSyncEligible === 'function'
+        && !_ctxScopeSyncEligible(_hScope);
+      syncBtn.disabled = isNoSource || isNoHooks || _hIneligible;
       if (isNoSource) {
         syncBtn.setAttribute('data-no-source', 'true');
         syncBtn.removeAttribute('data-no-hooks');
+        syncBtn.removeAttribute('data-sync-ineligible');
         syncBtn.title = t('settings.hooks.sync_now_disabled_no_source');
       } else if (isNoHooks) {
         syncBtn.removeAttribute('data-no-source');
         syncBtn.setAttribute('data-no-hooks', 'true');
+        syncBtn.removeAttribute('data-sync-ineligible');
         syncBtn.title = t('settings.hooks.sync_now_disabled_no_hooks');
+      } else if (_hIneligible) {
+        const k = (typeof _ctxScopeIsEnrolled === 'function' && _ctxScopeIsEnrolled(_hScope))
+          ? 'settings.ctx.matrix_sync_paused_title'
+          : 'settings.ctx.matrix_sync_not_enrolled_title';
+        syncBtn.removeAttribute('data-no-source');
+        syncBtn.removeAttribute('data-no-hooks');
+        syncBtn.setAttribute('data-sync-ineligible', k);
+        syncBtn.title = t(k);
       } else {
         syncBtn.removeAttribute('data-no-source');
         syncBtn.removeAttribute('data-no-hooks');
+        syncBtn.removeAttribute('data-sync-ineligible');
         syncBtn.title = t('settings.hooks.sync_now_tooltip');
       }
     }
@@ -695,7 +740,7 @@ async function loadHooksSync() {
           });
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
-            showToast(err.detail || t('toast.request_failed'), 'error');
+            showToast(_hooksErrDetail(err.detail, t('toast.request_failed')), 'error');
             return;
           }
           const result = await r.json();
@@ -742,7 +787,7 @@ document.getElementById('hooks-sync-btn')?.addEventListener('click', async () =>
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Request failed: ${res.status}`);
+      throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
     }
     return res.json();
   };

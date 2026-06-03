@@ -90,11 +90,18 @@ async function _ctxErrorMessageFromResponse(resp, fallback) {
   if (contentType.includes('application/json')) {
     const err = await resp.json().catch(() => ({}));
     const detail = err.detail;
-    if (typeof detail === 'string' && detail) return detail;
-    // Defensive fallback for structured payloads shaped like `{detail: "..."}`.
+    // Defensive branch for structured payloads shaped like `{detail: "..."}`
+    // (ProjectTierBlocked / redaction) — a different shape than #1210's 409, so
+    // handle it before delegating to the shared extractor.
     if (detail && typeof detail === 'object' && typeof detail.detail === 'string' && detail.detail) {
       return detail.detail;
     }
+    // String detail, or #1210's ``{reason_code, message}`` write-guard 409, both
+    // via the shared extractor — so the Sync All fan-out surfaces the same
+    // localized paused / not-enrolled reason the per-row / per-section Sync
+    // buttons do, instead of a generic English fallback.
+    const extracted = _ctxErrDetail(detail, null);
+    if (extracted) return extracted;
   } else {
     const text = await resp.text().catch(() => '');
     if (text.trim()) return text;
@@ -1336,7 +1343,7 @@ function _ctxWireProjectsMatrix() {
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         loadCtxOverview();
@@ -2205,6 +2212,22 @@ function _ctxScopeSyncEligible(scope) {
   return _ctxScopeIsEnrolled(scope) && scope.enabled !== false;
 }
 
+// Map a structured 409 write-guard ``detail`` to a readable, localized string.
+// Backend #1210 returns ``detail = {reason_code, message, project_scope_id}`` on
+// sync-ineligible writes; every other route returns a plain string ``detail``.
+// Precedence: known reason_code → i18n key; else the backend's English
+// ``message``; else a string detail as-is; else the caller's fallback.
+function _ctxErrDetail(detail, fallback) {
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object') {
+    const rc = detail.reason_code;
+    if (rc === 'sync_paused') return t('settings.ctx.error_sync_paused');
+    if (rc === 'sync_not_enrolled') return t('settings.ctx.error_sync_not_enrolled');
+    if (typeof detail.message === 'string') return detail.message;
+  }
+  return fallback;
+}
+
 // Sync All fans out over the ACTIVE scope's artifact types, so it must honor the
 // same eligibility gate as the per-row matrix Sync button — otherwise an
 // ineligible active project (paused / not enrolled) is still syncable via Sync
@@ -2786,7 +2809,7 @@ async function loadCtxList(type) {
             });
             if (!r.ok) {
               const err = await r.json().catch(() => ({}));
-              showToast(err.detail || t('toast.request_failed'), 'error');
+              showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
               return;
             }
             loadCtxList(type);
@@ -3378,18 +3401,39 @@ async function loadCtxDetail(type, name, opts = {}) {
       // dialog conservative — a stray click only removes the canonical,
       // and the user has to consciously check the box to fan-out delete
       // into ``~/.claude/skills/``, ``~/.codex/...``, etc.
-      const result = await showConfirm({
+      //
+      // The cascade fan-out writes the project runtime, which the backend 409s
+      // for a sync-ineligible (paused / not-enrolled) project (#1210). A plain
+      // canonical-only delete (cascade=false) stays UNgated, so offer the
+      // cascade checkbox ONLY when the active scope is sync-eligible — and gate
+      // the option, NOT the whole Delete button, so a canonical delete the
+      // backend allows still works. Computed at click time so a mid-session
+      // pause/resume is reflected. When ineligible we hide the option and note
+      // that only the canonical copy is removed. The §2a 409 handler below is
+      // the safety net if eligibility flips between this click and the request.
+      const _delScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
+      const _cascadeOffered = !_delScope || _ctxScopeSyncEligible(_delScope);
+      const confirmOpts = {
         title: t('settings.ctx.confirm_delete').replace('{name}', name),
-        message: t('settings.ctx.confirm_delete_msg'),
+        message: _cascadeOffered
+          ? t('settings.ctx.confirm_delete_msg')
+          : `${t('settings.ctx.confirm_delete_msg')} ${t('settings.ctx.cascade_unavailable_hint')}`,
         confirmText: t('settings.ctx.delete'),
-        extraOption: {
+      };
+      if (_cascadeOffered) {
+        confirmOpts.extraOption = {
           id: 'cascade',
           label: t('settings.ctx.cascade_delete'),
           defaultChecked: false,
-        },
-      });
-      if (!result || !result.ok) return;
-      const cascade = !!(result.extras && result.extras.cascade);
+        };
+      }
+      const result = await showConfirm(confirmOpts);
+      // ``showConfirm`` resolves to a boolean without ``extraOption`` and to
+      // ``{ok, extras}`` with it — normalize both shapes.
+      const ok = (result && typeof result === 'object') ? result.ok : !!result;
+      if (!ok) return;
+      const cascade = !!(result && typeof result === 'object'
+        && result.extras && result.extras.cascade);
       try {
         const csrf = await ensureCsrfToken();
         const r = await fetch(
@@ -3400,7 +3444,7 @@ async function loadCtxDetail(type, name, opts = {}) {
         );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         const data = await r.json();
@@ -3609,7 +3653,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
         );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         const data = await r.json();
@@ -3674,7 +3718,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       );
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(err.detail || t('toast.request_failed'), 'error');
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
       const data = await r.json();
@@ -3737,7 +3781,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(err.detail || t('toast.request_failed'), 'error');
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
       const data = await r.json();
@@ -3813,7 +3857,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         showToast(t('settings.ctx.create_success').replace('{name}', nameInput));
@@ -3856,7 +3900,7 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         const data = await r.json();
