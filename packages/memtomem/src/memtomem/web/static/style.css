@@ -4333,6 +4333,25 @@ button.ctx-runtime-chip--greyed:focus-visible {
   color: var(--text);
   font-family: var(--mono);
 }
+
+/* ADR-0022 version/label manager (detail panel). */
+.ctx-detail-versions { margin: 10px 0 14px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.ctx-detail-versions-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ctx-detail-versions-title { font-weight: 600; font-size: 0.82rem; }
+.ctx-version-empty { font-size: 0.78rem; }
+.ctx-version-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ctx-version-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+.ctx-version-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ctx-version-tag { font-family: var(--mono); font-weight: 600; font-size: 0.8rem; color: var(--accent); }
+.ctx-version-note { font-size: 0.75rem; color: var(--muted); }
+.ctx-version-date { font-size: 0.72rem; }
+.ctx-version-labels-inline { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.ctx-version-label-chip { display: inline-flex; align-items: center; gap: 3px; padding: 1px 4px 1px 8px; border-radius: 12px; background: rgba(90, 160, 224, 0.14); color: var(--accent); font-size: 0.72rem; font-weight: 600; }
+.ctx-version-label-remove { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 0.9rem; line-height: 1; padding: 0 2px; }
+.ctx-version-label-remove:hover { color: var(--danger); }
+.ctx-version-actions { display: flex; align-items: center; gap: 6px; }
+.ctx-version-label-select { font-size: 0.75rem; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); }
+
 .ctx-detail-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
 /* #1073: rendered as real <button role=tab> so screen readers announce
    "tab" and Enter/Space activate without a custom keydown shim. The
