@@ -233,7 +233,6 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
     }
 
 
-
 @router.get("/context/projects")
 async def list_projects(
     request: Request,

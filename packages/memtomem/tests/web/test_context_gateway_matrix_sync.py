@@ -29,7 +29,7 @@ _MATRIX_PROJECTS = {
             "experimental": False,
             "missing": False,
             "counts": {"skills": 0, "commands": 0, "agents": 0},
-            "runtime_coverage": []
+            "runtime_coverage": [],
         },
         {
             "scope_id": "scope-123",
@@ -45,28 +45,28 @@ _MATRIX_PROJECTS = {
                     "name": "claude",
                     "available": True,
                     "installed": True,
-                    "memtomem_registered": True
+                    "memtomem_registered": True,
                 },
                 {
                     "name": "gemini",
                     "available": True,
                     "installed": True,
-                    "memtomem_registered": False
+                    "memtomem_registered": False,
                 },
                 {
                     "name": "codex",
                     "available": True,
                     "installed": False,
-                    "memtomem_registered": False
+                    "memtomem_registered": False,
                 },
                 {
                     "name": "kimi",
                     "available": False,
                     "installed": True,
-                    "memtomem_registered": True
-                }
-            ]
-        }
+                    "memtomem_registered": True,
+                },
+            ],
+        },
     ]
 }
 
@@ -121,13 +121,14 @@ def _stub_overview_with_counter(page, payloads: list[dict]) -> dict:
 def test_matrix_rendering_and_badges(page, mm_web_url: str) -> None:
     """Matrix renders runtime badges separating installed from registered."""
     install_default_stubs(page)
-    
+
     # Override projects to return our matrix mock scope
-    page.route("**/api/context/projects**", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(_MATRIX_PROJECTS)
-    ))
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     page.goto(mm_web_url)
@@ -154,7 +155,10 @@ def test_matrix_rendering_and_badges(page, mm_web_url: str) -> None:
     gemini_badge = row.locator("td").nth(3).locator(".badge")
     assert (gemini_badge.text_content() or "").strip() == "Detected"
     assert gemini_badge.evaluate("el => el.classList.contains('badge-warning')")
-    assert gemini_badge.get_attribute("title") == "Marker folder exists & client installed, but not registered"
+    assert (
+        gemini_badge.get_attribute("title")
+        == "Marker folder exists & client installed, but not registered"
+    )
 
     # Codex column: available=true, installed=false, memtomem_registered=false => Available
     codex_badge = row.locator("td").nth(4).locator(".badge")
@@ -172,19 +176,20 @@ def test_matrix_rendering_and_badges(page, mm_web_url: str) -> None:
 def test_matrix_select_changes_active_scope(page, mm_web_url: str) -> None:
     """Clicking Select in matrix changes active scope and triggers reload."""
     install_default_stubs(page)
-    
+
     # First render with no active scope (active scope is empty/server cwd)
-    page.route("**/api/context/projects**", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(_MATRIX_PROJECTS)
-    ))
-    
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
+
     overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
 
     page.goto(mm_web_url)
     _open_context_gateway(page)
-    
+
     # Wait for table
     page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
 
@@ -208,14 +213,15 @@ def test_matrix_select_changes_active_scope(page, mm_web_url: str) -> None:
 def test_matrix_sync_fires_scoped_posts_and_refreshes_on_aborted(page, mm_web_url: str) -> None:
     """Clicking Sync in matrix confirmed fires scoped POSTs and refreshes overview on aborted."""
     install_default_stubs(page)
-    
+
     # Ensure target scope is user or project_shared so sync is not disabled
     # (Server CWD starts active scope)
-    page.route("**/api/context/projects**", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(_MATRIX_PROJECTS)
-    ))
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
 
     overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
 
@@ -229,23 +235,18 @@ def test_matrix_sync_fires_scoped_posts_and_refreshes_on_aborted(page, mm_web_ur
     page.route("**/api/context/commands/sync**", _record_sync)
     page.route("**/api/context/agents/sync**", _record_sync)
     page.route("**/api/context/mcp-servers/sync**", _record_sync)
-    
+
     # Settings returns aborted (mtime conflict)
     def _settings_aborted(route):
         sync_calls.append(route.request.url)
         route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({
-                "results": [
-                    {
-                        "name": "claude",
-                        "status": "aborted",
-                        "reason": "mtime conflict"
-                    }
-                ]
-            })
+            body=json.dumps(
+                {"results": [{"name": "claude", "status": "aborted", "reason": "mtime conflict"}]}
+            ),
         )
+
     page.route("**/api/context/settings/sync**", _settings_aborted)
 
     page.goto(mm_web_url)
@@ -281,12 +282,13 @@ def test_matrix_sync_fires_scoped_posts_and_refreshes_on_aborted(page, mm_web_ur
 def test_matrix_sync_server_cwd_empty_scope_id(page, mm_web_url: str) -> None:
     """Clicking Sync on the default Server CWD row (empty scope_id) fires sync POSTs without scope_id param."""
     install_default_stubs(page)
-    
-    page.route("**/api/context/projects**", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(_MATRIX_PROJECTS)
-    ))
+
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
 
     overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
 
@@ -334,12 +336,13 @@ def test_matrix_sync_server_cwd_empty_scope_id(page, mm_web_url: str) -> None:
 def test_matrix_write_blocked_in_user_tier(page, mm_web_url: str) -> None:
     """Matrix buttons sync, add-project, and remove must carry write-blocked attributes when target tier is user."""
     install_default_stubs(page)
-    
-    page.route("**/api/context/projects**", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(_MATRIX_PROJECTS)
-    ))
+
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
 
     page.goto(mm_web_url)
@@ -349,10 +352,10 @@ def test_matrix_write_blocked_in_user_tier(page, mm_web_url: str) -> None:
 
     # Initially, project_shared is active => data-write-blocked must not exist
     sync_btn = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-123"]')
-    add_btn = page.locator('.ctx-matrix-add-project-btn')
+    add_btn = page.locator(".ctx-matrix-add-project-btn")
     # Server CWD is not removable, but scope-123 is removable (has remove btn)
     remove_btn = page.locator('.ctx-matrix-remove-btn[data-scope-id="scope-123"]')
-    
+
     assert sync_btn.get_attribute("data-write-blocked") is None
     assert add_btn.get_attribute("data-write-blocked") is None
     assert remove_btn.get_attribute("data-write-blocked") is None
@@ -371,19 +374,23 @@ def test_matrix_add_project_reloads_overview_and_does_not_redirect(page, mm_web_
     install_default_stubs(page)
 
     # First load
-    page.route("**/api/context/projects**", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(_MATRIX_PROJECTS)
-    ))
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
     overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
 
     # Intercept known-projects POST
-    page.route("**/api/context/known-projects", lambda r: r.fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({"scope_id": "scope-new", "root": "/fake/new/project"})
-    ))
+    page.route(
+        "**/api/context/known-projects",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"scope_id": "scope-new", "root": "/fake/new/project"}),
+        ),
+    )
 
     page.goto(mm_web_url)
     _open_context_gateway(page)
@@ -393,7 +400,7 @@ def test_matrix_add_project_reloads_overview_and_does_not_redirect(page, mm_web_
     page.evaluate("window.PathPicker = { open: (opts) => opts.onSelect('/fake/new/project') }")
 
     # Locate and click matrix Add Project button
-    add_btn = page.locator('.ctx-matrix-add-project-btn')
+    add_btn = page.locator(".ctx-matrix-add-project-btn")
     assert add_btn.is_visible()
     add_btn.click()
 
@@ -407,7 +414,7 @@ def test_matrix_add_project_reloads_overview_and_does_not_redirect(page, mm_web_
     assert overview_state["n"] >= 2
 
     # Verify we are still on the overview section, NOT redirected to skills
-    assert page.locator('#settings-ctx-overview').evaluate("el => el.classList.contains('active')")
-    assert not page.locator('#settings-ctx-skills').evaluate("el => el.classList.contains('active')")
-
-
+    assert page.locator("#settings-ctx-overview").evaluate("el => el.classList.contains('active')")
+    assert not page.locator("#settings-ctx-skills").evaluate(
+        "el => el.classList.contains('active')"
+    )

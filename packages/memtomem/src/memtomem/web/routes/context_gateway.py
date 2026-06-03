@@ -198,8 +198,6 @@ def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
     return compute_runtime_coverage(project_root)
 
 
-
-
 def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
     """Build the per-surface error envelope.
 
