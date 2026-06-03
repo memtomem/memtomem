@@ -28,7 +28,10 @@ from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
 )
 from memtomem.web.routes._locks import _gateway_lock
-from memtomem.web.routes.context_projects import resolve_scope_root
+from memtomem.web.routes.context_projects import (
+    resolve_scope_root,
+    resolve_writable_scope_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +393,7 @@ class ApplySettingsSyncRequest(BaseModel):
 @router.post("/context/settings/sync")
 async def apply_settings_sync(
     body: ApplySettingsSyncRequest | None = None,
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Claude Code settings tier to write.",
@@ -470,7 +473,7 @@ class ResolveRequest(BaseModel):
 @router.post("/context/settings/resolve")
 async def resolve_conflict(
     body: ResolveRequest,
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Claude Code settings tier to update.",
@@ -730,7 +733,7 @@ def _check_rule_action_freshness(
 @router.post("/context/settings/rules/delete")
 async def delete_target_rule(
     body: RuleActionRequest,
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Claude Code settings tier to update.",

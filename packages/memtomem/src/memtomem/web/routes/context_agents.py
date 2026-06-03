@@ -28,7 +28,11 @@ from memtomem.context.agents import (
 )
 from memtomem.context.detector import AGENT_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.routes.context_projects import resolve_scope_root
+from memtomem.web.routes.context_projects import (
+    resolve_scope_root,
+    resolve_scope_root_cascade_gated,
+    resolve_writable_scope_root,
+)
 from memtomem.web.routes._locks import _gateway_lock
 
 # Flat list of project-relative runtime scan paths reported on list / import
@@ -366,7 +370,7 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 async def delete_agent(
     name: str,
     cascade: bool = Query(False),
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_scope_root_cascade_gated),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
@@ -470,7 +474,7 @@ class SyncRequest(BaseModel):
 @router.post("/context/agents/sync")
 async def sync_agents(
     body: SyncRequest | None = None,
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to fan out. Non-shared tiers rejected (ADR-0011).",

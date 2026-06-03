@@ -27,7 +27,10 @@ from memtomem.context.mcp_servers import (
     scan_mcp_server_text,
 )
 from memtomem.web.routes._locks import _gateway_lock
-from memtomem.web.routes.context_projects import resolve_scope_root
+from memtomem.web.routes.context_projects import (
+    resolve_scope_root,
+    resolve_writable_scope_root,
+)
 
 router = APIRouter(tags=["context-mcp-servers"])
 
@@ -362,7 +365,7 @@ async def diff_mcp_server(
 
 @router.post("/context/mcp-servers/sync")
 async def sync_mcp_servers(
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to fan out. Only project_shared is supported in v1.",

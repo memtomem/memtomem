@@ -28,7 +28,11 @@ from memtomem.context.skills import (
 )
 from memtomem.config import TargetScope
 from memtomem.web.routes._locks import _gateway_lock
-from memtomem.web.routes.context_projects import resolve_scope_root
+from memtomem.web.routes.context_projects import (
+    resolve_scope_root,
+    resolve_scope_root_cascade_gated,
+    resolve_writable_scope_root,
+)
 
 # Flat list of project-relative runtime scan paths reported on list / import
 # responses so the web UI's empty-state hint can name the exact directories
@@ -342,7 +346,7 @@ async def update_skill(
 async def delete_skill(
     name: str,
     cascade: bool = Query(False),
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_scope_root_cascade_gated),
     target_scope: TargetScope = Query(
         "project_shared",
         description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
@@ -453,7 +457,7 @@ async def diff_skill(
 
 @router.post("/context/skills/sync")
 async def sync_skills(
-    project_root: Path = Depends(resolve_scope_root),
+    project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description=(

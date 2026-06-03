@@ -94,6 +94,40 @@ def _default_project_root(request: Request) -> Path:
     return Path.cwd()
 
 
+def _resolve_selected_scope(
+    request: Request,
+    project_scope_id: str | None,
+    scope_id: str | None,
+) -> ProjectScope | None:
+    """Resolve an optional project selector to its discovered ``ProjectScope``.
+
+    Returns ``None`` when no selector is given (the caller falls back to the
+    server cwd). Raises 400 on a contradictory selector pair, and 404 on an
+    unknown or stale (registered but missing-root) selector. Shared by
+    :func:`resolve_scope_root` and :func:`resolve_writable_scope_root` so the
+    selector contract has exactly one implementation.
+    """
+    if project_scope_id is not None and scope_id is not None and project_scope_id != scope_id:
+        raise HTTPException(
+            status_code=400,
+            detail="project_scope_id and scope_id must match when both are provided",
+        )
+    selected_scope_id = project_scope_id or scope_id
+    if selected_scope_id is None:
+        return None
+
+    for scope in _discover_for(request):
+        if scope.scope_id != selected_scope_id:
+            continue
+        if scope.root is None or scope.missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"scope {selected_scope_id!r} is registered but its root is missing",
+            )
+        return scope
+    raise HTTPException(status_code=404, detail=f"unknown project_scope_id: {selected_scope_id!r}")
+
+
 def resolve_scope_root(
     request: Request,
     project_scope_id: str | None = Query(default=None),
@@ -107,25 +141,98 @@ def resolve_scope_root(
     Unknown selectors → 404. Stale selectors (registered but root no longer
     exists) → 404 too — read endpoints can't usefully serve from a missing dir.
     """
-    if project_scope_id is not None and scope_id is not None and project_scope_id != scope_id:
-        raise HTTPException(
-            status_code=400,
-            detail="project_scope_id and scope_id must match when both are provided",
-        )
-    selected_scope_id = project_scope_id or scope_id
-    if selected_scope_id is None:
+    scope = _resolve_selected_scope(request, project_scope_id, scope_id)
+    if scope is None:
         return _default_project_root(request)
+    assert scope.root is not None  # _resolve_selected_scope 404s on a missing root
+    return scope.root
 
-    for scope in _discover_for(request):
-        if scope.scope_id != selected_scope_id:
-            continue
-        if scope.root is None or scope.missing:
-            raise HTTPException(
-                status_code=404,
-                detail=f"scope {selected_scope_id!r} is registered but its root is missing",
-            )
-        return scope.root
-    raise HTTPException(status_code=404, detail=f"unknown project_scope_id: {selected_scope_id!r}")
+
+def resolve_writable_scope_root(
+    request: Request,
+    project_scope_id: str | None = Query(default=None),
+    scope_id: str | None = Query(default=None),
+    target_scope: TargetScope = Query(default="project_shared"),
+) -> Path:
+    """Like :func:`resolve_scope_root`, but refuses a sync-ineligible scope.
+
+    Defense-in-depth backend gate for sync-enrollment (#1203 §1i). The Web UI
+    and ``mm context update --all`` already skip ineligible projects, but a
+    direct API call to a runtime-writing endpoint
+    (``/context/{agents,commands,skills,mcp-servers}/sync``, ``/settings-sync``
+    and its conflict mutators) would otherwise push into a *paused* (enrolled then
+    disabled) or *never-enrolled* (discovery-only scan row) project's runtime.
+    Such a scope has ``sync_eligible=False``; we reject it with 409. Cascade
+    artifact deletes (``DELETE /context/{agents,commands,skills}/{name}?cascade=true``)
+    also unlink the generated runtime copies, so they route through the sibling
+    :func:`resolve_scope_root_cascade_gated`, which reuses this guard only when
+    ``cascade=true`` (a plain canonical delete stays ungated).
+
+    Both project-runtime tiers are gated — ``project_shared``
+    (``<root>/.claude/settings.json``) and ``project_local``
+    (``<root>/.claude/settings.local.json``) write *into the project*, so a
+    paused project must be refused for either. Only the ``user`` tier (global
+    ``~/.claude/``, not the project's runtime) stays exempt. The eligibility
+    check can't lean on the artifact routes' ``_reject_non_shared_write`` as a
+    ``project_local`` backstop: the settings-sync routes legitimately accept
+    ``project_local`` and never call it, so the gate must be enforced here for
+    every project-tier write.
+
+    server-cwd is always eligible (you can't pause the running directory), so
+    the no-selector default path is never blocked.
+    """
+    scope = _resolve_selected_scope(request, project_scope_id, scope_id)
+    if scope is None:
+        return _default_project_root(request)
+    if target_scope != "user" and not scope.sync_eligible:
+        # ``sync_eligible`` is False in two shapes: an enrolled known-project
+        # whose ``enabled`` flag is off (paused), or a discovery-only scope
+        # that was never enrolled. Surface a machine-readable ``reason_code``
+        # (mirrors the Web UI's paused/not-enrolled tooltip split) inside a
+        # structured ``detail`` so clients can tell this 409 apart from the
+        # plain-string "already exists" / mtime-conflict 409s on the same
+        # endpoints.
+        paused = "known-projects" in scope.sources
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": "sync_paused" if paused else "sync_not_enrolled",
+                "message": (
+                    f"Project {scope.scope_id!r} is not enrolled for sync "
+                    + (
+                        "(enrollment paused). Resume sync"
+                        if paused
+                        else "(discovery-only; never enrolled). Enroll the project"
+                    )
+                    + " from the Projects portal before writing to its runtime."
+                ),
+                "project_scope_id": scope.scope_id,
+            },
+        )
+    assert scope.root is not None  # _resolve_selected_scope 404s on a missing root
+    return scope.root
+
+
+def resolve_scope_root_cascade_gated(
+    request: Request,
+    project_scope_id: str | None = Query(default=None),
+    scope_id: str | None = Query(default=None),
+    target_scope: TargetScope = Query(default="project_shared"),
+    cascade: bool = Query(default=False),
+) -> Path:
+    """Scope resolver for the cascade-capable ``DELETE`` artifact routes.
+
+    A plain delete (``cascade=False``) removes only the canonical source and
+    stays ungated — pausing sync must not block managing a project's artifacts.
+    A ``cascade=True`` delete ALSO unlinks the generated runtime copies
+    (``gen.target_file(...)`` / the runtime skill dir under the project's
+    ``.claude`` etc.), so it writes the project runtime and is gated for
+    sync-eligibility exactly like a sync push (#1203 §1i). Mirrors the
+    ``cascade`` query the delete handlers already declare.
+    """
+    if cascade:
+        return resolve_writable_scope_root(request, project_scope_id, scope_id, target_scope)
+    return resolve_scope_root(request, project_scope_id, scope_id)
 
 
 # ── GET /context/projects ────────────────────────────────────────────────
