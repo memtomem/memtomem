@@ -162,7 +162,7 @@ def format_payload(payload: Any, mode: str, max_chars: int) -> Any:
         serialized = str(payload)
 
     if len(serialized) > max_chars:
-        serialized = serialized[: max_chars - 14] + "...[TRUNCATED]"
+        serialized = (serialized[: max(0, max_chars - 14)] + "...[TRUNCATED]")[:max_chars]
 
     try:
         return json.loads(serialized)
@@ -325,9 +325,9 @@ def trace_session(
                     )
 
                 try:
-                    span.__exit__(None, None, None)
+                    obs_context.__exit__(None, None, None)
                 except Exception as exc:
-                    logger.warning("Failed to exit Langfuse span context: %s", exc)
+                    logger.warning("Failed to exit Langfuse observation context: %s", exc)
 
             else:
                 # Fallback run of command if we failed to obtain span
