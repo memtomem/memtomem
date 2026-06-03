@@ -519,7 +519,10 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   // also flows through ``_reject_non_shared_write``, so the per-detail
   // "Import this <type>" button minted by ``_ctxLoadRuntimeOnlyDetail``
   // belongs in the same write-blocked sweep.
-  + '.ctx-runtime-only-import'
+  + '.ctx-runtime-only-import, '
+  // ADR-0022 version-store writes (freeze / promote / delete-label) are
+  // project_shared-only canonical writes, so they ride the same tier gate.
+  + '.ctx-version-freeze-btn, .ctx-version-promote-btn, .ctx-version-label-remove'
 );
 
 function _ctxRefreshWriteBlockedState() {
@@ -3143,6 +3146,229 @@ function _ctxRenderDetailChipsHtml(specs) {
 }
 
 
+// ── Version snapshots + label pointers (ADR-0022) ────────────────────────
+// Surfaces the per-artifact version store in the detail panel for agents and
+// commands in directory layout. Backed by the context_versions routes:
+//   GET    /api/context/<type>/<name>/versions       list versions + labels
+//   POST   .../versions                              freeze working canonical
+//   PUT    .../labels/<label>                         promote (== rollback)
+//   DELETE .../labels/<label>                         drop a label pointer
+// Skills and flat-layout artifacts have no version store — the GET returns
+// ``migrate_required`` and the section renders a hint instead of controls
+// (ADR-0022 invariants 3 + 7).
+const _CTX_VERSIONABLE_TYPES = new Set(['agents', 'commands']);
+// Label names always offered in the promote picker, unioned with whatever
+// labels already exist on the artifact (ADR-0022 allows arbitrary names).
+const _CTX_DEFAULT_LABELS = ['production', 'staging'];
+
+function _ctxLabelsByTag(labels) {
+  // Invert {label: tag} → {tag: [label, …]} so each version row can show the
+  // pointers that land on it.
+  const byTag = {};
+  for (const [label, tag] of Object.entries(labels || {})) {
+    (byTag[tag] = byTag[tag] || []).push(label);
+  }
+  return byTag;
+}
+
+function _ctxRenderVersionsInner(data) {
+  const versions = Array.isArray(data.versions) ? data.versions : [];
+  const labels = data.labels || {};
+  const byTag = _ctxLabelsByTag(labels);
+
+  let html = '<div class="ctx-detail-versions-header">';
+  html += `<span class="ctx-detail-versions-title" data-i18n="settings.ctx.versions.title">${escapeHtml(t('settings.ctx.versions.title'))}</span>`;
+  html += `<button class="btn-ghost ctx-version-freeze-btn" data-i18n="settings.ctx.versions.freeze" data-i18n-title="settings.ctx.versions.freeze_tooltip" title="${escapeHtml(t('settings.ctx.versions.freeze_tooltip'))}">${escapeHtml(t('settings.ctx.versions.freeze'))}</button>`;
+  html += '</div>';
+
+  if (!versions.length) {
+    html += `<div class="ctx-version-empty text-muted" data-i18n="settings.ctx.versions.empty">${escapeHtml(t('settings.ctx.versions.empty'))}</div>`;
+    return html;
+  }
+
+  // Every promote picker offers the same option set: defaults ∪ existing labels.
+  const labelOptions = Array.from(new Set([..._CTX_DEFAULT_LABELS, ...Object.keys(labels)]));
+  const opts = labelOptions
+    .map(l => `<option value="${escapeHtml(l)}">${escapeHtml(l)}</option>`)
+    .join('');
+
+  html += '<ul class="ctx-version-list">';
+  for (const v of versions) {
+    const tag = String(v.tag || '');
+    const here = byTag[tag] || [];
+    const labelChips = here
+      .map(l =>
+        `<span class="ctx-version-label-chip" data-label="${escapeHtml(l)}">`
+        + `<span class="ctx-version-label-name">${escapeHtml(l)}</span>`
+        + `<button class="ctx-version-label-remove" data-label="${escapeHtml(l)}" `
+        + `data-i18n-title="settings.ctx.versions.remove_label_tooltip" `
+        + `title="${escapeHtml(t('settings.ctx.versions.remove_label_tooltip'))}" `
+        + `aria-label="${escapeHtml(t('settings.ctx.versions.remove_label_tooltip'))}">×</button>`
+        + `</span>`,
+      )
+      .join('');
+    const date = v.created_at ? escapeHtml(String(v.created_at)) : '';
+    const note = v.note
+      ? `<span class="ctx-version-note">${escapeHtml(String(v.note))}</span>`
+      : '';
+    html += `<li class="ctx-version-row" data-tag="${escapeHtml(tag)}">`
+      + `<div class="ctx-version-main">`
+      + `<span class="ctx-version-tag">${escapeHtml(tag)}</span>`
+      + `<span class="ctx-version-labels-inline">${labelChips}</span>`
+      + note
+      + `<span class="ctx-version-date text-muted">${date}</span>`
+      + `</div>`
+      + `<div class="ctx-version-actions">`
+      + `<select class="ctx-version-label-select" aria-label="${escapeHtml(t('settings.ctx.versions.promote'))}">${opts}</select>`
+      + `<button class="btn-ghost ctx-version-promote-btn" data-tag="${escapeHtml(tag)}" `
+      + `data-i18n="settings.ctx.versions.promote" `
+      + `data-i18n-title="settings.ctx.versions.promote_tooltip" `
+      + `title="${escapeHtml(t('settings.ctx.versions.promote_tooltip'))}">${escapeHtml(t('settings.ctx.versions.promote'))}</button>`
+      + `</div>`
+      + `</li>`;
+  }
+  html += '</ul>';
+  return html;
+}
+
+async function _ctxLoadVersions(type, name, detailEl, seq) {
+  // Paints the version store into the hidden ``.ctx-detail-versions``
+  // placeholder mounted by ``loadCtxDetail``. ``seq`` guards against a
+  // superseded detail mount (shares ``_ctxDetailSeq[type]`` with the parent).
+  const container = detailEl.querySelector('.ctx-detail-versions');
+  if (!container) return;
+  // Early bail: a newer detail mount already superseded us, no need to fetch.
+  if (seq != null && seq !== _ctxDetailSeq[type]) return;
+  let data;
+  try {
+    const res = await fetch(
+      _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/versions`),
+    );
+    if (seq != null && seq !== _ctxDetailSeq[type]) return;
+    if (!res.ok) { container.hidden = true; return; }
+    data = await res.json();
+  } catch (_) {
+    container.hidden = true;
+    return;
+  }
+  if (seq != null && seq !== _ctxDetailSeq[type]) return;
+
+  if (data.migrate_required) {
+    // Flat-layout artifact: no per-artifact version store (ADR-0022 inv 3).
+    container.hidden = false;
+    container.innerHTML =
+      '<div class="ctx-detail-versions-header">'
+      + `<span class="ctx-detail-versions-title" data-i18n="settings.ctx.versions.title">${escapeHtml(t('settings.ctx.versions.title'))}</span>`
+      + '</div>'
+      + `<div class="ctx-version-empty text-muted" data-i18n="settings.ctx.versions.migrate_required">${escapeHtml(t('settings.ctx.versions.migrate_required'))}</div>`;
+    return;
+  }
+
+  container.hidden = false;
+  container.innerHTML = _ctxRenderVersionsInner(data);
+  _ctxWireVersionControls(type, name, detailEl, seq);
+  // The freeze/promote/remove buttons just landed — re-run the tier gate so
+  // they pick up ``data-write-blocked`` without a full detail re-render (#943).
+  _ctxRefreshWriteBlockedState();
+}
+
+function _ctxWireVersionControls(type, name, detailEl, seq) {
+  // Capture the mount's ``seq`` at definition time so a post-mutation reload
+  // bails if the user has since navigated to another artifact (re-reading
+  // ``_ctxDetailSeq[type]`` fresh would paint into a superseded panel).
+  const reload = () => _ctxLoadVersions(type, name, detailEl, seq);
+
+  detailEl.querySelector('.ctx-version-freeze-btn')?.addEventListener('click', async () => {
+    const btn = detailEl.querySelector('.ctx-version-freeze-btn');
+    btnLoading(btn, true);
+    try {
+      const csrf = await ensureCsrfToken();
+      // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
+      const headers = csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' };
+      const r = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/versions`),
+        { method: 'POST', headers, body: JSON.stringify({}) },
+      );
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+        return;
+      }
+      const result = await r.json();
+      const tag = (result.version && result.version.tag) || '';
+      showToast(t('settings.ctx.versions.freeze_success', { name, tag }));
+      reload();
+    } catch (_) {
+      showToast(t('toast.request_failed'), 'error');
+    } finally {
+      btnLoading(btn, false);
+    }
+  });
+
+  detailEl.querySelectorAll('.ctx-version-promote-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const tag = btn.dataset.tag || '';
+      const row = btn.closest('.ctx-version-row');
+      const select = row && row.querySelector('.ctx-version-label-select');
+      const label = select ? select.value : '';
+      if (!label) return;
+      btnLoading(btn, true);
+      try {
+        const csrf = await ensureCsrfToken();
+        // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
+        const headers = csrf
+          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+          : { 'Content-Type': 'application/json' };
+        const r = await fetch(
+          _ctxWithTargetScope(
+            `/api/context/${type}/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}`,
+          ),
+          { method: 'PUT', headers, body: JSON.stringify({ version: tag }) },
+        );
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          return;
+        }
+        showToast(t('settings.ctx.versions.promote_success', { label, tag }));
+        reload();
+      } catch (_) {
+        showToast(t('toast.request_failed'), 'error');
+      } finally {
+        btnLoading(btn, false);
+      }
+    });
+  });
+
+  detailEl.querySelectorAll('.ctx-version-label-remove').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const label = btn.dataset.label || '';
+      if (!label) return;
+      try {
+        const csrf = await ensureCsrfToken();
+        const r = await fetch(
+          _ctxWithTargetScope(
+            `/api/context/${type}/${encodeURIComponent(name)}/labels/${encodeURIComponent(label)}`,
+          ),
+          { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
+        );
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          return;
+        }
+        showToast(t('settings.ctx.versions.remove_label_success', { label }));
+        reload();
+      } catch (_) {
+        showToast(t('toast.request_failed'), 'error');
+      }
+    });
+  });
+}
+
+
 async function loadCtxDetail(type, name, opts = {}) {
   // ``opts.autoOpenDiff`` (default false): when the list-click handler
   // sees an "out of sync" runtime on the card, it passes ``true`` here
@@ -3203,6 +3429,15 @@ async function loadCtxDetail(type, name, opts = {}) {
     // file count (dir layout), and parsed-field chips for agents and
     // commands. Skills get the meta only — no chip row.
     html += _ctxRenderDetailMetaHeader(type, data);
+
+    // ADR-0022 version/label manager — agents + commands only. The
+    // placeholder mounts hidden and is filled asynchronously by
+    // ``_ctxLoadVersions`` (a separate GET), so a flat-layout / skill /
+    // no-versions artifact never flashes an empty box before the store
+    // resolves.
+    if (_CTX_VERSIONABLE_TYPES.has(type)) {
+      html += '<div class="ctx-detail-versions" hidden></div>';
+    }
 
     // #1073: ARIA tablist — tabs are buttons, panes are tabpanels labelled
     // by the tab that controls them, and only the active tab is in the
@@ -3462,6 +3697,14 @@ async function loadCtxDetail(type, name, opts = {}) {
     // the section-level gate so they pick up the tier filter without
     // requiring a list re-render (#943).
     _ctxRefreshWriteBlockedState();
+
+    // Fire-and-forget the version-store load (ADR-0022); it paints into the
+    // hidden placeholder and re-runs the write-block gate for its own
+    // buttons. Not awaited so the detail render returns promptly; the seq
+    // guard inside drops the paint if a newer detail mount supersedes us.
+    if (_CTX_VERSIONABLE_TYPES.has(type)) {
+      _ctxLoadVersions(type, name, detailEl, seq);
+    }
 
   } catch (err) {
     if (seq !== _ctxDetailSeq[type]) return;
