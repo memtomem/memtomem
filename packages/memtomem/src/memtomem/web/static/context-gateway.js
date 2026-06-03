@@ -953,6 +953,12 @@ function _renderCtxOverview(data) {
   // stays as a fallback for users who don't hover (mobile, keyboard).
   const syncAllBtn = document.getElementById('ctx-sync-all-btn');
   if (syncAllBtn) {
+    // Sync-eligibility of the active scope (paused / not-enrolled) gates Sync
+    // All the same way the matrix row Sync button is gated (#1203 review). The
+    // specific reason rides on ``data-syncIneligible`` so the click handler and
+    // the langchange refresh surface the matching copy, not the generic
+    // no-fanout one.
+    const syncAllIneligibleKey = _ctxSyncAllIneligibleKey();
     if (_ctxTargetScope === 'project_local') {
       // project_local has no runtime fan-out (ADR-0011 §3 / ADR-0016 §7),
       // so the Sync All button is disabled in this tier. We deliberately
@@ -965,7 +971,16 @@ function _renderCtxOverview(data) {
       syncAllBtn.dataset.runtimeOnly = 'true';
       syncAllBtn.title = t('settings.ctx.project_local_no_fanout_tooltip');
       syncAllBtn.setAttribute('aria-disabled', 'true');
+      // The no-fanout reason owns the disabled state in this tier; drop any
+      // stale ineligibility reason so the handler's bail copy stays correct.
+      delete syncAllBtn.dataset.syncIneligible;
+    } else if (syncAllIneligibleKey) {
+      syncAllBtn.dataset.runtimeOnly = 'true';
+      syncAllBtn.dataset.syncIneligible = syncAllIneligibleKey;
+      syncAllBtn.title = t(syncAllIneligibleKey);
+      syncAllBtn.setAttribute('aria-disabled', 'true');
     } else {
+      delete syncAllBtn.dataset.syncIneligible;
       const syncKinds = ['skills', 'commands', 'agents', 'mcp_servers'];
       const totals = syncKinds.reduce((acc, k) => {
         const d = data[k] || {};
@@ -1572,16 +1587,19 @@ async function _ctxSyncProjectScope(scopeId, btn) {
 window.addEventListener('langchange', () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn && btn.dataset.runtimeOnly === 'true') {
-    // ``_renderCtxOverview`` sets ``dataset.runtimeOnly='true'`` in two
-    // cases: (1) project_local tier (canonical drafts have no fan-out)
-    // and (2) all-canonicals-empty for any tier. Mirror its tier-aware
-    // tooltip choice here so an EN→KO→EN locale flip doesn't revert the
-    // hover text to the wrong copy for project_local. User-tier writes
-    // are gated by ``_ctxRefreshWriteBlockedState`` below — that path
+    // ``_renderCtxOverview`` sets ``dataset.runtimeOnly='true'`` in three
+    // cases: (1) project_local tier (canonical drafts have no fan-out),
+    // (2) all-canonicals-empty for any tier, and (3) the active scope is
+    // sync-ineligible (paused / not enrolled — keyed on
+    // ``data-syncIneligible``). Mirror its reason choice here so an EN→KO→EN
+    // locale flip doesn't revert the hover text to the wrong copy. User-tier
+    // writes are gated by ``_ctxRefreshWriteBlockedState`` below — that path
     // owns the user-tier tooltip refresh now (#943).
-    btn.title = _ctxTargetScope === 'project_local'
-      ? t('settings.ctx.project_local_no_fanout_tooltip')
-      : t('settings.ctx.sync_all_disabled_tooltip');
+    btn.title = btn.dataset.syncIneligible
+      ? t(btn.dataset.syncIneligible)
+      : _ctxTargetScope === 'project_local'
+        ? t('settings.ctx.project_local_no_fanout_tooltip')
+        : t('settings.ctx.sync_all_disabled_tooltip');
   }
   // Re-translate write-blocked button tooltips on every locale flip so
   // the dim button's hover copy stays consistent with the active
@@ -1842,18 +1860,19 @@ function _ctxSetSyncControlsDisabled(disabled) {
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-sync-all-btn');
   if (btn.dataset.runtimeOnly === 'true') {
-    // ``_renderCtxOverview`` stamps ``runtimeOnly='true'`` in two cases:
+    // ``_renderCtxOverview`` stamps ``runtimeOnly='true'`` in three cases:
     // project_local (canonical drafts have no fan-out — ADR-0011 §3 /
-    // ADR-0016 §7) and all-canonicals-empty for any other tier. The
-    // post-click toast must mirror the pre-click hover tooltip's
-    // tier-aware copy choice (already done in ``_renderCtxOverview``
-    // and in the ``langchange`` listener above); otherwise a
-    // project_local user sees "import first" guidance that doesn't
-    // apply, since their canonical drafts may already exist. Issue
-    // #1075 follow-up to #962.
-    const msgKey = _ctxTargetScope === 'project_local'
-      ? 'settings.ctx.project_local_no_fanout_tooltip'
-      : 'settings.ctx.sync_all_disabled_tooltip';
+    // ADR-0016 §7), all-canonicals-empty for any other tier, and the active
+    // scope being sync-ineligible (paused / not enrolled — keyed on
+    // ``data-syncIneligible``). The post-click toast must mirror the
+    // pre-click hover tooltip's reason choice (done in ``_renderCtxOverview``
+    // and the ``langchange`` listener above); otherwise the user sees copy
+    // that doesn't apply to the actual disable reason. Issue #1075 / #1203.
+    const msgKey = btn.dataset.syncIneligible
+      ? btn.dataset.syncIneligible
+      : _ctxTargetScope === 'project_local'
+        ? 'settings.ctx.project_local_no_fanout_tooltip'
+        : 'settings.ctx.sync_all_disabled_tooltip';
     showToast(t(msgKey), 'info');
     return;
   }
@@ -2184,6 +2203,20 @@ function _ctxScopeSyncEligible(scope) {
   if (scope && typeof scope.sync_eligible === 'boolean') return scope.sync_eligible;
   if (_ctxScopeIsServerCwd(scope)) return true;
   return _ctxScopeIsEnrolled(scope) && scope.enabled !== false;
+}
+
+// Sync All fans out over the ACTIVE scope's artifact types, so it must honor the
+// same eligibility gate as the per-row matrix Sync button — otherwise an
+// ineligible active project (paused / not enrolled) is still syncable via Sync
+// All, since the sync routes accept any resolvable scope (#1203 review). Returns
+// the i18n tooltip key when the active scope is excluded from sync, else '' (it
+// is eligible, server-cwd, or there is no resolvable active scope).
+function _ctxSyncAllIneligibleKey() {
+  const active = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
+  if (!active || _ctxScopeSyncEligible(active)) return '';
+  return _ctxScopeIsEnrolled(active)
+    ? 'settings.ctx.sync_all_paused_tooltip'
+    : 'settings.ctx.sync_all_not_enrolled_tooltip';
 }
 
 function _ctxScopeBadges(scope) {

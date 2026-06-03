@@ -685,3 +685,55 @@ def test_matrix_sync_project_local_tier_wins_over_eligibility(page, mm_web_url: 
         page.wait_for_timeout(50)
         paused_title = paused.get_attribute("data-i18n-title")
     assert paused_title == "settings.ctx.matrix_sync_disabled_title"
+
+
+def test_sync_all_gated_when_active_scope_ineligible(page, mm_web_url: str) -> None:
+    """Selecting a paused (ineligible) project as the active scope disables the
+    top-level Sync All button with the paused reason, and clicking it bails with
+    no sync fan-out. Without this gate an ineligible active scope is still
+    syncable via Sync All, since the sync routes accept any resolvable scope
+    (#1203 review P2): row-level gating alone is insufficient."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ELIGIBILITY_PROJECTS)
+        ),
+    )
+    # Initial mount + the re-render triggered by selecting a new active scope.
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _record_sync(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    for kind in ("skills", "commands", "agents", "mcp-servers", "settings"):
+        page.route(f"**/api/context/{kind}/sync**", _record_sync)
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    # Make the paused (sync_eligible:false, enrolled) scope the active project.
+    page.locator('.ctx-matrix-select-btn[data-scope-id="scope-paused"]').click()
+
+    sync_all = page.locator("#ctx-sync-all-btn")
+    # Wait for the post-select overview re-render to apply the eligibility gate.
+    deadline = time.monotonic() + 3.0
+    while sync_all.get_attribute("data-runtime-only") != "true" and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    assert sync_all.get_attribute("data-runtime-only") == "true"
+    assert sync_all.get_attribute("aria-disabled") == "true"
+    # dataset.syncIneligible → data-sync-ineligible; carries the paused reason.
+    assert sync_all.get_attribute("data-sync-ineligible") == "settings.ctx.sync_all_paused_tooltip"
+
+    # Firing the click on the gated button bails: info toast, NO confirm dialog,
+    # NO syncs. dispatch_event bypasses Playwright's actionability check (the
+    # button is aria-disabled) to exercise the handler's bail path directly.
+    sync_all.dispatch_event("click")
+    page.wait_for_selector("#toast-container .toast", timeout=3_000)
+    assert page.locator("#confirm-modal:not([hidden])").count() == 0
+    page.wait_for_timeout(300)
+    assert sync_calls == []

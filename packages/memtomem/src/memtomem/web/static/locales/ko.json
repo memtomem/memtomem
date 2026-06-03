@@ -476,6 +476,8 @@
   "settings.ctx.deep_link_reset": "전체 보기",
   "settings.ctx.sync_disabled_tooltip": "아직 fan-out 할 canonical {type} 이 없습니다. 가져오기를 먼저 누르세요.",
   "settings.ctx.sync_all_disabled_tooltip": "아직 fan-out 할 canonical 아티팩트가 없습니다. 각 섹션에서 가져오기를 먼저 누르세요.",
+  "settings.ctx.sync_all_not_enrolled_tooltip": "선택한 프로젝트가 동기화에 미등록 — 프로젝트 보드에서 등록하세요.",
+  "settings.ctx.sync_all_paused_tooltip": "선택한 프로젝트의 동기화가 중지됨 — 프로젝트 보드에서 재개하세요.",
   "settings.ctx.missing_canonical_project_shared_title": "project_shared canonical 누락",
   "settings.ctx.missing_canonical_project_shared_body": "{scan_dirs} 의 런타임 {type} {count}개가 canonical에 없습니다. 웹 UI에서 가져오기를 눌러 초기화하거나 아래 CLI bootstrap 및 sync 명령을 실행하세요.",
   "settings.ctx.missing_canonical_user_title": "user canonical 누락",

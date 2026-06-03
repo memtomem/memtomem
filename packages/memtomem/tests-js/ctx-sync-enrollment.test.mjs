@@ -47,12 +47,15 @@ const SCOPES = [
     stale: true, experimental: false, enabled: false, sync_eligible: false, counts: null,
   },
   {
-    // The running directory that is ALSO a registered known-project: the backend
-    // coalesces both sources onto one scope. It must stay non-managed AND
-    // non-enrollable (server-cwd guard in both predicates).
+    // A known project PAUSED then reopened as the running dir: the backend
+    // coalesces known-projects + server-cwd onto one scope with enabled:false
+    // but sync_eligible:true (the running dir can't be paused). It must stay
+    // non-managed AND non-enrollable (server-cwd guard in both predicates) AND
+    // show NO paused badge — the badge would be unresumable + contradict
+    // eligibility.
     scope_id: 'p-cwd-enrolled', project_scope_id: 'p-cwd-enrolled', label: 'CwdEnrolled',
     root: '/work/cwd-enrolled', tier: 'project', sources: ['known-projects', 'server-cwd'],
-    missing: false, stale: false, experimental: false, enabled: true, sync_eligible: true,
+    missing: false, stale: false, experimental: false, enabled: false, sync_eligible: true,
     counts: null,
   },
 ];
@@ -151,17 +154,19 @@ describe('portal enrollment UI', () => {
     expect(ps.querySelector('.ctx-scope-badge--stale')).not.toBeNull();
   });
 
-  it('a scope that is BOTH server-cwd and enrolled stays non-managed and non-enrollable', async () => {
+  it('a server-cwd + enrolled scope stays non-managed/non-enrollable with NO paused badge', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();
     const r = row(window, 'p-cwd-enrolled');
-    // Pins the `&& !_ctxScopeIsServerCwd` guard in both _ctxPortalIsManaged and
-    // _ctxPortalCanEnroll: dropping it would expose Pause/Rename/Remove (or
-    // Enroll) on the running directory's row.
+    // Pins the `&& !_ctxScopeIsServerCwd` guard in _ctxPortalIsManaged,
+    // _ctxPortalCanEnroll and _ctxPortalIsPaused: dropping it would expose
+    // Pause/Rename/Remove/Enroll on the running directory's row, or render an
+    // unresumable "sync paused" badge despite enabled:false + sync_eligible:true.
     expect(r.querySelector('.ctx-portal-enroll')).toBeNull();
     expect(r.querySelector('.ctx-portal-toggle-sync')).toBeNull();
     expect(r.querySelector('.ctx-portal-rename')).toBeNull();
     expect(r.querySelector('.ctx-portal-remove')).toBeNull();
+    expect(r.querySelector('.ctx-scope-badge--paused')).toBeNull();
   });
 
   it('Server CWD is never enrollable or managed', async () => {

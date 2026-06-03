@@ -334,12 +334,17 @@ function _ctxPortalCanEnroll(scope) {
   return !!scope && !_ctxScopeIsEnrolled(scope) && !_ctxScopeIsServerCwd(scope) && !scope.missing;
 }
 
-// An enrolled scope that has been paused (``enabled: false``) — excluded from
-// sync until resumed. Only enrolled scopes ever carry ``enabled: false`` (the
-// backend defaults cwd-only / scan-only rows to enabled), so this doubles as
-// the "show the paused badge / Resume action" predicate.
+// An enrolled, manageable scope that has been paused (``enabled: false``) —
+// excluded from sync until resumed. MUST exclude server-cwd: the backend
+// coalesces a known-projects entry with the running dir into one scope, so a
+// project paused then reopened as cwd carries ``enabled: false`` yet stays
+// ``sync_eligible: true`` (the running dir cannot be paused). Without the
+// server-cwd guard the row would show an unresumable "sync paused" badge that
+// contradicts its actual eligibility — and Resume is already suppressed for cwd
+// via _ctxPortalIsManaged. Scan-only (not enrolled) rows are "not enrolled",
+// not "paused". Drives both the paused badge and the Resume toggle label.
 function _ctxPortalIsPaused(scope) {
-  return !!scope && scope.enabled === false;
+  return _ctxScopeIsEnrolled(scope) && !_ctxScopeIsServerCwd(scope) && scope.enabled === false;
 }
 
 async function loadCtxProjects() {

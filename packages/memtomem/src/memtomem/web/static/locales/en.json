@@ -476,6 +476,8 @@
   "settings.ctx.deep_link_reset": "Show all",
   "settings.ctx.sync_disabled_tooltip": "No canonical {type} to fan out yet. Click Import first.",
   "settings.ctx.sync_all_disabled_tooltip": "No canonical artifacts to fan out yet. Click Import in each section first.",
+  "settings.ctx.sync_all_not_enrolled_tooltip": "The selected project is not enrolled for sync — enroll it on the Projects board.",
+  "settings.ctx.sync_all_paused_tooltip": "The selected project's sync is paused — resume it on the Projects board.",
   "settings.ctx.missing_canonical_project_shared_title": "Canonical missing in project_shared",
   "settings.ctx.missing_canonical_project_shared_body": "{count} runtime {type} from {scan_dirs} are not in canonical. Click Import to initialize from the web UI, or run the CLI bootstrap and sync commands below.",
   "settings.ctx.missing_canonical_user_title": "Canonical missing in user",
