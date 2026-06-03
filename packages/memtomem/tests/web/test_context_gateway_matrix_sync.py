@@ -28,6 +28,8 @@ _MATRIX_PROJECTS = {
             "sources": ["server-cwd"],
             "experimental": False,
             "missing": False,
+            "enabled": True,
+            "sync_eligible": True,
             "counts": {"skills": 0, "commands": 0, "agents": 0},
             "runtime_coverage": [],
         },
@@ -36,9 +38,14 @@ _MATRIX_PROJECTS = {
             "label": "My Scoped Project",
             "root": "/fake/scoped/project",
             "tier": "project",
-            "sources": ["known-project"],
+            # Real backend source string is ``known-projects`` (the frontend
+            # derives "enrolled" from it). An enrolled + enabled scope is
+            # sync-eligible, so the Sync button stays active.
+            "sources": ["known-projects"],
             "experimental": False,
             "missing": False,
+            "enabled": True,
+            "sync_eligible": True,
             "counts": {"skills": 2, "commands": 1, "agents": 3, "mcp-servers": 0},
             "runtime_coverage": [
                 {
@@ -485,3 +492,196 @@ def test_matrix_add_project_reloads_overview_and_does_not_redirect(page, mm_web_
     assert not page.locator("#settings-ctx-skills").evaluate(
         "el => el.classList.contains('active')"
     )
+
+
+# Sync-enrollment gating (#1203): one scope per eligibility shape. ``scope-on``
+# is the eligible control; ``scope-paused`` is enrolled-but-paused; ``scope-scan``
+# is a scan-only auto-displayed row that was never enrolled.
+_ELIGIBILITY_PROJECTS = {
+    "scopes": [
+        {
+            "scope_id": "",
+            "label": "Server CWD",
+            "root": "",
+            "tier": "project",
+            "sources": ["server-cwd"],
+            "experimental": False,
+            "missing": False,
+            "enabled": True,
+            "sync_eligible": True,
+            "counts": {"skills": 0, "commands": 0, "agents": 0},
+            "runtime_coverage": [],
+        },
+        {
+            "scope_id": "scope-on",
+            "label": "Enabled Project",
+            "root": "/fake/on",
+            "tier": "project",
+            "sources": ["known-projects"],
+            "experimental": False,
+            "missing": False,
+            "enabled": True,
+            "sync_eligible": True,
+            "counts": {"skills": 1, "commands": 0, "agents": 0},
+            "runtime_coverage": [],
+        },
+        {
+            "scope_id": "scope-paused",
+            "label": "Paused Project",
+            "root": "/fake/paused",
+            "tier": "project",
+            "sources": ["known-projects"],
+            "experimental": False,
+            "missing": False,
+            "enabled": False,
+            "sync_eligible": False,
+            "counts": {"skills": 1, "commands": 0, "agents": 0},
+            "runtime_coverage": [],
+        },
+        {
+            "scope_id": "scope-scan",
+            "label": "Scanned Project",
+            "root": "/fake/scan",
+            "tier": "project",
+            "sources": ["claude-projects"],
+            "experimental": False,
+            "missing": False,
+            "enabled": True,
+            "sync_eligible": False,
+            "counts": {"skills": 1, "commands": 0, "agents": 0},
+            "runtime_coverage": [],
+        },
+        {
+            # Enrolled + enabled (so sync_eligible) but the root is gone. The
+            # missing arm (branch 1) must win over the eligibility arm.
+            "scope_id": "scope-missing",
+            "label": "Missing Project",
+            "root": "/fake/missing",
+            "tier": "project",
+            "sources": ["known-projects"],
+            "experimental": False,
+            "missing": True,
+            "enabled": True,
+            "sync_eligible": True,
+            "counts": None,
+            "runtime_coverage": [],
+        },
+    ]
+}
+
+
+def test_matrix_sync_gated_on_eligibility(page, mm_web_url: str) -> None:
+    """The matrix Sync button is disabled for an ineligible scope (not enrolled,
+    or enrolled-but-paused), with the reason carried on ``data-i18n-title`` — not
+    a plain ``title``, which the write-block sweep would strip. An eligible
+    scope stays enabled."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ELIGIBILITY_PROJECTS)
+        ),
+    )
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    eligible = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-on"]')
+    paused = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-paused"]')
+    scan = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-scan"]')
+
+    assert not eligible.is_disabled()
+
+    assert paused.is_disabled()
+    assert paused.get_attribute("data-i18n-title") == "settings.ctx.matrix_sync_paused_title"
+
+    assert scan.is_disabled()
+    assert scan.get_attribute("data-i18n-title") == "settings.ctx.matrix_sync_not_enrolled_title"
+
+
+def test_matrix_sync_ineligible_tooltip_survives_write_block_sweep(page, mm_web_url: str) -> None:
+    """The ineligibility tooltip rides on ``data-i18n-title``, so a
+    ``_ctxRefreshWriteBlockedState`` pass in project_shared restores ``title``
+    from it rather than stripping it — the regression a plain ``title`` hits,
+    since ``.ctx-matrix-sync-btn`` is in the write-block sweep selector."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ELIGIBILITY_PROJECTS)
+        ),
+    )
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    paused = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-paused"]')
+    expected = page.evaluate("() => t('settings.ctx.matrix_sync_paused_title')")
+    assert paused.get_attribute("title") == expected
+
+    # Run the write-block sweep directly (project_shared → the not-blocked branch
+    # that restores title from data-i18n-title or strips it).
+    page.evaluate("() => _ctxRefreshWriteBlockedState()")
+
+    # Title preserved (restored from data-i18n-title), NOT removed.
+    assert paused.get_attribute("title") == expected
+
+
+def test_matrix_sync_missing_root_uses_disabled_title_over_eligibility(
+    page, mm_web_url: str
+) -> None:
+    """A missing root disables Sync via the project_local/missing arm (branch 1),
+    which takes precedence over the eligibility arm — even though the scope is
+    enrolled + enabled (sync_eligible). Guards the branch ordering."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ELIGIBILITY_PROJECTS)
+        ),
+    )
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    missing = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-missing"]')
+    assert missing.is_disabled()
+    # The missing arm wins: NOT the paused/not-enrolled tooltip.
+    assert missing.get_attribute("data-i18n-title") == "settings.ctx.matrix_sync_disabled_title"
+
+
+def test_matrix_sync_project_local_tier_wins_over_eligibility(page, mm_web_url: str) -> None:
+    """In the project_local tier every Sync button is disabled via branch 1
+    (no fan-out). It must win over the eligibility arm: an enrolled-but-paused
+    scope shows the project_local/missing tooltip, NOT the paused one — proving
+    the branch ordering is not inverted."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_ELIGIBILITY_PROJECTS)
+        ),
+    )
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    page.locator('.ctx-tier-filter button[data-scope="project_local"]').click()
+
+    # scope-paused is ineligible AND in project_local. Correct ordering → the
+    # disabled-title arm. An inverted order would surface the paused title.
+    paused = page.locator('.ctx-matrix-sync-btn[data-scope-id="scope-paused"]')
+    paused_title = paused.get_attribute("data-i18n-title")
+    deadline = time.monotonic() + 3.0
+    while paused_title != "settings.ctx.matrix_sync_disabled_title" and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+        paused_title = paused.get_attribute("data-i18n-title")
+    assert paused_title == "settings.ctx.matrix_sync_disabled_title"

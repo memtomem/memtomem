@@ -1210,11 +1210,27 @@ function _renderProjectsMatrix() {
       ? `<span class="badge badge-success">${escapeHtml(t('settings.ctx.active') || 'Selected')}</span>`
       : `<button type="button" class="btn-ghost btn-xs ctx-matrix-select-btn" data-scope-id="${escapeHtml(scope.scope_id)}">${escapeHtml(t('settings.ctx.select') || 'Select')}</button>`;
 
-    // Sync button (CWD-locked mutator 경계 유지를 위해, Project Local은 no fan-out 이므로 비활성화)
+    // Sync button. Disabled reasons, in precedence order:
+    //   1. project_local (no fan-out) / missing root — existing no-op cases.
+    //   2. not sync-eligible — the scope is discoverable but excluded from sync
+    //      because it is not enrolled, or enrolled-but-paused (#1203). The
+    //      tooltip points the user at the Projects board to enroll / resume.
+    // The tooltip MUST ride on ``data-i18n-title`` (not a plain ``title``):
+    // ``.ctx-matrix-sync-btn`` is in ``_CTX_WRITE_BUTTON_SELECTOR``, so a flip
+    // back to project_shared runs ``_ctxRefreshWriteBlockedState`` which
+    // restores ``title`` from ``data-i18n-title`` — a plain ``title`` would be
+    // stripped (``removeAttribute('title')``), silently dropping the reason.
     const isProjectLocal = _ctxTargetScope === 'project_local';
-    const syncDisabled = (isProjectLocal || isMissing)
-      ? ` disabled title="${escapeHtml(t('settings.ctx.matrix_sync_disabled_title'))}"`
-      : '';
+    let syncDisabled = '';
+    if (isProjectLocal || isMissing) {
+      const k = 'settings.ctx.matrix_sync_disabled_title';
+      syncDisabled = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
+    } else if (!_ctxScopeSyncEligible(scope)) {
+      const k = _ctxScopeIsEnrolled(scope)
+        ? 'settings.ctx.matrix_sync_paused_title'
+        : 'settings.ctx.matrix_sync_not_enrolled_title';
+      syncDisabled = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
+    }
     const syncBtn = `<button type="button" class="btn-primary btn-xs ctx-matrix-sync-btn" data-scope-id="${escapeHtml(scope.scope_id)}"${syncDisabled}>${escapeHtml(t('settings.ctx.sync') || 'Sync')}</button>`;
 
     // Remove button (Server CWD는 삭제 불가능)
@@ -2148,6 +2164,26 @@ function _ctxBasename(p) {
 
 function _ctxScopeIsServerCwd(scope) {
   return scope && Array.isArray(scope.sources) && scope.sources.includes('server-cwd');
+}
+
+// A scope is "enrolled" when it carries a ``known_projects.json`` entry — the
+// backend signals this by including ``known-projects`` in ``sources`` (there is
+// no separate ``enrolled`` field; #1203 backend contract). Only an enrolled
+// scope has a PATCH/DELETE-able registration, so rename / pause / unregister
+// gate on this, and only an enrolled-and-enabled (or server-cwd) scope syncs.
+function _ctxScopeIsEnrolled(scope) {
+  return !!scope && Array.isArray(scope.sources) && scope.sources.includes('known-projects');
+}
+
+// Whether the per-project Sync button is allowed to fire. The backend computes
+// ``sync_eligible`` (server-cwd OR enrolled-and-enabled) and the client trusts
+// it when present. When the field is absent (older payloads / pre-#1203 test
+// stubs) re-derive it from the SAME formula so gating still holds — server-cwd
+// is always eligible, an enrolled scope is eligible unless explicitly paused.
+function _ctxScopeSyncEligible(scope) {
+  if (scope && typeof scope.sync_eligible === 'boolean') return scope.sync_eligible;
+  if (_ctxScopeIsServerCwd(scope)) return true;
+  return _ctxScopeIsEnrolled(scope) && scope.enabled !== false;
 }
 
 function _ctxScopeBadges(scope) {

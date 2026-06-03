@@ -317,10 +317,29 @@ function _ctxPortalTotalCount(scope) {
   return _CTX_PORTAL_COUNT_TYPES.reduce((sum, ct) => sum + (scope.counts[ct.key] || 0), 0);
 }
 
-// A registered (non-server-cwd) scope is the only kind that can be renamed or
-// unregistered — the implicit Server-CWD row has no known_projects entry.
+// A scope is "managed" — renameable / pausable / unregisterable — only when it
+// is enrolled (carries a known_projects entry; ``_ctxScopeIsEnrolled`` reads
+// ``sources`` for "known-projects"). A scan-only auto-displayed row has no
+// entry, so PATCH/DELETE would 404 — it gets an Enroll action instead. The
+// implicit Server-CWD row is never managed even when it is also enrolled: its
+// registration is incidental and the running directory cannot be paused.
 function _ctxPortalIsManaged(scope) {
-  return !!scope && !_ctxScopeIsServerCwd(scope);
+  return _ctxScopeIsEnrolled(scope) && !_ctxScopeIsServerCwd(scope);
+}
+
+// A discoverable-but-not-enrolled, present project can be enrolled (POST
+// known-projects) so it joins sync. Server-cwd is implicitly sync-eligible and
+// a missing root cannot be enrolled.
+function _ctxPortalCanEnroll(scope) {
+  return !!scope && !_ctxScopeIsEnrolled(scope) && !_ctxScopeIsServerCwd(scope) && !scope.missing;
+}
+
+// An enrolled scope that has been paused (``enabled: false``) — excluded from
+// sync until resumed. Only enrolled scopes ever carry ``enabled: false`` (the
+// backend defaults cwd-only / scan-only rows to enabled), so this doubles as
+// the "show the paused badge / Resume action" predicate.
+function _ctxPortalIsPaused(scope) {
+  return !!scope && scope.enabled === false;
 }
 
 async function loadCtxProjects() {
@@ -502,6 +521,12 @@ function _ctxPortalBadgesHtml(scope) {
   if (scope.experimental) {
     parts.push(`<span class="ctx-scope-badge ctx-scope-badge--experimental">${escapeHtml(t('settings.ctx.scope_experimental'))}</span>`);
   }
+  // Sync-paused is orthogonal to missing/stale (an enrolled project can be both
+  // paused and stale), so it is its own check rather than part of the chain.
+  if (_ctxPortalIsPaused(scope)) {
+    const tip = escapeHtml(t('settings.ctx.portal_sync_paused_tip'));
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--paused" title="${tip}">${escapeHtml(t('settings.ctx.portal_sync_paused_badge'))}</span>`);
+  }
   if (scope.missing) {
     parts.push(`<span class="ctx-scope-badge ctx-scope-badge--missing">${escapeHtml(t('settings.ctx.scope_missing'))}</span>`);
   } else if (scope.stale) {
@@ -557,7 +582,24 @@ function _ctxPortalRowHtml(scope) {
       const useAria = escapeHtml(t('settings.ctx.portal_use_aria').replace('{label}', _ctxScopeDisplayLabel(scope)));
       actions.push(`<button type="button" class="btn-ghost btn-xs ctx-portal-use" data-scope-id="${sid}" aria-label="${useAria}">${escapeHtml(t('settings.ctx.portal_use'))}</button>`);
     }
+    // Enroll: a discovered-but-not-enrolled project joins sync (POST). Mutually
+    // exclusive with the managed block below (``canEnroll`` ⇔ not enrolled,
+    // ``managed`` ⇔ enrolled), so a row shows Enroll OR the Pause/Rename/Remove
+    // trio, never both.
+    if (_ctxPortalCanEnroll(scope)) {
+      const enrollAria = escapeHtml(t('settings.ctx.portal_enroll_aria').replace('{label}', _ctxScopeDisplayLabel(scope)));
+      const enrollTip = escapeHtml(t('settings.ctx.portal_enroll_tip'));
+      actions.push(`<button type="button" class="btn-ghost btn-xs ctx-portal-enroll" data-scope-id="${sid}" aria-label="${enrollAria}" title="${enrollTip}">${escapeHtml(t('settings.ctx.portal_enroll'))}</button>`);
+    }
     if (managed) {
+      // Pause / Resume sync (PATCH ``enabled``). A paused project shows Resume;
+      // an active one shows Pause. The handler re-derives the target state from
+      // the scope, so the button only carries its scope-id.
+      const paused = _ctxPortalIsPaused(scope);
+      const toggleKey = paused ? 'settings.ctx.portal_resume_sync' : 'settings.ctx.portal_pause_sync';
+      const toggleAriaKey = paused ? 'settings.ctx.portal_resume_sync_aria' : 'settings.ctx.portal_pause_sync_aria';
+      const toggleAria = escapeHtml(t(toggleAriaKey).replace('{label}', _ctxScopeDisplayLabel(scope)));
+      actions.push(`<button type="button" class="btn-ghost btn-xs ctx-portal-toggle-sync" data-scope-id="${sid}" aria-label="${toggleAria}">${escapeHtml(t(toggleKey))}</button>`);
       const renameAria = escapeHtml(t('settings.ctx.portal_rename_aria').replace('{label}', _ctxScopeDisplayLabel(scope)));
       actions.push(`<button type="button" class="btn-ghost btn-xs ctx-portal-rename" data-scope-id="${sid}" aria-label="${renameAria}">${escapeHtml(t('settings.ctx.portal_rename'))}</button>`);
       const removeAria = escapeHtml(t('settings.ctx.remove_project_aria').replace('{label}', _ctxScopeDisplayLabel(scope)).replace('{root}', scope.root || scope.scope_id));
@@ -602,6 +644,18 @@ function _ctxPortalWireRows(rowsEl) {
     btn.addEventListener('click', () => {
       const scope = _ctxPortalScopeById(btn.dataset.scopeId || '');
       if (scope) _ctxPortalUnregister(scope);
+    });
+  });
+  rowsEl.querySelectorAll('.ctx-portal-enroll').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const scope = _ctxPortalScopeById(btn.dataset.scopeId || '');
+      if (scope) _ctxPortalEnroll(scope);
+    });
+  });
+  rowsEl.querySelectorAll('.ctx-portal-toggle-sync').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const scope = _ctxPortalScopeById(btn.dataset.scopeId || '');
+      if (scope) _ctxPortalToggleEnabled(scope);
     });
   });
 
@@ -690,6 +744,61 @@ async function _ctxPortalUnregister(scope) {
     await loadCtxProjects();
   } catch (err) {
     showToast(t('toast.delete_failed', { error: err.message }), 'error');
+  }
+}
+
+// Enroll a discovered-but-not-enrolled project (POST known-projects) so it can
+// participate in sync. The auto-display filter only surfaces marker-bearing
+// roots, so the no-runtime-marker warning path is unreachable here — but the
+// POST returns 200 even with a warning, so an ``r.ok`` success is correct
+// regardless. A refetch flips the row to its enrolled (managed) state.
+async function _ctxPortalEnroll(scope) {
+  if (!scope.root) return; // _ctxPortalCanEnroll already excludes missing roots
+  try {
+    const csrf = await ensureCsrfToken();
+    const r = await fetch('/api/context/known-projects', {
+      method: 'POST',
+      headers: csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: scope.root }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast(err.detail || t('toast.request_failed'), 'error');
+      return;
+    }
+    showToast(t('settings.ctx.portal_enroll_success'));
+    await loadCtxProjects();
+  } catch (err) {
+    showToast(t('toast.request_failed', { error: err.message }), 'error');
+  }
+}
+
+// Pause / resume sync for an enrolled project (PATCH ``enabled``). The target
+// state is the inverse of the current one, re-derived from the scope so the
+// button is stateless: a paused scope resumes (enabled:true), an active one
+// pauses (enabled:false). A refetch re-renders the badge + toggle label.
+async function _ctxPortalToggleEnabled(scope) {
+  const newEnabled = _ctxPortalIsPaused(scope);
+  try {
+    const csrf = await ensureCsrfToken();
+    const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
+      method: 'PATCH',
+      headers: csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast(err.detail || t('toast.request_failed'), 'error');
+      return;
+    }
+    showToast(t(newEnabled ? 'settings.ctx.portal_resume_success' : 'settings.ctx.portal_pause_success'));
+    await loadCtxProjects();
+  } catch (err) {
+    showToast(t('toast.request_failed', { error: err.message }), 'error');
   }
 }
 
