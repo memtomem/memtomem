@@ -1,12 +1,13 @@
-import time
-import uuid
 import json
 import logging
+import random
 import re
+import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from contextlib import contextmanager
-from typing import Any, Generator, Dict, Optional
+from typing import Any, Dict, Generator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -203,8 +204,6 @@ def trace_session(
         "exit_code": 0,
         "status": "success",
     }
-
-    import random
 
     sampling_rate = getattr(config, "sampling_rate", 1.0)
     sampled_in = not (sampling_rate < 1.0 and random.random() >= sampling_rate)
