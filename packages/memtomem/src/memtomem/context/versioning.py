@@ -64,6 +64,7 @@ __all__ = [
     "VersionNotFoundError",
     "LabelNotFoundError",
     "ReservedLabelError",
+    "InvalidLabelError",
     "InvalidTagError",
     "VersionsDirMissingError",
     "versions_dir",
@@ -110,6 +111,12 @@ class ReservedLabelError(VersionError):
     """A reserved label (``latest``) was used as a writable label target."""
 
 
+class InvalidLabelError(VersionError):
+    """A label name is not allowed — e.g. it looks like a version tag
+    (``^v[1-9]\\d*$``), which the sync resolver always treats as a direct
+    version, so the label pointer could never be honored."""
+
+
 class InvalidTagError(VersionError):
     """A tag string does not match ``^v[1-9]\\d*$``."""
 
@@ -151,6 +158,25 @@ def _validate_tag(tag: str) -> str:
     if not _VALID_TAG_RE.fullmatch(tag):
         raise InvalidTagError(f"invalid version tag {tag!r} (expected ^v[1-9]\\d*$)")
     return tag
+
+
+def _validate_label_name(label: str) -> str:
+    """Reject label names that cannot be honored by the sync resolver.
+
+    ``--label`` shares one namespace with version tags: a ``^v[1-9]\\d*$`` value
+    always resolves as a direct version (``make_label_resolver``), so a label
+    *named* ``v1`` would be permanently shadowed by version ``v1``. Reject such
+    names (and the reserved ``latest``) at write time so they can never be
+    created, instead of storing an unreachable, misleading pointer.
+    """
+    if label in RESERVED_LABELS:
+        raise ReservedLabelError(f"{label!r} is a reserved label name")
+    if _VALID_TAG_RE.fullmatch(label):
+        raise InvalidLabelError(
+            f"label name {label!r} looks like a version tag — these are reserved for "
+            f"direct version addressing (`--label {label}` already deploys that version)"
+        )
+    return label
 
 
 def _now_iso() -> str:
@@ -203,13 +229,14 @@ def load_manifest(artifact_dir: Path) -> VersionsManifest:
 
     labels: dict[str, str] = {}
     for label, tag in raw_labels.items():
-        # ``latest`` is reserved and never stored; a hand-edited one would be
-        # an unmanageable pointer (every mutating API rejects it), so refuse to
-        # load it rather than surface an impossible state.
-        if label in RESERVED_LABELS:
-            raise ReservedLabelError(
-                f"malformed versions manifest at {path}: {label!r} is a reserved label"
-            )
+        # Refuse to load a label the write APIs would never create — a reserved
+        # ``latest`` or a version-shaped name (``v1``) that the sync resolver
+        # would permanently shadow with the same-named version. Fail loud on a
+        # tampered manifest rather than surface an impossible/unreachable state.
+        try:
+            _validate_label_name(str(label))
+        except VersionError as exc:
+            raise type(exc)(f"malformed versions manifest at {path}: {exc}") from exc
         _validate_tag(str(tag))
         labels[str(label)] = str(tag)
 
@@ -289,13 +316,12 @@ def create_version(artifact_dir: Path, working_file: Path, note: str = "") -> Ve
 def promote_label(artifact_dir: Path, label: str, version: str) -> None:
     """Point *label* at *version* (create-or-move). Rollout == rollback.
 
-    Raises :class:`ReservedLabelError` for ``latest``, :class:`InvalidTagError`
-    for a malformed tag, and :class:`VersionNotFoundError` if the tag is not in
-    the manifest. Holds ``_file_lock`` across ``load → validate → mutate →
-    save``.
+    Raises :class:`ReservedLabelError` for ``latest``, :class:`InvalidLabelError`
+    for a version-shaped label name, :class:`InvalidTagError` for a malformed
+    tag, and :class:`VersionNotFoundError` if the tag is not in the manifest.
+    Holds ``_file_lock`` across ``load → validate → mutate → save``.
     """
-    if label in RESERVED_LABELS:
-        raise ReservedLabelError(f"{label!r} is a reserved label and cannot be promoted")
+    _validate_label_name(label)
     _validate_tag(version)
     lock = _lock_path_for(versions_json_path(artifact_dir))
     with _file_lock(lock):
@@ -369,9 +395,11 @@ def make_label_resolver(label: str) -> Callable[[Path, Layout], bytes]:
     (``agents/<name>.md``) has no version store — resolving raises
     :class:`VersionsDirMissingError`, which the engine isolates as a skip.
 
-    A label matching ``^v[1-9]\\d*$`` is treated as a **direct version tag**
+    A value matching ``^v[1-9]\\d*$`` is treated as a **direct version tag**
     (``resolve_version``); any other string is a **named label**
-    (``resolve_label``).
+    (``resolve_label``). This precedence is unambiguous because
+    :func:`_validate_label_name` forbids creating a label whose name is
+    version-shaped, so a ``vN`` here can only ever mean the version ``vN``.
     """
 
     def _resolve(item_path: Path, layout: Layout) -> bytes:
