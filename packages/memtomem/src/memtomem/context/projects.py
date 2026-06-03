@@ -732,10 +732,13 @@ def discover_project_scopes(
     scopes: list[ProjectScope] = []
     for key in order:
         resolved, sources, missing, stored_label = by_resolved[key]
-        # ``experimental`` is true iff the *only* source is the opt-in scan.
-        # cwd / known-projects unions clear the flag so the most-trusted
-        # source wins for display purposes.
-        experimental = sources == {"claude-projects"}
+        # ``experimental`` flags a row present ONLY because the unfiltered opt-in
+        # scan gate is open: a scan-only source AND no runtime marker. A
+        # marker-bearing scan row is admitted by the default filtered auto-display
+        # path (auto_display_configured_projects), so it is a normal configured
+        # project — not opt-in/experimental — and must not carry the warning copy.
+        # cwd / known-projects unions also clear the flag (most-trusted source wins).
+        experimental = sources == {"claude-projects"} and not has_runtime_marker(resolved)
         # Label precedence: an explicit stored label (set via Add Project or the
         # rename PATCH) wins — it is the user's deliberate name, so it overrides
         # even the "Server CWD" auto-label when the cwd was also registered.
