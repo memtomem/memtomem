@@ -770,6 +770,55 @@ def test_discover_paused_known_not_reenabled_by_scan(
     assert scope.sync_eligible is False  # the scan did NOT re-enable it
 
 
+def test_discover_auto_displayed_configured_scan_not_experimental(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A marker-bearing scan row admitted by the default filtered auto-display
+    path is NOT badged experimental — it is a normal configured project, not the
+    opt-in/experimental scan."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    configured = tmp_path / "cfg"
+    configured.mkdir()
+    (configured / ".claude").mkdir()
+
+    from memtomem.context import projects as proj_mod
+
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [configured])
+    scopes = proj_mod.discover_project_scopes(
+        cwd,
+        tmp_path / "kp.json",
+        experimental_claude_projects_scan=False,
+        auto_display_configured_projects=True,
+    )
+    scope = next(s for s in scopes if s.root == configured.resolve())
+    assert "claude-projects" in scope.sources
+    assert scope.experimental is False
+
+
+def test_discover_unconfigured_scan_row_is_experimental(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unmarked scan row — present only because the unfiltered experimental
+    gate is open — IS experimental."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    plain = tmp_path / "plain"
+    plain.mkdir()  # no runtime marker
+
+    from memtomem.context import projects as proj_mod
+
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [plain])
+    scopes = proj_mod.discover_project_scopes(
+        cwd,
+        tmp_path / "kp.json",
+        experimental_claude_projects_scan=True,
+        auto_display_configured_projects=False,
+    )
+    scope = next(s for s in scopes if s.root == plain.resolve())
+    assert scope.experimental is True
+
+
 # ── runtime marker helper (POST validation warning) ─────────────────────
 
 
