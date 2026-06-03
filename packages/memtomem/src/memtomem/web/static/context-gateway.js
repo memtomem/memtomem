@@ -3187,30 +3187,13 @@ async function loadCtxDetail(type, name, opts = {}) {
     // toggle's `.then()` had just rehydrated (review P2).
     if (seq !== _ctxDetailSeq[type]) return;
 
-    // Proactively disable Delete when the active project is sync-ineligible.
-    // A ``cascade=true`` delete unlinks the generated runtime copies, which the
-    // backend 409s for a paused / not-enrolled project (#1210); gating here
-    // avoids that round-trip and mirrors the matrix Sync button (same tooltip
-    // keys). The §2a error handler stays as the safety net for the race window
-    // where the scope is paused after this render. (Caveat: this also blocks a
-    // canonical-only delete on an ineligible scope — acceptable, the user
-    // resumes/enrolls on the Projects board; see PR description.)
-    const _delScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
-    let delAttrs = '';
-    if (_delScope && !_ctxScopeSyncEligible(_delScope)) {
-      const k = _ctxScopeIsEnrolled(_delScope)
-        ? 'settings.ctx.matrix_sync_paused_title'
-        : 'settings.ctx.matrix_sync_not_enrolled_title';
-      delAttrs = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
-    }
-
     let html = '<div class="ctx-detail">';
     html += `<div class="ctx-detail-header">
       <strong>${escapeHtml(name)}</strong>
       <div style="display:flex;gap:6px">
         <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
         <button class="btn-ghost ctx-detail-diff-btn" data-i18n="settings.ctx.diff_view">${t('settings.ctx.diff_view')}</button>
-        <button class="btn-ghost btn-danger ctx-detail-delete-btn"${delAttrs} data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
+        <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
 
@@ -3418,18 +3401,39 @@ async function loadCtxDetail(type, name, opts = {}) {
       // dialog conservative — a stray click only removes the canonical,
       // and the user has to consciously check the box to fan-out delete
       // into ``~/.claude/skills/``, ``~/.codex/...``, etc.
-      const result = await showConfirm({
+      //
+      // The cascade fan-out writes the project runtime, which the backend 409s
+      // for a sync-ineligible (paused / not-enrolled) project (#1210). A plain
+      // canonical-only delete (cascade=false) stays UNgated, so offer the
+      // cascade checkbox ONLY when the active scope is sync-eligible — and gate
+      // the option, NOT the whole Delete button, so a canonical delete the
+      // backend allows still works. Computed at click time so a mid-session
+      // pause/resume is reflected. When ineligible we hide the option and note
+      // that only the canonical copy is removed. The §2a 409 handler below is
+      // the safety net if eligibility flips between this click and the request.
+      const _delScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
+      const _cascadeOffered = !_delScope || _ctxScopeSyncEligible(_delScope);
+      const confirmOpts = {
         title: t('settings.ctx.confirm_delete').replace('{name}', name),
-        message: t('settings.ctx.confirm_delete_msg'),
+        message: _cascadeOffered
+          ? t('settings.ctx.confirm_delete_msg')
+          : `${t('settings.ctx.confirm_delete_msg')} ${t('settings.ctx.cascade_unavailable_hint')}`,
         confirmText: t('settings.ctx.delete'),
-        extraOption: {
+      };
+      if (_cascadeOffered) {
+        confirmOpts.extraOption = {
           id: 'cascade',
           label: t('settings.ctx.cascade_delete'),
           defaultChecked: false,
-        },
-      });
-      if (!result || !result.ok) return;
-      const cascade = !!(result.extras && result.extras.cascade);
+        };
+      }
+      const result = await showConfirm(confirmOpts);
+      // ``showConfirm`` resolves to a boolean without ``extraOption`` and to
+      // ``{ok, extras}`` with it — normalize both shapes.
+      const ok = (result && typeof result === 'object') ? result.ok : !!result;
+      if (!ok) return;
+      const cascade = !!(result && typeof result === 'object'
+        && result.extras && result.extras.cascade);
       try {
         const csrf = await ensureCsrfToken();
         const r = await fetch(

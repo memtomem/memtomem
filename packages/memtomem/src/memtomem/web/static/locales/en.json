@@ -392,6 +392,7 @@
   "settings.ctx.matrix_sync_paused_title": "Sync paused — resume it on the Projects board",
   "settings.ctx.error_sync_paused": "Project sync is paused — resume it on the Projects board.",
   "settings.ctx.error_sync_not_enrolled": "Project is not enrolled for sync — enroll it on the Projects board.",
+  "settings.ctx.cascade_unavailable_hint": "Sync is paused or not enrolled for this project, so only the canonical copy is deleted (no runtime fan-out).",
   "settings.ctx.matrix_counts_title": "Skills: {skills}, Commands: {commands}, Agents: {agents}, MCP: {mcp}",
   "settings.ctx.import": "Import",
   "settings.ctx.create": "Create",

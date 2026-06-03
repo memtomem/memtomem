@@ -19,8 +19,10 @@ a plain string. These specs pin:
 * An unknown ``reason_code`` falls back to the backend ``message``.
 * The KO locale renders its own copy (translation + josa parity).
 * §5a proactive gate: when the active project is sync-ineligible the Delete
-  button is rendered disabled with the matrix tooltip, so the 409 round-trip
-  is avoided entirely.
+  button stays ENABLED (the backend allows a canonical-only ``cascade=false``
+  delete) but the cascade checkbox is hidden and the confirm explains the
+  canonical-only delete — so the gated runtime fan-out 409 is avoided without
+  blocking the delete the backend permits.
 """
 
 from __future__ import annotations
@@ -38,8 +40,10 @@ pytestmark = pytest.mark.browser
 EN_PAUSED = "Project sync is paused — resume it on the Projects board."
 EN_NOT_ENROLLED = "Project is not enrolled for sync — enroll it on the Projects board."
 KO_PAUSED = "프로젝트 동기화가 중지되었습니다 — 프로젝트 보드에서 재개하세요."
-MATRIX_PAUSED_TITLE = "Sync paused — resume it on the Projects board"
-MATRIX_NOT_ENROLLED_TITLE = "Not enrolled — enroll this project on the Projects board to sync it"
+EN_CASCADE_HINT = (
+    "Sync is paused or not enrolled for this project, so only the canonical "
+    "copy is deleted (no runtime fan-out)."
+)
 
 
 _SKILL_DETAIL = {
@@ -230,73 +234,80 @@ def test_cascade_delete_409_sync_paused_ko(page, mm_web_url: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cascade_delete_button_disabled_when_scope_paused(page, mm_web_url: str) -> None:
-    """When the active project is paused, the Delete button renders disabled
-    with the matrix paused tooltip — the 409 round-trip is avoided."""
+def _run_canonical_only_delete(page, mm_web_url: str, scope: dict, active_scope_id: str) -> None:
+    """Shared body for the ineligible-scope cases: Delete stays ENABLED (the
+    backend allows a canonical-only `cascade=false` delete), but the cascade
+    checkbox is hidden and the confirm message explains canonical-only delete.
+    Confirming issues a `cascade=false` DELETE that succeeds."""
     install_default_stubs(page)
-    delete_calls: list[str] = []
 
     def _detail_handler(route):
         if route.request.method == "DELETE":
-            delete_calls.append(route.request.url)
-            route.fulfill(status=200, content_type="application/json", body="{}")
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"deleted": True}),
+            )
             return
         route.fulfill(status=200, content_type="application/json", body=json.dumps(_SKILL_DETAIL))
 
     page.route("**/api/context/skills/demo-skill**", _detail_handler)
-    # Active scope = the paused project, set before module init reads localStorage.
-    page.add_init_script("localStorage.setItem('memtomem_ctx_active_scope_id', 'p-off')")
+    page.add_init_script(
+        f"localStorage.setItem('memtomem_ctx_active_scope_id', {active_scope_id!r})"
+    )
     page.route(
         "**/api/context/projects**",
         lambda r: r.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"scopes": [_paused_scope()]}),
+            body=json.dumps({"scopes": [scope]}),
         ),
     )
     page.goto(mm_web_url)
     _open_skills(page)
     page.evaluate("() => { loadCtxDetail('skills', 'demo-skill'); }")
 
-    btn = page.wait_for_selector(
-        "#ctx-skills-detail .ctx-detail-delete-btn[disabled]", timeout=4_000
+    # Delete stays ENABLED — a canonical-only delete is allowed on a paused /
+    # not-enrolled scope (only the runtime fan-out is gated by #1210).
+    btn = page.wait_for_selector("#ctx-skills-detail .ctx-detail-delete-btn", timeout=4_000)
+    assert btn.is_disabled() is False, (
+        "Delete must stay enabled on an ineligible scope — canonical-only delete is allowed"
     )
-    assert btn.get_attribute("data-i18n-title") == "settings.ctx.matrix_sync_paused_title", (
-        "disabled Delete must carry the matrix paused i18n-title key"
+    assert btn.get_attribute("disabled") is None
+
+    btn.click()
+    page.wait_for_function("() => !document.getElementById('confirm-modal').hidden", timeout=2_000)
+    # The cascade checkbox row must be HIDDEN (no runtime fan-out while ineligible)
+    # and the confirm message must explain the canonical-only delete.
+    assert page.locator("#confirm-extra-row").is_hidden(), (
+        "cascade option must be hidden when the active scope is sync-ineligible"
     )
-    assert MATRIX_PAUSED_TITLE in (btn.get_attribute("title") or ""), (
-        f"disabled Delete title must be the resolved paused copy; got {btn.get_attribute('title')!r}"
+    msg = page.locator("#confirm-message").text_content() or ""
+    assert EN_CASCADE_HINT in msg, f"confirm must explain the canonical-only delete; got {msg!r}"
+
+    # Confirming issues a canonical (cascade=false) DELETE; the success path hides
+    # the detail pane.
+    with page.expect_request(
+        lambda r: "/api/context/skills/demo-skill" in r.url and r.method == "DELETE",
+        timeout=4_000,
+    ) as req_info:
+        page.locator("#confirm-ok-btn").click()
+    delete_req = req_info.value
+    assert "cascade=false" in delete_req.url, (
+        f"an ineligible scope must delete canonical-only (cascade=false); got {delete_req.url!r}"
     )
-    assert delete_calls == [], f"disabled Delete must not issue a DELETE; saw {delete_calls!r}"
+    page.wait_for_selector("#ctx-skills-detail", state="hidden", timeout=3_000)
 
 
-def test_cascade_delete_button_disabled_when_scope_not_enrolled(page, mm_web_url: str) -> None:
-    """A scan-only (never-enrolled) active scope uses the not-enrolled
-    tooltip variant on the disabled Delete button."""
-    install_default_stubs(page)
-    page.route(
-        "**/api/context/skills/demo-skill**",
-        lambda r: r.fulfill(
-            status=200, content_type="application/json", body=json.dumps(_SKILL_DETAIL)
-        ),
-    )
-    page.add_init_script("localStorage.setItem('memtomem_ctx_active_scope_id', 'p-scan')")
-    page.route(
-        "**/api/context/projects**",
-        lambda r: r.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"scopes": [_paused_scope("p-scan", enrolled=False)]}),
-        ),
-    )
-    page.goto(mm_web_url)
-    _open_skills(page)
-    page.evaluate("() => { loadCtxDetail('skills', 'demo-skill'); }")
+def test_cascade_delete_paused_scope_offers_canonical_only_delete(page, mm_web_url: str) -> None:
+    """A paused active project keeps Delete enabled but drops the cascade option
+    and runs a canonical-only delete (which the backend allows)."""
+    _run_canonical_only_delete(page, mm_web_url, _paused_scope(), "p-off")
 
-    btn = page.wait_for_selector(
-        "#ctx-skills-detail .ctx-detail-delete-btn[disabled]", timeout=4_000
-    )
-    assert btn.get_attribute("data-i18n-title") == "settings.ctx.matrix_sync_not_enrolled_title", (
-        "disabled Delete must carry the matrix not-enrolled i18n-title key"
-    )
-    assert MATRIX_NOT_ENROLLED_TITLE in (btn.get_attribute("title") or "")
+
+def test_cascade_delete_not_enrolled_scope_offers_canonical_only_delete(
+    page, mm_web_url: str
+) -> None:
+    """A scan-only (never-enrolled) active project behaves the same — cascade
+    hidden, canonical-only delete proceeds."""
+    _run_canonical_only_delete(page, mm_web_url, _paused_scope("p-scan", enrolled=False), "p-scan")
