@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -268,10 +269,58 @@ class TestTraceSessionContext:
             langfuse_secret_key = "sk"
 
         mock_span = MagicMock()
+        mock_span.__enter__.return_value = mock_span
         mock_span.update.side_effect = Exception("Telemetry update failed")
 
         mock_client = MagicMock()
         mock_client.start_as_current_observation.return_value = mock_span
+
+        with (
+            patch(
+                "memtomem.observability.session_tracing.get_trace_config",
+                return_value=DummyConfig(),
+            ),
+            patch(
+                "memtomem.observability.session_tracing.get_langfuse_client",
+                return_value=mock_client,
+            ),
+        ):
+            completed = False
+            with trace_session("cmd", "evt"):
+                completed = True
+            assert completed is True
+
+            with pytest.raises(ValueError, match="command failed"):
+                with trace_session("cmd", "evt"):
+                    raise ValueError("command failed")
+
+            assert mock_span.update.called
+
+    def test_langfuse_propagate_import_failure_isolation(self, monkeypatch):
+        class DummyConfig:
+            enabled = True
+            jsonl_enabled = False
+            sampling_rate = 1.0
+            payload_mode = "full"
+            max_payload_chars = 10000
+            langfuse_enabled = True
+            langfuse_public_key = "pk"
+            langfuse_secret_key = "sk"
+
+        mock_span = MagicMock()
+        mock_span.__enter__.return_value = mock_span
+
+        mock_client = MagicMock()
+        mock_client.start_as_current_observation.return_value = mock_span
+
+        original_import = builtins.__import__
+
+        def failing_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "langfuse" and "propagate_attributes" in fromlist:
+                raise RuntimeError("propagate import failed")
+            return original_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", failing_import)
 
         with (
             patch(

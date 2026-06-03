@@ -231,7 +231,11 @@ def trace_session(
         command_exception = None
         span = None
         try:
-            from langfuse import propagate_attributes
+            try:
+                from langfuse import propagate_attributes
+            except Exception as exc:
+                logger.warning("Failed to import Langfuse propagate_attributes: %s", exc)
+                propagate_attributes = None
 
             try:
                 span = obs_context.__enter__()
@@ -247,16 +251,17 @@ def trace_session(
                     logger.warning("Failed to format propagated metadata: %s", exc)
 
                 prop_ctx = None
-                try:
-                    prop_ctx = propagate_attributes(
-                        session_id=ctx.get("session_id") or f"no-session-{agent_id}",
-                        user_id=ctx.get("agent_id") or agent_id,
-                        metadata=clean_prop_metadata,
-                    )
-                    prop_ctx.__enter__()
-                except Exception as exc:
-                    logger.warning("Failed to enter propagate_attributes context: %s", exc)
-                    prop_ctx = None
+                if propagate_attributes is not None:
+                    try:
+                        prop_ctx = propagate_attributes(
+                            session_id=ctx.get("session_id") or f"no-session-{agent_id}",
+                            user_id=ctx.get("agent_id") or agent_id,
+                            metadata=clean_prop_metadata,
+                        )
+                        prop_ctx.__enter__()
+                    except Exception as exc:
+                        logger.warning("Failed to enter propagate_attributes context: %s", exc)
+                        prop_ctx = None
 
                 try:
                     yield ctx
@@ -281,17 +286,18 @@ def trace_session(
                     final_clean_metadata = format_propagated_metadata(ctx["metadata"])
 
                     final_prop_ctx = None
-                    try:
-                        final_prop_ctx = propagate_attributes(
-                            session_id=final_session_id,
-                            user_id=final_agent_id,
-                            metadata=final_clean_metadata,
-                        )
-                        final_prop_ctx.__enter__()
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to enter final propagate_attributes context: %s", exc
-                        )
+                    if propagate_attributes is not None:
+                        try:
+                            final_prop_ctx = propagate_attributes(
+                                session_id=final_session_id,
+                                user_id=final_agent_id,
+                                metadata=final_clean_metadata,
+                            )
+                            final_prop_ctx.__enter__()
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to enter final propagate_attributes context: %s", exc
+                            )
 
                     try:
                         pass
