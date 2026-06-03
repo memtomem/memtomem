@@ -19,8 +19,9 @@ from memtomem.context import runtime_registry as rr
 
 @pytest.fixture(autouse=True)
 def _clear_kimi_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Isolate from a runner that happens to export KIMI_SHARE_DIR.
+    # Isolate from a runner that happens to export KIMI_SHARE_DIR / KIMI_CODE_HOME.
     monkeypatch.delenv("KIMI_SHARE_DIR", raising=False)
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -142,6 +143,30 @@ def test_kimi_share_dir_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     status = rr.probe_runtime("kimi", home=tmp_path)
     assert status.installed is True
     assert status.mms_registered is True
+
+
+def test_kimi_installed_via_kimi_code_home(tmp_path: Path) -> None:
+    """A Kimi Code install with only ``~/.kimi-code/`` (no ``~/.kimi/mcp.json``
+    yet) is still detected as installed — the CLI's data home, distinct from the
+    MCP-config dir (ADR-0021 §1 false-negative-detection fix)."""
+    (tmp_path / ".kimi-code").mkdir()
+    status = rr.probe_runtime("kimi", home=tmp_path)
+    assert status.installed is True
+    assert status.memtomem_registered is False  # home present, no MCP config
+
+
+def test_kimi_code_home_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``$KIMI_CODE_HOME`` relocates the install marker."""
+    custom = tmp_path / "relocated-kimi-code"
+    custom.mkdir()
+    monkeypatch.setenv("KIMI_CODE_HOME", str(custom))
+    # Neither ~/.kimi nor ~/.kimi-code exists under home; detection rides the env.
+    assert rr.probe_runtime("kimi", home=tmp_path).installed is True
+
+
+def test_kimi_not_installed_when_no_marker(tmp_path: Path) -> None:
+    """Neither ``~/.kimi`` nor ``~/.kimi-code`` present → not installed."""
+    assert rr.probe_runtime("kimi", home=tmp_path).installed is False
 
 
 # --- error classification (coarse, no message) --------------------------------

@@ -111,6 +111,19 @@ def _kimi_dir(home: Path) -> Path:
     return Path(share).expanduser() if share else home / ".kimi"
 
 
+def _kimi_code_home(home: Path) -> Path:
+    """Kimi Code CLI's primary data dir — ``~/.kimi-code`` (or ``$KIMI_CODE_HOME``).
+
+    Distinct from :func:`_kimi_dir`: the CLI keeps its sessions / logs / config
+    under ``~/.kimi-code/`` while the cross-client-compatible **MCP** config lives
+    at ``~/.kimi/mcp.json``. Used only as an install marker so a Kimi Code install
+    that has not yet written ``~/.kimi/mcp.json`` is still detected — the
+    false-negative runtime-detection drift tracked in ADR-0021 §1.
+    """
+    home_env = os.environ.get("KIMI_CODE_HOME")
+    return Path(home_env).expanduser() if home_env else home / ".kimi-code"
+
+
 @dataclass(frozen=True)
 class _Location:
     """One place an in-scope client may hold its MCP-server map.
@@ -171,7 +184,9 @@ _INSTALLED_MARKERS: dict[str, Callable[[Path], tuple[Path, ...]]] = {
         h / "Library" / "Application Support" / "Antigravity",
     ),
     "codex": lambda h: (h / ".codex" / "config.toml", h / ".codex"),
-    "kimi": lambda h: (_kimi_dir(h),),
+    # ``~/.kimi`` holds the MCP config; ``~/.kimi-code`` is the CLI's data home.
+    # Either present => installed (ADR-0021 §1 false-negative-detection fix).
+    "kimi": lambda h: (_kimi_dir(h), _kimi_code_home(h)),
 }
 
 
