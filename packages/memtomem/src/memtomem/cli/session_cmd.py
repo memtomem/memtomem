@@ -167,22 +167,50 @@ def start(
     except InvalidNameError as e:
         raise click.ClickException(str(e)) from e
     stale_cutoff = _parse_duration(auto_end_stale) if auto_end_stale else None
-    try:
-        asyncio.run(
-            _start(
-                agent_id,
-                title,
-                namespace,
-                idempotent=idempotent,
-                stale_cutoff=stale_cutoff,
-                stale_label=auto_end_stale,
-                as_json=as_json,
+
+    from memtomem.observability.session_tracing import trace_session
+    initial_payload = {
+        "agent_id": agent_id,
+        "title": title,
+        "namespace": namespace,
+        "idempotent": idempotent,
+        "auto_end_stale": auto_end_stale,
+        "as_json": as_json,
+    }
+
+    with trace_session(
+        command="session_start",
+        event_type="session_start",
+        agent_id=agent_id,
+        initial_payload=initial_payload,
+    ) as trace_ctx:
+        try:
+            session_id, resumed, auto_ended = asyncio.run(
+                _start(
+                    agent_id,
+                    title,
+                    namespace,
+                    idempotent=idempotent,
+                    stale_cutoff=stale_cutoff,
+                    stale_label=auto_end_stale,
+                    as_json=as_json,
+                )
             )
-        )
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
+            trace_ctx["session_id"] = session_id
+            trace_ctx["metadata"] = {
+                "resumed": resumed,
+                "auto_ended_count": len(auto_ended),
+            }
+            trace_ctx["payload"].update({
+                "session_id": session_id,
+                "resumed": resumed,
+                "auto_ended": auto_ended,
+            })
+        except Exception as e:
+            trace_ctx["exit_code"] = 1
+            if isinstance(e, click.ClickException):
+                raise
+            raise click.ClickException(str(e)) from e
 
 
 async def _start(
@@ -194,7 +222,7 @@ async def _start(
     stale_cutoff: timedelta | None = None,
     stale_label: str | None = None,
     as_json: bool = False,
-) -> None:
+) -> tuple[str, bool, list[str]]:
     from memtomem.cli._bootstrap import cli_components
 
     # JSON exposes a flat ``auto_ended`` list of UUIDs; the per-reason counters
@@ -268,7 +296,7 @@ async def _start(
                 }
             )
         )
-        return
+        return session_id, resumed, auto_ended
 
     if resumed:
         click.echo(f"Session resumed: {session_id}")
@@ -285,6 +313,7 @@ async def _start(
         if n_cross_agent:
             bits.append(f"{n_cross_agent} cross-agent")
         click.echo(f"  Auto-ended {len(auto_ended)} session(s) ({', '.join(bits)})")
+    return session_id, resumed, auto_ended
 
 
 @session.command()
@@ -295,15 +324,38 @@ def end(summary: str | None, auto_summary: bool) -> None:
     session_id = _read_current_session()
     if not session_id:
         raise click.ClickException("No active session. Run `mm session start` first.")
-    try:
-        asyncio.run(_end(session_id, summary, auto_summary))
-    except click.ClickException:
-        raise
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
+
+    from memtomem.observability.session_tracing import trace_session
+    initial_payload = {
+        "session_id": session_id,
+        "summary": summary,
+        "auto_summary": auto_summary,
+    }
+
+    with trace_session(
+        command="session_end",
+        event_type="session_end",
+        session_id=session_id,
+        initial_payload=initial_payload,
+    ) as trace_ctx:
+        try:
+            final_summary, event_count = asyncio.run(_end(session_id, summary, auto_summary))
+            trace_ctx["metadata"] = {
+                "event_count": event_count,
+                "summary": final_summary,
+            }
+            trace_ctx["payload"].update({
+                "final_summary": final_summary,
+                "event_count": event_count,
+            })
+        except Exception as e:
+            trace_ctx["exit_code"] = 1
+            if isinstance(e, click.ClickException):
+                raise
+            raise click.ClickException(str(e)) from e
 
 
-async def _end(session_id: str, summary: str | None, auto_summary: bool) -> None:
+async def _end(session_id: str, summary: str | None, auto_summary: bool) -> tuple[str | None, int]:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
@@ -329,6 +381,7 @@ async def _end(session_id: str, summary: str | None, auto_summary: bool) -> None
     click.echo(f"Session ended: {session_id}")
     if summary:
         click.echo(f"  Summary: {summary}")
+    return summary, len(events)
 
 
 @session.command("list")
@@ -340,15 +393,31 @@ def list_sessions(
     agent_id: str | None, since: str | None, limit: int, *, as_json: bool = False
 ) -> None:
     """List sessions."""
-    try:
-        asyncio.run(_list_sessions(agent_id, since, limit, as_json=as_json))
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
+    from memtomem.observability.session_tracing import trace_session
+    initial_payload = {
+        "agent_id": agent_id,
+        "since": since,
+        "limit": limit,
+        "as_json": as_json,
+    }
+
+    with trace_session(
+        command="session_list",
+        event_type="session_list",
+        initial_payload=initial_payload,
+    ) as trace_ctx:
+        try:
+            count = asyncio.run(_list_sessions(agent_id, since, limit, as_json=as_json))
+            trace_ctx["metadata"] = {"count": count}
+            trace_ctx["payload"]["count"] = count
+        except Exception as e:
+            trace_ctx["exit_code"] = 1
+            raise click.ClickException(str(e)) from e
 
 
 async def _list_sessions(
     agent_id: str | None, since: str | None, limit: int, *, as_json: bool = False
-) -> None:
+) -> int:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
@@ -366,11 +435,11 @@ async def _list_sessions(
             for s in sessions
         ]
         click.echo(json.dumps({"sessions": payload, "count": len(payload)}, indent=2))
-        return
+        return len(sessions)
 
     if not sessions:
         click.echo("No sessions found.")
-        return
+        return 0
 
     click.echo(f"{'ID':<38}{'Agent':<15}{'Started':<22}{'Status'}")
     click.echo("-" * 85)
@@ -379,6 +448,7 @@ async def _list_sessions(
         started = s["started_at"][:19] if s["started_at"] else ""
         click.echo(f"{s['id']:<38}{s['agent_id']:<15}{started:<22}{status}")
     click.echo(f"\n{len(sessions)} session(s)")
+    return len(sessions)
 
 
 @session.command()
@@ -386,9 +456,8 @@ async def _list_sessions(
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON for scripting.")
 def events(session_id: str, *, as_json: bool = False) -> None:
     """Show events for a session. Uses current session if no ID given."""
-    if not session_id:
-        session_id = _read_current_session() or ""
-    if not session_id:
+    resolved_session_id = session_id or _read_current_session() or ""
+    if not resolved_session_id:
         # JSON callers get a parseable error shape instead of a Click exit-1
         # so ``mm session events --json | jq`` doesn't break when no session
         # is active. Text callers keep the original ClickException path.
@@ -396,13 +465,29 @@ def events(session_id: str, *, as_json: bool = False) -> None:
             click.echo(json.dumps({"error": "no_session"}))
             return
         raise click.ClickException("No session ID provided and no active session.")
-    try:
-        asyncio.run(_events(session_id, as_json=as_json))
-    except Exception as e:
-        raise click.ClickException(str(e)) from e
+
+    from memtomem.observability.session_tracing import trace_session
+    initial_payload = {
+        "session_id": resolved_session_id,
+        "as_json": as_json,
+    }
+
+    with trace_session(
+        command="session_events",
+        event_type="session_events",
+        session_id=resolved_session_id,
+        initial_payload=initial_payload,
+    ) as trace_ctx:
+        try:
+            count = asyncio.run(_events(resolved_session_id, as_json=as_json))
+            trace_ctx["metadata"] = {"count": count}
+            trace_ctx["payload"]["count"] = count
+        except Exception as e:
+            trace_ctx["exit_code"] = 1
+            raise click.ClickException(str(e)) from e
 
 
-async def _events(session_id: str, *, as_json: bool = False) -> None:
+async def _events(session_id: str, *, as_json: bool = False) -> int:
     from memtomem.cli._bootstrap import cli_components
 
     async with cli_components() as comp:
@@ -423,11 +508,11 @@ async def _events(session_id: str, *, as_json: bool = False) -> None:
                 indent=2,
             )
         )
-        return
+        return len(evts)
 
     if not evts:
         click.echo("No events for this session.")
-        return
+        return 0
 
     click.echo(f"{'Time':<22}{'Type':<18}{'Content'}")
     click.echo("-" * 70)
@@ -436,6 +521,7 @@ async def _events(session_id: str, *, as_json: bool = False) -> None:
         content = ev["content"][:40].replace("\n", " ")
         click.echo(f"{ts:<22}{ev['event_type']:<18}{content}")
     click.echo(f"\n{len(evts)} event(s)")
+    return len(evts)
 
 
 # ---------------------------------------------------------------------------
@@ -468,33 +554,54 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
     Exit code is always 0.
     """
     session_id = _read_current_session()
-    if not session_id:
-        # No active session — silently skip (hooks should not fail).
-        # --json callers get a parseable skip ack so pipelines can tell
-        # "no session" apart from "event written".
-        if as_json:
-            click.echo(json.dumps({"ok": False, "reason": "no_active_session"}))
-        return
-    try:
-        metadata = json.loads(meta) if meta else None
-    except json.JSONDecodeError:
-        # Malformed --meta: under --json emit the error ack (exit 0) so
-        # scripts can distinguish "bad input" from "write failed". Under
-        # text path, let Click surface the traceback — a hook author
-        # mistyping meta wants to see why.
-        if as_json:
-            click.echo(json.dumps({"ok": False, "reason": "invalid_meta"}))
+
+    from memtomem.observability.session_tracing import trace_session
+    initial_payload = {
+        "session_id": session_id,
+        "event_type": event_type,
+        "content": content,
+        "meta": meta,
+        "as_json": as_json,
+    }
+
+    with trace_session(
+        command="activity_log",
+        event_type="activity_log",
+        session_id=session_id,
+        initial_payload=initial_payload,
+    ) as trace_ctx:
+        if not session_id:
+            # No active session — silently skip (hooks should not fail).
+            # --json callers get a parseable skip ack so pipelines can tell
+            # "no session" apart from "event written".
+            trace_ctx["metadata"] = {"status": "skipped", "reason": "no_active_session"}
+            if as_json:
+                click.echo(json.dumps({"ok": False, "reason": "no_active_session"}))
             return
-        raise
-    try:
-        asyncio.run(_log_event(session_id, event_type, content, metadata))
-    except Exception:
-        logger.warning("Activity hook failed", exc_info=True)
-        if as_json:
-            click.echo(json.dumps({"ok": False, "reason": "write_failed"}))
-        return
-    if as_json:
-        click.echo(json.dumps({"ok": True, "session_id": session_id, "event_type": event_type}))
+        try:
+            metadata = json.loads(meta) if meta else None
+        except json.JSONDecodeError:
+            # Malformed --meta: under --json emit the error ack (exit 0) so
+            # scripts can distinguish "bad input" from "write failed". Under
+            # text path, let Click surface the traceback — a hook author
+            # mistyping meta wants to see why.
+            trace_ctx["metadata"] = {"status": "error", "reason": "invalid_meta"}
+            trace_ctx["exit_code"] = 0
+            if as_json:
+                click.echo(json.dumps({"ok": False, "reason": "invalid_meta"}))
+                return
+            raise
+        try:
+            asyncio.run(_log_event(session_id, event_type, content, metadata))
+            trace_ctx["metadata"] = {"status": "success"}
+            if as_json:
+                click.echo(json.dumps({"ok": True, "session_id": session_id, "event_type": event_type}))
+        except Exception:
+            trace_ctx["metadata"] = {"status": "error", "reason": "write_failed"}
+            logger.warning("Activity hook failed", exc_info=True)
+            if as_json:
+                click.echo(json.dumps({"ok": False, "reason": "write_failed"}))
+            return
 
 
 async def _log_event(session_id: str, event_type: str, content: str, metadata: dict | None) -> None:
@@ -531,32 +638,57 @@ def wrap(agent_id: str, title: str | None, command: tuple[str, ...]) -> None:
     cmd_str = " ".join(command)
     effective_title = title or f"Headless: {cmd_str[:60]}"
 
-    try:
-        asyncio.run(_wrap_start(session_id, agent_id, effective_title))
-    except Exception as e:
-        click.echo(f"Warning: session start failed: {e}", err=True)
+    from memtomem.observability.session_tracing import trace_session
+    initial_payload = {
+        "agent_id": agent_id,
+        "title": title,
+        "command": command,
+    }
 
-    _write_current_session(session_id)
+    with trace_session(
+        command="session_wrap",
+        event_type="session_wrap",
+        agent_id=agent_id,
+        session_id=session_id,
+        initial_payload=initial_payload,
+    ) as trace_ctx:
+        try:
+            asyncio.run(_wrap_start(session_id, agent_id, effective_title))
+        except Exception as e:
+            click.echo(f"Warning: session start failed: {e}", err=True)
 
-    # Run the wrapped command
-    try:
-        result = subprocess.run(command, check=False)
-        exit_code = result.returncode
-    except KeyboardInterrupt:
-        exit_code = 130
-    except Exception as e:
-        click.echo(f"Command failed: {e}", err=True)
+        _write_current_session(session_id)
+
+        # Run the wrapped command
         exit_code = 1
+        try:
+            result = subprocess.run(command, check=False)
+            exit_code = result.returncode
+        except KeyboardInterrupt:
+            exit_code = 130
+        except Exception as e:
+            click.echo(f"Command failed: {e}", err=True)
+            exit_code = 1
+        finally:
+            trace_ctx["exit_code"] = exit_code
+            trace_ctx["metadata"] = {
+                "exit_code": exit_code,
+                "command": cmd_str,
+            }
+            trace_ctx["payload"].update({
+                "exit_code": exit_code,
+                "command": cmd_str,
+            })
 
-    # End session
-    summary = f"Command: {cmd_str[:100]}. Exit code: {exit_code}"
-    try:
-        asyncio.run(_wrap_end(session_id, summary, exit_code))
-    except Exception as e:
-        click.echo(f"Warning: session end failed: {e}", err=True)
+        # End session
+        summary = f"Command: {cmd_str[:100]}. Exit code: {exit_code}"
+        try:
+            asyncio.run(_wrap_end(session_id, summary, exit_code))
+        except Exception as e:
+            click.echo(f"Warning: session end failed: {e}", err=True)
 
-    _clear_current_session()
-    sys.exit(exit_code)
+        _clear_current_session()
+        sys.exit(exit_code)
 
 
 async def _wrap_start(session_id: str, agent_id: str, title: str) -> None:

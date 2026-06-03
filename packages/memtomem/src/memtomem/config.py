@@ -786,6 +786,43 @@ class ContextGatewayConfig(BaseSettings):
     user_tier_enabled: bool = False
 
 
+class SessionTraceConfig(BaseSettings):
+    """Configuration for session command execution tracing."""
+
+    enabled: bool = False
+    jsonl_enabled: bool = True
+    jsonl_path: Path = Path("~/.memtomem/traces/session-traces.jsonl")
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = ""
+    sampling_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    payload_mode: Literal["metadata", "redacted", "full"] = "metadata"
+    max_payload_chars: int = Field(default=10000, gt=0)
+
+    @model_validator(mode="after")
+    def _require_keys_when_enabled(self) -> "SessionTraceConfig":
+        if self.enabled and self.langfuse_enabled and not (self.langfuse_public_key and self.langfuse_secret_key):
+            raise ValueError(
+                "SessionTraceConfig.langfuse_enabled=true requires both langfuse_public_key and langfuse_secret_key "
+                "to be set (non-empty)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_langfuse_package_when_enabled(self) -> "SessionTraceConfig":
+        if self.enabled and self.langfuse_enabled:
+            from importlib.util import find_spec
+
+            if find_spec("langfuse") is None:
+                raise ValueError(
+                    "SessionTraceConfig.langfuse_enabled=true but the 'langfuse' package is not "
+                    "installed. Install the langfuse extra "
+                    "(e.g. `pip install 'memtomem[langfuse]'`)."
+                )
+        return self
+
+
 class Mem2MemConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="MEMTOMEM_",
@@ -816,6 +853,7 @@ class Mem2MemConfig(BaseSettings):
     session_summary: SessionSummaryConfig = Field(default_factory=SessionSummaryConfig)
     context_gateway: ContextGatewayConfig = Field(default_factory=ContextGatewayConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    session_trace: SessionTraceConfig = Field(default_factory=SessionTraceConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -892,6 +930,18 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
     # operator intent — so the asymmetry is by design.
     "rerank": {"enabled", "oversample", "min_pool", "max_pool"},
     "hooks": {"target_scope"},
+    "session_trace": {
+        "enabled",
+        "jsonl_enabled",
+        "jsonl_path",
+        "langfuse_enabled",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "langfuse_host",
+        "sampling_rate",
+        "payload_mode",
+        "max_payload_chars",
+    },
 }
 
 FIELD_CONSTRAINTS: dict[str, dict] = {
@@ -932,6 +982,16 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "rerank.min_pool": {"type": int, "min": 1, "max": 1000},
     "rerank.max_pool": {"type": int, "min": 1, "max": 1000},
     "hooks.target_scope": {"type": str, "allowed": set(get_args(TargetScope))},
+    "session_trace.enabled": {"type": bool},
+    "session_trace.jsonl_enabled": {"type": bool},
+    "session_trace.jsonl_path": {"type": str},
+    "session_trace.langfuse_enabled": {"type": bool},
+    "session_trace.langfuse_public_key": {"type": str},
+    "session_trace.langfuse_secret_key": {"type": str},
+    "session_trace.langfuse_host": {"type": str},
+    "session_trace.sampling_rate": {"type": float, "min": 0.0, "max": 1.0},
+    "session_trace.payload_mode": {"type": str, "allowed": {"metadata", "redacted", "full"}},
+    "session_trace.max_payload_chars": {"type": int, "min": 1},
 }
 
 
@@ -1840,7 +1900,10 @@ def _portable_path_str(p: Path | str | os.PathLike[str]) -> str:
 # home-relative serialization. Update both tuples when adding new path-
 # typed fields. Loaders apply ``Path.expanduser()`` per-field, so the
 # round-trip ``write tilde -> read absolute`` is symmetric.
-_CONFIG_PATH_SCALAR_FIELDS: tuple[tuple[str, str], ...] = (("storage", "sqlite_path"),)
+_CONFIG_PATH_SCALAR_FIELDS: tuple[tuple[str, str], ...] = (
+    ("storage", "sqlite_path"),
+    ("session_trace", "jsonl_path"),
+)
 _CONFIG_PATH_LIST_FIELDS: tuple[tuple[str, str], ...] = (("indexing", "memory_dirs"),)
 
 
