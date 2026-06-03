@@ -162,6 +162,25 @@ class TestContextVersionCliInline:
         )
         assert r.exit_code == 0, r.output
 
+        # 3b. a version-shaped label name is rejected cleanly (would be
+        #     shadowed by version v1 in the resolver).
+        r = runner.invoke(
+            cli,
+            [
+                "context",
+                "version",
+                "promote",
+                "agents",
+                "my-agent",
+                "--to",
+                "v1",
+                "--version",
+                "v1",
+            ],
+        )
+        assert r.exit_code != 0
+        assert "version tag" in r.output.lower()
+
         # 4. list shows v1 + the production pointer
         r = runner.invoke(cli, ["context", "version", "list", "agents", "my-agent"])
         assert r.exit_code == 0, r.output

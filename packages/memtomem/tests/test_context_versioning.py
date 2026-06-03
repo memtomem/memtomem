@@ -127,6 +127,17 @@ class TestPromoteLabel:
         with pytest.raises(v.InvalidTagError):
             v.promote_label(artifact_dir, "production", "latest")
 
+    @pytest.mark.parametrize("bad_label", ["v1", "v2", "v10"])
+    def test_version_shaped_label_name_rejected(self, tmp_path, bad_label):
+        # A label named like a version tag would be permanently shadowed by the
+        # same-named version in the sync resolver — reject at write time.
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        with pytest.raises(v.InvalidLabelError):
+            v.promote_label(artifact_dir, bad_label, "v1")
+        # The shadowing label was never stored.
+        assert bad_label not in v.load_manifest(artifact_dir).labels
+
 
 class TestDeleteLabel:
     def test_removes_pointer(self, tmp_path):
@@ -219,6 +230,20 @@ class TestManifest:
             encoding="utf-8",
         )
         with pytest.raises(v.ReservedLabelError):
+            v.load_manifest(artifact_dir)
+
+    def test_load_rejects_version_shaped_label(self, tmp_path):
+        # A hand-edited version-shaped label is unreachable (shadowed by the
+        # same-named version) — refuse to load it (review P2).
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        (artifact_dir / "versions.json").write_text(
+            json.dumps(
+                {"versions": {"v1": {"created_at": "", "note": ""}}, "labels": {"v1": "v1"}}
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(v.InvalidLabelError):
             v.load_manifest(artifact_dir)
 
     @pytest.mark.parametrize("bad", ["[]", '"a string"', "42", '{"versions": []}', '{"labels": 3}'])
