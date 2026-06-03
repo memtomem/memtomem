@@ -52,6 +52,259 @@ let _ctxPortalEditingId = null;
 let _ctxPortalSearch = '';
 let _ctxPortalSort = 'name'; // 'name' | 'items'
 
+// Map of scope_id -> runtimes list (one GET /api/context/runtimes per scope; the
+// endpoint resolves per-scope via resolve_scope_root's project_scope_id param).
+let _ctxPortalRuntimesMap = {};
+// Active runtime filter: null | 'claude' | 'antigravity' | 'codex' | 'kimi'
+let _ctxPortalRuntimeFilter = null;
+
+// In-scope provider clients (ADR-0021 §B), in display order. Antigravity is the
+// gemini-family client and keeps its own label (RUNTIME_TO_CLIENT: gemini→antigravity).
+const _CTX_PORTAL_RUNTIME_CLIENTS = ['claude', 'antigravity', 'codex', 'kimi'];
+
+// Display label for a provider client. Proper-noun product names are identical
+// across locales (matches scope_experimental), so this is intentionally not i18n.
+function _ctxPortalRuntimeLabel(name) {
+  if (name === 'antigravity') return 'Antigravity';
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+// Initialize guide modal
+const _ctxPortalInstallGuideModal = document.getElementById('ctx-install-guide-modal');
+if (_ctxPortalInstallGuideModal) {
+  let releaseFn = null;
+  const closeGuide = () => {
+    if (releaseFn) { releaseFn(); releaseFn = null; }
+    _ctxPortalInstallGuideModal.setAttribute('hidden', '');
+  };
+  window.registerModalCloser(_ctxPortalInstallGuideModal, closeGuide);
+  document.getElementById('ctx-install-guide-close-btn')?.addEventListener('click', closeGuide);
+  document.getElementById('ctx-install-guide-ok-btn')?.addEventListener('click', closeGuide);
+  
+  window._ctxPortalShowInstallGuide = (runtimeName) => {
+    const titleEl = document.getElementById('ctx-install-guide-title');
+    const bodyEl = document.getElementById('ctx-install-guide-body');
+    if (!titleEl || !bodyEl) return;
+    // Re-entrancy guard: release a still-open guide before reopening so we never
+    // orphan an _ACTIVE_MODALS entry / leave the background inert.
+    if (releaseFn) { releaseFn(); releaseFn = null; }
+
+    const displayName = _ctxPortalRuntimeLabel(runtimeName);
+    titleEl.textContent = t('settings.ctx.install_guide_title').replace('{runtime}', displayName);
+
+    // Code-fence header labels are format/context names kept literal (JSON / TOML
+    // are proper nouns; "Terminal" is a deferred i18n nit). The commands inside
+    // are copied verbatim from docs/guides/mcp-clients.md (the registration SoT).
+    let guideHtml = '';
+    if (runtimeName === 'claude') {
+      guideHtml = `
+        <p class="guide-text">${escapeHtml(t('settings.ctx.guide_claude_desc'))}</p>
+        <div class="guide-code-block">
+          <div class="guide-code-header">
+            <span>Terminal</span>
+            <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
+          </div>
+          <pre class="guide-code"><code>claude mcp add memtomem -- uvx --from memtomem memtomem-server</code></pre>
+        </div>
+        <p class="guide-note">${escapeHtml(t('settings.ctx.guide_claude_note'))}</p>
+      `;
+    } else if (runtimeName === 'antigravity') {
+      guideHtml = `
+        <p class="guide-text">${escapeHtml(t('settings.ctx.guide_antigravity_desc'))}</p>
+        <h5 class="guide-section-sub">${escapeHtml(t('settings.ctx.guide_antigravity_cli'))}</h5>
+        <p class="guide-text-sm">${escapeHtml(t('settings.ctx.guide_antigravity_cli_desc'))}</p>
+        <div class="guide-code-block">
+          <div class="guide-code-header">
+            <span>JSON</span>
+            <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
+          </div>
+          <pre class="guide-code"><code>{
+  "mcpServers": {
+    "memtomem": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"]
+    }
+  }
+}</code></pre>
+        </div>
+      `;
+    } else if (runtimeName === 'codex') {
+      guideHtml = `
+        <p class="guide-text">${escapeHtml(t('settings.ctx.guide_codex_desc'))}</p>
+        <div class="guide-code-block">
+          <div class="guide-code-header">
+            <span>TOML</span>
+            <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
+          </div>
+          <pre class="guide-code"><code>[mcp_servers.memtomem]
+command = "uvx"
+args = ["--from", "memtomem", "memtomem-server"]</code></pre>
+        </div>
+      `;
+    } else if (runtimeName === 'kimi') {
+      guideHtml = `
+        <p class="guide-text">${escapeHtml(t('settings.ctx.guide_kimi_desc'))}</p>
+        <div class="guide-code-block">
+          <div class="guide-code-header">
+            <span>Terminal</span>
+            <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
+          </div>
+          <pre class="guide-code"><code>mm init --mcp kimi</code></pre>
+        </div>
+      `;
+    }
+
+    bodyEl.innerHTML = guideHtml;
+    releaseFn = window.openModal(_ctxPortalInstallGuideModal);
+    // Move focus into the dialog so keyboard/SR users aren't parked on the now-
+    // inert trigger chip (OK is the safe default — no destructive action), mirroring
+    // the sibling conflict modal in context-gateway.js.
+    document.getElementById('ctx-install-guide-ok-btn')?.focus();
+
+    // Wire copy buttons. navigator.clipboard is undefined on insecure (non-localhost)
+    // contexts, so guard the call and swallow a denied/absent clipboard quietly.
+    bodyEl.querySelectorAll('.copy-code-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const code = btn.closest('.guide-code-block').querySelector('.guide-code code').textContent;
+        if (!navigator.clipboard?.writeText) return;
+        navigator.clipboard.writeText(code).then(() => {
+          const originalText = btn.textContent;
+          btn.textContent = t('settings.ctx.copied');
+          setTimeout(() => { btn.textContent = originalText; }, 1500);
+        }).catch(() => {});
+      });
+    });
+  };
+}
+
+function _ctxPortalSyncFilterFromDeepLink() {
+  const link = _ctxParseDeepLink();
+  _ctxPortalRuntimeFilter =
+    link && _CTX_PORTAL_RUNTIME_CLIENTS.includes(link.runtime) ? link.runtime : null;
+}
+
+function _ctxPortalSetRuntimeFilter(runtime) {
+  _ctxPortalRuntimeFilter = runtime;
+  const link = _ctxParseDeepLink() || {};
+  link.runtime = runtime || '';
+  _ctxSetDeepLink(link);
+  _ctxPortalRenderHeadingChips();
+  _ctxPortalRenderRows();
+}
+
+// Per-CLI traffic-lights on a project row (PR4-deferred "row UI"). Each dot is a
+// non-color cue carrier via role=img + aria-label (WCAG 1.4.1 — state is not
+// conveyed by color alone). Uses dedicated short copy (no install-guide click
+// hint — only the heading greyed chips open the guide).
+function _ctxPortalRowTrafficLightsHtml(scope) {
+  if (scope.missing) return '';
+  const runtimes = _ctxPortalRuntimesMap[scope.scope_id] || [];
+  const lights = _CTX_PORTAL_RUNTIME_CLIENTS.map(name => {
+    const r = runtimes.find(item => item.name === name);
+    let state = 'uninstalled'; // 'uninstalled' | 'installed' | 'registered'
+    let detail = t('settings.ctx.runtime_not_installed');
+    if (r && r.error_kind) {
+      // Config unreadable — error-first precedence, matching the heading chip, so
+      // one runtime never reads installed/registered here yet error in the heading.
+      detail = t('settings.ctx.runtime_error_tooltip');
+    } else if (r && r.installed) {
+      if (r.memtomem_registered || r.mms_registered) {
+        state = 'registered';
+        detail = t('settings.ctx.runtime_registered_tooltip').replace('{path}', (r.config_paths || []).join(', '));
+      } else {
+        state = 'installed';
+        detail = t('settings.ctx.runtime_installed_tooltip');
+      }
+    }
+    const label = `${_ctxPortalRuntimeLabel(name)}: ${detail}`;
+    return `<span class="ctx-portal-row-light ctx-portal-row-light--${state}" role="img" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span>`;
+  }).join('');
+  return `<div class="ctx-portal-row-lights">${lights}</div>`;
+}
+
+function _ctxPortalRenderHeadingChips() {
+  const container = document.getElementById('ctx-portal-heading-chips');
+  if (!container) return;
+
+  const runtimes = _ctxPortalRuntimesMap[_ctxActiveScopeId] || _ctxPortalRuntimesMap[''] || [];
+
+  const runtimeChips = _CTX_PORTAL_RUNTIME_CLIENTS.map(name => {
+    const r = runtimes.find(item => item.name === name);
+    const installed = !!(r && r.installed);
+    const registered = !!(r && (r.memtomem_registered || r.mms_registered));
+    const configPaths = (r && r.config_paths) || [];
+    const errorKind = (r && r.error_kind) || null;
+    const displayName = _ctxPortalRuntimeLabel(name);
+
+    let stateClass;
+    let tooltip;
+    if (errorKind) {
+      // Config exists but is unreadable (permission/parse) — greyed, but the
+      // install guide is not the remedy, so this chip stays non-interactive.
+      stateClass = 'ctx-runtime-chip--greyed';
+      tooltip = t('settings.ctx.runtime_error_tooltip');
+    } else if (!installed) {
+      stateClass = 'ctx-runtime-chip--greyed';
+      tooltip = t('settings.ctx.runtime_uninstalled_tooltip');
+    } else if (registered) {
+      stateClass = 'ctx-runtime-chip--registered';
+      tooltip = t('settings.ctx.runtime_registered_tooltip').replace('{path}', configPaths.join(', '));
+    } else {
+      stateClass = 'ctx-runtime-chip--installed';
+      tooltip = t('settings.ctx.runtime_installed_tooltip');
+    }
+
+    // A not-installed chip is the install-guide trigger, so render a real
+    // <button> — keyboard-reachable and it announces its action (#1003 prefers
+    // a true button over a click-only span). Installed/registered/error chips
+    // are non-interactive status, so a <span> with a hover title suffices.
+    const aria = `${displayName}: ${tooltip}`;
+    if (!installed && !errorKind) {
+      return `<button type="button" class="ctx-runtime-chip ${stateClass}" data-runtime="${escapeHtml(name)}" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(aria)}">${escapeHtml(displayName)}</button>`;
+    }
+    // role=img + aria-label so the colored status (and config path) is exposed to
+    // screen readers, not just the hover title — matching the row dots.
+    return `<span class="ctx-runtime-chip ${stateClass}" data-runtime="${escapeHtml(name)}" role="img" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(aria)}">${escapeHtml(displayName)}</span>`;
+  }).join('');
+
+  const filterGroup = ['all', ..._CTX_PORTAL_RUNTIME_CLIENTS].map(name => {
+    const active = (name === 'all' && !_ctxPortalRuntimeFilter) || (_ctxPortalRuntimeFilter === name);
+    const label = name === 'all' ? t('settings.ctx.filter_all') : _ctxPortalRuntimeLabel(name);
+    return `<button type="button" class="${active ? 'active' : ''}" data-filter="${escapeHtml(name)}" aria-pressed="${active}">${escapeHtml(label)}</button>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="ctx-portal-runtimes-row">
+      <span class="ctx-portal-heading-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
+      <div class="ctx-portal-runtimes-list">${runtimeChips}</div>
+    </div>
+    <div class="ctx-portal-filter-row">
+      <span class="ctx-portal-heading-label" id="ctx-portal-filter-label">${escapeHtml(t('settings.ctx.filter_label'))}</span>
+      <div class="ctx-portal-filter-group" role="group" aria-labelledby="ctx-portal-filter-label">${filterGroup}</div>
+    </div>
+  `;
+
+  // Only the not-installed chips render as <button> (error-state greyed chips
+  // are non-interactive <span>s), so target buttons to open the install guide.
+  container.querySelectorAll('button.ctx-runtime-chip--greyed').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const name = chip.dataset.runtime;
+      if (name && typeof window._ctxPortalShowInstallGuide === 'function') {
+        window._ctxPortalShowInstallGuide(name);
+      }
+    });
+  });
+
+  container.querySelectorAll('.ctx-portal-filter-group button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.filter;
+      const targetFilter = filter === 'all' ? null : filter;
+      _ctxPortalSetRuntimeFilter(targetFilter);
+    });
+  });
+}
+
 const _CTX_PORTAL_COUNT_TYPES = [
   { key: 'skills', icon: '🧩', labelKey: 'settings.nav.ctx_skills' },
   { key: 'commands', icon: '⌘', labelKey: 'settings.nav.ctx_commands' },
@@ -76,6 +329,9 @@ async function loadCtxProjects() {
   const listEl = document.getElementById('ctx-projects-list');
   if (!listEl) return;
   panelLoading(listEl);
+  
+  _ctxPortalSyncFilterFromDeepLink();
+  
   try {
     const data = await _ctxFetchProjects();
     // Bail if a newer load started OR the tier flipped under us mid-fetch
@@ -87,10 +343,39 @@ async function loadCtxProjects() {
     _ctxPortalEditingId = null;
     _ctxPortalScopes = scopes;
     if (!scopes.length) {
-      // Server CWD is always present, so this is defensive only.
+      // Server CWD is always present, so this is defensive only. Clear the
+      // heading chip strip too, so a stale strip can't outlive an emptied list.
+      const headingEl = document.getElementById('ctx-portal-heading-chips');
+      if (headingEl) headingEl.innerHTML = '';
       listEl.innerHTML = emptyState('', t('settings.ctx.no_project_scopes'), '');
       return;
     }
+
+    // Now fetch runtimes for each scope in parallel to build the per-CLI traffic-lights (row UI)
+    const runtimePromises = scopes.map(async (scope) => {
+      if (scope.missing) {
+        return { scopeId: scope.scope_id, runtimes: [] };
+      }
+      try {
+        const url = _ctxWithTargetScope('/api/context/runtimes', { scopeId: scope.scope_id });
+        const res = await fetch(url);
+        if (!res.ok) throw new Error();
+        const rData = await res.json();
+        return { scopeId: scope.scope_id, runtimes: rData.runtimes || [] };
+      } catch (err) {
+        return { scopeId: scope.scope_id, runtimes: [] };
+      }
+    });
+
+    const runtimesResults = await Promise.all(runtimePromises);
+    if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return;
+
+    _ctxPortalRuntimesMap = {};
+    for (const result of runtimesResults) {
+      _ctxPortalRuntimesMap[result.scopeId] = result.runtimes;
+    }
+
+    _ctxPortalRenderHeadingChips();
     _ctxPortalRenderScaffold(listEl);
     _ctxPortalRenderRows();
   } catch (err) {
@@ -140,13 +425,23 @@ function _ctxPortalRenderScaffold(listEl) {
 function _ctxPortalVisibleScopes() {
   const all = Array.isArray(_ctxPortalScopes) ? _ctxPortalScopes : [];
   const q = _ctxPortalSearch.trim().toLowerCase();
-  const matched = q
+  let matched = q
     ? all.filter(s => {
         const label = (_ctxScopeDisplayLabel(s) || '').toLowerCase();
         const root = (s.root || '').toLowerCase();
         return label.includes(q) || root.includes(q);
       })
     : all.slice();
+
+  // Apply provider client-side filter
+  if (_ctxPortalRuntimeFilter) {
+    matched = matched.filter(s => {
+      const runtimes = _ctxPortalRuntimesMap[s.scope_id] || [];
+      const r = runtimes.find(item => item.name === _ctxPortalRuntimeFilter);
+      return r && (r.memtomem_registered || r.mms_registered);
+    });
+  }
+
   // Server CWD is pinned first (the primary working tree); the rest follow the
   // chosen sort. ``localeCompare`` keeps the name sort stable + accent-aware.
   const cwd = matched.filter(_ctxScopeIsServerCwd);
@@ -264,10 +559,13 @@ function _ctxPortalRowHtml(scope) {
     }
   }
 
+  const trafficLights = _ctxPortalRowTrafficLightsHtml(scope);
+
   return `<div class="${classes.join(' ')}" data-scope-id="${sid}">
     <div class="ctx-portal-row-main">
       <div class="ctx-portal-row-head">
         ${_ctxPortalLabelCellHtml(scope, editing)}
+        ${trafficLights}
       </div>
       <div class="ctx-portal-root"${rootTitle}>${rootText}</div>
       ${_ctxPortalCountsHtml(scope)}
@@ -331,6 +629,8 @@ function _ctxPortalSetActive(scopeId) {
   _ctxBumpActiveScopeDetailSeq();
   try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
   if (typeof _ctxClearDeepLink === 'function') _ctxClearDeepLink();
+  _ctxPortalRuntimeFilter = null; // Clear runtime filter on active project switch
+  _ctxPortalRenderHeadingChips();
   _ctxPortalRenderRows();
 }
 
@@ -414,6 +714,7 @@ window.addEventListener('langchange', () => {
   if (Array.isArray(_ctxPortalScopes) && _ctxPortalScopes.length) {
     const listEl = document.getElementById('ctx-projects-list');
     if (listEl) {
+      _ctxPortalRenderHeadingChips();
       _ctxPortalRenderScaffold(listEl);
       _ctxPortalRenderRows();
     }
