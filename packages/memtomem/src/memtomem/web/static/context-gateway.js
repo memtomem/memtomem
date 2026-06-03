@@ -235,7 +235,22 @@ function _ctxNormalizeActiveScope(scopes) {
   return active;
 }
 
-async function _ctxFetchProjects() {
+// Fetch ``/api/context/projects`` and classify the outcome, WITHOUT mutating
+// any module global. Returns ``{ data, warn }``:
+//   - ``data``  always a ``{scopes: [...]}`` object — the real scopes on
+//               success, or the synthetic Server-CWD fallback on any failure.
+//   - ``warn``  null on success / silent-404, else ``{kind, status?, detail}``
+//               describing a "loud" (toastable) failure shape.
+//
+// Pure by contract (#1194): a superseded, still-in-flight fetch that resolves
+// AFTER a newer one must not be able to clobber the shared ``_ctxProjectsCache``,
+// the normalized+persisted ``_ctxActiveScopeId``, or the failure-toast memo.
+// So this helper only READS — callers commit the result via
+// ``_ctxCommitProjects`` ONLY after re-checking their own sequence/scope guard.
+// ``opts.targetScope`` pins the tier when a caller must fetch projects and a
+// sibling resource (e.g. overview) under one tier, so a mid-flight tier flip
+// can't split the two requests across tiers (ADR-0021 §C).
+async function _ctxFetchProjectsData(opts = {}) {
   let data;
   // Four failure shapes need to stay distinguishable per #1080:
   //   - 404 / network throw   → older deployment or absent endpoint; the
@@ -254,7 +269,7 @@ async function _ctxFetchProjects() {
     // picker renders a per-scope count badge, so this shared loader must
     // request counts. ``_ctxWithTargetScope`` appends ``&target_scope=`` after
     // the existing ``?``.
-    const res = await fetch(_ctxWithTargetScope('/api/context/projects?include=counts', { includeScope: false }));
+    const res = await fetch(_ctxWithTargetScope('/api/context/projects?include=counts', { includeScope: false, targetScope: opts.targetScope }));
     if (!res.ok) {
       const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
@@ -301,6 +316,16 @@ async function _ctxFetchProjects() {
       }],
     };
   }
+  return { data, warn };
+}
+
+// Commit a ``_ctxFetchProjectsData`` result into the shared module state. Split
+// from the fetch (#1194) so each caller commits ONLY after its own
+// sequence/scope guard passes — a late, superseded fetch must not overwrite a
+// newer one's cache / active scope / toast memo. Carries the #1102
+// normalize-only-when-authoritative gate and the #1101 failure-toast de-dup.
+// Returns ``data`` for callers that render from it.
+function _ctxCommitProjects({ data, warn }) {
   _ctxProjectsCache = data.scopes || [];
   // Normalize only when the outcome is *authoritative* — i.e. exactly when we
   // did NOT raise a "loud" failure toast (``warn``). Three cases:
@@ -335,6 +360,18 @@ async function _ctxFetchProjects() {
     _ctxProjectsFetchWarnKey = null;
   }
   return data;
+}
+
+// Legacy all-in-one: fetch THEN immediately commit. Preserved for direct
+// callers and the #1080/#1101/#1102 tests that depend on the combined contract.
+// DO NOT call from a concurrency-sensitive UI loader: it commits BEFORE any
+// caller sequence guard, which re-introduces the #1194 stale-fetch race.
+// Guarded loaders use ``_ctxFetchProjectsData`` + a post-guard
+// ``_ctxCommitProjects`` instead.
+async function _ctxFetchProjects() {
+  const result = await _ctxFetchProjectsData();
+  _ctxCommitProjects(result);
+  return result.data;
 }
 
 function _ctxProjectControls(type, scopes = _ctxProjectsCache) {
@@ -1036,14 +1073,33 @@ function _renderCtxOverview(data) {
 
 async function loadCtxOverview() {
   const seq = ++_ctxOverviewSeq;
+  // Pin the tier once at entry. The projects fetch and the overview fetch must
+  // run under the SAME tier — otherwise a tier flip between them would commit a
+  // project list computed for one tier and then render overview counts for
+  // another (ADR-0021 §C; mirrors the portal's #972 ``requestedScope`` guard).
+  const requestedTier = _ctxTargetScope;
   const el = qs('ctx-overview-content');
   panelLoading(el);
   try {
-    await _ctxFetchProjects();
-    const res = await fetch(_ctxWithTargetScope('/api/context/overview'));
+    // Fetch projects, then commit ONLY after re-checking the guard, so a
+    // superseded in-flight fetch can't clobber the shared cache / active scope
+    // (#1194). The overview fetch URL depends on the just-committed active
+    // scope, so the commit happens here, before it.
+    const projectsResult = await _ctxFetchProjectsData({ targetScope: requestedTier });
+    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
+    _ctxCommitProjects(projectsResult);
+    // Pin the resolved effective scope alongside the tier so the overview
+    // request can't re-resolve against a cache a later refresh might mutate
+    // (ADR-0021 §C: pin BOTH scope and tier).
+    const pinnedScopeId = _ctxEffectiveScopeId();
+    const res = await fetch(_ctxWithTargetScope('/api/context/overview', {
+      targetScope: requestedTier,
+      scopeId: pinnedScopeId,
+      scopeResolved: true,
+    }));
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || t('settings.ctx.load_overview_failed'));
     const data = await res.json();
-    if (seq !== _ctxOverviewSeq) return;
+    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
     // Shape guard (sibling of the #1100 projects-fetch hardening): a bare-null
     // or non-object 200 would TypeError inside _renderCtxOverview; route it
     // through the failure path instead.
@@ -1051,7 +1107,7 @@ async function loadCtxOverview() {
     _ctxOverviewCache = data;
     _renderCtxOverview(data);
   } catch (err) {
-    if (seq !== _ctxOverviewSeq) return;
+    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
     _ctxOverviewCache = null;
     el.innerHTML = emptyState('', t('settings.ctx.load_overview_failed'), err.message);
   }
@@ -2518,8 +2574,12 @@ async function loadCtxList(type) {
   }
 
   try {
-    const data = await _ctxFetchProjects();
+    // Fetch then commit ONLY after the sequence guard, so a superseded
+    // in-flight projects fetch can't clobber the shared cache / active scope
+    // (#1194). The render below already gates on this same guard.
+    const result = await _ctxFetchProjectsData();
     if (seq !== _ctxListSeq[type]) return;
+    const data = _ctxCommitProjects(result);
     const scopes = data.scopes || [];
     if (!scopes.length) {
       // Should never happen — server cwd always present — but render
