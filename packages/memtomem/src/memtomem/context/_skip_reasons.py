@@ -38,6 +38,18 @@ TOML_PARSE_ERROR: Final = "toml_parse_error"
 PRIVACY_BLOCKED: Final = "privacy_blocked"
 PRIVACY_BLOCKED_PROJECT_SHARED: Final = "privacy_blocked_project_shared"
 
+# Versioning (ADR-0022) skip codes — emitted in Phase 1 of
+# ``sync_atomic_artifact`` when a label-aware ``resolve_canonical_bytes``
+# cannot resolve the requested label/version for one artifact. Per-item
+# isolation (a single artifact's missing label does not abort the whole
+# fan-out), consistent with the existing parse/read skip handling.
+LABEL_NOT_FOUND: Final = "label_not_found"
+VERSION_NOT_FOUND: Final = "version_not_found"
+# A non-``latest`` label / bare version tag was requested for a flat-layout
+# artifact, which has no per-artifact ``versions/`` store (ADR-0022 §3).
+# ``latest`` / no-label sync on a flat artifact is unaffected.
+VERSIONING_REQUIRES_DIR_LAYOUT: Final = "versioning_requires_dir_layout"
+
 # Closed set of skip codes — typing dataclass `skipped` triples and route
 # response builders against `SkipCode` catches typos at the construction site
 # instead of letting an arbitrary string slip through to the wire.
@@ -52,4 +64,7 @@ SkipCode = Literal[
     "toml_parse_error",
     "privacy_blocked",
     "privacy_blocked_project_shared",
+    "label_not_found",
+    "version_not_found",
+    "versioning_requires_dir_layout",
 ]

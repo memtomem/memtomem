@@ -7,7 +7,9 @@ from pathlib import Path
 
 import click
 
+from memtomem.context import versioning
 from memtomem.context.agents import (
+    AGENT_DIR_FILENAME,
     ON_DROP_LEVELS,
     StrictDropError,
     canonical_agent_name,
@@ -16,12 +18,13 @@ from memtomem.context.agents import (
     generate_all_agents,
 )
 from memtomem.context.commands import (
+    COMMAND_DIR_FILENAME,
     StrictDropError as CommandStrictDropError,
     diff_commands,
     extract_commands_to_canonical,
     generate_all_commands,
 )
-from memtomem.context._names import InvalidNameError
+from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import (
     detect_agent_dirs,
     detect_agent_files,
@@ -89,7 +92,7 @@ from memtomem.context.skills import (
 )
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
-from typing import Any, cast, get_args
+from typing import Any, Literal, cast, get_args
 
 from memtomem.config import (
     ContextGatewayConfig,
@@ -289,9 +292,10 @@ def _print_agents_generate(
     on_drop: str = "ignore",
     *,
     scope: TargetScope = "project_shared",
+    label: str | None = None,
 ) -> None:
     try:
-        result = generate_all_agents(root, strict=strict, on_drop=on_drop, scope=scope)
+        result = generate_all_agents(root, strict=strict, on_drop=on_drop, scope=scope, label=label)
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
@@ -392,9 +396,12 @@ def _print_commands_generate(
     on_drop: str = "ignore",
     *,
     scope: TargetScope = "project_shared",
+    label: str | None = None,
 ) -> None:
     try:
-        result = generate_all_commands(root, strict=strict, on_drop=on_drop, scope=scope)
+        result = generate_all_commands(
+            root, strict=strict, on_drop=on_drop, scope=scope, label=label
+        )
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
@@ -619,6 +626,46 @@ _SCOPE_OPTION = click.option(
         "so --scope=project_local skips the prompt (writes stay in-project)."
     ),
 )
+
+# ADR-0022: fan out a labeled version instead of the working canonical. Applies
+# only to the version-eligible kinds (agents / commands); ineligible included
+# kinds run label-less (see ``_warn_label_ineligible_kinds``).
+_LABEL_OPTION = click.option(
+    "--label",
+    default=None,
+    help=(
+        "Sync the version at this label (e.g. 'production') or a bare version "
+        "tag ('v2') instead of the working canonical. Applies to agents and "
+        "commands only; 'latest' / omitted means the working file."
+    ),
+)
+
+# Kinds whose fan-out honors --label (ADR-0022 v1 scope: agents + commands).
+_LABEL_ELIGIBLE_KINDS: frozenset[str] = frozenset({"agents", "commands"})
+
+
+def _warn_label_ineligible_kinds(label: str | None, inc: set[str]) -> None:
+    """Warn when --label is given but cannot apply to (some of) ``--include``.
+
+    ADR-0022 invariant 10: ``--label`` governs only agents/commands. Ineligible
+    included kinds (skills/settings/project-memory) run label-less; a label with
+    no eligible kind in ``--include`` is a warned no-op, never an error.
+    """
+    if label is None or label == "latest":
+        return
+    ineligible = sorted(inc - _LABEL_ELIGIBLE_KINDS)
+    if ineligible:
+        click.secho(
+            f"  note: --label does not apply to {', '.join(ineligible)} "
+            "(only agents/commands are versioned); they sync from the working file.",
+            fg="yellow",
+        )
+    if not (inc & _LABEL_ELIGIBLE_KINDS):
+        click.secho(
+            f"  note: --label={label} had no effect — no versioned kind "
+            "(agents/commands) in --include.",
+            fg="yellow",
+        )
 
 
 @click.group("context")
@@ -905,6 +952,7 @@ def _read_agent_file(path: Path) -> str:
     help="Skip confirmation prompts before writing settings files outside this project.",
 )
 @_SCOPE_OPTION
+@_LABEL_OPTION
 def generate_cmd(
     agent: str,
     include: tuple[str, ...],
@@ -912,6 +960,7 @@ def generate_cmd(
     on_drop: str,
     yes: bool,
     scope_flag: str | None,
+    label: str | None,
 ) -> None:
     """Generate agent files from .memtomem/context.md."""
     # Validate --agent up front so a typo fails loudly (exit 1) instead of
@@ -950,6 +999,7 @@ def generate_cmd(
     # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
     # ADR-0011 PR-E1 Codex review trip-wire).
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+    _warn_label_ineligible_kinds(label, inc)
 
     if "skills" in inc:
         click.echo("")
@@ -957,11 +1007,15 @@ def generate_cmd(
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
+        _print_agents_generate(
+            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+        )
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
+        _print_commands_generate(
+            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+        )
 
     if "settings" in inc:
         click.echo("")
@@ -1073,12 +1127,14 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     help="Skip confirmation prompts before writing settings files outside this project.",
 )
 @_SCOPE_OPTION
+@_LABEL_OPTION
 def sync_cmd(
     include: tuple[str, ...],
     strict: bool,
     on_drop: str,
     yes: bool,
     scope_flag: str | None,
+    label: str | None,
 ) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
@@ -1129,6 +1185,7 @@ def sync_cmd(
     # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
     # ADR-0011 PR-E1 Codex review trip-wire).
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
+    _warn_label_ineligible_kinds(label, inc)
 
     if "skills" in inc:
         click.echo("")
@@ -1136,11 +1193,15 @@ def sync_cmd(
 
     if "agents" in inc:
         click.echo("")
-        _print_agents_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
+        _print_agents_generate(
+            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+        )
 
     if "commands" in inc:
         click.echo("")
-        _print_commands_generate(root, strict=strict, on_drop=on_drop, scope=artifact_scope)
+        _print_commands_generate(
+            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+        )
 
     if "settings" in inc:
         click.echo("")
@@ -1155,6 +1216,125 @@ def sync_cmd(
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 
     click.secho("Synced.", fg="green")
+
+
+# ── Version snapshots + label pointers (ADR-0022) ────────────────────
+
+_VERSION_ARTIFACT_TYPES = ("agents", "commands")
+
+
+def _resolve_version_target(
+    artifact_type: str, name: str, scope_flag: str | None
+) -> tuple[Path, Path]:
+    """Resolve ``(artifact_dir, working_file)`` for a version operation.
+
+    Validates ``artifact_type`` (agents/commands) and ``name``, resolves the
+    scoped canonical root, and returns the per-artifact directory plus its
+    working canonical file (``agent.md`` / ``command.md``). Raises
+    ``click.ClickException`` on a bad type/name. The directory may not exist
+    yet (flat-layout or absent) — the versioning layer raises a clean error in
+    that case.
+    """
+    if artifact_type not in _VERSION_ARTIFACT_TYPES:
+        raise click.ClickException(
+            f"Unknown artifact type: {artifact_type}. "
+            f"Expected one of: {', '.join(_VERSION_ARTIFACT_TYPES)}."
+        )
+    try:
+        validate_name(name)
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+    root = _find_project_root()
+    scope = _resolve_artifact_cli_scope(scope_flag)
+    # ``artifact_type`` is narrowed to agents/commands by the guard above; cast
+    # to the ``canonical_artifact_dir`` literal so mypy keeps the kind typed.
+    kind = cast("Literal['agents', 'commands']", artifact_type)
+    artifact_dir = canonical_artifact_dir(kind, scope, root) / name
+    working_filename = AGENT_DIR_FILENAME if artifact_type == "agents" else COMMAND_DIR_FILENAME
+    return artifact_dir, artifact_dir / working_filename
+
+
+@context.group("version")
+def version_group() -> None:
+    """Manage version snapshots + label pointers for agents/commands (ADR-0022).
+
+    A version is an immutable snapshot of an artifact's working canonical;
+    a label (e.g. 'production') is a movable pointer over versions. Use
+    `mm context sync --label <name>` to fan out a labeled version.
+    """
+
+
+@version_group.command("create")
+@click.argument("artifact_type")
+@click.argument("name")
+@click.option("--note", default="", help="Optional annotation stored with the snapshot.")
+@_SCOPE_OPTION
+def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str | None) -> None:
+    """Snapshot the current working canonical as a new immutable version.
+
+    Example: `mm context version create agents my-agent --note "stable"`
+    """
+    artifact_dir, working_file = _resolve_version_target(artifact_type, name, scope_flag)
+    if not working_file.is_file():
+        raise click.ClickException(
+            f"No working canonical at {working_file}. The artifact must exist in "
+            f"directory layout — run `mm context migrate {artifact_type[:-1]} {name}` first."
+        )
+    try:
+        record = versioning.create_version(artifact_dir, working_file, note=note)
+    except versioning.VersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.secho(f"Created {artifact_type}/{name} version {record.tag}", fg="green")
+
+
+@version_group.command("promote")
+@click.argument("artifact_type")
+@click.argument("name")
+@click.option(
+    "--to", "label", required=True, help="Label to point at the version (e.g. production)."
+)
+@click.option("--version", "version", required=True, help="Version tag to promote (e.g. v2).")
+@_SCOPE_OPTION
+def version_promote_cmd(
+    artifact_type: str, name: str, label: str, version: str, scope_flag: str | None
+) -> None:
+    """Move a label pointer to a specific version (rollout == rollback).
+
+    Example: `mm context version promote agents my-agent --to production --version v2`
+    """
+    artifact_dir, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    try:
+        versioning.promote_label(artifact_dir, label, version)
+    except versioning.VersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.secho(f"Promoted {artifact_type}/{name}: {label} → {version}", fg="green")
+
+
+@version_group.command("list")
+@click.argument("artifact_type")
+@click.argument("name")
+@_SCOPE_OPTION
+def version_list_cmd(artifact_type: str, name: str, scope_flag: str | None) -> None:
+    """List versions and label pointers for an artifact."""
+    artifact_dir, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    try:
+        manifest = versioning.load_manifest(artifact_dir)
+    except versioning.VersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not manifest.versions:
+        click.echo(f"  (no versions for {artifact_type}/{name})")
+        return
+    # Reverse label map: tag → [labels] so each version line shows its pointers.
+    labels_by_tag: dict[str, list[str]] = {}
+    for label, tag in manifest.labels.items():
+        labels_by_tag.setdefault(tag, []).append(label)
+    click.secho(f"{artifact_type}/{name} versions:", fg="cyan")
+    for tag in sorted(manifest.versions, key=lambda t: int(t[1:])):
+        rec = manifest.versions[tag]
+        pointers = labels_by_tag.get(tag, [])
+        suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
+        note = f"  — {rec.note}" if rec.note else ""
+        click.echo(f"  {tag:6s} {rec.created_at}{suffix}{note}")
 
 
 @context.command("install")

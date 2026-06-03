@@ -108,6 +108,100 @@ class TestContextInitGenerateInline:
         assert not (home / ".codex" / "agents").exists()
 
 
+class TestContextVersionCliInline:
+    """In-process round-trip over ``mm context version`` + ``sync --label``
+    (ADR-0022). The pure module is covered in ``test_context_versioning.py``;
+    this pins the CLI surface and the edit/deploy split end-to-end."""
+
+    _AGENT = "---\nname: my-agent\ndescription: d\n---\n\nMARKER {m}\n"
+
+    def _dir_agent(self, project: Path, marker: str) -> Path:
+        adir = project / ".memtomem" / "agents" / "my-agent"
+        adir.mkdir(parents=True, exist_ok=True)
+        working = adir / "agent.md"
+        working.write_text(self._AGENT.format(m=marker), encoding="utf-8")
+        return working
+
+    def test_version_create_promote_sync_roundtrip(self, tmp_path, monkeypatch):
+        from memtomem.cli import _bootstrap
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+
+        working = self._dir_agent(project, marker="A")
+
+        # 1. create → versions/v1.md
+        r = runner.invoke(cli, ["context", "version", "create", "agents", "my-agent"])
+        assert r.exit_code == 0, r.output
+        assert (project / ".memtomem/agents/my-agent/versions/v1.md").is_file()
+
+        # 2. working file moves on to B
+        working.write_text(self._AGENT.format(m="B"), encoding="utf-8")
+
+        # 3. promote production → v1
+        r = runner.invoke(
+            cli,
+            [
+                "context",
+                "version",
+                "promote",
+                "agents",
+                "my-agent",
+                "--to",
+                "production",
+                "--version",
+                "v1",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        # 4. list shows v1 + the production pointer
+        r = runner.invoke(cli, ["context", "version", "list", "agents", "my-agent"])
+        assert r.exit_code == 0, r.output
+        assert "v1" in r.output and "production" in r.output
+
+        # 5. sync --label production → frozen v1 (marker A) fans out
+        r = runner.invoke(cli, ["context", "sync", "--include=agents", "--label", "production"])
+        assert r.exit_code == 0, r.output
+        out = (project / ".claude/agents/my-agent.md").read_text(encoding="utf-8")
+        assert "MARKER A" in out and "MARKER B" not in out
+
+        # 6. backward-compat: no --label syncs the working file (marker B)
+        r = runner.invoke(cli, ["context", "sync", "--include=agents"])
+        assert r.exit_code == 0, r.output
+        out = (project / ".claude/agents/my-agent.md").read_text(encoding="utf-8")
+        assert "MARKER B" in out
+
+    def test_version_create_on_flat_layout_errors(self, tmp_path, monkeypatch):
+        from memtomem.cli import _bootstrap
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+        monkeypatch.chdir(project)
+        runner = CliRunner()
+
+        # Flat-layout agent (no per-artifact directory).
+        flat_root = project / ".memtomem" / "agents"
+        flat_root.mkdir(parents=True, exist_ok=True)
+        (flat_root / "flat-agent.md").write_text(self._AGENT.format(m="A"), encoding="utf-8")
+
+        r = runner.invoke(cli, ["context", "version", "create", "agents", "flat-agent"])
+        assert r.exit_code != 0
+        assert "migrate" in r.output.lower()
+
+
 class TestContextInitGenerateSubprocess:
     """Out-of-process ``mm`` round-trip — process-boundary regressions
     that the in-process variant cannot surface (HOME / USERPROFILE /

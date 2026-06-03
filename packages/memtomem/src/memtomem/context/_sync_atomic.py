@@ -35,6 +35,11 @@ from memtomem.context import override as _override
 from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import GENERATOR_VENDOR, Layout
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
+from memtomem.context.versioning import (
+    LabelNotFoundError,
+    VersionNotFoundError,
+    VersionsDirMissingError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +146,14 @@ class AtomicSyncAdapter(Generic[T]):
     # appear under ``memtomem.context.agents`` / ``memtomem.context.commands``
     # for log filters that historically targeted those names.
     logger: logging.Logger = logger
+    # ADR-0022: optional label-aware canonical-bytes resolver. ``None``
+    # (default) ⇒ the engine reads ``item_path`` directly (today's behavior,
+    # byte-for-byte). When set, the engine calls this instead of
+    # ``item_path.read_bytes()`` in Phase 1, substituting a versioned snapshot
+    # for the working file. Signature ``(item_path, layout) -> bytes``; it may
+    # raise ``LabelNotFoundError`` / ``VersionNotFoundError`` /
+    # ``VersionsDirMissingError``, which the engine isolates as per-item skips.
+    resolve_canonical_bytes: Callable[[Path, Layout], bytes] | None = None
 
 
 def sync_atomic_artifact(
@@ -229,13 +242,42 @@ def sync_atomic_artifact(
             skipped.append((target, "unknown runtime", skip_codes.UNKNOWN_RUNTIME))
             continue
         for item_path, layout in canonicals:
+            # Artifact display name for skip rows: dir layout nests the file as
+            # ``<name>/agent.md``, so ``item_path.name`` would read "agent.md"
+            # — use the parent dir name instead so per-artifact skips (esp. the
+            # new label/version ones) name the artifact, not its filename.
+            display_name = item_path.parent.name if layout == "dir" else item_path.stem
             # PR-E3 Codex review fold: read canonical bytes ONCE and use
             # the captured buffer for both Gate A scan AND parse, closing
             # the scan→write TOCTOU window. A concurrent edit between
             # scan and parse would otherwise let an attacker present
             # clean bytes to scan and unsafe bytes to render.
+            #
+            # ADR-0022: when the adapter carries a label-aware resolver, it
+            # substitutes a versioned snapshot's bytes for the working file.
+            # Resolution failures isolate per-artifact as typed skips (a
+            # missing label on one artifact must not abort the whole fan-out),
+            # consistent with the OSError/parse handling below.
             try:
-                item_bytes = item_path.read_bytes()
+                if adapter.resolve_canonical_bytes is not None:
+                    item_bytes = adapter.resolve_canonical_bytes(item_path, layout)
+                else:
+                    item_bytes = item_path.read_bytes()
+            except LabelNotFoundError as exc:
+                skipped.append((display_name, f"label: {exc}", skip_codes.LABEL_NOT_FOUND))
+                continue
+            except VersionNotFoundError as exc:
+                skipped.append((display_name, f"version: {exc}", skip_codes.VERSION_NOT_FOUND))
+                continue
+            except VersionsDirMissingError as exc:
+                skipped.append(
+                    (
+                        display_name,
+                        f"versioning requires dir layout: {exc}",
+                        skip_codes.VERSIONING_REQUIRES_DIR_LAYOUT,
+                    )
+                )
+                continue
             except OSError as exc:
                 skipped.append((item_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                 continue

@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -55,6 +55,7 @@ from memtomem.context._sync_atomic import (
     sync_atomic_artifact,
 )
 from memtomem.context.scope_resolver import canonical_artifact_dir
+from memtomem.context.versioning import make_label_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -723,6 +724,7 @@ def generate_all_agents(
     on_drop: str = "ignore",
     *,
     scope: TargetScope = "project_shared",
+    label: str | None = None,
 ) -> AgentSyncResult:
     """Fan out every canonical sub-agent to the requested runtimes.
 
@@ -740,7 +742,15 @@ def generate_all_agents(
         scope: ADR-0011 PR-E3 — selects canonical root and runtime
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
+        label: ADR-0022 — when set to a non-``latest`` value, fan out the
+            version pointed at by this label (or a bare ``vN`` tag) instead of
+            the working ``agent.md``. ``None`` / ``"latest"`` preserve today's
+            behavior byte-for-byte (the working file). Per-artifact resolution
+            failures isolate as skips; they never abort the whole fan-out.
     """
+    adapter = _AGENT_ADAPTER
+    if label is not None and label != "latest":
+        adapter = replace(_AGENT_ADAPTER, resolve_canonical_bytes=make_label_resolver(label))
     # Runtime type matches AgentSyncResult because _AGENT_ADAPTER's
     # ``result_type`` is AgentSyncResult; mypy can't infer that through the
     # engine's AtomicSyncResult signature, so cast to preserve the public
@@ -748,7 +758,7 @@ def generate_all_agents(
     return cast(
         "AgentSyncResult",
         sync_atomic_artifact(
-            _AGENT_ADAPTER,
+            adapter,
             project_root,
             runtimes,
             strict=strict,

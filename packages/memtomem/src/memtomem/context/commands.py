@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -57,6 +57,7 @@ from memtomem.context.agents import (
     _toml_scalar,
 )
 from memtomem.context.scope_resolver import canonical_artifact_dir
+from memtomem.context.versioning import make_label_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +449,7 @@ def generate_all_commands(
     on_drop: str = "ignore",
     *,
     scope: TargetScope = "project_shared",
+    label: str | None = None,
 ) -> CommandSyncResult:
     """Fan out every canonical command to the requested runtimes.
 
@@ -465,12 +467,20 @@ def generate_all_commands(
         scope: ADR-0011 PR-E3 — selects canonical root and runtime
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
+        label: ADR-0022 — when set to a non-``latest`` value, fan out the
+            version pointed at by this label (or a bare ``vN`` tag) instead of
+            the working ``command.md``. ``None`` / ``"latest"`` preserve
+            today's behavior byte-for-byte. Per-artifact resolution failures
+            isolate as skips.
     """
+    adapter = _COMMAND_ADAPTER
+    if label is not None and label != "latest":
+        adapter = replace(_COMMAND_ADAPTER, resolve_canonical_bytes=make_label_resolver(label))
     # See note on the matching ``cast`` in agents.py.
     return cast(
         "CommandSyncResult",
         sync_atomic_artifact(
-            _COMMAND_ADAPTER,
+            adapter,
             project_root,
             runtimes,
             strict=strict,
