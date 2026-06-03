@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=92" />
+  <link rel="stylesheet" href="/style.css?v=93" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -502,6 +502,13 @@
             <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations" role="tab" aria-selected="false">
+          <span class="nav-icon" aria-hidden="true">📁</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_projects">Projects</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_projects_sub">Multi-project portal</span>
+          </span>
+        </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-skills" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🧩</span>
           <span class="nav-labels">
@@ -556,7 +563,32 @@
                       data-i18n-aria-label="settings.ctx.sync_all_aria">Sync All</button>
             </div>
           </div>
+          <!-- Sync All per-phase progress + result summary (ADR-0021 §C).
+               Sibling of #ctx-overview-content so the post-sync overview
+               reload doesn't wipe the summary. Populated by context-gateway.js
+               (_renderCtxSyncStatus); hidden until a Sync All run starts. -->
+          <div id="ctx-sync-status" class="ctx-sync-status" role="status" aria-live="polite" hidden></div>
           <div id="ctx-overview-content"></div>
+        </div>
+
+        <!-- Context Gateway: Projects (Portal) -->
+        <div class="settings-section" id="settings-ctx-projects">
+          <p class="settings-section-desc" data-i18n="settings.ctx.portal_desc">Browse, switch, rename, and unregister the projects memtomem tracks. Health shows which roots are missing or not yet initialized.</p>
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.portal_title">Projects</h2>
+            <div>
+              <button id="ctx-projects-refresh-btn" class="btn-ghost"
+                      data-i18n="settings.ctx.refresh"
+                      data-i18n-title="settings.ctx.refresh_tooltip"
+                      data-i18n-aria-label="settings.ctx.refresh_aria">Refresh</button>
+              <button class="btn-ghost ctx-add-project-btn" data-type="projects"
+                      data-i18n="settings.ctx.add_project"
+                      data-i18n-title="settings.ctx.portal_add_project_tooltip"
+                      data-i18n-aria-label="settings.ctx.portal_add_project_aria">Add Project</button>
+            </div>
+          </div>
+          <div id="ctx-portal-heading-chips" class="ctx-portal-heading-chips"></div>
+          <div id="ctx-projects-list"></div>
         </div>
 
         <!-- Context Gateway: Skills -->
@@ -1448,6 +1480,24 @@
     </div>
   </div>
 
+  <!-- Install Guide Modal -->
+  <div id="ctx-install-guide-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ctx-install-guide-title">
+    <div class="modal-inner confirm-dialog ctx-install-guide-dialog">
+      <div class="modal-header">
+        <span id="ctx-install-guide-title" class="modal-title"></span>
+        <button id="ctx-install-guide-close-btn" class="btn-ghost"
+                data-i18n-title="settings.ctx.install_guide_close_aria"
+                data-i18n-aria-label="settings.ctx.install_guide_close_aria"
+                title="Close install guide" aria-label="Close install guide">✕</button>
+      </div>
+      <div id="ctx-install-guide-body" class="ctx-install-guide-body">
+      </div>
+      <div class="confirm-actions">
+        <button type="button" id="ctx-install-guide-ok-btn" class="btn-primary" data-i18n="settings.ctx.install_guide_ok">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/vendor/purify.min.js?v=1"></script>
   <script src="/vendor/marked.umd.js?v=2"></script>
   <script src="/vendor/prism.min.js?v=1"></script>
@@ -1466,7 +1516,8 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=13"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=49"></script>
+  <script src="/context-gateway.js?v=51"></script>
+  <script src="/context-portal.js?v=1"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>
 </html>

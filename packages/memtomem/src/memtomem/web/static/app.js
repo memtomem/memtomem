@@ -1362,7 +1362,8 @@ const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
 // CTA, settings-namespaces.js Quick Links — auto-redirects without
 // per-call-site updates.
 const GATEWAY_SECTIONS = new Set([
-  'ctx-overview', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers', 'hooks-sync',
+  'ctx-overview', 'ctx-projects', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers',
+  'hooks-sync',
 ]);
 
 function loadNavCollapseState() {
@@ -1468,6 +1469,7 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'harness-health') { loadHarnessHealth(); loadWatchdogStatus(); }
   if (sectionName === 'hooks-sync') loadHooksSync();
   if (sectionName === 'ctx-overview') loadCtxOverview();
+  if (sectionName === 'ctx-projects') loadCtxProjects();
   if (sectionName === 'ctx-skills') loadCtxList('skills');
   if (sectionName === 'ctx-commands') loadCtxList('commands');
   if (sectionName === 'ctx-agents') loadCtxList('agents');
@@ -6502,6 +6504,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const confirmModal = qs('confirm-modal');
     if (confirmModal && !confirmModal.hidden) return; // handled by showConfirm's own listener
+    const installGuideModal = qs('ctx-install-guide-modal');
+    if (installGuideModal && !installGuideModal.hidden) { closeModal(installGuideModal); return; }
     const srcPreview = qs('source-preview-modal');
     if (srcPreview && !srcPreview.hidden) { closeModal(srcPreview); return; }
     const expandModal = qs('expand-modal');

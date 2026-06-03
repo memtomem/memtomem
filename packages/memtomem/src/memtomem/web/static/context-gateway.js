@@ -142,9 +142,14 @@ try {
   _ctxActiveScopeId = '';
 }
 
-function _ctxTargetScopeParam() {
-  if (_ctxTargetScope === 'project_shared') return '';
-  return `target_scope=${encodeURIComponent(_ctxTargetScope)}`;
+function _ctxTargetScopeParam(targetScope = _ctxTargetScope) {
+  // ``targetScope`` defaults to the live global so existing single-shot
+  // callers are unchanged. A multi-phase flow (Sync All) snapshots the tier
+  // once and passes it explicitly so a mid-run tier flip can't make later
+  // phases land in a different tier (ADR-0021 §C / Major-1) — see the Sync
+  // All handler's ``syncAllTier`` snapshot.
+  if (targetScope === 'project_shared') return '';
+  return `target_scope=${encodeURIComponent(targetScope)}`;
 }
 
 // The scope a request *effectively* targets, as a bare id ('' === Server-CWD).
@@ -174,10 +179,23 @@ function _ctxScopeParam(scopeId = _ctxActiveScopeId) {
 
 function _ctxWithTargetScope(url, opts = {}) {
   const params = [];
-  const targetParam = _ctxTargetScopeParam();
-  const scopeParam = opts.includeScope === false
-    ? ''
-    : _ctxScopeParam(opts.scopeId);
+  // ``opts.targetScope`` pins the tier (defaults to the live global); pass it
+  // alongside ``opts.scopeId`` to freeze both dimensions of a multi-phase run.
+  const targetParam = _ctxTargetScopeParam(opts.targetScope);
+  let scopeParam;
+  if (opts.includeScope === false) {
+    scopeParam = '';
+  } else if (opts.scopeResolved) {
+    // ``opts.scopeId`` is an ALREADY-effective id snapshotted once for a
+    // multi-phase run. Emit it verbatim, bypassing ``_ctxScopeParam`` →
+    // ``_ctxEffectiveScopeId``'s live ``_ctxProjectsCache`` re-resolution — a
+    // mid-run cache refresh marking the pinned project missing must not
+    // collapse later phases to Server-CWD (ADR-0016 §5 / ADR-0021 §C: pin
+    // BOTH scope and tier, not just tier).
+    scopeParam = opts.scopeId ? `scope_id=${encodeURIComponent(opts.scopeId)}` : '';
+  } else {
+    scopeParam = _ctxScopeParam(opts.scopeId);
+  }
   if (targetParam) params.push(targetParam);
   if (scopeParam) params.push(scopeParam);
   if (!params.length) return url;
@@ -232,7 +250,11 @@ async function _ctxFetchProjects() {
   //     same "endpoint exists but failing" class, surface a toast (#1100).
   let warn = null;
   try {
-    const res = await fetch(_ctxWithTargetScope('/api/context/projects', { includeScope: false }));
+    // ``?include=counts`` is opt-in server-side (ADR-0021 PR2): the scope
+    // picker renders a per-scope count badge, so this shared loader must
+    // request counts. ``_ctxWithTargetScope`` appends ``&target_scope=`` after
+    // the existing ``?``.
+    const res = await fetch(_ctxWithTargetScope('/api/context/projects?include=counts', { includeScope: false }));
     if (!res.ok) {
       const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
@@ -269,8 +291,13 @@ async function _ctxFetchProjects() {
         tier: 'project',
         sources: ['server-cwd'],
         missing: false,
+        // Match the API scope shape: ``stale`` (ADR-0021 PR2) and the full
+        // four-key counts dict. The synthetic fallback is a safe default
+        // (never stale → no spurious "Initialize" prompt) so a fetch outage
+        // can't desync the rendered shape from a real response.
+        stale: false,
         experimental: false,
-        counts: { skills: 0, commands: 0, agents: 0 },
+        counts: { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 },
       }],
     };
   }
@@ -337,6 +364,9 @@ function _ctxWireProjectControls() {
       const next = select.value || '';
       if (next === _ctxActiveScopeId) return;
       _ctxActiveScopeId = next;
+      // A prior Sync All summary belongs to the project it ran on; drop it on
+      // a project switch so the summary can't be misread against a new scope.
+      _renderCtxSyncStatus(null);
       _ctxNormalizeActiveScope(_ctxProjectsCache);
       _ctxBumpActiveScopeDetailSeq();
       try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
@@ -377,6 +407,9 @@ function _ctxWireTierControls() {
       const next = btn.dataset.scope;
       if (!next || next === _ctxTargetScope) return;
       _ctxTargetScope = next;
+      // A prior Sync All summary belongs to the tier it ran on; drop it so a
+      // tier switch doesn't leave a result summary that no longer applies.
+      _renderCtxSyncStatus(null);
       // Update write-blocked affordances synchronously so the user sees
       // the dim/banner change immediately, before the async list refetch
       // settles. ``loadCtxList`` / ``loadCtxOverview`` re-apply on success
@@ -565,15 +598,17 @@ function _ctxParseDeepLink() {
   const section = params.get('section') || '';
   const filter = params.get('filter') || '';
   const artifact = params.get('artifact') || '';
-  if (!section && !filter && !artifact) return null;
+  const runtime = params.get('runtime') || '';
+  if (!section && !filter && !artifact && !runtime) return null;
   return {
     section,
     filter: _CTX_DEEP_LINK_FILTERS.has(filter) ? filter : '',
     artifact,
+    runtime,
   };
 }
 
-function _ctxBuildDeepLinkUrl({ section, filter, artifact }) {
+function _ctxBuildDeepLinkUrl({ section, filter, artifact, runtime }) {
   // Build the URL by mutating the *current* URL's search params rather
   // than constructing a fresh string — preserves any unrelated query
   // params the SPA might be using (or future feature might add) and
@@ -582,9 +617,11 @@ function _ctxBuildDeepLinkUrl({ section, filter, artifact }) {
   url.searchParams.delete('section');
   url.searchParams.delete('filter');
   url.searchParams.delete('artifact');
+  url.searchParams.delete('runtime');
   if (section) url.searchParams.set('section', section);
   if (filter) url.searchParams.set('filter', filter);
   if (artifact) url.searchParams.set('artifact', artifact);
+  if (runtime) url.searchParams.set('runtime', runtime);
   return url.pathname + (url.search || '') + (url.hash || '');
 }
 
@@ -602,7 +639,7 @@ function _ctxSetDeepLink(state) {
 }
 
 function _ctxClearDeepLink() {
-  _ctxSetDeepLink({ section: '', filter: '', artifact: '' });
+  _ctxSetDeepLink({ section: '', filter: '', artifact: '', runtime: '' });
 }
 
 // Map the dashboard tile's dominant issue (the same ladder the badge
@@ -1471,6 +1508,10 @@ window.addEventListener('langchange', () => {
     } else {
       loadCtxOverview();
     }
+    // The Sync All status region lives outside ``#ctx-overview-content`` so
+    // neither re-render above touches it. Re-render from the retained state so
+    // its phase labels / summary follow the locale flip (#698 staleness class).
+    if (_ctxSyncStatusState) _renderCtxSyncStatus(_ctxSyncStatusState);
     // The Context Gateway sub-sections are mutually exclusive — if the
     // overview is active, none of the per-type list sections can be.
     return;
@@ -1583,6 +1624,121 @@ window.addEventListener('langchange', () => {
   }
 });
 
+// -- Sync All per-phase progress + result summary (ADR-0021 §C) --------------
+//
+// The Sync All fan-out is a sequence of independent ``POST /sync`` calls (one
+// per artifact type, then settings), so the streaming ``makeChunkProgressRenderer``
+// (built for SSE chunk events) does not fit. Instead we render the phase list
+// declaratively from a single state object: each phase carries a ``state``
+// (pending → syncing → done | failed | not_run) and an optional one-line
+// ``summary`` (generated/dropped/skipped counts). The same object is the source
+// of truth re-rendered on ``langchange`` (so a locale flip re-translates the
+// labels) and cleared on a scope/tier switch (the summary is per-run).
+const _CTX_SYNC_PHASES = ['skills', 'commands', 'agents', 'mcp-servers', 'settings'];
+
+// Last Sync All run's phase states, or null when nothing has run / was cleared.
+// Shape: { skills: {state, summary?}, commands: {...}, ... }.
+let _ctxSyncStatusState = null;
+
+function _ctxSyncPhaseLabel(phase) {
+  // Reuse the existing per-phase titles (also used by the partial-failure
+  // toast). ``mcp-servers`` → ``mcp_servers_phase_title``.
+  return t(`settings.ctx.${String(phase).replace(/-/g, '_')}_phase_title`);
+}
+
+// Extract RAW per-type counts from an artifact sync response body
+// ({generated, dropped?, skipped}). Stored verbatim in the phase state — never
+// a pre-localized string — so the ``langchange`` re-render can format them in
+// the current locale (a frozen localized summary would leave a Korean phase
+// label next to an English "2 generated", #698 staleness class).
+function _ctxSyncArtifactCounts(body) {
+  const len = (arr) => (Array.isArray(arr) ? arr.length : 0);
+  return {
+    generated: len(body && body.generated),
+    dropped: len(body && body.dropped),
+    skipped: len(body && body.skipped),
+  };
+}
+
+// Format raw counts into a localized one-line summary, AT RENDER TIME. Counts
+// of 0 for dropped/skipped are omitted to keep the line uncluttered;
+// ``generated`` is always shown so a no-op sync reads as "0 generated" rather
+// than as a blank.
+function _ctxSyncFormatCounts(counts) {
+  const c = counts || {};
+  const parts = [t('settings.ctx.sync_count_generated', { count: c.generated || 0 })];
+  if (c.dropped > 0) parts.push(t('settings.ctx.sync_count_dropped', { count: c.dropped }));
+  if (c.skipped > 0) parts.push(t('settings.ctx.sync_count_skipped', { count: c.skipped }));
+  return parts.join(' · ');
+}
+
+// Render (or clear, when ``states`` is null) the status region. Declarative —
+// rebuilds the whole list each call so repeated updates can't desync.
+function _renderCtxSyncStatus(states) {
+  const el = document.getElementById('ctx-sync-status');
+  if (!el) return;
+  _ctxSyncStatusState = states;
+  if (!states) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  const rows = _CTX_SYNC_PHASES.map((phase) => {
+    const entry = states[phase] || { state: 'pending' };
+    const label = escapeHtml(_ctxSyncPhaseLabel(phase));
+    let badge;
+    if (entry.state === 'syncing') {
+      badge = `<span class="ctx-sync-spinner" aria-hidden="true"></span>`
+        + `<span class="ctx-sync-state">${escapeHtml(t('settings.ctx.sync_state_syncing'))}</span>`;
+    } else if (entry.state === 'done') {
+      // Format the stored raw counts here so a langchange re-render picks up
+      // the active locale; phases with no counts (settings) read as "Done".
+      const text = entry.counts
+        ? _ctxSyncFormatCounts(entry.counts)
+        : t('settings.ctx.sync_state_done');
+      badge = `<span class="ctx-sync-state ctx-sync-state--done">${escapeHtml(text)}</span>`;
+    } else if (entry.state === 'failed') {
+      badge = `<span class="ctx-sync-state ctx-sync-state--failed">`
+        + `${escapeHtml(t('settings.ctx.sync_state_failed'))}</span>`;
+    } else if (entry.state === 'attention') {
+      // Settings landed but needs host-write confirmation — distinct from a
+      // plain ``done`` so the row matches the "complete except Settings" toast.
+      badge = `<span class="ctx-sync-state ctx-sync-state--attention">`
+        + `${escapeHtml(t('settings.ctx.sync_state_needs_confirmation'))}</span>`;
+    } else if (entry.state === 'not_run') {
+      badge = `<span class="ctx-sync-state ctx-sync-state--muted">`
+        + `${escapeHtml(t('settings.ctx.sync_state_not_run'))}</span>`;
+    } else {
+      badge = `<span class="ctx-sync-state ctx-sync-state--muted">`
+        + `${escapeHtml(t('settings.ctx.sync_state_pending'))}</span>`;
+    }
+    // ``entry.state`` is a controlled enum (set only by ``setPhase`` with
+    // literal values), so it needs no escaping in the class name.
+    return `<li class="ctx-sync-phase ctx-sync-phase--${entry.state}">`
+      + `<span class="ctx-sync-phase-label">${label}</span>${badge}</li>`;
+  }).join('');
+  el.hidden = false;
+  el.innerHTML = `<p class="ctx-sync-status-heading">`
+    + `${escapeHtml(t('settings.ctx.sync_status_heading'))}</p>`
+    + `<ul class="ctx-sync-phase-list">${rows}</ul>`;
+}
+
+// Disable (or restore) the tier + active-project controls for the duration of
+// a Sync All run. The tier/project values are already pinned into the phase
+// URLs (see ``_ctxWithTargetScope`` opts), so this is a clarity affordance —
+// it prevents the user from flipping a control whose change won't take effect
+// until the next run. Scoped to the overview section so per-list-page controls
+// are untouched. ``loadCtxOverview`` re-renders fresh (enabled) controls in the
+// handler's ``finally``, so this only governs the in-flight window.
+function _ctxSetSyncControlsDisabled(disabled) {
+  document
+    .querySelectorAll('#settings-ctx-overview .ctx-tier-filter button')
+    .forEach((btn) => { btn.disabled = disabled; });
+  document
+    .querySelectorAll('#settings-ctx-overview .ctx-project-select')
+    .forEach((sel) => { sel.disabled = disabled; });
+}
+
 // Sync All button
 document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-sync-all-btn');
@@ -1609,6 +1765,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   });
   if (!ok) return;
   btnLoading(btn, true);
+  // Lock the tier/project controls for the run. The phase URLs are pinned to
+  // the snapshot below, so this is a clarity affordance — a mid-run flip
+  // wouldn't take effect until the next run, and disabling makes that obvious.
+  _ctxSetSyncControlsDisabled(true);
   // Track per-phase outcomes so we can (a) refresh the overview even when
   // a later phase fails — without this the dashboard keeps showing
   // pre-sync counts while disk has already moved (issue #1074) — and
@@ -1618,8 +1778,35 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   const succeeded = [];
   let failed = null;
   let anyPhaseStarted = false;
+  // Declarative per-phase status: all pending up front, then each phase moves
+  // pending → syncing → done | failed; phases never reached after a failure
+  // are marked not_run at the end. ``setPhase`` mutates the shared object in
+  // place and re-renders, so the ``langchange`` listener can re-translate from
+  // the same object (ADR-0021 §C per-phase progress + result summary). The
+  // third arg is RAW counts ({generated,dropped,skipped}), never a localized
+  // string — formatting happens in ``_renderCtxSyncStatus`` so a locale flip
+  // re-translates the summary too.
+  const phaseStates = {};
+  for (const phase of _CTX_SYNC_PHASES) phaseStates[phase] = { state: 'pending' };
+  const setPhase = (phase, state, counts) => {
+    phaseStates[phase] = { state, counts };
+    _renderCtxSyncStatus(phaseStates);
+  };
+  _renderCtxSyncStatus(phaseStates);
   try {
-    const syncAllScopeId = _ctxActiveScopeId;
+    // Snapshot BOTH dimensions once, right after confirm and before the first
+    // await, then pass them fixed to every phase URL. ``_ctxWithTargetScope``
+    // otherwise re-reads the mutable ``_ctxTargetScope`` global (tier) and
+    // re-resolves the scope against the live ``_ctxProjectsCache`` on each
+    // call, so a mid-run tier flip OR a cache refresh could send later phases
+    // to a different (project, tier) — violating "one (project, tier) per
+    // invocation" (ADR-0016 §5 / ADR-0021 §C Major-1). The scope is resolved to
+    // its effective value here (Server-CWD collapses to '') and passed with
+    // ``scopeResolved`` so it is emitted verbatim. Pinning, not bailing: the
+    // run completes on the (project, tier) the confirm dialog was shown for;
+    // any flip applies to the next run.
+    const syncAllScopeId = _ctxEffectiveScopeId(_ctxActiveScopeId);
+    const syncAllTier = _ctxTargetScope;
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
@@ -1627,14 +1814,20 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
+      setPhase(typ, 'syncing');
       let resp;
       try {
         resp = await fetch(
-          _ctxWithTargetScope(`/api/context/${typ}/sync`, { scopeId: syncAllScopeId }),
+          _ctxWithTargetScope(`/api/context/${typ}/sync`, {
+            scopeId: syncAllScopeId,
+            scopeResolved: true,
+            targetScope: syncAllTier,
+          }),
           { method: 'POST', headers },
         );
       } catch (err) {
         failed = { phase: typ, reason: err.message };
+        setPhase(typ, 'failed');
         break;
       }
       if (!resp.ok) {
@@ -1642,9 +1835,16 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           phase: typ,
           reason: await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`),
         };
+        setPhase(typ, 'failed');
         break;
       }
+      // Parse the body for the per-type result counts (generated/dropped/
+      // skipped). Tolerates an empty/non-JSON body — a bare ``{}`` yields all
+      // zeros (renders as "0 generated"), never throws. Store RAW counts; the
+      // render formats them per-locale.
+      const body = await resp.json().catch(() => ({}));
       succeeded.push(typ);
+      setPhase(typ, 'done', _ctxSyncArtifactCounts(body));
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored
@@ -1671,10 +1871,15 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     let settingsReason = '';
     if (!failed) {
       anyPhaseStarted = true;
+      setPhase('settings', 'syncing');
       let settingsResp;
       try {
         settingsResp = await fetch(
-          _ctxWithTargetScope('/api/context/settings/sync', { scopeId: syncAllScopeId }),
+          _ctxWithTargetScope('/api/context/settings/sync', {
+            scopeId: syncAllScopeId,
+            scopeResolved: true,
+            targetScope: syncAllTier,
+          }),
           { method: 'POST', headers },
         );
       } catch (err) {
@@ -1705,20 +1910,38 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           }
         }
       }
+      // Reflect the settings outcome in its status row. ``error``/``aborted``
+      // (and a transport/non-OK ``failed``) read as failed; ``needs_confirmation``
+      // reads as ``attention`` so the row matches the "complete except Settings"
+      // toast (the toast also carries the Open Settings action); ``ok``/
+      // ``skipped`` read as done.
+      if (failed && failed.phase === 'settings') {
+        setPhase('settings', 'failed');
+      } else if (settingsSeverity === 'error' || settingsSeverity === 'aborted') {
+        setPhase('settings', 'failed');
+      } else if (settingsSeverity === 'needs_confirmation') {
+        setPhase('settings', 'attention');
+      } else {
+        setPhase('settings', 'done');
+      }
+    }
+    // Any phase still pending was skipped because an earlier phase failed —
+    // mark it not_run so the summary doesn't leave a frozen spinner/pending.
+    for (const phase of _CTX_SYNC_PHASES) {
+      if (phaseStates[phase].state === 'pending') setPhase(phase, 'not_run');
     }
     // Decide the final toast. Partial-success branches name the phases
     // that landed so the user can map the toast to what disk actually
     // changed; a bare "Sync failed: X" after a half-completed run is
     // the failure mode the issue calls out.
-    const phaseLabel = (p) => t(`settings.ctx.${String(p).replace(/-/g, '_')}_phase_title`);
     if (failed) {
       if (succeeded.length === 0) {
         showToast(t('toast.sync_failed', { error: failed.reason }), 'error');
       } else {
         showToast(
           t('toast.sync_partial_failed', {
-            succeeded: succeeded.map(phaseLabel).join(', '),
-            failed_phase: phaseLabel(failed.phase),
+            succeeded: succeeded.map(_ctxSyncPhaseLabel).join(', '),
+            failed_phase: _ctxSyncPhaseLabel(failed.phase),
             reason: failed.reason,
           }),
           'error',
@@ -1743,10 +1966,16 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       showToast(t('settings.ctx.sync_success'));
     }
   } finally {
+    // Restore the tier/project controls. ``loadCtxOverview`` below re-renders
+    // fresh (enabled) controls anyway, but restore explicitly so an early
+    // bail or a sequence-guarded overview skip can't leave them stuck.
+    _ctxSetSyncControlsDisabled(false);
     // Refresh the overview whenever any phase actually fired — this
     // is the load-bearing line for #1074. A mid-run failure still
     // leaves disk in a new state, so the dashboard counts must
-    // reflect what the next attempt would be diffing against.
+    // reflect what the next attempt would be diffing against. The
+    // ``#ctx-sync-status`` summary lives outside ``#ctx-overview-content``,
+    // so this reload leaves the per-phase result summary on screen.
     if (anyPhaseStarted) {
       loadCtxOverview();
     }
@@ -3501,7 +3730,13 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
           _ctxActiveScopeId = data.scope_id;
           try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
         }
-        loadCtxList(type);
+        // The Portal board (ADR-0021 PR4) shares this Add Project button but has
+        // no per-type ``loadCtxList`` — route it to its own loader.
+        if (type === 'projects') {
+          loadCtxProjects();
+        } else {
+          loadCtxList(type);
+        }
       } catch (err) {
         showToast(t('toast.request_failed', { error: err.message }), 'error');
       } finally {

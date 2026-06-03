@@ -3739,6 +3739,62 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   color: white;
 }
 
+/* Sync All per-phase progress + result summary (ADR-0021 §C). */
+.ctx-sync-status {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.ctx-sync-status-heading {
+  margin: 0 0 8px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.ctx-sync-phase-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ctx-sync-phase {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.82rem;
+}
+.ctx-sync-phase-label { color: var(--text); }
+.ctx-sync-phase--pending .ctx-sync-phase-label,
+.ctx-sync-phase--not_run .ctx-sync-phase-label { color: var(--muted); }
+.ctx-sync-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ctx-sync-state--done { color: var(--green); }
+.ctx-sync-state--failed { color: var(--danger); }
+.ctx-sync-state--attention { color: var(--yellow); }
+.ctx-sync-state--muted { color: var(--muted); }
+.ctx-sync-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.65s linear infinite;
+}
+
 .ctx-overview-header { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 12px; font-size: 0.85rem; color: var(--muted); }
 .ctx-overview-root, .ctx-overview-runtimes, .ctx-overview-last-sync { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ctx-overview-root-label, .ctx-overview-runtimes-label, .ctx-overview-last-sync-label { font-weight: 600; color: var(--text); }
@@ -3814,6 +3870,87 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 }
 .ctx-scope-badge--experimental { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 .ctx-scope-badge--missing { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
+.ctx-scope-badge--stale { background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
+
+/* Context Portal (ADR-0021 PR4) — multi-project board */
+.ctx-portal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.ctx-portal-search {
+  flex: 1 1 220px;
+  min-width: 160px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+.ctx-portal-sort { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.85rem; }
+.ctx-portal-sort select {
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+.ctx-portal-rows { display: flex; flex-direction: column; gap: 8px; }
+.ctx-portal-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.ctx-portal-row--active { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+/* Non-color cue in addition to the dimming + the "(missing)" text badge, so the
+ * missing state isn't conveyed by opacity alone (WCAG 1.4.1). */
+.ctx-portal-row--missing { opacity: 0.6; border-left: 3px dashed var(--danger); }
+.ctx-portal-row-main { min-width: 0; flex: 1 1 auto; }
+.ctx-portal-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctx-portal-label { color: var(--text); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.ctx-portal-label-input {
+  padding: 3px 7px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font: inherit;
+}
+.ctx-portal-root {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-portal-counts { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.ctx-portal-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.ctx-portal-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.ctx-portal-active-badge {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent);
+  font-weight: 600;
+}
 .ctx-scope-remove {
   margin-left: auto;
   background: transparent;
@@ -3840,6 +3977,176 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   padding: 1px 6px;
 }
 .ctx-runtime-badge--error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
+
+/* Context Portal per-CLI runtime chips & filter (PR5) */
+.ctx-portal-heading-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 15px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ctx-portal-runtimes-row,
+.ctx-portal-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ctx-portal-heading-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 80px;
+}
+.ctx-portal-runtimes-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ctx-runtime-chip {
+  /* `border: 0` + `appearance: none` reset UA chrome so the not-installed
+     chip, rendered as a real <button> for keyboard access, matches the
+     <span> status chips; the --installed/--registered variants add a border. */
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 12px;
+  white-space: nowrap;
+  cursor: default;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: all 0.2s ease;
+}
+.ctx-runtime-chip--greyed {
+  background: rgba(123, 127, 150, 0.12);
+  color: var(--muted);
+}
+button.ctx-runtime-chip--greyed {
+  cursor: pointer;
+}
+button.ctx-runtime-chip--greyed:hover {
+  background: rgba(123, 127, 150, 0.22);
+}
+button.ctx-runtime-chip--greyed:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ctx-runtime-chip--installed {
+  background: rgba(243, 156, 18, 0.15);
+  color: var(--yellow);
+  border: 1px solid rgba(243, 156, 18, 0.3);
+  padding: 1px 7px;
+}
+.ctx-runtime-chip--registered {
+  background: rgba(76, 175, 125, 0.15);
+  color: var(--green);
+  border: 1px solid rgba(76, 175, 125, 0.3);
+  padding: 1px 7px;
+}
+.ctx-portal-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.ctx-portal-filter-group button {
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.ctx-portal-filter-group button.active {
+  background: var(--accent);
+  color: white;
+}
+.ctx-portal-filter-group button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ctx-portal-row-lights {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-left: 8px;
+}
+.ctx-portal-row-light {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.ctx-portal-row-light--uninstalled {
+  background: var(--muted);
+  opacity: 0.4;
+}
+.ctx-portal-row-light--installed {
+  background: var(--yellow);
+}
+.ctx-portal-row-light--registered {
+  background: var(--green);
+}
+.ctx-install-guide-body {
+  margin: 15px 0;
+  font-size: 0.9rem;
+}
+.ctx-install-guide-body .guide-text {
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.ctx-install-guide-body .guide-text-sm {
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.ctx-install-guide-body .guide-section-sub {
+  font-size: 0.88rem;
+  font-weight: 600;
+  margin: 15px 0 6px 0;
+  color: var(--text);
+}
+.ctx-install-guide-body .guide-code-block {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-hover);
+}
+.ctx-install-guide-body .guide-code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 10px;
+  background: var(--border);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.ctx-install-guide-body .guide-code {
+  margin: 0;
+  padding: 10px;
+  font-size: 0.8rem;
+  overflow-x: auto;
+  background: transparent;
+}
+.ctx-install-guide-body .guide-code code {
+  font-family: var(--mono);
+}
+.ctx-install-guide-body .guide-note {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
 
 /* Import-first state: when the cwd's canonical count is zero, demote the
    Sync button (no-op until canonicals exist) and promote Import to the

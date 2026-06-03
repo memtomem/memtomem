@@ -1001,7 +1001,11 @@ def test_q_pr4_langchange_off_section_does_not_call_loadCtxList(page, mm_web_url
             body=json.dumps(_CWD_PROJECTS_WITH_NON_CWD_MISSING),
         )
 
-    page.route("**/api/context/projects", _projects_handler)
+    # Trailing ``**`` so the now-``?include=counts`` query string still matches
+    # (ADR-0021 PR2 made counts opt-in; the loader appends the param). Without
+    # it a stray fetch would slip past this handler and the no-call assertion
+    # below would pass vacuously.
+    page.route("**/api/context/projects**", _projects_handler)
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.goto(mm_web_url)
     page.locator("#tabbtn-search").click()

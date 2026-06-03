@@ -4,9 +4,12 @@ PR2 of the multi-project context UI series — see
 ``memtomem-docs/memtomem/planning/multi-project-context-ui-rfc.md``.
 
 Endpoints:
-- ``GET /api/context/projects`` — list all discovered scopes with item counts.
+- ``GET /api/context/projects`` — list all discovered scopes with health and
+  optional (``?include=counts``) per-type item counts.
 - ``POST /api/context/known-projects`` — register a project root for the
   Add Project UI; idempotent.
+- ``PATCH /api/context/known-projects/{scope_id}`` — rename a registration
+  (label only).
 - ``DELETE /api/context/known-projects/{scope_id}`` — drop a registration
   (including stale entries whose root no longer exists).
 
@@ -211,11 +214,16 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
         "tier": scope.tier,
         "sources": list(scope.sources),
         "missing": scope.missing,
+        "stale": scope.stale,
         "experimental": scope.experimental,
+        # Counts are opt-in via ``?include=counts``: each scope costs several
+        # per-type artifact scans (see ``_counts_for``), so the N-project Portal
+        # list stays cheap by default. ``null`` means "not computed" — distinct
+        # from a genuine zero — and a missing root has nothing to count.
         "counts": (
             _counts_for(scope.root, target_scope=target_scope)
             if (with_counts and scope.root is not None and not scope.missing)
-            else {"skills": 0, "commands": 0, "agents": 0, "mcp-servers": 0}
+            else None
         ),
         "runtime_coverage": (
             compute_runtime_coverage(scope.root)
@@ -236,18 +244,32 @@ async def list_projects(
             "is counted only when explicitly requested."
         ),
     ),
+    include: str = Query(
+        "",
+        description=(
+            "Comma-separated optional sections to compute. Recognized: 'counts' "
+            "(per-type item counts — omitted by default because each scope costs "
+            "several artifact scans). Unknown tokens are ignored."
+        ),
+    ),
 ) -> dict:
-    """Enumerate discovered project scopes with per-type item counts.
+    """Enumerate discovered project scopes with health and optional item counts.
 
-    Response shape (RFC §Decision 4):
+    Response shape (RFC §Decision 4, extended by ADR-0021 PR2):
 
-    ``{scopes: [{scope_id, label, root, tier, sources, missing,
-    experimental, counts: {skills, commands, agents}}]}``
+    ``{target_scope, scopes: [{project_scope_id, scope_id, label, root, tier,
+    sources, missing, stale, experimental, counts}]}`` where ``counts`` is
+    ``{skills, commands, agents, mcp-servers}`` only when ``?include=counts``
+    is requested (else ``null``).
     """
+    include_tokens = {tok.strip() for tok in include.split(",") if tok.strip()}
+    with_counts = "counts" in include_tokens
     scopes = _discover_for(request)
     return {
         "target_scope": target_scope,
-        "scopes": [_scope_to_dict(s, with_counts=True, target_scope=target_scope) for s in scopes],
+        "scopes": [
+            _scope_to_dict(s, with_counts=with_counts, target_scope=target_scope) for s in scopes
+        ],
     }
 
 
@@ -283,7 +305,12 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
 
     cfg = _gateway_config(request)
     store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
-    entry = store.add(candidate, label=body.label)
+    # Normalize the label the same way PATCH does: a blank / whitespace-only
+    # value stores None (basename fallback). Since a stored label now wins label
+    # precedence in discovery, an unnormalized "   " here would otherwise render
+    # a blank project name.
+    label = (body.label or "").strip() or None
+    entry = store.add(candidate, label=label)
     project_scope_id = compute_scope_id(entry.root)
 
     response: dict = {
@@ -301,6 +328,43 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
             "No .claude/.gemini/.agents/.kimi/.memtomem directory found under this root."
         )
     return response
+
+
+# ── PATCH /context/known-projects/{scope_id} ─────────────────────────────
+
+
+class UpdateProjectLabelRequest(BaseModel):
+    label: str | None = None
+
+
+@router.patch("/context/known-projects/{scope_id}")
+async def update_known_project(
+    scope_id: str, body: UpdateProjectLabelRequest, request: Request
+) -> dict:
+    """Rename a registered project (label only).
+
+    The store is otherwise append/delete-only; this is the one mutator that
+    edits an existing entry in place. ``root`` and ``added_at`` are preserved —
+    the scope_id is path-derived, so a rename never moves the project. A blank
+    or whitespace-only label *clears* the custom label, so discovery falls back
+    to the directory basename. 404 when no registration matches (mirrors
+    DELETE) so the client can tell "renamed" from "never registered".
+
+    Only known-projects entries are editable — the implicit server-cwd scope
+    must be registered (POST) before it can be relabeled.
+    """
+    cfg = _gateway_config(request)
+    store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
+    label = (body.label or "").strip() or None
+    updated = store.update_label_by_scope_id(scope_id, label)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
+    return {
+        "project_scope_id": scope_id,
+        "scope_id": scope_id,
+        "root": str(updated.root),
+        "label": updated.label,
+    }
 
 
 # ── DELETE /context/known-projects/{scope_id} ────────────────────────────
