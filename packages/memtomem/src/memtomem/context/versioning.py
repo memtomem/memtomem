@@ -274,7 +274,13 @@ def next_version_tag(manifest: VersionsManifest) -> str:
     return f"v{max(_tag_num(t) for t in manifest.versions) + 1}"
 
 
-def create_version(artifact_dir: Path, working_file: Path, note: str = "") -> VersionRecord:
+def create_version(
+    artifact_dir: Path,
+    working_file: Path,
+    note: str = "",
+    *,
+    source_bytes: bytes | None = None,
+) -> VersionRecord:
     """Snapshot *working_file* into ``versions/<tag>.md`` and record it.
 
     Holds a single ``_file_lock`` on the ``versions.json`` sidecar across the
@@ -282,6 +288,12 @@ def create_version(artifact_dir: Path, working_file: Path, note: str = "") -> Ve
     so two concurrent callers cannot both allocate the same tag. The version
     file is write-once: if ``versions/<tag>.md`` already exists the call raises
     :class:`InvalidTagError` rather than overwriting.
+
+    ``source_bytes``: pass the bytes the caller already read (and privacy-
+    scanned) to snapshot *exactly* those, closing the scan→write TOCTOU window —
+    otherwise re-reading ``working_file`` here could capture a concurrently
+    edited (unsafe) file the caller never scanned. ``None`` (default) reads
+    ``working_file`` for callers with no pre-scan obligation.
 
     Raises :class:`VersionsDirMissingError` if *artifact_dir* does not exist
     (flat-layout artifact has no per-artifact directory).
@@ -291,19 +303,26 @@ def create_version(artifact_dir: Path, working_file: Path, note: str = "") -> Ve
             f"{artifact_dir} is not a directory — versioning requires directory layout "
             f"(run `mm context migrate` first)"
         )
-    try:
-        source_bytes = working_file.read_bytes()
-    except OSError as exc:
-        raise VersionError(f"cannot read working canonical {working_file}: {exc}") from exc
+    if source_bytes is None:
+        try:
+            source_bytes = working_file.read_bytes()
+        except OSError as exc:
+            raise VersionError(f"cannot read working canonical {working_file}: {exc}") from exc
 
     lock = _lock_path_for(versions_json_path(artifact_dir))
     with _file_lock(lock):
         manifest = load_manifest(artifact_dir)
-        tag = next_version_tag(manifest)
+        # Allocate against BOTH the manifest and any on-disk ``vN.md`` files.
+        # A crash between the version-file write and the manifest save (below)
+        # leaves an orphan ``vN.md`` absent from the manifest; allocating off
+        # the manifest alone would recompute the same tag, hit the
+        # write-once guard, and wedge every future create. Reconciling against
+        # disk skips past the orphan instead (the orphan stays unreferenced and
+        # harmless — it is not in the manifest, so it is never listed/resolved).
+        tag = _next_version_tag_reconciled(artifact_dir, manifest)
         vfile = versions_dir(artifact_dir) / f"{tag}.md"
-        # Write-once. next_version_tag() is monotonic over the manifest, but a
-        # stray on-disk vN.md not in the manifest would otherwise be silently
-        # clobbered by atomic_write_bytes' os.replace — refuse loudly instead.
+        # By construction ``tag`` is free on disk; keep the no-overwrite check
+        # as a defensive assertion against an unexpected race.
         if vfile.exists():
             raise InvalidTagError(f"version file already exists: {vfile}")
         atomic_write_bytes(vfile, source_bytes)
@@ -311,6 +330,22 @@ def create_version(artifact_dir: Path, working_file: Path, note: str = "") -> Ve
         manifest.versions[tag] = record
         _save_manifest(artifact_dir, manifest)
     return record
+
+
+def _next_version_tag_reconciled(artifact_dir: Path, manifest: VersionsManifest) -> str:
+    """Next tag considering both the manifest and on-disk ``vN.md`` files.
+
+    Crash-safe variant of :func:`next_version_tag`: an orphan version file
+    (written before its manifest entry was saved) bumps the allocation forward
+    instead of colliding. Caller must hold the sidecar lock.
+    """
+    nums = {_tag_num(t) for t in manifest.versions}
+    vdir = versions_dir(artifact_dir)
+    if vdir.is_dir():
+        for vfile in vdir.glob("v*.md"):
+            if _VALID_TAG_RE.fullmatch(vfile.stem):
+                nums.add(_tag_num(vfile.stem))
+    return f"v{max(nums) + 1}" if nums else "v1"
 
 
 def promote_label(artifact_dir: Path, label: str, version: str) -> None:
@@ -381,13 +416,18 @@ def resolve_label(artifact_dir: Path, label: str) -> Path:
     return resolve_version(artifact_dir, tag)
 
 
-def make_label_resolver(label: str) -> Callable[[Path, Layout], bytes]:
-    """Build a ``(item_path, layout) -> bytes`` resolver for the sync engine.
+def make_label_resolver(label: str) -> Callable[[Path, Layout], tuple[bytes, Path]]:
+    """Build a ``(item_path, layout) -> (bytes, source_path)`` resolver.
 
     Plugged into ``AtomicSyncAdapter.resolve_canonical_bytes`` (ADR-0022) so a
     labeled ``mm context sync`` fans out a frozen version's bytes instead of
     the working file. The caller must NOT pass ``label`` of ``None`` or
     ``latest`` here — those use the unmodified adapter (working-file path).
+
+    Returns the resolved bytes **and the version file they came from**, so the
+    engine can attribute its Gate A privacy scan to the actual
+    ``versions/vN.md`` (not the clean working ``agent.md``) — otherwise a secret
+    living only in a frozen version would point remediation at the wrong file.
 
     Layout handling (the flat-layout ``item_path.parent`` trap): only the
     directory layout has a per-artifact directory, so ``item_path.parent`` is
@@ -402,7 +442,7 @@ def make_label_resolver(label: str) -> Callable[[Path, Layout], bytes]:
     version-shaped, so a ``vN`` here can only ever mean the version ``vN``.
     """
 
-    def _resolve(item_path: Path, layout: Layout) -> bytes:
+    def _resolve(item_path: Path, layout: Layout) -> tuple[bytes, Path]:
         if layout != "dir":
             raise VersionsDirMissingError(
                 f"{item_path.name}: versioning requires directory layout "
@@ -410,7 +450,9 @@ def make_label_resolver(label: str) -> Callable[[Path, Layout], bytes]:
             )
         artifact_dir = item_path.parent
         if _VALID_TAG_RE.fullmatch(label):
-            return resolve_version(artifact_dir, label).read_bytes()
-        return resolve_label(artifact_dir, label).read_bytes()
+            vfile = resolve_version(artifact_dir, label)
+        else:
+            vfile = resolve_label(artifact_dir, label)
+        return vfile.read_bytes(), vfile
 
     return _resolve

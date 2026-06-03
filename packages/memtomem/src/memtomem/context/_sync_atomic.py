@@ -37,6 +37,7 @@ from memtomem.context._names import GENERATOR_VENDOR, Layout
 from memtomem.context.privacy_scan import raise_or_collect, scan_text_content
 from memtomem.context.versioning import (
     LabelNotFoundError,
+    VersionError,
     VersionNotFoundError,
     VersionsDirMissingError,
 )
@@ -150,10 +151,11 @@ class AtomicSyncAdapter(Generic[T]):
     # (default) ⇒ the engine reads ``item_path`` directly (today's behavior,
     # byte-for-byte). When set, the engine calls this instead of
     # ``item_path.read_bytes()`` in Phase 1, substituting a versioned snapshot
-    # for the working file. Signature ``(item_path, layout) -> bytes``; it may
-    # raise ``LabelNotFoundError`` / ``VersionNotFoundError`` /
-    # ``VersionsDirMissingError``, which the engine isolates as per-item skips.
-    resolve_canonical_bytes: Callable[[Path, Layout], bytes] | None = None
+    # for the working file. Returns ``(bytes, source_path)`` so the Gate A scan
+    # attributes to the actual ``versions/vN.md``, not the working file. It may
+    # raise the ``VersionError`` family (label/version not found, flat layout,
+    # malformed manifest), which the engine isolates as per-item skips.
+    resolve_canonical_bytes: Callable[[Path, Layout], tuple[bytes, Path]] | None = None
 
 
 def sync_atomic_artifact(
@@ -258,9 +260,13 @@ def sync_atomic_artifact(
             # Resolution failures isolate per-artifact as typed skips (a
             # missing label on one artifact must not abort the whole fan-out),
             # consistent with the OSError/parse handling below.
+            # ``scan_source`` is the path the Gate A scan attributes to — the
+            # resolved version file when a label is in play, else the working
+            # canonical. Defaults to ``item_path`` for the no-label path.
+            scan_source = item_path
             try:
                 if adapter.resolve_canonical_bytes is not None:
-                    item_bytes = adapter.resolve_canonical_bytes(item_path, layout)
+                    item_bytes, scan_source = adapter.resolve_canonical_bytes(item_path, layout)
                 else:
                     item_bytes = item_path.read_bytes()
             except LabelNotFoundError as exc:
@@ -277,6 +283,13 @@ def sync_atomic_artifact(
                         skip_codes.VERSIONING_REQUIRES_DIR_LAYOUT,
                     )
                 )
+                continue
+            except VersionError as exc:
+                # Catch-all for the rest of the family (malformed/tampered
+                # manifest → InvalidTagError / InvalidLabelError / base
+                # VersionError). Isolate per-artifact as a parse-class skip
+                # rather than aborting the whole fan-out with a raw traceback.
+                skipped.append((display_name, f"version store: {exc}", skip_codes.PARSE_ERROR))
                 continue
             except OSError as exc:
                 skipped.append((item_path.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
@@ -308,9 +321,11 @@ def sync_atomic_artifact(
             # (same buffer the parse used). project_shared block raises
             # PrivacyBlockedError; user/project_local block emits
             # PRIVACY_BLOCKED skip and continues to next runtime.
+            # ``scan_source`` attributes the scan to the resolved version file
+            # when a label is in play (ADR-0022), else the working canonical.
             file_scan = scan_text_content(
                 item_text,
-                source_path=item_path,
+                source_path=scan_source,
                 surface="cli_context_sync",
                 scope=scope,
                 project_root=project_root,

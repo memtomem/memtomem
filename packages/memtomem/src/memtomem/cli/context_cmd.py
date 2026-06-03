@@ -69,7 +69,12 @@ from memtomem.context.generator import (
     preamble_source,
 )
 from memtomem.context.parser import CONTEXT_FILENAME, parse_context, sections_to_markdown
-from memtomem.context.privacy_scan import PrivacyScanError, scan_artifact_tree
+from memtomem.context.privacy_scan import (
+    PrivacyScanError,
+    raise_or_collect,
+    scan_artifact_tree,
+    scan_text_content,
+)
 from memtomem.context.settings import (
     diff_settings,
     generate_all_settings,
@@ -1225,15 +1230,15 @@ _VERSION_ARTIFACT_TYPES = ("agents", "commands")
 
 def _resolve_version_target(
     artifact_type: str, name: str, scope_flag: str | None
-) -> tuple[Path, Path]:
-    """Resolve ``(artifact_dir, working_file)`` for a version operation.
+) -> tuple[Path, Path, TargetScope, Path]:
+    """Resolve ``(artifact_dir, working_file, scope, project_root)``.
 
     Validates ``artifact_type`` (agents/commands) and ``name``, resolves the
-    scoped canonical root, and returns the per-artifact directory plus its
-    working canonical file (``agent.md`` / ``command.md``). Raises
-    ``click.ClickException`` on a bad type/name. The directory may not exist
-    yet (flat-layout or absent) — the versioning layer raises a clean error in
-    that case.
+    scoped canonical root, and returns the per-artifact directory, its working
+    canonical file (``agent.md`` / ``command.md``), the resolved scope, and the
+    project root. Raises ``click.ClickException`` on a bad type/name. The
+    directory may not exist yet (flat-layout or absent) — the versioning layer
+    raises a clean error in that case.
     """
     if artifact_type not in _VERSION_ARTIFACT_TYPES:
         raise click.ClickException(
@@ -1251,7 +1256,7 @@ def _resolve_version_target(
     kind = cast("Literal['agents', 'commands']", artifact_type)
     artifact_dir = canonical_artifact_dir(kind, scope, root) / name
     working_filename = AGENT_DIR_FILENAME if artifact_type == "agents" else COMMAND_DIR_FILENAME
-    return artifact_dir, artifact_dir / working_filename
+    return artifact_dir, artifact_dir / working_filename, scope, root
 
 
 @context.group("version")
@@ -1274,14 +1279,42 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
 
     Example: `mm context version create agents my-agent --note "stable"`
     """
-    artifact_dir, working_file = _resolve_version_target(artifact_type, name, scope_flag)
+    artifact_dir, working_file, scope, root = _resolve_version_target(
+        artifact_type, name, scope_flag
+    )
     if not working_file.is_file():
         raise click.ClickException(
             f"No working canonical at {working_file}. The artifact must exist in "
             f"directory layout — run `mm context migrate {artifact_type[:-1]} {name}` first."
         )
+    # Gate A on the snapshot bytes (ADR-0011 trust boundary): creating a version
+    # is a new write into a git-tracked tree for project_shared, so a privacy
+    # hit must hard-refuse before versions/vN.md lands. user / project_local
+    # are permissive (the working file already holds the content locally, so a
+    # snapshot adds no exposure) — raise_or_collect only raises for
+    # project_shared and returns a skip tuple (ignored here) otherwise.
+    # Read ONCE and snapshot the SAME bytes (source_bytes=) so a concurrent edit
+    # between scan and write cannot slip unscanned bytes into the version.
     try:
-        record = versioning.create_version(artifact_dir, working_file, note=note)
+        snapshot_bytes = working_file.read_bytes()
+    except OSError as exc:
+        raise click.ClickException(f"cannot read {working_file}: {exc}") from exc
+    file_scan = scan_text_content(
+        snapshot_bytes.decode("utf-8", errors="replace"),
+        source_path=working_file,
+        surface="cli_context_version_create",
+        scope=scope,
+        project_root=root,
+    )
+    if file_scan.decision in ("blocked", "blocked_project_shared"):
+        try:
+            raise_or_collect(file_scan, scope=scope, kind=artifact_type[:-1], artifact_name=name)
+        except PrivacyScanError as exc:
+            raise click.ClickException(exc.message) from exc
+    try:
+        record = versioning.create_version(
+            artifact_dir, working_file, note=note, source_bytes=snapshot_bytes
+        )
     except versioning.VersionError as exc:
         raise click.ClickException(str(exc)) from exc
     click.secho(f"Created {artifact_type}/{name} version {record.tag}", fg="green")
@@ -1302,7 +1335,7 @@ def version_promote_cmd(
 
     Example: `mm context version promote agents my-agent --to production --version v2`
     """
-    artifact_dir, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    artifact_dir, _, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
     try:
         versioning.promote_label(artifact_dir, label, version)
     except versioning.VersionError as exc:
@@ -1316,7 +1349,7 @@ def version_promote_cmd(
 @_SCOPE_OPTION
 def version_list_cmd(artifact_type: str, name: str, scope_flag: str | None) -> None:
     """List versions and label pointers for an artifact."""
-    artifact_dir, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    artifact_dir, _, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
     try:
         manifest = versioning.load_manifest(artifact_dir)
     except versioning.VersionError as exc:
