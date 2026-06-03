@@ -90,11 +90,18 @@ async function _ctxErrorMessageFromResponse(resp, fallback) {
   if (contentType.includes('application/json')) {
     const err = await resp.json().catch(() => ({}));
     const detail = err.detail;
-    if (typeof detail === 'string' && detail) return detail;
-    // Defensive fallback for structured payloads shaped like `{detail: "..."}`.
+    // Defensive branch for structured payloads shaped like `{detail: "..."}`
+    // (ProjectTierBlocked / redaction) — a different shape than #1210's 409, so
+    // handle it before delegating to the shared extractor.
     if (detail && typeof detail === 'object' && typeof detail.detail === 'string' && detail.detail) {
       return detail.detail;
     }
+    // String detail, or #1210's ``{reason_code, message}`` write-guard 409, both
+    // via the shared extractor — so the Sync All fan-out surfaces the same
+    // localized paused / not-enrolled reason the per-row / per-section Sync
+    // buttons do, instead of a generic English fallback.
+    const extracted = _ctxErrDetail(detail, null);
+    if (extracted) return extracted;
   } else {
     const text = await resp.text().catch(() => '');
     if (text.trim()) return text;
@@ -1336,7 +1343,7 @@ function _ctxWireProjectsMatrix() {
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         loadCtxOverview();
@@ -2205,6 +2212,22 @@ function _ctxScopeSyncEligible(scope) {
   return _ctxScopeIsEnrolled(scope) && scope.enabled !== false;
 }
 
+// Map a structured 409 write-guard ``detail`` to a readable, localized string.
+// Backend #1210 returns ``detail = {reason_code, message, project_scope_id}`` on
+// sync-ineligible writes; every other route returns a plain string ``detail``.
+// Precedence: known reason_code → i18n key; else the backend's English
+// ``message``; else a string detail as-is; else the caller's fallback.
+function _ctxErrDetail(detail, fallback) {
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object') {
+    const rc = detail.reason_code;
+    if (rc === 'sync_paused') return t('settings.ctx.error_sync_paused');
+    if (rc === 'sync_not_enrolled') return t('settings.ctx.error_sync_not_enrolled');
+    if (typeof detail.message === 'string') return detail.message;
+  }
+  return fallback;
+}
+
 // Sync All fans out over the ACTIVE scope's artifact types, so it must honor the
 // same eligibility gate as the per-row matrix Sync button — otherwise an
 // ineligible active project (paused / not enrolled) is still syncable via Sync
@@ -2786,7 +2809,7 @@ async function loadCtxList(type) {
             });
             if (!r.ok) {
               const err = await r.json().catch(() => ({}));
-              showToast(err.detail || t('toast.request_failed'), 'error');
+              showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
               return;
             }
             loadCtxList(type);
@@ -3164,13 +3187,30 @@ async function loadCtxDetail(type, name, opts = {}) {
     // toggle's `.then()` had just rehydrated (review P2).
     if (seq !== _ctxDetailSeq[type]) return;
 
+    // Proactively disable Delete when the active project is sync-ineligible.
+    // A ``cascade=true`` delete unlinks the generated runtime copies, which the
+    // backend 409s for a paused / not-enrolled project (#1210); gating here
+    // avoids that round-trip and mirrors the matrix Sync button (same tooltip
+    // keys). The §2a error handler stays as the safety net for the race window
+    // where the scope is paused after this render. (Caveat: this also blocks a
+    // canonical-only delete on an ineligible scope — acceptable, the user
+    // resumes/enrolls on the Projects board; see PR description.)
+    const _delScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
+    let delAttrs = '';
+    if (_delScope && !_ctxScopeSyncEligible(_delScope)) {
+      const k = _ctxScopeIsEnrolled(_delScope)
+        ? 'settings.ctx.matrix_sync_paused_title'
+        : 'settings.ctx.matrix_sync_not_enrolled_title';
+      delAttrs = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
+    }
+
     let html = '<div class="ctx-detail">';
     html += `<div class="ctx-detail-header">
       <strong>${escapeHtml(name)}</strong>
       <div style="display:flex;gap:6px">
         <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
         <button class="btn-ghost ctx-detail-diff-btn" data-i18n="settings.ctx.diff_view">${t('settings.ctx.diff_view')}</button>
-        <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
+        <button class="btn-ghost btn-danger ctx-detail-delete-btn"${delAttrs} data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
 
@@ -3400,7 +3440,7 @@ async function loadCtxDetail(type, name, opts = {}) {
         );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         const data = await r.json();
@@ -3609,7 +3649,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
         );
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         const data = await r.json();
@@ -3674,7 +3714,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       );
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(err.detail || t('toast.request_failed'), 'error');
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
       const data = await r.json();
@@ -3737,7 +3777,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(err.detail || t('toast.request_failed'), 'error');
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
       const data = await r.json();
@@ -3813,7 +3853,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         showToast(t('settings.ctx.create_success').replace('{name}', nameInput));
@@ -3856,7 +3896,7 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         const data = await r.json();

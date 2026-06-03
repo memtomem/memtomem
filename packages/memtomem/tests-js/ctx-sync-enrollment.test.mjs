@@ -111,6 +111,49 @@ describe('sync-eligibility helpers', () => {
   });
 });
 
+describe('_ctxErrDetail — structured 409 (#1210) → localized string', () => {
+  it('passes a plain-string detail through unchanged (back-compat with every non-gated route)', async () => {
+    const { window } = await boot();
+    expect(window._ctxErrDetail('Already exists', 'fb')).toBe('Already exists');
+  });
+
+  it('maps reason_code → the localized toast copy (not the raw key, not [object Object])', async () => {
+    const { window } = await boot();
+    // i18n loads the catalog asynchronously and ``boot`` doesn't await it;
+    // ``setLang`` resolves once ``/locales/en.json`` is in, so ``t()`` returns
+    // real copy rather than the raw-key fallback.
+    await window.I18N.setLang('en');
+    const paused = window._ctxErrDetail({ reason_code: 'sync_paused' }, 'fb');
+    expect(paused).toBe(window.t('settings.ctx.error_sync_paused'));
+    expect(paused).not.toBe('settings.ctx.error_sync_paused'); // key actually resolved
+    expect(paused).not.toContain('[object Object]');
+
+    const notEnrolled = window._ctxErrDetail({ reason_code: 'sync_not_enrolled' }, 'fb');
+    expect(notEnrolled).toBe(window.t('settings.ctx.error_sync_not_enrolled'));
+    expect(notEnrolled).not.toBe('settings.ctx.error_sync_not_enrolled');
+  });
+
+  it('falls back to the backend message for an unknown reason_code', async () => {
+    const { window } = await boot();
+    expect(window._ctxErrDetail(
+      { reason_code: 'something_else', message: 'Backend said no' }, 'fb',
+    )).toBe('Backend said no');
+  });
+
+  it('uses .message when there is no reason_code', async () => {
+    const { window } = await boot();
+    expect(window._ctxErrDetail({ message: 'plain message' }, 'fb')).toBe('plain message');
+  });
+
+  it('falls back to the caller fallback for empty / unusable detail', async () => {
+    const { window } = await boot();
+    expect(window._ctxErrDetail(undefined, 'fb')).toBe('fb');
+    expect(window._ctxErrDetail(null, 'fb')).toBe('fb');
+    expect(window._ctxErrDetail({}, 'fb')).toBe('fb');
+    expect(window._ctxErrDetail({ reason_code: 'something_else' }, 'fb')).toBe('fb');
+  });
+});
+
 describe('portal enrollment UI', () => {
   it('scan-only row offers Enroll and hides rename/remove/toggle', async () => {
     const { window } = await boot();
