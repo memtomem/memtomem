@@ -87,6 +87,9 @@ async def test_get_projects_cwd_only(client) -> None:
     assert scope["experimental"] is False
     assert "counts" in scope
     assert set(scope["counts"].keys()) == {"skills", "commands", "agents", "mcp-servers"}
+    assert "runtime_coverage" in scope
+    runtimes = {r["name"] for r in scope["runtime_coverage"]}
+    assert runtimes == {"claude", "gemini", "codex", "kimi"}
 
 
 @pytest.mark.asyncio

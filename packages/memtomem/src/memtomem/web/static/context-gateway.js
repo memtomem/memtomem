@@ -859,6 +859,7 @@ function _renderCtxOverview(data) {
       </div>`;
     }
     html += '</div>';
+    html += _renderProjectsMatrix();
     el.innerHTML = html;
     _ctxWireProjectControls();
     _ctxWireTierControls();
@@ -992,6 +993,7 @@ function _renderCtxOverview(data) {
   // future write-block sweep that wants to dim/disable a pointer can
   // see the buttons in their final wired state.
   _ctxRefreshWriteBlockedState();
+  _ctxWireProjectsMatrix();
 }
 
 async function loadCtxOverview() {
@@ -1014,6 +1016,307 @@ async function loadCtxOverview() {
     if (seq !== _ctxOverviewSeq) return;
     _ctxOverviewCache = null;
     el.innerHTML = emptyState('', t('settings.ctx.load_overview_failed'), err.message);
+  }
+}
+
+function _renderProjectsMatrix() {
+  const scopes = _ctxProjectsCache || [];
+  if (!scopes.length) return '';
+
+  const runtimes = ['claude', 'gemini', 'codex', 'kimi'];
+
+  // Table header
+  let html = `<div class="ctx-projects-matrix-container">
+    <h3 class="ctx-projects-matrix-title">${escapeHtml(t('settings.ctx.projects_matrix_title') || 'Project Scope Matrix')}</h3>
+    <table class="ctx-projects-matrix-table">
+      <thead>
+        <tr>
+          <th>${escapeHtml(t('settings.ctx.matrix_col_project') || 'Project')}</th>
+          <th>${escapeHtml(t('settings.ctx.matrix_col_counts') || 'Inventory')}</th>
+          ${runtimes.map(rt => `<th>${escapeHtml(rt.toUpperCase())}</th>`).join('')}
+          <th>${escapeHtml(t('settings.ctx.matrix_col_actions') || 'Actions')}</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+  for (const scope of scopes) {
+    const isActive = _ctxScopeIsActive(scope);
+    const rowClass = isActive ? 'ctx-matrix-row--active' : '';
+    const label = _ctxScopeDisplayLabel(scope);
+    const rootPath = scope.root || '';
+    const isMissing = !!scope.missing;
+
+    // 요약 counts
+    const c = scope.counts || {};
+    const skillsCount = c.skills || 0;
+    const commandsCount = c.commands || 0;
+    const agentsCount = c.agents || 0;
+    const mcpCount = c['mcp-servers'] || 0;
+    const countsHtml = `<span class="ctx-matrix-counts" title="Skills: ${skillsCount}, Commands: ${commandsCount}, Agents: ${agentsCount}, MCP: ${mcpCount}">
+      🧩${skillsCount} ⌘${commandsCount} 🤖${agentsCount} 🔌${mcpCount}
+    </span>`;
+
+    // Runtimes columns
+    const runtimeCols = runtimes.map(rtName => {
+      const coverage = (scope.runtime_coverage || []).find(rc => rc.name === rtName);
+      if (!coverage) {
+        return `<td><span class="matrix-badge badge-gray">—</span></td>`;
+      }
+      
+      const available = !!coverage.available;
+      const installed = !!coverage.installed;
+      
+      let badgeCls = 'badge-gray';
+      let badgeText = '—';
+      let titleText = '';
+      
+      if (available && installed) {
+        badgeCls = 'badge-success';
+        badgeText = 'Active';
+        titleText = 'Detected & Registered';
+      } else if (available) {
+        badgeCls = 'badge-warning';
+        badgeText = 'Detected';
+        titleText = 'Marker folder exists, but client not registered';
+      } else if (installed) {
+        badgeCls = 'badge-blue';
+        badgeText = 'Client';
+        titleText = 'Client registered, but no project marker found';
+      }
+      
+      if (coverage.memtomem_registered) {
+        badgeText += ' (Reg)';
+      }
+      
+      return `<td>
+        <span class="badge ${badgeCls}" title="${escapeHtml(titleText)}">${escapeHtml(badgeText)}</span>
+      </td>`;
+    }).join('');
+
+    // Actions column
+    // Switch scope button (Selected Project Scope for Reads/Sync)
+    const selectBtn = isActive
+      ? `<span class="badge badge-success">${escapeHtml(t('settings.ctx.active') || 'Selected')}</span>`
+      : `<button type="button" class="btn-ghost btn-xs ctx-matrix-select-btn" data-scope-id="${escapeHtml(scope.scope_id)}">${escapeHtml(t('settings.ctx.select') || 'Select')}</button>`;
+
+    // Sync button (CWD-locked mutator 경계 유지를 위해, Project Local은 no fan-out 이므로 비활성화)
+    const isProjectLocal = scope.tier === 'project_local';
+    const syncDisabled = (isProjectLocal || isMissing) ? ' disabled title="No fan-out for project_local or missing project"' : '';
+    const syncBtn = `<button type="button" class="btn-primary btn-xs ctx-matrix-sync-btn" data-scope-id="${escapeHtml(scope.scope_id)}"${syncDisabled}>${escapeHtml(t('settings.ctx.sync') || 'Sync')}</button>`;
+
+    // Remove button (Server CWD는 삭제 불가능)
+    const removable = !_ctxScopeIsServerCwd(scope);
+    const removeAria = t('settings.ctx.remove_project_aria')
+      .replace('{label}', scope.label)
+      .replace('{root}', scope.root || scope.scope_id);
+    const removeBtn = removable
+      ? `<button type="button" class="ctx-matrix-remove-btn text-danger" data-scope-id="${escapeHtml(scope.scope_id)}" aria-label="${escapeHtml(removeAria)}" title="${escapeHtml(removeAria)}">×</button>`
+      : '';
+
+    html += `<tr class="${rowClass}">
+      <td>
+        <div class="ctx-matrix-project-label" title="${escapeHtml(rootPath)}">${escapeHtml(label)}</div>
+        <code class="ctx-matrix-project-path">${escapeHtml(rootPath)}</code>
+      </td>
+      <td>${countsHtml}</td>
+      ${runtimeCols}
+      <td>
+        <div class="ctx-matrix-actions">
+          ${selectBtn}
+          ${syncBtn}
+          ${removeBtn}
+        </div>
+      </td>
+    </tr>`;
+  }
+
+  html += `</tbody>
+    </table>
+    <div class="ctx-matrix-footer">
+      <button type="button" class="btn-ghost btn-sm ctx-matrix-add-project-btn">+ ${escapeHtml(t('settings.ctx.add_project') || 'Add Project')}</button>
+    </div>
+  </div>`;
+
+  return html;
+}
+
+function _ctxWireProjectsMatrix() {
+  const container = document.querySelector('.ctx-projects-matrix-container');
+  if (!container) return;
+
+  // 1. Select / Switch Scope
+  container.querySelectorAll('.ctx-matrix-select-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const scopeId = btn.dataset.scopeId || '';
+      if (scopeId === _ctxActiveScopeId) return;
+      _ctxActiveScopeId = scopeId;
+      _ctxNormalizeActiveScope(_ctxProjectsCache);
+      _ctxBumpActiveScopeDetailSeq();
+      try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
+      _ctxClearDeepLink();
+      loadCtxOverview();
+    });
+  });
+
+  // 2. Sync Scope
+  container.querySelectorAll('.ctx-matrix-sync-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const scopeId = btn.dataset.scopeId;
+      if (scopeId) {
+        _ctxSyncProjectScope(scopeId, btn);
+      }
+    });
+  });
+
+  // 3. Remove Scope (Delete)
+  container.querySelectorAll('.ctx-matrix-remove-btn').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      const scopeId = btn.dataset.scopeId;
+      const scope = _ctxProjectsCache.find(s => s.scope_id === scopeId);
+      if (!scope) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const ok = await showConfirm({
+        title: t('settings.ctx.remove_project'),
+        message: t('settings.ctx.confirm_remove_project')
+          .replace('{label}', scope.label)
+          .replace('{root}', scope.root || scope.scope_id),
+        confirmText: t('settings.ctx.remove'),
+      });
+      if (!ok) return;
+      try {
+        const csrf = await ensureCsrfToken();
+        const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scopeId)}`, {
+          method: 'DELETE',
+          headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {},
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(err.detail || t('toast.request_failed'), 'error');
+          return;
+        }
+        loadCtxOverview();
+      } catch (err) {
+        showToast(t('toast.delete_failed', { error: err.message }), 'error');
+      }
+    });
+  });
+
+  // 4. Add Project
+  container.querySelector('.ctx-matrix-add-project-btn')?.addEventListener('click', () => {
+    // Add Project trigger
+    const addBtn = document.querySelector('.ctx-add-project-btn');
+    if (addBtn) {
+      addBtn.click();
+    } else {
+      // Fallback click on any other section's add-project button or trigger manually
+      const onSelect = async (root) => {
+        if (!root) return;
+        try {
+          const csrf = await ensureCsrfToken();
+          const headers = csrf
+            ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+            : { 'Content-Type': 'application/json' };
+          const r = await fetch('/api/context/known-projects', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ root }),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            showToast(err.detail || t('toast.request_failed'), 'error');
+            return;
+          }
+          const data = await r.json();
+          showToast(t('settings.ctx.add_project_success'), 'success');
+          if (data.scope_id) {
+            _ctxActiveScopeId = data.scope_id;
+            try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
+          }
+          loadCtxOverview();
+        } catch (err) {
+          showToast(t('toast.request_failed', { error: err.message }), 'error');
+        }
+      };
+      if (window.PathPicker && typeof window.PathPicker.open === 'function') {
+        window.PathPicker.open({ purpose: 'project', onSelect });
+      }
+    }
+  });
+}
+
+async function _ctxSyncProjectScope(scopeId, btn) {
+  const ok = await showConfirm({
+    title: t('settings.ctx.sync_all'),
+    message: t('settings.ctx.confirm_sync_all'),
+    confirmText: t('settings.ctx.sync'),
+  });
+  if (!ok) return;
+
+  btnLoading(btn, true);
+  showToast(t('settings.ctx.sync_started') || 'Syncing project...', 'info');
+
+  const succeeded = [];
+  let failed = null;
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = csrf
+      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+      : { 'Content-Type': 'application/json' };
+    
+    const types = ['skills', 'commands', 'agents', 'mcp_servers'];
+    for (const typ of types) {
+      let resp;
+      try {
+        resp = await fetch(
+          _ctxWithTargetScope(`/api/context/${typ}/sync`, { scopeId: scopeId }),
+          { method: 'POST', headers }
+        );
+      } catch (err) {
+        failed = { phase: typ, reason: err.message };
+        break;
+      }
+      if (!resp.ok) {
+        failed = {
+          phase: typ,
+          reason: await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`),
+        };
+        break;
+      }
+      succeeded.push(typ);
+    }
+
+    if (!failed) {
+      try {
+        const settingsResp = await fetch(
+          _ctxWithTargetScope('/api/context/settings/sync', { scopeId: scopeId }),
+          { method: 'POST', headers }
+        );
+        if (!settingsResp.ok) {
+          failed = {
+            phase: 'settings',
+            reason: await _ctxErrorMessageFromResponse(settingsResp, 'Sync settings failed'),
+          };
+        }
+      } catch (err) {
+        failed = { phase: 'settings', reason: err.message };
+      }
+    }
+
+    if (failed) {
+      const msg = t('settings.ctx.sync_failed_partial')
+        .replace('{phase}', failed.phase)
+        .replace('{reason}', failed.reason)
+        .replace('{succeeded}', succeeded.join(', ') || 'none');
+      showToast(msg, 'error');
+    } else {
+      showToast(t('settings.ctx.sync_success') || 'Sync completed successfully!', 'success');
+      loadCtxOverview();
+    }
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    btnLoading(btn, false);
   }
 }
 

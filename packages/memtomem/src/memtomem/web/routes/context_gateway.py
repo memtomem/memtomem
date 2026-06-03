@@ -193,48 +193,10 @@ def _compute_last_synced_at(project_root: Path, target_scope: TargetScope) -> st
 
 
 def _compute_detected_runtimes(project_root: Path) -> list[dict[str, object]]:
-    """Probe each known runtime for any on-disk fan-out surface.
+    from memtomem.context.runtime_coverage import compute_runtime_coverage
 
-    Returns one entry per runtime in :data:`KNOWN_RUNTIMES` with an
-    ``available`` flag that is the OR across:
-      * top-level agent file (``CLAUDE.md`` / ``GEMINI.md`` / ``AGENTS.md``),
-      * non-import runtime marker file (for example Kimi ``.kimi/config.toml``),
-      * project-scope skill dir (``.claude/skills`` etc.),
-      * project-scope sub-agent dir (``.claude/agents`` etc.),
-      * project-scope command dir (``.claude/commands`` etc., Codex omitted).
+    return compute_runtime_coverage(project_root)
 
-    The aggregate "any surface" semantics matches the dashboard chip strip
-    described in #830 — undetected-but-known runtimes still appear so the
-    user can see they exist on the runway, just greyed out.
-
-    Aggregate ``registered_roots`` shape is deferred until ADR-0009 (#829);
-    this endpoint stays single-project until that policy lands.
-    """
-    from memtomem.context._runtime_targets import KNOWN_RUNTIMES
-    from memtomem.context.detector import (
-        AGENT_DIRS,
-        AGENT_FILES,
-        COMMAND_DIRS,
-        RUNTIME_MARKER_FILES,
-        SKILL_DIRS,
-    )
-
-    out: list[dict[str, object]] = []
-    for rt in KNOWN_RUNTIMES:
-        probes: list[bool] = []
-        for rel in AGENT_FILES.get(rt, []):
-            probes.append((project_root / rel).exists())
-        for rel in RUNTIME_MARKER_FILES.get(rt, []):
-            probes.append((project_root / rel).exists())
-        for rel in SKILL_DIRS.get(f"{rt}_skills", []):
-            probes.append((project_root / rel).is_dir())
-        for rel in AGENT_DIRS.get(f"{rt}_agents", []):
-            probes.append((project_root / rel).is_dir())
-        cmd = COMMAND_DIRS.get(f"{rt}_commands")
-        if cmd is not None:
-            probes.append((project_root / cmd[0]).is_dir())
-        out.append({"name": rt, "available": any(probes)})
-    return out
 
 
 def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
