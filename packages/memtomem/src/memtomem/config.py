@@ -802,7 +802,11 @@ class SessionTraceConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _require_keys_when_enabled(self) -> "SessionTraceConfig":
-        if self.enabled and self.langfuse_enabled and not (self.langfuse_public_key and self.langfuse_secret_key):
+        if (
+            self.enabled
+            and self.langfuse_enabled
+            and not (self.langfuse_public_key and self.langfuse_secret_key)
+        ):
             raise ValueError(
                 "SessionTraceConfig.langfuse_enabled=true requires both langfuse_public_key and langfuse_secret_key "
                 "to be set (non-empty)."

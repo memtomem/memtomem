@@ -6,12 +6,13 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Any, Generator, Dict, Optional, Literal
+from typing import Any, Generator, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 _trace_config: Optional[Any] = None
 _langfuse_client: Optional[Any] = None
+
 
 def get_trace_config(*, force_reload: bool = False) -> Any:
     global _trace_config
@@ -20,6 +21,7 @@ def get_trace_config(*, force_reload: bool = False) -> Any:
     if _trace_config is None:
         try:
             from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
             cfg = Mem2MemConfig()
             load_config_d(cfg, quiet=True)
             load_config_overrides(cfg)
@@ -27,6 +29,7 @@ def get_trace_config(*, force_reload: bool = False) -> Any:
         except Exception:
             pass
         if _trace_config is None:
+
             class DummyConfig:
                 enabled = False
                 jsonl_enabled = False
@@ -35,16 +38,23 @@ def get_trace_config(*, force_reload: bool = False) -> Any:
                 sampling_rate = 1.0
                 payload_mode = "metadata"
                 max_payload_chars = 10000
+
             _trace_config = DummyConfig()
     return _trace_config
+
 
 def get_langfuse_client(config: Any, *, force_reload: bool = False) -> Any:
     global _langfuse_client
     if force_reload:
         _langfuse_client = None
-    if _langfuse_client is None and getattr(config, "enabled", False) and getattr(config, "langfuse_enabled", False):
+    if (
+        _langfuse_client is None
+        and getattr(config, "enabled", False)
+        and getattr(config, "langfuse_enabled", False)
+    ):
         try:
             from langfuse import Langfuse
+
             kwargs: Dict[str, Any] = {}
             if public_key := getattr(config, "langfuse_public_key", ""):
                 kwargs["public_key"] = public_key
@@ -57,15 +67,18 @@ def get_langfuse_client(config: Any, *, force_reload: bool = False) -> Any:
             logger.warning("Failed to initialize Langfuse client: %s", e)
     return _langfuse_client
 
+
 def sanitize_metadata_key(key: str) -> str:
-    sanitized = re.sub(r'[^a-zA-Z0-9]', '', key)
+    sanitized = re.sub(r"[^a-zA-Z0-9]", "", key)
     return sanitized if sanitized else "key"
+
 
 def sanitize_metadata_value(val: Any) -> str:
     s = str(val)
     if len(s) > 200:
         s = s[:197] + "..."
     return s
+
 
 def format_propagated_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
     if not metadata:
@@ -75,6 +88,7 @@ def format_propagated_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:
         clean_key = sanitize_metadata_key(k)
         res[clean_key] = sanitize_metadata_value(v)
     return res
+
 
 def format_payload(payload: Any, mode: str, max_chars: int) -> Any:
     if mode == "metadata":
@@ -88,7 +102,9 @@ def format_payload(payload: Any, mode: str, max_chars: int) -> Any:
         if isinstance(payload, dict):
             redacted_payload = {}
             for k, v in payload.items():
-                if any(sec in k.lower() for sec in ["api_key", "secret", "password", "token", "key"]):
+                if any(
+                    sec in k.lower() for sec in ["api_key", "secret", "password", "token", "key"]
+                ):
                     redacted_payload[k] = "***"
                 else:
                     redacted_payload[k] = v
@@ -98,18 +114,17 @@ def format_payload(payload: Any, mode: str, max_chars: int) -> Any:
                 serialized = str(redacted_payload)
         else:
             serialized = re.sub(
-                r'(?i)(api_key|secret|password|token|key)["\s:]+[\w\-]+',
-                r'\1: "***"',
-                serialized
+                r'(?i)(api_key|secret|password|token|key)["\s:]+[\w\-]+', r'\1: "***"', serialized
             )
 
     if len(serialized) > max_chars:
-        serialized = serialized[:max_chars - 14] + "...[TRUNCATED]"
-    
+        serialized = serialized[: max_chars - 14] + "...[TRUNCATED]"
+
     try:
         return json.loads(serialized)
     except Exception:
         return serialized
+
 
 @contextmanager
 def trace_session(
@@ -136,7 +151,7 @@ def trace_session(
     start_time = time.perf_counter()
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     trace_id = str(uuid.uuid4())
-    
+
     ctx = {
         "session_id": session_id,
         "agent_id": agent_id,
@@ -145,8 +160,9 @@ def trace_session(
         "exit_code": 0,
         "status": "success",
     }
-    
+
     import random
+
     sampling_rate = getattr(config, "sampling_rate", 1.0)
     sampled_in = not (sampling_rate < 1.0 and random.random() >= sampling_rate)
 
@@ -158,7 +174,7 @@ def trace_session(
             payload_mode = getattr(config, "payload_mode", "metadata")
             max_payload_chars = getattr(config, "max_payload_chars", 10000)
             formatted_payload = format_payload(ctx["payload"], payload_mode, max_payload_chars)
-            
+
             obs_context = langfuse_client.start_as_current_observation(
                 name="memtomem_session_command",
                 as_type="span",
@@ -171,28 +187,29 @@ def trace_session(
     if obs_context is not None:
         try:
             from langfuse import propagate_attributes
+
             with obs_context as span:
                 clean_prop_metadata = format_propagated_metadata(ctx["metadata"])
-                
+
                 with propagate_attributes(
                     session_id=ctx.get("session_id") or f"no-session-{agent_id}",
                     user_id=ctx.get("agent_id") or agent_id,
                     metadata=clean_prop_metadata,
                 ):
                     yield ctx
-                
+
                 # If session_id/metadata updated during yield, propagate again to update the span
                 final_session_id = ctx.get("session_id") or f"no-session-{agent_id}"
                 final_agent_id = ctx.get("agent_id") or agent_id
                 final_clean_metadata = format_propagated_metadata(ctx["metadata"])
-                
+
                 with propagate_attributes(
                     session_id=final_session_id,
                     user_id=final_agent_id,
                     metadata=final_clean_metadata,
                 ):
                     pass
-                
+
                 payload_mode = getattr(config, "payload_mode", "metadata")
                 max_payload_chars = getattr(config, "max_payload_chars", 10000)
                 final_payload = format_payload(ctx["payload"], payload_mode, max_payload_chars)
@@ -215,11 +232,11 @@ def trace_session(
                 langfuse_client.flush()
             except Exception as e:
                 logger.warning("Failed to flush Langfuse client: %s", e)
-            
+
             end_time = time.perf_counter()
             ended_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             duration_ms = (end_time - start_time) * 1000.0
-            
+
             _write_local_jsonl(
                 config=config,
                 trace_id=trace_id,
@@ -249,7 +266,7 @@ def trace_session(
             end_time = time.perf_counter()
             ended_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             duration_ms = (end_time - start_time) * 1000.0
-            
+
             _write_local_jsonl(
                 config=config,
                 trace_id=trace_id,
@@ -265,6 +282,7 @@ def trace_session(
                 metadata=ctx["metadata"],
                 payload=ctx["payload"],
             )
+
 
 def _write_local_jsonl(
     config: Any,
@@ -287,12 +305,12 @@ def _write_local_jsonl(
     payload_mode = getattr(config, "payload_mode", "metadata")
     max_payload_chars = getattr(config, "max_payload_chars", 10000)
     final_payload = format_payload(payload, payload_mode, max_payload_chars)
-    
+
     jsonl_path_raw = getattr(config, "jsonl_path", "~/.memtomem/traces/session-traces.jsonl")
     try:
         jsonl_path = Path(jsonl_path_raw).expanduser().resolve()
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         row = {
             "trace_id": trace_id,
             "session_id": session_id,

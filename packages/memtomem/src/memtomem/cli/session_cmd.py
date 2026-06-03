@@ -169,6 +169,7 @@ def start(
     stale_cutoff = _parse_duration(auto_end_stale) if auto_end_stale else None
 
     from memtomem.observability.session_tracing import trace_session
+
     initial_payload = {
         "agent_id": agent_id,
         "title": title,
@@ -201,11 +202,13 @@ def start(
                 "resumed": resumed,
                 "auto_ended_count": len(auto_ended),
             }
-            trace_ctx["payload"].update({
-                "session_id": session_id,
-                "resumed": resumed,
-                "auto_ended": auto_ended,
-            })
+            trace_ctx["payload"].update(
+                {
+                    "session_id": session_id,
+                    "resumed": resumed,
+                    "auto_ended": auto_ended,
+                }
+            )
         except Exception as e:
             trace_ctx["exit_code"] = 1
             if isinstance(e, click.ClickException):
@@ -326,6 +329,7 @@ def end(summary: str | None, auto_summary: bool) -> None:
         raise click.ClickException("No active session. Run `mm session start` first.")
 
     from memtomem.observability.session_tracing import trace_session
+
     initial_payload = {
         "session_id": session_id,
         "summary": summary,
@@ -344,10 +348,12 @@ def end(summary: str | None, auto_summary: bool) -> None:
                 "event_count": event_count,
                 "summary": final_summary,
             }
-            trace_ctx["payload"].update({
-                "final_summary": final_summary,
-                "event_count": event_count,
-            })
+            trace_ctx["payload"].update(
+                {
+                    "final_summary": final_summary,
+                    "event_count": event_count,
+                }
+            )
         except Exception as e:
             trace_ctx["exit_code"] = 1
             if isinstance(e, click.ClickException):
@@ -394,6 +400,7 @@ def list_sessions(
 ) -> None:
     """List sessions."""
     from memtomem.observability.session_tracing import trace_session
+
     initial_payload = {
         "agent_id": agent_id,
         "since": since,
@@ -467,6 +474,7 @@ def events(session_id: str, *, as_json: bool = False) -> None:
         raise click.ClickException("No session ID provided and no active session.")
 
     from memtomem.observability.session_tracing import trace_session
+
     initial_payload = {
         "session_id": resolved_session_id,
         "as_json": as_json,
@@ -556,6 +564,7 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
     session_id = _read_current_session()
 
     from memtomem.observability.session_tracing import trace_session
+
     initial_payload = {
         "session_id": session_id,
         "event_type": event_type,
@@ -595,7 +604,9 @@ def log_event(event_type: str, content: str, meta: str | None, *, as_json: bool 
             asyncio.run(_log_event(session_id, event_type, content, metadata))
             trace_ctx["metadata"] = {"status": "success"}
             if as_json:
-                click.echo(json.dumps({"ok": True, "session_id": session_id, "event_type": event_type}))
+                click.echo(
+                    json.dumps({"ok": True, "session_id": session_id, "event_type": event_type})
+                )
         except Exception:
             trace_ctx["metadata"] = {"status": "error", "reason": "write_failed"}
             logger.warning("Activity hook failed", exc_info=True)
@@ -639,6 +650,7 @@ def wrap(agent_id: str, title: str | None, command: tuple[str, ...]) -> None:
     effective_title = title or f"Headless: {cmd_str[:60]}"
 
     from memtomem.observability.session_tracing import trace_session
+
     initial_payload = {
         "agent_id": agent_id,
         "title": title,
@@ -675,10 +687,12 @@ def wrap(agent_id: str, title: str | None, command: tuple[str, ...]) -> None:
                 "exit_code": exit_code,
                 "command": cmd_str,
             }
-            trace_ctx["payload"].update({
-                "exit_code": exit_code,
-                "command": cmd_str,
-            })
+            trace_ctx["payload"].update(
+                {
+                    "exit_code": exit_code,
+                    "command": cmd_str,
+                }
+            )
 
         # End session
         summary = f"Command: {cmd_str[:100]}. Exit code: {exit_code}"
