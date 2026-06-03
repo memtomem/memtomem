@@ -3871,6 +3871,8 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-scope-badge--experimental { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 .ctx-scope-badge--missing { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
 .ctx-scope-badge--stale { background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
+/* Sync paused (enrolled but enabled:false) — neutral/muted, not an error state. */
+.ctx-scope-badge--paused { background: rgba(128, 128, 128, 0.15); color: var(--text-secondary); }
 
 /* Context Portal (ADR-0021 PR4) — multi-project board */
 .ctx-portal-toolbar {

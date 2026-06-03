@@ -865,10 +865,14 @@ def test_sync_all_mid_run_cache_refresh_pins_scope_to_start_project(page, mm_web
         "label": "Project X",
         "root": "/fake/project-x",
         "tier": "project",
-        "sources": ["known"],
+        # Real backend source string is ``known-projects``; enrolled + enabled so
+        # the scope is sync-eligible and Sync All stays enabled (#1203 gate).
+        "sources": ["known-projects"],
         "experimental": False,
         "missing": False,
         "stale": False,
+        "enabled": True,
+        "sync_eligible": True,
         "counts": {"skills": 2, "commands": 0, "agents": 1, "mcp-servers": 0},
     }
     page.route(
