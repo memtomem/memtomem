@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=92" />
+  <link rel="stylesheet" href="/style.css?v=93" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -563,6 +563,11 @@
                       data-i18n-aria-label="settings.ctx.sync_all_aria">Sync All</button>
             </div>
           </div>
+          <!-- Sync All per-phase progress + result summary (ADR-0021 §C).
+               Sibling of #ctx-overview-content so the post-sync overview
+               reload doesn't wipe the summary. Populated by context-gateway.js
+               (_renderCtxSyncStatus); hidden until a Sync All run starts. -->
+          <div id="ctx-sync-status" class="ctx-sync-status" role="status" aria-live="polite" hidden></div>
           <div id="ctx-overview-content"></div>
         </div>
 
@@ -1511,7 +1516,7 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=13"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=50"></script>
+  <script src="/context-gateway.js?v=51"></script>
   <script src="/context-portal.js?v=1"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>

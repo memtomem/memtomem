@@ -3739,6 +3739,62 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   color: white;
 }
 
+/* Sync All per-phase progress + result summary (ADR-0021 §C). */
+.ctx-sync-status {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.ctx-sync-status-heading {
+  margin: 0 0 8px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.ctx-sync-phase-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ctx-sync-phase {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.82rem;
+}
+.ctx-sync-phase-label { color: var(--text); }
+.ctx-sync-phase--pending .ctx-sync-phase-label,
+.ctx-sync-phase--not_run .ctx-sync-phase-label { color: var(--muted); }
+.ctx-sync-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ctx-sync-state--done { color: var(--green); }
+.ctx-sync-state--failed { color: var(--danger); }
+.ctx-sync-state--attention { color: var(--yellow); }
+.ctx-sync-state--muted { color: var(--muted); }
+.ctx-sync-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.65s linear infinite;
+}
+
 .ctx-overview-header { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 12px; font-size: 0.85rem; color: var(--muted); }
 .ctx-overview-root, .ctx-overview-runtimes, .ctx-overview-last-sync { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ctx-overview-root-label, .ctx-overview-runtimes-label, .ctx-overview-last-sync-label { font-weight: 600; color: var(--text); }

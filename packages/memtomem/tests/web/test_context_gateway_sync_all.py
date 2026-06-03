@@ -8,8 +8,8 @@ handling, or (c) ``loadCtxOverview`` reload after sync surfaces in CI.
 The handler's contract (``static/context-gateway.js:435-514``):
 
 * ``showConfirm`` first; cancel returns without firing a single sync POST.
-* On confirm, fan out ``POST /api/context/{type}/sync`` for each detected
-  runtime (``['skills', 'agents']`` in prod mode), then
+* On confirm, fan out ``POST /api/context/{type}/sync`` for skills,
+  commands, agents, and mcp-servers in that order, then
   ``POST /api/context/settings/sync``.
 * Artifact POST non-OK responses surface the backend ``detail`` text in the
   failure toast instead of replacing it with a generic client message.
@@ -183,6 +183,11 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
     page.route("**/api/context/skills/sync", _record_sync)
     page.route("**/api/context/commands/sync", _record_sync)
     page.route("**/api/context/agents/sync", _record_sync)
+    # mcp-servers is part of the artifact fan-out (context-gateway.js ``types``)
+    # but was previously absorbed by the conftest ``**/api/**`` catch-all and
+    # never pinned. Route it explicitly so the phase order assertion below
+    # covers all four artifact phases (ADR-0021 PR6 / Codex round-2 Minor).
+    page.route("**/api/context/mcp-servers/sync", _record_sync)
 
     def _settings_sync(route):
         sync_calls.append(route.request.url)
@@ -235,16 +240,18 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
         f"Happy-path toast must be {SYNC_SUCCESS_TOAST!r}, got {toast_text!r}"
     )
 
-    # All four POSTs fired in order: skills → commands → agents → settings.
-    # The exact order matters because a regression that reorders or drops one
-    # would surface here.
-    sync_paths = [u.split("/api/")[-1] for u in sync_calls]
+    # All five POSTs fired in order: skills → commands → agents →
+    # mcp-servers → settings. The exact order matters because a regression
+    # that reorders or drops one would surface here. mcp-servers is pinned
+    # explicitly (PR6) so it can no longer hide behind the catch-all.
+    sync_paths = [u.split("/api/")[-1].split("?")[0] for u in sync_calls]
     assert sync_paths == [
         "context/skills/sync",
         "context/commands/sync",
         "context/agents/sync",
+        "context/mcp-servers/sync",
         "context/settings/sync",
-    ], f"Sync All must fire skills→commands→agents→settings, got {sync_paths!r}"
+    ], f"Sync All must fire skills→commands→agents→mcp-servers→settings, got {sync_paths!r}"
 
     # After all POSTs the handler calls ``loadCtxOverview()`` (line 510) to
     # refresh the cards. Pin the second GET to catch a regression that drops
@@ -707,4 +714,275 @@ def test_sync_all_settings_needs_confirmation_opens_hooks_sync(page, mm_web_url:
         "  return section && !section.classList.contains('hidden');"
         "}",
         timeout=4_000,
+    )
+
+
+def test_sync_all_mid_run_tier_flip_pins_all_phases_to_start_tier(page, mm_web_url: str) -> None:
+    """S1-f (ADR-0021 PR6 / Codex round-2 Major-1): a tier flip *during* a Sync
+    All run must not make later phases land in a different tier.
+
+    The handler snapshots both the active scope id and the target tier right
+    after confirm, then pins them into every phase URL. Before the fix
+    ``_ctxWithTargetScope`` re-read the mutable ``_ctxTargetScope`` global on
+    each phase, so flipping the tier button mid-sequence sent the remaining
+    phases to a different tier — violating "one (project, tier) per
+    invocation" (ADR-0016 §5).
+
+    Mechanism: an init-script wraps ``window.fetch`` and flips the live tier
+    to ``user`` the instant the first artifact phase (skills) fires — i.e.
+    after phase 1's URL is built but before phase 2's. Sync All is only
+    enabled on ``project_shared`` (the default, which emits no
+    ``target_scope`` param), so the regression shows up as later phases
+    carrying ``target_scope=user``.
+
+    Symmetric pin (``feedback_pin_invert_symmetric_assertion.md``): positive
+    that no phase URL carries ``target_scope=``; negative guard that the flip
+    actually fired (otherwise the positive assertion is vacuous).
+    """
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    phase_urls: list[str] = []
+
+    def _record(route):
+        phase_urls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    # ``**`` suffix matches the ``?scope_id=`` / ``?target_scope=`` query
+    # variants — a bare ``.../sync`` glob would miss a URL with a query string
+    # and let it fall through to the conftest catch-all (unrecorded).
+    page.route("**/api/context/skills/sync**", _record)
+    page.route("**/api/context/commands/sync**", _record)
+    page.route("**/api/context/agents/sync**", _record)
+    page.route("**/api/context/mcp-servers/sync**", _record)
+
+    def _settings(route):
+        phase_urls.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "ok",
+                            "reason": None,
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    page.route("**/api/context/settings/sync**", _settings)
+
+    # Flip the live tier global the moment skills/sync fires. ``_ctxTargetScope``
+    # is a top-level ``let`` in the classic (non-module) context-gateway.js
+    # script, so it is reachable as a bare global from the wrapped fetch.
+    page.add_init_script(
+        """
+        (() => {
+          const realFetch = window.fetch.bind(window);
+          let flipped = false;
+          window.fetch = (url, opts) => {
+            if (!flipped && String(url).includes('/api/context/skills/sync')) {
+              flipped = true;
+              try { _ctxTargetScope = 'user'; } catch (e) {}
+            }
+            return realFetch(url, opts);
+          };
+        })();
+        """
+    )
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    # Default tier is project_shared → Sync All enabled.
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    # All phases return 200 → success toast settles the run.
+    page.wait_for_selector("#toast-container .toast.toast-success", timeout=4_000)
+
+    assert len(phase_urls) == 5, (
+        f"all five phases must fire (skills→commands→agents→mcp-servers→settings); "
+        f"got {phase_urls!r}"
+    )
+
+    # Positive: no phase straddled to another tier. project_shared emits no
+    # ``target_scope`` param, so the pinned run leaves it absent on every URL.
+    straddled = [u for u in phase_urls if "target_scope=" in u]
+    assert straddled == [], (
+        f"mid-run tier flip must not straddle phases across tiers; these phase "
+        f"URLs carried a target_scope param: {straddled!r}"
+    )
+
+    # Negative guard: confirm the flip actually took effect on the live global,
+    # so the positive assertion above is not vacuously true.
+    live_tier = page.evaluate("() => _ctxTargetScope")
+    assert live_tier == "user", (
+        f"harness must have flipped the live tier to 'user' mid-run "
+        f"(got {live_tier!r}); the pin assertion would otherwise be vacuous"
+    )
+
+
+def test_sync_all_mid_run_cache_refresh_pins_scope_to_start_project(page, mm_web_url: str) -> None:
+    """S1-g (ADR-0021 PR6 / review blocker): the active project scope must stay
+    pinned for the whole run even if ``_ctxProjectsCache`` is refreshed mid-run.
+
+    Sister of the tier-flip test on the *scope* dimension. The handler
+    snapshots the effective scope id at confirm and passes it with
+    ``scopeResolved`` so ``_ctxWithTargetScope`` emits it verbatim. Before the
+    fix the snapshot was re-resolved per phase via
+    ``_ctxScopeParam`` → ``_ctxEffectiveScopeId``, which looks the scope up in
+    the live ``_ctxProjectsCache``; clearing that cache mid-run (the pinned
+    project goes ``missing``) collapsed later phases to Server-CWD (``scope_id``
+    dropped) — straddling the run across two projects (ADR-0016 §5).
+
+    Mechanism: the projects payload registers a single non-cwd project so the
+    active scope resolves to ``proj-x``; an init-script wraps ``window.fetch``
+    and empties ``_ctxProjectsCache`` the instant skills/sync fires.
+    """
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    # Override the conftest server-CWD payload with a real (non-cwd) project so
+    # the active scope id is a concrete ``proj-x`` that appears on phase URLs.
+    project_scope = {
+        "scope_id": "proj-x",
+        "label": "Project X",
+        "root": "/fake/project-x",
+        "tier": "project",
+        "sources": ["known"],
+        "experimental": False,
+        "missing": False,
+        "stale": False,
+        "counts": {"skills": 2, "commands": 0, "agents": 1, "mcp-servers": 0},
+    }
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"scopes": [project_scope]}),
+        ),
+    )
+
+    phase_urls: list[str] = []
+
+    def _record(route):
+        phase_urls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    # ``**`` suffix matches the ``?scope_id=proj-x`` query these phase URLs
+    # carry — a bare ``.../sync`` glob would miss them and let them fall through
+    # to the conftest catch-all (unrecorded).
+    page.route("**/api/context/skills/sync**", _record)
+    page.route("**/api/context/commands/sync**", _record)
+    page.route("**/api/context/agents/sync**", _record)
+    page.route("**/api/context/mcp-servers/sync**", _record)
+
+    def _settings(route):
+        phase_urls.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "ok",
+                            "reason": None,
+                            "warnings": [],
+                            "target": "/fake/.claude/settings.json",
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        )
+
+    page.route("**/api/context/settings/sync**", _settings)
+
+    # Empty the live projects cache the instant skills/sync fires — i.e. after
+    # phase 1's URL is built but before phase 2's. ``_ctxProjectsCache`` is a
+    # top-level ``let`` in the classic context-gateway.js script, reachable as a
+    # bare global from the wrapped fetch.
+    # Record the cache length *right after* clearing into a window flag — the
+    # handler's finally re-fetches projects and restores the cache, so reading
+    # it post-run can't prove the mid-run emptying. Reading the same binding
+    # inside the wrapper proves (a) the bare-global assignment hit the real
+    # _ctxProjectsCache and (b) phases 2..5 were built against an empty cache.
+    page.add_init_script(
+        """
+        (() => {
+          const realFetch = window.fetch.bind(window);
+          let cleared = false;
+          window.fetch = (url, opts) => {
+            if (!cleared && String(url).includes('/api/context/skills/sync')) {
+              cleared = true;
+              try {
+                _ctxProjectsCache = [];
+                window.__ctxCacheLenAfterClear = _ctxProjectsCache.length;
+              } catch (e) {
+                window.__ctxCacheLenAfterClear = -1;
+              }
+            }
+            return realFetch(url, opts);
+          };
+        })();
+        """
+    )
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    # Sanity: the active scope resolved to the registered project.
+    assert page.evaluate("() => _ctxActiveScopeId") == "proj-x", (
+        "active scope must resolve to the registered project before the run"
+    )
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+    page.wait_for_selector("#toast-container .toast.toast-success", timeout=4_000)
+
+    assert len(phase_urls) == 5, f"all five phases must fire; got {phase_urls!r}"
+
+    # Positive: every phase carries the pinned scope_id, even the ones built
+    # after the cache was emptied.
+    unpinned = [u for u in phase_urls if "scope_id=proj-x" not in u]
+    assert unpinned == [], (
+        f"mid-run cache refresh must not unpin the scope; these phase URLs "
+        f"dropped scope_id=proj-x: {unpinned!r}"
+    )
+
+    # Negative guard: confirm the cache was actually emptied mid-run (captured
+    # inside the wrapper before the finally re-fetch restored it), so the
+    # positive assertion is not vacuous — without the empty cache the scope
+    # would resolve normally and pass regardless of the pin.
+    cleared_len = page.evaluate("() => window.__ctxCacheLenAfterClear")
+    assert cleared_len == 0, (
+        f"harness must have emptied _ctxProjectsCache mid-run (got "
+        f"{cleared_len!r}); the pin assertion would otherwise be vacuous"
     )
