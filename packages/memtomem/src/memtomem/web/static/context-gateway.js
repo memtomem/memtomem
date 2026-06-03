@@ -1270,17 +1270,29 @@ function _ctxSyncPhaseLabel(phase) {
   return t(`settings.ctx.${String(phase).replace(/-/g, '_')}_phase_title`);
 }
 
-// Build the one-line per-type summary from an artifact sync response body
-// ({generated, dropped?, skipped}). Counts of 0 for dropped/skipped are
-// omitted to keep the line uncluttered; ``generated`` is always shown so a
-// no-op sync still reads as "0 generated" rather than as a blank.
-function _ctxSyncArtifactSummary(body) {
+// Extract RAW per-type counts from an artifact sync response body
+// ({generated, dropped?, skipped}). Stored verbatim in the phase state — never
+// a pre-localized string — so the ``langchange`` re-render can format them in
+// the current locale (a frozen localized summary would leave a Korean phase
+// label next to an English "2 generated", #698 staleness class).
+function _ctxSyncArtifactCounts(body) {
   const len = (arr) => (Array.isArray(arr) ? arr.length : 0);
-  const parts = [t('settings.ctx.sync_count_generated', { count: len(body && body.generated) })];
-  const dropped = len(body && body.dropped);
-  if (dropped > 0) parts.push(t('settings.ctx.sync_count_dropped', { count: dropped }));
-  const skipped = len(body && body.skipped);
-  if (skipped > 0) parts.push(t('settings.ctx.sync_count_skipped', { count: skipped }));
+  return {
+    generated: len(body && body.generated),
+    dropped: len(body && body.dropped),
+    skipped: len(body && body.skipped),
+  };
+}
+
+// Format raw counts into a localized one-line summary, AT RENDER TIME. Counts
+// of 0 for dropped/skipped are omitted to keep the line uncluttered;
+// ``generated`` is always shown so a no-op sync reads as "0 generated" rather
+// than as a blank.
+function _ctxSyncFormatCounts(counts) {
+  const c = counts || {};
+  const parts = [t('settings.ctx.sync_count_generated', { count: c.generated || 0 })];
+  if (c.dropped > 0) parts.push(t('settings.ctx.sync_count_dropped', { count: c.dropped }));
+  if (c.skipped > 0) parts.push(t('settings.ctx.sync_count_skipped', { count: c.skipped }));
   return parts.join(' · ');
 }
 
@@ -1303,7 +1315,11 @@ function _renderCtxSyncStatus(states) {
       badge = `<span class="ctx-sync-spinner" aria-hidden="true"></span>`
         + `<span class="ctx-sync-state">${escapeHtml(t('settings.ctx.sync_state_syncing'))}</span>`;
     } else if (entry.state === 'done') {
-      const text = entry.summary || t('settings.ctx.sync_state_done');
+      // Format the stored raw counts here so a langchange re-render picks up
+      // the active locale; phases with no counts (settings) read as "Done".
+      const text = entry.counts
+        ? _ctxSyncFormatCounts(entry.counts)
+        : t('settings.ctx.sync_state_done');
       badge = `<span class="ctx-sync-state ctx-sync-state--done">${escapeHtml(text)}</span>`;
     } else if (entry.state === 'failed') {
       badge = `<span class="ctx-sync-state ctx-sync-state--failed">`
@@ -1390,11 +1406,14 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   // pending → syncing → done | failed; phases never reached after a failure
   // are marked not_run at the end. ``setPhase`` mutates the shared object in
   // place and re-renders, so the ``langchange`` listener can re-translate from
-  // the same object (ADR-0021 §C per-phase progress + result summary).
+  // the same object (ADR-0021 §C per-phase progress + result summary). The
+  // third arg is RAW counts ({generated,dropped,skipped}), never a localized
+  // string — formatting happens in ``_renderCtxSyncStatus`` so a locale flip
+  // re-translates the summary too.
   const phaseStates = {};
   for (const phase of _CTX_SYNC_PHASES) phaseStates[phase] = { state: 'pending' };
-  const setPhase = (phase, state, summary) => {
-    phaseStates[phase] = { state, summary };
+  const setPhase = (phase, state, counts) => {
+    phaseStates[phase] = { state, counts };
     _renderCtxSyncStatus(phaseStates);
   };
   _renderCtxSyncStatus(phaseStates);
@@ -1443,12 +1462,13 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         setPhase(typ, 'failed');
         break;
       }
-      // Parse the body for the per-type result summary (generated/dropped/
-      // skipped counts). Tolerates an empty/non-JSON body — a bare ``{}``
-      // renders as "0 generated", never throws.
+      // Parse the body for the per-type result counts (generated/dropped/
+      // skipped). Tolerates an empty/non-JSON body — a bare ``{}`` yields all
+      // zeros (renders as "0 generated"), never throws. Store RAW counts; the
+      // render formats them per-locale.
       const body = await resp.json().catch(() => ({}));
       succeeded.push(typ);
-      setPhase(typ, 'done', _ctxSyncArtifactSummary(body));
+      setPhase(typ, 'done', _ctxSyncArtifactCounts(body));
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored

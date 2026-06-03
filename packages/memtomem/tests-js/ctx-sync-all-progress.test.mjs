@@ -227,4 +227,49 @@ describe('Sync All — per-phase progress + result summary', () => {
     expect(region.hidden).toBe(true);
     expect(region.innerHTML).toBe('');
   });
+
+  it('re-translates the result summary on langchange (no mixed-language rows)', async () => {
+    // Regression for the P2 review finding: the phase state must store RAW
+    // counts, not a pre-localized string. Run in EN, switch to KO — the
+    // summary must follow the locale, not stay frozen as English next to a
+    // re-translated Korean label.
+    const window = await bootSyncAll({
+      skills: { body: { generated: [{ runtime: 'claude' }, { runtime: 'codex' }], skipped: [] } },
+      commands: { body: { generated: [{ runtime: 'claude' }] } },
+      agents: { body: { generated: [{ runtime: 'claude' }] } },
+      'mcp-servers': { body: { generated: [{ runtime: 'claude' }] } },
+      settings: { body: { results: [{ name: 'claude', status: 'ok' }] } },
+    });
+    const { I18N } = window;
+
+    window.document.getElementById('ctx-sync-all-btn').click();
+    await flush(window);
+
+    const region = window.document.getElementById('ctx-sync-status');
+    // skills is first in _CTX_SYNC_PHASES — find by index so the lookup is
+    // locale-independent (the label text changes after setLang).
+    const skillsRow = () => region.querySelectorAll('.ctx-sync-phase')[0];
+
+    // Precondition: the summary is the EN "2 generated".
+    const enSummary = I18N.t('settings.ctx.sync_count_generated', { count: 2 });
+    expect(skillsRow().textContent).toContain(enSummary);
+
+    // The langchange re-render of the status region is gated behind an active
+    // Gateway/Settings host tab + active overview section — mark them active so
+    // the listener reaches _renderCtxSyncStatus.
+    window.document.getElementById('tab-context-gateway')?.classList.add('active');
+    window.document.getElementById('tab-settings')?.classList.add('active');
+    window.document.getElementById('settings-ctx-overview')?.classList.add('active');
+
+    await I18N.setLang('ko');
+
+    const koSummary = I18N.t('settings.ctx.sync_count_generated', { count: 2 });
+    // Sanity: the two locales actually differ, else the assertion is vacuous.
+    expect(koSummary).not.toBe(enSummary);
+    // The summary followed the locale; the stale English text is gone.
+    expect(skillsRow().textContent).toContain(koSummary);
+    expect(skillsRow().textContent).not.toContain(enSummary);
+    // And the phase label itself is the Korean one (no mixed-language row).
+    expect(skillsRow().textContent).toContain(I18N.t('settings.ctx.skills_phase_title'));
+  });
 });
