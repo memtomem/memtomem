@@ -201,6 +201,122 @@ def test_store_update_label_updates_all_duplicate_rows(tmp_path: Path) -> None:
     assert all(e.label == "new" for e in entries)
 
 
+# ── enabled (sync enrollment) ────────────────────────────────────────────
+
+
+def test_store_add_enabled_default_true(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project)
+    assert store.load()[0].enabled is True
+
+
+def test_store_set_enabled_round_trip(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project)
+    sid = compute_scope_id(project)
+
+    paused = store.set_enabled_by_scope_id(sid, False)
+    assert paused is not None and paused.enabled is False
+    assert store.load()[0].enabled is False  # persisted
+
+    resumed = store.set_enabled_by_scope_id(sid, True)
+    assert resumed is not None and resumed.enabled is True
+    assert store.load()[0].enabled is True
+
+
+def test_store_legacy_entry_without_enabled_defaults_true(tmp_path: Path) -> None:
+    """A pre-``enabled`` schema row (no key) reads back as enabled — old and new
+    readers must agree without a version bump."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    kp = tmp_path / "kp.json"
+    kp.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [
+                    {"root": str(project), "added_at": "2026-01-01T00:00:00Z", "label": None}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert KnownProjectsStore(kp).load()[0].enabled is True
+
+
+def test_store_set_enabled_unknown_returns_none(tmp_path: Path) -> None:
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    assert store.set_enabled_by_scope_id("p-deadbeefcafe", False) is None
+
+
+def test_store_set_enabled_preserves_label_and_added_at(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    added_at = store.add(project, label="Alpha").added_at
+    sid = compute_scope_id(project)
+
+    updated = store.set_enabled_by_scope_id(sid, False)
+    assert updated is not None
+    assert updated.label == "Alpha"  # toggling sync never touches the label
+    assert updated.added_at == added_at
+
+
+def test_store_update_label_preserves_enabled(tmp_path: Path) -> None:
+    """Regression: a rename must NOT silently resume a paused project (the
+    default-True dataclass field would otherwise reset ``enabled``)."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project)
+    sid = compute_scope_id(project)
+    store.set_enabled_by_scope_id(sid, False)
+
+    renamed = store.update_label_by_scope_id(sid, "Renamed")
+    assert renamed is not None
+    assert renamed.enabled is False  # rename preserved the paused state
+    assert store.load()[0].enabled is False
+
+
+def test_store_update_entry_both_fields_atomic(tmp_path: Path) -> None:
+    """``update_entry_by_scope_id`` applies label + enabled in one write."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project, label="Old")
+    sid = compute_scope_id(project)
+
+    updated = store.update_entry_by_scope_id(
+        sid, label="New", set_label=True, enabled=False, set_enabled=True
+    )
+    assert updated is not None
+    assert updated.label == "New"
+    assert updated.enabled is False
+    reloaded = store.load()[0]
+    assert reloaded.label == "New"
+    assert reloaded.enabled is False
+
+
+def test_store_update_entry_unset_fields_preserved(tmp_path: Path) -> None:
+    """Fields without their ``set_*`` flag are left untouched."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project, label="Keep")
+    sid = compute_scope_id(project)
+    store.set_enabled_by_scope_id(sid, False)
+
+    # Touch neither field → no-op update that still matches.
+    updated = store.update_entry_by_scope_id(sid)
+    assert updated is not None
+    assert updated.label == "Keep"
+    assert updated.enabled is False
+
+
 def test_store_corrupt_json_recovers_to_empty(tmp_path: Path) -> None:
     kp = tmp_path / "kp.json"
     kp.write_text("not valid {json")
@@ -424,7 +540,7 @@ def test_annotate_health_file_root_is_missing_not_stale(tmp_path: Path) -> None:
 def test_discover_experimental_scan_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When the flag is False, ``~/.claude/projects/`` is never inspected."""
+    """When BOTH scan gates are off, ``~/.claude/projects/`` is never inspected."""
     claude_projects = tmp_path / "fake_home" / ".claude" / "projects"
     claude_projects.mkdir(parents=True)
     cwd = tmp_path / "work"
@@ -435,11 +551,14 @@ def test_discover_experimental_scan_disabled(
     monkeypatch.setattr(proj_mod, "_CLAUDE_PROJECTS_DIR", claude_projects)
 
     # ``-tmp`` decodes to ``/tmp`` which exists on every Unix host — would be
-    # picked up if the flag were True. With it False the scan never runs.
+    # picked up if a scan gate were open. With both off the scan never runs.
     (claude_projects / "-tmp").mkdir()
 
     scopes = proj_mod.discover_project_scopes(
-        cwd, tmp_path / "kp.json", experimental_claude_projects_scan=False
+        cwd,
+        tmp_path / "kp.json",
+        experimental_claude_projects_scan=False,
+        auto_display_configured_projects=False,
     )
     assert len(scopes) == 1
     assert "claude-projects" not in scopes[0].sources
@@ -519,11 +638,150 @@ def test_discover_experimental_dedup_with_cwd(
     assert cwd_scope.label == "Server CWD"
 
 
+# ── auto-display filter + enabled / sync_eligible ───────────────────────
+
+
+def test_discover_auto_display_filters_scan_by_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """auto_display on, experimental off: scan candidates are admitted only when
+    their root carries a runtime marker."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    configured = tmp_path / "cfg"
+    configured.mkdir()
+    (configured / ".codex").mkdir()  # codex-only project (exercises the .codex marker)
+    plain = tmp_path / "plain"
+    plain.mkdir()  # no runtime marker
+
+    from memtomem.context import projects as proj_mod
+
+    monkeypatch.setattr(
+        proj_mod, "_discover_claude_projects", lambda anchors=(): [configured, plain]
+    )
+    scopes = proj_mod.discover_project_scopes(
+        cwd,
+        tmp_path / "kp.json",
+        experimental_claude_projects_scan=False,
+        auto_display_configured_projects=True,
+    )
+    scan_roots = {s.root for s in scopes if "claude-projects" in s.sources}
+    assert configured.resolve() in scan_roots  # marker present → admitted
+    assert plain.resolve() not in scan_roots  # no marker → filtered out
+
+
+def test_discover_experimental_bypasses_marker_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The experimental flag is the unfiltered escape hatch — an unmarked scan
+    candidate still surfaces."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    plain = tmp_path / "plain"
+    plain.mkdir()  # no marker
+
+    from memtomem.context import projects as proj_mod
+
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [plain])
+    scopes = proj_mod.discover_project_scopes(
+        cwd,
+        tmp_path / "kp.json",
+        experimental_claude_projects_scan=True,
+        auto_display_configured_projects=False,
+    )
+    assert any(s.root == plain.resolve() and "claude-projects" in s.sources for s in scopes)
+
+
+def test_discover_filter_never_drops_known_or_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker filter applies only to scan rows — an unmarked known project
+    (and the cwd) are always shown."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()  # no marker
+    known = tmp_path / "known"
+    known.mkdir()  # no marker
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(known)
+
+    from memtomem.context import projects as proj_mod
+
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [])
+    scopes = proj_mod.discover_project_scopes(
+        cwd, kp, experimental_claude_projects_scan=False, auto_display_configured_projects=True
+    )
+    roots = {s.root for s in scopes}
+    assert cwd.resolve() in roots
+    assert known.resolve() in roots
+
+
+def test_discover_sync_eligible_derivation(tmp_path: Path) -> None:
+    """sync_eligible = server-cwd OR (enrolled AND enabled)."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    enabled_proj = tmp_path / "en"
+    enabled_proj.mkdir()
+    disabled_proj = tmp_path / "dis"
+    disabled_proj.mkdir()
+    kp = tmp_path / "kp.json"
+    store = KnownProjectsStore(kp)
+    store.add(enabled_proj)
+    store.add(disabled_proj)
+    store.set_enabled_by_scope_id(compute_scope_id(disabled_proj), False)
+
+    scopes = discover_project_scopes(
+        cwd, kp, experimental_claude_projects_scan=False, auto_display_configured_projects=False
+    )
+    by_root = {s.root: s for s in scopes}
+    cwd_scope = next(s for s in scopes if "server-cwd" in s.sources)
+    assert cwd_scope.enabled is True and cwd_scope.sync_eligible is True
+    assert by_root[enabled_proj.resolve()].enabled is True
+    assert by_root[enabled_proj.resolve()].sync_eligible is True
+    assert by_root[disabled_proj.resolve()].enabled is False
+    assert by_root[disabled_proj.resolve()].sync_eligible is False
+
+
+def test_discover_paused_known_not_reenabled_by_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (Blocker 2): a paused known project the scan also surfaces must
+    stay sync-ineligible — scan / cwd sources never contribute enablement."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".codex").mkdir()
+    kp = tmp_path / "kp.json"
+    store = KnownProjectsStore(kp)
+    store.add(project)
+    store.set_enabled_by_scope_id(compute_scope_id(project), False)
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    from memtomem.context import projects as proj_mod
+
+    # Scan surfaces the SAME root → a naive OR-merge would flip enabled back True.
+    monkeypatch.setattr(proj_mod, "_discover_claude_projects", lambda anchors=(): [project])
+    scopes = proj_mod.discover_project_scopes(
+        cwd, kp, experimental_claude_projects_scan=False, auto_display_configured_projects=True
+    )
+    scope = next(s for s in scopes if s.root == project.resolve())
+    assert "known-projects" in scope.sources
+    assert "claude-projects" in scope.sources  # both sources coalesced onto one row
+    assert scope.enabled is False
+    assert scope.sync_eligible is False  # the scan did NOT re-enable it
+
+
 # ── runtime marker helper (POST validation warning) ─────────────────────
 
 
 def test_has_runtime_marker_true(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
+    assert has_runtime_marker(tmp_path) is True
+
+
+def test_has_runtime_marker_codex(tmp_path: Path) -> None:
+    """Codex-configured projects (``.codex``) count as a runtime marker — the
+    user's explicit codex/agy/kimi coverage requirement."""
+    (tmp_path / ".codex").mkdir()
     assert has_runtime_marker(tmp_path) is True
 
 

@@ -149,6 +149,25 @@ def _csrf_observe_only_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMTOMEM_WEB__CSRF_ENFORCE", "0")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claude_projects_scan(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the ``~/.claude/projects`` scan at a nonexistent dir suite-wide.
+
+    ``auto_display_configured_projects`` is on by default in production, so
+    ``discover_project_scopes`` now scans ``~/.claude/projects/`` (filtered to
+    roots with a runtime marker) unless gated. Without this isolation any test
+    that lists project scopes — directly or via a route — would pick up the
+    developer's real Claude project history and break exact-count assertions.
+    ``_CLAUDE_PROJECTS_DIR`` is captured at import time, so sandboxing HOME does
+    not cover it; we patch the module attribute directly. Tests that exercise
+    the scan monkeypatch ``_CLAUDE_PROJECTS_DIR`` themselves, which overrides
+    this default cleanly (and reverts in LIFO order at teardown).
+    """
+    import memtomem.context.projects as _proj
+
+    monkeypatch.setattr(_proj, "_CLAUDE_PROJECTS_DIR", tmp_path / "no-claude-projects")
+
+
 @pytest.fixture
 async def components(tmp_path):
     """Create components with a temporary DB for isolated testing."""

@@ -779,8 +779,18 @@ class ContextGatewayConfig(BaseSettings):
     known_projects_path: Path = Path("~/.memtomem/known_projects.json")
     # Opt-in reverse-decode of ``~/.claude/projects/<encoded>`` directory
     # names. Off by default — the encoding is fragile around dash-containing
-    # paths, so this is gated behind explicit consent (RFC §Decision 2).
+    # paths, so this is gated behind explicit consent (RFC §Decision 2). When
+    # True the scan is *unfiltered* (the legacy escape hatch).
     experimental_claude_projects_scan: bool = False
+    # Filtered auto-display of ~/.claude/projects/ scan candidates: surfaces a
+    # discovered project only when its root carries a recognized runtime marker
+    # (.claude/.gemini/.codex/.agents/.kimi/.memtomem). On by default — this is
+    # the auto-display source. Independent of experimental_claude_projects_scan
+    # (which, when True, widens the same scan to unfiltered candidates). Added
+    # as a new field rather than flipping the experimental flag so no env var
+    # name changes (no validation_alias infra) and the unfiltered default is
+    # untouched.
+    auto_display_configured_projects: bool = True
     # PR3 surface — listed here for forward-compat. While ``False`` the user
     # scope is hidden from discovery responses entirely (RFC §Decision 5).
     user_tier_enabled: bool = False

@@ -85,6 +85,10 @@ async def test_get_projects_cwd_only(client) -> None:
     assert scope["tier"] == "project"
     assert scope["missing"] is False
     assert scope["experimental"] is False
+    # Sync-enrollment fields: the server cwd is always sync-eligible (it cannot
+    # be paused), and ``enabled`` defaults True for a scope with no known entry.
+    assert scope["enabled"] is True
+    assert scope["sync_eligible"] is True
     # cwd_root has a .claude marker but no .memtomem store → reported stale.
     assert scope["stale"] is True
     # Counts and runtime coverage are both opt-in now (ADR-0021 PR2): the
@@ -659,3 +663,116 @@ async def test_patch_blank_label_clears_to_basename(client, tmp_path: Path) -> N
 async def test_patch_unknown_scope_id_404(client) -> None:
     resp = await client.patch("/api/context/known-projects/p-deadbeefcafe", json={"label": "x"})
     assert resp.status_code == 404
+
+
+# ── PATCH /context/known-projects/{scope_id} (enabled / sync enrollment) ──
+
+
+async def _register(client, root: Path) -> str:
+    root.mkdir()
+    (root / ".claude").mkdir()
+    add = await client.post("/api/context/known-projects", json={"root": str(root)})
+    return add.json()["scope_id"]
+
+
+@pytest.mark.asyncio
+async def test_patch_enabled_toggle_round_trip(client, tmp_path: Path) -> None:
+    """PATCH {enabled} flips sync enrollment and is reflected in discovery."""
+    sid = await _register(client, tmp_path / "proj")
+
+    off = await client.patch(f"/api/context/known-projects/{sid}", json={"enabled": False})
+    assert off.status_code == 200, off.text
+    assert off.json()["enabled"] is False
+    scope = next(
+        s
+        for s in (await client.get("/api/context/projects")).json()["scopes"]
+        if s["scope_id"] == sid
+    )
+    assert scope["enabled"] is False
+    assert scope["sync_eligible"] is False
+
+    on = await client.patch(f"/api/context/known-projects/{sid}", json={"enabled": True})
+    assert on.json()["enabled"] is True
+    scope = next(
+        s
+        for s in (await client.get("/api/context/projects")).json()["scopes"]
+        if s["scope_id"] == sid
+    )
+    assert scope["sync_eligible"] is True
+
+
+@pytest.mark.asyncio
+async def test_patch_enabled_only_preserves_label(client, tmp_path: Path) -> None:
+    """Regression: an enabled-only PATCH must not wipe the custom label."""
+    sid = await _register(client, tmp_path / "proj")
+    await client.patch(f"/api/context/known-projects/{sid}", json={"label": "Keep"})
+
+    resp = await client.patch(f"/api/context/known-projects/{sid}", json={"enabled": False})
+    assert resp.status_code == 200
+    assert resp.json()["label"] == "Keep"
+    assert resp.json()["enabled"] is False
+    scope = next(
+        s
+        for s in (await client.get("/api/context/projects")).json()["scopes"]
+        if s["scope_id"] == sid
+    )
+    assert scope["label"] == "Keep"
+
+
+@pytest.mark.asyncio
+async def test_patch_label_only_preserves_enabled(client, tmp_path: Path) -> None:
+    """A label-only PATCH must not silently resume a paused project."""
+    sid = await _register(client, tmp_path / "proj")
+    await client.patch(f"/api/context/known-projects/{sid}", json={"enabled": False})
+
+    resp = await client.patch(f"/api/context/known-projects/{sid}", json={"label": "Renamed"})
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False  # still paused
+
+
+@pytest.mark.asyncio
+async def test_patch_enabled_null_leaves_enabled_unchanged(client, tmp_path: Path) -> None:
+    """``enabled: null`` means 'unchanged' — it never persists None nor resumes."""
+    sid = await _register(client, tmp_path / "proj")
+    await client.patch(f"/api/context/known-projects/{sid}", json={"enabled": False})
+
+    resp = await client.patch(
+        f"/api/context/known-projects/{sid}", json={"enabled": None, "label": "Renamed"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["label"] == "Renamed"
+    assert resp.json()["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_patch_no_fields_is_400(client, tmp_path: Path) -> None:
+    sid = await _register(client, tmp_path / "proj")
+    resp = await client.patch(f"/api/context/known-projects/{sid}", json={})
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_patch_enabled_unknown_scope_id_404(client) -> None:
+    resp = await client.patch("/api/context/known-projects/p-deadbeefcafe", json={"enabled": False})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_patch_label_and_enabled_together(client, tmp_path: Path) -> None:
+    """A combined PATCH applies both fields in a single atomic store write."""
+    sid = await _register(client, tmp_path / "proj")
+
+    resp = await client.patch(
+        f"/api/context/known-projects/{sid}", json={"label": "Both", "enabled": False}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["label"] == "Both"
+    assert resp.json()["enabled"] is False
+    scope = next(
+        s
+        for s in (await client.get("/api/context/projects")).json()["scopes"]
+        if s["scope_id"] == sid
+    )
+    assert scope["label"] == "Both"
+    assert scope["enabled"] is False
+    assert scope["sync_eligible"] is False

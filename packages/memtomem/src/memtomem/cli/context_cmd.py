@@ -1383,7 +1383,10 @@ def _run_update_all(
         )
         return
 
-    project_roots = [e.root for e in project_entries if e.root.is_dir()]
+    # Sync enrollment: a disabled (paused) known project is excluded from the
+    # batch, matching the web Sync gate and ``sync_eligible``. ``enabled``
+    # defaults True for legacy entries, so this only skips explicitly-paused ones.
+    project_roots = [e.root for e in project_entries if e.root.is_dir() and e.enabled]
     if not project_roots:
         click.echo(
             "No registered projects exist on disk; nothing to update.",

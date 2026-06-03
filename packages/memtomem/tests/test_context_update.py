@@ -689,6 +689,48 @@ def test_cli_update_all_no_projects_have_asset_exits_zero(
     assert "No projects have skills/foo" in result.output
 
 
+def test_cli_update_all_skips_disabled_projects(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled (paused) known project is excluded from ``--all`` batch sync,
+    matching the web Sync gate / ``sync_eligible``. The project exists on disk
+    AND has the asset installed, so the *only* reason it is skipped is
+    ``enabled=False`` — with it paused the batch finds nothing to update."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    paused = tmp_path / "paused"
+    paused.mkdir()
+    install_skill(paused, "foo")  # asset present, but the project is paused
+    known = tmp_path / "known.json"
+    known.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [
+                    {
+                        "root": str(paused),
+                        "added_at": "2026-01-01T00:00:00Z",
+                        "label": None,
+                        "enabled": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing to update" in result.output
+
+
 # ── CLI --all: refuse blocks batch ──────────────────────────────────────
 
 

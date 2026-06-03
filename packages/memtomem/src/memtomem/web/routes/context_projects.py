@@ -8,8 +8,8 @@ Endpoints:
   optional (``?include=counts``) per-type item counts.
 - ``POST /api/context/known-projects`` — register a project root for the
   Add Project UI; idempotent.
-- ``PATCH /api/context/known-projects/{scope_id}`` — rename a registration
-  (label only).
+- ``PATCH /api/context/known-projects/{scope_id}`` — update a registration's
+  label and/or ``enabled`` (sync-enrollment) flag.
 - ``DELETE /api/context/known-projects/{scope_id}`` — drop a registration
   (including stale entries whose root no longer exists).
 
@@ -33,6 +33,7 @@ from memtomem.context.commands import (
     list_canonical_commands,
 )
 from memtomem.context.projects import (
+    _MARKER_DIRS,
     KnownProjectsStore,
     ProjectScope,
     compute_scope_id,
@@ -71,6 +72,7 @@ def _discover_for(request: Request) -> list[ProjectScope]:
         cwd,
         Path(cfg.known_projects_path).expanduser(),
         experimental_claude_projects_scan=cfg.experimental_claude_projects_scan,
+        auto_display_configured_projects=cfg.auto_display_configured_projects,
     )
 
 
@@ -241,6 +243,12 @@ def _scope_to_dict(
         "missing": scope.missing,
         "stale": scope.stale,
         "experimental": scope.experimental,
+        # ``enabled`` — the known_projects sync-enrollment flag. ``sync_eligible``
+        # — derived (server-cwd OR enrolled+enabled); the frontend gates the Sync
+        # button on it. ``enrolled`` is intentionally not a separate field — the
+        # client derives it from ``sources`` containing "known-projects".
+        "enabled": scope.enabled,
+        "sync_eligible": scope.sync_eligible,
         "counts": counts,
         "runtime_coverage": coverage,
     }
@@ -272,9 +280,11 @@ async def list_projects(
     Response shape (RFC §Decision 4, extended by ADR-0021 PR2):
 
     ``{target_scope, scopes: [{project_scope_id, scope_id, label, root, tier,
-    sources, missing, stale, experimental, counts}]}`` where ``counts`` is
-    ``{skills, commands, agents, mcp-servers}`` only when ``?include=counts``
-    is requested (else ``null``).
+    sources, missing, stale, experimental, enabled, sync_eligible, counts}]}``
+    where ``counts`` is ``{skills, commands, agents, mcp-servers}`` only when
+    ``?include=counts`` is requested (else ``null``). ``enabled`` is the
+    known_projects sync-enrollment flag; ``sync_eligible`` is the derived
+    server-cwd-OR-enrolled-and-enabled gate.
     """
     include_tokens = {tok.strip() for tok in include.split(",") if tok.strip()}
     with_counts = "counts" in include_tokens
@@ -308,9 +318,10 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
 
     Validation:
     - ``root`` must be an absolute path that resolves to an existing directory.
-    - Without a recognized runtime marker (``.claude``/``.gemini``/``.agents``/``.kimi``/``.memtomem``)
-      the registration still succeeds (HTTP 200) but carries a ``warning`` field
-      so the user can intentionally pre-register an empty checkout.
+    - Without a recognized runtime marker directory (the ``_MARKER_DIRS`` set:
+      ``.claude``/``.gemini``/``.codex``/``.agents``/``.kimi``/``.memtomem``) the
+      registration still succeeds (HTTP 200) but carries a ``warning`` field so
+      the user can intentionally pre-register an empty checkout.
     """
     raw = body.root.strip()
     if not raw:
@@ -345,9 +356,10 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
         # client matching is i18n-stable. ``warning`` carries the human prose
         # for back-compat; new clients should switch on the code.
         response["warning_code"] = "no_runtime_marker"
-        response["warning"] = (
-            "No .claude/.gemini/.agents/.kimi/.memtomem directory found under this root."
-        )
+        # Derive the list from _MARKER_DIRS so it never drifts from the actual
+        # marker set (e.g. when .codex was added). Clients should switch on the
+        # i18n-stable warning_code, not this human prose.
+        response["warning"] = f"No {'/'.join(_MARKER_DIRS)} directory found under this root."
     return response
 
 
@@ -356,28 +368,52 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
 
 class UpdateProjectLabelRequest(BaseModel):
     label: str | None = None
+    enabled: bool | None = None
 
 
 @router.patch("/context/known-projects/{scope_id}")
 async def update_known_project(
     scope_id: str, body: UpdateProjectLabelRequest, request: Request
 ) -> dict:
-    """Rename a registered project (label only).
+    """Update a registered project's label and/or sync-enrollment flag.
 
     The store is otherwise append/delete-only; this is the one mutator that
     edits an existing entry in place. ``root`` and ``added_at`` are preserved —
-    the scope_id is path-derived, so a rename never moves the project. A blank
-    or whitespace-only label *clears* the custom label, so discovery falls back
-    to the directory basename. 404 when no registration matches (mirrors
-    DELETE) so the client can tell "renamed" from "never registered".
+    the scope_id is path-derived, so this never moves the project.
+
+    Each field is applied only when *present* so a single-field PATCH never
+    clobbers the other: a ``{"enabled": ...}`` request leaves the label intact,
+    and a label-only request leaves ``enabled`` intact. ``label`` presence is
+    detected via ``model_fields_set`` (so an explicit ``label: null`` still
+    *clears* the custom label → basename fallback); ``enabled`` is persisted
+    only for a real bool — an omitted key or ``enabled: null`` means "unchanged".
+    With no applicable field the request is a 400. 404 when no registration
+    matches (mirrors DELETE) so the client can tell "updated" from "never
+    registered".
 
     Only known-projects entries are editable — the implicit server-cwd scope
-    must be registered (POST) before it can be relabeled.
+    must be registered (POST) before it can be relabeled or paused. (Pausing a
+    server-cwd scope has no sync effect: ``sync_eligible`` keeps server-cwd
+    eligible regardless, since the running directory cannot be paused.)
     """
     cfg = _gateway_config(request)
     store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
-    label = (body.label or "").strip() or None
-    updated = store.update_label_by_scope_id(scope_id, label)
+
+    label_present = "label" in body.model_fields_set
+    set_enabled = body.enabled is not None  # null / omitted both mean "unchanged"
+    if not set_enabled and not label_present:
+        raise HTTPException(status_code=400, detail="no fields to update (label and/or enabled)")
+
+    # Single atomic store write — applying label + enabled in one lock window so a
+    # concurrent DELETE / PATCH can't interleave and partially apply the combined
+    # update (Codex review). ``set_*`` flags gate which fields are touched.
+    updated = store.update_entry_by_scope_id(
+        scope_id,
+        label=(body.label or "").strip() or None,
+        set_label=label_present,
+        enabled=bool(body.enabled),
+        set_enabled=set_enabled,
+    )
     if updated is None:
         raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
     return {
@@ -385,6 +421,7 @@ async def update_known_project(
         "scope_id": scope_id,
         "root": str(updated.root),
         "label": updated.label,
+        "enabled": updated.enabled,
     }
 
 

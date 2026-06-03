@@ -100,6 +100,12 @@ class ProjectScope:
     missing: bool = False
     stale: bool = False
     experimental: bool = False
+    # ``enabled`` — the known_projects entry's sync-enrollment flag (True for
+    # cwd-only / scan-only scopes, which have no entry). ``sync_eligible`` —
+    # derived: server-cwd OR (enrolled AND enabled). Only an enrolled+enabled
+    # scope (or the always-eligible server cwd) participates in sync.
+    enabled: bool = True
+    sync_eligible: bool = False
 
 
 # ── known_projects.json store ───────────────────────────────────────────
@@ -113,6 +119,13 @@ class _KnownProjectEntry:
     root: Path
     added_at: str
     label: str | None
+    # Per-project sync enrollment. Additive field — the schema stays version 1:
+    # legacy rows without the key read back as ``True`` (see ``load``), so old
+    # and new readers agree. Known downgrade hazard — an older writer that lacks
+    # this field drops it on rewrite, silently resuming a paused project;
+    # acceptable for single-user local use, revisit with unknown-field
+    # preservation if paused state must survive older tools.
+    enabled: bool = True
 
 
 class KnownProjectsStore:
@@ -167,6 +180,10 @@ class KnownProjectsStore:
                     root=Path(root),
                     added_at=str(item.get("added_at") or ""),
                     label=item.get("label") if isinstance(item.get("label"), str) else None,
+                    # Legacy rows (pre-``enabled`` schema) and any non-bool value
+                    # default to True — enrolled-but-unflagged means "participating",
+                    # matching ``add``'s default. Only an explicit JSON ``false`` disables.
+                    enabled=item.get("enabled") is not False,
                 )
             )
         return entries
@@ -185,6 +202,7 @@ class KnownProjectsStore:
                 root=normalized,
                 added_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 label=label,
+                enabled=True,
             )
             self._write(entries + [new_entry])
             return new_entry
@@ -204,23 +222,32 @@ class KnownProjectsStore:
             self._write(kept)
             return True
 
-    def update_label_by_scope_id(
-        self, scope_id: str, label: str | None
+    def update_entry_by_scope_id(
+        self,
+        scope_id: str,
+        *,
+        label: str | None = None,
+        set_label: bool = False,
+        enabled: bool = True,
+        set_enabled: bool = False,
     ) -> _KnownProjectEntry | None:
-        """Set (or clear, when *label* is None) the label of the entry whose
-        computed scope_id matches. Returns the updated entry, or None if no
+        """Atomically update ``label`` and/or ``enabled`` of the matching entry in
+        a SINGLE locked load/write. Returns the first updated entry, or None if no
         entry matched.
 
-        Label-only: ``root`` and ``added_at`` are preserved (the registration's
-        identity is path-derived, so a rename never changes the scope_id). Holds
-        the same exclusive sidecar lock and atomic ``tmp + os.replace`` as
-        ``add`` / ``remove_by_scope_id``.
+        Each field is applied only when its ``set_*`` flag is True (an unset field
+        is preserved). Applying both in one lock window keeps a combined PATCH
+        atomic — a concurrent DELETE / PATCH cannot interleave between a label
+        write and an enabled write, so the request never partially applies, loses
+        the other field, nor 404s after a half-write. ``root`` / ``added_at`` are
+        always preserved (identity is path-derived, so this never changes the
+        scope_id). Holds the same exclusive sidecar lock + atomic
+        ``tmp + os.replace`` as ``add`` / ``remove_by_scope_id``.
 
         Updates *every* entry whose scope_id matches — mirroring
         ``remove_by_scope_id``'s all-matching semantics — so a manually corrupted
-        file with duplicate rows can't leave a stale label behind a "success".
+        file with duplicate rows can't leave a stale row behind a "success".
         ``add`` dedups by resolved path, so duplicates never arise via the API.
-        Returns the first updated entry.
         """
         with _file_lock(_lock_path_for(self._path)):
             entries = self.load()
@@ -228,7 +255,12 @@ class KnownProjectsStore:
             new_entries: list[_KnownProjectEntry] = []
             for e in entries:
                 if compute_scope_id(e.root) == scope_id:
-                    replacement = _KnownProjectEntry(root=e.root, added_at=e.added_at, label=label)
+                    replacement = _KnownProjectEntry(
+                        root=e.root,
+                        added_at=e.added_at,
+                        label=label if set_label else e.label,
+                        enabled=enabled if set_enabled else e.enabled,
+                    )
                     new_entries.append(replacement)
                     if first_updated is None:
                         first_updated = replacement
@@ -239,6 +271,25 @@ class KnownProjectsStore:
             self._write(new_entries)
             return first_updated
 
+    def update_label_by_scope_id(
+        self, scope_id: str, label: str | None
+    ) -> _KnownProjectEntry | None:
+        """Set (or clear, when *label* is None) the label of the matching entry.
+
+        Thin wrapper over :meth:`update_entry_by_scope_id` — ``enabled`` is
+        preserved, so a rename never silently resumes a paused project.
+        """
+        return self.update_entry_by_scope_id(scope_id, label=label, set_label=True)
+
+    def set_enabled_by_scope_id(self, scope_id: str, enabled: bool) -> _KnownProjectEntry | None:
+        """Set the per-project sync-enrollment flag of the matching entry.
+
+        Thin wrapper over :meth:`update_entry_by_scope_id` — the label is
+        preserved. A disabled project stays discoverable but is excluded from sync
+        (web sync button, Sync All, and CLI ``mm context update --all``).
+        """
+        return self.update_entry_by_scope_id(scope_id, enabled=enabled, set_enabled=True)
+
     def _write(self, entries: list[_KnownProjectEntry]) -> None:
         doc = {
             "version": _KNOWN_PROJECTS_VERSION,
@@ -247,6 +298,7 @@ class KnownProjectsStore:
                     "root": str(e.root),
                     "added_at": e.added_at,
                     "label": e.label,
+                    "enabled": e.enabled,
                 }
                 for e in entries
             ],
@@ -600,6 +652,7 @@ def discover_project_scopes(
     known_projects_file: Path,
     *,
     experimental_claude_projects_scan: bool,
+    auto_display_configured_projects: bool = True,
 ) -> list[ProjectScope]:
     """Enumerate all project scopes the UI should render, in display order.
 
@@ -607,6 +660,17 @@ def discover_project_scopes(
     visible even before Add Project is used). Entries with the same
     resolved path coalesce; ``sources`` then carries the union of every
     place each scope was discovered.
+
+    ``~/.claude/projects`` scan candidates are gated two ways:
+    ``experimental_claude_projects_scan`` admits them *unfiltered* (the legacy
+    escape hatch), while ``auto_display_configured_projects`` (on by default)
+    admits only candidates whose root carries a runtime marker
+    (``has_runtime_marker``). The filter applies *only* to scan rows — server
+    cwd and known-projects entries are always shown, even when missing/stale.
+
+    ``enabled`` / ``sync_eligible`` are read strictly from the matching
+    known_projects entry (never from cwd / scan sources) so a paused project
+    that also shows up in the scan cannot be silently re-enabled.
     """
     # Resolved-path → (display_path, sources, missing, stored_label)
     by_resolved: dict[str, tuple[Path, set[str], bool, str | None]] = {}
@@ -639,6 +703,10 @@ def discover_project_scopes(
     # 2. User-registered roots from known_projects.json.
     store = KnownProjectsStore(known_projects_file)
     known_entries = store.load()
+    # Sync enrollment (``enabled``) is read strictly from the known_projects
+    # entry, keyed the same way ``_add`` keys ``by_resolved`` so the lookup at
+    # emit time matches. cwd / scan sources never contribute enablement.
+    known_by_key = {_normalize_for_scope_id(e.root): e for e in known_entries}
     for entry in known_entries:
         _add(
             entry.root,
@@ -647,14 +715,18 @@ def discover_project_scopes(
             label=entry.label,
         )
 
-    # 3. Opt-in scan of ~/.claude/projects/ — silently skipped when the flag is
-    #    False so the default discovery path stays cheap. The cwd and the
-    #    user-registered roots are passed as authoritative decode anchors so a
-    #    kebab-case project resolves unambiguously even where the FS walk would
-    #    flag it ambiguous.
-    if experimental_claude_projects_scan:
+    # 3. Scan of ~/.claude/projects/. Admitted when EITHER gate is open:
+    #    - experimental_claude_projects_scan: unfiltered (legacy escape hatch).
+    #    - auto_display_configured_projects (default on): only candidates whose
+    #      root carries a runtime marker, so auto-display surfaces configured
+    #      projects only. The cwd and user-registered roots are passed as
+    #      authoritative decode anchors so a kebab-case project resolves
+    #      unambiguously even where the FS walk would flag it ambiguous.
+    if experimental_claude_projects_scan or auto_display_configured_projects:
         anchors = (cwd, *(entry.root for entry in known_entries))
         for decoded in _discover_claude_projects(anchors):
+            if not experimental_claude_projects_scan and not has_runtime_marker(decoded):
+                continue
             _add(decoded, "claude-projects", missing=False)
 
     scopes: list[ProjectScope] = []
@@ -675,6 +747,15 @@ def discover_project_scopes(
             label = "Server CWD"
         else:
             label = _label_for(resolved)
+        # Sync enrollment is read from the known entry only (cwd / scan never
+        # contribute), so a paused known project that is also scan-discovered
+        # stays ineligible. server-cwd is always eligible — the directory the
+        # server runs in cannot be "paused".
+        known_entry = known_by_key.get(key)
+        enabled = known_entry.enabled if known_entry is not None else True
+        sync_eligible = ("server-cwd" in sources) or (
+            known_entry is not None and known_entry.enabled
+        )
         scopes.append(
             ProjectScope(
                 scope_id=compute_scope_id(resolved),
@@ -687,6 +768,8 @@ def discover_project_scopes(
                 # and is never reported stale — the two flags are exclusive.
                 stale=(not missing) and _root_stale(resolved),
                 experimental=experimental,
+                enabled=enabled,
+                sync_eligible=sync_eligible,
             )
         )
     return scopes
@@ -695,7 +778,12 @@ def discover_project_scopes(
 # ── Validation helpers ──────────────────────────────────────────────────
 
 
-_MARKER_DIRS = (".claude", ".gemini", ".agents", ".kimi", ".memtomem")
+# One marker per in-scope runtime (claude / antigravity-on-.gemini / codex /
+# kimi) plus the canonical ``.memtomem`` store. ``.codex`` covers Codex agents
+# (``.codex/agents``) and ``.agents`` covers Codex skills (``.agents/skills``) —
+# see ``_runtime_targets.py``. Used both for the Add-Project "looks configured"
+# warning and as the auto-display filter on ``~/.claude/projects`` scan rows.
+_MARKER_DIRS = (".claude", ".gemini", ".codex", ".agents", ".kimi", ".memtomem")
 
 
 def has_runtime_marker(root: Path) -> bool:
@@ -703,7 +791,9 @@ def has_runtime_marker(root: Path) -> bool:
 
     Used by ``POST /api/context/known-projects`` to decide whether to
     emit a warning ("looks like a non-project directory") without rejecting
-    the registration outright. Empty parents are valid — the user might be
-    setting up a fresh checkout.
+    the registration outright, and by ``discover_project_scopes`` to filter
+    ``~/.claude/projects`` scan candidates to ones that actually carry runtime
+    config. Empty parents are valid — the user might be setting up a fresh
+    checkout.
     """
     return any((root / m).is_dir() for m in _MARKER_DIRS)
