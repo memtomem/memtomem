@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from memtomem.context.runtime_coverage import compute_runtime_coverage
 
 
