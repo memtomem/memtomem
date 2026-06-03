@@ -19,6 +19,7 @@ coverage.json
 !.env.example
 !.env.*.example
 .mcp.json
+.mcp.json.bak.*
 !.mcp.json.example
 
 # Claude Code
