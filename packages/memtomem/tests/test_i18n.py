@@ -1141,7 +1141,16 @@ class TestNoHardcodedStrings:
         protects all of those. The browser-side cache pin in
         ``test_context_gateway_overview.py`` covers the langchange path
         directly; this static check enforces the guard's structural
-        invariants — counter + capture + bail-on-stale."""
+        invariants — counter + capture + bail-on-stale.
+
+        Since #1194 / ADR-0021 §C the guard also pins the tier captured at
+        entry (``requestedTier``) so a mid-fetch tier flip can't commit a
+        project list fetched for one tier and render overview counts for
+        another, and the shared projects-cache commit moved BEHIND the
+        post-fetch guard (split helper). The guard returns therefore read
+        ``seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope`` —
+        the regex below tolerates that optional tier-drift clause while
+        still requiring the seq check, so removing the guard still fails."""
         text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
         assert "_ctxOverviewSeq" in text, (
             "missing _ctxOverviewSeq module counter — Bug-1 race guard"
@@ -1149,13 +1158,20 @@ class TestNoHardcodedStrings:
         assert re.search(r"const seq\s*=\s*\+\+_ctxOverviewSeq", text), (
             "loadCtxOverview must capture-and-bump _ctxOverviewSeq at entry"
         )
-        # Both the success path (after innerHTML compute) and the catch
-        # path must early-return when the captured seq is stale; without
-        # the catch-path guard a late error overlay would clobber the
-        # cards rendered by a newer toggle.
-        guards = re.findall(r"if \(seq !==\s*_ctxOverviewSeq\)\s*return;", text)
-        assert len(guards) >= 2, (
-            f"expected sequence-guard returns in both success+catch paths, found {len(guards)}"
+        # All THREE fetch-dependent paths must early-return when the captured
+        # seq is stale (or, since #1194, the pinned tier drifted): the
+        # intermediate projects-fetch guard (gates the shared-cache commit),
+        # the success path (after innerHTML compute), and the catch path —
+        # without the latter a late error overlay would clobber the cards
+        # rendered by a newer toggle. The optional ``|| requestedTier ...``
+        # clause is matched but not required so the bare seq form still counts.
+        # Threshold tracks the path count exactly (``>= 3``, not ``>= 2``): with
+        # three guards a looser ``>= 2`` would let a future drop of any single
+        # guard — including the #1194 commit-gating one — slip through green.
+        guards = re.findall(r"if \(seq !==\s*_ctxOverviewSeq(?:\s*\|\|[^)]*)?\)\s*return;", text)
+        assert len(guards) >= 3, (
+            f"expected sequence-guard returns in all three fetch-dependent paths "
+            f"(intermediate-commit, success, catch), found {len(guards)}"
         )
 
     def test_q_pr1_langchange_listener_reloads_overview(self) -> None:

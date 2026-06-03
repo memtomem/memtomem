@@ -333,10 +333,16 @@ async function loadCtxProjects() {
   _ctxPortalSyncFilterFromDeepLink();
   
   try {
-    const data = await _ctxFetchProjects();
+    // Fetch under the pinned tier, then commit the shared cache ONLY after the
+    // guard passes — a superseded in-flight fetch must not clobber the shared
+    // ``_ctxProjectsCache`` / active scope (#1194). The board already renders
+    // from its own post-guard ``_ctxPortalScopes`` snapshot; this extends the
+    // same discipline to the shared cache the helper used to commit pre-guard.
+    const result = await _ctxFetchProjectsData({ targetScope: requestedScope });
     // Bail if a newer load started OR the tier flipped under us mid-fetch
     // (#972): counts in this payload were computed for ``requestedScope``.
     if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return;
+    const data = _ctxCommitProjects(result);
     const scopes = data.scopes || [];
     // Reset edit state on a fresh load and commit the validated snapshot before
     // any render reads it.

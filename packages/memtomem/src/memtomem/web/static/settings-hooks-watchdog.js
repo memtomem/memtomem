@@ -368,9 +368,19 @@ async function loadHooksSync() {
   panelLoading(contentEl);
   const requestedScope = _hooksCurrentTargetScope();
   let requestedProjectScope = _hooksCurrentProjectScope();
-  if (typeof _ctxFetchProjects === 'function') {
+  if (typeof _ctxFetchProjectsData === 'function') {
     try {
-      await _ctxFetchProjects();
+      const result = await _ctxFetchProjectsData({ targetScope: requestedScope });
+      // Bail before BOTH the shared-cache commit AND the status-control render
+      // below if this load was superseded mid-fetch: an older load must neither
+      // clobber a newer one's cache / active scope (#1194) nor repaint the
+      // ``hooks-sync-status`` controls over the newer render. Mirrors the
+      // early-return guard every other projects-fetch caller uses. The project
+      // switcher render below reads ``_ctxProjectsCache`` via
+      // ``_ctxProjectControls``, so a current load must commit before it.
+      if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()
+        || requestedProjectScope !== _hooksCurrentProjectScope()) return;
+      _ctxCommitProjects(result);
     } catch (err) {
       requestedProjectScope = _hooksCurrentProjectScope();
       if (seq !== _hooksSyncSeq || requestedScope !== _hooksCurrentTargetScope()
