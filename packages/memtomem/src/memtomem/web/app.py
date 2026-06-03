@@ -27,6 +27,7 @@ from memtomem.web.routes import (
     context_mcp_servers,
     context_projects,
     context_skills,
+    context_versions,
     decay,
     dedup,
     evaluation,
@@ -100,6 +101,7 @@ _PROD_ROUTERS: list[ModuleType] = [
     context_commands,
     context_agents,
     context_mcp_servers,
+    context_versions,
     settings_sync,
 ]
 _DEV_ONLY_ROUTERS: list[ModuleType] = [
