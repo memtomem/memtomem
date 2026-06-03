@@ -22,7 +22,7 @@ def test_compute_runtime_coverage_empty_dir(tmp_path: Path) -> None:
 def test_compute_runtime_coverage_with_markers(tmp_path: Path) -> None:
     """Markers trigger available=True for targeted runtimes."""
     # Claude marker directory
-    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
     # Kimi config file marker
     (tmp_path / ".kimi").mkdir()
     (tmp_path / ".kimi" / "config.toml").touch()

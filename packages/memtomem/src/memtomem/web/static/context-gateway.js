@@ -1100,7 +1100,7 @@ function _renderProjectsMatrix() {
       : `<button type="button" class="btn-ghost btn-xs ctx-matrix-select-btn" data-scope-id="${escapeHtml(scope.scope_id)}">${escapeHtml(t('settings.ctx.select') || 'Select')}</button>`;
 
     // Sync button (CWD-locked mutator 경계 유지를 위해, Project Local은 no fan-out 이므로 비활성화)
-    const isProjectLocal = scope.tier === 'project_local';
+    const isProjectLocal = _ctxTargetScope === 'project_local';
     const syncDisabled = (isProjectLocal || isMissing) ? ' disabled title="No fan-out for project_local or missing project"' : '';
     const syncBtn = `<button type="button" class="btn-primary btn-xs ctx-matrix-sync-btn" data-scope-id="${escapeHtml(scope.scope_id)}"${syncDisabled}>${escapeHtml(t('settings.ctx.sync') || 'Sync')}</button>`;
 
@@ -1258,13 +1258,15 @@ async function _ctxSyncProjectScope(scopeId, btn) {
 
   const succeeded = [];
   let failed = null;
+  let settingsSeverity = null;
+  let settingsReason = '';
   try {
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
     
-    const types = ['skills', 'commands', 'agents', 'mcp_servers'];
+    const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       let resp;
       try {
@@ -1295,22 +1297,62 @@ async function _ctxSyncProjectScope(scopeId, btn) {
         if (!settingsResp.ok) {
           failed = {
             phase: 'settings',
-            reason: await _ctxErrorMessageFromResponse(settingsResp, 'Sync settings failed'),
+            reason: await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'),
           };
+        } else {
+          const settingsData = await settingsResp.json().catch(() => ({}));
+          const settingsResults = settingsData.results || [];
+          const firstWithStatus = (s) => settingsResults.find(r => r && r.status === s);
+          const errored = firstWithStatus('error');
+          const aborted = firstWithStatus('aborted');
+          const needsConfirmation = firstWithStatus('needs_confirmation');
+          if (errored) {
+            settingsSeverity = 'error';
+            settingsReason = errored.reason || '';
+          } else if (aborted) {
+            settingsSeverity = 'aborted';
+          } else if (needsConfirmation) {
+            settingsSeverity = 'needs_confirmation';
+          } else {
+            settingsSeverity = 'ok';
+          }
         }
       } catch (err) {
         failed = { phase: 'settings', reason: err.message };
       }
     }
 
+    const phaseLabel = (p) => t(`settings.ctx.${String(p).replace(/-/g, '_')}_phase_title`);
     if (failed) {
-      const msg = t('settings.ctx.sync_failed_partial')
-        .replace('{phase}', failed.phase)
-        .replace('{reason}', failed.reason)
-        .replace('{succeeded}', succeeded.join(', ') || 'none');
-      showToast(msg, 'error');
+      if (succeeded.length === 0) {
+        showToast(t('toast.sync_failed', { error: failed.reason }), 'error');
+      } else {
+        showToast(
+          t('toast.sync_partial_failed', {
+            succeeded: succeeded.map(phaseLabel).join(', '),
+            failed_phase: phaseLabel(failed.phase),
+            reason: failed.reason,
+          }),
+          'error'
+        );
+      }
+    } else if (settingsSeverity === 'error') {
+      showToast(t('toast.sync_failed', { error: settingsReason }), 'error');
+    } else if (settingsSeverity === 'aborted') {
+      showToast(t('settings.ctx.mtime_conflict'), 'warning');
+    } else if (settingsSeverity === 'needs_confirmation') {
+      showToast(
+        t('toast.sync_partial_settings_needs_confirmation'),
+        'info',
+        {
+          action: {
+            label: t('toast.open_settings_action'),
+            onClick: () => switchSettingsSection('hooks-sync'),
+          },
+        }
+      );
     } else {
-      showToast(t('settings.ctx.sync_success') || 'Sync completed successfully!', 'success');
+      showToast(t('settings.ctx.sync_success'));
       loadCtxOverview();
     }
   } catch (err) {
