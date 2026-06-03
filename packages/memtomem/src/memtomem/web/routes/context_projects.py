@@ -204,6 +204,8 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
 
 
 def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: TargetScope) -> dict:
+    from memtomem.context.runtime_coverage import compute_runtime_coverage
+
     return {
         "project_scope_id": scope.scope_id,
         "scope_id": scope.scope_id,
@@ -222,6 +224,11 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
             _counts_for(scope.root, target_scope=target_scope)
             if (with_counts and scope.root is not None and not scope.missing)
             else None
+        ),
+        "runtime_coverage": (
+            compute_runtime_coverage(scope.root)
+            if (scope.root is not None and not scope.missing)
+            else []
         ),
     }
 

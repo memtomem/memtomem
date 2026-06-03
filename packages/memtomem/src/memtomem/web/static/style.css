@@ -4474,3 +4474,89 @@ button.ctx-runtime-chip--greyed:focus-visible {
      Reload-vs-Force choice (was two ~225px columns side by side). */
   #ctx-conflict-preview-row { flex-direction: column; }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Projects Matrix Table Styles
+   ═══════════════════════════════════════════════════════════════ */
+.ctx-projects-matrix-container {
+  margin-top: 32px;
+  background: var(--surface, #1e1e1e);
+  border: 1px solid var(--border, #333);
+  border-radius: var(--radius, 8px);
+  padding: 24px;
+}
+
+.ctx-projects-matrix-title {
+  margin-top: 0;
+  margin-bottom: 16px;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text, #e0e0e0);
+}
+
+.ctx-projects-matrix-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+  font-size: 0.85rem;
+}
+
+.ctx-projects-matrix-table th,
+.ctx-projects-matrix-table td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #333);
+}
+
+.ctx-projects-matrix-table th {
+  font-weight: 600;
+  color: var(--muted, #888);
+  background: var(--bg-hover, rgba(59, 99, 232, 0.06));
+}
+
+.ctx-matrix-row--active {
+  background: rgba(46, 117, 89, 0.1) !important;
+}
+
+.ctx-matrix-project-label {
+  font-weight: 600;
+  color: var(--text, #e0e0e0);
+}
+
+.ctx-matrix-project-path {
+  font-size: 0.75rem;
+  color: var(--muted, #888);
+  font-family: var(--mono);
+}
+
+.ctx-matrix-counts {
+  font-size: 0.8rem;
+  white-space: nowrap;
+  letter-spacing: 0.5px;
+}
+
+.ctx-matrix-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ctx-matrix-remove-btn {
+  background: none;
+  border: none;
+  color: var(--danger, #ff5f56);
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 0 4px;
+}
+
+.ctx-matrix-remove-btn:hover {
+  opacity: 0.8;
+}
+
+.ctx-matrix-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+

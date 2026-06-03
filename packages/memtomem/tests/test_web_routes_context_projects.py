@@ -90,6 +90,9 @@ async def test_get_projects_cwd_only(client) -> None:
     # Counts are opt-in now (ADR-0021 PR2): the default response omits them
     # (``null``, distinct from a real zero) so the project list stays cheap.
     assert scope["counts"] is None
+    assert "runtime_coverage" in scope
+    runtimes = {r["name"] for r in scope["runtime_coverage"]}
+    assert runtimes == {"claude", "gemini", "codex", "kimi"}
 
 
 @pytest.mark.asyncio
