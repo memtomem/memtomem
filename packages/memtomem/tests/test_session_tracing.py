@@ -16,6 +16,7 @@ from memtomem.config import (
     FIELD_CONSTRAINTS,
 )
 from memtomem.observability.session_tracing import (
+    _redact_metadata,
     format_payload,
     format_propagated_metadata,
     sanitize_metadata_key,
@@ -23,6 +24,8 @@ from memtomem.observability.session_tracing import (
     trace_session,
 )
 from memtomem.cli import cli
+
+from .helpers import set_home
 
 
 @pytest.fixture
@@ -154,6 +157,54 @@ class TestPayloadSanitization:
         assert "***" in formatted["harmless_string_with_secret"]
         assert "my-api-key-value" not in formatted["cli_args"]
         assert "***" in formatted["cli_args"]
+
+    def test_redact_metadata_modes(self):
+        meta = {
+            "command": "deploy --api-key sk-SECRETABC123456",
+            # a bare secret under a secret-named KEY (no inline marker) must be
+            # scrubbed by the dict-key policy — exactly like the payload path.
+            "api_key": "plain-secret-value",
+            "harmless": "ok",
+        }
+
+        # full mode is the explicit verbatim opt-in — returned unchanged.
+        assert _redact_metadata(meta, "full") is meta
+
+        # redacted and the default metadata mode both scrub secret-bearing
+        # values while leaving harmless ones intact.
+        for mode in ("redacted", "metadata"):
+            out = _redact_metadata(meta, mode)
+            assert "sk-SECRETABC123456" not in out["command"]
+            assert "***" in out["command"]
+            assert out["api_key"] == "***"
+            assert "plain-secret-value" not in json.dumps(out)
+            assert out["harmless"] == "ok"
+            # the source dict must not be mutated in place.
+            assert meta["command"] == "deploy --api-key sk-SECRETABC123456"
+            assert meta["api_key"] == "plain-secret-value"
+
+        # empty metadata is a no-op regardless of mode.
+        assert _redact_metadata({}, "redacted") == {}
+
+    def test_redact_metadata_non_string_object_value(self):
+        # A value whose __str__ leaks a secret must be scrubbed: the exporters
+        # stringify it (json.dumps(default=str), sanitize_metadata_value), so
+        # leaving the object verbatim would leak the secret downstream.
+        class Secretish:
+            def __str__(self):
+                return "wrapped --api-key sk-SECRETABC123456"
+
+        out = _redact_metadata({"obj": Secretish()}, "redacted")
+        assert "sk-SECRETABC123456" not in str(out["obj"])
+        assert "***" in str(out["obj"])
+
+        # JSON scalars must pass through untouched — no spurious stringification.
+        assert _redact_metadata({"n": 5, "f": 1.5, "b": True, "z": None}, "redacted") == {
+            "n": 5,
+            "f": 1.5,
+            "b": True,
+            "z": None,
+        }
 
     def test_truncation(self):
         payload = {"long_text": "a" * 1000}
@@ -348,6 +399,14 @@ class TestCLIIntegration:
         return CliRunner()
 
     def test_session_start_traces_written(self, runner, tmp_path: Path, monkeypatch):
+        # Isolate HOME so `mm session start` → _write_current_session() writes
+        # to tmp_path/.memtomem/.current_session, not the real
+        # ~/.memtomem/.current_session (PermissionError in protected-home CI,
+        # and overwrites a developer's live session otherwise).
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+
         # Redirect config and override path to test tracing
         jsonl_file = tmp_path / "traces.jsonl"
 
@@ -391,6 +450,155 @@ class TestCLIIntegration:
         assert data["agent_id"] == "claude"
         assert "session_id" in data["payload"]
         assert data["payload"]["resumed"] is False
+
+    def _trace_with_secret_metadata(self, tmp_path, monkeypatch, mode: str) -> dict:
+        """Run one trace whose metadata carries a secret, return the JSONL row."""
+        jsonl_file = tmp_path / "traces.jsonl"
+
+        class DummyConfig:
+            enabled = True
+            jsonl_enabled = True
+            jsonl_path = jsonl_file
+            sampling_rate = 1.0
+            payload_mode = mode
+            max_payload_chars = 10000
+            langfuse_enabled = False
+
+        monkeypatch.setattr(
+            "memtomem.observability.session_tracing.get_trace_config",
+            lambda *args, **kwargs: DummyConfig(),
+        )
+        secret_cmd = "deploy --api-key sk-SECRETABC123456"
+        with trace_session("session_wrap", "session_wrap", agent_id="claude") as ctx:
+            ctx["metadata"]["command"] = secret_cmd
+            ctx["payload"]["command"] = secret_cmd
+        return json.loads(jsonl_file.read_text(encoding="utf-8").strip())
+
+    def test_metadata_redacted_in_jsonl(self, runner, tmp_path: Path, monkeypatch):
+        # The command metadata leaks the secret pre-fix; redacted mode must
+        # scrub it everywhere, not just in the payload (P1).
+        data = self._trace_with_secret_metadata(tmp_path, monkeypatch, "redacted")
+        blob = json.dumps(data)
+        assert "sk-SECRETABC123456" not in blob
+        assert "***" in data["metadata"]["command"]
+
+    def test_metadata_verbatim_in_full_mode(self, runner, tmp_path: Path, monkeypatch):
+        # full mode is an explicit opt-in to verbatim content for both payload
+        # and metadata — no redaction.
+        data = self._trace_with_secret_metadata(tmp_path, monkeypatch, "full")
+        assert "sk-SECRETABC123456" in data["metadata"]["command"]
+
+    def test_metadata_redacted_in_langfuse_sinks(self, tmp_path: Path, monkeypatch):
+        # The JSONL tests force langfuse_enabled=False, so they only prove the
+        # JSONL sink. Cover the three Langfuse sinks too: initial + final
+        # propagate_attributes(metadata=...) and span.update(output=...). A
+        # regression that dropped redaction on any of these would otherwise pass.
+        import sys
+        import types
+        from contextlib import contextmanager
+
+        captured_propagate: list = []
+        captured_output: list = []
+
+        class FakeSpan:
+            def update(self, **kwargs):
+                captured_output.append(kwargs.get("output"))
+
+        class FakeObs:
+            def __enter__(self):
+                return FakeSpan()
+
+            def __exit__(self, *exc):
+                return False
+
+        class FakeClient:
+            def start_as_current_observation(self, **kwargs):
+                return FakeObs()
+
+            def flush(self):
+                pass
+
+        @contextmanager
+        def fake_propagate_attributes(*, session_id, user_id, metadata):
+            captured_propagate.append(metadata)
+            yield
+
+        fake_langfuse = types.ModuleType("langfuse")
+        fake_langfuse.propagate_attributes = fake_propagate_attributes
+        monkeypatch.setitem(sys.modules, "langfuse", fake_langfuse)
+        monkeypatch.setattr(
+            "memtomem.observability.session_tracing.get_langfuse_client",
+            lambda *args, **kwargs: FakeClient(),
+        )
+
+        class DummyConfig:
+            enabled = True
+            jsonl_enabled = False
+            langfuse_enabled = True
+            sampling_rate = 1.0
+            payload_mode = "redacted"
+            max_payload_chars = 10000
+
+        monkeypatch.setattr(
+            "memtomem.observability.session_tracing.get_trace_config",
+            lambda *args, **kwargs: DummyConfig(),
+        )
+
+        secret = "deploy --api-key sk-SECRETABC123456"
+        # Pass the secret via initial_metadata so the INITIAL propagate_attributes
+        # (which fires before the yield) sees it too — otherwise that sink only
+        # ever sees {} and a redaction regression there would go uncaught.
+        with trace_session(
+            "session_wrap",
+            "session_wrap",
+            agent_id="claude",
+            initial_metadata={"command": secret},
+        ):
+            pass
+
+        # Both propagate sinks (initial + final) and the span output sink fired,
+        # and none may carry the raw secret.
+        assert len(captured_propagate) >= 2
+        assert captured_output
+        blob = json.dumps({"propagate": captured_propagate, "output": captured_output}, default=str)
+        assert "sk-SECRETABC123456" not in blob
+        # the INITIAL propagate sink (index 0) must be redacted, not just the final
+        assert "***" in str(captured_propagate[0].get("command", ""))
+        assert "***" in str(captured_propagate[-1].get("command", ""))
+        assert "***" in captured_output[-1]["metadata"]["command"]
+
+    def test_jsonl_redaction_failure_does_not_escape(self, tmp_path: Path, monkeypatch):
+        # A pathological metadata value (here a failing __str__) must not let a
+        # telemetry failure escape _write_local_jsonl and override the wrapped
+        # command result — redaction now runs inside the JSONL write guard (P2).
+        jsonl_file = tmp_path / "traces.jsonl"
+
+        class Boom:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        class DummyConfig:
+            enabled = True
+            jsonl_enabled = True
+            jsonl_path = jsonl_file
+            sampling_rate = 1.0
+            payload_mode = "redacted"
+            max_payload_chars = 10000
+            langfuse_enabled = False
+
+        monkeypatch.setattr(
+            "memtomem.observability.session_tracing.get_trace_config",
+            lambda *args, **kwargs: DummyConfig(),
+        )
+
+        # Reaching the assertions proves no telemetry exception leaked out of the
+        # context manager during cleanup.
+        with trace_session("session_wrap", "session_wrap", agent_id="claude") as ctx:
+            ctx["metadata"]["bad"] = Boom()
+
+        # The row was dropped (redaction raised, was caught + logged) rather than
+        # written with the unredacted value.
+        assert not jsonl_file.exists() or jsonl_file.read_text(encoding="utf-8") == ""
 
     def test_config_credential_redaction(self, runner, override_path: Path, monkeypatch):
         # Stub provider-dir discovery to [] so auto_discover migration doesn't trigger log warning

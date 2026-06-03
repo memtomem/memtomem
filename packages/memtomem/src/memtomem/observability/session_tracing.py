@@ -145,8 +145,39 @@ def _redact_value(val: Any) -> Any:
         val = re.sub(p2, r"\1\2***", val)
 
         return val
-    else:
+    elif val is None or isinstance(val, (bool, int, float)):
+        # JSON scalars cannot carry a secret string — leave them untouched so
+        # we don't stringify legitimate numbers/bools.
         return val
+    else:
+        # Any other object (Exception, bytes, custom type) is stringified by
+        # the exporters (json.dumps(default=str) for the JSONL row,
+        # sanitize_metadata_value's str() for Langfuse), so a value whose
+        # __str__ contains "--api-key sk-…" would otherwise leak verbatim.
+        # Redact its string form here too.
+        return _redact_value(str(val))
+
+
+def _redact_metadata(metadata: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    """Redact metadata values unless ``full`` payload mode is selected.
+
+    Metadata (e.g. the wrapped command line, or an error string echoing it) can
+    carry secrets just like the payload — ``mm session wrap -- tool --api-key
+    sk-...`` lands the raw command in ``metadata["command"]``. The payload is
+    redacted via :func:`format_payload`, but metadata is exported through a
+    separate path (Langfuse propagated attributes + span output + the JSONL
+    row), so it must be redacted here too or ``redacted`` / ``metadata`` mode
+    leaks the secret. ``full`` mode opts into verbatim content for both.
+
+    Delegates to :func:`_redact_value` on the whole dict so metadata is scrubbed
+    exactly like the payload — including the dict-key policy: an ``api_key`` /
+    ``password`` / ``token`` key redacts its value even when that value carries
+    no inline marker (iterating values alone would drop the top-level key check
+    and leak it).
+    """
+    if mode == "full" or not metadata:
+        return metadata
+    return _redact_value(metadata)
 
 
 def format_payload(payload: Any, mode: str, max_chars: int) -> Any:
@@ -245,7 +276,10 @@ def trace_session(
             if span is not None:
                 clean_prop_metadata = {}
                 try:
-                    clean_prop_metadata = format_propagated_metadata(ctx["metadata"])
+                    _mode = getattr(config, "payload_mode", "metadata")
+                    clean_prop_metadata = format_propagated_metadata(
+                        _redact_metadata(ctx["metadata"], _mode)
+                    )
                 except Exception as exc:
                     logger.warning("Failed to format propagated metadata: %s", exc)
 
@@ -282,7 +316,10 @@ def trace_session(
                 try:
                     final_session_id = ctx.get("session_id") or f"no-session-{agent_id}"
                     final_agent_id = ctx.get("agent_id") or agent_id
-                    final_clean_metadata = format_propagated_metadata(ctx["metadata"])
+                    _final_mode = getattr(config, "payload_mode", "metadata")
+                    final_clean_metadata = format_propagated_metadata(
+                        _redact_metadata(ctx["metadata"], _final_mode)
+                    )
 
                     final_prop_ctx = None
                     if propagate_attributes is not None:
@@ -315,7 +352,7 @@ def trace_session(
                     final_output = {
                         "exit_code": ctx.get("exit_code", 0),
                         "status": ctx.get("status", "success"),
-                        "metadata": ctx.get("metadata", {}),
+                        "metadata": _redact_metadata(ctx.get("metadata", {}), payload_mode),
                         "payload": final_payload,
                     }
                     span.update(output=final_output)
@@ -427,10 +464,15 @@ def _write_local_jsonl(
 
     payload_mode = getattr(config, "payload_mode", "metadata")
     max_payload_chars = getattr(config, "max_payload_chars", 10000)
-    final_payload = format_payload(payload, payload_mode, max_payload_chars)
-
     jsonl_path_raw = getattr(config, "jsonl_path", "~/.memtomem/traces/session-traces.jsonl")
     try:
+        # Redaction + serialization run inside the guard: a pathological value
+        # (a failing __str__, a self-referential structure) must not let a
+        # telemetry failure escape here and override the wrapped command result.
+        final_payload = format_payload(payload, payload_mode, max_payload_chars)
+        # ``command`` and other metadata can carry secrets — scrub before write.
+        safe_metadata = _redact_metadata(metadata, payload_mode)
+
         jsonl_path = Path(jsonl_path_raw).expanduser().resolve()
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -445,7 +487,7 @@ def _write_local_jsonl(
             "duration_ms": round(duration_ms, 2),
             "status": status,
             "exit_code": exit_code,
-            "metadata": metadata,
+            "metadata": safe_metadata,
             "payload": final_payload,
         }
         with open(jsonl_path, "a", encoding="utf-8") as f:
