@@ -2043,6 +2043,19 @@ def save_config_overrides(
     Uses **read-merge-write** so non-mutable keys (init-only settings like
     ``embedding.provider``, ``storage.sqlite_path``) carry across saves.
     """
+    from pydantic import ValidationError
+
+    try:
+        config.session_trace.model_validate(config.session_trace.model_dump())
+    except ValidationError as e:
+        msgs = []
+        for error in e.errors():
+            msg = error.get("msg", "")
+            if msg.startswith("Value error, "):
+                msg = msg[len("Value error, ") :]
+            msgs.append(msg)
+        raise ValueError("; ".join(msgs) if msgs else str(e))
+
     import json as _json
     import logging
 

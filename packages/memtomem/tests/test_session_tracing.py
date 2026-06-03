@@ -122,6 +122,38 @@ class TestPayloadSanitization:
         assert formatted["password"] == "***"
         assert formatted["user_key"] == "***"
 
+    def test_nested_and_bare_token_redaction(self):
+        payload = {
+            "harmless_field": "some-value",
+            "nested_dict": {
+                "password": "mypassword",
+                "normal": "ok",
+            },
+            "nested_list": [
+                {"token": "some-token"},
+                "just a string",
+                "sk-123456789012345678901234567890",
+            ],
+            "json_string": '{"nested":{"api_key":"sk-abcdef"}}',
+            "harmless_string_with_secret": "Here is a secret: sk-123456789012345678901234567890",
+            "cli_args": "mm init --api-key my-api-key-value",
+        }
+        formatted = format_payload(payload, "redacted", 5000)
+        assert formatted["harmless_field"] == "some-value"
+        assert formatted["nested_dict"]["password"] == "***"
+        assert formatted["nested_dict"]["normal"] == "ok"
+        assert formatted["nested_list"][0]["token"] == "***"
+        assert formatted["nested_list"][1] == "just a string"
+        assert formatted["nested_list"][2] == "***"
+
+        json_redacted = json.loads(formatted["json_string"])
+        assert json_redacted["nested"]["api_key"] == "***"
+
+        assert "sk-" not in formatted["harmless_string_with_secret"]
+        assert "***" in formatted["harmless_string_with_secret"]
+        assert "my-api-key-value" not in formatted["cli_args"]
+        assert "***" in formatted["cli_args"]
+
     def test_truncation(self):
         payload = {"long_text": "a" * 1000}
         formatted = format_payload(payload, "full", 100)
@@ -224,6 +256,42 @@ class TestTraceSessionContext:
                 completed = True
             assert completed is True
 
+    def test_langfuse_failure_isolation(self):
+        class DummyConfig:
+            enabled = True
+            jsonl_enabled = False
+            sampling_rate = 1.0
+            payload_mode = "full"
+            max_payload_chars = 10000
+            langfuse_enabled = True
+            langfuse_public_key = "pk"
+            langfuse_secret_key = "sk"
+
+        mock_span = MagicMock()
+        mock_span.update.side_effect = Exception("Telemetry update failed")
+
+        mock_client = MagicMock()
+        mock_client.start_as_current_observation.return_value = mock_span
+
+        with (
+            patch(
+                "memtomem.observability.session_tracing.get_trace_config",
+                return_value=DummyConfig(),
+            ),
+            patch(
+                "memtomem.observability.session_tracing.get_langfuse_client",
+                return_value=mock_client,
+            ),
+        ):
+            completed = False
+            with trace_session("cmd", "evt"):
+                completed = True
+            assert completed is True
+
+            with pytest.raises(ValueError, match="command failed"):
+                with trace_session("cmd", "evt"):
+                    raise ValueError("command failed")
+
 
 class TestCLIIntegration:
     @pytest.fixture
@@ -315,3 +383,106 @@ class TestCLIIntegration:
         assert "new-secret-999" not in result_set.output
         assert "my-secret-key-12345" not in result_set.output
         assert "session_trace.langfuse_secret_key: *** -> ***" in result_set.output
+
+
+class TestConfigSaveValidationAndRollback:
+    @pytest.fixture
+    def runner(self) -> CliRunner:
+        return CliRunner()
+
+    def test_save_config_validation_rejection(self, override_path: Path):
+        cfg = Mem2MemConfig()
+        cfg.session_trace.enabled = True
+        cfg.session_trace.langfuse_enabled = True
+        cfg.session_trace.langfuse_public_key = ""
+        cfg.session_trace.langfuse_secret_key = ""
+
+        from memtomem.config import save_config_overrides
+
+        with pytest.raises(
+            ValueError, match="requires both langfuse_public_key and langfuse_secret_key"
+        ):
+            save_config_overrides(cfg)
+
+    def test_cli_config_set_validation_error(self, runner, override_path: Path, monkeypatch):
+        import memtomem.config as _cfg
+
+        monkeypatch.setattr(_cfg, "_canonical_provider_dirs", lambda: [])
+
+        override_path.write_text("{}", encoding="utf-8")
+
+        result = runner.invoke(cli, ["config", "set", "session_trace.enabled", "true"])
+        assert result.exit_code == 0
+
+        result = runner.invoke(cli, ["config", "set", "session_trace.langfuse_enabled", "true"])
+        assert result.exit_code != 0
+        assert "requires both langfuse_public_key and langfuse_secret_key" in result.output
+
+        with open(override_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        assert saved.get("session_trace", {}).get("langfuse_enabled") is not True
+
+    @pytest.mark.anyio
+    async def test_web_api_patch_rollback(self, monkeypatch):
+        app_mock = MagicMock()
+        app_mock.state.config = Mem2MemConfig()
+        app_mock.state.config.session_trace.enabled = True
+        app_mock.state.config.session_trace.langfuse_enabled = False
+
+        request_mock = MagicMock()
+        request_mock.app = app_mock
+
+        from fastapi import HTTPException
+        from memtomem.web.routes.system import ConfigPatchRequest, patch_config
+
+        req = ConfigPatchRequest(session_trace={"langfuse_enabled": True})
+
+        def mock_build_fresh():
+            cfg = Mem2MemConfig()
+            cfg.session_trace.enabled = True
+            cfg.session_trace.langfuse_enabled = False
+            return cfg
+
+        from memtomem.web import hot_reload as _hr
+
+        monkeypatch.setattr(_hr, "_build_fresh_config", mock_build_fresh)
+        monkeypatch.setattr(_hr, "current_signature", lambda: ())
+        monkeypatch.setattr(_hr, "_set_last_signature", lambda app, sig: None)
+        monkeypatch.setattr(_hr, "commit_writer_signature", lambda app: None)
+
+        with pytest.raises(HTTPException) as excinfo:
+            await patch_config(
+                request=request_mock,
+                req=req,
+                persist=True,
+                storage=MagicMock(),
+                search_pipeline=MagicMock(),
+            )
+        assert excinfo.value.status_code == 400
+        assert "requires both langfuse_public_key and langfuse_secret_key" in str(
+            excinfo.value.detail
+        )
+
+        assert app_mock.state.config.session_trace.langfuse_enabled is False
+
+    @pytest.mark.anyio
+    async def test_mcp_config_rollback(self, monkeypatch):
+        app_mock = MagicMock()
+        app_mock.config = Mem2MemConfig()
+        app_mock.config.session_trace.enabled = True
+        app_mock.config.session_trace.langfuse_enabled = False
+
+        from memtomem.server.tools import status_config
+
+        monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app_mock))
+
+        from memtomem.server.tools.status_config import mem_config
+
+        res = await mem_config(
+            key="session_trace.langfuse_enabled", value="true", persist=True, ctx=MagicMock()
+        )
+
+        assert "Failed to persist config" in res
+        assert "requires both langfuse_public_key and langfuse_secret_key" in res
+
+        assert app_mock.config.session_trace.langfuse_enabled is False

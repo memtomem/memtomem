@@ -243,8 +243,18 @@ async def mem_config(
             if persist:
                 from memtomem.config import save_config_overrides
 
-                save_config_overrides(app.config)
-                result += " (persisted to config.json)"
+                try:
+                    save_config_overrides(app.config)
+                    result += " (persisted to config.json)"
+                except ValueError as e:
+                    # Rollback the runtime mutation by reloading the configuration from disk
+                    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+                    fresh = Mem2MemConfig()
+                    load_config_d(fresh, quiet=True)
+                    load_config_overrides(fresh)
+                    app.config = fresh
+                    return f"Failed to persist config: {e}. Runtime change rolled back."
             else:
                 result += " (runtime only — not persisted)"
         return result

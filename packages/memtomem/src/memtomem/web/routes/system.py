@@ -538,7 +538,14 @@ async def patch_config(
                     search_pipeline.invalidate_cache()
 
                 if persist:
-                    save_config_overrides(config)
+                    try:
+                        save_config_overrides(config)
+                    except ValueError as e:
+                        request.app.state.config = _hot_reload._build_fresh_config()
+                        _hot_reload._set_last_signature(
+                            request.app, _hot_reload.current_signature()
+                        )
+                        raise HTTPException(400, detail=str(e))
                     # Self-write mtime bump — otherwise the next GET sees
                     # our own edit as "external" and reloads spuriously.
                     _hot_reload.commit_writer_signature(request.app)
@@ -562,7 +569,12 @@ async def save_config(
                     request.app, storage=storage, search_pipeline=search_pipeline
                 )
                 _check_reload_block(request)
-                save_config_overrides(request.app.state.config)
+                try:
+                    save_config_overrides(request.app.state.config)
+                except ValueError as e:
+                    request.app.state.config = _hot_reload._build_fresh_config()
+                    _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                    raise HTTPException(400, detail=str(e))
                 _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config save timed out — another update may be in progress")

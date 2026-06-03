@@ -91,8 +91,11 @@ def config_set(key: str, value: str) -> None:
     section_obj = getattr(cfg, section_name)
     old_val = getattr(section_obj, field_name)
     setattr(section_obj, field_name, coerced)
-
-    save_config_overrides(cfg)
+    try:
+        save_config_overrides(cfg)
+    except ValueError as e:
+        click.echo(click.style(f"{key}: {e}", fg="red"))
+        raise SystemExit(1)
 
     old_show = old_val
     new_show = coerced
