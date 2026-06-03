@@ -1343,7 +1343,7 @@ function activateTab(tabName, opts = {}) {
     if (!start) {
       try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
     }
-    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-overview';
+    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-projects';
     switchSettingsSection(start);
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();

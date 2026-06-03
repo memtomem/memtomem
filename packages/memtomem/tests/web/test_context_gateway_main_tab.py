@@ -5,7 +5,7 @@ Pin three pieces of behavior so a partial revert can't silently re-nest
 the Gateway under Settings without breaking these tests:
 
 * Clicking ``#tabbtn-context-gateway`` lands the user on ``#tab-context-gateway``
-  with ``ctx-overview`` as the default active section.
+  with ``ctx-projects`` as the default active section.
 * ``switchSettingsSection('ctx-skills')`` (legacy caller pattern from
   e.g. ``settings-namespaces.js`` quick links) auto-redirects into the
   new Gateway tab — no per-call-site fix needed.
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.browser
 
 def test_main_tab_button_activates_gateway_panel(page, mm_web_url: str) -> None:
     """Click on the new top-level Gateway button → ``#tab-context-gateway``
-    becomes active and the default section ``ctx-overview`` populates.
+    becomes active and the default section ``ctx-projects`` populates.
     """
     install_default_stubs(page)
 
@@ -39,7 +39,7 @@ def test_main_tab_button_activates_gateway_panel(page, mm_web_url: str) -> None:
         timeout=4_000,
     )
 
-    # Default landing section is ctx-overview.
+    # Default landing section is ctx-projects.
     active_section = page.evaluate(
         "() => {"
         "  const sections = document.querySelectorAll("
@@ -50,8 +50,8 @@ def test_main_tab_button_activates_gateway_panel(page, mm_web_url: str) -> None:
         "  return null;"
         "}"
     )
-    assert active_section == "settings-ctx-overview", (
-        f"Default Gateway sub-section must be ctx-overview, got {active_section!r}"
+    assert active_section == "settings-ctx-projects", (
+        f"Default Gateway sub-section must be ctx-projects, got {active_section!r}"
     )
 
 

@@ -495,14 +495,14 @@
           <span class="nav-group-caret" aria-hidden="true">▾</span>
           <span data-i18n="settings.nav.integrations">Agent Integrations</span>
         </button>
-        <button class="settings-nav-btn settings-nav-btn--landing" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">🔄</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_overview">Context Gateway</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn settings-nav-btn--landing" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations" role="tab" aria-selected="false">
           <span class="nav-icon" aria-hidden="true">📁</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_projects">Projects</span>
@@ -548,7 +548,7 @@
       <div class="settings-content">
 
         <!-- Context Gateway: Overview -->
-        <div class="settings-section active" id="settings-ctx-overview">
+        <div class="settings-section" id="settings-ctx-overview">
           <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Sync memtomem agent runtime artifacts to Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
@@ -572,7 +572,7 @@
         </div>
 
         <!-- Context Gateway: Projects (Portal) -->
-        <div class="settings-section" id="settings-ctx-projects">
+        <div class="settings-section active" id="settings-ctx-projects">
           <p class="settings-section-desc" data-i18n="settings.ctx.portal_desc">Browse, switch, rename, and unregister the projects memtomem tracks. Health shows which roots are missing or not yet initialized.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.portal_title">Projects</h2>

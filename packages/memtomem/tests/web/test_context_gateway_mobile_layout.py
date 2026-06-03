@@ -61,6 +61,9 @@ def test_gateway_mobile_390px_no_overflow(page, mm_web_url) -> None:
         "() => document.querySelector('.tab-btn.active')?.dataset.tab === 'context-gateway'",
         timeout=4_000,
     )
+    # The Gateway now lands on Projects by default; this test pins the
+    # Overview section's mobile layout, so switch to Overview explicitly.
+    page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_selector("#ctx-sync-all-btn", timeout=4_000)
 
     metrics = page.evaluate(
@@ -136,6 +139,9 @@ def test_gateway_overview_grid_single_column_at_480px(page, mm_web_url) -> None:
         "() => document.querySelector('.tab-btn.active')?.dataset.tab === 'context-gateway'",
         timeout=4_000,
     )
+    # The Gateway now lands on Projects by default; this test pins the
+    # Overview grid's column count, so switch to Overview explicitly.
+    page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_selector("#tab-context-gateway .ctx-overview-grid", timeout=4_000)
 
     track_count = page.evaluate(
