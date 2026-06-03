@@ -481,11 +481,16 @@ async def patch_config(
                         rerank_changed = True
 
                         for key, old_val, coerced in pending_changes:
+                            old_show = str(old_val)
+                            new_show = str(coerced)
+                            if "api_key" in key or "secret_key" in key:
+                                old_show = "***" if old_val else ""
+                                new_show = "***" if coerced else ""
                             applied.append(
                                 ConfigPatchChange(
                                     field=f"{section_name}.{key}",
-                                    old_value=str(old_val),
-                                    new_value=str(coerced),
+                                    old_value=old_show,
+                                    new_value=new_show,
                                 )
                             )
                         continue
@@ -507,11 +512,18 @@ async def patch_config(
                         setattr(section_obj, key, coerced)
                         if full_key == "search.tokenizer" and old_val != coerced:
                             tokenizer_changed = True
+
+                        old_show = str(old_val)
+                        new_show = str(coerced)
+                        if "api_key" in key or "secret_key" in key:
+                            old_show = "***" if old_val else ""
+                            new_show = "***" if coerced else ""
+
                         applied.append(
                             ConfigPatchChange(
                                 field=full_key,
-                                old_value=str(old_val),
-                                new_value=str(coerced),
+                                old_value=old_show,
+                                new_value=new_show,
                             )
                         )
 

@@ -166,4 +166,7 @@ def _set_config_key(config: Mem2MemConfig, key: str, value: str) -> str:
             return f"Invalid value '{value}' for '{key}': {exc}"
 
     setattr(section, field_name, coerced)
-    return f"Set {key} = {coerced!r}"
+    show_val = coerced
+    if field_name == "langfuse_secret_key" or field_name == "api_key":
+        show_val = "***" if coerced else ""
+    return f"Set {key} = {show_val!r}"

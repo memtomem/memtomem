@@ -260,6 +260,10 @@ async def mem_config(
         return result
 
     config_dict = app.config.model_dump()
+    if config_dict.get("embedding", {}).get("api_key"):
+        config_dict["embedding"]["api_key"] = "***"
+    if config_dict.get("session_trace", {}).get("langfuse_secret_key"):
+        config_dict["session_trace"]["langfuse_secret_key"] = "***"
 
     if key:
         parts = key.split(".")

@@ -535,3 +535,81 @@ class TestConfigSaveValidationAndRollback:
         assert "requires both langfuse_public_key and langfuse_secret_key" in res
 
         assert app_mock.config.session_trace.langfuse_enabled is False
+
+
+class TestConfigMaskingAndSecretsSecurity:
+    @pytest.mark.anyio
+    async def test_mcp_config_secret_masking(self, monkeypatch):
+        app_mock = MagicMock()
+        app_mock.config = Mem2MemConfig()
+        app_mock.config.embedding.api_key = "my-openai-api-key"
+        app_mock.config.session_trace.langfuse_secret_key = "my-langfuse-secret"
+
+        from memtomem.server.tools import status_config
+
+        monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app_mock))
+
+        from memtomem.server.tools.status_config import mem_config
+
+        # Test full config dump masks secrets
+        full_res = await mem_config(ctx=MagicMock())
+        assert "my-openai-api-key" not in full_res
+        assert "my-langfuse-secret" not in full_res
+        assert '"api_key": "***"' in full_res
+        assert '"langfuse_secret_key": "***"' in full_res
+
+        # Test single key read masks secrets
+        key_res1 = await mem_config(key="session_trace.langfuse_secret_key", ctx=MagicMock())
+        assert "my-langfuse-secret" not in key_res1
+        assert key_res1 == "session_trace.langfuse_secret_key = ***"
+
+        key_res2 = await mem_config(key="embedding.api_key", ctx=MagicMock())
+        assert "my-openai-api-key" not in key_res2
+        assert key_res2 == "embedding.api_key = ***"
+
+        # Test setting config masks the return confirmation value
+        set_res = await mem_config(
+            key="session_trace.langfuse_secret_key",
+            value="new-secret",
+            persist=False,
+            ctx=MagicMock(),
+        )
+        assert "new-secret" not in set_res
+        assert (
+            set_res
+            == "Set session_trace.langfuse_secret_key = '***' (runtime only — not persisted)"
+        )
+
+    @pytest.mark.anyio
+    async def test_web_patch_config_secret_masking(self, monkeypatch):
+        app_mock = MagicMock()
+        app_mock.state.config = Mem2MemConfig()
+        app_mock.state.config.session_trace.langfuse_secret_key = "old-secret"
+
+        request_mock = MagicMock()
+        request_mock.app = app_mock
+
+        from memtomem.web.routes.system import ConfigPatchRequest, patch_config
+
+        req = ConfigPatchRequest(session_trace={"langfuse_secret_key": "new-secret"})
+
+        # Mock reload_if_stale to be noop
+        from memtomem.web import hot_reload as _hr
+
+        monkeypatch.setattr(_hr, "reload_if_stale", AsyncMock(return_value=False))
+        # Mock save_config_overrides to be noop
+        monkeypatch.setattr("memtomem.web.routes.system.save_config_overrides", lambda cfg: None)
+
+        res = await patch_config(
+            request=request_mock,
+            req=req,
+            persist=True,
+            storage=MagicMock(),
+            search_pipeline=MagicMock(),
+        )
+
+        # Verify old_value and new_value are masked in response
+        assert len(res.applied) == 1
+        assert res.applied[0].field == "session_trace.langfuse_secret_key"
+        assert res.applied[0].old_value == "***"
+        assert res.applied[0].new_value == "***"
