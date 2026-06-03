@@ -573,15 +573,17 @@ function _ctxParseDeepLink() {
   const section = params.get('section') || '';
   const filter = params.get('filter') || '';
   const artifact = params.get('artifact') || '';
-  if (!section && !filter && !artifact) return null;
+  const runtime = params.get('runtime') || '';
+  if (!section && !filter && !artifact && !runtime) return null;
   return {
     section,
     filter: _CTX_DEEP_LINK_FILTERS.has(filter) ? filter : '',
     artifact,
+    runtime,
   };
 }
 
-function _ctxBuildDeepLinkUrl({ section, filter, artifact }) {
+function _ctxBuildDeepLinkUrl({ section, filter, artifact, runtime }) {
   // Build the URL by mutating the *current* URL's search params rather
   // than constructing a fresh string — preserves any unrelated query
   // params the SPA might be using (or future feature might add) and
@@ -590,9 +592,11 @@ function _ctxBuildDeepLinkUrl({ section, filter, artifact }) {
   url.searchParams.delete('section');
   url.searchParams.delete('filter');
   url.searchParams.delete('artifact');
+  url.searchParams.delete('runtime');
   if (section) url.searchParams.set('section', section);
   if (filter) url.searchParams.set('filter', filter);
   if (artifact) url.searchParams.set('artifact', artifact);
+  if (runtime) url.searchParams.set('runtime', runtime);
   return url.pathname + (url.search || '') + (url.hash || '');
 }
 
@@ -610,7 +614,7 @@ function _ctxSetDeepLink(state) {
 }
 
 function _ctxClearDeepLink() {
-  _ctxSetDeepLink({ section: '', filter: '', artifact: '' });
+  _ctxSetDeepLink({ section: '', filter: '', artifact: '', runtime: '' });
 }
 
 // Map the dashboard tile's dominant issue (the same ladder the badge

@@ -582,6 +582,7 @@
                       data-i18n-aria-label="settings.ctx.portal_add_project_aria">Add Project</button>
             </div>
           </div>
+          <div id="ctx-portal-heading-chips" class="ctx-portal-heading-chips"></div>
           <div id="ctx-projects-list"></div>
         </div>
 
@@ -1470,6 +1471,24 @@
       <div class="confirm-actions">
         <button type="button" id="path-picker-cancel-btn" class="btn-ghost" data-i18n="picker.cancel">Cancel</button>
         <button type="button" id="path-picker-select-btn" class="btn-primary" data-i18n="picker.select" disabled>Select</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Install Guide Modal -->
+  <div id="ctx-install-guide-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ctx-install-guide-title">
+    <div class="modal-inner confirm-dialog ctx-install-guide-dialog">
+      <div class="modal-header">
+        <span id="ctx-install-guide-title" class="modal-title"></span>
+        <button id="ctx-install-guide-close-btn" class="btn-ghost"
+                data-i18n-title="settings.ctx.install_guide_close_aria"
+                data-i18n-aria-label="settings.ctx.install_guide_close_aria"
+                title="Close install guide" aria-label="Close install guide">✕</button>
+      </div>
+      <div id="ctx-install-guide-body" class="ctx-install-guide-body">
+      </div>
+      <div class="confirm-actions">
+        <button type="button" id="ctx-install-guide-ok-btn" class="btn-primary" data-i18n="settings.ctx.install_guide_ok">OK</button>
       </div>
     </div>
   </div>

@@ -129,6 +129,7 @@ class TestNoHardcodedStrings:
         "settings-config.js",
         "settings-hooks-watchdog.js",
         "context-gateway.js",
+        "context-portal.js",
     )
 
     def test_no_template_literal_toasts(self) -> None:
@@ -1030,6 +1031,34 @@ class TestNoHardcodedStrings:
         missing_ko = required - set(ko)
         assert not missing_en, f"Q-PR1 keys missing from en.json: {sorted(missing_en)}"
         assert not missing_ko, f"Q-PR1 keys missing from ko.json: {sorted(missing_ko)}"
+
+    def test_context_portal_pr5_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """PR5 keys for per-CLI runtimes and guides."""
+        required = {
+            "settings.ctx.runtime_uninstalled_tooltip",
+            "settings.ctx.runtime_installed_tooltip",
+            "settings.ctx.runtime_registered_tooltip",
+            "settings.ctx.install_guide_title",
+            "settings.ctx.copied",
+            "settings.ctx.guide_claude_desc",
+            "settings.ctx.guide_claude_note",
+            "settings.ctx.guide_antigravity_desc",
+            "settings.ctx.guide_antigravity_cli",
+            "settings.ctx.guide_antigravity_cli_desc",
+            "settings.ctx.guide_codex_desc",
+            "settings.ctx.guide_kimi_desc",
+            "settings.ctx.copy",
+            "settings.ctx.filter_label",
+            "settings.ctx.filter_all",
+            "settings.ctx.runtime_not_installed",
+            "settings.ctx.runtime_error_tooltip",
+            "settings.ctx.install_guide_ok",
+            "settings.ctx.install_guide_close_aria",
+        }
+        missing_en = required - set(en)
+        missing_ko = required - set(ko)
+        assert not missing_en, f"PR5 keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"PR5 keys missing from ko.json: {sorted(missing_ko)}"
 
     def test_q_pr1_no_legacy_detect_keys(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The ``detect`` naming was an alias for what the handler always

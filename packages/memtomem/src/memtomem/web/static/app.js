@@ -6504,6 +6504,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const confirmModal = qs('confirm-modal');
     if (confirmModal && !confirmModal.hidden) return; // handled by showConfirm's own listener
+    const installGuideModal = qs('ctx-install-guide-modal');
+    if (installGuideModal && !installGuideModal.hidden) { closeModal(installGuideModal); return; }
     const srcPreview = qs('source-preview-modal');
     if (srcPreview && !srcPreview.hidden) { closeModal(srcPreview); return; }
     const expandModal = qs('expand-modal');
