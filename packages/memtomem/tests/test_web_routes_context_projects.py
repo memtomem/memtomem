@@ -87,10 +87,26 @@ async def test_get_projects_cwd_only(client) -> None:
     assert scope["experimental"] is False
     # cwd_root has a .claude marker but no .memtomem store → reported stale.
     assert scope["stale"] is True
-    # Counts are opt-in now (ADR-0021 PR2): the default response omits them
-    # (``null``, distinct from a real zero) so the project list stays cheap.
+    # Counts and runtime coverage are both opt-in now (ADR-0021 PR2): the
+    # default response omits them (``null``, distinct from a real zero / empty
+    # list) so the project list stays cheap.
     assert scope["counts"] is None
-    assert "runtime_coverage" in scope
+    assert scope["runtime_coverage"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_projects_runtime_coverage_opt_in(client) -> None:
+    """``?include=runtime_coverage`` computes per-runtime coverage per scope.
+
+    Coverage costs a ``probe_all_runtimes`` pass (per-client config reads) for
+    every scope, so — like ``counts`` — it is omitted unless explicitly
+    requested. Requesting only coverage must not also trigger counts.
+    """
+    resp = await client.get("/api/context/projects", params={"include": "runtime_coverage"})
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    assert scope["counts"] is None
+    assert isinstance(scope["runtime_coverage"], list)
     runtimes = {r["name"] for r in scope["runtime_coverage"]}
     assert runtimes == {"claude", "gemini", "codex", "kimi"}
 

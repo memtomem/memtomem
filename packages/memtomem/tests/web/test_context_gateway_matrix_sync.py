@@ -145,9 +145,10 @@ def test_matrix_rendering_and_badges(page, mm_web_url: str) -> None:
     inventory = row.locator(".ctx-matrix-counts")
     assert "🧩2" in (inventory.text_content() or "")
 
-    # Claude column: available=true, installed=true, memtomem_registered=true => Active (Reg)
+    # Claude column: available=true, installed=true, memtomem_registered=true => Active
+    # ("Active" already implies registered, so no redundant " (Reg)" suffix).
     claude_badge = row.locator("td").nth(2).locator(".badge")
-    assert (claude_badge.text_content() or "").strip() == "Active (Reg)"
+    assert (claude_badge.text_content() or "").strip() == "Active"
     assert claude_badge.evaluate("el => el.classList.contains('badge-success')")
     assert claude_badge.get_attribute("title") == "Detected, Installed & Registered"
 
@@ -171,6 +172,72 @@ def test_matrix_rendering_and_badges(page, mm_web_url: str) -> None:
     assert (kimi_badge.text_content() or "").strip() == "Client (Reg)"
     assert kimi_badge.evaluate("el => el.classList.contains('badge-blue')")
     assert kimi_badge.get_attribute("title") == "Client installed, but no project marker found"
+
+
+def test_matrix_counts_null_renders_dash(page, mm_web_url: str) -> None:
+    """A scope whose ``counts`` is ``null`` (the API default when the fetch does
+    not opt into ``?include=counts``) renders a muted dash, not a misleading
+    all-zero inventory row."""
+    install_default_stubs(page)
+
+    projects = json.loads(json.dumps(_MATRIX_PROJECTS))
+    projects["scopes"][1]["counts"] = None
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(projects)),
+    )
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    row = page.locator(".ctx-projects-matrix-table tbody tr", has_text="My Scoped Project")
+    text = (row.locator(".ctx-matrix-counts").text_content() or "").strip()
+    assert text == "—"
+    assert "🧩" not in text
+
+
+def test_matrix_badges_localized_on_langchange(page, mm_web_url: str) -> None:
+    """Runtime badge labels/tooltips localize via ``t()`` — a KO langchange swaps
+    the English 'Active' for its Korean label (regression: badges were hardcoded
+    English literals)."""
+    install_default_stubs(page)
+
+    page.route(
+        "**/api/context/projects**",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MATRIX_PROJECTS)
+        ),
+    )
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW, _HEALTHY_OVERVIEW])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.wait_for_selector(".ctx-projects-matrix-table", timeout=5_000)
+
+    row = page.locator(".ctx-projects-matrix-table tbody tr", has_text="My Scoped Project")
+    claude_badge = row.locator("td").nth(2).locator(".badge")
+    assert (claude_badge.text_content() or "").strip() == "Active"
+
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    # The langchange listener re-renders the overview (and matrix) from cache;
+    # the claude badge label flips to its Korean string (활성).
+    page.wait_for_function(
+        "() => {"
+        "  const row = Array.from(document.querySelectorAll("
+        "    '.ctx-projects-matrix-table tbody tr'))"
+        "    .find(tr => (tr.textContent || '').includes('My Scoped Project'));"
+        "  if (!row) return false;"
+        "  const b = row.querySelectorAll('td')[2].querySelector('.badge');"
+        "  return !!b && b.textContent.trim() === '활성';"
+        "}",
+        timeout=4_000,
+    )
+    assert (
+        row.locator("td").nth(2).locator(".badge").get_attribute("title")
+        == "감지됨, 설치됨 및 등록됨"
+    )
 
 
 def test_matrix_select_changes_active_scope(page, mm_web_url: str) -> None:

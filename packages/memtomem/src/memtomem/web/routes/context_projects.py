@@ -203,8 +203,33 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     return counts
 
 
-def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: TargetScope) -> dict:
+def _scope_to_dict(
+    scope: ProjectScope,
+    *,
+    with_counts: bool,
+    with_coverage: bool,
+    target_scope: TargetScope,
+) -> dict:
     from memtomem.context.runtime_coverage import compute_runtime_coverage
+
+    computable = scope.root is not None and not scope.missing
+
+    # Counts are opt-in via ``?include=counts``: each scope costs several
+    # per-type artifact scans (see ``_counts_for``), so the N-project Portal
+    # list stays cheap by default. ``null`` means "not computed" — distinct
+    # from a genuine zero — and a missing root has nothing to count.
+    counts = (
+        _counts_for(scope.root, target_scope=target_scope) if (with_counts and computable) else None
+    )
+
+    # Runtime coverage is opt-in via ``?include=runtime_coverage`` for the same
+    # reason: ``compute_runtime_coverage`` runs a ``probe_all_runtimes`` pass
+    # (per-client config-file reads) for every scope, so it must not be paid by
+    # default callers (ADR-0021 PR2 "cheap by default"). ``null`` means "not
+    # computed"; a present root with no detected runtimes yields ``[]``.
+    coverage: list[dict[str, object]] | None = None
+    if with_coverage:
+        coverage = compute_runtime_coverage(scope.root) if computable else []
 
     return {
         "project_scope_id": scope.scope_id,
@@ -216,20 +241,8 @@ def _scope_to_dict(scope: ProjectScope, *, with_counts: bool, target_scope: Targ
         "missing": scope.missing,
         "stale": scope.stale,
         "experimental": scope.experimental,
-        # Counts are opt-in via ``?include=counts``: each scope costs several
-        # per-type artifact scans (see ``_counts_for``), so the N-project Portal
-        # list stays cheap by default. ``null`` means "not computed" — distinct
-        # from a genuine zero — and a missing root has nothing to count.
-        "counts": (
-            _counts_for(scope.root, target_scope=target_scope)
-            if (with_counts and scope.root is not None and not scope.missing)
-            else None
-        ),
-        "runtime_coverage": (
-            compute_runtime_coverage(scope.root)
-            if (scope.root is not None and not scope.missing)
-            else []
-        ),
+        "counts": counts,
+        "runtime_coverage": coverage,
     }
 
 
@@ -247,8 +260,10 @@ async def list_projects(
         "",
         description=(
             "Comma-separated optional sections to compute. Recognized: 'counts' "
-            "(per-type item counts — omitted by default because each scope costs "
-            "several artifact scans). Unknown tokens are ignored."
+            "(per-type item counts) and 'runtime_coverage' (per-runtime "
+            "detected/installed/registered status) — both omitted by default "
+            "because each scope costs extra per-project scans / config probes. "
+            "Unknown tokens are ignored."
         ),
     ),
 ) -> dict:
@@ -263,11 +278,18 @@ async def list_projects(
     """
     include_tokens = {tok.strip() for tok in include.split(",") if tok.strip()}
     with_counts = "counts" in include_tokens
+    with_coverage = "runtime_coverage" in include_tokens
     scopes = _discover_for(request)
     return {
         "target_scope": target_scope,
         "scopes": [
-            _scope_to_dict(s, with_counts=with_counts, target_scope=target_scope) for s in scopes
+            _scope_to_dict(
+                s,
+                with_counts=with_counts,
+                with_coverage=with_coverage,
+                target_scope=target_scope,
+            )
+            for s in scopes
         ],
     }
 
