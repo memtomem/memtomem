@@ -265,13 +265,16 @@ async function _ctxFetchProjectsData(opts = {}) {
   //     same "endpoint exists but failing" class, surface a toast (#1100).
   let warn = null;
   try {
-    // ``?include=counts,runtime_coverage`` are opt-in server-side (ADR-0021
-    // PR2): the scope picker renders per-scope count badges and the Project
-    // Scope Matrix renders per-runtime coverage badges, so this shared loader
-    // requests both. They stay omitted by default for cheap callers (each adds
-    // per-scope scans / config probes). ``_ctxWithTargetScope`` appends
-    // ``&target_scope=`` after the existing ``?``.
-    const res = await fetch(_ctxWithTargetScope('/api/context/projects?include=counts,runtime_coverage', { includeScope: false, targetScope: opts.targetScope }));
+    // ``include`` tokens are opt-in server-side (ADR-0021 PR2). ``counts`` is
+    // always requested — every caller renders the scope picker's per-scope
+    // count badges. ``runtime_coverage`` is requested ONLY when the caller asks
+    // (``opts.includeCoverage``): it costs a ``probe_all_runtimes`` pass (per-
+    // client config reads) per scope and is consumed solely by the overview's
+    // Project Scope Matrix, so cheap callers (the per-type list tabs, the
+    // portal, hooks-sync) must NOT pay it on every reload. ``_ctxWithTargetScope``
+    // appends ``&target_scope=`` after the existing ``?``.
+    const include = opts.includeCoverage ? 'counts,runtime_coverage' : 'counts';
+    const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }));
     if (!res.ok) {
       const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
@@ -1087,7 +1090,12 @@ async function loadCtxOverview() {
     // superseded in-flight fetch can't clobber the shared cache / active scope
     // (#1194). The overview fetch URL depends on the just-committed active
     // scope, so the commit happens here, before it.
-    const projectsResult = await _ctxFetchProjectsData({ targetScope: requestedTier });
+    // Overview is the only consumer of runtime coverage (the Project Scope
+    // Matrix), so it is the only fetch that opts into the expensive probe.
+    const projectsResult = await _ctxFetchProjectsData({
+      targetScope: requestedTier,
+      includeCoverage: true,
+    });
     if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
     _ctxCommitProjects(projectsResult);
     // Pin the resolved effective scope alongside the tier so the overview
