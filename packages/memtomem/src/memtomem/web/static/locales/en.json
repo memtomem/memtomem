@@ -442,6 +442,7 @@
   "settings.ctx.load_failed": "Failed to load {type}",
   "settings.ctx.load_detail_failed": "Failed to load detail",
   "settings.ctx.no_project_scopes": "No project scopes",
+  "settings.ctx.show_all_projects": "Show all projects ({n})",
   "settings.ctx.not_found": "\"{name}\" not found",
   "settings.ctx.diff_tab_hint": "Click the Diff tab to load...",
   "settings.ctx.diff_failed": "Diff failed",

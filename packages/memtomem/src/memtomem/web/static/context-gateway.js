@@ -527,6 +527,32 @@ function _ctxWireTierControls() {
   });
 }
 
+// rank 2c: the "Show all projects" toggle. Rendered only when there is more
+// than one scope (a single Server-CWD-only install has nothing to collapse,
+// so the toggle would be a dead checkbox). The count in the label is the
+// total scope count so the user knows how large the roster they're hiding
+// is — the same framing as the Projects portal's row count.
+function _ctxShowAllScopesControl(type, scopes) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  if (list.length <= 1) return '';
+  const label = t('settings.ctx.show_all_projects').replace('{n}', String(list.length));
+  return `<label class="ctx-list-show-all" data-type="${escapeHtml(type)}">
+    <input type="checkbox" id="ctx-${escapeHtml(type)}-show-all"${_ctxListShowAllScopes ? ' checked' : ''}>
+    <span>${escapeHtml(label)}</span>
+  </label>`;
+}
+
+function _ctxWireShowAllScopes(type, listEl) {
+  const toggle = listEl.querySelector(`#ctx-${type}-show-all`);
+  if (!toggle) return;
+  toggle.addEventListener('change', () => {
+    _ctxListShowAllScopes = toggle.checked;
+    // Re-run the section so the scope loop re-filters; mirrors how the
+    // project switcher / tier filter re-issue ``loadCtxList`` on change.
+    loadCtxList(type);
+  });
+}
+
 // -- Tier-aware write-block gate (issue #943) ---------------------------------
 //
 // ADR-0011 / #940 wired ``target_scope`` through every artifact route, with
@@ -1943,6 +1969,15 @@ document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () =
 // ``loadCtxList`` invocation that originated them.
 let _ctxListSeq = { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 };
 
+// rank 2c: artifact sections (Skills/Commands/Agents/MCP) scope to the
+// active project by default — the same ~30-project roster the Projects
+// portal already owns shouldn't be re-painted as a wall of collapsed
+// accordions in every section. A "Show all projects" toggle opts back
+// into the full roster. Shared across all four sections (a deliberate
+// reading: the toggle answers "do I want the roster or just my project",
+// which is the same intent regardless of which artifact I'm browsing).
+let _ctxListShowAllScopes = false;
+
 // Sibling guard for ``loadCtxDetail`` and ``_ctxLoadRuntimeOnlyDetail``
 // races. Both write to the same ``detailEl``, so they share one
 // per-type counter. Rapid langchange / card-click bursts can put
@@ -2543,9 +2578,20 @@ async function loadCtxList(type) {
       return;
     }
 
+    // rank 2c: default to the active project only — the Projects portal owns
+    // the full roster, so re-painting every scope as a collapsed accordion in
+    // each artifact section just buries the one project the user is acting on.
+    // The "Show all projects" toggle opts back into the full list. Fall back
+    // to all scopes if no active scope resolves (``_ctxCommitProjects``
+    // normalizes one, but never blank the panel) so a stale active-scope id
+    // can't strand the user on an empty section.
+    const activeScopes = scopes.filter(_ctxScopeIsActive);
+    const visibleScopes = (_ctxListShowAllScopes || !activeScopes.length) ? scopes : activeScopes;
+
     let html = _ctxProjectControls(type, scopes);
     html += _ctxTierControls(type);
-    for (const scope of scopes) {
+    html += _ctxShowAllScopesControl(type, scopes);
+    for (const scope of visibleScopes) {
       const isActive = _ctxScopeIsActive(scope);
       const count = _ctxScopeCount(scope, type);
       const groupId = `ctx-${type}-group-${escapeHtml(scope.scope_id)}`;
@@ -2590,6 +2636,7 @@ async function loadCtxList(type) {
     listEl.innerHTML = html;
     _ctxWireProjectControls();
     _ctxWireTierControls();
+    _ctxWireShowAllScopes(type, listEl);
 
     // Tier-aware read-only banner (issue #943): inserted at the top of
     // the list whenever the canonical-tier filter is set to a
@@ -2620,7 +2667,9 @@ async function loadCtxList(type) {
     // and the per-scope remove (×) button. ``seq`` is threaded into the
     // group fetch so a late group response from a stale ``loadCtxList``
     // can't paint into the new list's ``ctx-scope-items`` containers.
-    for (const scope of scopes) {
+    // Iterate the same ``visibleScopes`` the render loop used so we never
+    // try to wire a group that wasn't painted (rank 2c).
+    for (const scope of visibleScopes) {
       const groupEl = listEl.querySelector(`details[data-scope-id="${CSS.escape(scope.scope_id)}"]`);
       if (!groupEl) continue;
       const itemsEl = groupEl.querySelector('.ctx-scope-items');

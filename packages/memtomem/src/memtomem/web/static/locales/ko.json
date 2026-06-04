@@ -442,6 +442,7 @@
   "settings.ctx.load_failed": "{type} 목록을 불러오지 못했습니다",
   "settings.ctx.load_detail_failed": "세부 정보를 불러오지 못했습니다",
   "settings.ctx.no_project_scopes": "프로젝트 스코프가 없습니다",
+  "settings.ctx.show_all_projects": "모든 프로젝트 보기 ({n})",
   "settings.ctx.not_found": "\"{name}\"을(를) 찾을 수 없습니다",
   "settings.ctx.diff_tab_hint": "Diff 탭을 클릭하면 불러옵니다...",
   "settings.ctx.diff_failed": "Diff에 실패했습니다",
