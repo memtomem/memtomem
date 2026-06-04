@@ -5,6 +5,82 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-06-04
+
+Patch release on top of 0.2.3: a multi-project **Context Portal**,
+Langfuse-style **artifact version snapshots + label pointers** for agents and
+commands (ADR-0022), per-project **sync enrollment**, a new `mm tags` CLI, CLI
+session tracing on Langfuse v4, and broad Web UI / i18n / accessibility
+hardening — alongside a session-trace secret-redaction fix and retry/webhook
+reliability fixes.
+
+- **Secrets are now redacted in session-trace metadata sinks.** Session command
+  tracing wrote span/trace metadata to its observability sinks without running
+  the redaction pass, so a secret-shaped value captured in command context could
+  reach the trace backend in clear text. The metadata now goes through the same
+  redaction funnel as the rest of the trace payload.
+
+- **Context Portal — multi-project state board (ADR-0021).** The Context Gateway
+  gains a read-only runtime/client registration registry, a multi-project board
+  section, per-CLI runtime chips with a provider filter, project health + label
+  rename + lazy artifact counts, and a "Sync All" flow with per-phase progress, a
+  result summary, and (project, tier) pinning so each phase re-resolves against
+  the intended scope. The gateway now lands on the Projects Portal by default
+  (#1191–#1193, #1195–#1197, #1200–#1202).
+
+- **Artifact version snapshots + label pointers for agents and commands
+  (ADR-0022).** Canonical agents/commands can keep Langfuse-style
+  `versions/vN.md` snapshots with movable label pointers (e.g. `production`,
+  `staging`) instead of a single flat file. New MCP tools `mem_context_version`
+  and `mem_context_promote`, plus label-aware `mem_context_sync`, expose this
+  over MCP; the Web UI adds a detail-panel version/label manager, list-card label
+  chips (`GET /context/{type}?include=versions`), a versioned create layout, and
+  an opt-in "enable versioning" migration that adopts existing flat web-created
+  artifacts into the versioned layout (#1206, #1212–#1216, #1218).
+
+- **Per-project sync enrollment.** Project discovery is split from sync: matching
+  projects are auto-displayed, but artifacts only fan out once a project is
+  explicitly enrolled. Adds enroll / pause / resume UI, sync-eligibility gating
+  on the matrix and Sync-All, and a write-guard that returns a structured `409`
+  (with localized detail) on runtime-writing routes for paused or not-enrolled
+  projects (#1203, #1205, #1208, #1210, #1211).
+
+- **`mm tags` — list / rename / delete / merge tags (#688).** New CLI verb with a
+  matching Tags tab in the Web UI for the same rename / merge / delete actions.
+  Dry-run sampling is now global so the preview sample matches the count and the
+  applied set (#1175–#1177).
+
+- **CLI session command tracing + Langfuse v4 (#1199).** CLI command runs can
+  emit session traces through a new `observability/session_tracing.py`, updated
+  to the Langfuse v4 client surface.
+
+- **Kimi Code install detected via the `~/.kimi-code` home dir (#1204).** The
+  install probe also checks `~/.kimi-code` (the CLI data home set by
+  `KIMI_CODE_HOME`), fixing an ADR-0021 false-negative where a present Kimi
+  install was reported as absent.
+
+- **Retry and webhook reliability fixes.** `with_retry` now honors string
+  `retry_after` attributes instead of ignoring them (#1178), and
+  `_validate_webhook_url` URL-safety behavior is pinned by tests (#1179).
+
+- **Web UI accessibility + UX consolidation.** Context Gateway roster
+  consolidation (Overview matrix removed, Sync routed through the Projects
+  Portal), active-project + tier controls hoisted into one gateway header bar, a
+  single capability-mapped source for artifact-section toolbars, artifact lists
+  scoped to the active project with a "Show all projects" toggle, Sync/Import
+  dry-run confirm previews with count/destination threading, and a11y fixes
+  (settings-nav `<nav>` landmark + `aria-current`, un-nested project-remove `×`,
+  labeled Hooks controls) (#1217, #1219–#1223).
+
+- **Localization (EN/KO).** Command palette labels, the Context Gateway
+  create-form name placeholder, Search history and recent chips, settings
+  recovery messages, Decay scan status, Index streaming progress, and the
+  embedding-mismatch banner are now localized (#1184–#1190).
+
+- **Internal.** Unused `noqa` directives removed across src and tests; validated
+  `TargetScope` casts replace return-value `type: ignore`s; the gc orphan-project
+  report renderer is typed (#1180–#1183).
+
 ## [0.2.3] — 2026-06-01
 
 - **`mm memory doctor` — read-only hygiene report for memory stores.** A
