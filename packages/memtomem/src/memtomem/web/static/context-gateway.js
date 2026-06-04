@@ -640,9 +640,10 @@ function _ctxWireShowAllScopes(type, listEl) {
 //       and fires a toast — the per-button handler never sees the event,
 //       so no POST is ever issued.
 //
-// Per-section buttons (.ctx-create-btn / .ctx-import-btn / .ctx-sync-btn)
-// live in the static HTML so the refresh applies on every render that
-// touches the tier filter; per-item buttons (.ctx-detail-edit-btn /
+// Per-section toolbar buttons (.ctx-create-btn / .ctx-import-btn /
+// .ctx-sync-btn) are generated once at init by ``_ctxRenderToolbars`` (rank 21)
+// and then persist in the DOM, so the refresh still applies on every render
+// that touches the tier filter; per-item buttons (.ctx-detail-edit-btn /
 // .ctx-detail-delete-btn) are minted by ``loadCtxDetail`` so its callers
 // reapply the refresh after the detail innerHTML lands.
 //
@@ -671,6 +672,69 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   + '.ctx-version-enable-btn, '
   + '.ctx-version-freeze-btn, .ctx-version-promote-btn, .ctx-version-label-remove'
 );
+
+// rank 21: artifact-section toolbars (Skills / Commands / Agents / MCP Servers)
+// render from one source instead of hand-copied static markup, so a button
+// added here propagates to every section and each section's button set is a
+// declared capability rather than an accidental copy-paste divergence.
+//
+//   - add_project / create / sync are universal.
+//   - ``import`` is false for ``mcp-servers``: there is no per-type ``/import``
+//     route (servers come from the single ``.mcp.json`` source — cf.
+//     ``context_mcp_servers.py``, which ships no import endpoint), so the
+//     omission is an explicit capability flag here, not a silent gap. The
+//     user-facing "no Import" messaging lives in the MCP empty-state hint
+//     (rank 7); this map keeps the structural omission from drifting.
+//
+// Buttons are emitted with the exact classes / ``data-type`` / ``data-i18n*``
+// the static markup used, so the existing click bindings, the write-block
+// sweep (``_CTX_WRITE_BUTTON_SELECTOR``), and i18n ``applyDOM`` keep working
+// unchanged. Rendered once at init (below) — before the click bindings further
+// down and before DOMContentLoaded's first ``applyDOM`` — so they behave like
+// the old static buttons (English fallback text, translated on the first pass).
+const _CTX_TOOLBAR_CAPS = {
+  skills: { import: true },
+  commands: { import: true },
+  agents: { import: true },
+  'mcp-servers': { import: false },
+};
+
+// ``data-type`` uses hyphens (``mcp-servers``) but the i18n keys use the
+// underscore form (``mcp_servers_*``); bridge the two spellings here.
+function _ctxToolbarI18nPrefix(type) {
+  return type.replace(/-/g, '_');
+}
+
+function _ctxToolbarHtml(type) {
+  const caps = _CTX_TOOLBAR_CAPS[type] || {};
+  const p = _ctxToolbarI18nPrefix(type);
+  const button = (cls, variant, labelKey, action, fallback) =>
+    `<button class="${variant} ${cls}" data-type="${escapeHtml(type)}"`
+    + ` data-i18n="${labelKey}"`
+    + ` data-i18n-title="settings.ctx.${p}_${action}_tooltip"`
+    + ` data-i18n-aria-label="settings.ctx.${p}_${action}_aria">${fallback}</button>`;
+  const buttons = [
+    button('ctx-add-project-btn', 'btn-ghost', 'settings.ctx.add_project', 'add_project', 'Add Project'),
+    button('ctx-create-btn', 'btn-ghost', 'settings.ctx.create', 'create', 'Create'),
+  ];
+  if (caps.import) {
+    buttons.push(button('ctx-import-btn', 'btn-ghost', 'settings.ctx.import', 'import', 'Import'));
+  }
+  // Sync stays rightmost and primary across every section.
+  buttons.push(button('ctx-sync-btn', 'btn-primary', 'settings.ctx.sync', 'sync', 'Sync'));
+  return buttons.join('\n');
+}
+
+// Fill the per-section ``.ctx-toolbar`` containers from the single template
+// above. Runs at module load so the buttons exist for the ``querySelectorAll``
+// click bindings and for the first write-block sweep, exactly as the static
+// markup did.
+function _ctxRenderToolbars() {
+  document.querySelectorAll('.ctx-toolbar[data-type]').forEach(el => {
+    el.innerHTML = _ctxToolbarHtml(el.dataset.type);
+  });
+}
+_ctxRenderToolbars();
 
 function _ctxRefreshWriteBlockedState() {
   const blocked = _ctxTargetScope !== 'project_shared';

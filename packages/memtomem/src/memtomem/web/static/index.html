@@ -604,24 +604,14 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows shared across Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="skills"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.skills_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="skills"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.skills_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_create_aria">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="skills"
-                      data-i18n="settings.ctx.import"
-                      data-i18n-title="settings.ctx.skills_import_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_import_aria">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="skills"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.skills_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_sync_aria">Sync</button>
-            </div>
+            <!-- rank 21: artifact-section toolbars render from one source
+                 (_ctxToolbarHtml + _CTX_TOOLBAR_CAPS in context-gateway.js),
+                 so button presence is a declared capability per type rather
+                 than hand-copied markup that drifts. Filled once at init by
+                 _ctxRenderToolbars(); the buttons carry the same classes /
+                 data-type / data-i18n* as before, so the existing bindings,
+                 write-block sweep, and i18n applyDOM are unchanged. -->
+            <div class="ctx-toolbar" data-type="skills"></div>
           </div>
           <div id="ctx-skills-status"></div>
           <div id="ctx-skills-list"></div>
@@ -633,24 +623,7 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project-scoped slash commands kept in .claude/commands/, synced to detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Custom Commands</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="commands"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.commands_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="commands"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.commands_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_create_aria">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="commands"
-                      data-i18n="settings.ctx.import"
-                      data-i18n-title="settings.ctx.commands_import_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_import_aria">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="commands"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.commands_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_sync_aria">Sync</button>
-            </div>
+            <div class="ctx-toolbar" data-type="commands"></div>
           </div>
           <div id="ctx-commands-status"></div>
           <div id="ctx-commands-list"></div>
@@ -662,24 +635,7 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents shared across Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="agents"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.agents_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="agents"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.agents_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_create_aria">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="agents"
-                      data-i18n="settings.ctx.import"
-                      data-i18n-title="settings.ctx.agents_import_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_import_aria">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="agents"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.agents_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_sync_aria">Sync</button>
-            </div>
+            <div class="ctx-toolbar" data-type="agents"></div>
           </div>
           <div id="ctx-agents-status"></div>
           <div id="ctx-agents-list"></div>
@@ -691,20 +647,7 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">Project-scoped MCP server definitions synced to .mcp.json.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.mcp_servers_title">MCP Servers</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="mcp-servers"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.mcp_servers_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.mcp_servers_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="mcp-servers"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.mcp_servers_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.mcp_servers_create_aria">Create</button>
-              <button class="btn-primary ctx-sync-btn" data-type="mcp-servers"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.mcp_servers_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.mcp_servers_sync_aria">Sync</button>
-            </div>
+            <div class="ctx-toolbar" data-type="mcp-servers"></div>
           </div>
           <div id="ctx-mcp-servers-status"></div>
           <div id="ctx-mcp-servers-list"></div>
@@ -1524,7 +1467,7 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=16"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=60"></script>
+  <script src="/context-gateway.js?v=61"></script>
   <script src="/context-portal.js?v=2"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>
