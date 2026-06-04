@@ -85,6 +85,23 @@ function _hooksWireTierControls() {
   }
 }
 
+// rank 22: the Hooks section inherits the same project switcher + tier toggle
+// the artifact sections use, but renders them bare above a single "Sync Now"
+// button — so the control row read as accidental chrome rather than a
+// deliberate control. Both controls ARE functional here (they pick which
+// canonical settings.json is read/synced), so we keep them but wrap them in a
+// labeled row with an explicit caption naming that effect, matching the
+// intentional look of the artifact-section control rows.
+function _hooksControlsHtml() {
+  const proj = _hooksProjectControlsHtml();
+  const tier = _hooksTierControlsHtml();
+  if (!proj && !tier) return '';
+  const caption = typeof t === 'function' ? t('settings.hooks.controls_caption') : '';
+  return `<div class="hooks-controls">${proj}${tier}`
+    + `<p class="hooks-controls-caption" data-i18n="settings.hooks.controls_caption">`
+    + `${escapeHtml(caption)}</p></div>`;
+}
+
 function _renderHookRuleDetail(key, contentEl) {
   const idx = Number(key);
   const entry = Number.isInteger(idx) ? _hooksRuleRegistry[idx] : undefined;
@@ -403,7 +420,7 @@ async function loadHooksSync() {
     }
   }
   requestedProjectScope = _hooksCurrentProjectScope();
-  statusEl.innerHTML = _hooksProjectControlsHtml() + _hooksTierControlsHtml();
+  statusEl.innerHTML = _hooksControlsHtml();
   _hooksWireProjectControls();
   _hooksWireTierControls();
 
@@ -452,8 +469,7 @@ async function loadHooksSync() {
     // target path is often what the user needs to inspect.
     const showTarget = !!data.target_path && data.status !== 'no_source';
     statusEl.innerHTML =
-      _hooksProjectControlsHtml()
-      + _hooksTierControlsHtml()
+      _hooksControlsHtml()
       + `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
       + (showTarget
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`

@@ -2543,15 +2543,27 @@ async function loadCtxList(type) {
       // disambiguate same-name scopes (``Edu/inflearn`` vs ``Work/inflearn``)
       // on hover without inflating the visible label.
       const rootTitle = scope.root ? `title="${escapeHtml(scope.root)}"` : '';
-      html += `<details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isActive ? ' open' : ''}>
-        <summary class="ctx-scope-summary" ${rootTitle}>
-          <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
-          <span class="ctx-scope-summary-count">${count}</span>
-          ${_ctxScopeBadges(scope)}
-          ${removeBtn}
-        </summary>
-        <div class="ctx-scope-items" id="${groupId}" data-loaded="false"></div>
-      </details>`;
+      // The remove (×) button is a SIBLING of <details>, not a child of
+      // <summary> (rank 15). A real <button> nested inside the <summary>
+      // activation control is the banned nested-interactive antipattern
+      // (#1003) and made keyboard activation of × ambiguous against the
+      // disclosure's native toggle. It can't be a plain child of <details>
+      // either — native <details> hides every non-<summary> child while
+      // collapsed, which would make × disappear on closed groups. So wrap
+      // both and pin × over the summary's right edge via CSS
+      // (``.ctx-scope-group-wrap``), keeping × always visible and a
+      // standalone button with unambiguous keyboard activation.
+      html += `<div class="ctx-scope-group-wrap">
+        <details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isActive ? ' open' : ''}>
+          <summary class="ctx-scope-summary" ${rootTitle}>
+            <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
+            <span class="ctx-scope-summary-count">${count}</span>
+            ${_ctxScopeBadges(scope)}
+          </summary>
+          <div class="ctx-scope-items" id="${groupId}" data-loaded="false"></div>
+        </details>
+        ${removeBtn}
+      </div>`;
     }
     listEl.innerHTML = html;
     _ctxWireProjectControls();
@@ -2598,7 +2610,9 @@ async function loadCtxList(type) {
       if (groupEl.open) fetchOnce();
       groupEl.addEventListener('toggle', () => { if (groupEl.open) fetchOnce(); });
 
-      const removeBtn = groupEl.querySelector('.ctx-scope-remove');
+      // × is a sibling of <details> inside ``.ctx-scope-group-wrap`` (rank
+      // 15), so reach it through the wrapper rather than ``groupEl`` itself.
+      const removeBtn = groupEl.parentElement?.querySelector(':scope > .ctx-scope-remove');
       if (removeBtn) {
         removeBtn.addEventListener('click', async (ev) => {
           ev.preventDefault();

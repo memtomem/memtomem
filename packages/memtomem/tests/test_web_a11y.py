@@ -674,3 +674,148 @@ class TestIssue1073CtxKeyboardSemantics:
             "ctx-detail-tabs must wire keydown → _arrowNavIndex so Left/Right/"
             "Home/End move focus between tabs (#1073)"
         )
+
+
+_HOOKS_JS = _STATIC_DIR / "settings-hooks-watchdog.js"
+_STYLE_CSS = _STATIC_DIR / "style.css"
+
+
+@pytest.fixture(scope="module")
+def hooks_js() -> str:
+    assert _HOOKS_JS.exists(), f"settings-hooks-watchdog.js missing: {_HOOKS_JS}"
+    return _HOOKS_JS.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def style_css() -> str:
+    assert _STYLE_CSS.exists(), f"style.css missing: {_STYLE_CSS}"
+    return _STYLE_CSS.read_text(encoding="utf-8")
+
+
+class TestSettingsNavIsNavigationNotTablist:
+    """rank 14: the Gateway + Settings sidebars (``.settings-nav``, shared)
+    carry interactive collapsible group-header buttons, which a strict ARIA
+    tablist must not contain. They were demoted to navigation lists (``<nav>``
+    + ``aria-current=page``). Pin that so a future edit can't silently restore
+    the broken ``role=tablist`` / ``role=tab`` contract that announced
+    "tab, N of M" with no associated panel and no arrow-key movement.
+    """
+
+    def test_settings_nav_is_nav_landmark_not_tablist(self, index_html: str) -> None:
+        navs = re.findall(r"<nav class=\"settings-nav\"[^>]*>", index_html)
+        assert len(navs) == 2, (
+            f"expected 2 <nav class=settings-nav> (Gateway + Settings), got {len(navs)}"
+        )
+        for tag in navs:
+            assert "role=" not in tag, (
+                "settings-nav must not declare a role — it was demoted from "
+                f"role=tablist to a plain <nav> landmark (rank 14): {tag}"
+            )
+            assert "aria-label=" in tag, f"each settings-nav landmark needs an aria-label: {tag}"
+        assert 'class="settings-nav" role="tablist"' not in index_html, (
+            "settings-nav must no longer be a role=tablist (rank 14)"
+        )
+
+    def test_settings_nav_buttons_drop_tab_role(self, index_html: str) -> None:
+        btns = re.findall(r"<button class=\"settings-nav-btn[^>]*>", index_html)
+        assert btns, "no settings-nav-btn found — selector drift?"
+        for tag in btns:
+            assert 'role="tab"' not in tag, (
+                f"settings-nav-btn must not be role=tab (rank 14): {tag}"
+            )
+            assert "aria-selected" not in tag, (
+                "settings-nav-btn must not carry aria-selected — the active "
+                f"item uses aria-current=page instead (rank 14): {tag}"
+            )
+        config_btn = next((t for t in btns if 'data-section="config"' in t), None)
+        assert config_btn and 'aria-current="page"' in config_btn, (
+            "the statically-active 'config' nav item must mark itself with "
+            "aria-current=page (rank 14)"
+        )
+
+    def test_switch_settings_section_marks_aria_current(self, app_js: str) -> None:
+        body = _extract_function(app_js, "switchSettingsSection")
+        assert "setAttribute('aria-current', 'page')" in body, (
+            "switchSettingsSection must set aria-current=page on the active nav item (rank 14)"
+        )
+        assert "removeAttribute('aria-current')" in body, (
+            "switchSettingsSection must clear aria-current from inactive nav items (rank 14)"
+        )
+        assert "setAttribute('aria-selected'" not in body, (
+            "switchSettingsSection must not set aria-selected on the settings "
+            "nav — it is a navigation list, not a tablist (rank 14)"
+        )
+
+
+class TestScopeRemoveButtonNotNestedInSummary:
+    """rank 15: the destructive project-remove × must not be interpolated
+    inside the ``<summary>`` disclosure trigger (nested-interactive
+    antipattern, #1003). It now renders as a sibling of ``<details>`` inside
+    ``.ctx-scope-group-wrap``, pinned over the summary row by CSS so it stays
+    visible while the group is collapsed.
+    """
+
+    def test_remove_button_is_sibling_not_inside_summary(self, ctx_js: str) -> None:
+        assert '<div class="ctx-scope-group-wrap">' in ctx_js, (
+            "scope groups must be wrapped in .ctx-scope-group-wrap so × can be "
+            "a sibling of <details> (rank 15)"
+        )
+        i_summary = ctx_js.index('<summary class="ctx-scope-summary"')
+        i_summary_close = ctx_js.index("</summary>", i_summary)
+        i_details_close = ctx_js.index("</details>", i_summary_close)
+        i_remove = ctx_js.index("${removeBtn}", i_summary)
+        assert i_remove > i_details_close, (
+            "${removeBtn} must be interpolated after </details> (a sibling of "
+            "the disclosure), not within it — rank 15"
+        )
+        summary_block = ctx_js[i_summary:i_summary_close]
+        assert "${removeBtn}" not in summary_block, (
+            "the remove × must not live inside <summary> — that is the banned "
+            "nested-interactive antipattern (#1003 / rank 15)"
+        )
+
+    def test_remove_button_keeps_accessible_name(self, ctx_js: str) -> None:
+        m = re.search(r'<button class="ctx-scope-remove"[^>]*>', ctx_js)
+        assert m, "ctx-scope-remove button template not found"
+        tag = m.group(0)
+        assert "aria-label=" in tag and "title=" in tag, (
+            "ctx-scope-remove must keep aria-label + title (the × glyph alone "
+            "is not an accessible name)"
+        )
+
+    def test_remove_button_css_keeps_it_visible_when_collapsed(self, style_css: str) -> None:
+        assert ".ctx-scope-group-wrap { position: relative;" in style_css, (
+            ".ctx-scope-group-wrap must establish a positioning context (rank 15)"
+        )
+        m = re.search(r"\.ctx-scope-remove\s*\{[^}]*\}", style_css, re.DOTALL)
+        assert m and "position: absolute" in m.group(0), (
+            ".ctx-scope-remove must be position:absolute so it shows on a "
+            "collapsed group, where native <details> hides non-summary "
+            "children (rank 15)"
+        )
+
+
+class TestHooksControlsPresentation:
+    """rank 22: the Hooks section's inherited project switcher + tier toggle
+    are wrapped in a labeled ``.hooks-controls`` row with an explicit caption,
+    so the functional-but-bare control row reads as intentional rather than
+    chrome accidentally inherited from the artifact sections.
+    """
+
+    def test_hooks_controls_helper_wraps_with_caption(self, hooks_js: str) -> None:
+        body = _extract_function(hooks_js, "_hooksControlsHtml")
+        assert 'class="hooks-controls"' in body, (
+            "_hooksControlsHtml must wrap the controls in .hooks-controls (rank 22)"
+        )
+        assert "settings.hooks.controls_caption" in body, (
+            "_hooksControlsHtml must render the controls_caption (rank 22)"
+        )
+
+    def test_hooks_render_paths_use_wrapped_controls(self, hooks_js: str) -> None:
+        load = _extract_function(hooks_js, "loadHooksSync")
+        assert "_hooksControlsHtml()" in load, (
+            "loadHooksSync must render controls via the wrapped helper (rank 22)"
+        )
+        assert "_hooksProjectControlsHtml() + _hooksTierControlsHtml()" not in load, (
+            "loadHooksSync must not emit the bare unwrapped controls (rank 22)"
+        )

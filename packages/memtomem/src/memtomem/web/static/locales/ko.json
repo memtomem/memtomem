@@ -316,6 +316,8 @@
 
   "settings.nav.general": "일반",
   "settings.nav.integrations": "에이전트 연동",
+  "settings.nav.gateway_sections_aria": "컨텍스트 게이트웨이 섹션",
+  "settings.nav.settings_sections_aria": "설정 섹션",
   "settings.nav.runtime": "런타임",
   "settings.nav.data": "데이터",
   "settings.nav.danger_zone": "위험 구역",
@@ -670,6 +672,7 @@
   "settings.hooks.no_hooks_defined": ".memtomem/settings.json 에 정의된 훅이 없습니다.",
   "settings.hooks.no_hooks_hint": ".memtomem/settings.json 에 훅 규칙을 추가하면 대기 중 또는 동기화됨 상태로 표시됩니다.",
   "settings.hooks.load_failed": "동기화 상태를 불러오지 못했습니다",
+  "settings.hooks.controls_caption": "어느 settings.json을 읽고 동기화할지는 티어·프로젝트 선택으로 결정됩니다.",
   "settings.hooks.target_label": "대상:",
   "settings.hooks.target_label_user": "User 스코프 대상:",
   "settings.hooks.target_label_project_shared": "프로젝트(공유) 대상:",
