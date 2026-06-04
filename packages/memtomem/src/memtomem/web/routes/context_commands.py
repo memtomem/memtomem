@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,10 +12,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
+from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
+    COMMAND_DIR_FILENAME,
     COMMAND_GENERATORS,
     CommandParseError,
     canonical_command_name,
@@ -52,17 +55,6 @@ def _commands_root(project_root: Path, *, scope: TargetScope = "project_shared")
     from memtomem.context.scope_resolver import canonical_artifact_dir
 
     return canonical_artifact_dir("commands", scope, project_root)
-
-
-def _canonical_command_path(
-    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
-) -> Path:
-    """Validate the name via core and return the canonical command path.
-
-    ``scope`` selects the canonical residency tier (ADR-0016).
-    """
-    name = validate_name(raw_name, kind="command")
-    return _commands_root(project_root, scope=scope) / f"{name}.md"
 
 
 def _resolve_existing_command(
@@ -300,8 +292,44 @@ async def create_command(
             async with _gateway_lock:
                 if resolve_canonical_command(project_root, name, scope=target_scope) is not None:
                     raise HTTPException(409, detail=f"Command '{name}' already exists")
-                cmd_path = _canonical_command_path(project_root, name, scope=target_scope)
-                atomic_write_text(cmd_path, body.content)
+                # ADR-0022: create in versioned directory layout (command.md +
+                # versions/v1.md + manifest) from the start, so the artifact is
+                # immediately versionable in the detail panel instead of a flat
+                # file the version UI tells you to ``mm context migrate`` — which
+                # then skips it as an unowned manual flat (the split-brain).
+                # Mirrored in context_agents.py.
+                artifact_dir = _commands_root(project_root, scope=target_scope) / name
+                if artifact_dir.exists():
+                    # resolve_canonical_command found no working file above, but a
+                    # stale/orphan directory remains — surface a clean 409 rather
+                    # than a 500 from mkdir()'s FileExistsError.
+                    raise HTTPException(409, detail=f"Command '{name}' already exists")
+                # Encode the submitted content up front, before anything touches
+                # disk. A lone-surrogate body can't be UTF-8 encoded; failing
+                # after mkdir would leave an orphan dir that wedges retries on the
+                # 409 above. These exact bytes become source_bytes for
+                # create_version, so v1.md is byte-identical to the working file
+                # with no re-read race (_gateway_lock guards only this process).
+                try:
+                    content_bytes = body.content.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise HTTPException(400, detail="Command content is not valid UTF-8") from exc
+                artifact_dir.mkdir(parents=True)
+                cmd_path = artifact_dir / COMMAND_DIR_FILENAME
+                try:
+                    atomic_write_text(cmd_path, body.content)
+                    versioning.create_version(
+                        artifact_dir,
+                        cmd_path,
+                        note="Initial version (created via web)",
+                        source_bytes=content_bytes,
+                    )
+                except BaseException:
+                    # Roll back the partial artifact dir so a transient failure
+                    # doesn't leave an empty directory that wedges every future
+                    # create of this name on the orphan-dir 409 above.
+                    shutil.rmtree(artifact_dir, ignore_errors=True)
+                    raise
     except TimeoutError:
         raise HTTPException(503, "Command create timed out — another sync may be in progress")
     return {"name": name, "canonical_path": str(cmd_path.relative_to(project_root))}

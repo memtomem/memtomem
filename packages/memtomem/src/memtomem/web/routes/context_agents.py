@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,9 +12,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
+from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.agents import (
+    AGENT_DIR_FILENAME,
     AGENT_GENERATORS,
     CANONICAL_AGENT_ROOT,
     AgentParseError,
@@ -56,20 +59,6 @@ def _agents_root(project_root: Path, *, scope: TargetScope = "project_shared") -
     from memtomem.context.scope_resolver import canonical_artifact_dir
 
     return canonical_artifact_dir("agents", scope, project_root)
-
-
-def _canonical_agent_path(
-    project_root: Path, raw_name: str, *, scope: TargetScope = "project_shared"
-) -> Path:
-    """Validate the name via core and return the canonical agent path.
-
-    Raises ``InvalidNameError`` (subclass of ``ValueError`` → 400) when the
-    name fails the same checks applied in CLI/MCP write paths.
-
-    ``scope`` selects the canonical residency tier (ADR-0016).
-    """
-    name = validate_name(raw_name, kind="agent")
-    return _agents_root(project_root, scope=scope) / f"{name}.md"
 
 
 def _resolve_existing_agent(
@@ -303,8 +292,44 @@ async def create_agent(
             async with _gateway_lock:
                 if resolve_canonical_agent(project_root, name, scope=target_scope) is not None:
                     raise HTTPException(409, detail=f"Agent '{name}' already exists")
-                agent_path = _canonical_agent_path(project_root, name, scope=target_scope)
-                atomic_write_text(agent_path, body.content)
+                # ADR-0022: create in versioned directory layout (agent.md +
+                # versions/v1.md + manifest) from the start, so the artifact is
+                # immediately versionable in the detail panel instead of a flat
+                # file the version UI tells you to ``mm context migrate`` — which
+                # then skips it as an unowned manual flat (the split-brain).
+                # Mirrored in context_commands.py.
+                artifact_dir = _agents_root(project_root, scope=target_scope) / name
+                if artifact_dir.exists():
+                    # resolve_canonical_agent found no working file above, but a
+                    # stale/orphan directory remains — surface a clean 409 rather
+                    # than a 500 from mkdir()'s FileExistsError.
+                    raise HTTPException(409, detail=f"Agent '{name}' already exists")
+                # Encode the submitted content up front, before anything touches
+                # disk. A lone-surrogate body can't be UTF-8 encoded; failing
+                # after mkdir would leave an orphan dir that wedges retries on the
+                # 409 above. These exact bytes become source_bytes for
+                # create_version, so v1.md is byte-identical to the working file
+                # with no re-read race (_gateway_lock guards only this process).
+                try:
+                    content_bytes = body.content.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise HTTPException(400, detail="Agent content is not valid UTF-8") from exc
+                artifact_dir.mkdir(parents=True)
+                agent_path = artifact_dir / AGENT_DIR_FILENAME
+                try:
+                    atomic_write_text(agent_path, body.content)
+                    versioning.create_version(
+                        artifact_dir,
+                        agent_path,
+                        note="Initial version (created via web)",
+                        source_bytes=content_bytes,
+                    )
+                except BaseException:
+                    # Roll back the partial artifact dir so a transient failure
+                    # doesn't leave an empty directory that wedges every future
+                    # create of this name on the orphan-dir 409 above.
+                    shutil.rmtree(artifact_dir, ignore_errors=True)
+                    raise
     except TimeoutError:
         raise HTTPException(503, "Agent create timed out — another sync may be in progress")
     return {"name": name, "canonical_path": str(agent_path.relative_to(project_root))}
