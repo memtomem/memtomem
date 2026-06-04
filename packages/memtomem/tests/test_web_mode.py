@@ -327,10 +327,14 @@ def test_html_settings_nav_btns_all_carry_ui_tier_attr() -> None:
         assert "data-ui-tier=" in tag, f"settings-nav-btn missing data-ui-tier: {tag[:120]}"
 
 
-def test_ctx_projects_has_landing_modifier_for_group_dashboard() -> None:
-    """ctx-projects is the Agent Integrations group's dashboard card and must
+def test_ctx_overview_has_landing_modifier_for_group_dashboard() -> None:
+    """ctx-overview is the Agent Integrations group's dashboard card and must
     carry the ``settings-nav-btn--landing`` modifier so CSS gives it visual
     hierarchy distinct from the leaf rows.
+
+    rank 2/20: the Overview is now the aggregate dashboard (sync status +
+    Sync-All + cross-project tiles, no per-project roster) and the cold-visit
+    landing, so the ``--landing`` modifier moved here from ctx-projects.
 
     Post-#962 the Agent Integrations sidebar lives under the top-level
     ``#tab-context-gateway`` panel rather than nested in Settings. The
@@ -338,32 +342,32 @@ def test_ctx_projects_has_landing_modifier_for_group_dashboard() -> None:
     class and the new tab ancestry.
     """
     html = _read_static("index.html")
-    projects_btn = re.search(r'<button[^>]*data-section="ctx-projects"[^>]*>', html)
-    assert projects_btn is not None, "ctx-projects button not found in markup"
-    assert "settings-nav-btn--landing" in projects_btn.group(0), (
-        "ctx-projects must carry settings-nav-btn--landing modifier "
+    overview_btn = re.search(r'<button[^>]*data-section="ctx-overview"[^>]*>', html)
+    assert overview_btn is not None, "ctx-overview button not found in markup"
+    assert "settings-nav-btn--landing" in overview_btn.group(0), (
+        "ctx-overview must carry settings-nav-btn--landing modifier "
         "(group dashboard, not a leaf); "
-        f"got: {projects_btn.group(0)[:200]}"
+        f"got: {overview_btn.group(0)[:200]}"
     )
     # Anchor the button inside the new Gateway tab. ``#tab-context-gateway``
-    # comes BEFORE the ctx-projects match site if the move was applied
+    # comes BEFORE the ctx-overview match site if the move was applied
     # correctly; a regression that re-nests the Gateway under Settings
     # would put ``#tab-settings`` between them.
-    head = html[: projects_btn.start()]
+    head = html[: overview_btn.start()]
     gateway_idx = head.rfind('id="tab-context-gateway"')
     settings_idx = head.rfind('id="tab-settings"')
     assert gateway_idx >= 0, (
-        "ctx-projects button is not under #tab-context-gateway — promotion regressed (#962)."
+        "ctx-overview button is not under #tab-context-gateway — promotion regressed (#962)."
     )
     assert gateway_idx > settings_idx, (
-        "ctx-projects must live under #tab-context-gateway, but its closest"
+        "ctx-overview must live under #tab-context-gateway, but its closest"
         " ancestor tab id is #tab-settings — restructure regressed (#962)."
     )
 
 
 def test_other_integration_leaves_lack_landing_modifier() -> None:
-    """Symmetric negative pin: only ctx-projects is the landing card. The
-    other Agent Integrations leaves (Overview / Skills / Custom Commands / Subagents /
+    """Symmetric negative pin: only ctx-overview is the landing card. The
+    other Agent Integrations leaves (Projects / Skills / Custom Commands / Subagents /
     MCP Servers / Hooks) must not carry the ``--landing`` modifier, otherwise the visual
     hierarchy collapses again.
 
@@ -372,7 +376,7 @@ def test_other_integration_leaves_lack_landing_modifier() -> None:
     """
     html = _read_static("index.html")
     for section in (
-        "ctx-overview",
+        "ctx-projects",
         "ctx-skills",
         "ctx-commands",
         "ctx-agents",
@@ -383,7 +387,7 @@ def test_other_integration_leaves_lack_landing_modifier() -> None:
         assert tag is not None, f"{section} button not found in markup"
         assert "settings-nav-btn--landing" not in tag.group(0), (
             f"{section} must NOT carry --landing modifier "
-            "(reserved for ctx-projects only); "
+            "(reserved for ctx-overview only); "
             f"got: {tag.group(0)[:200]}"
         )
         head = html[: tag.start()]

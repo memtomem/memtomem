@@ -1355,7 +1355,11 @@ function activateTab(tabName, opts = {}) {
     if (!start) {
       try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
     }
-    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-projects';
+    // rank 2/20: the Overview is now a true aggregate dashboard (sync status +
+    // Sync-All + cross-project tiles, no per-project roster), so a cold visit
+    // lands there rather than on the full Projects roster. Returning users
+    // still resume their last-viewed section via the localStorage branch above.
+    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-overview';
     switchSettingsSection(start);
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();

@@ -996,12 +996,6 @@ button:active { opacity: 0.7; }
 .badge-success { background: rgba(76, 175, 125, 0.15); color: var(--green); }
 .badge-warning { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 .badge-muted { background: rgba(123, 127, 150, 0.15); color: var(--muted); }
-/* Matrix runtime states: split the two former color collisions. ``available``
- * (marker but no client) is the desaturated outline twin of solid-amber
- * ``detected``; ``registered`` (registered, nothing installed) gets its own
- * violet tint so it no longer reads as the neutral-grey ``none``. */
-.badge-amber-outline { background: transparent; color: var(--yellow); border: 1px solid rgba(243, 156, 18, 0.55); }
-.badge-violet { background: rgba(139, 110, 230, 0.16); color: #8b6ee6; }
 .badge-source { background: rgba(76, 175, 125, 0.15); color: var(--green); font-family: var(--mono); font-weight: 400; }
 .badge-validity { background: rgba(108, 92, 231, 0.10); color: var(--muted); font-family: var(--mono); font-weight: 400; }
 .badge-validity--expired { opacity: 0.55; text-decoration: line-through; }
@@ -4021,7 +4015,8 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   border-radius: 8px;
 }
 .ctx-portal-runtimes-row,
-.ctx-portal-filter-row {
+.ctx-portal-filter-row,
+.ctx-portal-legend-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -4536,112 +4531,3 @@ button.ctx-runtime-chip--greyed:focus-visible {
      Reload-vs-Force choice (was two ~225px columns side by side). */
   #ctx-conflict-preview-row { flex-direction: column; }
 }
-
-/* ═══════════════════════════════════════════════════════════════
-   Projects Matrix Table Styles
-   ═══════════════════════════════════════════════════════════════ */
-.ctx-projects-matrix-container {
-  margin-top: 32px;
-  background: var(--surface, #1e1e1e);
-  border: 1px solid var(--border, #333);
-  border-radius: var(--radius, 8px);
-  padding: 24px;
-  /* The 7-column table is wider than a phone; scroll it instead of clipping the
-   * right runtime columns + per-row Select/Sync/Remove off-screen (they were
-   * unreachable, the page can't scroll sideways under html/body overflow:hidden). */
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-.ctx-projects-matrix-title {
-  margin-top: 0;
-  margin-bottom: 16px;
-  font-size: 1.15rem;
-  font-weight: 600;
-  color: var(--text, #e0e0e0);
-}
-
-/* State legend under the matrix title — decodes the runtime-status badges so
- * they don't rely on per-cell tooltips for at-a-glance scanning. */
-.ctx-matrix-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 16px; font-size: 0.78rem; color: var(--muted); }
-.ctx-matrix-legend-item { display: inline-flex; align-items: center; gap: 5px; }
-.ctx-matrix-legend-item .badge { font-size: 0.72rem; }
-/* Decorative per-state glyph (reinforces hue; kept out of badge text content so
- * the label stays assertable). Legend badges carry only the glyph. */
-.badge[data-mstate="active"]::before { content: "\25CF\00A0"; }     /* ● */
-.badge[data-mstate="detected"]::before { content: "\25D0\00A0"; }   /* ◐ */
-.badge[data-mstate="available"]::before { content: "\25CB\00A0"; }  /* ○ */
-.badge[data-mstate="client"]::before { content: "\25CD\00A0"; }     /* ◍ */
-.badge[data-mstate="registered"]::before { content: "\25C7\00A0"; } /* ◇ */
-.badge[data-mstate="none"]::before { content: ""; }
-.ctx-matrix-legend-item .badge::before { margin-right: 0; }
-
-.ctx-projects-matrix-table {
-  width: 100%;
-  /* Floor at content width so the table scrolls (container overflow-x) on narrow
-   * viewports rather than crushing/clipping columns. */
-  min-width: max-content;
-  border-collapse: collapse;
-  margin-bottom: 16px;
-  font-size: 0.85rem;
-}
-
-.ctx-projects-matrix-table th,
-.ctx-projects-matrix-table td {
-  padding: 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border, #333);
-}
-
-.ctx-projects-matrix-table th {
-  font-weight: 600;
-  color: var(--muted, #888);
-  background: var(--bg-hover, rgba(59, 99, 232, 0.06));
-}
-
-.ctx-matrix-row--active {
-  background: rgba(46, 117, 89, 0.1) !important;
-}
-
-.ctx-matrix-project-label {
-  font-weight: 600;
-  color: var(--text, #e0e0e0);
-}
-
-.ctx-matrix-project-path {
-  font-size: 0.75rem;
-  color: var(--muted, #888);
-  font-family: var(--mono);
-}
-
-.ctx-matrix-counts {
-  font-size: 0.8rem;
-  white-space: nowrap;
-  letter-spacing: 0.5px;
-}
-
-.ctx-matrix-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.ctx-matrix-remove-btn {
-  background: none;
-  border: none;
-  color: var(--danger, #ff5f56);
-  cursor: pointer;
-  font-size: 1.2rem;
-  padding: 0 4px;
-}
-
-.ctx-matrix-remove-btn:hover {
-  opacity: 0.8;
-}
-
-.ctx-matrix-footer {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-

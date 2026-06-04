@@ -1,12 +1,12 @@
 /* Per-project sync enrollment (#1203 frontend) — portal Enroll + Pause/Resume
- * and the sync-eligibility helpers shared with the matrix Sync gate.
+ * and the sync-eligibility helpers shared with the portal card Sync gate.
  *
  * Drives the production ``context-portal.js`` + ``context-gateway.js`` inside
  * the index.html DOM via the jsdom harness, mirroring ``ctx-portal-board``.
- * The matrix Sync-button gating (which depends on ``_renderProjectsMatrix``
- * reading module state) is covered by the Playwright suite
- * ``tests/web/test_context_gateway_matrix_sync.py``; here we unit-test the
- * shared eligibility helpers and the portal mutation flows.
+ * The portal card Sync-button gating (eligibility / write-block / server-CWD)
+ * is covered by the Playwright suite
+ * ``tests/web/test_context_portal_card_sync.py``; here we unit-test the shared
+ * eligibility helpers and the portal mutation flows.
  */
 
 import { describe, it, expect } from 'vitest';

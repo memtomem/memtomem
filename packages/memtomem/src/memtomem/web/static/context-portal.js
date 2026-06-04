@@ -13,7 +13,9 @@
  *                       _ctxActiveScopeId, _ctxTargetScope, _CTX_ACTIVE_SCOPE_KEY,
  *                       _ctxScopeIsServerCwd, _ctxScopeIsActive,
  *                       _ctxScopeDisplayLabel, _ctxNormalizeActiveScope,
- *                       _ctxBumpActiveScopeDetailSeq, _ctxClearDeepLink
+ *                       _ctxBumpActiveScopeDetailSeq, _ctxClearDeepLink,
+ *                       _ctxScopeIsEnrolled, _ctxScopeSyncEligible,
+ *                       _ctxSyncProjectScope, _ctxRefreshWriteBlockedState
  *
  * Backend contract (PR2): ``GET /api/context/projects?include=counts`` returns
  * scopes carrying ``{missing, stale, counts}``; ``PATCH`` / ``DELETE
@@ -279,6 +281,21 @@ function _ctxPortalRenderHeadingChips() {
     return `<button type="button" class="${active ? 'active' : ''}" data-filter="${escapeHtml(name)}" aria-pressed="${active}">${escapeHtml(label)}</button>`;
   }).join('');
 
+  // rank 13: a legend decoding the two color/glyph systems used on each card —
+  // the per-runtime traffic-light dots (color = install state) and the inventory
+  // emoji (glyph = artifact type). Reuses the app's ``.graph-legend`` language and
+  // the EXACT ``.ctx-portal-row-light--*`` swatches so the colors match the row
+  // dots 1:1. The runtime order behind the dots is already discoverable from the
+  // Runtimes row above (Claude · Antigravity · Codex · Kimi via _ctxPortalRuntimeLabel).
+  const legendDots = [
+    { state: 'uninstalled', key: 'settings.ctx.portal_legend_uninstalled' },
+    { state: 'installed', key: 'settings.ctx.portal_legend_installed' },
+    { state: 'registered', key: 'settings.ctx.portal_legend_registered' },
+  ].map(d => `<span class="graph-legend-item"><span class="ctx-portal-row-light ctx-portal-row-light--${d.state}"></span>${escapeHtml(t(d.key))}</span>`).join('');
+  const legendCounts = _CTX_PORTAL_COUNT_TYPES.map(c =>
+    `<span class="graph-legend-item"><span aria-hidden="true">${c.icon}</span>${escapeHtml(t(c.labelKey))}</span>`
+  ).join('');
+
   container.innerHTML = `
     <div class="ctx-portal-runtimes-row">
       <span class="ctx-portal-heading-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
@@ -287,6 +304,10 @@ function _ctxPortalRenderHeadingChips() {
     <div class="ctx-portal-filter-row">
       <span class="ctx-portal-heading-label" id="ctx-portal-filter-label">${escapeHtml(t('settings.ctx.filter_label'))}</span>
       <div class="ctx-portal-filter-group" role="group" aria-labelledby="ctx-portal-filter-label">${filterGroup}</div>
+    </div>
+    <div class="ctx-portal-legend-row">
+      <span class="ctx-portal-heading-label">${escapeHtml(t('settings.ctx.portal_legend_label'))}</span>
+      <div class="graph-legend">${legendDots}${legendCounts}</div>
     </div>
   `;
 
@@ -549,6 +570,12 @@ function _ctxPortalRenderRows() {
   }
   rowsEl.innerHTML = hiddenHint + scopes.map(_ctxPortalRowHtml).join('');
   _ctxPortalWireRows(rowsEl);
+  // The freshly-rendered ``.ctx-portal-sync`` buttons must pick up the tier
+  // write-block state (``data-write-blocked`` + reason tooltip) on user /
+  // project_local tiers. The portal didn't previously call this — the matrix
+  // did, on the overview render path that no longer exists. Global from
+  // context-gateway.js.
+  _ctxRefreshWriteBlockedState();
   // A row may have just (re)entered edit mode — focus its input after paint.
   if (_ctxPortalEditingId !== null) {
     const input = rowsEl.querySelector('.ctx-portal-label-input');
@@ -644,6 +671,28 @@ function _ctxPortalRowHtml(scope) {
       const useAria = escapeHtml(t('settings.ctx.portal_use_aria').replace('{label}', _ctxScopeDisplayLabel(scope)));
       actions.push(`<button type="button" class="btn-ghost btn-xs ctx-portal-use" data-scope-id="${sid}" aria-label="${useAria}">${escapeHtml(t('settings.ctx.portal_use'))}</button>`);
     }
+    // Per-project Sync — fan out THIS row's scope to its runtimes (the lone
+    // action carried over from the removed Overview matrix). Rendered for EVERY
+    // scope, including Server CWD (whose effective id collapses to '' in
+    // ``_ctxSyncProjectScope``), gated on sync-eligibility exactly as the matrix
+    // was: disabled with a reason tooltip for project_local / missing / paused /
+    // not-enrolled. Reuses the shared ``matrix_sync_*`` tooltip keys (also read
+    // by ``settings-hooks-watchdog.js`` — do NOT rename). ``data-i18n-title``
+    // (not bare ``title``) so the tier write-block sweep restores the reason.
+    // Sync syncs the row only — it never changes the active project (that's Use).
+    const isProjectLocal = _ctxTargetScope === 'project_local';
+    let syncDisabled = '';
+    if (isProjectLocal || scope.missing) {
+      const k = 'settings.ctx.matrix_sync_disabled_title';
+      syncDisabled = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
+    } else if (!_ctxScopeSyncEligible(scope)) {
+      const k = _ctxScopeIsEnrolled(scope)
+        ? 'settings.ctx.matrix_sync_paused_title'
+        : 'settings.ctx.matrix_sync_not_enrolled_title';
+      syncDisabled = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
+    }
+    const syncAria = escapeHtml(t('settings.ctx.portal_sync_aria').replace('{label}', _ctxScopeDisplayLabel(scope)));
+    actions.push(`<button type="button" class="btn-primary btn-xs ctx-portal-sync" data-scope-id="${sid}" aria-label="${syncAria}"${syncDisabled}>${escapeHtml(t('settings.ctx.sync'))}</button>`);
     // Enroll: a discovered-but-not-enrolled project joins sync (POST). Mutually
     // exclusive with the managed block below (``canEnroll`` ⇔ not enrolled,
     // ``managed`` ⇔ enrolled), so a row shows Enroll OR the Pause/Rename/Remove
@@ -692,6 +741,13 @@ function _ctxPortalScopeById(scopeId) {
 function _ctxPortalWireRows(rowsEl) {
   rowsEl.querySelectorAll('.ctx-portal-use').forEach(btn => {
     btn.addEventListener('click', () => _ctxPortalSetActive(btn.dataset.scopeId || ''));
+  });
+  rowsEl.querySelectorAll('.ctx-portal-sync').forEach(btn => {
+    // Row-only sync: pass THIS row's scope_id (Server CWD's collapses to '' in
+    // ``_ctxEffectiveScopeId``). Must NOT touch ``_ctxActiveScopeId`` — Sync is
+    // not a selection change (only ``.ctx-portal-use`` is). ``_ctxSyncProjectScope``
+    // is a global from context-gateway.js (loaded before this file).
+    btn.addEventListener('click', () => _ctxSyncProjectScope(btn.dataset.scopeId || '', btn));
   });
   rowsEl.querySelectorAll('.ctx-portal-rename').forEach(btn => {
     btn.addEventListener('click', () => {
