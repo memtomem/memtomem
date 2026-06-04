@@ -316,6 +316,8 @@
 
   "settings.nav.general": "General",
   "settings.nav.integrations": "Agent Integrations",
+  "settings.nav.gateway_sections_aria": "Context Gateway sections",
+  "settings.nav.settings_sections_aria": "Settings sections",
   "settings.nav.runtime": "Runtime",
   "settings.nav.data": "Data",
   "settings.nav.danger_zone": "Danger Zone",
@@ -670,6 +672,7 @@
   "settings.hooks.no_hooks_defined": "No hooks defined in .memtomem/settings.json.",
   "settings.hooks.no_hooks_hint": "Add hook rules to .memtomem/settings.json to make them appear as pending or synced.",
   "settings.hooks.load_failed": "Failed to load sync status",
+  "settings.hooks.controls_caption": "Tier and project select which settings.json is read and synced.",
   "settings.hooks.target_label": "Target:",
   "settings.hooks.target_label_user": "User-scope target:",
   "settings.hooks.target_label_project_shared": "Project (shared) target:",

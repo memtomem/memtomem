@@ -1462,14 +1462,19 @@ function switchSettingsSection(sectionName) {
   try { localStorage.setItem(LAST_SECTION_KEY, sectionName); } catch {}
   document.querySelectorAll('.settings-nav-btn').forEach(b => {
     b.classList.remove('active');
-    b.setAttribute('aria-selected', 'false');
+    // ``.settings-nav`` is a navigation list (role-less <nav>), not a tablist
+    // (rank 14): the group headers are interactive collapse toggles, which a
+    // strict ARIA tablist may not contain. Mark the active entry with
+    // ``aria-current="page"`` — the standard nav-selection cue — instead of
+    // ``aria-selected``, which only belongs on a role=tab.
+    b.removeAttribute('aria-current');
   });
   document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
   const btn = document.querySelector(`.settings-nav-btn[data-section="${sectionName}"]`);
   const section = document.getElementById(`settings-${sectionName}`);
   if (btn) {
     btn.classList.add('active');
-    btn.setAttribute('aria-selected', 'true');
+    btn.setAttribute('aria-current', 'page');
   }
   if (section) section.classList.add('active');
   ensureActiveGroupExpanded(sectionName);
