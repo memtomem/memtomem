@@ -196,3 +196,119 @@ def test_remove_label_button_deletes_pointer(page, mm_web_url: str) -> None:
             "#ctx-agents-detail .ctx-version-label-remove[data-label='production']"
         ).click()
     assert info.value.method == "DELETE"
+
+
+# ── Enable versioning for a flat artifact (ADR-0022 rank 6) ───────────────
+
+
+_FLAT_AGENT_DETAIL = {
+    "name": "flat-agent",
+    "content": "---\ndescription: Flat one\n---\n\nBody",
+    "mtime_ns": str(1_700_000_000 * 1_000_000_000),
+    "target_scope": "project_shared",
+    "layout": "flat",
+    "fields": {"description": "Flat one"},
+}
+
+_MIGRATE_REQUIRED = {
+    "name": "flat-agent",
+    "artifact_type": "agents",
+    "target_scope": "project_shared",
+    "layout": "flat",
+    "versions": [],
+    "labels": {},
+    "has_versions": False,
+    "migrate_required": True,
+}
+
+
+def _stub_enable(page, kind: str, detail: dict) -> None:
+    """Stubs for the flat → migrate_required path: the versions GET reports
+    ``migrate_required`` and the ``/versions/enable`` POST succeeds."""
+    list_payload = {
+        kind: [
+            {
+                "name": detail["name"],
+                "canonical_path": f".claude/{kind}/{detail['name']}",
+                "target_scope": detail["target_scope"],
+                "runtimes": [{"runtime": "claude", "status": "in_sync"}],
+            }
+        ],
+        "canonical_root": f".claude/{kind}",
+        "scanned_dirs": [],
+    }
+
+    def _projects_handler(route):
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_projects_payload(kind))
+        )
+
+    def _list_handler(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(list_payload))
+
+    def _detail_handler(route):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(detail))
+
+    def _versions_handler(route):
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_MIGRATE_REQUIRED)
+        )
+
+    def _enable_handler(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "name": detail["name"],
+                    "artifact_type": kind,
+                    "target_scope": "project_shared",
+                    "layout": "dir",
+                    "migrated": True,
+                }
+            ),
+        )
+
+    page.route("**/api/context/projects**", _projects_handler)
+    page.route(f"**/api/context/{kind}**", _list_handler)
+    page.route(f"**/api/context/{kind}/{detail['name']}**", _detail_handler)
+    page.route(f"**/api/context/{kind}/{detail['name']}/versions**", _versions_handler)
+    # Registered last → wins over the broader ``/versions**`` glob for this URL.
+    page.route(f"**/api/context/{kind}/{detail['name']}/versions/enable**", _enable_handler)
+
+
+def _wait_enable_button(page, kind: str) -> None:
+    page.wait_for_function(
+        f"() => {{"
+        f"  const s = document.querySelector('#ctx-{kind}-detail .ctx-detail-versions');"
+        f"  return s && !s.hidden && s.querySelector('.ctx-version-enable-btn') !== null;"
+        f"}}",
+        timeout=5_000,
+    )
+
+
+def test_flat_artifact_shows_enable_versioning_button(page, mm_web_url: str) -> None:
+    install_default_stubs(page)
+    _stub_enable(page, "agents", _FLAT_AGENT_DETAIL)
+    page.goto(mm_web_url)
+    _open_detail(page, "agents", "flat-agent")
+    _wait_enable_button(page, "agents")
+
+    # The freeze/promote controls must NOT be present for a flat artifact —
+    # only the enable affordance + the migrate_required hint.
+    assert page.locator("#ctx-agents-detail .ctx-version-freeze-btn").count() == 0
+    assert page.locator("#ctx-agents-detail .ctx-version-empty").count() == 1
+
+
+def test_enable_button_posts_to_versions_enable_route(page, mm_web_url: str) -> None:
+    install_default_stubs(page)
+    _stub_enable(page, "agents", _FLAT_AGENT_DETAIL)
+    page.goto(mm_web_url)
+    _open_detail(page, "agents", "flat-agent")
+    _wait_enable_button(page, "agents")
+
+    with page.expect_request(
+        lambda r: r.method == "POST" and "/api/context/agents/flat-agent/versions/enable" in r.url
+    ) as info:
+        page.locator("#ctx-agents-detail .ctx-version-enable-btn").click()
+    assert info.value.method == "POST"

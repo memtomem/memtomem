@@ -25,6 +25,7 @@ from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
 from memtomem.context.migrate import (
     MigrateRow,
     _is_flat_file_dirty,
+    adopt_flat_to_dir,
     classify_migrate,
     migrate_one,
 )
@@ -1982,3 +1983,69 @@ def test_e4_project_shared_blocked_override_leaves_no_partial_fanout_commands(sc
         "claude_commands — partial fan-out violates ADR §5 atomicity."
     )
     assert not gemini_fanout.exists()
+
+
+# ── adopt_flat_to_dir (ADR-0022 rank 6) ──────────────────────────────────
+
+
+def test_adopt_flat_to_dir_renames_byte_identical(tmp_path: Path) -> None:
+    """A flat canonical is moved into ``<name>/agent.md`` with bytes intact and
+    the flat file gone — the single conversion versioning needs."""
+    flat = _write_flat(tmp_path, "agents", "foo", b"---\nx: 1\n---\nbody\n")
+    dir_path = tmp_path / ".memtomem" / "agents" / "foo"
+
+    new_working = adopt_flat_to_dir("agents", flat, dir_path)
+
+    assert new_working == dir_path / "agent.md"
+    assert new_working.read_bytes() == b"---\nx: 1\n---\nbody\n"
+    assert not flat.exists()  # the flat sibling is consumed, not duplicated
+
+
+def test_adopt_flat_to_dir_works_for_commands(tmp_path: Path) -> None:
+    flat = _write_flat(tmp_path, "commands", "deploy", b"run\n")
+    dir_path = tmp_path / ".memtomem" / "commands" / "deploy"
+    new_working = adopt_flat_to_dir("commands", flat, dir_path)
+    assert new_working == dir_path / "command.md"
+    assert new_working.read_bytes() == b"run\n"
+    assert not flat.exists()
+
+
+def test_adopt_flat_to_dir_succeeds_without_lockfile_entry(tmp_path: Path) -> None:
+    """The whole point of rank 6: a web-created flat file (no lockfile entry —
+    which ``classify_migrate`` would mark ``skip_manual``) is still adoptable."""
+    flat = _write_flat(tmp_path, "agents", "ui-made", b"body\n")
+    # No ``_add_lock_entry`` call — classify_migrate would refuse this file.
+    rows = classify_migrate(tmp_path, "agents", "ui-made")
+    assert rows and rows[0].state == "skip_manual"  # confirms the dead-end
+
+    new_working = adopt_flat_to_dir("agents", flat, tmp_path / ".memtomem" / "agents" / "ui-made")
+    assert new_working.is_file()
+    # The lockfile is never touched — adopt is provenance-agnostic.
+    assert not (tmp_path / ".memtomem" / "lock.json").exists()
+
+
+def test_adopt_flat_to_dir_missing_flat_raises(tmp_path: Path) -> None:
+    (tmp_path / ".memtomem" / "agents").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError):
+        adopt_flat_to_dir(
+            "agents",
+            tmp_path / ".memtomem" / "agents" / "ghost.md",
+            tmp_path / ".memtomem" / "agents" / "ghost",
+        )
+
+
+def test_adopt_flat_to_dir_collision_refuses(tmp_path: Path) -> None:
+    """flat + dir both present is the user-edit-bearing ``cleanup_flat`` case;
+    adopt refuses it (FileExistsError) and leaves both files untouched."""
+    flat = _write_flat(tmp_path, "agents", "foo", b"flat\n")
+    _write_dir(tmp_path, "agents", "foo", b"dir\n")
+    with pytest.raises(FileExistsError):
+        adopt_flat_to_dir("agents", flat, tmp_path / ".memtomem" / "agents" / "foo")
+    assert flat.read_bytes() == b"flat\n"  # untouched
+    assert (tmp_path / ".memtomem" / "agents" / "foo" / "agent.md").read_bytes() == b"dir\n"
+
+
+def test_adopt_flat_to_dir_unknown_type_raises(tmp_path: Path) -> None:
+    flat = _write_flat(tmp_path, "agents", "foo", b"x\n")
+    with pytest.raises(ValueError):
+        adopt_flat_to_dir("skills", flat, tmp_path / ".memtomem" / "skills" / "foo")

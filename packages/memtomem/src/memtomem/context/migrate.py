@@ -79,6 +79,7 @@ __all__ = [
     "MigrateRow",
     "MigrateScopeResult",
     "MigrateState",
+    "adopt_flat_to_dir",
     "classify_migrate",
     "migrate_one",
     "migrate_scope",
@@ -525,6 +526,92 @@ def _is_within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# ── ADR-0022 rank 6: adopt an unmanaged flat canonical into dir layout ──
+
+
+def adopt_flat_to_dir(asset_type: str, flat_path: Path, dir_path: Path) -> Path:
+    """Convert a single unmanaged flat-layout canonical to directory layout.
+
+    The version store (ADR-0022) needs a per-artifact directory
+    (``<type>/<name>/``) to hold ``versions/`` + ``versions.json``. A flat
+    canonical (``<type>/<name>.md``) has no such home, so versioning is
+    unavailable for it (invariant 3).
+
+    Why this is NOT :func:`classify_migrate` / :func:`migrate_one`: those
+    deliberately classify a flat file with **no lockfile entry** as
+    ``skip_manual`` ("resolve manually") because it sits outside the wiki
+    install/upgrade lifecycle and could be a user's hand-dropped file the
+    install machinery must not silently consume. But a web-created (UI
+    ``create``) canonical is a legitimate artifact that merely lacks install
+    provenance — it was permanently locked out of versioning because the
+    ``migrate_required`` hint pointed at ``mm context migrate``, which
+    provably skips it. This function is the explicit, deliberate adopt path
+    that escape hatch needs: it converts **any** flat canonical regardless of
+    lockfile status, since the conversion is a single byte-identical
+    ``os.replace`` and install provenance is irrelevant to giving the file a
+    directory home.
+
+    Because the bytes are unchanged and stay in the same scope, no privacy
+    re-scan is needed here — a labeled ``mm context sync`` still re-scans the
+    frozen ``versions/vN.md`` at deploy time (ADR-0022 Gate A), so the trust
+    boundary is unaffected.
+
+    Args:
+        asset_type: ``"agents"`` or ``"commands"`` (selects the manifest name).
+        flat_path: the flat canonical (``<root>/<name>.md``); must be a file.
+        dir_path: the target per-artifact directory (``<root>/<name>``).
+
+    Returns:
+        The new working-canonical path (``dir_path/<manifest>``).
+
+    Raises:
+        ValueError: unknown ``asset_type``.
+        FileNotFoundError: ``flat_path`` is not a file (nothing to adopt).
+        FileExistsError: the dir-layout manifest already exists — a flat+dir
+            collision with user-edit semantics this focused path must not
+            silently resolve; ``mm context migrate`` handles that case.
+        OSError: ``flat_path`` / ``dir_path`` escape the shared canonical
+            root, or the rename fails.
+    """
+    if asset_type not in MIGRATABLE_ASSET_TYPES:
+        raise ValueError(
+            f"adopt_flat_to_dir: unsupported asset_type {asset_type!r} "
+            f"(expected one of {MIGRATABLE_ASSET_TYPES})"
+        )
+    flat_path = Path(flat_path)
+    dir_path = Path(dir_path)
+    if not flat_path.is_file():
+        raise FileNotFoundError(f"no flat canonical to adopt at {flat_path}")
+
+    target_file = dir_path / ASSET_DIR_FILENAMES[asset_type]
+
+    # Defense-in-depth path guard: ``dir_path`` must resolve under the flat
+    # file's own canonical ``<type>`` root, so a traversal-bearing ``name``
+    # (e.g. ``../evil``) can never rename outside the store. This is a backstop
+    # for future callers — the sole caller already runs ``name`` through
+    # ``validate_name`` — so, unlike :func:`migrate_one`, the root is derived
+    # from ``flat_path`` rather than an independently resolved install root.
+    canonical_root = flat_path.parent.resolve()
+    if not (
+        _is_within(flat_path.resolve(), canonical_root)
+        and _is_within(dir_path.resolve(), canonical_root)
+    ):
+        raise OSError(f"path escapes canonical root: {flat_path} / {dir_path}")
+
+    if target_file.exists():
+        # A dir-layout manifest already sits alongside the flat file — that is
+        # the flat+dir collision (``cleanup_flat`` / ``refuse_dirty``), which has
+        # user-edit semantics. Refuse; ``mm context migrate`` owns that path.
+        raise FileExistsError(
+            f"directory layout already exists at {target_file}; "
+            f"resolve the flat+dir collision with `mm context migrate` first"
+        )
+
+    dir_path.mkdir(parents=True, exist_ok=True)
+    os.replace(flat_path, target_file)
+    return target_file
 
 
 # ── ADR-0011 PR-E4: scope-tier migration ──────────────────────────────

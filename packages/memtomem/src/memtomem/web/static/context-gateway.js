@@ -558,8 +558,11 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   // "Import this <type>" button minted by ``_ctxLoadRuntimeOnlyDetail``
   // belongs in the same write-blocked sweep.
   + '.ctx-runtime-only-import, '
-  // ADR-0022 version-store writes (freeze / promote / delete-label) are
-  // project_shared-only canonical writes, so they ride the same tier gate.
+  // ADR-0022 version-store writes (enable / freeze / promote / delete-label)
+  // are project_shared-only canonical writes, so they ride the same tier gate.
+  // ``.ctx-version-enable-btn`` (rank 6) adopts a flat artifact into dir layout
+  // — also a project_shared-only canonical write.
+  + '.ctx-version-enable-btn, '
   + '.ctx-version-freeze-btn, .ctx-version-promote-btn, .ctx-version-label-remove'
 );
 
@@ -3079,13 +3082,25 @@ async function _ctxLoadVersions(type, name, detailEl, seq) {
   if (seq != null && seq !== _ctxDetailSeq[type]) return;
 
   if (data.migrate_required) {
-    // Flat-layout artifact: no per-artifact version store (ADR-0022 inv 3).
+    // Flat-layout artifact: no per-artifact directory to hold a versions/
+    // store (ADR-0022 inv 3). Offer an explicit "Enable versioning" action
+    // that adopts the flat canonical into directory layout (rank 6) — the CLI
+    // ``mm context migrate`` refuses web-created flat files (no lockfile entry
+    // ⇒ skip_manual), so this button is the supported escape hatch.
     container.hidden = false;
     container.innerHTML =
       '<div class="ctx-detail-versions-header">'
       + `<span class="ctx-detail-versions-title" data-i18n="settings.ctx.versions.title">${escapeHtml(t('settings.ctx.versions.title'))}</span>`
+      + `<button class="btn-ghost ctx-version-enable-btn" data-i18n="settings.ctx.versions.enable" `
+      + `data-i18n-title="settings.ctx.versions.enable_tooltip" `
+      + `title="${escapeHtml(t('settings.ctx.versions.enable_tooltip'))}">${escapeHtml(t('settings.ctx.versions.enable'))}</button>`
       + '</div>'
       + `<div class="ctx-version-empty text-muted" data-i18n="settings.ctx.versions.migrate_required">${escapeHtml(t('settings.ctx.versions.migrate_required'))}</div>`;
+    _ctxWireEnableVersioning(type, name, detailEl, seq);
+    // The enable button just landed — run the tier gate so it picks up
+    // ``data-write-blocked`` on non-shared tiers (it's a project_shared-only
+    // canonical write, like freeze/promote).
+    _ctxRefreshWriteBlockedState();
     return;
   }
 
@@ -3095,6 +3110,44 @@ async function _ctxLoadVersions(type, name, detailEl, seq) {
   // The freeze/promote/remove buttons just landed — re-run the tier gate so
   // they pick up ``data-write-blocked`` without a full detail re-render (#943).
   _ctxRefreshWriteBlockedState();
+}
+
+function _ctxWireEnableVersioning(type, name, detailEl, seq) {
+  // Wires the "Enable versioning" button shown for a flat-layout artifact: it
+  // adopts the flat canonical into directory layout (ADR-0022 rank 6) so the
+  // version store becomes available. On success the layout changed flat→dir,
+  // so reload the WHOLE detail panel (not just the versions section) — the meta
+  // header's layout / file-count chips are now stale too.
+  const btn = detailEl.querySelector('.ctx-version-enable-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btnLoading(btn, true);
+    try {
+      const csrf = await ensureCsrfToken();
+      // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
+      const headers = csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' };
+      const r = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/versions/enable`),
+        { method: 'POST', headers, body: JSON.stringify({}) },
+      );
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+        return;
+      }
+      showToast(t('settings.ctx.versions.enable_success', { name }));
+      // Bail if the user navigated to another artifact while the POST was in
+      // flight — re-rendering the detail would yank them back to this one.
+      if (seq != null && seq !== _ctxDetailSeq[type]) return;
+      loadCtxDetail(type, name);
+    } catch (_) {
+      showToast(t('toast.request_failed'), 'error');
+    } finally {
+      btnLoading(btn, false);
+    }
+  });
 }
 
 function _ctxWireVersionControls(type, name, detailEl, seq) {
