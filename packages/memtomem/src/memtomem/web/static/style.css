@@ -3990,6 +3990,9 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 /* "Initialized only" toggle sits beside Sort in the toolbar. */
 .ctx-portal-hide-uninit { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
 .ctx-portal-hide-uninit input { cursor: pointer; }
+/* rank 2c: "Show all projects" toggle in the artifact-list controls row. */
+.ctx-list-show-all { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
+.ctx-list-show-all input { cursor: pointer; }
 /* "N uninitialized hidden" hint above the rows. */
 .ctx-portal-hidden-hint { font-size: 0.8rem; margin: 0 0 8px; }
 .ctx-portal-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
