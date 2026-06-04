@@ -342,6 +342,32 @@ class TestExtractCommandsToCanonical:
         assert result.imported == []
         assert result.skipped == []
 
+    def test_dry_run_reports_without_writing(self, tmp_path):
+        # rank-10: dry_run covers BOTH the Claude (byte passthrough) and
+        # Gemini (TOML→Markdown) write branches — neither touches disk.
+        claude = tmp_path / ".claude/commands"
+        claude.mkdir(parents=True)
+        (claude / "review.md").write_text(SAMPLE_FULL_COMMAND, encoding="utf-8")
+        gemini = tmp_path / ".gemini/commands"
+        gemini.mkdir(parents=True)
+        (gemini / "summarize.toml").write_text(
+            'description = "Summarize"\nprompt = "Summarize {{args}}."\n',
+            encoding="utf-8",
+        )
+
+        preview = extract_commands_to_canonical(tmp_path, dry_run=True)
+        names = sorted(canonical_command_name(p, layout) for p, layout in preview.imported)
+        assert names == ["review", "summarize"]
+        assert preview.skipped == []
+        # Nothing written by either branch.
+        assert not (tmp_path / CANONICAL_COMMAND_ROOT).exists()
+
+        # A real run reproduces the same import set and now writes.
+        applied = extract_commands_to_canonical(tmp_path)
+        assert len(applied.imported) == 2
+        assert (tmp_path / CANONICAL_COMMAND_ROOT / "review" / "command.md").is_file()
+        assert (tmp_path / CANONICAL_COMMAND_ROOT / "summarize" / "command.md").is_file()
+
 
 class TestDiffCommands:
     def test_empty_project(self, tmp_path):

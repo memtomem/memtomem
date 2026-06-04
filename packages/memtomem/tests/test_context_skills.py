@@ -373,6 +373,41 @@ class TestExtractSkills:
         assert result.imported == []
         assert result.skipped == []
 
+    def test_dry_run_reports_without_writing(self, tmp_path):
+        # rank-10: dry_run lists the would-import destination but never
+        # touches disk, and a real run afterwards still imports normally.
+        skill = tmp_path / ".claude/skills/code-review"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        preview = extract_skills_to_canonical(tmp_path, dry_run=True)
+        assert [p.name for p in preview.imported] == ["code-review"]
+        assert preview.skipped == []
+        # Nothing written — the canonical dir does not exist yet.
+        assert not (tmp_path / CANONICAL_SKILL_ROOT / "code-review").exists()
+
+        # A real run produces the identical import set and now writes.
+        applied = extract_skills_to_canonical(tmp_path)
+        assert [p.name for p in applied.imported] == ["code-review"]
+        assert (tmp_path / CANONICAL_SKILL_ROOT / "code-review/SKILL.md").exists()
+
+    def test_dry_run_reports_would_skip_existing(self, tmp_path):
+        # An existing canonical entry is reported as a (would-)skip in dry_run
+        # mode, and the existing content is left untouched.
+        src = tmp_path / ".claude/skills/existing"
+        src.mkdir(parents=True)
+        (src / "SKILL.md").write_text("new", encoding="utf-8")
+
+        canonical = tmp_path / CANONICAL_SKILL_ROOT / "existing"
+        canonical.mkdir(parents=True)
+        (canonical / "SKILL.md").write_text("old", encoding="utf-8")
+
+        preview = extract_skills_to_canonical(tmp_path, dry_run=True)
+        assert preview.imported == []
+        assert len(preview.skipped) == 1
+        assert "canonical exists" in preview.skipped[0][1]
+        assert (canonical / "SKILL.md").read_text(encoding="utf-8") == "old"
+
 
 class TestDiffSkills:
     def test_empty_project(self, tmp_path):

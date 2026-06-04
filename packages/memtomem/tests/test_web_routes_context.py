@@ -912,6 +912,31 @@ class TestImportSkills:
         assert (tmp_path / ".memtomem" / "skills" / "from-claude" / SKILL_MANIFEST).is_file()
 
     @pytest.mark.anyio
+    async def test_import_dry_run_previews_without_writing(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        # rank-10: ``?dry_run=1`` returns the would-import preview (with a
+        # ``dry_run`` flag) and leaves canonical untouched; a follow-up real
+        # import then writes.
+        _make_runtime_skill(tmp_path, ".claude/skills", "from-claude", "# Imported\n")
+        r = await client.post(
+            "/api/context/skills/import?dry_run=1",
+            json={"overwrite": False},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["dry_run"] is True
+        assert any(i["name"] == "from-claude" for i in data["imported"])
+        # Disk is untouched by the preview.
+        assert not (tmp_path / ".memtomem" / "skills" / "from-claude").exists()
+
+        # A real import (default dry_run) now writes and echoes dry_run=False.
+        r2 = await client.post("/api/context/skills/import", json={"overwrite": False})
+        assert r2.status_code == 200
+        assert r2.json()["dry_run"] is False
+        assert (tmp_path / ".memtomem" / "skills" / "from-claude" / SKILL_MANIFEST).is_file()
+
+    @pytest.mark.anyio
     async def test_import_skips_existing(self, client: AsyncClient, tmp_path: Path):
         _make_skill(tmp_path, "already")
         _make_runtime_skill(tmp_path, ".claude/skills", "already", "# Different\n")
