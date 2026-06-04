@@ -86,6 +86,16 @@ async function boot(calls) {
 
 const row = (window, id) => window.document.querySelector(`.ctx-portal-row[data-scope-id="${id}"]`);
 
+// The "Initialized only" toggle is default-ON; turn it off when a test asserts
+// on a stale (uninitialized) row that would otherwise be hidden.
+function showUninitialized(window) {
+  const cb = window.document.querySelector('#ctx-portal-hide-uninit');
+  if (cb && cb.checked) {
+    cb.checked = false;
+    cb.dispatchEvent(new window.Event('change', { bubbles: true }));
+  }
+}
+
 describe('sync-eligibility helpers', () => {
   it('_ctxScopeIsEnrolled reads "known-projects" in sources', async () => {
     const { window } = await boot();
@@ -190,6 +200,7 @@ describe('portal enrollment UI', () => {
   it('a paused AND stale row renders BOTH badges (orthogonal, not folded into the chain)', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();
+    showUninitialized(window); // p-paused-stale is stale → hidden by default
     const ps = row(window, 'p-paused-stale');
     // Folding paused into the `if (missing) ... else if (stale) ...` chain would
     // drop the paused badge here (stale wins the else-if), so assert both.

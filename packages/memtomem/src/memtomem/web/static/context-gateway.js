@@ -49,12 +49,22 @@ function _ctxBadge(status) {
   return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(_ctxStatusText(status))}</span>`;
 }
 
+// Display label for a runtime key. Only ``gemini`` needs remapping — it is the
+// Antigravity client (RUNTIME_TO_CLIENT: gemini→antigravity), so printing the
+// raw key leaks an internal name the Projects portal already shows as
+// "Antigravity". The on-disk .gemini/ marker paths keep the gemini key
+// untouched — this maps the *label* only.
+const _CTX_RUNTIME_LABEL = { gemini: 'Antigravity' };
+function _ctxRuntimeLabel(name) {
+  return _CTX_RUNTIME_LABEL[name] || name;
+}
+
 function renderRuntimeBadges(runtimes) {
   if (!runtimes || !runtimes.length) return '';
   return '<div class="ctx-runtime-badges">' +
     runtimes.map(r => {
       const short = r.runtime.replace(/_skills|_commands|_agents/g, '');
-      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(short)}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
+      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(_ctxRuntimeLabel(short))}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
     }).join('') + '</div>';
 }
 
@@ -768,7 +778,8 @@ function _renderCtxOverview(data) {
     const cls = available ? 'badge badge-success' : 'badge badge-gray';
     const title = available ? '' : ` title="${undetectedTitle}"`;
     const name = escapeHtml(rt.name || '');
-    return `<span class="${cls}"${title} data-runtime="${name}">${name}</span>`;
+    const label = escapeHtml(_ctxRuntimeLabel(rt.name || ''));
+    return `<span class="${cls}"${title} data-runtime="${name}">${label}</span>`;
   }).join('');
 
   // Issue #832 / ADR-0009 §1.c: surface freshness as "Canonical updated: 5m
@@ -1173,6 +1184,31 @@ async function loadCtxOverview() {
   }
 }
 
+// Matrix runtime-state descriptors: a distinct hue per state, reinforced by a
+// decorative leading glyph (CSS ``::before`` keyed on ``data-mstate``, so the
+// glyph stays out of the badge's text content). Color alone collided
+// (detected≡available shared one yellow; none≡registered shared one grey) and
+// the labels are near-identical short words — the hue + glyph + the legend
+// below the title tell the five states apart without reading every tooltip.
+// Order runs most→least set up.
+const _CTX_MATRIX_STATES = [
+  { key: 'active', cls: 'badge-success' },
+  { key: 'detected', cls: 'badge-warning' },
+  { key: 'available', cls: 'badge-amber-outline' },
+  { key: 'client', cls: 'badge-blue' },
+  { key: 'registered', cls: 'badge-violet' },
+  { key: 'none', cls: 'badge-gray' },
+];
+
+function _ctxMatrixLegendHtml() {
+  const items = _CTX_MATRIX_STATES
+    .filter(st => st.key !== 'none')
+    .map(st => `<span class="ctx-matrix-legend-item">
+      <span class="badge ${st.cls}" data-mstate="${st.key}"></span>${escapeHtml(t(`settings.ctx.matrix_badge_${st.key}`))}</span>`)
+    .join('');
+  return `<div class="ctx-matrix-legend">${items}</div>`;
+}
+
 function _renderProjectsMatrix() {
   const scopes = _ctxProjectsCache || [];
   if (!scopes.length) return '';
@@ -1182,12 +1218,13 @@ function _renderProjectsMatrix() {
   // Table header
   let html = `<div class="ctx-projects-matrix-container">
     <h3 class="ctx-projects-matrix-title">${escapeHtml(t('settings.ctx.projects_matrix_title') || 'Project Scope Matrix')}</h3>
+    ${_ctxMatrixLegendHtml()}
     <table class="ctx-projects-matrix-table">
       <thead>
         <tr>
           <th>${escapeHtml(t('settings.ctx.matrix_col_project') || 'Project')}</th>
           <th>${escapeHtml(t('settings.ctx.matrix_col_counts') || 'Inventory')}</th>
-          ${runtimes.map(rt => `<th>${escapeHtml(rt.toUpperCase())}</th>`).join('')}
+          ${runtimes.map(rt => `<th>${escapeHtml(_ctxRuntimeLabel(rt).toUpperCase())}</th>`).join('')}
           <th>${escapeHtml(t('settings.ctx.matrix_col_actions') || 'Actions')}</th>
         </tr>
       </thead>
@@ -1212,11 +1249,19 @@ function _renderProjectsMatrix() {
     const countsTitle = t('settings.ctx.matrix_counts_title', {
       skills: skillsCount, commands: commandsCount, agents: agentsCount, mcp: mcpCount,
     });
-    const countsHtml = hasCounts
-      ? `<span class="ctx-matrix-counts" title="${escapeHtml(countsTitle)}">
+    const countsTotal = skillsCount + commandsCount + agentsCount + mcpCount;
+    let countsHtml;
+    if (!hasCounts) {
+      countsHtml = '<span class="ctx-matrix-counts text-muted">—</span>';
+    } else if (countsTotal === 0) {
+      // Zero-suppress: collapse an all-zero inventory to one muted "empty" pill
+      // instead of 🧩0 ⌘0 🤖0 🔌0 (matches the portal card treatment).
+      countsHtml = `<span class="ctx-matrix-counts text-muted">${escapeHtml(t('settings.ctx.portal_counts_empty'))}</span>`;
+    } else {
+      countsHtml = `<span class="ctx-matrix-counts" title="${escapeHtml(countsTitle)}">
       🧩${skillsCount} ⌘${commandsCount} 🤖${agentsCount} 🔌${mcpCount}
-    </span>`
-      : '<span class="ctx-matrix-counts text-muted">—</span>';
+    </span>`;
+    }
 
     // Runtimes columns. State → (css class, label key, title key); labels and
     // tooltips are localized via ``t()`` so the badges translate (the rest of
@@ -1227,19 +1272,21 @@ function _renderProjectsMatrix() {
       const installed = !!(coverage && coverage.installed);
       const registered = !!(coverage && coverage.memtomem_registered);
 
-      let badgeCls = 'badge-gray';
       let key = 'none';
       if (available && installed && registered) {
-        badgeCls = 'badge-success'; key = 'active';
+        key = 'active';
       } else if (available && installed) {
-        badgeCls = 'badge-warning'; key = 'detected';
+        key = 'detected';
       } else if (available) {
-        badgeCls = 'badge-yellow'; key = 'available';
+        key = 'available';
       } else if (installed) {
-        badgeCls = 'badge-blue'; key = 'client';
+        key = 'client';
       } else if (registered) {
-        badgeCls = 'badge-gray'; key = 'registered';
+        key = 'registered';
       }
+      // Distinct hue + glyph per state (see ``_CTX_MATRIX_STATES``) so the two
+      // former color collisions (detected≡available, none≡registered) read apart.
+      const st = _CTX_MATRIX_STATES.find(s => s.key === key) || _CTX_MATRIX_STATES[_CTX_MATRIX_STATES.length - 1];
 
       let badgeText = t(`settings.ctx.matrix_badge_${key}`);
       // Mark registration only on states that don't already imply it — ``active``
@@ -1249,8 +1296,10 @@ function _renderProjectsMatrix() {
       }
       const titleText = t(`settings.ctx.matrix_badge_${key}_title`);
 
+      // ``data-mstate`` drives the decorative ``::before`` glyph in CSS; the
+      // badge text itself stays clean (label only) so it remains assertable.
       return `<td>
-        <span class="badge ${badgeCls}" title="${escapeHtml(titleText)}">${escapeHtml(badgeText)}</span>
+        <span class="badge ${st.cls}" data-mstate="${key}" title="${escapeHtml(titleText)}">${escapeHtml(badgeText)}</span>
       </td>`;
     }).join('');
 
@@ -1445,6 +1494,7 @@ async function _ctxSyncProjectScope(scopeId, btn) {
     title: t('settings.ctx.sync_all'),
     message: t('settings.ctx.confirm_sync_all'),
     confirmText: t('settings.ctx.sync'),
+    danger: false,
   });
   if (!ok) return;
 
@@ -1915,6 +1965,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     title: t('settings.ctx.sync_all'),
     message: t('settings.ctx.confirm_sync_all'),
     confirmText: t('settings.ctx.sync'),
+    danger: false,
   });
   if (!ok) return;
   btnLoading(btn, true);
@@ -2351,7 +2402,17 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     // #956 explicitly scopes "preserve current project-tier wording".
     const isUser = _ctxTargetScope === 'user';
     const canonical = isUser ? `~/.memtomem/${type}` : `.memtomem/${type}`;
-    const hintKey = isUser ? 'settings.ctx.empty_hint_user' : 'settings.ctx.empty_hint';
+    // MCP servers have no Import affordance (single ``.mcp.json`` source, no
+    // /import route), so the shared project-tier hint's "click Import" sentence
+    // pointed at a button that doesn't exist for this section. Branch it.
+    let hintKey;
+    if (isUser) {
+      hintKey = 'settings.ctx.empty_hint_user';
+    } else if (type === 'mcp-servers') {
+      hintKey = 'settings.ctx.empty_hint_mcp';
+    } else {
+      hintKey = 'settings.ctx.empty_hint';
+    }
     let hint = t(hintKey)
       .replace(/\{type\}/g, type)
       .replace('{canonical}', canonical);
@@ -2518,10 +2579,13 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
             if (card.dataset.canonicalPath) {
               loadCtxDetail(type, card.dataset.name, {
                 autoOpenDiff: card.dataset.outOfSync === 'true',
+                focusOnLoad: true,
               });
             } else {
               const detailEl = qs(`ctx-${type}-detail`);
-              _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
+              _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl, {
+                focusOnLoad: true,
+              });
             }
           });
           // #1073: keyboard activation parity with click. Card renders with
@@ -3409,6 +3473,24 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
 }
 
 
+// A card click renders the detail panel as a DOM sibling AFTER the full
+// project roster, so it paints ~2000px below the click — without a scroll +
+// focus move the interaction reads as dead, and keyboard/SR users are left
+// stranded high in the list. Both detail loaders call this once painted, but
+// only on user navigation (``opts.focusOnLoad``); the langchange re-render
+// path leaves it unset so a language toggle never yanks the viewport down.
+function _ctxFocusDetail(detailEl) {
+  try {
+    detailEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (_e) {
+    detailEl.scrollIntoView();
+  }
+  // ``preventScroll`` so moving focus to the heading doesn't fight the
+  // smooth scroll above (the heading is tabindex=-1 + the region's label).
+  const heading = detailEl.querySelector('.ctx-detail-name');
+  if (heading) heading.focus({ preventScroll: true });
+}
+
 async function loadCtxDetail(type, name, opts = {}) {
   // ``opts.autoOpenDiff`` (default false): when the list-click handler
   // sees an "out of sync" runtime on the card, it passes ``true`` here
@@ -3453,12 +3535,11 @@ async function loadCtxDetail(type, name, opts = {}) {
     // toggle's `.then()` had just rehydrated (review P2).
     if (seq !== _ctxDetailSeq[type]) return;
 
-    let html = '<div class="ctx-detail">';
+    let html = `<div class="ctx-detail" role="region" aria-labelledby="ctx-detail-name-${type}">`;
     html += `<div class="ctx-detail-header">
-      <strong>${escapeHtml(name)}</strong>
+      <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       <div style="display:flex;gap:6px">
         <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
-        <button class="btn-ghost ctx-detail-diff-btn" data-i18n="settings.ctx.diff_view">${t('settings.ctx.diff_view')}</button>
         <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
@@ -3526,6 +3607,7 @@ async function loadCtxDetail(type, name, opts = {}) {
 
     html += '</div>';
     detailEl.innerHTML = html;
+    if (opts.focusOnLoad) _ctxFocusDetail(detailEl);
     // mtime_ns is a string (JS Number can't safely represent ns epochs).
     detailEl.dataset.mtimeNs = data.mtime_ns || '';
     // Pin the conflict-draft key for this editor session. The effective scope
@@ -3661,12 +3743,6 @@ async function loadCtxDetail(type, name, opts = {}) {
       } catch (err) {
         showToast(t('toast.save_failed', { error: err.message }), 'error');
       } finally { btnLoading(btn, false); }
-    });
-
-    // Diff button
-    detailEl.querySelector('.ctx-detail-diff-btn')?.addEventListener('click', () => {
-      const diffTab = detailEl.querySelector('.ctx-detail-tab[data-pane="diff"]');
-      if (diffTab) diffTab.click();
     });
 
     // Delete
@@ -3885,9 +3961,9 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     const data = await res.json();
     if (seq !== _ctxDetailSeq[type]) return;
 
-    let html = '<div class="ctx-detail">';
+    let html = `<div class="ctx-detail" role="region" aria-labelledby="ctx-detail-name-${type}">`;
     html += `<div class="ctx-detail-header">
-      <strong>${escapeHtml(name)}</strong>
+      <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       ${_ctxBadge('missing canonical')}
     </div>`;
     html += `<div class="text-muted" style="margin:6px 0 12px">${t('settings.ctx.runtime_only_detail_hint')}</div>`;
@@ -3917,6 +3993,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
     html += '</div>';
     detailEl.innerHTML = html;
+    if (opts.focusOnLoad) _ctxFocusDetail(detailEl);
 
     detailEl.querySelector('.ctx-runtime-only-import')?.addEventListener('click', async () => {
       const btn = detailEl.querySelector('.ctx-runtime-only-import');
@@ -3987,6 +4064,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       title: t('settings.ctx.sync'),
       message: t('settings.ctx.confirm_sync').replace('{type}', type),
       confirmText: t('settings.ctx.sync'),
+      danger: false,
     });
     if (!ok) return;
     btnLoading(btn, true);
@@ -4043,6 +4121,9 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       title: t('settings.ctx.import'),
       message: t('settings.ctx.confirm_import').replace('{type}', type),
       confirmText: t('settings.ctx.import'),
+      // Import is non-destructive by default (the destructive path is the
+      // opt-in "overwrite" checkbox below) — keep the button primary-blue.
+      danger: false,
       extraOption: {
         id: 'overwrite',
         label: t('settings.ctx.confirm_import_overwrite_label'),
@@ -4100,6 +4181,26 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
 
 // -- Create button (delegated) ------------------------------------------------
 
+// Label-based destination for the Create form — "{active project} · {tier}".
+// Built from the active scope label + selected tier (not a reconstructed FS
+// path) so it can't drift from the server's canonicalization; it just tells the
+// user WHERE the new artifact will land before they submit (it POSTs to the
+// active scope + ``_ctxTargetScope``).
+function _ctxCreateDestinationLabel() {
+  const activeScope = (_ctxProjectsCache || []).find(
+    s => (s.scope_id || '') === (_ctxActiveScopeId || ''),
+  );
+  const project = activeScope
+    ? _ctxScopeDisplayLabel(activeScope)
+    : t('settings.ctx.create_dest_active_project');
+  const tierKey = _ctxTargetScope === 'user'
+    ? 'settings.ctx.tier_option_user'
+    : _ctxTargetScope === 'project_local'
+      ? 'settings.ctx.tier_option_project_local'
+      : 'settings.ctx.tier_option_project_shared';
+  return t('settings.ctx.create_destination', { project, tier: t(tierKey) });
+}
+
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const type = btn.dataset.type;
@@ -4111,6 +4212,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       ? '{\n  "command": "uvx",\n  "args": ["--from", "example", "example-server"]\n}'
       : t('settings.ctx.create_content_placeholder');
     form.innerHTML = `
+      <div class="ctx-create-destination">${escapeHtml(_ctxCreateDestinationLabel())}</div>
       <label>${escapeHtml(t('settings.ctx.create_name_label'))}</label>
       <input type="text" class="ctx-create-name" placeholder="${escapeHtml(t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) }))}" style="width:100%" />
       <label style="margin-top:8px">${escapeHtml(t('settings.ctx.create_content_label'))}</label>

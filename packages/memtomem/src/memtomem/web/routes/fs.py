@@ -92,18 +92,21 @@ def _known_project_parent_roots(config) -> list[Path]:
 def _project_allow_list_roots(request: Request, config) -> list[Path]:
     """Return wider project-discovery roots for Context Gateway Add Project.
 
-    This extends, rather than replaces, the Index roots so Home and configured
-    memory dirs remain visible. Adding the server cwd's parent lets users pick
-    sibling worktrees/projects without making the picker browse from ``/``.
-    Known-project parents keep previously registered project families
-    discoverable after restart.
+    Project-discovery roots lead: the server cwd's parent (sibling
+    worktrees/projects) and known-project parents (previously registered
+    families), so actual project parents head the picker. The Index roots
+    (Home + configured ``memory_dirs``) follow so they stay browsable but no
+    longer crowd out project parents at the top — memory-storage dirs are not
+    valid Add-Project roots, so they should not be the first thing offered
+    (``_dedupe_roots`` keeps first occurrence, preserving this order).
     """
-    candidates = _index_allow_list_roots(config)
+    candidates: list[Path] = []
     project_root = Path(getattr(request.app.state, "project_root", Path.cwd())).expanduser()
     project_parent = project_root.parent
     if project_parent != project_root and project_parent != Path(project_parent.anchor):
         candidates.append(project_parent)
     candidates.extend(_known_project_parent_roots(config))
+    candidates.extend(_index_allow_list_roots(config))
     return _dedupe_roots(candidates)
 
 

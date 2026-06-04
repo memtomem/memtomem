@@ -996,6 +996,12 @@ button:active { opacity: 0.7; }
 .badge-success { background: rgba(76, 175, 125, 0.15); color: var(--green); }
 .badge-warning { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 .badge-muted { background: rgba(123, 127, 150, 0.15); color: var(--muted); }
+/* Matrix runtime states: split the two former color collisions. ``available``
+ * (marker but no client) is the desaturated outline twin of solid-amber
+ * ``detected``; ``registered`` (registered, nothing installed) gets its own
+ * violet tint so it no longer reads as the neutral-grey ``none``. */
+.badge-amber-outline { background: transparent; color: var(--yellow); border: 1px solid rgba(243, 156, 18, 0.55); }
+.badge-violet { background: rgba(139, 110, 230, 0.16); color: #8b6ee6; }
 .badge-source { background: rgba(76, 175, 125, 0.15); color: var(--green); font-family: var(--mono); font-weight: 400; }
 .badge-validity { background: rgba(108, 92, 231, 0.10); color: var(--muted); font-family: var(--mono); font-weight: 400; }
 .badge-validity--expired { opacity: 0.55; text-decoration: line-through; }
@@ -1965,9 +1971,15 @@ input[type="file"] { font-size: 0.85rem; color: var(--muted); }
 .modal-overlay[hidden] { display: none; }
 .modal-inner {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 10px; padding: 24px 28px; min-width: 320px;
+  border-radius: 10px; padding: 24px 28px;
+  /* ``min-width: 320px`` floored the modal wider than a ~356px phone, forcing a
+   * zero-gutter full-bleed; ``min()`` lets it shrink to fit with a gutter. */
+  min-width: min(320px, 100%);
   max-width: 460px; width: 90%;
   box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+}
+@media (max-width: 520px) {
+  .modal-inner { padding: 18px 16px; }
 }
 .modal-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -3954,6 +3966,13 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   background: var(--bg);
   border: 1px solid var(--border);
 }
+/* Zero-suppressed inventory: a single muted pill in place of four 0-chips. */
+.ctx-portal-count--empty { font-family: inherit; font-style: italic; opacity: 0.7; }
+/* "Initialized only" toggle sits beside Sort in the toolbar. */
+.ctx-portal-hide-uninit { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
+.ctx-portal-hide-uninit input { cursor: pointer; }
+/* "N uninitialized hidden" hint above the rows. */
+.ctx-portal-hidden-hint { font-size: 0.8rem; margin: 0 0 8px; }
 .ctx-portal-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .ctx-portal-active-badge {
   font-size: 0.7rem;
@@ -4291,6 +4310,13 @@ button.ctx-runtime-chip--greyed:focus-visible {
 
 .ctx-detail { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; background: var(--surface); }
 .ctx-detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+/* The artifact name is an <h2> (region label + focus target on open); reset
+ * heading defaults so it keeps the inline-strong look it replaced. The
+ * tabindex=-1 focus is programmatic-only, so suppress the outline unless the
+ * user is keyboard-navigating. */
+.ctx-detail-name { margin: 0; font-size: 1rem; font-weight: 600; line-height: 1.3; }
+.ctx-detail-name:focus { outline: none; }
+.ctx-detail-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Detail meta header — #962. Renders the artifact's description / scope /
  * layout / mtime in a label-value grid above the Canonical|Diff tabs so
  * the user can identify the artifact without scanning raw frontmatter. */
@@ -4370,7 +4396,9 @@ button.ctx-runtime-chip--greyed:focus-visible {
 .ctx-detail-tab { padding: 8px 16px; cursor: pointer; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-family: inherit; font-size: 0.85rem; line-height: inherit; transition: color 0.15s; }
 .ctx-detail-tab:hover { color: var(--text); }
 .ctx-detail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-.ctx-detail-pane { display: none; }
+/* ``overflow-x: auto`` so a wide field-map / diff table scrolls inside the pane
+ * on narrow viewports instead of clipping (same fix as the project matrix). */
+.ctx-detail-pane { display: none; overflow-x: auto; }
 .ctx-detail-pane.active { display: block; }
 
 .ctx-content-pre { font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; overflow: auto; max-height: 400px; white-space: pre-wrap; word-break: break-word; }
@@ -4384,12 +4412,15 @@ button.ctx-runtime-chip--greyed:focus-visible {
 .ctx-import-item { padding: 4px 0; font-size: 0.85rem; }
 .ctx-import-item .badge { font-size: 0.68rem; margin-left: 6px; }
 
-.ctx-field-map { width: 100%; font-size: 0.78rem; border-collapse: collapse; margin-top: 8px; }
+.ctx-field-map { width: 100%; min-width: max-content; font-size: 0.78rem; border-collapse: collapse; margin-top: 8px; }
 .ctx-field-map th, .ctx-field-map td { padding: 4px 12px; border-bottom: 1px solid var(--border); text-align: center; }
 .ctx-field-map th { color: var(--muted); font-weight: 600; }
 .ctx-field-map td:first-child { text-align: left; font-family: var(--mono); }
 
 .ctx-create-form { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; background: var(--surface); }
+/* "Destination: <project> · <tier>" — tells the user where the new artifact
+ * lands before they submit. */
+.ctx-create-destination { font-size: 0.8rem; color: var(--muted); margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 .ctx-create-form label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
 .ctx-create-form input { margin-bottom: 8px; }
 
@@ -4515,6 +4546,11 @@ button.ctx-runtime-chip--greyed:focus-visible {
   border: 1px solid var(--border, #333);
   border-radius: var(--radius, 8px);
   padding: 24px;
+  /* The 7-column table is wider than a phone; scroll it instead of clipping the
+   * right runtime columns + per-row Select/Sync/Remove off-screen (they were
+   * unreachable, the page can't scroll sideways under html/body overflow:hidden). */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .ctx-projects-matrix-title {
@@ -4525,8 +4561,26 @@ button.ctx-runtime-chip--greyed:focus-visible {
   color: var(--text, #e0e0e0);
 }
 
+/* State legend under the matrix title — decodes the runtime-status badges so
+ * they don't rely on per-cell tooltips for at-a-glance scanning. */
+.ctx-matrix-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 16px; font-size: 0.78rem; color: var(--muted); }
+.ctx-matrix-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.ctx-matrix-legend-item .badge { font-size: 0.72rem; }
+/* Decorative per-state glyph (reinforces hue; kept out of badge text content so
+ * the label stays assertable). Legend badges carry only the glyph. */
+.badge[data-mstate="active"]::before { content: "\25CF\00A0"; }     /* ● */
+.badge[data-mstate="detected"]::before { content: "\25D0\00A0"; }   /* ◐ */
+.badge[data-mstate="available"]::before { content: "\25CB\00A0"; }  /* ○ */
+.badge[data-mstate="client"]::before { content: "\25CD\00A0"; }     /* ◍ */
+.badge[data-mstate="registered"]::before { content: "\25C7\00A0"; } /* ◇ */
+.badge[data-mstate="none"]::before { content: ""; }
+.ctx-matrix-legend-item .badge::before { margin-right: 0; }
+
 .ctx-projects-matrix-table {
   width: 100%;
+  /* Floor at content width so the table scrolls (container overflow-x) on narrow
+   * viewports rather than crushing/clipping columns. */
+  min-width: max-content;
   border-collapse: collapse;
   margin-bottom: 16px;
   font-size: 0.85rem;

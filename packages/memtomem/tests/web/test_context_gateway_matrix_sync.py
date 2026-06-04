@@ -168,15 +168,19 @@ def test_matrix_rendering_and_badges(page, mm_web_url: str) -> None:
         == "Marker folder exists & client installed, but not registered"
     )
 
-    # Codex column: available=true, installed=false, memtomem_registered=false => Available
+    # Codex column: available=true, installed=false, memtomem_registered=false => Available.
+    # ``available`` now uses the desaturated outline twin of solid-amber
+    # ``detected`` (the two formerly shared one yellow); the decorative glyph
+    # lives in a CSS ::before, so the text content stays the bare label.
     codex_badge = row.locator("td").nth(4).locator(".badge")
     assert (codex_badge.text_content() or "").strip() == "Available"
-    assert codex_badge.evaluate("el => el.classList.contains('badge-yellow')")
+    assert codex_badge.evaluate("el => el.classList.contains('badge-amber-outline')")
     assert codex_badge.get_attribute("title") == "Marker folder exists, but client not installed"
 
-    # Kimi column: available=false, installed=true, memtomem_registered=true => Client (Reg)
+    # Kimi column: available=false, installed=true, memtomem_registered=true =>
+    # "Installed · registered" (label "Client"->"Installed", suffix " (Reg)"->" · registered").
     kimi_badge = row.locator("td").nth(5).locator(".badge")
-    assert (kimi_badge.text_content() or "").strip() == "Client (Reg)"
+    assert (kimi_badge.text_content() or "").strip() == "Installed · registered"
     assert kimi_badge.evaluate("el => el.classList.contains('badge-blue')")
     assert kimi_badge.get_attribute("title") == "Client installed, but no project marker found"
 

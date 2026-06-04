@@ -51,6 +51,11 @@ let _ctxPortalEditingId = null;
 // repainted (the search box keeps focus).
 let _ctxPortalSearch = '';
 let _ctxPortalSort = 'name'; // 'name' | 'items'
+// Default ON: a fresh board is dominated by ~dozens of discovered-but-stale
+// (uninitialized, no ``.memtomem/``) roots whose 0/0/0/0 rows bury the few
+// real projects. The toggle hides ``scope.stale`` rows (Server CWD is always
+// kept, it is pinned regardless of count) and a hint reports how many it hid.
+let _ctxPortalHideUninit = true;
 
 // Map of scope_id -> runtimes list (one GET /api/context/runtimes per scope; the
 // endpoint resolves per-scope via resolve_scope_root's project_scope_id param).
@@ -433,6 +438,10 @@ function _ctxPortalRenderScaffold(listEl) {
           <option value="items"${_ctxPortalSort === 'items' ? ' selected' : ''}>${sortItems}</option>
         </select>
       </label>
+      <label class="ctx-portal-hide-uninit">
+        <input type="checkbox" id="ctx-portal-hide-uninit"${_ctxPortalHideUninit ? ' checked' : ''}>
+        <span>${escapeHtml(t('settings.ctx.portal_hide_uninit'))}</span>
+      </label>
     </div>
     <div id="ctx-projects-rows" class="ctx-portal-rows"></div>`;
 
@@ -450,9 +459,19 @@ function _ctxPortalRenderScaffold(listEl) {
       _ctxPortalRenderRows();
     });
   }
+  const hideUninit = listEl.querySelector('#ctx-portal-hide-uninit');
+  if (hideUninit) {
+    hideUninit.addEventListener('change', () => {
+      _ctxPortalHideUninit = hideUninit.checked;
+      _ctxPortalRenderRows();
+    });
+  }
 }
 
-function _ctxPortalVisibleScopes() {
+// Scopes passing the search box + provider filter, before the hide-uninit
+// toggle and sort. Shared by ``_ctxPortalVisibleScopes`` and the hidden-count
+// hint so the two can never disagree about what "uninitialized" was filtered.
+function _ctxPortalMatchedScopes() {
   const all = Array.isArray(_ctxPortalScopes) ? _ctxPortalScopes : [];
   const q = _ctxPortalSearch.trim().toLowerCase();
   let matched = q
@@ -470,6 +489,33 @@ function _ctxPortalVisibleScopes() {
       const r = runtimes.find(item => item.name === _ctxPortalRuntimeFilter);
       return r && (r.memtomem_registered || r.mms_registered);
     });
+  }
+  return matched;
+}
+
+// Whether the hide-uninit toggle is actively suppressing rows right now. An
+// explicit search query overrides it — typing a name should find a project
+// even if it is uninitialized, so the toggle only declutters the default
+// browse view, not search results.
+function _ctxPortalHideUninitActive() {
+  return _ctxPortalHideUninit && _ctxPortalSearch.trim() === '';
+}
+
+// Count of stale (uninitialized) non-CWD scopes the hide-uninit toggle is
+// currently suppressing — drives the "N hidden" hint and the toggle relevance.
+function _ctxPortalHiddenUninitCount() {
+  if (!_ctxPortalHideUninitActive()) return 0;
+  return _ctxPortalMatchedScopes().filter(s => s.stale && !_ctxScopeIsServerCwd(s)).length;
+}
+
+function _ctxPortalVisibleScopes() {
+  let matched = _ctxPortalMatchedScopes();
+
+  // Hide uninitialized (stale = no ``.memtomem/`` yet) roots unless explicitly
+  // shown or being searched for. Server CWD is never hidden — it is the primary
+  // tree and is pinned first below regardless of count.
+  if (_ctxPortalHideUninitActive()) {
+    matched = matched.filter(s => !s.stale || _ctxScopeIsServerCwd(s));
   }
 
   // Server CWD is pinned first (the primary working tree); the rest follow the
@@ -489,15 +535,19 @@ function _ctxPortalRenderRows() {
   const rowsEl = document.getElementById('ctx-projects-rows');
   if (!rowsEl) return;
   const scopes = _ctxPortalVisibleScopes();
+  const hiddenUninit = _ctxPortalHiddenUninitCount();
+  const hiddenHint = hiddenUninit
+    ? `<div class="ctx-portal-hidden-hint text-muted">${escapeHtml(t('settings.ctx.portal_hidden_uninit', { count: hiddenUninit }))}</div>`
+    : '';
   if (!scopes.length) {
-    rowsEl.innerHTML = emptyState(
+    rowsEl.innerHTML = hiddenHint + emptyState(
       '',
       t('settings.ctx.portal_no_match', { query: _ctxPortalSearch.trim() }),
       '',
     );
     return;
   }
-  rowsEl.innerHTML = scopes.map(_ctxPortalRowHtml).join('');
+  rowsEl.innerHTML = hiddenHint + scopes.map(_ctxPortalRowHtml).join('');
   _ctxPortalWireRows(rowsEl);
   // A row may have just (re)entered edit mode — focus its input after paint.
   if (_ctxPortalEditingId !== null) {
@@ -510,6 +560,13 @@ function _ctxPortalCountsHtml(scope) {
   // ``counts: null`` means "not computed" (or a missing root) — render nothing
   // rather than a misleading row of zeros.
   if (!scope.counts) return '';
+  // Zero-suppress: four 0-chips are the dominant (and meaningless) visual
+  // texture of the board, so collapse an all-zero inventory to one muted
+  // "empty" pill. Non-empty scopes keep the per-type breakdown.
+  const total = _CTX_PORTAL_COUNT_TYPES.reduce((sum, ct) => sum + (scope.counts[ct.key] || 0), 0);
+  if (total === 0) {
+    return `<div class="ctx-portal-counts"><span class="ctx-portal-count ctx-portal-count--empty">${escapeHtml(t('settings.ctx.portal_counts_empty'))}</span></div>`;
+  }
   const chips = _CTX_PORTAL_COUNT_TYPES.map(ct => {
     const n = scope.counts[ct.key] || 0;
     const title = escapeHtml(t(ct.labelKey));

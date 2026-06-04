@@ -69,10 +69,21 @@ function rowsText(window) {
     .map(el => el.textContent.trim());
 }
 
+// The "Initialized only" toggle is default-ON, hiding stale (uninitialized)
+// rows; turn it off when a test needs the full scope set (incl. stale rows).
+function showUninitialized(window) {
+  const cb = window.document.querySelector('#ctx-portal-hide-uninit');
+  if (cb && cb.checked) {
+    cb.checked = false;
+    cb.dispatchEvent(new window.Event('change', { bubbles: true }));
+  }
+}
+
 describe('Context Portal board (PR4)', () => {
   it('renders one row per scope with health badges and counts', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();
+    showUninitialized(window); // reveal the stale Beta row hidden by default
 
     const rows = window.document.querySelectorAll('.ctx-portal-row');
     expect(rows.length).toBe(SCOPES.length);
@@ -162,6 +173,7 @@ describe('Context Portal board (PR4)', () => {
     const calls = [];
     const { window } = await boot(calls);
     await window.loadCtxProjects();
+    showUninitialized(window); // p-beta is stale (uninitialized) — reveal it
 
     window.document.querySelector('.ctx-portal-row[data-scope-id="p-beta"] .ctx-portal-remove')
       .dispatchEvent(new window.Event('click', { bubbles: true }));

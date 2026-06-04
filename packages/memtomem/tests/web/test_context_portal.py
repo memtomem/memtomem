@@ -111,6 +111,13 @@ def test_portal_renders_health_and_counts(page, mm_web_url: str) -> None:
     _stub_portal(page)
     _open_portal(page, mm_web_url)
 
+    # Verify health rendering for ALL scopes incl. the stale Beta row, which the
+    # default-on "Initialized only" toggle hides — turn it off for this test.
+    page.locator("#ctx-portal-hide-uninit").uncheck()
+    page.wait_for_function(
+        "() => document.querySelectorAll('.ctx-portal-row').length === 4", timeout=2_000
+    )
+
     rows = page.locator(".ctx-portal-row")
     assert rows.count() == 4
 
@@ -160,6 +167,14 @@ def test_portal_unregister_fires_delete_after_confirm(page, mm_web_url: str) -> 
     captured: list[dict] = []
     _stub_portal(page, captured)
     _open_portal(page, mm_web_url)
+
+    # p-beta is stale (uninitialized); reveal it past the default-on
+    # "Initialized only" toggle before exercising its remove button.
+    page.locator("#ctx-portal-hide-uninit").uncheck()
+    page.wait_for_function(
+        "() => !!document.querySelector(\".ctx-portal-row[data-scope-id='p-beta']\")",
+        timeout=2_000,
+    )
 
     page.locator(".ctx-portal-row[data-scope-id='p-beta'] .ctx-portal-remove").click()
     # showConfirm modal — confirm.
