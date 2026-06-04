@@ -215,6 +215,14 @@ def test_provider_filter_sets_deeplink_and_filters_rows(page, mm_web_url: str) -
     _stub_portal(page)
     _open_portal(page, mm_web_url)
 
+    # This test exercises the runtime filter over the FULL scope set, including
+    # the stale Beta row the default-on "Initialized only" toggle now hides —
+    # turn it off so the baseline is all four scopes.
+    page.locator("#ctx-portal-hide-uninit").uncheck()
+    page.wait_for_function(
+        "() => document.querySelectorAll('.ctx-portal-row').length === 4", timeout=2_000
+    )
+
     # All four scopes render with no filter (one is missing but still listed).
     assert page.locator(".ctx-portal-row").count() == 4
 
@@ -291,6 +299,13 @@ def test_active_switch_clears_runtime_filter(page, mm_web_url: str) -> None:
     active-scope-keyed heading chips + the deep-link clear."""
     _stub_portal(page)
     _open_portal(page, mm_web_url)
+
+    # Full scope set incl. the stale Beta row — disable the default-on
+    # "Initialized only" toggle so the post-clear baseline is all four scopes.
+    page.locator("#ctx-portal-hide-uninit").uncheck()
+    page.wait_for_function(
+        "() => document.querySelectorAll('.ctx-portal-row').length === 4", timeout=2_000
+    )
 
     page.locator(".ctx-portal-filter-group button[data-filter='claude']").click()
     page.wait_for_function("() => location.search.includes('runtime=claude')", timeout=2_000)

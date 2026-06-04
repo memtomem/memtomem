@@ -1,12 +1,12 @@
 /* Per-project sync enrollment (#1203 frontend) — portal Enroll + Pause/Resume
- * and the sync-eligibility helpers shared with the matrix Sync gate.
+ * and the sync-eligibility helpers shared with the portal card Sync gate.
  *
  * Drives the production ``context-portal.js`` + ``context-gateway.js`` inside
  * the index.html DOM via the jsdom harness, mirroring ``ctx-portal-board``.
- * The matrix Sync-button gating (which depends on ``_renderProjectsMatrix``
- * reading module state) is covered by the Playwright suite
- * ``tests/web/test_context_gateway_matrix_sync.py``; here we unit-test the
- * shared eligibility helpers and the portal mutation flows.
+ * The portal card Sync-button gating (eligibility / write-block / server-CWD)
+ * is covered by the Playwright suite
+ * ``tests/web/test_context_portal_card_sync.py``; here we unit-test the shared
+ * eligibility helpers and the portal mutation flows.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -85,6 +85,16 @@ async function boot(calls) {
 }
 
 const row = (window, id) => window.document.querySelector(`.ctx-portal-row[data-scope-id="${id}"]`);
+
+// The "Initialized only" toggle is default-ON; turn it off when a test asserts
+// on a stale (uninitialized) row that would otherwise be hidden.
+function showUninitialized(window) {
+  const cb = window.document.querySelector('#ctx-portal-hide-uninit');
+  if (cb && cb.checked) {
+    cb.checked = false;
+    cb.dispatchEvent(new window.Event('change', { bubbles: true }));
+  }
+}
 
 describe('sync-eligibility helpers', () => {
   it('_ctxScopeIsEnrolled reads "known-projects" in sources', async () => {
@@ -190,6 +200,7 @@ describe('portal enrollment UI', () => {
   it('a paused AND stale row renders BOTH badges (orthogonal, not folded into the chain)', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();
+    showUninitialized(window); // p-paused-stale is stale → hidden by default
     const ps = row(window, 'p-paused-stale');
     // Folding paused into the `if (missing) ... else if (stale) ...` chain would
     // drop the paused badge here (stale wins the else-if), so assert both.

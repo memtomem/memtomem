@@ -145,6 +145,29 @@ def test_zero_total_renders_empty_badge_not_green_synced(page, mm_web_url: str) 
     )
 
 
+def test_overview_renders_no_projects_matrix(page, mm_web_url: str) -> None:
+    """rank 2: the Overview is a tiles-only aggregate dashboard. The per-project
+    roster ``projects matrix`` was removed — the roster lives solely on the
+    Projects portal now — so no matrix table or matrix row controls render here."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/overview",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(_HEALTHY_OVERVIEW)
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    # The aggregate stat tiles still render...
+    assert page.locator("#ctx-overview-content .ctx-overview-stat").count() > 0
+    # ...but the matrix table + its per-row controls are gone everywhere.
+    assert page.locator(".ctx-projects-matrix-table").count() == 0
+    assert page.locator(".ctx-matrix-sync-btn").count() == 0
+    assert page.locator(".ctx-matrix-add-project-btn").count() == 0
+    assert page.locator(".ctx-matrix-remove-btn").count() == 0
+
+
 def test_langchange_rerenders_card_label_text(page, mm_web_url: str) -> None:
     """Bug-1 single-toggle pin: ``langchange`` must re-render
     ``ctx-overview-content`` so inline-templated ``t()`` text picks up the

@@ -1159,12 +1159,24 @@ function showConfirm({
   message = '',
   confirmText = t('common.confirm'),
   extraOption = null,
+  // ``danger`` (default true) styles the OK button red. The shared dialog is
+  // also used for non-destructive confirms (Sync / Sync-All / Import), which
+  // pass ``danger: false`` so the most frequent gateway action isn't a red
+  // "danger" button — red stays reserved for genuine deletes.
+  danger = true,
 }) {
   return new Promise(resolve => {
     const modal = qs('confirm-modal');
     qs('confirm-title').textContent = title;
     qs('confirm-message').textContent = message;
-    qs('confirm-ok-btn').textContent = confirmText;
+    const okBtn = qs('confirm-ok-btn');
+    okBtn.textContent = confirmText;
+    okBtn.className = danger ? 'btn-danger' : 'btn-primary';
+    // The OK button ships with ``data-i18n="modal.delete_btn"`` as static
+    // markup; drop it so a langchange while the dialog is open can't re-apply
+    // "Delete"/"삭제" over the caller's ``confirmText`` (e.g. "Sync"). The text
+    // is always driven by ``confirmText`` here, so the attribute is dead weight.
+    okBtn.removeAttribute('data-i18n');
 
     const extraRow = qs('confirm-extra-row');
     const extraCheckbox = qs('confirm-extra-checkbox');
@@ -1343,7 +1355,11 @@ function activateTab(tabName, opts = {}) {
     if (!start) {
       try { start = localStorage.getItem(LAST_SECTION_KEY); } catch {}
     }
-    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-projects';
+    // rank 2/20: the Overview is now a true aggregate dashboard (sync status +
+    // Sync-All + cross-project tiles, no per-project roster), so a cold visit
+    // lands there rather than on the full Projects roster. Returning users
+    // still resume their last-viewed section via the localStorage branch above.
+    if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-overview';
     switchSettingsSection(start);
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();

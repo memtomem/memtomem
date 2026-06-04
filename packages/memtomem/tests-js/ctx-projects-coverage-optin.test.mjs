@@ -1,15 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { bootApp } from './setup/jsdom-app.mjs';
 
-/* Regression for the runtime_coverage opt-in gate (PR #1201 review P2).
+/* Regression for the runtime_coverage probe gate (PR #1201 review P2).
  *
  * ``runtime_coverage`` costs a ``probe_all_runtimes`` pass (per-client config
- * reads) for every registered scope and is consumed ONLY by the overview's
- * Project Scope Matrix. The shared ``_ctxFetchProjectsData`` loader is also
- * used by the per-type list tabs (``loadCtxList``) purely for the scope
- * picker / counts, so the expensive probe must ride the overview fetch only —
- * never the list-tab reloads, which would defeat the gate for multi-project
- * users on normal navigation. */
+ * reads) for every registered scope. Its only consumer — the overview's
+ * Project Scope Matrix — was removed in rank 2, so NO fetch should opt into it
+ * anymore: the overview is now a counts-only aggregate dashboard, and the
+ * per-type list tabs (``loadCtxList``) only ever needed counts for the scope
+ * picker. This pins that neither path re-introduces the expensive probe. */
 function installFetch(window, projectsUrls) {
   const upstream = window.fetch;
   const scope = {
@@ -62,8 +61,8 @@ function installFetch(window, projectsUrls) {
   };
 }
 
-describe('Context Gateway — runtime_coverage is overview-only opt-in', () => {
-  it('overview fetch requests runtime_coverage; list-tab fetch requests only counts', async () => {
+describe('Context Gateway — runtime_coverage probe is not requested (matrix removed)', () => {
+  it('neither the overview nor the list-tab projects fetch requests runtime_coverage', async () => {
     const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway.js'] });
     const { window } = dom;
     const projectsUrls = [];
@@ -73,14 +72,16 @@ describe('Context Gateway — runtime_coverage is overview-only opt-in', () => {
     await window.loadCtxOverview();
     const overviewUrls = projectsUrls.splice(0);
     expect(overviewUrls.length).toBeGreaterThan(0);
-    expect(overviewUrls.some((u) => u.includes('runtime_coverage'))).toBe(true);
+    // rank 2: the matrix was the only coverage consumer, so the overview now
+    // fetches counts only — never the expensive probe.
+    expect(overviewUrls.every((u) => !u.includes('runtime_coverage'))).toBe(true);
+    expect(overviewUrls.every((u) => u.includes('include=counts'))).toBe(true);
 
     await window.loadCtxList('skills');
     const listUrls = projectsUrls.splice(0);
     expect(listUrls.length).toBeGreaterThan(0);
-    // The expensive probe must NOT ride the list-tab projects fetch...
+    // The list tab never paid the probe either; counts (scope picker) still rides.
     expect(listUrls.every((u) => !u.includes('runtime_coverage'))).toBe(true);
-    // ...but cheap counts (needed by the scope picker) still does.
     expect(listUrls.every((u) => u.includes('include=counts'))).toBe(true);
   });
 });

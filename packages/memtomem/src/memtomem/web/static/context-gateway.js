@@ -49,12 +49,22 @@ function _ctxBadge(status) {
   return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(_ctxStatusText(status))}</span>`;
 }
 
+// Display label for a runtime key. Only ``gemini`` needs remapping — it is the
+// Antigravity client (RUNTIME_TO_CLIENT: gemini→antigravity), so printing the
+// raw key leaks an internal name the Projects portal already shows as
+// "Antigravity". The on-disk .gemini/ marker paths keep the gemini key
+// untouched — this maps the *label* only.
+const _CTX_RUNTIME_LABEL = { gemini: 'Antigravity' };
+function _ctxRuntimeLabel(name) {
+  return _CTX_RUNTIME_LABEL[name] || name;
+}
+
 function renderRuntimeBadges(runtimes) {
   if (!runtimes || !runtimes.length) return '';
   return '<div class="ctx-runtime-badges">' +
     runtimes.map(r => {
       const short = r.runtime.replace(/_skills|_commands|_agents/g, '');
-      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(short)}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
+      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(_ctxRuntimeLabel(short))}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
     }).join('') + '</div>';
 }
 
@@ -299,12 +309,11 @@ async function _ctxFetchProjectsData(opts = {}) {
   try {
     // ``include`` tokens are opt-in server-side (ADR-0021 PR2). ``counts`` is
     // always requested — every caller renders the scope picker's per-scope
-    // count badges. ``runtime_coverage`` is requested ONLY when the caller asks
-    // (``opts.includeCoverage``): it costs a ``probe_all_runtimes`` pass (per-
-    // client config reads) per scope and is consumed solely by the overview's
-    // Project Scope Matrix, so cheap callers (the per-type list tabs, the
-    // portal, hooks-sync) must NOT pay it on every reload. ``_ctxWithTargetScope``
-    // appends ``&target_scope=`` after the existing ``?``.
+    // count badges. The ``opts.includeCoverage`` token (``runtime_coverage``,
+    // an expensive ``probe_all_runtimes`` pass) is retained as a capability but
+    // has NO caller since rank 2 removed its only consumer (the Project Scope
+    // Matrix); leaving the gate means re-adding a coverage consumer is a
+    // one-flag change. ``_ctxWithTargetScope`` appends ``&target_scope=``.
     const include = opts.includeCoverage ? 'counts,runtime_coverage' : 'counts';
     const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }));
     if (!res.ok) {
@@ -539,7 +548,11 @@ function _ctxWireTierControls() {
 const _CTX_WRITE_BUTTON_SELECTOR = (
   '.ctx-create-btn, .ctx-import-btn, .ctx-sync-btn, '
   + '.ctx-detail-edit-btn, .ctx-detail-delete-btn, '
-  + '.ctx-matrix-sync-btn, .ctx-matrix-add-project-btn, .ctx-matrix-remove-btn, '
+  // Per-project Sync moved from the (removed) Overview matrix to the Projects
+  // portal card; it is the one tier-sensitive fan-out on the portal, so it
+  // rides the same write-block sweep (portal add/remove are registry ops and
+  // stay un-gated, as they were before).
+  + '.ctx-portal-sync, '
   // The single-item runtime-only import route (#940 import_<type>)
   // also flows through ``_reject_non_shared_write``, so the per-detail
   // "Import this <type>" button minted by ``_ctxLoadRuntimeOnlyDetail``
@@ -768,7 +781,8 @@ function _renderCtxOverview(data) {
     const cls = available ? 'badge badge-success' : 'badge badge-gray';
     const title = available ? '' : ` title="${undetectedTitle}"`;
     const name = escapeHtml(rt.name || '');
-    return `<span class="${cls}"${title} data-runtime="${name}">${name}</span>`;
+    const label = escapeHtml(_ctxRuntimeLabel(rt.name || ''));
+    return `<span class="${cls}"${title} data-runtime="${name}">${label}</span>`;
   }).join('');
 
   // Issue #832 / ADR-0009 §1.c: surface freshness as "Canonical updated: 5m
@@ -974,7 +988,6 @@ function _renderCtxOverview(data) {
       </div>`;
     }
     html += '</div>';
-    html += _renderProjectsMatrix();
     el.innerHTML = html;
     _ctxWireProjectControls();
     _ctxWireTierControls();
@@ -1123,7 +1136,6 @@ function _renderCtxOverview(data) {
   // future write-block sweep that wants to dim/disable a pointer can
   // see the buttons in their final wired state.
   _ctxRefreshWriteBlockedState();
-  _ctxWireProjectsMatrix();
 }
 
 async function loadCtxOverview() {
@@ -1140,11 +1152,11 @@ async function loadCtxOverview() {
     // superseded in-flight fetch can't clobber the shared cache / active scope
     // (#1194). The overview fetch URL depends on the just-committed active
     // scope, so the commit happens here, before it.
-    // Overview is the only consumer of runtime coverage (the Project Scope
-    // Matrix), so it is the only fetch that opts into the expensive probe.
+    // No caller opts into runtime_coverage anymore: its only consumer was the
+    // Project Scope Matrix, removed in rank 2. Overview is now a counts-only
+    // aggregate dashboard, so it skips the expensive ``probe_all_runtimes`` pass.
     const projectsResult = await _ctxFetchProjectsData({
       targetScope: requestedTier,
-      includeCoverage: true,
     });
     if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
     _ctxCommitProjects(projectsResult);
@@ -1173,278 +1185,12 @@ async function loadCtxOverview() {
   }
 }
 
-function _renderProjectsMatrix() {
-  const scopes = _ctxProjectsCache || [];
-  if (!scopes.length) return '';
-
-  const runtimes = ['claude', 'gemini', 'codex', 'kimi'];
-
-  // Table header
-  let html = `<div class="ctx-projects-matrix-container">
-    <h3 class="ctx-projects-matrix-title">${escapeHtml(t('settings.ctx.projects_matrix_title') || 'Project Scope Matrix')}</h3>
-    <table class="ctx-projects-matrix-table">
-      <thead>
-        <tr>
-          <th>${escapeHtml(t('settings.ctx.matrix_col_project') || 'Project')}</th>
-          <th>${escapeHtml(t('settings.ctx.matrix_col_counts') || 'Inventory')}</th>
-          ${runtimes.map(rt => `<th>${escapeHtml(rt.toUpperCase())}</th>`).join('')}
-          <th>${escapeHtml(t('settings.ctx.matrix_col_actions') || 'Actions')}</th>
-        </tr>
-      </thead>
-      <tbody>`;
-
-  for (const scope of scopes) {
-    const isActive = _ctxScopeIsActive(scope);
-    const rowClass = isActive ? 'ctx-matrix-row--active' : '';
-    const label = _ctxScopeDisplayLabel(scope);
-    const rootPath = scope.root || '';
-    const isMissing = !!scope.missing;
-
-    // Inventory summary. ``counts`` is ``null`` when the projects fetch did not
-    // opt into ``?include=counts`` (or the scope has no root) — render a muted
-    // dash for "not computed" instead of a misleading all-zero row.
-    const hasCounts = !!scope.counts && typeof scope.counts === 'object';
-    const c = hasCounts ? scope.counts : {};
-    const skillsCount = c.skills || 0;
-    const commandsCount = c.commands || 0;
-    const agentsCount = c.agents || 0;
-    const mcpCount = c['mcp-servers'] || 0;
-    const countsTitle = t('settings.ctx.matrix_counts_title', {
-      skills: skillsCount, commands: commandsCount, agents: agentsCount, mcp: mcpCount,
-    });
-    const countsHtml = hasCounts
-      ? `<span class="ctx-matrix-counts" title="${escapeHtml(countsTitle)}">
-      🧩${skillsCount} ⌘${commandsCount} 🤖${agentsCount} 🔌${mcpCount}
-    </span>`
-      : '<span class="ctx-matrix-counts text-muted">—</span>';
-
-    // Runtimes columns. State → (css class, label key, title key); labels and
-    // tooltips are localized via ``t()`` so the badges translate (the rest of
-    // the matrix already does). ``key`` also gates the registration suffix.
-    const runtimeCols = runtimes.map(rtName => {
-      const coverage = (scope.runtime_coverage || []).find(rc => rc.name === rtName);
-      const available = !!(coverage && coverage.available);
-      const installed = !!(coverage && coverage.installed);
-      const registered = !!(coverage && coverage.memtomem_registered);
-
-      let badgeCls = 'badge-gray';
-      let key = 'none';
-      if (available && installed && registered) {
-        badgeCls = 'badge-success'; key = 'active';
-      } else if (available && installed) {
-        badgeCls = 'badge-warning'; key = 'detected';
-      } else if (available) {
-        badgeCls = 'badge-yellow'; key = 'available';
-      } else if (installed) {
-        badgeCls = 'badge-blue'; key = 'client';
-      } else if (registered) {
-        badgeCls = 'badge-gray'; key = 'registered';
-      }
-
-      let badgeText = t(`settings.ctx.matrix_badge_${key}`);
-      // Mark registration only on states that don't already imply it — ``active``
-      // and ``registered`` do, and ``none`` carries no runtime to annotate.
-      if (registered && key !== 'active' && key !== 'registered' && key !== 'none') {
-        badgeText += t('settings.ctx.matrix_badge_reg_suffix');
-      }
-      const titleText = t(`settings.ctx.matrix_badge_${key}_title`);
-
-      return `<td>
-        <span class="badge ${badgeCls}" title="${escapeHtml(titleText)}">${escapeHtml(badgeText)}</span>
-      </td>`;
-    }).join('');
-
-    // Actions column
-    // Switch scope button (Selected Project Scope for Reads/Sync)
-    const selectBtn = isActive
-      ? `<span class="badge badge-success">${escapeHtml(t('settings.ctx.active') || 'Selected')}</span>`
-      : `<button type="button" class="btn-ghost btn-xs ctx-matrix-select-btn" data-scope-id="${escapeHtml(scope.scope_id)}">${escapeHtml(t('settings.ctx.select') || 'Select')}</button>`;
-
-    // Sync button. Disabled reasons, in precedence order:
-    //   1. project_local (no fan-out) / missing root — existing no-op cases.
-    //   2. not sync-eligible — the scope is discoverable but excluded from sync
-    //      because it is not enrolled, or enrolled-but-paused (#1203). The
-    //      tooltip points the user at the Projects board to enroll / resume.
-    // The tooltip MUST ride on ``data-i18n-title`` (not a plain ``title``):
-    // ``.ctx-matrix-sync-btn`` is in ``_CTX_WRITE_BUTTON_SELECTOR``, so a flip
-    // back to project_shared runs ``_ctxRefreshWriteBlockedState`` which
-    // restores ``title`` from ``data-i18n-title`` — a plain ``title`` would be
-    // stripped (``removeAttribute('title')``), silently dropping the reason.
-    const isProjectLocal = _ctxTargetScope === 'project_local';
-    let syncDisabled = '';
-    if (isProjectLocal || isMissing) {
-      const k = 'settings.ctx.matrix_sync_disabled_title';
-      syncDisabled = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
-    } else if (!_ctxScopeSyncEligible(scope)) {
-      const k = _ctxScopeIsEnrolled(scope)
-        ? 'settings.ctx.matrix_sync_paused_title'
-        : 'settings.ctx.matrix_sync_not_enrolled_title';
-      syncDisabled = ` disabled data-i18n-title="${k}" title="${escapeHtml(t(k))}"`;
-    }
-    const syncBtn = `<button type="button" class="btn-primary btn-xs ctx-matrix-sync-btn" data-scope-id="${escapeHtml(scope.scope_id)}"${syncDisabled}>${escapeHtml(t('settings.ctx.sync') || 'Sync')}</button>`;
-
-    // Remove button (Server CWD는 삭제 불가능)
-    const removable = !_ctxScopeIsServerCwd(scope);
-    const removeAria = t('settings.ctx.remove_project_aria')
-      .replace('{label}', scope.label)
-      .replace('{root}', scope.root || scope.scope_id);
-    const removeBtn = removable
-      ? `<button type="button" class="ctx-matrix-remove-btn text-danger" data-scope-id="${escapeHtml(scope.scope_id)}" aria-label="${escapeHtml(removeAria)}" title="${escapeHtml(removeAria)}">×</button>`
-      : '';
-
-    html += `<tr class="${rowClass}">
-      <td>
-        <div class="ctx-matrix-project-label" title="${escapeHtml(rootPath)}">${escapeHtml(label)}</div>
-        <code class="ctx-matrix-project-path">${escapeHtml(rootPath)}</code>
-      </td>
-      <td>${countsHtml}</td>
-      ${runtimeCols}
-      <td>
-        <div class="ctx-matrix-actions">
-          ${selectBtn}
-          ${syncBtn}
-          ${removeBtn}
-        </div>
-      </td>
-    </tr>`;
-  }
-
-  html += `</tbody>
-    </table>
-    <div class="ctx-matrix-footer">
-      <button type="button" class="btn-ghost btn-sm ctx-matrix-add-project-btn">+ ${escapeHtml(t('settings.ctx.add_project') || 'Add Project')}</button>
-    </div>
-  </div>`;
-
-  return html;
-}
-
-function _ctxWireProjectsMatrix() {
-  const container = document.querySelector('.ctx-projects-matrix-container');
-  if (!container) return;
-
-  // 1. Select / Switch Scope
-  container.querySelectorAll('.ctx-matrix-select-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const scopeId = btn.dataset.scopeId || '';
-      if (scopeId === _ctxActiveScopeId) return;
-      _ctxActiveScopeId = scopeId;
-      _ctxNormalizeActiveScope(_ctxProjectsCache);
-      _ctxBumpActiveScopeDetailSeq();
-      try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
-      _ctxClearDeepLink();
-      loadCtxOverview();
-    });
-  });
-
-  // 2. Sync Scope
-  container.querySelectorAll('.ctx-matrix-sync-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const scopeId = btn.dataset.scopeId;
-      if (scopeId !== undefined) {
-        _ctxSyncProjectScope(scopeId, btn);
-      }
-    });
-  });
-
-  // 3. Remove Scope (Delete)
-  container.querySelectorAll('.ctx-matrix-remove-btn').forEach(btn => {
-    btn.addEventListener('click', async (ev) => {
-      const scopeId = btn.dataset.scopeId;
-      const scope = _ctxProjectsCache.find(s => s.scope_id === scopeId);
-      if (!scope) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      const ok = await showConfirm({
-        title: t('settings.ctx.remove_project'),
-        message: t('settings.ctx.confirm_remove_project')
-          .replace('{label}', scope.label)
-          .replace('{root}', scope.root || scope.scope_id),
-        confirmText: t('settings.ctx.remove'),
-      });
-      if (!ok) return;
-      try {
-        const csrf = await ensureCsrfToken();
-        const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scopeId)}`, {
-          method: 'DELETE',
-          headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {},
-        });
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
-          return;
-        }
-        loadCtxOverview();
-      } catch (err) {
-        showToast(t('toast.delete_failed', { error: err.message }), 'error');
-      }
-    });
-  });
-
-  // 4. Add Project
-  container.querySelector('.ctx-matrix-add-project-btn')?.addEventListener('click', (ev) => {
-    const btn = ev.currentTarget;
-    const onSelect = async (root) => {
-      if (!root) return;
-      btnLoading(btn, true);
-      try {
-        const csrf = await ensureCsrfToken();
-        const headers = csrf
-          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
-          : { 'Content-Type': 'application/json' };
-        const r = await fetch('/api/context/known-projects', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ root }),
-        });
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
-          return;
-        }
-        const data = await r.json();
-        const warningKey = data.warning_code
-          ? `settings.ctx.add_project_warning_${data.warning_code}`
-          : null;
-        if (warningKey) {
-          const localized = t(warningKey);
-          const message = localized === warningKey
-            ? (data.warning || localized)
-            : localized;
-          showToast(message, 'warning');
-        } else if (data.warning) {
-          showToast(data.warning, 'warning');
-        } else {
-          showToast(t('settings.ctx.add_project_success'), 'success');
-        }
-        if (data.scope_id) {
-          _ctxActiveScopeId = data.scope_id;
-          try { localStorage.setItem(_CTX_ACTIVE_SCOPE_KEY, _ctxActiveScopeId); } catch {}
-        }
-        loadCtxOverview();
-      } catch (err) {
-        showToast(t('toast.request_failed', { error: err.message }), 'error');
-      } finally {
-        btnLoading(btn, false);
-      }
-    };
-    if (window.PathPicker && typeof window.PathPicker.open === 'function') {
-      window.PathPicker.open({ purpose: 'project', onSelect });
-      return;
-    }
-    const raw = window.prompt(t('settings.ctx.add_project_prompt'), '');
-    if (!raw) return;
-    const root = raw.trim();
-    if (!root) return;
-    onSelect(root);
-  });
-}
-
 async function _ctxSyncProjectScope(scopeId, btn) {
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
     message: t('settings.ctx.confirm_sync_all'),
     confirmText: t('settings.ctx.sync'),
+    danger: false,
   });
   if (!ok) return;
 
@@ -1573,7 +1319,18 @@ async function _ctxSyncProjectScope(scopeId, btn) {
     showToast(err.message, 'error');
   } finally {
     if (anyPhaseStarted) {
-      loadCtxOverview();
+      // Refresh whichever gateway section is showing. Post-matrix-removal this
+      // is only invoked from a Projects portal card, so repaint the portal
+      // roster (fresh per-runtime state + counts) rather than the Overview the
+      // matrix used to live on. ``loadCtxProjects`` is a global from
+      // context-portal.js (loaded after this file; resolved at click time).
+      // This refresh does not change ``_ctxActiveScopeId`` — Sync ≠ select.
+      const projectsSection = document.getElementById('settings-ctx-projects');
+      if (projectsSection && projectsSection.classList.contains('active')) {
+        loadCtxProjects();
+      } else {
+        loadCtxOverview();
+      }
     }
     btnLoading(btn, false);
   }
@@ -1915,6 +1672,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     title: t('settings.ctx.sync_all'),
     message: t('settings.ctx.confirm_sync_all'),
     confirmText: t('settings.ctx.sync'),
+    danger: false,
   });
   if (!ok) return;
   btnLoading(btn, true);
@@ -2351,7 +2109,17 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     // #956 explicitly scopes "preserve current project-tier wording".
     const isUser = _ctxTargetScope === 'user';
     const canonical = isUser ? `~/.memtomem/${type}` : `.memtomem/${type}`;
-    const hintKey = isUser ? 'settings.ctx.empty_hint_user' : 'settings.ctx.empty_hint';
+    // MCP servers have no Import affordance (single ``.mcp.json`` source, no
+    // /import route), so the shared project-tier hint's "click Import" sentence
+    // pointed at a button that doesn't exist for this section. Branch it.
+    let hintKey;
+    if (isUser) {
+      hintKey = 'settings.ctx.empty_hint_user';
+    } else if (type === 'mcp-servers') {
+      hintKey = 'settings.ctx.empty_hint_mcp';
+    } else {
+      hintKey = 'settings.ctx.empty_hint';
+    }
     let hint = t(hintKey)
       .replace(/\{type\}/g, type)
       .replace('{canonical}', canonical);
@@ -2518,10 +2286,13 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
             if (card.dataset.canonicalPath) {
               loadCtxDetail(type, card.dataset.name, {
                 autoOpenDiff: card.dataset.outOfSync === 'true',
+                focusOnLoad: true,
               });
             } else {
               const detailEl = qs(`ctx-${type}-detail`);
-              _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl);
+              _ctxLoadRuntimeOnlyDetail(type, card.dataset.name, detailEl, {
+                focusOnLoad: true,
+              });
             }
           });
           // #1073: keyboard activation parity with click. Card renders with
@@ -3409,6 +3180,24 @@ function _ctxWireVersionControls(type, name, detailEl, seq) {
 }
 
 
+// A card click renders the detail panel as a DOM sibling AFTER the full
+// project roster, so it paints ~2000px below the click — without a scroll +
+// focus move the interaction reads as dead, and keyboard/SR users are left
+// stranded high in the list. Both detail loaders call this once painted, but
+// only on user navigation (``opts.focusOnLoad``); the langchange re-render
+// path leaves it unset so a language toggle never yanks the viewport down.
+function _ctxFocusDetail(detailEl) {
+  try {
+    detailEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (_e) {
+    detailEl.scrollIntoView();
+  }
+  // ``preventScroll`` so moving focus to the heading doesn't fight the
+  // smooth scroll above (the heading is tabindex=-1 + the region's label).
+  const heading = detailEl.querySelector('.ctx-detail-name');
+  if (heading) heading.focus({ preventScroll: true });
+}
+
 async function loadCtxDetail(type, name, opts = {}) {
   // ``opts.autoOpenDiff`` (default false): when the list-click handler
   // sees an "out of sync" runtime on the card, it passes ``true`` here
@@ -3453,12 +3242,11 @@ async function loadCtxDetail(type, name, opts = {}) {
     // toggle's `.then()` had just rehydrated (review P2).
     if (seq !== _ctxDetailSeq[type]) return;
 
-    let html = '<div class="ctx-detail">';
+    let html = `<div class="ctx-detail" role="region" aria-labelledby="ctx-detail-name-${type}">`;
     html += `<div class="ctx-detail-header">
-      <strong>${escapeHtml(name)}</strong>
+      <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       <div style="display:flex;gap:6px">
         <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
-        <button class="btn-ghost ctx-detail-diff-btn" data-i18n="settings.ctx.diff_view">${t('settings.ctx.diff_view')}</button>
         <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
@@ -3526,6 +3314,7 @@ async function loadCtxDetail(type, name, opts = {}) {
 
     html += '</div>';
     detailEl.innerHTML = html;
+    if (opts.focusOnLoad) _ctxFocusDetail(detailEl);
     // mtime_ns is a string (JS Number can't safely represent ns epochs).
     detailEl.dataset.mtimeNs = data.mtime_ns || '';
     // Pin the conflict-draft key for this editor session. The effective scope
@@ -3661,12 +3450,6 @@ async function loadCtxDetail(type, name, opts = {}) {
       } catch (err) {
         showToast(t('toast.save_failed', { error: err.message }), 'error');
       } finally { btnLoading(btn, false); }
-    });
-
-    // Diff button
-    detailEl.querySelector('.ctx-detail-diff-btn')?.addEventListener('click', () => {
-      const diffTab = detailEl.querySelector('.ctx-detail-tab[data-pane="diff"]');
-      if (diffTab) diffTab.click();
     });
 
     // Delete
@@ -3885,9 +3668,9 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     const data = await res.json();
     if (seq !== _ctxDetailSeq[type]) return;
 
-    let html = '<div class="ctx-detail">';
+    let html = `<div class="ctx-detail" role="region" aria-labelledby="ctx-detail-name-${type}">`;
     html += `<div class="ctx-detail-header">
-      <strong>${escapeHtml(name)}</strong>
+      <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       ${_ctxBadge('missing canonical')}
     </div>`;
     html += `<div class="text-muted" style="margin:6px 0 12px">${t('settings.ctx.runtime_only_detail_hint')}</div>`;
@@ -3917,6 +3700,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
     html += '</div>';
     detailEl.innerHTML = html;
+    if (opts.focusOnLoad) _ctxFocusDetail(detailEl);
 
     detailEl.querySelector('.ctx-runtime-only-import')?.addEventListener('click', async () => {
       const btn = detailEl.querySelector('.ctx-runtime-only-import');
@@ -3987,6 +3771,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       title: t('settings.ctx.sync'),
       message: t('settings.ctx.confirm_sync').replace('{type}', type),
       confirmText: t('settings.ctx.sync'),
+      danger: false,
     });
     if (!ok) return;
     btnLoading(btn, true);
@@ -4043,6 +3828,9 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       title: t('settings.ctx.import'),
       message: t('settings.ctx.confirm_import').replace('{type}', type),
       confirmText: t('settings.ctx.import'),
+      // Import is non-destructive by default (the destructive path is the
+      // opt-in "overwrite" checkbox below) — keep the button primary-blue.
+      danger: false,
       extraOption: {
         id: 'overwrite',
         label: t('settings.ctx.confirm_import_overwrite_label'),
@@ -4100,6 +3888,26 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
 
 // -- Create button (delegated) ------------------------------------------------
 
+// Label-based destination for the Create form — "{active project} · {tier}".
+// Built from the active scope label + selected tier (not a reconstructed FS
+// path) so it can't drift from the server's canonicalization; it just tells the
+// user WHERE the new artifact will land before they submit (it POSTs to the
+// active scope + ``_ctxTargetScope``).
+function _ctxCreateDestinationLabel() {
+  const activeScope = (_ctxProjectsCache || []).find(
+    s => (s.scope_id || '') === (_ctxActiveScopeId || ''),
+  );
+  const project = activeScope
+    ? _ctxScopeDisplayLabel(activeScope)
+    : t('settings.ctx.create_dest_active_project');
+  const tierKey = _ctxTargetScope === 'user'
+    ? 'settings.ctx.tier_option_user'
+    : _ctxTargetScope === 'project_local'
+      ? 'settings.ctx.tier_option_project_local'
+      : 'settings.ctx.tier_option_project_shared';
+  return t('settings.ctx.create_destination', { project, tier: t(tierKey) });
+}
+
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const type = btn.dataset.type;
@@ -4111,6 +3919,7 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
       ? '{\n  "command": "uvx",\n  "args": ["--from", "example", "example-server"]\n}'
       : t('settings.ctx.create_content_placeholder');
     form.innerHTML = `
+      <div class="ctx-create-destination">${escapeHtml(_ctxCreateDestinationLabel())}</div>
       <label>${escapeHtml(t('settings.ctx.create_name_label'))}</label>
       <input type="text" class="ctx-create-name" placeholder="${escapeHtml(t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) }))}" style="width:100%" />
       <label style="margin-top:8px">${escapeHtml(t('settings.ctx.create_content_label'))}</label>
