@@ -597,12 +597,21 @@ def extract_skills_to_canonical(
     *,
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
+    dry_run: bool = False,
 ) -> ExtractResult:
     """Import existing runtime skills into the scoped canonical directory.
 
     When the same skill name appears in multiple runtimes, the first one wins
     (deterministic order: claude → gemini → codex). Existing canonical
     entries are preserved unless ``overwrite=True``.
+
+    ``dry_run`` (rank-10 import preview) runs the full scan + name validation
+    + Gate A privacy walk + cross-runtime dedup + canonical-exists check, then
+    **skips only the directory copy**: the returned ``imported`` lists the
+    destinations that *would* be written and ``skipped`` carries the same
+    reasons a real run would, but nothing touches disk. The skip decisions are
+    identical to a real run because both evaluate ``dst.exists()`` before any
+    write, so the preview is accurate (modulo the documented TOCTOU window).
 
     ADR-0011 PR-E2: ``scope`` selects both the canonical destination
     (:func:`canonical_artifact_dir`) and the source runtime root
@@ -731,8 +740,11 @@ def extract_skills_to_canonical(
                 continue
 
             # All files clean — copy the whole tree (atomic at directory level).
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            copy_skill(skill_dir, dst)
+            # ``dry_run`` records the would-import destination but skips the
+            # mkdir + copy so the preview never mutates disk (rank-10).
+            if not dry_run:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                copy_skill(skill_dir, dst)
             imported.append(dst)
             seen[skill_name] = runtime_label
 

@@ -793,8 +793,15 @@ def extract_agents_to_canonical(
     *,
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
+    dry_run: bool = False,
 ) -> ExtractResult:
     """Import existing Claude / Gemini agent files into ``.memtomem/agents/``.
+
+    ``dry_run`` (rank-10 import preview) runs the full scan + validation +
+    Gate A re-scan + cross-runtime dedup + canonical-exists check, then
+    **skips only the write**: ``imported`` lists the destinations that *would*
+    be written and ``skipped`` carries the same reasons a real run would, with
+    nothing touching disk.
 
     Codex TOML is **not** imported (one-way conversion; too lossy to round-trip
     without reconstructing fields we dropped on the way out). First occurrence
@@ -922,9 +929,12 @@ def extract_agents_to_canonical(
                 )
                 seen[agent_name] = runtime_label
                 continue
-            # outcome is GateAProceed — write.
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(dst, content_bytes)
+            # outcome is GateAProceed — write. ``dry_run`` records the
+            # would-import target but skips the write so the preview never
+            # mutates disk (rank-10).
+            if not dry_run:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_bytes(dst, content_bytes)
             imported.append((dst, layout))
             seen[agent_name] = runtime_label
 

@@ -254,6 +254,17 @@ function _ctxScopeDisplayLabel(scope) {
   return scope.label || _ctxBasename(scope.root) || scope.scope_id;
 }
 
+// Resolve a bare scope_id ('' === Server CWD) to its human label via the
+// projects cache. Used by the Sync / Sync-All / Import confirm dialogs to name
+// the project being acted on (rank-10 confirm threading). Falls back to the
+// Server-CWD label when the id isn't in the cache (cold cache / Server CWD).
+function _ctxScopeDisplayLabelById(scopeId) {
+  const scope = (_ctxProjectsCache || []).find(
+    s => (s.scope_id || '') === (scopeId || ''),
+  );
+  return scope ? _ctxScopeDisplayLabel(scope) : t('settings.ctx.server_cwd');
+}
+
 function _ctxNormalizeActiveScope(scopes) {
   const list = Array.isArray(scopes) ? scopes : [];
   const availableScopes = list.filter(scope => !scope.missing);
@@ -1191,7 +1202,11 @@ async function loadCtxOverview() {
 async function _ctxSyncProjectScope(scopeId, btn) {
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
-    message: t('settings.ctx.confirm_sync_all'),
+    // rank-10: name the specific project this portal card syncs (the raw
+    // ``scopeId`` resolves to its label; '' === Server CWD).
+    message: t('settings.ctx.confirm_sync_all', {
+      dest: _ctxScopeDisplayLabelById(scopeId),
+    }),
     confirmText: t('settings.ctx.sync'),
     danger: false,
   });
@@ -1673,7 +1688,11 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   }
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
-    message: t('settings.ctx.confirm_sync_all'),
+    // rank-10: name the active project being fanned out so the user sees
+    // WHERE the artifacts come from before committing.
+    message: t('settings.ctx.confirm_sync_all', {
+      dest: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
+    }),
     confirmText: t('settings.ctx.sync'),
     danger: false,
   });
@@ -3836,7 +3855,13 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     }
     const ok = await showConfirm({
       title: t('settings.ctx.sync'),
-      message: t('settings.ctx.confirm_sync').replace('{type}', type),
+      // rank-10: name the artifact count so the user sees WHAT fans out
+      // before committing. ``canonicalCount`` is already in the section
+      // dataset (the '0' case bailed to a toast above), so no fetch needed.
+      message: t('settings.ctx.confirm_sync', {
+        type,
+        count: section?.dataset.canonicalCount || '0',
+      }),
       confirmText: t('settings.ctx.sync'),
       danger: false,
     });
@@ -3885,6 +3910,73 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
 document.querySelectorAll('.ctx-import-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     const type = btn.dataset.type;
+    // rank-10: run a dry-run preview first so the confirm names the
+    // destination (active project · project_shared) and how many artifacts
+    // would import vs already exist. The preview is best-effort — any failure
+    // (offline, gateway-lock contention, a non-shared-tier 400) falls back to
+    // the destination-only confirm so Import is never blocked by it.
+    //
+    // Pin the effective scope + tier ONCE at click time and reuse the snapshot
+    // for the preview, the destination label, AND the final import POST. The
+    // gateway UI isn't inert until the modal opens, so a mid-flight active-
+    // project/tier change during the preview fetch could otherwise make the
+    // preview counts, the named destination, and the real write disagree — the
+    // same one-(project, tier)-per-invocation pinning Sync All enforces
+    // (ADR-0016 §5 / ADR-0021 §C; Codex review).
+    const pinnedScopeOpts = {
+      scopeId: _ctxEffectiveScopeId(_ctxActiveScopeId),
+      scopeResolved: true,
+      targetScope: _ctxTargetScope,
+    };
+    btnLoading(btn, true);
+    let preview = null;
+    try {
+      const previewCsrf = await ensureCsrfToken();
+      const previewHeaders = previewCsrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': previewCsrf }
+        : { 'Content-Type': 'application/json' };
+      // ``_ctxWithTargetScope`` appends scope/tier with ``&`` since the URL
+      // already carries ``?dry_run=1`` (it branches on ``url.includes('?')``).
+      const pr = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/import?dry_run=1`, pinnedScopeOpts),
+        { method: 'POST', headers: previewHeaders, body: JSON.stringify({ overwrite: false }) },
+      );
+      if (pr.ok) {
+        const data = await pr.json();
+        // Only trust a well-shaped preview; a malformed / empty body falls back
+        // to the destination-only confirm rather than a misleading "0 / 0".
+        if (Array.isArray(data?.imported) && Array.isArray(data?.skipped)) preview = data;
+      }
+    } catch {
+      /* best-effort preview — fall through to the destination-only confirm */
+    } finally {
+      btnLoading(btn, false);
+    }
+    const importDest = _ctxImportDestinationLabel(pinnedScopeOpts.scopeId);
+    let importMessage = t('settings.ctx.confirm_import', { type, dest: importDest });
+    if (preview) {
+      const wouldImport = preview.imported.length;
+      // Only ``canonical_exists`` skips are what the Overwrite checkbox governs.
+      // The skipped list also carries ``already_imported`` (cross-runtime
+      // dedup), ``invalid_name``, parse errors, and privacy blocks — counting
+      // those as "already exist" would misstate both the count and the overwrite
+      // hint (Codex review). The other skips surface in the post-import result
+      // panel, not this pre-commit summary.
+      const wouldOverwrite = preview.skipped.filter(
+        s => s && s.reason_code === 'canonical_exists',
+      ).length;
+      importMessage += ' ' + t('settings.ctx.confirm_import_preview', {
+        imported: wouldImport,
+        skipped: wouldOverwrite,
+      });
+      // The preview runs with overwrite:false, so ``wouldOverwrite`` is exactly
+      // the set the Overwrite checkbox below would replace. Say so explicitly —
+      // otherwise the "already exist" count reads as "will be skipped" even when
+      // the user then enables Overwrite (rank-10 review).
+      if (wouldOverwrite > 0) {
+        importMessage += ' ' + t('settings.ctx.confirm_import_overwrite_hint');
+      }
+    }
     // Overwrite is opt-in: the default skip-when-canonical-exists rule
     // protects user-maintained canonicals from a stray Import wiping
     // them out with a stale runtime copy. The checkbox lets the user
@@ -3893,7 +3985,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
     // and wanting to flow that back into ``.memtomem/``.
     const result = await showConfirm({
       title: t('settings.ctx.import'),
-      message: t('settings.ctx.confirm_import').replace('{type}', type),
+      message: importMessage,
       confirmText: t('settings.ctx.import'),
       // Import is non-destructive by default (the destructive path is the
       // opt-in "overwrite" checkbox below) — keep the button primary-blue.
@@ -3912,7 +4004,9 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       const headers = csrf
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
-      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`), {
+      // Same click-time (project, tier) snapshot as the preview so the write
+      // can't land somewhere the preview/label didn't describe.
+      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`, pinnedScopeOpts), {
         method: 'POST',
         headers,
         body: JSON.stringify({ overwrite }),
@@ -3973,6 +4067,20 @@ function _ctxCreateDestinationLabel() {
       ? 'settings.ctx.tier_option_project_local'
       : 'settings.ctx.tier_option_project_shared';
   return t('settings.ctx.create_destination', { project, tier: t(tierKey) });
+}
+
+// Destination label for the Import confirm — "{project} · {tier}".
+// Takes the click-time pinned ``scopeId`` so the named destination matches the
+// project the preview + final POST target (not a live read that could drift if
+// the active project changes mid-flight). Import only ever writes to the
+// ``project_shared`` canonical tier (non-shared tiers are rejected server-side
+// AND ``.ctx-import-btn`` rides the write-block sweep, so it's only clickable on
+// project_shared), so the tier is fixed — naming it answers rank-10's "Import
+// hides the destination tier" gap. Returns just "{project} · {tier}" (no
+// "Destination:" prefix) so it reads inline inside the confirm sentence.
+function _ctxImportDestinationLabel(scopeId = _ctxActiveScopeId) {
+  const project = _ctxScopeDisplayLabelById(scopeId);
+  return `${project} · ${t('settings.ctx.tier_option_project_shared')}`;
 }
 
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {
