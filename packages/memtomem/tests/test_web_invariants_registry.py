@@ -84,6 +84,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_skills.update_skill",
         "context_versions.create_artifact_version",
         "context_versions.delete_artifact_label",
+        "context_versions.enable_artifact_versioning",
         "context_versions.promote_artifact_label",
         "decay.expire_old_chunks",
         "dedup.merge_duplicates",
@@ -194,6 +195,10 @@ _REDACTION_EXEMPT: dict[str, str] = {
     ),
     "context_versions.promote_artifact_label": "moves a label pointer in versions.json; no prose",
     "context_versions.delete_artifact_label": "drops a label pointer in versions.json; no prose",
+    "context_versions.enable_artifact_versioning": (
+        "byte-identical flat→dir rename of an already-canonical file; no new "
+        "content ingress (Gate A still applies at sync-time on frozen versions)"
+    ),
     # Tag mutations: short labels, separate validation at ingest.
     "chunks.update_chunk_tags": "tags are short labels; redaction not applicable to tag strings",
     "tags.run_auto_tag": "auto-tag operates on already-stored chunks; "

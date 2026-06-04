@@ -13,7 +13,8 @@ Scope boundaries (ADR-0022):
   other type returns 404 here.
 - **directory layout only.** A flat-layout artifact (``agents/<name>.md``) has
   no per-artifact home for a ``versions/`` store (invariant 3). Mutations on a
-  flat artifact return 409 (run ``mm context migrate`` first); the read route
+  flat artifact return 409 (enable versioning via ``POST .../versions/enable``,
+  or ``mm context migrate`` for a CLI-installed artifact); the read route
   returns a benign ``migrate_required`` flag so the UI can hint instead of error.
 - **per ``(scope, type, name)``.** The version store lives under the artifact's
   canonical directory, which is scope-specific (ADR-0011 / ADR-0022 Decision b);
@@ -43,6 +44,7 @@ from memtomem.context import versioning
 from memtomem.context._names import Layout, validate_name
 from memtomem.context.agents import resolve_canonical_agent
 from memtomem.context.commands import resolve_canonical_command
+from memtomem.context.migrate import adopt_flat_to_dir
 from memtomem.context.versioning import (
     LabelNotFoundError,
     VersionError,
@@ -148,7 +150,8 @@ def _require_dir_layout(name: str, layout: Layout) -> None:
             status_code=409,
             detail=(
                 f"{name!r} uses flat layout, which has no per-artifact version store. "
-                f"Run `mm context migrate` to convert it to directory layout first."
+                f"Enable versioning (POST /context/<type>/<name>/versions/enable) to convert it "
+                f"to directory layout; for a CLI-installed artifact, `mm context migrate` also works."
             ),
         )
 
@@ -184,7 +187,7 @@ def version_summary(canonical_path: Path, layout: Layout) -> dict:
     - ``count`` — number of frozen versions
     - ``versionable`` — ``True`` iff a version store can live here (dir layout)
     - ``migrate_required`` — ``True`` iff a canonical exists but is flat-layout
-      (invariant 3: ``mm context migrate`` first before it can be versioned)
+      (invariant 3: enable versioning to convert it to dir layout first)
 
     A flat-layout artifact has no per-artifact home for a ``versions/`` store
     (invariant 3) → ``versionable=False, migrate_required=True``, no labels. A
@@ -325,6 +328,126 @@ async def create_artifact_version(
         "target_scope": target_scope,
         "version": {"tag": record.tag, "created_at": record.created_at, "note": record.note},
     }
+
+
+# ── Enable versioning (adopt a flat artifact into dir layout) ─────────────
+
+
+@router.post("/context/{artifact_type}/{name}/versions/enable")
+async def enable_artifact_versioning(
+    artifact_type: str,
+    name: str,
+    project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description="Canonical-residency tier to adopt into dir layout. Non-shared rejected.",
+    ),
+) -> dict:
+    """Adopt a flat-layout artifact into directory layout so it can be versioned.
+
+    ADR-0022 invariant 3 keeps the version store dir-layout-only, and the
+    create/promote routes *refuse* a flat artifact with 409 ("migrate first").
+    That escape hatch — ``mm context migrate`` — provably skips a web-created
+    flat file (no lockfile entry ⇒ ``skip_manual``), so a UI-created artifact
+    was permanently locked out of versioning (rank 6). This route is the
+    explicit, deliberate adopt action the ``migrate_required`` hint points at:
+    a single byte-identical ``os.replace`` of ``<type>/<name>.md`` →
+    ``<type>/<name>/<manifest>`` (via :func:`adopt_flat_to_dir`), after which
+    the version routes work normally.
+
+    Resolution + the rename run **under the gateway lock** so the layout check
+    cannot race the adopt: two concurrent enables resolve serially, the first
+    adopts, and the second re-resolves to ``dir`` and returns
+    ``migrated: false`` (idempotent) rather than 404-ing on the moved file. An
+    already-``dir`` artifact is likewise an idempotent no-op.
+
+    Two conflict states are refused with 409 rather than silently mishandled:
+
+    - **flat+dir collision** — both ``<name>.md`` and ``<name>/<manifest>``
+      exist. The dir is already versionable, but the stray flat sibling is an
+      unresolved layout collision; ``mm context migrate`` cannot clean a
+      no-lockfile flat, so we surface it for manual resolution.
+    - **orphaned version store** — the target ``<name>/`` already holds a
+      ``versions.json`` / ``versions/`` left by a prior artifact of the same
+      name. Adopting into it would silently attach stale version history to the
+      new artifact, so we refuse.
+
+    The bytes do not change and stay in the same scope, so no privacy re-scan is
+    needed here (a labeled sync still re-scans the frozen ``versions/vN.md`` at
+    deploy time — Gate A). Writes the canonical only (``.memtomem/…``), never
+    runtime fan-out, so it follows the canonical-write tier policy
+    (``project_shared``-only this release), not the sync-eligibility gate.
+    """
+    _reject_non_shared_write(target_scope, "Enable versioning")
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                # Resolve UNDER the lock so a concurrent enable can't move the
+                # flat file out from under a layout check made outside it.
+                name, working_file, layout = _resolve_versionable(
+                    artifact_type, project_root, name, target_scope
+                )
+                # canonical ``<type>`` root: parent of the dir for dir layout,
+                # parent of the file for flat layout.
+                canonical_root = (
+                    working_file.parent.parent if layout == "dir" else working_file.parent
+                )
+                flat_path = canonical_root / f"{name}.md"
+                dir_path = canonical_root / name
+
+                if layout == "dir":
+                    if flat_path.exists():
+                        # flat+dir collision — refuse rather than report a
+                        # misleading idempotent success while a stray flat lingers.
+                        raise HTTPException(
+                            status_code=409,
+                            detail=_PATH_RE.sub(
+                                "<path>",
+                                f"{name!r} has both flat ({flat_path}) and directory layouts; "
+                                "remove the redundant flat file to resolve the collision.",
+                            ),
+                        )
+                    return {
+                        "name": name,
+                        "artifact_type": artifact_type,
+                        "target_scope": target_scope,
+                        "layout": "dir",
+                        "migrated": False,
+                    }
+
+                # Flat layout → adopt. Refuse if a version store already lives in
+                # the target dir (orphaned from a prior same-named artifact),
+                # else the adopted file would inherit stale version history.
+                if (
+                    versioning.versions_json_path(dir_path).exists()
+                    or versioning.versions_dir(dir_path).is_dir()
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=_PATH_RE.sub(
+                            "<path>",
+                            f"{name!r} cannot be adopted: an orphaned version store already "
+                            f"exists at {dir_path}. Resolve it manually first.",
+                        ),
+                    )
+                adopt_flat_to_dir(artifact_type, flat_path, dir_path)
+                return {
+                    "name": name,
+                    "artifact_type": artifact_type,
+                    "target_scope": target_scope,
+                    "layout": "dir",
+                    "migrated": True,
+                }
+    except TimeoutError:
+        raise HTTPException(503, "Enable versioning timed out — another sync may be in progress")
+    except FileNotFoundError as exc:
+        # The flat file vanished mid-rename (external deletion under the lock).
+        raise HTTPException(status_code=404, detail=_PATH_RE.sub("<path>", str(exc)))
+    except FileExistsError as exc:
+        # flat+dir collision surfaced by the adopt guard (defense in depth).
+        raise HTTPException(status_code=409, detail=_PATH_RE.sub("<path>", str(exc)))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=_PATH_RE.sub("<path>", str(exc)))
 
 
 # ── Promote / rollback a label ───────────────────────────────────────────
