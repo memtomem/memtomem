@@ -760,11 +760,28 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 
 Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. Generated summaries are persisted as `archive:session:<id>` chunks (hidden from default `mem_search`). Skip reasons (`disabled`, `no llm`, `below min_chunks`, `too large`, `empty output`, `llm error`) surface in the `mem_session_end` response so operators can see why auto-summary did not fire.
 
+## Session Trace
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_SESSION_TRACE__ENABLED` | `false` | Enable session CLI command execution tracing. |
+| `MEMTOMEM_SESSION_TRACE__JSONL_ENABLED` | `true` | Enable JSONL tracing output. |
+| `MEMTOMEM_SESSION_TRACE__JSONL_PATH` | `~/.memtomem/traces/session-traces.jsonl` | File path where JSONL session traces are stored. |
+| `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED` | `false` | Enable Langfuse integration for tracing session CLI commands (requires the `langfuse` package). |
+| `MEMTOMEM_SESSION_TRACE__LANGFUSE_PUBLIC_KEY` | _(empty)_ | Public key for your Langfuse project. |
+| `MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY` | _(empty)_ | Secret key for your Langfuse project. |
+| `MEMTOMEM_SESSION_TRACE__LANGFUSE_HOST` | _(empty)_ | Langfuse host URL (e.g. `https://cloud.langfuse.com` or self-hosted endpoint). |
+| `MEMTOMEM_SESSION_TRACE__SAMPLING_RATE` | `1.0` | Sampling rate for Langfuse spans, from `0.0` (no spans) to `1.0` (send all). Note: local JSONL logging is not affected by sampling (disable output via `ENABLED=false` or `JSONL_ENABLED=false`). |
+| `MEMTOMEM_SESSION_TRACE__PAYLOAD_MODE` | `metadata` | Payload logging mode: `metadata` (no payloads logged / None), `redacted` (replaces secret-looking fields like passwords/keys with `***` while leaving ordinary values intact), or `full` (log complete input/output). |
+| `MEMTOMEM_SESSION_TRACE__MAX_PAYLOAD_CHARS` | `10000` | Maximum character length for payload properties before truncation. |
+
+When `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` is set, both public and secret keys must be supplied, and the `langfuse` Python package must be installed (e.g., via `pip install 'memtomem[langfuse]'` or `uv tool install 'memtomem[all]'` which includes it).
+
 ## Tool Mode
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (37 incl. `mem_do`), `full` (84) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (38 incl. `mem_do`), `full` (86) |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
 

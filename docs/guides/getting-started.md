@@ -383,6 +383,7 @@ mm context init            # create .memtomem/context.md from existing files
 mm context generate        # generate CLAUDE.md, .cursorrules, GEMINI.md, etc.
 mm context diff            # show pending changes before syncing
 mm context sync            # update all editors after editing context.md
+mm context version --help  # manage version snapshots + label pointers (ADR-0022)
 mm session start           # start a tracked session
 mm session end             # end session with auto-summary
 mm session list            # list sessions
@@ -468,6 +469,11 @@ mm context sync --include=commands
 
 # Everything in one shot
 mm context sync --include=skills,agents,commands
+
+# Versioning & promotion (agents & commands only)
+mm context version create agents my-agent --note "v1 release" # freeze current working canonical to v1
+mm context version promote agents my-agent --to production --version v1 # point 'production' label to v1
+mm context sync --include=agents,commands --label production # deploy the labeled version instead of the working canonical
 ```
 
 Run `mm context --help` for the full fan-out matrix across editors (Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot) and per-runtime field-drop details.

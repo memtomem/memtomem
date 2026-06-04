@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **84 MCP tools** organized into categories:
+memtomem provides **86 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -1206,12 +1206,20 @@ mm context init --scope project_local  # seed gitignored draft tier + auto-appen
 mm context init --scope project_shared --confirm-project-shared       # Gate B: explicit opt-in
 mm context init --include=agents --scope user --force-unsafe-import   # bypass Gate A on existing leaks
 mm context generate --agent all        # generate all agent files
+mm context generate --include=agents --label production # generate files using the 'production' labeled snapshot (agents/commands only)
 mm context diff                        # check sync status
 mm context sync                        # sync context.md → agent files (project_shared default)
 mm context sync --scope user           # fan out from ~/.memtomem/... → ~/.{claude,gemini,codex}/...
 mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)
+mm context sync --include=agents,commands --label production # sync using the 'production' labeled version (agents/commands only)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
+
+# Context Versioning (ADR-0022)
+mm context version create agents my-agent --note "stable"          # snapshot the current working canonical as a new immutable version
+mm context version promote agents my-agent --to production --version v1 # move a label pointer (e.g. production) to a specific version (e.g. v1)
+mm context version list agents my-agent                            # list all versions and label pointers for an artifact
+
 # Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
 # `generate` warns on stderr when both sections are populated. context.md is
 # the source of truth — edit there, not in generated files.
@@ -1389,4 +1397,4 @@ See [`uninstall.md`](uninstall.md) for the five-step removal flow: detach the MC
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 84 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 86 tools with parameters
