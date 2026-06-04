@@ -2516,25 +2516,9 @@ select:focus-visible {
   margin-bottom: 1rem;
 }
 #hooks-sync-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-/* rank 22: a deliberate control row for the Hooks project switcher + tier
-   toggle, with a full-width caption naming what they scope so the row reads
-   as intentional rather than chrome inherited from the artifact sections. */
-.hooks-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  width: 100%;
-  margin-bottom: 4px;
-}
-.hooks-controls .ctx-project-switcher,
-.hooks-controls .ctx-tier-filter { margin-bottom: 0; }
-.hooks-controls-caption {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--muted);
-}
+/* rank 11 superseded rank 22's in-section ``.hooks-controls`` row: the Hooks
+   active-project + tier controls now live in the shared gateway header bar
+   (#ctx-control-bar), so the section status row holds only the badge + target. */
 .hooks-status-target { font-size: 0.78rem; color: var(--muted); max-width: 100%; }
 /* ``overflow-wrap: anywhere`` lets long absolute paths break at any
  * character so the target span never pushes the Sync Now button or
@@ -3762,6 +3746,31 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-tier-filter button.active {
   background: var(--accent);
   color: white;
+}
+
+/* rank 11: persistent gateway header control bar. Hosts the active-project
+   switcher + canonical-tier filter once, above the section panels, instead of
+   re-emitting them into every section. Sticky so it stays put while the section
+   content scrolls under it (.settings-content is the overflow-y:auto ancestor);
+   opaque --bg (the inherited panel background) covers the scrolled rows. The
+   descendant margin reset drops the controls' stacking margin-bottom — in this
+   horizontal row the bar's gap owns the spacing. */
+.ctx-control-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.ctx-control-bar .ctx-project-switcher,
+.ctx-control-bar .ctx-tier-filter {
+  margin: 0;
 }
 
 /* Sync All per-phase progress + result summary (ADR-0021 §C). */

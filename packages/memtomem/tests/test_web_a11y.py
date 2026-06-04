@@ -795,27 +795,28 @@ class TestScopeRemoveButtonNotNestedInSummary:
         )
 
 
-class TestHooksControlsPresentation:
-    """rank 22: the Hooks section's inherited project switcher + tier toggle
-    are wrapped in a labeled ``.hooks-controls`` row with an explicit caption,
-    so the functional-but-bare control row reads as intentional rather than
-    chrome accidentally inherited from the artifact sections.
+class TestHooksControlsHoisted:
+    """rank 11 superseded rank 22: the Hooks section's project switcher + tier
+    toggle were hoisted out of the section into the shared gateway header bar
+    (#ctx-control-bar), so the section no longer emits, wraps, or captions its
+    own controls — it paints the shared bar and keeps only the badge + target.
     """
 
-    def test_hooks_controls_helper_wraps_with_caption(self, hooks_js: str) -> None:
-        body = _extract_function(hooks_js, "_hooksControlsHtml")
-        assert 'class="hooks-controls"' in body, (
-            "_hooksControlsHtml must wrap the controls in .hooks-controls (rank 22)"
-        )
-        assert "settings.hooks.controls_caption" in body, (
-            "_hooksControlsHtml must render the controls_caption (rank 22)"
+    def test_hooks_render_uses_shared_control_bar(self, hooks_js: str) -> None:
+        load = _extract_function(hooks_js, "loadHooksSync")
+        assert "_ctxRenderControlBar()" in load, (
+            "loadHooksSync must paint the shared header bar via _ctxRenderControlBar() (rank 11)"
         )
 
-    def test_hooks_render_paths_use_wrapped_controls(self, hooks_js: str) -> None:
-        load = _extract_function(hooks_js, "loadHooksSync")
-        assert "_hooksControlsHtml()" in load, (
-            "loadHooksSync must render controls via the wrapped helper (rank 22)"
+    def test_hooks_drops_in_section_control_helpers(self, hooks_js: str) -> None:
+        # The rank-22 wrapper and the per-section control emitters/caption are
+        # gone — the controls live in the shared bar now.
+        assert "_hooksControlsHtml" not in hooks_js, (
+            "rank 11 removed the in-section _hooksControlsHtml wrapper"
         )
-        assert "_hooksProjectControlsHtml() + _hooksTierControlsHtml()" not in load, (
-            "loadHooksSync must not emit the bare unwrapped controls (rank 22)"
+        assert "_hooksProjectControlsHtml" not in hooks_js, (
+            "rank 11 removed the per-section project-control emitter"
+        )
+        assert "controls_caption" not in hooks_js, (
+            "rank 11 removed the hooks controls_caption (no in-section row)"
         )

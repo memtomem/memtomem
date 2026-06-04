@@ -167,6 +167,12 @@ let _ctxTargetScope = 'project_shared';
 const _CTX_ACTIVE_SCOPE_KEY = 'memtomem_ctx_active_scope_id';
 let _ctxActiveScopeId = '';
 let _ctxProjectsCache = [];
+// rank 11: a Sync All run disables the shared header bar's controls for its
+// duration. The lock lives here, not only in the DOM, because the bar is a
+// single shared host that ``_ctxRenderControlBar`` repaints on section switches
+// / loader resolves / langchange — re-applying the flag after each repaint keeps
+// the controls disabled until the run's ``finally`` clears it (Codex review).
+let _ctxSyncControlsLocked = false;
 
 // De-dup memo for the `/api/context/projects` failure toast (#1101).
 // ``_ctxFetchProjects`` runs from three independent panel-load paths
@@ -429,6 +435,69 @@ async function _ctxFetchProjects() {
   const result = await _ctxFetchProjectsData();
   _ctxCommitProjects(result);
   return result.data;
+}
+
+// -- Hoisted gateway control bar (rank 11) ------------------------------------
+//
+// The active-project ``<select>`` and the canonical-tier filter used to be
+// re-emitted into EVERY gateway section's content (Overview, Skills, Commands,
+// Agents, MCP, Hooks) — the same picker painted 6× for one piece of state,
+// since ``_ctxActiveScopeId`` / ``_ctxTargetScope`` are module globals. They now
+// render ONCE into the persistent ``#ctx-control-bar`` host that sits above the
+// section panels. ``_ctxRenderControlBar`` repaints that single host for the
+// active section; the unchanged ``_ctxWireProjectControls`` / ``_ctxWireTier
+// Controls`` helpers route a change to the active section's loader via the
+// control's ``data-type`` (overview→loadCtxOverview, hooks-sync→loadHooksSync,
+// else→loadCtxList). The Projects portal owns its own roster and never carried
+// these controls, so the bar is hidden there.
+const _CTX_SECTION_BAR_TYPE = {
+  'ctx-overview': 'overview',
+  'ctx-skills': 'skills',
+  'ctx-commands': 'commands',
+  'ctx-agents': 'agents',
+  'ctx-mcp-servers': 'mcp-servers',
+  'hooks-sync': 'hooks-sync',
+  // ``ctx-projects`` is intentionally absent → the bar hides on the portal.
+};
+
+// The control "type" of the active gateway section, or '' when none applies
+// (Projects portal, or no gateway section active). The active section id is
+// ``settings-<section>`` (e.g. ``settings-ctx-skills`` / ``settings-hooks-sync``);
+// strip the prefix, then map to the loader-routing type.
+function _ctxActiveGatewayType() {
+  const active = document.querySelector('#tab-context-gateway .settings-section.active');
+  if (!active || !active.id) return '';
+  const section = active.id.replace(/^settings-/, '');
+  return _CTX_SECTION_BAR_TYPE[section] || '';
+}
+
+// Repaint the persistent control bar for whatever gateway section is currently
+// active — ALWAYS sourced from the live ``.settings-section.active`` (never a
+// caller-supplied type). This is deliberate: the bar is one shared, visible
+// host, and the loaders that trigger a repaint are async. If a stale
+// ``loadCtxOverview`` / ``loadCtxList`` resolves AFTER the user has navigated to
+// a different section, sourcing the type from the active section makes the late
+// render paint the bar for the section the user is actually on (or hide it on
+// the Projects portal) instead of hijacking it back to the loader's section and
+// mis-routing the next tier/project change. Re-rendering replaces the host's
+// markup, so the (idempotent, global) wire helpers re-bind the single live
+// instance and the detached prior nodes drop their listeners with them.
+function _ctxRenderControlBar() {
+  const host = document.getElementById('ctx-control-bar');
+  if (!host) return;
+  const type = _ctxActiveGatewayType();
+  if (!type) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  host.innerHTML = _ctxProjectControls(type) + _ctxTierControls(type);
+  _ctxWireProjectControls();
+  _ctxWireTierControls();
+  // Re-apply a Sync All lock to the freshly-rendered controls so a repaint
+  // mid-run (navigation / loader / langchange) can't silently re-enable them.
+  _ctxApplySyncControlsLock();
 }
 
 function _ctxProjectControls(type, scopes = _ctxProjectsCache) {
@@ -868,8 +937,6 @@ function _renderCtxOverview(data) {
       </div>
       ${lastSyncHtml}
     </div>`;
-  html += _ctxProjectControls('overview');
-  html += _ctxTierControls('overview');
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       const d = data[typ.key] || {};
@@ -1029,8 +1096,12 @@ function _renderCtxOverview(data) {
     }
     html += '</div>';
     el.innerHTML = html;
-    _ctxWireProjectControls();
-    _ctxWireTierControls();
+    // rank 11: the active-project + tier controls live in the persistent gateway
+    // header bar, not inside this section's content. Repaint the (shared) bar —
+    // it self-sources the type from the active section, so a stale overview
+    // render that resolves after the user navigated away repaints the bar for
+    // their CURRENT section rather than hijacking it back to Overview.
+    _ctxRenderControlBar();
 
   // Gate the Sync All button: when every artifact type's items are
   // entirely runtime-only (no canonicals to fan out), Sync All resolves
@@ -1454,6 +1525,17 @@ window.addEventListener('langchange', () => {
     || (settingsTab && settingsTab.classList.contains('active'));
   if (!hostActive) return;
 
+  // rank 11: the hoisted control bar's labels are inline ``t()`` (active-project
+  // label, tier options, tier-filter aria), so ``I18N.applyDOM`` can't reach
+  // them — repaint the bar for the active gateway section on a locale flip. The
+  // per-section re-issue below also repaints it for the overview/list sections
+  // (an idempotent same-tick double-render, no visible flicker); this standalone
+  // call additionally covers hooks-sync, whose section has no re-issue branch
+  // here. Gated on the Gateway tab being the visible host so we never repaint
+  // into a hidden panel (the Settings-tab fallback above keeps ``hostActive``
+  // true while the gateway sections are off-screen).
+  if (gatewayTab && gatewayTab.classList.contains('active')) _ctxRenderControlBar();
+
   const overviewSection = document.getElementById('settings-ctx-overview');
   if (overviewSection && overviewSection.classList.contains('active')) {
     if (_ctxOverviewCache) {
@@ -1680,16 +1762,27 @@ function _renderCtxSyncStatus(states) {
 // a Sync All run. The tier/project values are already pinned into the phase
 // URLs (see ``_ctxWithTargetScope`` opts), so this is a clarity affordance —
 // it prevents the user from flipping a control whose change won't take effect
-// until the next run. Scoped to the overview section so per-list-page controls
-// are untouched. ``loadCtxOverview`` re-renders fresh (enabled) controls in the
-// handler's ``finally``, so this only governs the in-flight window.
+// until the next run. rank 11: the controls now live in the shared
+// ``#ctx-control-bar`` header, not inside the overview section — target the bar
+// directly (the old ``#settings-ctx-overview`` scope would match nothing and
+// the lock would silently no-op). ``loadCtxOverview`` re-renders fresh
+// (enabled) controls in the handler's ``finally``, so this only governs the
+// in-flight window.
+// Apply the current ``_ctxSyncControlsLocked`` flag to the shared bar's live
+// controls. Called both when the lock toggles and after every bar repaint, so
+// the disabled state survives the shared host being re-rendered mid-run.
+function _ctxApplySyncControlsLock() {
+  document
+    .querySelectorAll('#ctx-control-bar .ctx-tier-filter button')
+    .forEach((btn) => { btn.disabled = _ctxSyncControlsLocked; });
+  document
+    .querySelectorAll('#ctx-control-bar .ctx-project-select')
+    .forEach((sel) => { sel.disabled = _ctxSyncControlsLocked; });
+}
+
 function _ctxSetSyncControlsDisabled(disabled) {
-  document
-    .querySelectorAll('#settings-ctx-overview .ctx-tier-filter button')
-    .forEach((btn) => { btn.disabled = disabled; });
-  document
-    .querySelectorAll('#settings-ctx-overview .ctx-project-select')
-    .forEach((sel) => { sel.disabled = disabled; });
+  _ctxSyncControlsLocked = disabled;
+  _ctxApplySyncControlsLock();
 }
 
 // Sync All button
@@ -2532,17 +2625,17 @@ function _ctxRenderDeepLinkBanner(type, link, matchCount) {
   });
   banner.appendChild(labelEl);
   banner.appendChild(resetBtn);
-  // Insert above the per-scope groups but below any tier-filter row so
-  // the banner reads as a list-level state, not a per-scope label.
-  // ``.ctx-runtime-only-banner`` is a sibling concern (no canonicals);
-  // both banners can co-exist when a project has runtime-only items
-  // *and* the user deep-linked into the type.
-  const tierRow = listEl.querySelector('.ctx-tier-filter');
-  if (tierRow && tierRow.nextSibling) {
-    listEl.insertBefore(banner, tierRow.nextSibling);
-  } else {
-    listEl.insertBefore(banner, listEl.firstChild);
-  }
+  // rank 11: the tier filter moved to the persistent header bar, so the list no
+  // longer holds a tier-filter row to sit below. Keep the tier-aware
+  // write-blocked banner (#943) at the very top — its copy explains why the
+  // write buttons are dimmed, so the deep-link banner must not land above it —
+  // and place this banner immediately AFTER it when present (mirroring the
+  // runtime-only remediation banner's anchoring in _ctxRefreshSectionState),
+  // otherwise at the list's first row. ``.ctx-runtime-only-banner`` is a sibling
+  // concern; both can co-exist with a deep link.
+  const writeBlocked = listEl.querySelector('.ctx-write-blocked-banner');
+  const anchor = writeBlocked ? writeBlocked.nextSibling : listEl.firstChild;
+  listEl.insertBefore(banner, anchor);
 }
 
 async function loadCtxList(type) {
@@ -2588,9 +2681,11 @@ async function loadCtxList(type) {
     const activeScopes = scopes.filter(_ctxScopeIsActive);
     const visibleScopes = (_ctxListShowAllScopes || !activeScopes.length) ? scopes : activeScopes;
 
-    let html = _ctxProjectControls(type, scopes);
-    html += _ctxTierControls(type);
-    html += _ctxShowAllScopesControl(type, scopes);
+    // rank 11: the active-project + tier controls are no longer emitted into each
+    // section's list — they render once into the persistent header bar
+    // (``_ctxRenderControlBar`` below). The list keeps only the rank-2c "Show all
+    // projects" toggle + the per-scope groups for the visible scope(s).
+    let html = _ctxShowAllScopesControl(type, scopes);
     for (const scope of visibleScopes) {
       const isActive = _ctxScopeIsActive(scope);
       const count = _ctxScopeCount(scope, type);
@@ -2634,8 +2729,10 @@ async function loadCtxList(type) {
       </div>`;
     }
     listEl.innerHTML = html;
-    _ctxWireProjectControls();
-    _ctxWireTierControls();
+    // rank 11: repaint the shared header bar (self-sources from the active
+    // section so a stale list render can't hijack it). rank 2c: wire the
+    // "Show all projects" toggle that still lives in the list.
+    _ctxRenderControlBar();
     _ctxWireShowAllScopes(type, listEl);
 
     // Tier-aware read-only banner (issue #943): inserted at the top of

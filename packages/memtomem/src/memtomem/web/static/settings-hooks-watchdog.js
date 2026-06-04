@@ -63,44 +63,15 @@ function _hooksScopedUrl(path) {
   return path;
 }
 
-function _hooksProjectControlsHtml() {
-  if (typeof _ctxProjectControls !== 'function') return '';
-  return _ctxProjectControls('hooks-sync');
-}
-
-function _hooksWireProjectControls() {
-  if (typeof _ctxWireProjectControls === 'function') {
-    _ctxWireProjectControls();
-  }
-}
-
-function _hooksTierControlsHtml() {
-  if (typeof _ctxTierControls !== 'function') return '';
-  return _ctxTierControls('hooks-sync');
-}
-
-function _hooksWireTierControls() {
-  if (typeof _ctxWireTierControls === 'function') {
-    _ctxWireTierControls();
-  }
-}
-
-// rank 22: the Hooks section inherits the same project switcher + tier toggle
-// the artifact sections use, but renders them bare above a single "Sync Now"
-// button — so the control row read as accidental chrome rather than a
-// deliberate control. Both controls ARE functional here (they pick which
-// canonical settings.json is read/synced), so we keep them but wrap them in a
-// labeled row with an explicit caption naming that effect, matching the
-// intentional look of the artifact-section control rows.
-function _hooksControlsHtml() {
-  const proj = _hooksProjectControlsHtml();
-  const tier = _hooksTierControlsHtml();
-  if (!proj && !tier) return '';
-  const caption = typeof t === 'function' ? t('settings.hooks.controls_caption') : '';
-  return `<div class="hooks-controls">${proj}${tier}`
-    + `<p class="hooks-controls-caption" data-i18n="settings.hooks.controls_caption">`
-    + `${escapeHtml(caption)}</p></div>`;
-}
+// rank 11: the active-project + tier controls for the Hooks section moved to the
+// shared gateway header bar (``_ctxRenderControlBar()`` in loadHooksSync), which
+// supersedes rank 22 (#1220). That PR had kept the controls in-section, wrapped
+// in a labeled caption row; once they are hoisted out there is nothing left in
+// the section to wrap, so the in-section wrapper helper, its CSS, its i18n
+// caption key, and its a11y pins are removed (see test_web_a11y.py). The tier
+// still scopes which canonical settings.json is read/synced — that function is
+// preserved, just driven from the shared bar. The former per-section project /
+// tier control emitters are gone with the move.
 
 function _renderHookRuleDetail(key, contentEl) {
   const idx = Number(key);
@@ -420,9 +391,14 @@ async function loadHooksSync() {
     }
   }
   requestedProjectScope = _hooksCurrentProjectScope();
-  statusEl.innerHTML = _hooksControlsHtml();
-  _hooksWireProjectControls();
-  _hooksWireTierControls();
+  // rank 11: the active-project + tier controls live in the shared gateway
+  // header bar (``#ctx-control-bar``), not in this section's status row. Projects
+  // are already committed above, so paint the bar for hooks-sync now and leave
+  // the status row for the badge + target line painted post-fetch.
+  statusEl.innerHTML = '';
+  // Paint the shared header bar (self-sources from the active section, so a
+  // stale hooks load that lands after a section switch won't hijack it).
+  if (typeof _ctxRenderControlBar === 'function') _ctxRenderControlBar();
 
   try {
     const res = await fetch(_hooksScopedUrl('/api/settings-sync'));
@@ -468,14 +444,14 @@ async function loadHooksSync() {
     // (PR D follow-up). ``error`` state still shows it because the
     // target path is often what the user needs to inspect.
     const showTarget = !!data.target_path && data.status !== 'no_source';
+    // rank 11: controls are in the shared header bar (already painted pre-fetch
+    // and unaffected by this settings-sync fetch), so the status row now holds
+    // only the badge + target line.
     statusEl.innerHTML =
-      _hooksControlsHtml()
-      + `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
+      `<span class="badge ${badge.cls}">${escapeHtml(badge.text)}</span>`
       + (showTarget
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
-    _hooksWireTierControls();
-    _hooksWireProjectControls();
 
     // Sync Now is only meaningful when a canonical source exists and has
     // at least one hook rule. Disable the button for empty sources so a

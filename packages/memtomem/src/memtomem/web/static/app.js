@@ -1478,6 +1478,16 @@ function switchSettingsSection(sectionName) {
   }
   if (section) section.classList.add('active');
   ensureActiveGroupExpanded(sectionName);
+  // rank 11: repaint the persistent gateway control bar synchronously on every
+  // gateway section switch. Its visibility (hidden on the Projects portal) and
+  // selection must update the instant the section flips — the async loader below
+  // also repaints it post-fetch, but this synchronous call avoids a stale or
+  // wrong-section bar in the interim (and hides it immediately on ctx-projects,
+  // which has no loader that touches the bar). Guarded for non-gateway sections
+  // and for script load order (context-gateway.js defines _ctxRenderControlBar).
+  if (GATEWAY_SECTIONS.has(sectionName) && typeof _ctxRenderControlBar === 'function') {
+    _ctxRenderControlBar();
+  }
   // Section-specific loads (reuse existing functions)
   if (sectionName === 'config') loadConfig();
   if (sectionName === 'namespaces') loadNamespacesTab();

@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=98" />
+  <link rel="stylesheet" href="/style.css?v=99" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -546,6 +546,14 @@
         </button>
       </nav>
       <div class="settings-content">
+
+        <!-- rank 11: persistent active-project + canonical-tier control bar,
+             hoisted out of the per-section content so one shared picker drives
+             every section's loader. Populated/toggled by _ctxRenderControlBar
+             (context-gateway.js); hidden on the Projects portal, which owns its
+             own roster. The inner controls carry their own labels/aria, so the
+             host stays a plain styling container. -->
+        <div id="ctx-control-bar" class="ctx-control-bar" hidden></div>
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section active" id="settings-ctx-overview">
@@ -1507,16 +1515,16 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=124"></script>
+  <script src="/app.js?v=125"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=10"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
   <script src="/settings-maintenance.js?v=3"></script>
   <script src="/settings-namespaces.js?v=9"></script>
   <script src="/settings-harness.js?v=2"></script>
-  <script src="/settings-hooks-watchdog.js?v=15"></script>
+  <script src="/settings-hooks-watchdog.js?v=16"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=59"></script>
+  <script src="/context-gateway.js?v=60"></script>
   <script src="/context-portal.js?v=2"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>

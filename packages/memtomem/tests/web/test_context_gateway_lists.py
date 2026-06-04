@@ -575,11 +575,11 @@ def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_ur
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='project_local']").click()
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='project_local']").click()
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector("
-        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"project_local\"]');"
+        "    '#ctx-control-bar .ctx-tier-filter button[data-scope=\"project_local\"]');"
         "  return b && b.classList.contains('active');"
         "}",
         timeout=3_000,
@@ -1558,11 +1558,11 @@ def test_q956_empty_hint_user_tier_paths_to_user_canonical(page, mm_web_url: str
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='user']").click()
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='user']").click()
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector("
-        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"user\"]');"
+        "    '#ctx-control-bar .ctx-tier-filter button[data-scope=\"user\"]');"
         "  return b && b.classList.contains('active');"
         "}",
         timeout=3_000,
@@ -1611,11 +1611,11 @@ def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='user']").click()
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='user']").click()
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector("
-        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"user\"]');"
+        "    '#ctx-control-bar .ctx-tier-filter button[data-scope=\"user\"]');"
         "  return b && b.classList.contains('active');"
         "}",
         timeout=3_000,
