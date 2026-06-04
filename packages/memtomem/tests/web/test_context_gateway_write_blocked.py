@@ -103,13 +103,14 @@ def _open_skills(page):
 
 
 def _switch_tier(page, scope: str) -> None:
-    """Click the tier-filter button for ``scope`` inside the Skills section
-    and wait for the active class to flip — proxy for "the SPA has
-    observed the click and started the re-render."""
-    page.locator(f"#ctx-skills-list .ctx-tier-filter button[data-scope='{scope}']").click()
+    """Click the tier-filter button for ``scope`` in the shared gateway control
+    bar (rank 11: hoisted out of the per-section content) and wait for the
+    active class to flip — proxy for "the SPA has observed the click and started
+    the re-render."""
+    page.locator(f"#ctx-control-bar .ctx-tier-filter button[data-scope='{scope}']").click()
     page.wait_for_function(
         f"() => {{ const b = document.querySelector("
-        f"'#ctx-skills-list .ctx-tier-filter button[data-scope=\"{scope}\"]'); "
+        f"'#ctx-control-bar .ctx-tier-filter button[data-scope=\"{scope}\"]'); "
         f"return b && b.classList.contains('active'); }}",
         timeout=3_000,
     )

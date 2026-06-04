@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=96" />
+  <link rel="stylesheet" href="/style.css?v=99" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -490,62 +490,70 @@
        ``switchSettingsSection('ctx-*'/'hooks-sync')`` auto-redirects here. -->
   <div id="tab-context-gateway" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-context-gateway" hidden>
     <div class="settings-layout">
-      <div class="settings-nav" role="tablist">
+      <nav class="settings-nav" data-i18n-aria-label="settings.nav.gateway_sections_aria" aria-label="Context Gateway sections">
         <button class="settings-nav-group" type="button" data-group="integrations" aria-expanded="true">
           <span class="nav-group-caret" aria-hidden="true">▾</span>
           <span data-i18n="settings.nav.integrations">Agent Integrations</span>
         </button>
-        <button class="settings-nav-btn settings-nav-btn--landing" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn settings-nav-btn--landing" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">🔄</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_overview">Context Gateway</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">📁</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_projects">Projects</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_projects_sub">Multi-project portal</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-skills" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-skills" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">🧩</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_skills">Skills</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_skills_sub">Reusable workflows</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-commands" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-commands" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">⌘</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_commands">Custom Commands</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_commands_sub">Slash commands</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-agents" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-agents" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">🤖</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_agents">Subagents</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_agents_sub">Specialized agents</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-mcp-servers" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-mcp-servers" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">🔌</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_mcp_servers">MCP Servers</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_mcp_servers_sub">Project tool servers</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="hooks-sync" data-group="integrations" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="hooks-sync" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">📎</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.hooks_sync">Hooks</span>
             <span class="nav-sub" data-i18n="settings.nav.hooks_sync_sub">Lifecycle hooks</span>
           </span>
         </button>
-      </div>
+      </nav>
       <div class="settings-content">
+
+        <!-- rank 11: persistent active-project + canonical-tier control bar,
+             hoisted out of the per-section content so one shared picker drives
+             every section's loader. Populated/toggled by _ctxRenderControlBar
+             (context-gateway.js); hidden on the Projects portal, which owns its
+             own roster. The inner controls carry their own labels/aria, so the
+             host stays a plain styling container. -->
+        <div id="ctx-control-bar" class="ctx-control-bar" hidden></div>
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section active" id="settings-ctx-overview">
@@ -596,24 +604,14 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows shared across Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="skills"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.skills_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="skills"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.skills_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_create_aria">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="skills"
-                      data-i18n="settings.ctx.import"
-                      data-i18n-title="settings.ctx.skills_import_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_import_aria">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="skills"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.skills_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.skills_sync_aria">Sync</button>
-            </div>
+            <!-- rank 21: artifact-section toolbars render from one source
+                 (_ctxToolbarHtml + _CTX_TOOLBAR_CAPS in context-gateway.js),
+                 so button presence is a declared capability per type rather
+                 than hand-copied markup that drifts. Filled once at init by
+                 _ctxRenderToolbars(); the buttons carry the same classes /
+                 data-type / data-i18n* as before, so the existing bindings,
+                 write-block sweep, and i18n applyDOM are unchanged. -->
+            <div class="ctx-toolbar" data-type="skills"></div>
           </div>
           <div id="ctx-skills-status"></div>
           <div id="ctx-skills-list"></div>
@@ -625,24 +623,7 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project-scoped slash commands kept in .claude/commands/, synced to detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Custom Commands</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="commands"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.commands_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="commands"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.commands_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_create_aria">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="commands"
-                      data-i18n="settings.ctx.import"
-                      data-i18n-title="settings.ctx.commands_import_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_import_aria">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="commands"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.commands_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.commands_sync_aria">Sync</button>
-            </div>
+            <div class="ctx-toolbar" data-type="commands"></div>
           </div>
           <div id="ctx-commands-status"></div>
           <div id="ctx-commands-list"></div>
@@ -654,24 +635,7 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents shared across Claude Code, Codex, and other detected runtimes.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="agents"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.agents_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="agents"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.agents_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_create_aria">Create</button>
-              <button class="btn-ghost ctx-import-btn" data-type="agents"
-                      data-i18n="settings.ctx.import"
-                      data-i18n-title="settings.ctx.agents_import_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_import_aria">Import</button>
-              <button class="btn-primary ctx-sync-btn" data-type="agents"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.agents_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.agents_sync_aria">Sync</button>
-            </div>
+            <div class="ctx-toolbar" data-type="agents"></div>
           </div>
           <div id="ctx-agents-status"></div>
           <div id="ctx-agents-list"></div>
@@ -683,20 +647,7 @@
           <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">Project-scoped MCP server definitions synced to .mcp.json.</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.mcp_servers_title">MCP Servers</h2>
-            <div>
-              <button class="btn-ghost ctx-add-project-btn" data-type="mcp-servers"
-                      data-i18n="settings.ctx.add_project"
-                      data-i18n-title="settings.ctx.mcp_servers_add_project_tooltip"
-                      data-i18n-aria-label="settings.ctx.mcp_servers_add_project_aria">Add Project</button>
-              <button class="btn-ghost ctx-create-btn" data-type="mcp-servers"
-                      data-i18n="settings.ctx.create"
-                      data-i18n-title="settings.ctx.mcp_servers_create_tooltip"
-                      data-i18n-aria-label="settings.ctx.mcp_servers_create_aria">Create</button>
-              <button class="btn-primary ctx-sync-btn" data-type="mcp-servers"
-                      data-i18n="settings.ctx.sync"
-                      data-i18n-title="settings.ctx.mcp_servers_sync_tooltip"
-                      data-i18n-aria-label="settings.ctx.mcp_servers_sync_aria">Sync</button>
-            </div>
+            <div class="ctx-toolbar" data-type="mcp-servers"></div>
           </div>
           <div id="ctx-mcp-servers-status"></div>
           <div id="ctx-mcp-servers-list"></div>
@@ -832,19 +783,19 @@
   <!-- ===== SETTINGS HUB ===== -->
   <div id="tab-settings" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-settings" hidden>
     <div class="settings-layout">
-      <div class="settings-nav" role="tablist">
+      <nav class="settings-nav" data-i18n-aria-label="settings.nav.settings_sections_aria" aria-label="Settings sections">
         <button class="settings-nav-group" type="button" data-group="general" aria-expanded="true">
           <span class="nav-group-caret" aria-hidden="true">▾</span>
           <span data-i18n="settings.nav.general">General</span>
         </button>
-        <button class="settings-nav-btn active" data-ui-tier="prod" data-section="config" data-group="general" role="tab" aria-selected="true">
+        <button class="settings-nav-btn active" data-ui-tier="prod" data-section="config" data-group="general" aria-current="page">
           <span class="nav-icon" aria-hidden="true">⚙</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.config">Config</span>
             <span class="nav-sub" data-i18n="settings.nav.config_sub">Embedding &amp; DB</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="namespaces" data-group="general" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="namespaces" data-group="general">
           <span class="nav-icon" aria-hidden="true">🗂</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.namespaces">Namespaces</span>
@@ -856,28 +807,28 @@
           <span class="nav-group-caret" aria-hidden="true">▸</span>
           <span data-i18n="settings.nav.runtime">Runtime</span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-sessions" data-group="runtime" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-sessions" data-group="runtime">
           <span class="nav-icon" aria-hidden="true">▷</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.sessions">Sessions</span>
             <span class="nav-sub" data-i18n="settings.nav.sessions_sub">Episodic history</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-scratch" data-group="runtime" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-scratch" data-group="runtime">
           <span class="nav-icon" aria-hidden="true">✎</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.working_memory">Working Memory</span>
             <span class="nav-sub" data-i18n="settings.nav.working_memory_sub">Scratch KV</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-procedures" data-group="runtime" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-procedures" data-group="runtime">
           <span class="nav-icon" aria-hidden="true">📜</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.procedures">Procedures</span>
             <span class="nav-sub" data-i18n="settings.nav.procedures_sub">Saved recipes</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-health" data-group="runtime" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-health" data-group="runtime">
           <span class="nav-icon" aria-hidden="true">💓</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.health">Health Report</span>
@@ -889,21 +840,21 @@
           <span class="nav-group-caret" aria-hidden="true">▸</span>
           <span data-i18n="settings.nav.data">Data</span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="dedup" data-group="data" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="dedup" data-group="data">
           <span class="nav-icon" aria-hidden="true">🧹</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.dedup">Deduplicate</span>
             <span class="nav-sub" data-i18n="settings.nav.dedup_sub">Remove near-duplicates</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="decay" data-group="data" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="decay" data-group="data">
           <span class="nav-icon" aria-hidden="true">⏲</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.decay">Age-out</span>
             <span class="nav-sub" data-i18n="settings.nav.decay_sub">Expire old memories</span>
           </span>
         </button>
-        <button class="settings-nav-btn" data-ui-tier="prod" data-section="export" data-group="data" role="tab" aria-selected="false">
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="export" data-group="data">
           <span class="nav-icon" aria-hidden="true">⇅</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.export_import">Export / Import</span>
@@ -915,14 +866,14 @@
           <span class="nav-group-caret" aria-hidden="true">⚠</span>
           <span data-i18n="settings.nav.danger_zone">Danger Zone</span>
         </div>
-        <button class="settings-nav-btn settings-nav-btn--danger" data-ui-tier="prod" data-section="reset" data-group="danger" role="tab" aria-selected="false">
+        <button class="settings-nav-btn settings-nav-btn--danger" data-ui-tier="prod" data-section="reset" data-group="danger">
           <span class="nav-icon" aria-hidden="true">⚠</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.reset">Reset Database</span>
             <span class="nav-sub" data-i18n="settings.nav.reset_sub">Delete all data</span>
           </span>
         </button>
-      </div>
+      </nav>
       <div class="settings-content">
 
         <!-- Config section -->
@@ -1507,16 +1458,16 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=123"></script>
+  <script src="/app.js?v=125"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=10"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
   <script src="/settings-maintenance.js?v=3"></script>
   <script src="/settings-namespaces.js?v=9"></script>
   <script src="/settings-harness.js?v=2"></script>
-  <script src="/settings-hooks-watchdog.js?v=14"></script>
+  <script src="/settings-hooks-watchdog.js?v=16"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=55"></script>
+  <script src="/context-gateway.js?v=61"></script>
   <script src="/context-portal.js?v=2"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>

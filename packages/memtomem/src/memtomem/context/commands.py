@@ -528,8 +528,15 @@ def extract_commands_to_canonical(
     *,
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
+    dry_run: bool = False,
 ) -> ExtractResult:
     """Import existing Claude/Gemini command files into the scoped canonical dir.
+
+    ``dry_run`` (rank-10 import preview) runs the full scan + validation +
+    Gate A walk + cross-runtime dedup + canonical-exists check on both the
+    Claude and Gemini branches, then **skips only the write**: ``imported``
+    lists the destinations that *would* be written and ``skipped`` carries the
+    same reasons a real run would, with nothing touching disk.
 
     Phase 3's conversion is lossless in both directions (only two TOML fields,
     placeholder rewrite is reversible), so Gemini commands can be round-tripped
@@ -642,8 +649,11 @@ def extract_commands_to_canonical(
                 )
                 seen[cmd_name] = claude_label
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(dst, content_bytes)
+            # ``dry_run`` records the would-import target but skips the write
+            # so the preview never mutates disk (rank-10).
+            if not dry_run:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_bytes(dst, content_bytes)
             imported.append((dst, layout))
             seen[cmd_name] = claude_label
 
@@ -710,8 +720,11 @@ def extract_commands_to_canonical(
                 )
                 seen[cmd_name] = gemini_label
                 continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(dst, canonical_content)
+            # ``dry_run`` records the would-import target but skips the write
+            # so the preview never mutates disk (rank-10).
+            if not dry_run:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(dst, canonical_content)
             imported.append((dst, layout))
             seen[cmd_name] = gemini_label
 

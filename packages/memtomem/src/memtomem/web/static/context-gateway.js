@@ -167,6 +167,12 @@ let _ctxTargetScope = 'project_shared';
 const _CTX_ACTIVE_SCOPE_KEY = 'memtomem_ctx_active_scope_id';
 let _ctxActiveScopeId = '';
 let _ctxProjectsCache = [];
+// rank 11: a Sync All run disables the shared header bar's controls for its
+// duration. The lock lives here, not only in the DOM, because the bar is a
+// single shared host that ``_ctxRenderControlBar`` repaints on section switches
+// / loader resolves / langchange — re-applying the flag after each repaint keeps
+// the controls disabled until the run's ``finally`` clears it (Codex review).
+let _ctxSyncControlsLocked = false;
 
 // De-dup memo for the `/api/context/projects` failure toast (#1101).
 // ``_ctxFetchProjects`` runs from three independent panel-load paths
@@ -252,6 +258,17 @@ function _ctxScopeDisplayLabel(scope) {
   if (!scope) return '';
   if (_ctxScopeIsServerCwd(scope)) return t('settings.ctx.server_cwd');
   return scope.label || _ctxBasename(scope.root) || scope.scope_id;
+}
+
+// Resolve a bare scope_id ('' === Server CWD) to its human label via the
+// projects cache. Used by the Sync / Sync-All / Import confirm dialogs to name
+// the project being acted on (rank-10 confirm threading). Falls back to the
+// Server-CWD label when the id isn't in the cache (cold cache / Server CWD).
+function _ctxScopeDisplayLabelById(scopeId) {
+  const scope = (_ctxProjectsCache || []).find(
+    s => (s.scope_id || '') === (scopeId || ''),
+  );
+  return scope ? _ctxScopeDisplayLabel(scope) : t('settings.ctx.server_cwd');
 }
 
 function _ctxNormalizeActiveScope(scopes) {
@@ -420,6 +437,69 @@ async function _ctxFetchProjects() {
   return result.data;
 }
 
+// -- Hoisted gateway control bar (rank 11) ------------------------------------
+//
+// The active-project ``<select>`` and the canonical-tier filter used to be
+// re-emitted into EVERY gateway section's content (Overview, Skills, Commands,
+// Agents, MCP, Hooks) — the same picker painted 6× for one piece of state,
+// since ``_ctxActiveScopeId`` / ``_ctxTargetScope`` are module globals. They now
+// render ONCE into the persistent ``#ctx-control-bar`` host that sits above the
+// section panels. ``_ctxRenderControlBar`` repaints that single host for the
+// active section; the unchanged ``_ctxWireProjectControls`` / ``_ctxWireTier
+// Controls`` helpers route a change to the active section's loader via the
+// control's ``data-type`` (overview→loadCtxOverview, hooks-sync→loadHooksSync,
+// else→loadCtxList). The Projects portal owns its own roster and never carried
+// these controls, so the bar is hidden there.
+const _CTX_SECTION_BAR_TYPE = {
+  'ctx-overview': 'overview',
+  'ctx-skills': 'skills',
+  'ctx-commands': 'commands',
+  'ctx-agents': 'agents',
+  'ctx-mcp-servers': 'mcp-servers',
+  'hooks-sync': 'hooks-sync',
+  // ``ctx-projects`` is intentionally absent → the bar hides on the portal.
+};
+
+// The control "type" of the active gateway section, or '' when none applies
+// (Projects portal, or no gateway section active). The active section id is
+// ``settings-<section>`` (e.g. ``settings-ctx-skills`` / ``settings-hooks-sync``);
+// strip the prefix, then map to the loader-routing type.
+function _ctxActiveGatewayType() {
+  const active = document.querySelector('#tab-context-gateway .settings-section.active');
+  if (!active || !active.id) return '';
+  const section = active.id.replace(/^settings-/, '');
+  return _CTX_SECTION_BAR_TYPE[section] || '';
+}
+
+// Repaint the persistent control bar for whatever gateway section is currently
+// active — ALWAYS sourced from the live ``.settings-section.active`` (never a
+// caller-supplied type). This is deliberate: the bar is one shared, visible
+// host, and the loaders that trigger a repaint are async. If a stale
+// ``loadCtxOverview`` / ``loadCtxList`` resolves AFTER the user has navigated to
+// a different section, sourcing the type from the active section makes the late
+// render paint the bar for the section the user is actually on (or hide it on
+// the Projects portal) instead of hijacking it back to the loader's section and
+// mis-routing the next tier/project change. Re-rendering replaces the host's
+// markup, so the (idempotent, global) wire helpers re-bind the single live
+// instance and the detached prior nodes drop their listeners with them.
+function _ctxRenderControlBar() {
+  const host = document.getElementById('ctx-control-bar');
+  if (!host) return;
+  const type = _ctxActiveGatewayType();
+  if (!type) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.hidden = false;
+  host.innerHTML = _ctxProjectControls(type) + _ctxTierControls(type);
+  _ctxWireProjectControls();
+  _ctxWireTierControls();
+  // Re-apply a Sync All lock to the freshly-rendered controls so a repaint
+  // mid-run (navigation / loader / langchange) can't silently re-enable them.
+  _ctxApplySyncControlsLock();
+}
+
 function _ctxProjectControls(type, scopes = _ctxProjectsCache) {
   const list = Array.isArray(scopes) ? scopes : [];
   if (!list.length) return '';
@@ -516,6 +596,32 @@ function _ctxWireTierControls() {
   });
 }
 
+// rank 2c: the "Show all projects" toggle. Rendered only when there is more
+// than one scope (a single Server-CWD-only install has nothing to collapse,
+// so the toggle would be a dead checkbox). The count in the label is the
+// total scope count so the user knows how large the roster they're hiding
+// is — the same framing as the Projects portal's row count.
+function _ctxShowAllScopesControl(type, scopes) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  if (list.length <= 1) return '';
+  const label = t('settings.ctx.show_all_projects').replace('{n}', String(list.length));
+  return `<label class="ctx-list-show-all" data-type="${escapeHtml(type)}">
+    <input type="checkbox" id="ctx-${escapeHtml(type)}-show-all"${_ctxListShowAllScopes ? ' checked' : ''}>
+    <span>${escapeHtml(label)}</span>
+  </label>`;
+}
+
+function _ctxWireShowAllScopes(type, listEl) {
+  const toggle = listEl.querySelector(`#ctx-${type}-show-all`);
+  if (!toggle) return;
+  toggle.addEventListener('change', () => {
+    _ctxListShowAllScopes = toggle.checked;
+    // Re-run the section so the scope loop re-filters; mirrors how the
+    // project switcher / tier filter re-issue ``loadCtxList`` on change.
+    loadCtxList(type);
+  });
+}
+
 // -- Tier-aware write-block gate (issue #943) ---------------------------------
 //
 // ADR-0011 / #940 wired ``target_scope`` through every artifact route, with
@@ -534,9 +640,10 @@ function _ctxWireTierControls() {
 //       and fires a toast — the per-button handler never sees the event,
 //       so no POST is ever issued.
 //
-// Per-section buttons (.ctx-create-btn / .ctx-import-btn / .ctx-sync-btn)
-// live in the static HTML so the refresh applies on every render that
-// touches the tier filter; per-item buttons (.ctx-detail-edit-btn /
+// Per-section toolbar buttons (.ctx-create-btn / .ctx-import-btn /
+// .ctx-sync-btn) are generated once at init by ``_ctxRenderToolbars`` (rank 21)
+// and then persist in the DOM, so the refresh still applies on every render
+// that touches the tier filter; per-item buttons (.ctx-detail-edit-btn /
 // .ctx-detail-delete-btn) are minted by ``loadCtxDetail`` so its callers
 // reapply the refresh after the detail innerHTML lands.
 //
@@ -558,10 +665,76 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   // "Import this <type>" button minted by ``_ctxLoadRuntimeOnlyDetail``
   // belongs in the same write-blocked sweep.
   + '.ctx-runtime-only-import, '
-  // ADR-0022 version-store writes (freeze / promote / delete-label) are
-  // project_shared-only canonical writes, so they ride the same tier gate.
+  // ADR-0022 version-store writes (enable / freeze / promote / delete-label)
+  // are project_shared-only canonical writes, so they ride the same tier gate.
+  // ``.ctx-version-enable-btn`` (rank 6) adopts a flat artifact into dir layout
+  // — also a project_shared-only canonical write.
+  + '.ctx-version-enable-btn, '
   + '.ctx-version-freeze-btn, .ctx-version-promote-btn, .ctx-version-label-remove'
 );
+
+// rank 21: artifact-section toolbars (Skills / Commands / Agents / MCP Servers)
+// render from one source instead of hand-copied static markup, so a button
+// added here propagates to every section and each section's button set is a
+// declared capability rather than an accidental copy-paste divergence.
+//
+//   - add_project / create / sync are universal.
+//   - ``import`` is false for ``mcp-servers``: there is no per-type ``/import``
+//     route (servers come from the single ``.mcp.json`` source — cf.
+//     ``context_mcp_servers.py``, which ships no import endpoint), so the
+//     omission is an explicit capability flag here, not a silent gap. The
+//     user-facing "no Import" messaging lives in the MCP empty-state hint
+//     (rank 7); this map keeps the structural omission from drifting.
+//
+// Buttons are emitted with the exact classes / ``data-type`` / ``data-i18n*``
+// the static markup used, so the existing click bindings, the write-block
+// sweep (``_CTX_WRITE_BUTTON_SELECTOR``), and i18n ``applyDOM`` keep working
+// unchanged. Rendered once at init (below) — before the click bindings further
+// down and before DOMContentLoaded's first ``applyDOM`` — so they behave like
+// the old static buttons (English fallback text, translated on the first pass).
+const _CTX_TOOLBAR_CAPS = {
+  skills: { import: true },
+  commands: { import: true },
+  agents: { import: true },
+  'mcp-servers': { import: false },
+};
+
+// ``data-type`` uses hyphens (``mcp-servers``) but the i18n keys use the
+// underscore form (``mcp_servers_*``); bridge the two spellings here.
+function _ctxToolbarI18nPrefix(type) {
+  return type.replace(/-/g, '_');
+}
+
+function _ctxToolbarHtml(type) {
+  const caps = _CTX_TOOLBAR_CAPS[type] || {};
+  const p = _ctxToolbarI18nPrefix(type);
+  const button = (cls, variant, labelKey, action, fallback) =>
+    `<button class="${variant} ${cls}" data-type="${escapeHtml(type)}"`
+    + ` data-i18n="${labelKey}"`
+    + ` data-i18n-title="settings.ctx.${p}_${action}_tooltip"`
+    + ` data-i18n-aria-label="settings.ctx.${p}_${action}_aria">${fallback}</button>`;
+  const buttons = [
+    button('ctx-add-project-btn', 'btn-ghost', 'settings.ctx.add_project', 'add_project', 'Add Project'),
+    button('ctx-create-btn', 'btn-ghost', 'settings.ctx.create', 'create', 'Create'),
+  ];
+  if (caps.import) {
+    buttons.push(button('ctx-import-btn', 'btn-ghost', 'settings.ctx.import', 'import', 'Import'));
+  }
+  // Sync stays rightmost and primary across every section.
+  buttons.push(button('ctx-sync-btn', 'btn-primary', 'settings.ctx.sync', 'sync', 'Sync'));
+  return buttons.join('\n');
+}
+
+// Fill the per-section ``.ctx-toolbar`` containers from the single template
+// above. Runs at module load so the buttons exist for the ``querySelectorAll``
+// click bindings and for the first write-block sweep, exactly as the static
+// markup did.
+function _ctxRenderToolbars() {
+  document.querySelectorAll('.ctx-toolbar[data-type]').forEach(el => {
+    el.innerHTML = _ctxToolbarHtml(el.dataset.type);
+  });
+}
+_ctxRenderToolbars();
 
 function _ctxRefreshWriteBlockedState() {
   const blocked = _ctxTargetScope !== 'project_shared';
@@ -828,8 +1001,6 @@ function _renderCtxOverview(data) {
       </div>
       ${lastSyncHtml}
     </div>`;
-  html += _ctxProjectControls('overview');
-  html += _ctxTierControls('overview');
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       const d = data[typ.key] || {};
@@ -989,8 +1160,12 @@ function _renderCtxOverview(data) {
     }
     html += '</div>';
     el.innerHTML = html;
-    _ctxWireProjectControls();
-    _ctxWireTierControls();
+    // rank 11: the active-project + tier controls live in the persistent gateway
+    // header bar, not inside this section's content. Repaint the (shared) bar —
+    // it self-sources the type from the active section, so a stale overview
+    // render that resolves after the user navigated away repaints the bar for
+    // their CURRENT section rather than hijacking it back to Overview.
+    _ctxRenderControlBar();
 
   // Gate the Sync All button: when every artifact type's items are
   // entirely runtime-only (no canonicals to fan out), Sync All resolves
@@ -1188,7 +1363,11 @@ async function loadCtxOverview() {
 async function _ctxSyncProjectScope(scopeId, btn) {
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
-    message: t('settings.ctx.confirm_sync_all'),
+    // rank-10: name the specific project this portal card syncs (the raw
+    // ``scopeId`` resolves to its label; '' === Server CWD).
+    message: t('settings.ctx.confirm_sync_all', {
+      dest: _ctxScopeDisplayLabelById(scopeId),
+    }),
     confirmText: t('settings.ctx.sync'),
     danger: false,
   });
@@ -1409,6 +1588,17 @@ window.addEventListener('langchange', () => {
     (gatewayTab && gatewayTab.classList.contains('active'))
     || (settingsTab && settingsTab.classList.contains('active'));
   if (!hostActive) return;
+
+  // rank 11: the hoisted control bar's labels are inline ``t()`` (active-project
+  // label, tier options, tier-filter aria), so ``I18N.applyDOM`` can't reach
+  // them — repaint the bar for the active gateway section on a locale flip. The
+  // per-section re-issue below also repaints it for the overview/list sections
+  // (an idempotent same-tick double-render, no visible flicker); this standalone
+  // call additionally covers hooks-sync, whose section has no re-issue branch
+  // here. Gated on the Gateway tab being the visible host so we never repaint
+  // into a hidden panel (the Settings-tab fallback above keeps ``hostActive``
+  // true while the gateway sections are off-screen).
+  if (gatewayTab && gatewayTab.classList.contains('active')) _ctxRenderControlBar();
 
   const overviewSection = document.getElementById('settings-ctx-overview');
   if (overviewSection && overviewSection.classList.contains('active')) {
@@ -1636,16 +1826,27 @@ function _renderCtxSyncStatus(states) {
 // a Sync All run. The tier/project values are already pinned into the phase
 // URLs (see ``_ctxWithTargetScope`` opts), so this is a clarity affordance —
 // it prevents the user from flipping a control whose change won't take effect
-// until the next run. Scoped to the overview section so per-list-page controls
-// are untouched. ``loadCtxOverview`` re-renders fresh (enabled) controls in the
-// handler's ``finally``, so this only governs the in-flight window.
+// until the next run. rank 11: the controls now live in the shared
+// ``#ctx-control-bar`` header, not inside the overview section — target the bar
+// directly (the old ``#settings-ctx-overview`` scope would match nothing and
+// the lock would silently no-op). ``loadCtxOverview`` re-renders fresh
+// (enabled) controls in the handler's ``finally``, so this only governs the
+// in-flight window.
+// Apply the current ``_ctxSyncControlsLocked`` flag to the shared bar's live
+// controls. Called both when the lock toggles and after every bar repaint, so
+// the disabled state survives the shared host being re-rendered mid-run.
+function _ctxApplySyncControlsLock() {
+  document
+    .querySelectorAll('#ctx-control-bar .ctx-tier-filter button')
+    .forEach((btn) => { btn.disabled = _ctxSyncControlsLocked; });
+  document
+    .querySelectorAll('#ctx-control-bar .ctx-project-select')
+    .forEach((sel) => { sel.disabled = _ctxSyncControlsLocked; });
+}
+
 function _ctxSetSyncControlsDisabled(disabled) {
-  document
-    .querySelectorAll('#settings-ctx-overview .ctx-tier-filter button')
-    .forEach((btn) => { btn.disabled = disabled; });
-  document
-    .querySelectorAll('#settings-ctx-overview .ctx-project-select')
-    .forEach((sel) => { sel.disabled = disabled; });
+  _ctxSyncControlsLocked = disabled;
+  _ctxApplySyncControlsLock();
 }
 
 // Sync All button
@@ -1670,7 +1871,11 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   }
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
-    message: t('settings.ctx.confirm_sync_all'),
+    // rank-10: name the active project being fanned out so the user sees
+    // WHERE the artifacts come from before committing.
+    message: t('settings.ctx.confirm_sync_all', {
+      dest: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
+    }),
     confirmText: t('settings.ctx.sync'),
     danger: false,
   });
@@ -1920,6 +2125,15 @@ document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () =
 // runtime-only banner) so its async writes are gated by the parent
 // ``loadCtxList`` invocation that originated them.
 let _ctxListSeq = { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 };
+
+// rank 2c: artifact sections (Skills/Commands/Agents/MCP) scope to the
+// active project by default — the same ~30-project roster the Projects
+// portal already owns shouldn't be re-painted as a wall of collapsed
+// accordions in every section. A "Show all projects" toggle opts back
+// into the full roster. Shared across all four sections (a deliberate
+// reading: the toggle answers "do I want the roster or just my project",
+// which is the same intent regardless of which artifact I'm browsing).
+let _ctxListShowAllScopes = false;
 
 // Sibling guard for ``loadCtxDetail`` and ``_ctxLoadRuntimeOnlyDetail``
 // races. Both write to the same ``detailEl``, so they share one
@@ -2475,17 +2689,17 @@ function _ctxRenderDeepLinkBanner(type, link, matchCount) {
   });
   banner.appendChild(labelEl);
   banner.appendChild(resetBtn);
-  // Insert above the per-scope groups but below any tier-filter row so
-  // the banner reads as a list-level state, not a per-scope label.
-  // ``.ctx-runtime-only-banner`` is a sibling concern (no canonicals);
-  // both banners can co-exist when a project has runtime-only items
-  // *and* the user deep-linked into the type.
-  const tierRow = listEl.querySelector('.ctx-tier-filter');
-  if (tierRow && tierRow.nextSibling) {
-    listEl.insertBefore(banner, tierRow.nextSibling);
-  } else {
-    listEl.insertBefore(banner, listEl.firstChild);
-  }
+  // rank 11: the tier filter moved to the persistent header bar, so the list no
+  // longer holds a tier-filter row to sit below. Keep the tier-aware
+  // write-blocked banner (#943) at the very top — its copy explains why the
+  // write buttons are dimmed, so the deep-link banner must not land above it —
+  // and place this banner immediately AFTER it when present (mirroring the
+  // runtime-only remediation banner's anchoring in _ctxRefreshSectionState),
+  // otherwise at the list's first row. ``.ctx-runtime-only-banner`` is a sibling
+  // concern; both can co-exist with a deep link.
+  const writeBlocked = listEl.querySelector('.ctx-write-blocked-banner');
+  const anchor = writeBlocked ? writeBlocked.nextSibling : listEl.firstChild;
+  listEl.insertBefore(banner, anchor);
 }
 
 async function loadCtxList(type) {
@@ -2521,9 +2735,22 @@ async function loadCtxList(type) {
       return;
     }
 
-    let html = _ctxProjectControls(type, scopes);
-    html += _ctxTierControls(type);
-    for (const scope of scopes) {
+    // rank 2c: default to the active project only — the Projects portal owns
+    // the full roster, so re-painting every scope as a collapsed accordion in
+    // each artifact section just buries the one project the user is acting on.
+    // The "Show all projects" toggle opts back into the full list. Fall back
+    // to all scopes if no active scope resolves (``_ctxCommitProjects``
+    // normalizes one, but never blank the panel) so a stale active-scope id
+    // can't strand the user on an empty section.
+    const activeScopes = scopes.filter(_ctxScopeIsActive);
+    const visibleScopes = (_ctxListShowAllScopes || !activeScopes.length) ? scopes : activeScopes;
+
+    // rank 11: the active-project + tier controls are no longer emitted into each
+    // section's list — they render once into the persistent header bar
+    // (``_ctxRenderControlBar`` below). The list keeps only the rank-2c "Show all
+    // projects" toggle + the per-scope groups for the visible scope(s).
+    let html = _ctxShowAllScopesControl(type, scopes);
+    for (const scope of visibleScopes) {
       const isActive = _ctxScopeIsActive(scope);
       const count = _ctxScopeCount(scope, type);
       const groupId = `ctx-${type}-group-${escapeHtml(scope.scope_id)}`;
@@ -2543,19 +2770,34 @@ async function loadCtxList(type) {
       // disambiguate same-name scopes (``Edu/inflearn`` vs ``Work/inflearn``)
       // on hover without inflating the visible label.
       const rootTitle = scope.root ? `title="${escapeHtml(scope.root)}"` : '';
-      html += `<details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isActive ? ' open' : ''}>
-        <summary class="ctx-scope-summary" ${rootTitle}>
-          <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
-          <span class="ctx-scope-summary-count">${count}</span>
-          ${_ctxScopeBadges(scope)}
-          ${removeBtn}
-        </summary>
-        <div class="ctx-scope-items" id="${groupId}" data-loaded="false"></div>
-      </details>`;
+      // The remove (×) button is a SIBLING of <details>, not a child of
+      // <summary> (rank 15). A real <button> nested inside the <summary>
+      // activation control is the banned nested-interactive antipattern
+      // (#1003) and made keyboard activation of × ambiguous against the
+      // disclosure's native toggle. It can't be a plain child of <details>
+      // either — native <details> hides every non-<summary> child while
+      // collapsed, which would make × disappear on closed groups. So wrap
+      // both and pin × over the summary's right edge via CSS
+      // (``.ctx-scope-group-wrap``), keeping × always visible and a
+      // standalone button with unambiguous keyboard activation.
+      html += `<div class="ctx-scope-group-wrap">
+        <details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isActive ? ' open' : ''}>
+          <summary class="ctx-scope-summary" ${rootTitle}>
+            <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
+            <span class="ctx-scope-summary-count">${count}</span>
+            ${_ctxScopeBadges(scope)}
+          </summary>
+          <div class="ctx-scope-items" id="${groupId}" data-loaded="false"></div>
+        </details>
+        ${removeBtn}
+      </div>`;
     }
     listEl.innerHTML = html;
-    _ctxWireProjectControls();
-    _ctxWireTierControls();
+    // rank 11: repaint the shared header bar (self-sources from the active
+    // section so a stale list render can't hijack it). rank 2c: wire the
+    // "Show all projects" toggle that still lives in the list.
+    _ctxRenderControlBar();
+    _ctxWireShowAllScopes(type, listEl);
 
     // Tier-aware read-only banner (issue #943): inserted at the top of
     // the list whenever the canonical-tier filter is set to a
@@ -2586,7 +2828,9 @@ async function loadCtxList(type) {
     // and the per-scope remove (×) button. ``seq`` is threaded into the
     // group fetch so a late group response from a stale ``loadCtxList``
     // can't paint into the new list's ``ctx-scope-items`` containers.
-    for (const scope of scopes) {
+    // Iterate the same ``visibleScopes`` the render loop used so we never
+    // try to wire a group that wasn't painted (rank 2c).
+    for (const scope of visibleScopes) {
       const groupEl = listEl.querySelector(`details[data-scope-id="${CSS.escape(scope.scope_id)}"]`);
       if (!groupEl) continue;
       const itemsEl = groupEl.querySelector('.ctx-scope-items');
@@ -2598,7 +2842,9 @@ async function loadCtxList(type) {
       if (groupEl.open) fetchOnce();
       groupEl.addEventListener('toggle', () => { if (groupEl.open) fetchOnce(); });
 
-      const removeBtn = groupEl.querySelector('.ctx-scope-remove');
+      // × is a sibling of <details> inside ``.ctx-scope-group-wrap`` (rank
+      // 15), so reach it through the wrapper rather than ``groupEl`` itself.
+      const removeBtn = groupEl.parentElement?.querySelector(':scope > .ctx-scope-remove');
       if (removeBtn) {
         removeBtn.addEventListener('click', async (ev) => {
           ev.preventDefault();
@@ -3065,13 +3311,25 @@ async function _ctxLoadVersions(type, name, detailEl, seq) {
   if (seq != null && seq !== _ctxDetailSeq[type]) return;
 
   if (data.migrate_required) {
-    // Flat-layout artifact: no per-artifact version store (ADR-0022 inv 3).
+    // Flat-layout artifact: no per-artifact directory to hold a versions/
+    // store (ADR-0022 inv 3). Offer an explicit "Enable versioning" action
+    // that adopts the flat canonical into directory layout (rank 6) — the CLI
+    // ``mm context migrate`` refuses web-created flat files (no lockfile entry
+    // ⇒ skip_manual), so this button is the supported escape hatch.
     container.hidden = false;
     container.innerHTML =
       '<div class="ctx-detail-versions-header">'
       + `<span class="ctx-detail-versions-title" data-i18n="settings.ctx.versions.title">${escapeHtml(t('settings.ctx.versions.title'))}</span>`
+      + `<button class="btn-ghost ctx-version-enable-btn" data-i18n="settings.ctx.versions.enable" `
+      + `data-i18n-title="settings.ctx.versions.enable_tooltip" `
+      + `title="${escapeHtml(t('settings.ctx.versions.enable_tooltip'))}">${escapeHtml(t('settings.ctx.versions.enable'))}</button>`
       + '</div>'
       + `<div class="ctx-version-empty text-muted" data-i18n="settings.ctx.versions.migrate_required">${escapeHtml(t('settings.ctx.versions.migrate_required'))}</div>`;
+    _ctxWireEnableVersioning(type, name, detailEl, seq);
+    // The enable button just landed — run the tier gate so it picks up
+    // ``data-write-blocked`` on non-shared tiers (it's a project_shared-only
+    // canonical write, like freeze/promote).
+    _ctxRefreshWriteBlockedState();
     return;
   }
 
@@ -3081,6 +3339,44 @@ async function _ctxLoadVersions(type, name, detailEl, seq) {
   // The freeze/promote/remove buttons just landed — re-run the tier gate so
   // they pick up ``data-write-blocked`` without a full detail re-render (#943).
   _ctxRefreshWriteBlockedState();
+}
+
+function _ctxWireEnableVersioning(type, name, detailEl, seq) {
+  // Wires the "Enable versioning" button shown for a flat-layout artifact: it
+  // adopts the flat canonical into directory layout (ADR-0022 rank 6) so the
+  // version store becomes available. On success the layout changed flat→dir,
+  // so reload the WHOLE detail panel (not just the versions section) — the meta
+  // header's layout / file-count chips are now stale too.
+  const btn = detailEl.querySelector('.ctx-version-enable-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    btnLoading(btn, true);
+    try {
+      const csrf = await ensureCsrfToken();
+      // Inline-binding CSRF thread (shape B in test_web_invariants_registry).
+      const headers = csrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+        : { 'Content-Type': 'application/json' };
+      const r = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/versions/enable`),
+        { method: 'POST', headers, body: JSON.stringify({}) },
+      );
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+        return;
+      }
+      showToast(t('settings.ctx.versions.enable_success', { name }));
+      // Bail if the user navigated to another artifact while the POST was in
+      // flight — re-rendering the detail would yank them back to this one.
+      if (seq != null && seq !== _ctxDetailSeq[type]) return;
+      loadCtxDetail(type, name);
+    } catch (_) {
+      showToast(t('toast.request_failed'), 'error');
+    } finally {
+      btnLoading(btn, false);
+    }
+  });
 }
 
 function _ctxWireVersionControls(type, name, detailEl, seq) {
@@ -3769,7 +4065,13 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     }
     const ok = await showConfirm({
       title: t('settings.ctx.sync'),
-      message: t('settings.ctx.confirm_sync').replace('{type}', type),
+      // rank-10: name the artifact count so the user sees WHAT fans out
+      // before committing. ``canonicalCount`` is already in the section
+      // dataset (the '0' case bailed to a toast above), so no fetch needed.
+      message: t('settings.ctx.confirm_sync', {
+        type,
+        count: section?.dataset.canonicalCount || '0',
+      }),
       confirmText: t('settings.ctx.sync'),
       danger: false,
     });
@@ -3818,6 +4120,73 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
 document.querySelectorAll('.ctx-import-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     const type = btn.dataset.type;
+    // rank-10: run a dry-run preview first so the confirm names the
+    // destination (active project · project_shared) and how many artifacts
+    // would import vs already exist. The preview is best-effort — any failure
+    // (offline, gateway-lock contention, a non-shared-tier 400) falls back to
+    // the destination-only confirm so Import is never blocked by it.
+    //
+    // Pin the effective scope + tier ONCE at click time and reuse the snapshot
+    // for the preview, the destination label, AND the final import POST. The
+    // gateway UI isn't inert until the modal opens, so a mid-flight active-
+    // project/tier change during the preview fetch could otherwise make the
+    // preview counts, the named destination, and the real write disagree — the
+    // same one-(project, tier)-per-invocation pinning Sync All enforces
+    // (ADR-0016 §5 / ADR-0021 §C; Codex review).
+    const pinnedScopeOpts = {
+      scopeId: _ctxEffectiveScopeId(_ctxActiveScopeId),
+      scopeResolved: true,
+      targetScope: _ctxTargetScope,
+    };
+    btnLoading(btn, true);
+    let preview = null;
+    try {
+      const previewCsrf = await ensureCsrfToken();
+      const previewHeaders = previewCsrf
+        ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': previewCsrf }
+        : { 'Content-Type': 'application/json' };
+      // ``_ctxWithTargetScope`` appends scope/tier with ``&`` since the URL
+      // already carries ``?dry_run=1`` (it branches on ``url.includes('?')``).
+      const pr = await fetch(
+        _ctxWithTargetScope(`/api/context/${type}/import?dry_run=1`, pinnedScopeOpts),
+        { method: 'POST', headers: previewHeaders, body: JSON.stringify({ overwrite: false }) },
+      );
+      if (pr.ok) {
+        const data = await pr.json();
+        // Only trust a well-shaped preview; a malformed / empty body falls back
+        // to the destination-only confirm rather than a misleading "0 / 0".
+        if (Array.isArray(data?.imported) && Array.isArray(data?.skipped)) preview = data;
+      }
+    } catch {
+      /* best-effort preview — fall through to the destination-only confirm */
+    } finally {
+      btnLoading(btn, false);
+    }
+    const importDest = _ctxImportDestinationLabel(pinnedScopeOpts.scopeId);
+    let importMessage = t('settings.ctx.confirm_import', { type, dest: importDest });
+    if (preview) {
+      const wouldImport = preview.imported.length;
+      // Only ``canonical_exists`` skips are what the Overwrite checkbox governs.
+      // The skipped list also carries ``already_imported`` (cross-runtime
+      // dedup), ``invalid_name``, parse errors, and privacy blocks — counting
+      // those as "already exist" would misstate both the count and the overwrite
+      // hint (Codex review). The other skips surface in the post-import result
+      // panel, not this pre-commit summary.
+      const wouldOverwrite = preview.skipped.filter(
+        s => s && s.reason_code === 'canonical_exists',
+      ).length;
+      importMessage += ' ' + t('settings.ctx.confirm_import_preview', {
+        imported: wouldImport,
+        skipped: wouldOverwrite,
+      });
+      // The preview runs with overwrite:false, so ``wouldOverwrite`` is exactly
+      // the set the Overwrite checkbox below would replace. Say so explicitly —
+      // otherwise the "already exist" count reads as "will be skipped" even when
+      // the user then enables Overwrite (rank-10 review).
+      if (wouldOverwrite > 0) {
+        importMessage += ' ' + t('settings.ctx.confirm_import_overwrite_hint');
+      }
+    }
     // Overwrite is opt-in: the default skip-when-canonical-exists rule
     // protects user-maintained canonicals from a stray Import wiping
     // them out with a stale runtime copy. The checkbox lets the user
@@ -3826,7 +4195,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
     // and wanting to flow that back into ``.memtomem/``.
     const result = await showConfirm({
       title: t('settings.ctx.import'),
-      message: t('settings.ctx.confirm_import').replace('{type}', type),
+      message: importMessage,
       confirmText: t('settings.ctx.import'),
       // Import is non-destructive by default (the destructive path is the
       // opt-in "overwrite" checkbox below) — keep the button primary-blue.
@@ -3845,7 +4214,9 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       const headers = csrf
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
-      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`), {
+      // Same click-time (project, tier) snapshot as the preview so the write
+      // can't land somewhere the preview/label didn't describe.
+      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`, pinnedScopeOpts), {
         method: 'POST',
         headers,
         body: JSON.stringify({ overwrite }),
@@ -3906,6 +4277,20 @@ function _ctxCreateDestinationLabel() {
       ? 'settings.ctx.tier_option_project_local'
       : 'settings.ctx.tier_option_project_shared';
   return t('settings.ctx.create_destination', { project, tier: t(tierKey) });
+}
+
+// Destination label for the Import confirm — "{project} · {tier}".
+// Takes the click-time pinned ``scopeId`` so the named destination matches the
+// project the preview + final POST target (not a live read that could drift if
+// the active project changes mid-flight). Import only ever writes to the
+// ``project_shared`` canonical tier (non-shared tiers are rejected server-side
+// AND ``.ctx-import-btn`` rides the write-block sweep, so it's only clickable on
+// project_shared), so the tier is fixed — naming it answers rank-10's "Import
+// hides the destination tier" gap. Returns just "{project} · {tier}" (no
+// "Destination:" prefix) so it reads inline inside the confirm sentence.
+function _ctxImportDestinationLabel(scopeId = _ctxActiveScopeId) {
+  const project = _ctxScopeDisplayLabelById(scopeId);
+  return `${project} · ${t('settings.ctx.tier_option_project_shared')}`;
 }
 
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {

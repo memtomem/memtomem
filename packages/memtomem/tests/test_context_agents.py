@@ -403,6 +403,22 @@ class TestExtractAgentsToCanonical:
         assert result.imported == []
         assert result.skipped == []
 
+    def test_dry_run_reports_without_writing(self, tmp_path):
+        # rank-10: dry_run lists the would-import target but never writes,
+        # and a real run afterwards still imports normally.
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "helper.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+
+        preview = extract_agents_to_canonical(tmp_path, dry_run=True)
+        assert [canonical_agent_name(p, layout) for p, layout in preview.imported] == ["helper"]
+        assert preview.skipped == []
+        assert not (tmp_path / CANONICAL_AGENT_ROOT).exists()
+
+        applied = extract_agents_to_canonical(tmp_path)
+        assert len(applied.imported) == 1
+        assert (tmp_path / CANONICAL_AGENT_ROOT / "helper" / "agent.md").is_file()
+
 
 class TestDiffAgents:
     def test_empty_project(self, tmp_path, codex_home):

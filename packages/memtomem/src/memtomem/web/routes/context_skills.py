@@ -504,6 +504,14 @@ async def import_skills(
         "project_shared",
         description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
     ),
+    dry_run: bool = Query(
+        False,
+        description=(
+            "Preview the import without writing to canonical (rank-10): runs the "
+            "full scan + privacy walk + dedup and returns the would-import / would-"
+            "skip counts, leaving disk untouched."
+        ),
+    ),
 ) -> dict:
     """Import runtime skills into canonical .memtomem/skills/."""
     _reject_non_shared_write(target_scope, "Import skills")
@@ -511,7 +519,9 @@ async def import_skills(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = extract_skills_to_canonical(project_root, overwrite=overwrite)
+                result = extract_skills_to_canonical(
+                    project_root, overwrite=overwrite, dry_run=dry_run
+                )
     except TimeoutError:
         raise HTTPException(503, "Skills import timed out — another sync may be in progress")
     return {
@@ -525,6 +535,7 @@ async def import_skills(
         ],
         "project_root": str(project_root),
         "scanned_dirs": _SKILL_SCAN_DIRS,
+        "dry_run": dry_run,
     }
 
 

@@ -2516,6 +2516,9 @@ select:focus-visible {
   margin-bottom: 1rem;
 }
 #hooks-sync-status { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* rank 11 superseded rank 22's in-section ``.hooks-controls`` row: the Hooks
+   active-project + tier controls now live in the shared gateway header bar
+   (#ctx-control-bar), so the section status row holds only the badge + target. */
 .hooks-status-target { font-size: 0.78rem; color: var(--muted); max-width: 100%; }
 /* ``overflow-wrap: anywhere`` lets long absolute paths break at any
  * character so the target span never pushes the Sync Now button or
@@ -3745,6 +3748,31 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   color: white;
 }
 
+/* rank 11: persistent gateway header control bar. Hosts the active-project
+   switcher + canonical-tier filter once, above the section panels, instead of
+   re-emitting them into every section. Sticky so it stays put while the section
+   content scrolls under it (.settings-content is the overflow-y:auto ancestor);
+   opaque --bg (the inherited panel background) covers the scrolled rows. The
+   descendant margin reset drops the controls' stacking margin-bottom — in this
+   horizontal row the bar's gap owns the spacing. */
+.ctx-control-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.ctx-control-bar .ctx-project-switcher,
+.ctx-control-bar .ctx-tier-filter {
+  margin: 0;
+}
+
 /* Sync All per-phase progress + result summary (ADR-0021 §C). */
 .ctx-sync-status {
   margin: 0 0 12px;
@@ -3848,11 +3876,17 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-card-label-tag { font-family: var(--mono); }
 
 /* PR2 multi-project: collapsible scope groups, mirroring memory-dirs-group. */
-.ctx-scope-group { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 8px; }
-.ctx-scope-group + .ctx-scope-group { margin-top: 0; }
+/* rank 15: wraps <details> + its sibling × so the remove button can be
+   pinned over the summary row while staying OUT of the <summary> activation
+   control (nested-interactive antipattern) and visible while collapsed. */
+.ctx-scope-group-wrap { position: relative; margin-bottom: 8px; }
+.ctx-scope-group-wrap + .ctx-scope-group-wrap { margin-top: 0; }
+.ctx-scope-group { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .ctx-scope-summary {
   display: flex; align-items: center; gap: 10px;
-  padding: 10px 14px;
+  /* right padding reserves room for the absolutely-positioned × so badges
+     never slide under it. */
+  padding: 10px 40px 10px 14px;
   cursor: pointer;
   font-size: 0.86rem;
   user-select: none;
@@ -3965,6 +3999,9 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 /* "Initialized only" toggle sits beside Sort in the toolbar. */
 .ctx-portal-hide-uninit { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
 .ctx-portal-hide-uninit input { cursor: pointer; }
+/* rank 2c: "Show all projects" toggle in the artifact-list controls row. */
+.ctx-list-show-all { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
+.ctx-list-show-all input { cursor: pointer; }
 /* "N uninitialized hidden" hint above the rows. */
 .ctx-portal-hidden-hint { font-size: 0.8rem; margin: 0 0 8px; }
 .ctx-portal-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
@@ -3977,7 +4014,12 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   font-weight: 600;
 }
 .ctx-scope-remove {
-  margin-left: auto;
+  /* Pinned over the summary's right edge (rank 15) — a sibling of <details>,
+     not a flex child of <summary>, so it stays visible when the group is
+     collapsed and is a standalone keyboard-focusable button. */
+  position: absolute;
+  top: 8px;
+  right: 12px;
   background: transparent;
   border: 1px solid transparent;
   color: var(--muted);

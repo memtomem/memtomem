@@ -56,6 +56,24 @@ def _open_agents_list(page) -> None:
     )
 
 
+def _show_all_projects(page, type_: str = "skills") -> None:
+    """Enable the rank-2c "Show all projects" toggle so non-active scope
+    accordions render.
+
+    Artifact sections default to the active project only (the Projects portal
+    owns the full roster), so any assertion on a non-active scope's accordion
+    must first opt back into the full list. Mirrors the portal suite's
+    ``showUninitialized`` helper for the rank-3 hide-uninit toggle. Waits for
+    the re-render to paint more than one group so the caller's per-scope
+    locators don't race the ``loadCtxList`` refetch the toggle triggers.
+    """
+    page.locator(f"#ctx-{type_}-show-all").check()
+    page.wait_for_function(
+        f"() => document.querySelectorAll('#ctx-{type_}-list .ctx-scope-group').length > 1",
+        timeout=5_000,
+    )
+
+
 # Single-scope CWD payload with one out-of-sync canonical skill (so
 # ``renderRuntimeBadges`` has something to label) plus a non-cwd scope
 # carrying the ``missing`` flag (so ``_ctxScopeBadges`` renders).
@@ -80,6 +98,34 @@ _CWD_PROJECTS_WITH_NON_CWD_MISSING = {
             "experimental": False,
             "missing": True,
             "counts": {"skills": 0, "commands": 0, "agents": 0},
+        },
+    ]
+}
+
+
+# Active Server-CWD scope plus a second *live* project (not missing) so the
+# rank-2c active-only default has a real non-active accordion to hide.
+_CWD_PROJECTS_WITH_SECOND_LIVE = {
+    "scopes": [
+        {
+            "scope_id": "cwd-scope",
+            "label": "cwd",
+            "root": "/srv/cwd",
+            "tier": "user",
+            "sources": ["server-cwd"],
+            "experimental": False,
+            "missing": False,
+            "counts": {"skills": 1, "commands": 0, "agents": 0},
+        },
+        {
+            "scope_id": "other-proj",
+            "label": "other-project",
+            "root": "/srv/other",
+            "tier": "user",
+            "sources": ["history"],
+            "experimental": False,
+            "missing": False,
+            "counts": {"skills": 1, "commands": 0, "agents": 0},
         },
     ]
 }
@@ -178,6 +224,9 @@ def test_q_pr4_langchange_rerenders_scope_badge_inline_text(page, mm_web_url: st
     _stub_skills(page, _CWD_SKILLS_ITEMS)
     page.goto(mm_web_url)
     _open_skills_list(page)
+    # The missing scope is non-active, so it's hidden until "Show all
+    # projects" is enabled (rank 2c).
+    _show_all_projects(page, "skills")
 
     badge = page.locator(
         "#ctx-skills-list "
@@ -207,6 +256,85 @@ def test_q_pr4_langchange_rerenders_scope_badge_inline_text(page, mm_web_url: st
     assert post == "(없음)", f"KO scope_missing badge should be '(없음)', got {post!r}"
     # Symmetric negative: the English literal must not linger.
     assert "(missing)" not in post, f"EN literal must not survive KO toggle: {post!r}"
+
+
+def test_artifact_list_defaults_to_active_scope_only(page, mm_web_url: str) -> None:
+    """rank 2c: an artifact section paints ONLY the active project's accordion
+    by default — not the full roster the Projects portal already owns.
+
+    With two live scopes (active Server-CWD + a second project), the cold
+    list renders exactly one ``.ctx-scope-group`` (the active one), the
+    non-active scope's accordion is absent, and the "Show all projects"
+    toggle is present but unchecked.
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_SECOND_LIVE)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    groups = page.locator("#ctx-skills-list .ctx-scope-group")
+    assert groups.count() == 1, (
+        f"Default artifact list must render only the active scope, got {groups.count()} groups"
+    )
+    assert page.locator("#ctx-skills-list details[data-scope-id='cwd-scope']").count() == 1, (
+        "The active (Server-CWD) scope accordion must be the one rendered"
+    )
+    assert page.locator("#ctx-skills-list details[data-scope-id='other-proj']").count() == 0, (
+        "A non-active scope accordion must be hidden until 'Show all projects'"
+    )
+
+    toggle = page.locator("#ctx-skills-show-all")
+    assert toggle.count() == 1, "The 'Show all projects' toggle must render with >1 scope"
+    assert not toggle.is_checked(), "The toggle defaults to off (active project only)"
+    # The ``{n}`` count interpolates the total scope count (2 here) so a broken
+    # i18n key or replace would surface as a literal ``{n}`` / missing number.
+    label = page.locator(".ctx-list-show-all[data-type='skills'] span")
+    assert "(2)" in (label.text_content() or ""), (
+        f"Toggle label must interpolate the scope count, got {label.text_content()!r}"
+    )
+
+
+def test_show_all_projects_toggle_reveals_all_scopes(page, mm_web_url: str) -> None:
+    """rank 2c: enabling "Show all projects" re-renders the full roster — every
+    scope accordion, including non-active ones, becomes visible again.
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_SECOND_LIVE)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+    assert page.locator("#ctx-skills-list .ctx-scope-group").count() == 1
+
+    # ``_show_all_projects`` checks the toggle and waits for >1 group to paint.
+    _show_all_projects(page, "skills")
+
+    assert page.locator("#ctx-skills-list .ctx-scope-group").count() == 2, (
+        "Show all projects must reveal every scope accordion"
+    )
+    assert page.locator("#ctx-skills-list details[data-scope-id='cwd-scope']").count() == 1, (
+        "Active scope still present after revealing all"
+    )
+    assert page.locator("#ctx-skills-list details[data-scope-id='other-proj']").count() == 1, (
+        "Previously hidden non-active scope is now visible"
+    )
+
+
+def test_single_scope_install_has_no_show_all_toggle(page, mm_web_url: str) -> None:
+    """rank 2c: a Server-CWD-only install (one scope) has nothing to collapse,
+    so the "Show all projects" toggle is suppressed — it would be a dead
+    checkbox. The default ``install_default_stubs`` payload is exactly this
+    single-scope shape.
+    """
+    install_default_stubs(page)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    assert page.locator("#ctx-skills-list .ctx-scope-group").count() == 1
+    assert page.locator("#ctx-skills-show-all").count() == 0, (
+        "Single-scope installs must not render the show-all toggle"
+    )
 
 
 def test_q_pr4_langchange_rerenders_runtime_badge_label(page, mm_web_url: str) -> None:
@@ -447,11 +575,11 @@ def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_ur
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='project_local']").click()
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='project_local']").click()
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector("
-        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"project_local\"]');"
+        "    '#ctx-control-bar .ctx-tier-filter button[data-scope=\"project_local\"]');"
         "  return b && b.classList.contains('active');"
         "}",
         timeout=3_000,
@@ -1430,11 +1558,11 @@ def test_q956_empty_hint_user_tier_paths_to_user_canonical(page, mm_web_url: str
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='user']").click()
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='user']").click()
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector("
-        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"user\"]');"
+        "    '#ctx-control-bar .ctx-tier-filter button[data-scope=\"user\"]');"
         "  return b && b.classList.contains('active');"
         "}",
         timeout=3_000,
@@ -1483,11 +1611,11 @@ def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
     page.goto(mm_web_url)
     _open_skills_list(page)
 
-    page.locator("#ctx-skills-list .ctx-tier-filter button[data-scope='user']").click()
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='user']").click()
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector("
-        "    '#ctx-skills-list .ctx-tier-filter button[data-scope=\"user\"]');"
+        "    '#ctx-control-bar .ctx-tier-filter button[data-scope=\"user\"]');"
         "  return b && b.classList.contains('active');"
         "}",
         timeout=3_000,

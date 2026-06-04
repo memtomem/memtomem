@@ -8,6 +8,7 @@ skills + unknown types 404, flat-layout 409 ("migrate first"), non-shared tier
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -514,3 +515,121 @@ class TestPrivacyAndTimeout:
         r = await client.post("/api/context/agents/reviewer/versions", json={})
         assert r.status_code == 503
         assert "timed out" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Enable versioning (adopt flat → dir, ADR-0022 rank 6)
+# ---------------------------------------------------------------------------
+
+
+class TestEnableVersioning:
+    @pytest.mark.anyio
+    async def test_enable_flat_agent_adopts_to_dir_and_unlocks_versioning(self, client, tmp_path):
+        """A flat agent (the web-created shape) becomes versionable: the route
+        renames it into dir layout, after which list no longer reports
+        migrate_required and a freeze succeeds."""
+        flat = _make_flat_agent(tmp_path, "ui-agent")
+        original = flat.read_text(encoding="utf-8")
+
+        r = await client.post("/api/context/agents/ui-agent/versions/enable", json={})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["migrated"] is True
+        assert body["layout"] == "dir"
+
+        # On disk: flat file consumed, dir manifest carries the same bytes.
+        adir = tmp_path / ".memtomem" / "agents" / "ui-agent"
+        assert not flat.exists()
+        assert (adir / "agent.md").read_text(encoding="utf-8") == original
+
+        # The version store is now reachable.
+        listing = await client.get("/api/context/agents/ui-agent/versions")
+        assert listing.json()["migrate_required"] is False
+        created = await client.post("/api/context/agents/ui-agent/versions", json={})
+        assert created.status_code == 200
+        assert created.json()["version"]["tag"] == "v1"
+
+    @pytest.mark.anyio
+    async def test_enable_works_on_commands(self, client, tmp_path):
+        root = tmp_path / ".memtomem" / "commands"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "deploy.md").write_text("---\ndescription: d\n---\nrun\n", encoding="utf-8")
+        r = await client.post("/api/context/commands/deploy/versions/enable", json={})
+        assert r.status_code == 200
+        assert r.json()["migrated"] is True
+        assert (root / "deploy" / "command.md").is_file()
+        assert not (root / "deploy.md").exists()
+
+    @pytest.mark.anyio
+    async def test_enable_already_dir_is_idempotent_noop(self, client, tmp_path):
+        _make_dir_agent(tmp_path, "reviewer")
+        r = await client.post("/api/context/agents/reviewer/versions/enable", json={})
+        assert r.status_code == 200
+        assert r.json()["migrated"] is False
+        assert r.json()["layout"] == "dir"
+
+    @pytest.mark.anyio
+    async def test_enable_unsupported_type_skills_404(self, client, tmp_path):
+        r = await client.post("/api/context/skills/x/versions/enable", json={})
+        assert r.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_enable_missing_artifact_404(self, client, tmp_path):
+        r = await client.post("/api/context/agents/ghost/versions/enable", json={})
+        assert r.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_enable_non_shared_tier_400(self, client, tmp_path):
+        _make_flat_agent(tmp_path, "legacy")
+        r = await client.post(
+            "/api/context/agents/legacy/versions/enable?target_scope=project_local", json={}
+        )
+        assert r.status_code == 400
+        assert "project_shared" in r.json()["detail"]
+
+    @pytest.mark.anyio
+    async def test_enable_flat_dir_collision_409(self, client, tmp_path):
+        """Both flat + dir present: the dir is already versionable, but the stray
+        flat sibling is an unresolved collision — refuse rather than report a
+        misleading idempotent success (Codex Blocker)."""
+        _make_flat_agent(tmp_path, "dup")
+        _make_dir_agent(tmp_path, "dup")
+        r = await client.post("/api/context/agents/dup/versions/enable", json={})
+        assert r.status_code == 409
+        assert "collision" in r.json()["detail"].lower()
+        # Neither side touched.
+        assert (tmp_path / ".memtomem" / "agents" / "dup.md").exists()
+        assert (tmp_path / ".memtomem" / "agents" / "dup" / "agent.md").exists()
+
+    @pytest.mark.anyio
+    async def test_enable_refuses_orphaned_version_store_409(self, client, tmp_path):
+        """A flat artifact whose target dir already holds a versions.json (orphaned
+        from a prior same-named artifact) must not be adopted into it — else it
+        inherits stale version history (Codex Major 2)."""
+        flat = _make_flat_agent(tmp_path, "reborn")
+        orphan_dir = tmp_path / ".memtomem" / "agents" / "reborn"
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        (orphan_dir / "versions.json").write_text(
+            '{"versions": {"v1": {"created_at": "", "note": ""}}, "labels": {}}',
+            encoding="utf-8",
+        )
+        r = await client.post("/api/context/agents/reborn/versions/enable", json={})
+        assert r.status_code == 409
+        assert "orphan" in r.json()["detail"].lower()
+        assert flat.exists()  # flat not consumed
+        assert not (orphan_dir / "agent.md").exists()  # nothing adopted in
+
+    @pytest.mark.anyio
+    async def test_enable_concurrent_is_idempotent_no_404(self, client, tmp_path):
+        """Two concurrent enables must not 404 the loser: resolving + adopting
+        under the gateway lock means exactly one adopts (migrated:true) and the
+        other re-resolves to dir (migrated:false), both 200 (Codex Major 1)."""
+        _make_flat_agent(tmp_path, "racer")
+        r1, r2 = await asyncio.gather(
+            client.post("/api/context/agents/racer/versions/enable", json={}),
+            client.post("/api/context/agents/racer/versions/enable", json={}),
+        )
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert sorted([r1.json()["migrated"], r2.json()["migrated"]]) == [False, True]
+        assert (tmp_path / ".memtomem" / "agents" / "racer" / "agent.md").is_file()
+        assert not (tmp_path / ".memtomem" / "agents" / "racer.md").exists()

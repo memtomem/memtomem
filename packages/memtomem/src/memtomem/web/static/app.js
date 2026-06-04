@@ -1462,17 +1462,32 @@ function switchSettingsSection(sectionName) {
   try { localStorage.setItem(LAST_SECTION_KEY, sectionName); } catch {}
   document.querySelectorAll('.settings-nav-btn').forEach(b => {
     b.classList.remove('active');
-    b.setAttribute('aria-selected', 'false');
+    // ``.settings-nav`` is a navigation list (role-less <nav>), not a tablist
+    // (rank 14): the group headers are interactive collapse toggles, which a
+    // strict ARIA tablist may not contain. Mark the active entry with
+    // ``aria-current="page"`` — the standard nav-selection cue — instead of
+    // ``aria-selected``, which only belongs on a role=tab.
+    b.removeAttribute('aria-current');
   });
   document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
   const btn = document.querySelector(`.settings-nav-btn[data-section="${sectionName}"]`);
   const section = document.getElementById(`settings-${sectionName}`);
   if (btn) {
     btn.classList.add('active');
-    btn.setAttribute('aria-selected', 'true');
+    btn.setAttribute('aria-current', 'page');
   }
   if (section) section.classList.add('active');
   ensureActiveGroupExpanded(sectionName);
+  // rank 11: repaint the persistent gateway control bar synchronously on every
+  // gateway section switch. Its visibility (hidden on the Projects portal) and
+  // selection must update the instant the section flips — the async loader below
+  // also repaints it post-fetch, but this synchronous call avoids a stale or
+  // wrong-section bar in the interim (and hides it immediately on ctx-projects,
+  // which has no loader that touches the bar). Guarded for non-gateway sections
+  // and for script load order (context-gateway.js defines _ctxRenderControlBar).
+  if (GATEWAY_SECTIONS.has(sectionName) && typeof _ctxRenderControlBar === 'function') {
+    _ctxRenderControlBar();
+  }
   // Section-specific loads (reuse existing functions)
   if (sectionName === 'config') loadConfig();
   if (sectionName === 'namespaces') loadNamespacesTab();

@@ -624,9 +624,14 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     assert "ctx-overview-runtimes" in cg_js, (
         "Context Gateway runtime tags disappeared from the prod overview header."
     )
+    # rank 11 hoisted the active-project + tier controls out of the overview
+    # body into the shared ``#ctx-control-bar`` header, so the old
+    # ``html += _ctxTierControls('overview')`` marker is gone — bound the
+    # runtime-chips region on the grid open instead (the next thing emitted
+    # after the header block).
     runtime_block = cg_js[
         cg_js.find("const runtimes = Array.isArray(data.detected_runtimes)") : cg_js.find(
-            "html += _ctxTierControls('overview')"
+            "html += '<div class=\"ctx-overview-grid\">'"
         )
     ]
     assert "STATE.uiMode" not in runtime_block, (
@@ -636,7 +641,10 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     hooks_js = _read_static("settings-hooks-watchdog.js")
     assert "_hooksScopedUrl('/api/settings-sync')" in hooks_js
     assert "_hooksScopedUrl('/api/context/settings/resolve')" in hooks_js
-    assert "_ctxTierControls('hooks-sync')" in hooks_js
+    # rank 11: the Hooks tier control moved to the shared gateway header bar;
+    # loadHooksSync now paints it via _ctxRenderControlBar() (which self-sources
+    # the active section) instead of emitting _ctxTierControls inline.
+    assert "_ctxRenderControlBar()" in hooks_js
     assert "let _hooksSyncSeq = 0;" in hooks_js
     assert "const requestedScope = _hooksCurrentTargetScope();" in hooks_js
     assert "seq !== _hooksSyncSeq" in hooks_js
