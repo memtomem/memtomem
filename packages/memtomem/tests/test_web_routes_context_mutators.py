@@ -18,6 +18,7 @@ The matrix runs each test across agents / commands / skills via
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -113,6 +114,11 @@ TYPE_MATRIX = [
             "create_body": lambda n: {"name": n, "content": _agent_content(n)},
             "manifest": lambda root, n: root / ".memtomem" / "agents" / f"{n}.md",
             "make_canonical": _make_canonical_agent,
+            # Where a route-CREATED artifact's working file lands. ``manifest``
+            # above is the legacy *flat* location used by make_canonical-seeded
+            # tests; ADR-0022 create now writes the versioned *dir* layout.
+            "created_working": lambda root, n: root / ".memtomem" / "agents" / n / "agent.md",
+            "versioned": True,
         },
         id="agents",
     ),
@@ -124,6 +130,8 @@ TYPE_MATRIX = [
             "create_body": lambda n: {"name": n, "content": _command_content()},
             "manifest": lambda root, n: root / ".memtomem" / "commands" / f"{n}.md",
             "make_canonical": _make_canonical_command,
+            "created_working": lambda root, n: root / ".memtomem" / "commands" / n / "command.md",
+            "versioned": True,
         },
         id="commands",
     ),
@@ -135,6 +143,10 @@ TYPE_MATRIX = [
             "create_body": lambda n: {"name": n, "content": _skill_content()},
             "manifest": lambda root, n: root / ".memtomem" / "skills" / n / SKILL_MANIFEST,
             "make_canonical": _make_canonical_skill,
+            # Skills are already dir-based but are NOT ADR-0022 versioned
+            # (a skill's "version" is a whole-tree snapshot, not a single .md).
+            "created_working": lambda root, n: root / ".memtomem" / "skills" / n / SKILL_MANIFEST,
+            "versioned": False,
         },
         id="skills",
     ),
@@ -187,7 +199,69 @@ async def test_POST_accepts_valid_name(
 ):
     r = await client.post(adapter["list_url"], json=adapter["create_body"]("my-artifact.v2"))
     assert r.status_code == 200
-    assert adapter["manifest"](gateway_root, "my-artifact.v2").is_file()
+    working = adapter["created_working"](gateway_root, "my-artifact.v2")
+    assert working.is_file()
+    if adapter["versioned"]:
+        # ADR-0022: agents/commands are created in versioned directory layout
+        # (working file + versions/v1.md + manifest), not a flat file — so the
+        # detail panel can version them immediately (see
+        # test_POST_create_is_immediately_versionable) instead of dead-ending on
+        # a ``mm context migrate`` hint that then skips the file as a manual flat.
+        adir = working.parent
+        assert (adir / "versions" / "v1.md").is_file()
+        manifest = json.loads((adir / "versions.json").read_text(encoding="utf-8"))
+        assert set(manifest["versions"]) == {"v1"}
+        assert manifest.get("labels", {}) == {}
+
+
+VERSIONED_TYPE_MATRIX = [p for p in TYPE_MATRIX if p.values[0]["versioned"]]
+
+
+@pytest.mark.parametrize("adapter", VERSIONED_TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_POST_create_is_immediately_versionable(adapter: dict, client: AsyncClient):
+    """ADR-0022 split-brain regression (Codex BLOCKER).
+
+    A web-created agent/command is born in versioned dir layout, so snapshotting
+    the next version via ``POST .../versions`` returns ``v2`` instead of the old
+    flat-file dead-end (409 "flat layout — run ``mm context migrate``", which the
+    migrate then skips as an unowned manual flat).
+    """
+    r = await client.post(adapter["list_url"], json=adapter["create_body"]("ver-me"))
+    assert r.status_code == 200
+    rv = await client.post(adapter["detail"]("ver-me") + "/versions", json={"note": "second"})
+    assert rv.status_code == 200, rv.text
+    assert rv.json()["version"]["tag"] == "v2"
+
+
+@pytest.mark.parametrize("adapter", VERSIONED_TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_POST_invalid_utf8_content_leaves_no_orphan_dir(
+    adapter: dict, client: AsyncClient, gateway_root: Path
+):
+    """A lone-surrogate body can't be UTF-8 encoded.
+
+    The encode happens before any ``mkdir``, so create rejects it with 400 and
+    leaves no artifact directory behind — a later valid create for the same name
+    must not be wedged on the orphan-dir 409 guard. (Regression: an earlier
+    revision encoded after mkdir, leaking an orphan dir.)
+
+    The lone surrogate is sent as already-escaped JSON (``\\ud800`` is plain
+    ASCII on the wire) so the failure happens server-side at our encode, not in
+    the client's request serializer.
+    """
+    raw_body = '{"name": "surrogate", "content": "\\ud800"}'
+    r = await client.post(
+        adapter["list_url"],
+        content=raw_body,
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 400, r.text
+    working = adapter["created_working"](gateway_root, "surrogate")
+    assert not working.parent.exists(), f"{adapter['type']}: orphan artifact dir left behind"
+    # Retry with valid content must succeed (not 409-wedge on a stale dir).
+    ok = await client.post(adapter["list_url"], json=adapter["create_body"]("surrogate"))
+    assert ok.status_code == 200, ok.text
 
 
 @pytest.mark.parametrize("adapter", TYPE_MATRIX)
@@ -259,10 +333,15 @@ async def test_POST_atomic_on_replace_failure_leaves_no_canonical_file(
     gateway_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """If ``os.replace`` fails during POST create, the target file does not
+    """If ``os.replace`` fails during POST create, the working file does not
     exist and no ``.<name>.*.tmp`` sibling is left behind. Symmetric to the
     PUT atomicity test above — proves create goes through atomic_write_text
     on all three route types.
+
+    For the versioned (dir-layout) types it additionally pins the ADR-0022
+    rollback: a failed create must not leave an orphan artifact directory that
+    would wedge every retry on the orphan-dir 409 guard — a retry once the
+    transient failure clears must succeed.
     """
     import memtomem.context._atomic as _atomic
 
@@ -277,11 +356,21 @@ async def test_POST_atomic_on_replace_failure_leaves_no_canonical_file(
             json=adapter["create_body"]("fresh-one"),
         )
 
-    target = adapter["manifest"](gateway_root, "fresh-one")
-    assert not target.exists(), f"{adapter['type']}: partial file was created"
-    if target.parent.exists():
-        leftover = list(target.parent.glob(f".{target.name}.*.tmp"))
+    working = adapter["created_working"](gateway_root, "fresh-one")
+    assert not working.exists(), f"{adapter['type']}: partial file was created"
+    if working.parent.exists():
+        leftover = list(working.parent.glob(f".{working.name}.*.tmp"))
         assert leftover == [], f"{adapter['type']}: tempfile leaked: {leftover}"
+
+    if adapter["versioned"]:
+        # The whole artifact dir must be rolled back (not just the working file),
+        # else the orphan-dir 409 guard turns every retry into a permanent wedge.
+        assert not working.parent.exists(), (
+            f"{adapter['type']}: orphan artifact dir left behind — retry would 409"
+        )
+        monkeypatch.undo()
+        retry = await client.post(adapter["list_url"], json=adapter["create_body"]("fresh-one"))
+        assert retry.status_code == 200, f"{adapter['type']}: retry after rollback failed"
 
 
 # ---------------------------------------------------------------------------
