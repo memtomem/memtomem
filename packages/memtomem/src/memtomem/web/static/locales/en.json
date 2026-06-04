@@ -524,6 +524,8 @@
   "settings.ctx.versions.freeze_success": "Froze as {tag}: {name}",
   "settings.ctx.versions.promote_success": "Promoted {label} → {tag}",
   "settings.ctx.versions.remove_label_success": "Removed label: {label}",
+  "settings.ctx.versions.list_chip_tooltip": "Label {label} → version {tag}. Manage versions in the detail panel.",
+  "settings.ctx.versions.list_chip_aria": "label {label} at version {tag}",
   "settings.hooks.detail.event": "Event",
   "settings.hooks.detail.matcher": "Matcher",
   "settings.hooks.detail.command": "Command",

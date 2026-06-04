@@ -33,6 +33,7 @@ from memtomem.web.routes.context_projects import (
     resolve_scope_root_cascade_gated,
     resolve_writable_scope_root,
 )
+from memtomem.web.routes.context_versions import include_has, version_summary
 from memtomem.web.routes._locks import _gateway_lock
 
 # Flat list of project-relative runtime scan paths reported on list / import
@@ -120,8 +121,17 @@ async def list_agents(
             "when explicitly requested."
         ),
     ),
+    include: str | None = Query(
+        None,
+        description=(
+            "Comma-separated optional enrichments. ``versions`` adds a per-item "
+            "``versions`` summary (label pointers + count) to feed the list-card "
+            "chips (ADR-0022 PR4); omitted by default so the list stays I/O-free."
+        ),
+    ),
 ) -> dict:
     """List canonical agents. Accepts project selector aliases like list_skills."""
+    want_versions = include_has(include, "versions")
     canonicals = list_canonical_agents(project_root, scope=target_scope)
     diffs = diff_agents(project_root, scope=target_scope)
 
@@ -134,25 +144,34 @@ async def list_agents(
     for agent_path, layout in canonicals:
         name = canonical_agent_name(agent_path, layout)
         canonical_names.add(name)
-        agents.append(
-            {
-                "name": name,
-                "canonical_path": _safe_rel(agent_path, project_root),
-                "target_scope": target_scope,
-                "runtimes": by_name.get(name, []),
-            }
-        )
+        item: dict[str, object] = {
+            "name": name,
+            "canonical_path": _safe_rel(agent_path, project_root),
+            "target_scope": target_scope,
+            "runtimes": by_name.get(name, []),
+        }
+        if want_versions:
+            item["versions"] = version_summary(agent_path, layout)
+        agents.append(item)
 
     for agent_name, runtimes in by_name.items():
         if agent_name not in canonical_names:
-            agents.append(
-                {
-                    "name": agent_name,
-                    "canonical_path": None,
-                    "target_scope": target_scope,
-                    "runtimes": runtimes,
+            item = {
+                "name": agent_name,
+                "canonical_path": None,
+                "target_scope": target_scope,
+                "runtimes": runtimes,
+            }
+            if want_versions:
+                # Runtime-only: no canonical file → nothing to version and no
+                # store to migrate. Keep the four-key shape for the JS reader.
+                item["versions"] = {
+                    "labels": {},
+                    "count": 0,
+                    "versionable": False,
+                    "migrate_required": False,
                 }
-            )
+            agents.append(item)
 
     return {
         "agents": agents,

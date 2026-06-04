@@ -45,6 +45,17 @@ def _open_skills_list(page) -> None:
     )
 
 
+def _open_agents_list(page) -> None:
+    """Navigate to the Agents sub-section of Context Gateway (ADR-0022 PR4 chips
+    live only on agents + commands, never skills)."""
+    page.evaluate("() => activateTab('settings')")
+    page.evaluate("() => switchSettingsSection('ctx-agents')")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#ctx-agents-list .ctx-scope-group').length > 0",
+        timeout=5_000,
+    )
+
+
 # Single-scope CWD payload with one out-of-sync canonical skill (so
 # ``renderRuntimeBadges`` has something to label) plus a non-cwd scope
 # carrying the ``missing`` flag (so ``_ctxScopeBadges`` renders).
@@ -274,6 +285,105 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     assert "project_local" in text
     assert "no runtime fan-out" in text
     assert card_name.locator(".badge-tier--project_local").count() == 1
+
+
+# ADR-0022 PR4: cwd scope carrying one versioned agent. ``counts.agents >= 1``
+# so the agents section's cwd group lazily fetches the list.
+_CWD_PROJECTS_AGENTS = {
+    "scopes": [
+        {
+            "scope_id": "cwd-scope",
+            "label": "cwd",
+            "root": "/srv/cwd",
+            "tier": "user",
+            "sources": ["server-cwd"],
+            "experimental": False,
+            "missing": False,
+            "counts": {"skills": 0, "commands": 0, "agents": 1},
+        },
+    ]
+}
+
+# Enriched agents list payload as ``?include=versions`` would return it: one
+# canonical agent with two label pointers landing on frozen versions.
+_CWD_AGENTS_WITH_LABELS = {
+    "agents": [
+        {
+            "name": "reviewer",
+            "canonical_path": "/srv/cwd/.memtomem/agents/reviewer/agent.md",
+            "target_scope": "user",
+            "runtimes": [{"runtime": "claude_agents", "status": "in sync"}],
+            "versions": {
+                "labels": {"production": "v2", "staging": "v1"},
+                "count": 2,
+                "versionable": True,
+                "migrate_required": False,
+            },
+        }
+    ],
+    "scanned_dirs": ["/srv/cwd/.claude/agents/"],
+}
+
+
+def test_pr4_list_card_renders_label_chips_and_requests_include_versions(
+    page, mm_web_url: str
+) -> None:
+    """End-to-end pin for ADR-0022 PR4: the agents list is fetched with
+    ``?include=versions`` and the per-item label map renders read-only
+    ``production → v2`` chips on the card (with SR parity via aria-label).
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_AGENTS)
+
+    agents_calls: list[str] = []
+
+    def _agents_handler(route):
+        agents_calls.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_CWD_AGENTS_WITH_LABELS),
+        )
+
+    page.route("**/api/context/agents**", _agents_handler)
+    page.goto(mm_web_url)
+    _open_agents_list(page)
+
+    page.wait_for_selector(
+        "#ctx-agents-list details[data-scope-id='cwd-scope'] "
+        ".ctx-card[data-name='reviewer'] .ctx-card-label-chip",
+        timeout=5_000,
+    )
+    chips = page.locator(
+        "#ctx-agents-list details[data-scope-id='cwd-scope'] "
+        ".ctx-card[data-name='reviewer'] .ctx-card-label-chip"
+    )
+    assert chips.count() == 2, f"expected 2 label chips, got {chips.count()}"
+
+    prod = page.locator(
+        "#ctx-agents-list .ctx-card[data-name='reviewer'] "
+        ".ctx-card-label-chip[data-label='production']"
+    )
+    prod_text = (prod.text_content() or "").replace(" ", "")
+    assert "production" in prod_text and "v2" in prod_text, (
+        f"production chip should read 'production → v2', got {prod_text!r}"
+    )
+
+    # The enrichment must actually be requested for the agents list — the chips
+    # have no other data source.
+    assert any("include=versions" in u for u in agents_calls), (
+        f"agents list must be fetched with ?include=versions; got {agents_calls!r}"
+    )
+
+    # SR parity: the clickable card echoes the pointers into its aria-label
+    # (which overrides the visible chip text for assistive tech).
+    aria = (
+        page.locator("#ctx-agents-list .ctx-card[data-name='reviewer']").get_attribute("aria-label")
+        or ""
+    )
+    assert "production" in aria and "v2" in aria, (
+        f"card aria-label should echo the label pointers, got {aria!r}"
+    )
 
 
 def test_context_list_non_shared_tier_click_threads_target_scope(page, mm_web_url: str) -> None:

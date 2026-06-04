@@ -63,6 +63,31 @@ function renderDroppedChips(fields) {
   return fields.map(f => `<span class="ctx-dropped-chip">${escapeHtml(t('settings.ctx.dropped_fields'))}: ${escapeHtml(f)}</span>`).join('');
 }
 
+// ADR-0022 PR4: read-only ``production → v2`` label chips for a list card,
+// fed by the ``?include=versions`` enrichment (``item.versions.labels``). Chips
+// are informational only — freeze / promote / remove live in the detail panel
+// (PR3), so there is intentionally NO interactive element inside a card that is
+// itself ``role=button`` (avoids the nested-interactive trap). ``versionInfo``
+// is the per-item ``versions`` summary object; absent (no enrichment) or empty
+// labels render nothing. Server emits labels already alphabetically sorted, so
+// ``Object.keys`` insertion order is stable across reloads.
+function renderLabelChips(versionInfo) {
+  const labels = versionInfo && versionInfo.labels;
+  if (!labels) return '';
+  const names = Object.keys(labels);
+  if (!names.length) return '';
+  const chips = names.map((name) => {
+    const tag = labels[name];
+    const tip = t('settings.ctx.versions.list_chip_tooltip', { label: name, tag });
+    return `<span class="ctx-card-label-chip" data-label="${escapeHtml(name)}" title="${escapeHtml(tip)}">`
+      + `<span class="ctx-card-label-name">${escapeHtml(name)}</span>`
+      + `<span class="ctx-card-label-arrow" aria-hidden="true">→</span>`
+      + `<span class="ctx-card-label-tag">${escapeHtml(tag)}</span>`
+      + `</span>`;
+  }).join('');
+  return `<div class="ctx-card-labels">${chips}</div>`;
+}
+
 function renderImportResult(data) {
   let html = `<div class="ctx-import-result">`;
   html += `<div class="ctx-import-priority">${t('settings.ctx.import_priority')}</div>`;
@@ -2407,7 +2432,16 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
         statusSet.add(_ctxStatusText('missing canonical'));
       }
       const statusParts = Array.from(statusSet);
-      const suffix = statusParts.length ? ` — ${statusParts.join(', ')}` : '';
+      // Append label pointers (``production at v2``) so the SR string matches the
+      // visible chips. A clickable card carries an ``aria-label``, which OVERRIDES
+      // the visible chip text for assistive tech — chips not echoed here would be
+      // invisible to SR (same reasoning as the status suffix above). The arrow
+      // glyph in the visible chip is ``aria-hidden``; this uses a word phrasing.
+      const ariaLabels = (item.versions && item.versions.labels) || {};
+      const labelParts = Object.keys(ariaLabels).map((l) =>
+        t('settings.ctx.versions.list_chip_aria', { label: l, tag: ariaLabels[l] }));
+      const parts = statusParts.concat(labelParts);
+      const suffix = parts.length ? ` — ${parts.join(', ')}` : '';
       cardAriaLabel = ` aria-label="${escapeHtml(item.name + suffix)}"`;
     }
     html += `<div class="${cardClass}"${a11yAttrs}${cardAriaLabel} data-name="${escapeHtml(item.name)}"${canonAttr} data-out-of-sync="${outOfSync}"${statusesAttr}>
@@ -2418,6 +2452,7 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
         </div>
         ${renderRuntimeBadges(item.runtimes)}
       </div>
+      ${renderLabelChips(item.versions)}
     </div>`;
   }
   return html;
@@ -2431,6 +2466,11 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     if (scope && scope.scope_id && !_ctxScopeIsServerCwd(scope)) {
       params.set('scope_id', scope.scope_id);
     }
+    // ADR-0022 PR4: only agents + commands carry a version store (skills are
+    // out of v1, inv 7), so request the per-item ``versions`` enrichment for the
+    // label chips only there. The skills list route has no ``include`` param and
+    // would ignore it, but gating keeps the wire honest about what's versionable.
+    if (type === 'agents' || type === 'commands') params.set('include', 'versions');
     const query = params.toString();
     const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);

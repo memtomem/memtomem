@@ -32,6 +32,7 @@ from memtomem.web.routes.context_projects import (
     resolve_scope_root_cascade_gated,
     resolve_writable_scope_root,
 )
+from memtomem.web.routes.context_versions import include_has, version_summary
 from memtomem.web.routes._locks import _gateway_lock
 
 # Flat list of project-relative runtime scan paths reported on list / import
@@ -107,8 +108,17 @@ async def list_commands(
             "when explicitly requested."
         ),
     ),
+    include: str | None = Query(
+        None,
+        description=(
+            "Comma-separated optional enrichments. ``versions`` adds a per-item "
+            "``versions`` summary (label pointers + count) to feed the list-card "
+            "chips (ADR-0022 PR4); omitted by default so the list stays I/O-free."
+        ),
+    ),
 ) -> dict:
     """List canonical commands. Accepts project selector aliases like list_skills."""
+    want_versions = include_has(include, "versions")
     canonicals = list_canonical_commands(project_root, scope=target_scope)
     diffs = diff_commands(project_root, scope=target_scope)
 
@@ -121,25 +131,34 @@ async def list_commands(
     for cmd_path, layout in canonicals:
         name = canonical_command_name(cmd_path, layout)
         canonical_names.add(name)
-        commands.append(
-            {
-                "name": name,
-                "canonical_path": _safe_rel(cmd_path, project_root),
-                "target_scope": target_scope,
-                "runtimes": by_name.get(name, []),
-            }
-        )
+        item: dict[str, object] = {
+            "name": name,
+            "canonical_path": _safe_rel(cmd_path, project_root),
+            "target_scope": target_scope,
+            "runtimes": by_name.get(name, []),
+        }
+        if want_versions:
+            item["versions"] = version_summary(cmd_path, layout)
+        commands.append(item)
 
     for cmd_name, runtimes in by_name.items():
         if cmd_name not in canonical_names:
-            commands.append(
-                {
-                    "name": cmd_name,
-                    "canonical_path": None,
-                    "target_scope": target_scope,
-                    "runtimes": runtimes,
+            item = {
+                "name": cmd_name,
+                "canonical_path": None,
+                "target_scope": target_scope,
+                "runtimes": runtimes,
+            }
+            if want_versions:
+                # Runtime-only: no canonical file → nothing to version and no
+                # store to migrate. Keep the four-key shape for the JS reader.
+                item["versions"] = {
+                    "labels": {},
+                    "count": 0,
+                    "versionable": False,
+                    "migrate_required": False,
                 }
-            )
+            commands.append(item)
 
     return {
         "commands": commands,

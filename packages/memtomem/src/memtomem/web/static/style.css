@@ -3830,6 +3830,16 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-card-header { display: flex; align-items: center; justify-content: space-between; }
 .ctx-card-name { font-weight: 600; font-size: 0.9rem; }
 .ctx-card-path { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+/* ADR-0022 PR4: read-only label chips (production → v2) on a list card. Pill
+   shape is derived from the detail panel's ``.ctx-version-label-chip`` (same
+   accent pill), sized at 0.68rem to match the sibling ``.ctx-runtime-badge`` on
+   the same card — the denser list card runs a notch under the detail panel's
+   0.72rem chip. */
+.ctx-card-labels { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
+.ctx-card-label-chip { display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 12px; background: rgba(90, 160, 224, 0.14); color: var(--accent); font-size: 0.68rem; font-weight: 600; }
+.ctx-card-label-name { white-space: nowrap; }
+.ctx-card-label-arrow { opacity: 0.65; }
+.ctx-card-label-tag { font-family: var(--mono); }
 
 /* PR2 multi-project: collapsible scope groups, mirroring memory-dirs-group. */
 .ctx-scope-group { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 8px; }

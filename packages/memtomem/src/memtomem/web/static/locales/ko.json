@@ -524,6 +524,8 @@
   "settings.ctx.versions.freeze_success": "버전 고정 완료 ({tag}): {name}",
   "settings.ctx.versions.promote_success": "배포 완료: {label} → {tag}",
   "settings.ctx.versions.remove_label_success": "라벨 제거됨: {label}",
+  "settings.ctx.versions.list_chip_tooltip": "라벨 {label} → 버전 {tag}. 상세 패널에서 버전을 관리하세요.",
+  "settings.ctx.versions.list_chip_aria": "라벨 {label}, 버전 {tag}",
   "settings.hooks.detail.event": "이벤트",
   "settings.hooks.detail.matcher": "매처",
   "settings.hooks.detail.command": "명령",

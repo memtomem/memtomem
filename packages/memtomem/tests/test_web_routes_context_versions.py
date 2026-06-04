@@ -16,6 +16,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from memtomem.context import versioning
+from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.web.app import create_app
 
 
@@ -72,6 +73,27 @@ def _make_dir_command(tmp_path: Path, name: str) -> Path:
     return d
 
 
+def _make_dir_skill(tmp_path: Path, name: str) -> Path:
+    """Directory-layout skill: ``.memtomem/skills/<name>/<SKILL_MANIFEST>``.
+
+    Skills are out of versioning (ADR-0022 inv 7); used only to give the skills
+    LIST a non-empty payload for the ``?include=versions`` no-op assertion.
+    """
+    d = tmp_path / ".memtomem" / "skills" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / SKILL_MANIFEST).write_text(
+        f"---\nname: {name}\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    return d
+
+
+def _by_name(items: list[dict], name: str) -> dict:
+    for it in items:
+        if it["name"] == name:
+            return it
+    raise AssertionError(f"{name!r} not in list: {[i['name'] for i in items]}")
+
+
 # ---------------------------------------------------------------------------
 # List
 # ---------------------------------------------------------------------------
@@ -115,6 +137,143 @@ class TestListVersions:
     async def test_missing_artifact_404(self, client, tmp_path):
         r = await client.get("/api/context/agents/ghost/versions")
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# include_has — comma-separated ?include= parsing (pure)
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeHas:
+    @pytest.mark.parametrize(
+        "include,expected",
+        [
+            (None, False),
+            ("", False),
+            ("versions", True),
+            ("foo,versions", True),
+            ("foo, versions ", True),  # whitespace-tolerant
+            ("versions,bar", True),
+            ("versionsx", False),  # substring is not a member
+            ("ver", False),
+            ("foo,bar", False),
+        ],
+    )
+    def test_membership(self, include, expected):
+        from memtomem.web.routes.context_versions import include_has
+
+        assert include_has(include, "versions") is expected
+
+
+# ---------------------------------------------------------------------------
+# List-card enrichment (?include=versions) — ADR-0022 PR4
+# ---------------------------------------------------------------------------
+
+
+class TestListIncludeVersions:
+    @pytest.mark.anyio
+    async def test_no_include_omits_versions_key(self, client, tmp_path):
+        """Default list path is unchanged — no per-item ``versions`` key, so
+        existing callers and the wire shape stay byte-compatible."""
+        _make_dir_agent(tmp_path, "reviewer")
+        r = await client.get("/api/context/agents")
+        assert r.status_code == 200
+        items = r.json()["agents"]
+        assert items and all("versions" not in it for it in items)
+
+    @pytest.mark.anyio
+    async def test_include_versions_dir_agent_empty_store(self, client, tmp_path):
+        _make_dir_agent(tmp_path, "reviewer")
+        r = await client.get("/api/context/agents?include=versions")
+        assert r.status_code == 200
+        item = _by_name(r.json()["agents"], "reviewer")
+        assert item["versions"] == {
+            "labels": {},
+            "count": 0,
+            "versionable": True,
+            "migrate_required": False,
+        }
+
+    @pytest.mark.anyio
+    async def test_include_versions_reflects_labels_and_count(self, client, tmp_path):
+        _make_dir_agent(tmp_path, "reviewer")
+        await client.post("/api/context/agents/reviewer/versions", json={})  # v1
+        await client.post("/api/context/agents/reviewer/versions", json={})  # v2
+        await client.put("/api/context/agents/reviewer/labels/production", json={"version": "v2"})
+        await client.put("/api/context/agents/reviewer/labels/staging", json={"version": "v1"})
+        r = await client.get("/api/context/agents?include=versions")
+        item = _by_name(r.json()["agents"], "reviewer")
+        assert item["versions"]["labels"] == {"production": "v2", "staging": "v1"}
+        assert item["versions"]["count"] == 2
+        assert item["versions"]["versionable"] is True
+        assert item["versions"]["migrate_required"] is False
+
+    @pytest.mark.anyio
+    async def test_include_versions_flat_agent_migrate_required(self, client, tmp_path):
+        _make_flat_agent(tmp_path, "legacy")
+        r = await client.get("/api/context/agents?include=versions")
+        item = _by_name(r.json()["agents"], "legacy")
+        assert item["versions"]["versionable"] is False
+        assert item["versions"]["migrate_required"] is True
+        assert item["versions"]["labels"] == {}
+        assert item["versions"]["count"] == 0
+
+    @pytest.mark.anyio
+    async def test_corrupt_manifest_isolated_not_500(self, client, tmp_path):
+        """One unreadable ``versions.json`` must not 500 the list nor hide a
+        healthy sibling's labels (per-artifact isolation, like a sync skip)."""
+        _make_dir_agent(tmp_path, "good")
+        bad = _make_dir_agent(tmp_path, "bad")
+        await client.post("/api/context/agents/good/versions", json={})  # v1
+        await client.put("/api/context/agents/good/labels/production", json={"version": "v1"})
+        # Wrong JSON shape → VersionError on load_manifest.
+        (bad / "versions.json").write_text("[]", encoding="utf-8")
+
+        r = await client.get("/api/context/agents?include=versions")
+        assert r.status_code == 200
+        good_item = _by_name(r.json()["agents"], "good")
+        bad_item = _by_name(r.json()["agents"], "bad")
+        assert good_item["versions"]["labels"] == {"production": "v1"}
+        assert bad_item["versions"]["labels"] == {}
+        assert bad_item["versions"]["error"] is True
+        assert bad_item["versions"]["count"] == 0
+
+    @pytest.mark.anyio
+    async def test_include_versions_commands_too(self, client, tmp_path):
+        _make_dir_command(tmp_path, "deploy")
+        await client.post("/api/context/commands/deploy/versions", json={})  # v1
+        await client.put("/api/context/commands/deploy/labels/production", json={"version": "v1"})
+        r = await client.get("/api/context/commands?include=versions")
+        assert r.status_code == 200
+        item = _by_name(r.json()["commands"], "deploy")
+        assert item["versions"]["labels"] == {"production": "v1"}
+        assert item["versions"]["count"] == 1
+        assert item["versions"]["versionable"] is True
+
+    @pytest.mark.anyio
+    async def test_no_include_omits_versions_key_commands(self, client, tmp_path):
+        """Mirror of the agents default-path pin for commands — the byte-identical
+        per-route enrichment guard must keep the no-include wire shape (the two
+        routes write the guard independently, so the agents pin alone doesn't
+        protect a regression that drops the commands guard)."""
+        _make_dir_command(tmp_path, "deploy")
+        r = await client.get("/api/context/commands")
+        assert r.status_code == 200
+        items = r.json()["commands"]
+        assert items and all("versions" not in it for it in items)
+
+    @pytest.mark.anyio
+    async def test_skills_list_ignores_include_versions(self, client, tmp_path):
+        """The skills LIST route declares no ``include`` param (skills are out of
+        versioning, inv 7). FastAPI silently ignores an undeclared query param →
+        200, never 422, and no per-item ``versions`` key. Pins the frontend
+        gate's load-bearing assumption that sending the param to skills is a
+        harmless no-op."""
+        _make_dir_skill(tmp_path, "demo")
+        r = await client.get("/api/context/skills?include=versions")
+        assert r.status_code == 200
+        items = r.json()["skills"]
+        assert items and all("versions" not in it for it in items)
 
 
 # ---------------------------------------------------------------------------

@@ -153,6 +153,73 @@ def _require_dir_layout(name: str, layout: Layout) -> None:
         )
 
 
+# ── List-card enrichment (?include=versions) ─────────────────────────────
+#
+# Imported by ``context_agents.list_agents`` / ``context_commands.list_commands``
+# so a single ``GET /context/{type}?include=versions`` can feed the per-card
+# label chips (ADR-0022 PR4) without an N+1 fan-out to the per-artifact
+# ``/versions`` route. Kept here next to ``versioning`` so the list routes stay
+# version-store-agnostic and the eligible-type / dir-layout rules live in one file.
+
+
+def include_has(include: str | None, token: str) -> bool:
+    """True iff *token* appears in a comma-separated ``?include=`` query value.
+
+    Tolerant of surrounding whitespace (``include=versions, foo``) and of the
+    param being absent/empty, so callers branch on a plain bool.
+    """
+    if not include:
+        return False
+    return token in {part.strip() for part in include.split(",")}
+
+
+def version_summary(canonical_path: Path, layout: Layout) -> dict:
+    """Compact per-artifact version summary for ``?include=versions`` enrichment.
+
+    Called once per canonical list item so the list cards can render label chips
+    (``production → v2``) without a round-trip per artifact. The shape always
+    carries the same four keys so the JS reader never has to branch on presence:
+
+    - ``labels`` — ``{label: tag}`` pointer map (empty unless dir-layout w/ labels)
+    - ``count`` — number of frozen versions
+    - ``versionable`` — ``True`` iff a version store can live here (dir layout)
+    - ``migrate_required`` — ``True`` iff a canonical exists but is flat-layout
+      (invariant 3: ``mm context migrate`` first before it can be versioned)
+
+    A flat-layout artifact has no per-artifact home for a ``versions/`` store
+    (invariant 3) → ``versionable=False, migrate_required=True``, no labels. A
+    corrupt ``versions.json`` is isolated per-artifact (``error=True``, empty
+    labels) rather than 500-ing the whole list — mirroring how the sync engine
+    isolates a per-item read/parse failure as a skip instead of aborting the
+    fan-out. The manifest read is unsynchronized (``load_manifest`` takes no
+    lock), matching every other read path against this sidecar.
+    """
+    if layout != "dir":
+        return {"labels": {}, "count": 0, "versionable": False, "migrate_required": True}
+    artifact_dir = canonical_path.parent
+    try:
+        manifest = versioning.load_manifest(artifact_dir)
+    except VersionError:
+        # Name only (not the full path) in the server log — keep the corrupt
+        # sidecar diagnosable without 500-ing the list or leaking the abs path.
+        logger.warning(
+            "versions manifest unreadable for %r; listing without chips", artifact_dir.name
+        )
+        return {
+            "labels": {},
+            "count": 0,
+            "versionable": True,
+            "migrate_required": False,
+            "error": True,
+        }
+    return {
+        "labels": dict(manifest.labels),
+        "count": len(manifest.versions),
+        "versionable": True,
+        "migrate_required": False,
+    }
+
+
 # ── Read ─────────────────────────────────────────────────────────────────
 
 
