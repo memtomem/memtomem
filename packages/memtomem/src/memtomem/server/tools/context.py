@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 import click
 
 from memtomem.config import TargetScope
+from memtomem.context import versioning
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
@@ -16,8 +17,10 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
 
 if TYPE_CHECKING:
+    from memtomem.context._names import Layout
     from memtomem.context.migrate import MigrateRow, MigrateScopeResult
     from memtomem.context.scope_resolver import ArtifactKind
+    from memtomem.context.versioning import VersionsManifest
 
 # Known --include values (mirrors cli.context_cmd._KNOWN_INCLUDES).
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
@@ -82,6 +85,44 @@ def _parse_include(include: str) -> set[str]:
             )
         values.add(token)
     return values
+
+
+# Kinds whose fan-out honors a version label (ADR-0022 v1 scope: agents +
+# commands). Mirrors ``cli.context_cmd._LABEL_ELIGIBLE_KINDS``.
+_LABEL_ELIGIBLE_KINDS: frozenset[str] = frozenset({"agents", "commands"})
+
+
+def _normalize_label(label: str) -> str | None:
+    """MCP ``label`` arg (``str``, default ``""``) → ``generate_all_*``'s
+    ``str | None``. Empty/whitespace → ``None`` (== working file, today's
+    behavior); ``"latest"`` is passed through and also resolves to the working
+    file at the engine boundary (ADR-0022 invariant 2)."""
+    label = label.strip()
+    return label or None
+
+
+def _label_ineligible_notes(label: str | None, inc: set[str]) -> list[str]:
+    """MCP analog of cli ``_warn_label_ineligible_kinds`` (ADR-0022 invariant 10).
+
+    ``label`` governs only agents/commands; ineligible included kinds
+    (skills/settings/project-memory) run label-less, and a label with no
+    eligible kind in ``include`` is a warned no-op (never an error). Returns
+    note lines for the tool output instead of ``click.secho``-ing them.
+    """
+    if label is None or label == "latest":
+        return []
+    notes: list[str] = []
+    ineligible = sorted(inc - _LABEL_ELIGIBLE_KINDS)
+    if ineligible:
+        notes.append(
+            f"  note: label does not apply to {', '.join(ineligible)} "
+            "(only agents/commands are versioned); they sync from the working file."
+        )
+    if not (inc & _LABEL_ELIGIBLE_KINDS):
+        notes.append(
+            f"  note: label={label} had no effect — no versioned kind (agents/commands) in include."
+        )
+    return notes
 
 
 def _validate_on_drop(on_drop: str) -> str:
@@ -476,6 +517,7 @@ async def mem_context_generate(
     on_drop: str = "ignore",
     scope: str = "",
     allow_host_writes: bool = False,
+    label: str = "",
     ctx: CtxType = None,
 ) -> str:
     """Generate agent configuration files from .memtomem/context.md.
@@ -484,6 +526,14 @@ async def mem_context_generate(
         agent: Agent name (claude, cursor, gemini, codex, copilot) or "all".
         include: Comma-separated extra artifact kinds
             (``skills``, ``agents``, ``commands``, ``settings``).
+        label: ADR-0022 — fan out the frozen version at this label
+            (e.g. ``"production"``) or a bare version tag (``"v2"``) for the
+            versioned kinds (``agents`` / ``commands``) instead of the working
+            canonical. ``""`` (default) / ``"latest"`` means the working file
+            (today's behavior, unchanged). Ineligible included kinds run
+            label-less with a note (invariant 10); an unknown/dangling label is
+            isolated as a per-artifact skip, not a whole-run error. Mirrors the
+            CLI ``mm context generate --label``.
         strict: Legacy alias for ``on_drop="error"``. Promotes dropped-field
             warnings to errors when converting sub-agents or slash commands.
             When both are supplied, ``on_drop`` wins unless it is still the
@@ -516,11 +566,12 @@ async def mem_context_generate(
 
     inc = _parse_include(include)
     on_drop = _validate_on_drop(on_drop)
+    label_norm = _normalize_label(label)
     root = _find_project_root()
     artifact_scope = _resolve_artifact_mcp_scope(scope)
     ctx_path = root / CONTEXT_FILENAME
 
-    results: list[str] = []
+    results: list[str] = _label_ineligible_notes(label_norm, inc)
 
     if ctx_path.exists():
         sections = parse_context(ctx_path)
@@ -539,7 +590,9 @@ async def mem_context_generate(
         else:
             results.append(f"{CONTEXT_FILENAME} is empty.")
     elif not inc:
-        return f"{CONTEXT_FILENAME} not found. Create it with 'mm context init'."
+        # Carry any label note through this nothing-to-generate exit (CLI parity).
+        msg = f"{CONTEXT_FILENAME} not found. Create it with 'mm context init'."
+        return "\n".join([*results, msg]) if results else msg
     else:
         results.append(f"({CONTEXT_FILENAME} missing — skipping project memory)")
 
@@ -560,7 +613,7 @@ async def mem_context_generate(
     if "agents" in inc:
         try:
             agent_result = generate_all_agents(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
             )
         except StrictDropError as exc:
             return f"strict error: {exc}"
@@ -583,7 +636,7 @@ async def mem_context_generate(
     if "commands" in inc:
         try:
             command_result = generate_all_commands(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
             )
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
@@ -765,6 +818,7 @@ async def mem_context_sync(
     on_drop: str = "ignore",
     scope: str = "",
     allow_host_writes: bool = False,
+    label: str = "",
     ctx: CtxType = None,
 ) -> str:
     """Sync .memtomem/context.md to all detected agent files.
@@ -788,6 +842,16 @@ async def mem_context_sync(
     ``~/.claude/settings.json``), the tool returns a ``needs confirmation``
     line listing the host path instead of writing. Surface that to the
     user, then re-call with ``allow_host_writes=True`` to proceed.
+
+    ``label`` (ADR-0022) deploys a frozen version instead of the working
+    canonical for the versioned kinds (``agents`` / ``commands``): pass a label
+    (e.g. ``"production"``) or a bare version tag (``"v2"``) created via
+    ``mem_context_version`` / ``mem_context_promote``. ``""`` (default) /
+    ``"latest"`` fans out the working file (byte-for-byte today's behavior).
+    The label applies only to agents/commands — ineligible included kinds run
+    label-less with a note (invariant 10) — and an unknown/dangling label or a
+    flat-layout artifact is isolated as a per-artifact ``skipped`` row, never a
+    whole-run error. Mirrors the CLI ``mm context sync --label``.
     """
     from memtomem.context.agents import StrictDropError, generate_all_agents
     from memtomem.context.commands import (
@@ -802,11 +866,12 @@ async def mem_context_sync(
 
     inc = _parse_include(include)
     on_drop = _validate_on_drop(on_drop)
+    label_norm = _normalize_label(label)
     root = _find_project_root()
     artifact_scope = _resolve_artifact_mcp_scope(scope)
     ctx_path = root / CONTEXT_FILENAME
 
-    results: list[str] = []
+    results: list[str] = _label_ineligible_notes(label_norm, inc)
 
     if ctx_path.exists():
         sections = parse_context(ctx_path)
@@ -833,9 +898,14 @@ async def mem_context_sync(
                     results.append(f"{f.agent}: {gen.output_path}")
                     agents_synced.add(f.agent)
             elif not inc:
-                return "No agent files detected. Use mem_context_generate to create them."
+                # Carry any label note (e.g. "label had no effect") through this
+                # nothing-to-sync exit so a labeled call still warns, matching the
+                # CLI which prints the warning before this terminal message.
+                msg = "No agent files detected. Use mem_context_generate to create them."
+                return "\n".join([*results, msg]) if results else msg
     elif not inc:
-        return f"{CONTEXT_FILENAME} not found. Create it with 'mm context init'."
+        msg = f"{CONTEXT_FILENAME} not found. Create it with 'mm context init'."
+        return "\n".join([*results, msg]) if results else msg
     else:
         results.append(f"({CONTEXT_FILENAME} missing — skipping project memory)")
 
@@ -857,7 +927,7 @@ async def mem_context_sync(
     if "agents" in inc:
         try:
             agent_result = generate_all_agents(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
             )
         except StrictDropError as exc:
             return f"strict error: {exc}"
@@ -881,7 +951,7 @@ async def mem_context_sync(
     if "commands" in inc:
         try:
             command_result = generate_all_commands(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope
+                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
             )
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
@@ -1407,3 +1477,337 @@ async def mem_context_artifact_migrate(
         return "Nothing to migrate."
 
     return await asyncio.to_thread(_run_artifact_flat_apply, project_root, rows, force=force)
+
+
+# ── Version snapshots + label pointers (ADR-0022) ───────────────────────────
+#
+# Headless-agent parity for the ``mm context version`` CLI group
+# (``cli/context_cmd.py``) and the web ``/context/{type}/{name}/versions`` +
+# ``/labels/{label}`` routes (``web/routes/context_versions.py``). A *version*
+# is an immutable snapshot of one artifact's working canonical; a *label*
+# (``production`` / ``staging`` / …) is a movable pointer over versions, where a
+# promote doubles as a rollback. Both tools reuse the SAME pure-filesystem
+# ``context/versioning.py`` store the CLI and web routes use — no logic is
+# re-implemented. agents + commands only (skills are tree-snapshot artifacts,
+# deferred per ADR-0022 invariant 7).
+
+
+def _resolve_version_artifact(
+    artifact_type: str,
+    project_root: Path,
+    raw_name: str,
+    scope: TargetScope,
+) -> tuple[str, Path, Layout]:
+    """Resolve ``(artifact_type, name, scope)`` → ``(name, working_file, layout)``.
+
+    Mirrors the web router's ``_resolve_versionable`` (agents + commands only;
+    skills / unknown types rejected — ADR-0022 invariant 7). Raises
+    ``ValueError`` with a clean, path-free message for an unsupported type, an
+    invalid name (``validate_name``'s ``InvalidNameError`` is a ``ValueError``),
+    or a missing artifact — the caller catches it and returns ``error: …``.
+    """
+    from memtomem.context._names import validate_name
+    from memtomem.context.agents import resolve_canonical_agent
+    from memtomem.context.commands import resolve_canonical_command
+
+    resolvers = {
+        "agents": (resolve_canonical_agent, "agent"),
+        "commands": (resolve_canonical_command, "command"),
+    }
+    entry = resolvers.get(artifact_type)
+    if entry is None:
+        raise ValueError(
+            f"Versioning is not supported for {artifact_type!r} "
+            f"(agents and commands only — skills are deferred, ADR-0022 invariant 7)."
+        )
+    resolver, kind = entry
+    name = validate_name(raw_name, kind=kind)
+    resolved = resolver(project_root, name, scope=scope)
+    if resolved is None:
+        raise ValueError(f"{kind} {name!r} not found")
+    working_file, layout = resolved
+    return name, working_file, layout
+
+
+def _flat_layout_hint(artifact_type: str, name: str) -> str:
+    """The shared "no version store on flat layout" remediation line (inv 3)."""
+    return (
+        f"{artifact_type}/{name} uses flat layout, which has no per-artifact version "
+        f"store. Run mem_context_artifact_migrate(asset_type='{artifact_type}', "
+        f"name='{name}') to convert it to directory layout first."
+    )
+
+
+def _format_version_list(
+    artifact_type: str, name: str, scope: str, manifest: VersionsManifest
+) -> str:
+    """Plain-text version listing (newest first), mirroring the web GET shape
+    and the CLI ``version list`` content."""
+    if not manifest.versions:
+        return f"{artifact_type}/{name} [{scope}]: no versions yet."
+    # Reverse the label map so each version line shows the pointers that land
+    # on it (tag → [labels]).
+    labels_by_tag: dict[str, list[str]] = {}
+    for label, tag in manifest.labels.items():
+        labels_by_tag.setdefault(tag, []).append(label)
+    lines = [f"{artifact_type}/{name} [{scope}] versions (newest first):"]
+    for tag in sorted(manifest.versions, key=lambda t: int(t[1:]), reverse=True):
+        rec = manifest.versions[tag]
+        pointers = labels_by_tag.get(tag, [])
+        suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
+        note = f"  — {rec.note}" if rec.note else ""
+        lines.append(f"  {tag:6s} {rec.created_at}{suffix}{note}")
+    return "\n".join(lines)
+
+
+def _format_label_result(headline: str, manifest: VersionsManifest) -> str:
+    """Append the post-mutation label map to *headline* so the caller sees the
+    full pointer state after a promote / delete (mirrors the web routes echoing
+    ``labels`` in their response)."""
+    if not manifest.labels:
+        return f"{headline}\n  (no labels)"
+    body = "\n".join(f"  {label} → {manifest.labels[label]}" for label in sorted(manifest.labels))
+    return f"{headline}\nLabels:\n{body}"
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_version(
+    artifact_type: str,
+    name: str,
+    action: str = "list",
+    note: str = "",
+    scope: str = "",
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """List or freeze per-artifact version snapshots (ADR-0022).
+
+    Headless-agent parity for the ``mm context version list|create`` CLI
+    commands and the web ``GET/POST /context/{type}/{name}/versions`` routes:
+    freeze a known-good working canonical into an immutable ``versions/vN.md``
+    snapshot, then point a label at it with ``mem_context_promote`` — so
+    editing the canonical and deploying it become two acts with instant
+    rollback. Covers ``agents`` and ``commands`` only (skills are directory-tree
+    artifacts, deferred per ADR-0022 invariant 7).
+
+    Args:
+        artifact_type: ``agents`` or ``commands``. Any other type (including
+            ``skills``) is rejected.
+        name: Canonical artifact name (the directory under
+            ``.memtomem/<type>/``).
+        action: ``list`` (default, read-only) to show versions + label
+            pointers, or ``create`` to freeze the current working canonical
+            into a new ``vN`` snapshot.
+        note: Optional annotation stored with a ``create`` snapshot; ignored
+            for ``list``.
+        scope: ADR-0011 canonical residency tier — ``project_shared``
+            (default), ``user``, or ``project_local``. The user-tier and
+            project_shared ``name`` have independent version histories and
+            label maps (ADR-0022 Decision b); there is no cross-tier lookup.
+        confirm_project_shared: Required for ``action="create"`` when
+            ``scope="project_shared"`` is passed explicitly — the snapshot
+            lands in the git-tracked tree and MCP cannot prompt, so a missing
+            confirmation returns a ``needs confirmation`` line. The implicit
+            default scope does not require it (mirrors ``mem_context_init``).
+
+    A flat-layout artifact has no per-artifact ``versions/`` store (ADR-0022
+    invariant 3): ``list`` returns a benign migrate-required hint and
+    ``create`` refuses with a "run mem_context_artifact_migrate first" error.
+
+    On ``create`` the snapshot bytes are privacy-scanned (Gate A, ADR-0011
+    trust boundary): for ``project_shared`` a secret hard-refuses with a
+    ``privacy block:`` line before ``versions/vN.md`` lands in git-tracked
+    storage; ``user`` / ``project_local`` are permissive (the working file
+    already holds the content locally). Mirrors the CLI ``version create``.
+    Refusals are prefixed (``error:`` / ``needs confirmation:`` /
+    ``privacy block:``) so callers can branch on the prefix.
+    """
+    action = (action or "").strip().lower()
+    if action not in ("list", "create"):
+        return f"error: unknown action {action!r}. Supported: list, create."
+
+    root = await asyncio.to_thread(_find_project_root)
+    scope_explicit = bool(scope.strip())
+    try:
+        artifact_scope = _resolve_artifact_mcp_scope(scope)
+        name, working_file, layout = await asyncio.to_thread(
+            _resolve_version_artifact, artifact_type, root, name, artifact_scope
+        )
+    except ValueError as exc:
+        return f"error: {exc}"
+
+    artifact_dir = working_file.parent
+
+    if action == "list":
+        if layout != "dir":
+            # Benign hint, not an error — parity with the web read route's
+            # ``migrate_required`` flag (the UI hints instead of erroring).
+            return f"{_flat_layout_hint(artifact_type, name)} (no versions yet — migrate to start.)"
+        try:
+            manifest = await asyncio.to_thread(versioning.load_manifest, artifact_dir)
+        except versioning.VersionError as exc:
+            return f"error: {exc}"
+        return _format_version_list(artifact_type, name, artifact_scope, manifest)
+
+    # ── action == "create" ──
+    # Gate B: an explicit project_shared write into the git-tracked tree needs
+    # confirmation MCP cannot prompt for (mirrors mem_context_init / migrate).
+    if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
+        return (
+            "needs confirmation: scope='project_shared' freezes a snapshot into the "
+            "git-tracked tree. Re-call with confirm_project_shared=True to proceed."
+        )
+    if layout != "dir":
+        return f"error: {_flat_layout_hint(artifact_type, name)}"
+
+    # Gate A on the snapshot bytes (mirror cli version_create_cmd): read the
+    # working canonical ONCE and snapshot the SAME bytes via ``source_bytes=`` so
+    # a concurrent edit between scan and write cannot slip unscanned bytes into
+    # versions/vN.md. ``raise_or_collect`` hard-refuses project_shared on a hit
+    # and returns a (ignored) skip tuple for user / project_local — permissive
+    # because the working file already holds the content locally.
+    from memtomem.context.privacy_scan import (
+        PrivacyScanError,
+        raise_or_collect,
+        scan_text_content,
+    )
+
+    try:
+        snapshot_bytes = await asyncio.to_thread(working_file.read_bytes)
+    except OSError as exc:
+        return f"error: cannot read working canonical {working_file}: {exc}"
+    file_scan = await asyncio.to_thread(
+        lambda: scan_text_content(
+            snapshot_bytes.decode("utf-8", errors="replace"),
+            source_path=working_file,
+            surface="mcp_context_version_create",
+            scope=artifact_scope,
+            project_root=root,
+        )
+    )
+    if file_scan.decision in ("blocked", "blocked_project_shared"):
+        try:
+            raise_or_collect(
+                file_scan, scope=artifact_scope, kind=artifact_type[:-1], artifact_name=name
+            )
+        except PrivacyScanError as exc:
+            return f"privacy block: {exc.message}"
+
+    try:
+        record = await asyncio.to_thread(
+            versioning.create_version,
+            artifact_dir,
+            working_file,
+            note=note,
+            source_bytes=snapshot_bytes,
+        )
+    except versioning.VersionError as exc:
+        return f"error: {exc}"
+
+    return (
+        f"Created {artifact_type}/{name} version {record.tag} "
+        f"[{artifact_scope}] at {record.created_at}" + (f" — {record.note}" if record.note else "")
+    )
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_promote(
+    artifact_type: str,
+    name: str,
+    label: str,
+    version: str = "",
+    delete: bool = False,
+    scope: str = "",
+    confirm_project_shared: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Move or drop a label pointer over an artifact's versions (ADR-0022).
+
+    Headless-agent parity for ``mm context version promote`` and the web
+    ``PUT/DELETE /context/{type}/{name}/labels/{label}`` routes. A *label*
+    (``production`` / ``staging`` / …) is a movable pointer over the immutable
+    versions created by ``mem_context_version``. Promote and rollback are the
+    same act — both just move the pointer; pass ``delete=True`` to drop a label
+    entirely. Covers ``agents`` and ``commands`` only.
+
+    Moving a pointer only updates the manifest — it does NOT fan out to the
+    runtimes by itself. Deploy the pointed-at version with
+    ``mem_context_sync(include="agents", label="<label>", scope=...)`` (or the
+    CLI ``mm context sync --label <label>``).
+
+    Args:
+        artifact_type: ``agents`` or ``commands``.
+        name: Canonical artifact name.
+        label: The label to move or drop (e.g. ``production``). The reserved
+            ``latest`` (always the working file) and version-shaped names
+            (``v1`` — reserved for direct version addressing) are rejected.
+        version: Version tag to point ``label`` at (e.g. ``v2``). Required
+            unless ``delete=True``.
+        delete: Drop ``label`` from the manifest instead of moving it. A
+            ``delete`` of an absent label is a no-op (still succeeds). Cannot
+            be combined with ``version``.
+        scope: ADR-0011 canonical residency tier — ``project_shared``
+            (default), ``user``, or ``project_local`` (independent label maps
+            per tier, ADR-0022 Decision b).
+        confirm_project_shared: Required when ``scope="project_shared"`` is
+            passed explicitly — the label map (``versions.json``) is
+            git-tracked and MCP cannot prompt. The implicit default scope does
+            not require it (mirrors ``mem_context_init``).
+
+    A flat-layout artifact has no version store (ADR-0022 invariant 3) and is
+    refused. Refusals are prefixed (``error:`` / ``needs confirmation:``) so
+    callers can branch on the prefix.
+    """
+    if delete and version.strip():
+        return "error: delete=True drops the label and takes no version."
+    if not delete and not version.strip():
+        return (
+            "error: version is required to promote (e.g. version='v2'), "
+            "or pass delete=True to drop the label."
+        )
+
+    root = await asyncio.to_thread(_find_project_root)
+    scope_explicit = bool(scope.strip())
+    # Resolve scope + artifact BEFORE the confirm gate (matches
+    # mem_context_version's order) — telling the caller the artifact is missing
+    # or flat is more useful than asking them to confirm a write that cannot
+    # land. Neither resolution step mutates disk.
+    try:
+        artifact_scope = _resolve_artifact_mcp_scope(scope)
+        name, working_file, layout = await asyncio.to_thread(
+            _resolve_version_artifact, artifact_type, root, name, artifact_scope
+        )
+    except ValueError as exc:
+        return f"error: {exc}"
+
+    # Gate B: explicit project_shared write into the git-tracked label map.
+    if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
+        return (
+            "needs confirmation: scope='project_shared' moves a pointer in the "
+            "git-tracked label map. Re-call with confirm_project_shared=True to proceed."
+        )
+
+    if layout != "dir":
+        return f"error: {_flat_layout_hint(artifact_type, name)}"
+    artifact_dir = working_file.parent
+
+    try:
+        if delete:
+            await asyncio.to_thread(versioning.delete_label, artifact_dir, label)
+            manifest = await asyncio.to_thread(versioning.load_manifest, artifact_dir)
+            return _format_label_result(
+                f"Dropped label {label!r} from {artifact_type}/{name} [{artifact_scope}]",
+                manifest,
+            )
+        await asyncio.to_thread(versioning.promote_label, artifact_dir, label, version)
+        manifest = await asyncio.to_thread(versioning.load_manifest, artifact_dir)
+        return _format_label_result(
+            f"Promoted {artifact_type}/{name} [{artifact_scope}]: {label} → {version}",
+            manifest,
+        )
+    except versioning.VersionError as exc:
+        return f"error: {exc}"

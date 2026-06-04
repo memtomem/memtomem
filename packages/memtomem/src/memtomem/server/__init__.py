@@ -132,6 +132,8 @@ from memtomem.server.tools.context import (
     mem_context_memory_migrate,
     mem_context_migrate,  # deprecated alias for mem_context_memory_migrate (#1147 B5-2)
     mem_context_artifact_migrate,
+    mem_context_version,  # ADR-0022 PR2 — version snapshots (list/create)
+    mem_context_promote,  # ADR-0022 PR2 — label pointers (promote/delete)
 )
 from memtomem.server.tools.ingest import (
     mem_ingest,  # no @mcp.tool; import triggers @register("ingest") for mem_do routing

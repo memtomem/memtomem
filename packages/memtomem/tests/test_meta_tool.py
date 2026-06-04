@@ -3,7 +3,7 @@
 import json
 
 from memtomem.server.tool_registry import ACTIONS
-from memtomem.server.tools.meta import _help
+from memtomem.server.tools.meta import _ALIASES, _help, mem_do
 from memtomem.server.tools.status_config import mem_version
 
 
@@ -89,6 +89,42 @@ class TestMemDoRouting:
         """Verify fuzzy matching would find similar actions."""
         similar = [k for k in ACTIONS if "tag" in k]
         assert len(similar) >= 2  # tag_list, tag_rename, tag_delete, auto_tag
+
+
+class TestAliasInvariants:
+    """Guards for the ``_ALIASES`` map (ADR-0022 PR2 review)."""
+
+    def test_no_alias_shadows_a_registered_action(self):
+        """An alias key MUST NOT equal a real action name.
+
+        ``mem_do`` resolves aliases FIRST (``resolved = _ALIASES.get(action,
+        action)``) before the registry lookup, so an alias whose key matches a
+        registered action silently HIJACKS that action. A "version" alias for
+        ``context_version`` did exactly this to ``mem_version`` (the
+        memtomem-stm protocol-negotiation action) and was caught in review.
+        This fails loudly if any future alias re-introduces the collision.
+        """
+        collisions = sorted(set(_ALIASES) & set(ACTIONS))
+        assert not collisions, f"alias keys shadow real actions: {collisions}"
+
+    def test_every_alias_target_is_a_real_action(self):
+        """Each alias must resolve to an action that actually exists."""
+        dangling = sorted(t for t in _ALIASES.values() if t not in ACTIONS)
+        assert not dangling, f"aliases point at non-existent actions: {dangling}"
+
+
+class TestMemDoProtocolNegotiation:
+    """``mem_do('version')`` must reach ``mem_version``, not a context tool.
+
+    Pins the contract memtomem-stm depends on. The existing ``TestMemVersion``
+    only calls ``mem_version()`` directly, so it stayed green when a "version"
+    alias hijacked the ``mem_do`` route — this exercises the route end-to-end.
+    """
+
+    async def test_mem_do_version_returns_protocol_json(self):
+        result = await mem_do("version")
+        parsed = json.loads(result)
+        assert "version" in parsed and "capabilities" in parsed
 
 
 class TestScheduleActions:
