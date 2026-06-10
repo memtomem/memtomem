@@ -797,6 +797,7 @@ def extract_agents_to_canonical(
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
     dry_run: bool = False,
+    surface: str = "cli_context_init",
 ) -> ExtractResult:
     """Import existing Claude / Gemini agent files into ``.memtomem/agents/``.
 
@@ -917,6 +918,7 @@ def extract_agents_to_canonical(
                 src=md_file,
                 scope=scope,
                 force_unsafe_import=force_unsafe_import,
+                surface=surface,
                 audit_context={
                     "source": str(md_file),
                     "target": str(dst),

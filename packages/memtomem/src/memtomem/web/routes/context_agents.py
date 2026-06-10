@@ -586,7 +586,10 @@ async def import_agents(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 result = extract_agents_to_canonical(
-                    project_root, overwrite=overwrite, dry_run=dry_run
+                    project_root,
+                    overwrite=overwrite,
+                    dry_run=dry_run,
+                    surface="web_context_agents_import",
                 )
     except TimeoutError:
         raise HTTPException(503, "Agents import timed out — another sync may be in progress")
@@ -635,7 +638,10 @@ async def import_agent(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 result = extract_agents_to_canonical(
-                    project_root, overwrite=overwrite, only_name=name
+                    project_root,
+                    overwrite=overwrite,
+                    only_name=name,
+                    surface="web_context_agents_import",
                 )
     except TimeoutError:
         raise HTTPException(503, "Agent import timed out — another sync may be in progress")

@@ -367,3 +367,40 @@ async def test_mem_context_diff_settings_scope_passes_through_explicit_scope(
     captured.clear()
     await mem_context_diff(include="settings")
     assert captured == [None]
+
+
+@pytest.mark.anyio
+async def test_mem_context_init_uses_mcp_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate A audit attribution (#1229): imports driven by the MCP tool must
+    reach the privacy audit log as ``mcp_context_init``, not the CLI literal."""
+    from memtomem.privacy import WriteGuardResult
+
+    _make_project(tmp_path, monkeypatch)
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    agents = home / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "agt.md").write_text(_clean_agent_body("agt"), encoding="utf-8")
+    skill = home / ".claude" / "skills" / "sk"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: sk\n---\nbody\n", encoding="utf-8")
+    cmds = home / ".claude" / "commands"
+    cmds.mkdir(parents=True)
+    (cmds / "cmd.md").write_text("---\nname: cmd\n---\nbody\n", encoding="utf-8")
+
+    surfaces: list[str] = []
+
+    def spy(content_text, *, surface, **kw):
+        surfaces.append(surface)
+        return WriteGuardResult("pass", [])
+
+    monkeypatch.setattr("memtomem.context._gate_a.privacy.enforce_write_guard", spy)
+
+    out = await mem_context_init(include="skills,agents,commands", scope="user")
+
+    assert out.startswith("Imported") or "Imported" in out
+    assert surfaces, "Gate A never ran"
+    assert set(surfaces) == {"mcp_context_init"}

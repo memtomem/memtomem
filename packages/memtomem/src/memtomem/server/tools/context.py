@@ -334,6 +334,7 @@ async def mem_context_init(
                 overwrite=overwrite,
                 scope=artifact_scope,
                 force_unsafe_import=force_unsafe_import,
+                surface="mcp_context_init",
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
@@ -355,6 +356,7 @@ async def mem_context_init(
                 overwrite=overwrite,
                 scope=artifact_scope,
                 force_unsafe_import=force_unsafe_import,
+                surface="mcp_context_init",
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
@@ -373,6 +375,7 @@ async def mem_context_init(
                 overwrite=overwrite,
                 scope=artifact_scope,
                 force_unsafe_import=force_unsafe_import,
+                surface="mcp_context_init",
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"

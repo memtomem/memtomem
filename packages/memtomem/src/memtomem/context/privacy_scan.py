@@ -4,7 +4,10 @@ Sibling of :mod:`memtomem.context._gate_a` (the runtime → canonical
 import-side gate). Both share :func:`memtomem.privacy.enforce_write_guard`
 underneath, but the two surfaces differ on:
 
-* ``surface=`` string — ``"cli_context_sync"`` vs ``"cli_context_init"``.
+* ``surface=`` string — ``"cli_context_sync"`` vs the import side's
+  caller-supplied surface (default ``"cli_context_init"``; the Web import
+  routes pass ``"web_context_<kind>_import"`` and the MCP tool passes
+  ``"mcp_context_init"`` — #1229).
 * ``force_unsafe`` valve — sync has none (ADR §5: canonical → runtime
   fan-out is a write-amplifying loop, so a single bypass-flagged content
   would propagate to every registered runtime; the ADR explicitly

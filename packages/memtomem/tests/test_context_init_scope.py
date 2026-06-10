@@ -833,3 +833,76 @@ def test_extract_commands_audit_context_shape(
     assert captured["first"]["kind"] == "commands"  # plural
     assert captured["first"]["runtime"] == "claude"
     assert captured["first"]["command_name"] == "cmd"
+
+
+# ── #1229 — Gate A surface attribution ──────────────────────────────────
+
+
+def _capture_guard_surfaces(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Spy ``privacy.enforce_write_guard`` and record every call's ``surface``.
+
+    The surface string dimensions the privacy ``record()`` counter and tags
+    the force-unsafe bypass audit line — pre-#1229 every ingress surface was
+    hard-coded to the CLI literal, misattributing Web/MCP imports.
+    """
+    surfaces: list[str] = []
+
+    def spy(content_text: str, *, surface: str, **kw: Any) -> WriteGuardResult:
+        surfaces.append(surface)
+        return WriteGuardResult("pass", [])
+
+    monkeypatch.setattr("memtomem.context._gate_a.privacy.enforce_write_guard", spy)
+    return surfaces
+
+
+def test_extract_default_surface_is_cli_literal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``surface`` kwarg → the CLI literal (back-compat: ``mm context
+    init`` relies on the default)."""
+    home = tmp_path / "home"
+    set_home(monkeypatch, str(home))
+    proj = _make_project(tmp_path)
+    _seed_user_runtime_agents(home, "agt", "---\nname: agt\n---\nbody\n")
+
+    surfaces = _capture_guard_surfaces(monkeypatch)
+    extract_agents_to_canonical(proj, scope="user")
+    assert surfaces == ["cli_context_init"]
+
+
+def test_extract_surface_kwarg_reaches_gate_a_for_all_kinds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``surface`` kwarg threads through every Gate A call site —
+    including BOTH command branches (Claude ``.md`` and Gemini ``.toml``);
+    missing the second would silently misattribute only Gemini-sourced
+    commands."""
+    home = tmp_path / "home"
+    set_home(monkeypatch, str(home))
+    proj = _make_project(tmp_path)
+    _seed_user_runtime_agents(home, "agt", "---\nname: agt\n---\nbody\n")
+    skill = home / ".claude" / "skills" / "myskill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: myskill\n---\nbody\n", encoding="utf-8")
+    claude_cmds = home / ".claude" / "commands"
+    claude_cmds.mkdir(parents=True)
+    (claude_cmds / "cmd.md").write_text("---\nname: cmd\n---\nbody\n", encoding="utf-8")
+    gemini_cmds = home / ".gemini" / "commands"
+    gemini_cmds.mkdir(parents=True)
+    (gemini_cmds / "gcmd.toml").write_text(
+        'description = "g"\nprompt = "gemini prompt"\n', encoding="utf-8"
+    )
+
+    surfaces = _capture_guard_surfaces(monkeypatch)
+    extract_agents_to_canonical(proj, scope="user", surface="probe_agents")
+    assert surfaces == ["probe_agents"]
+
+    surfaces.clear()
+    extract_skills_to_canonical(proj, scope="user", surface="probe_skills")
+    assert surfaces == ["probe_skills"]
+
+    surfaces.clear()
+    extract_commands_to_canonical(proj, scope="user", surface="probe_commands")
+    assert surfaces == ["probe_commands", "probe_commands"]  # claude + gemini branches

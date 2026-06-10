@@ -543,7 +543,10 @@ async def import_skills(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 result = extract_skills_to_canonical(
-                    project_root, overwrite=overwrite, dry_run=dry_run
+                    project_root,
+                    overwrite=overwrite,
+                    dry_run=dry_run,
+                    surface="web_context_skills_import",
                 )
     except TimeoutError:
         raise HTTPException(503, "Skills import timed out — another sync may be in progress")
@@ -589,7 +592,10 @@ async def import_skill(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 result = extract_skills_to_canonical(
-                    project_root, overwrite=overwrite, only_name=name
+                    project_root,
+                    overwrite=overwrite,
+                    only_name=name,
+                    surface="web_context_skills_import",
                 )
     except TimeoutError:
         raise HTTPException(503, "Skill import timed out — another sync may be in progress")

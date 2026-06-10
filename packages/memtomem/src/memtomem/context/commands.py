@@ -543,6 +543,7 @@ def extract_commands_to_canonical(
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
     dry_run: bool = False,
+    surface: str = "cli_context_init",
 ) -> ExtractResult:
     """Import existing Claude/Gemini command files into the scoped canonical dir.
 
@@ -639,6 +640,7 @@ def extract_commands_to_canonical(
                 src=md_file,
                 scope=scope,
                 force_unsafe_import=force_unsafe_import,
+                surface=surface,
                 # Mirror agents.py audit_context shape — SOC pipelines grep
                 # both ``source=`` and ``target=`` for incident triage;
                 # commands' earlier omission was a sibling-parity gap
@@ -714,6 +716,7 @@ def extract_commands_to_canonical(
                 src=toml_file,
                 scope=scope,
                 force_unsafe_import=force_unsafe_import,
+                surface=surface,
                 audit_context={
                     "source": str(toml_file),
                     "target": str(dst),

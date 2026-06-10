@@ -760,6 +760,7 @@ def extract_skills_to_canonical(
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
     dry_run: bool = False,
+    surface: str = "cli_context_init",
 ) -> ExtractResult:
     """Import existing runtime skills into the scoped canonical directory.
 
@@ -889,6 +890,7 @@ def extract_skills_to_canonical(
                     src=src_file,
                     scope=scope,
                     force_unsafe_import=force_unsafe_import,
+                    surface=surface,
                     audit_context={
                         "source_file": str(src_file),
                         "skill_name": skill_name,

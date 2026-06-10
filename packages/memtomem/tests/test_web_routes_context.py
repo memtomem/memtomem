@@ -1794,3 +1794,64 @@ class TestCommandTargetScopePlumbing:
             json={"content": "# x\n", "mtime_ns": "0"},
         )
         assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Gate A surface attribution (#1229)
+# ---------------------------------------------------------------------------
+
+
+class TestImportSurfaceAttribution:
+    """Web imports must reach the privacy audit log under their own surface
+    string — pre-#1229 every ingress was misattributed to the CLI literal
+    ``cli_context_init``."""
+
+    def _spy_surfaces(self, monkeypatch) -> list[str]:
+        from memtomem.privacy import WriteGuardResult
+
+        surfaces: list[str] = []
+
+        def spy(content_text, *, surface, **kw):
+            surfaces.append(surface)
+            return WriteGuardResult("pass", [])
+
+        monkeypatch.setattr("memtomem.context._gate_a.privacy.enforce_write_guard", spy)
+        return surfaces
+
+    @pytest.mark.anyio
+    async def test_bulk_imports_use_web_surfaces(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        _make_runtime_skill(tmp_path, ".claude/skills", "s1", "# S\n")
+        agents_dir = tmp_path / ".claude" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "a1.md").write_text("---\nname: a1\n---\nbody\n", encoding="utf-8")
+        commands_dir = tmp_path / ".claude" / "commands"
+        commands_dir.mkdir(parents=True)
+        (commands_dir / "c1.md").write_text("---\nname: c1\n---\nbody\n", encoding="utf-8")
+
+        surfaces = self._spy_surfaces(monkeypatch)
+
+        r = await client.post("/api/context/skills/import", json={})
+        assert r.status_code == 200
+        assert set(surfaces) == {"web_context_skills_import"}
+
+        surfaces.clear()
+        r = await client.post("/api/context/agents/import", json={})
+        assert r.status_code == 200
+        assert set(surfaces) == {"web_context_agents_import"}
+
+        surfaces.clear()
+        r = await client.post("/api/context/commands/import", json={})
+        assert r.status_code == 200
+        assert set(surfaces) == {"web_context_commands_import"}
+
+    @pytest.mark.anyio
+    async def test_single_name_import_uses_web_surface(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        _make_runtime_skill(tmp_path, ".claude/skills", "solo", "# S\n")
+        surfaces = self._spy_surfaces(monkeypatch)
+        r = await client.post("/api/context/skills/solo/import", json={})
+        assert r.status_code == 200
+        assert set(surfaces) == {"web_context_skills_import"}

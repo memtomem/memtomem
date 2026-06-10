@@ -106,6 +106,7 @@ def apply_gate_a(
     audit_context: dict[str, object],
     message_kind: str,
     imported_so_far: int,
+    surface: str = "cli_context_init",
 ) -> GateAOutcome:
     """Run :func:`privacy.enforce_write_guard` and decide proceed / skip / abort.
 
@@ -149,6 +150,15 @@ def apply_gate_a(
             ("agent" / "skill" / "command"). Distinct from the plural
             ``kind`` field that callers usually carry inside
             ``audit_context``.
+        surface: Audit identifier forwarded verbatim to
+            :func:`privacy.enforce_write_guard` — it dimensions the
+            privacy ``record()`` counter and tags the force-unsafe
+            bypass audit log line, distinguishing every ingress surface.
+            Callers pass their own literal: the CLI relies on the
+            default ``"cli_context_init"``, the Web import routes pass
+            ``"web_context_<kind>_import"``, and the MCP tool passes
+            ``"mcp_context_init"`` (#1229 — previously every surface
+            was misattributed to the CLI literal).
         imported_so_far: Number of artifacts already imported in this
             run; passed through to the cleanup hint in the
             ClickException message. **Invariant**: callers must compute
@@ -160,7 +170,7 @@ def apply_gate_a(
     """
     guard = privacy.enforce_write_guard(
         content_text,
-        surface="cli_context_init",
+        surface=surface,
         force_unsafe=force_unsafe_import,
         scope=scope,
         audit_context=audit_context,
