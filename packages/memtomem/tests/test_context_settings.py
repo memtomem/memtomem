@@ -529,6 +529,119 @@ class TestClaudeSettingsMergeMalformed:
         assert r.status == "error"
         assert "not valid JSON" in r.reason
 
+    def test_non_dict_json_canonical_returns_error(self, claude_home, tmp_path):
+        """Valid JSON whose root is not an object used to AttributeError deep
+        inside the merge layer, aborting every runtime (#1229)."""
+        _make_canonical_settings(tmp_path, "[]\n")
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert "not a JSON object" in r.reason
+
+    def test_non_dict_json_target_returns_error_and_preserves_file(self, claude_home, tmp_path):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text('"just a string"\n', encoding="utf-8")
+
+        _make_canonical_settings(tmp_path, {"hooks": {}})
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert target.read_text(encoding="utf-8") == '"just a string"\n'
+
+    def test_list_shaped_hooks_target_returns_error_and_preserves_file(self, claude_home, tmp_path):
+        """Array-format hooks used to be silently destroyed: dict() over the
+        rule list coerced [{"matcher": ..., "hooks": [...]}] into the garbage
+        {"matcher": "hooks"} and wrote it back with status="ok" (#1229)."""
+        original = json.dumps(
+            {"hooks": [{"matcher": "Edit|Write", "hooks": [{"type": "command"}]}]}
+        )
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(original, encoding="utf-8")
+
+        _make_canonical_settings(tmp_path, {"hooks": {"PreToolUse": [_rule("Bash")]}})
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert "record keyed by event name" in r.reason
+        # The user's hook configuration must survive untouched.
+        assert target.read_text(encoding="utf-8") == original
+
+    def test_list_shaped_hooks_with_three_key_rules_returns_error(self, claude_home, tmp_path):
+        """Rules with != 2 keys made the same dict() coercion raise ValueError,
+        crashing the whole fan-out instead of erroring one target (#1229)."""
+        original = json.dumps(
+            {"hooks": [{"matcher": "Bash", "hooks": [], "comment": "three keys"}]}
+        )
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(original, encoding="utf-8")
+
+        _make_canonical_settings(tmp_path, {"hooks": {}})
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert target.read_text(encoding="utf-8") == original
+
+    def test_dict_shaped_event_value_returns_error_and_preserves_file(self, claude_home, tmp_path):
+        """A record-format hooks whose EVENT value is a dict (not a list)
+        used to be coerced by list() into its key strings and written back as
+        "rules" with status="ok" (Codex review on #1229)."""
+        original = json.dumps(
+            {"hooks": {"PreToolUse": {"matcher": "Bash", "hooks": [{"type": "command"}]}}}
+        )
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(original, encoding="utf-8")
+
+        _make_canonical_settings(tmp_path, {"hooks": {"PreToolUse": [_rule("Bash")]}})
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert "'hooks.PreToolUse' must be a list" in r.reason
+        assert target.read_text(encoding="utf-8") == original
+
+    def test_scalar_event_value_returns_error_not_crash(self, claude_home, tmp_path):
+        """A scalar event value made list() raise TypeError past the
+        MalformedSettingsError catch, crashing the whole fan-out (Codex
+        review on #1229)."""
+        original = json.dumps({"hooks": {"PreToolUse": 5}})
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(original, encoding="utf-8")
+
+        _make_canonical_settings(tmp_path, {"hooks": {"PreToolUse": [_rule("Bash")]}})
+        results = generate_all_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert target.read_text(encoding="utf-8") == original
+
+    def test_diff_settings_dict_shaped_event_value_returns_error(self, claude_home, tmp_path):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": {"matcher": "", "hooks": []}}}),
+            encoding="utf-8",
+        )
+
+        _make_canonical_settings(tmp_path, {"hooks": {"PreToolUse": [_rule("Bash")]}})
+        results = diff_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert "'hooks.PreToolUse' must be a list" in r.reason
+
+    def test_diff_settings_non_dict_canonical_returns_error(self, claude_home, tmp_path):
+        _make_canonical_settings(tmp_path, "42\n")
+        results = diff_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert "not a JSON object" in r.reason
+
+    def test_diff_settings_list_shaped_hooks_target_returns_error(self, claude_home, tmp_path):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": [{"matcher": "", "hooks": []}]}), encoding="utf-8")
+
+        _make_canonical_settings(tmp_path, {"hooks": {}})
+        results = diff_settings(tmp_path, scope="user")
+        r = results["claude_settings"]
+        assert r.status == "error"
+        assert "record keyed by event name" in r.reason
+
 
 class TestKimiSettingsMerge:
     def test_writes_managed_toml_block_and_preserves_existing_config(self, kimi_home, tmp_path):
