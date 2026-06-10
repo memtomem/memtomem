@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from memtomem.config import TargetScope
+from memtomem.context._names import is_internal_artifact_dir
 from memtomem.context.agents import AGENT_DIR_FILENAME
 from memtomem.context.commands import COMMAND_DIR_FILENAME
 from memtomem.context.dirty import is_asset_dirty
@@ -248,6 +249,10 @@ def _scan_draft_tier(scope: TargetScope, project_root: Path | None) -> Iterator[
                 # Skip directories that don't satisfy the kind's
                 # manifest contract — same convention as migrate's
                 # source-scope probe.
+                continue
+            if is_internal_artifact_dir(entry.name):
+                # Crash-leftover staging/move-aside trees from skill sync —
+                # not local drafts (#1229).
                 continue
             seen_names.add(entry.name)
             yield StatusRow(

@@ -28,6 +28,7 @@ __all__ = [
     "InvalidNameError",
     "Layout",
     "OVERRIDE_FORMATS",
+    "is_internal_artifact_dir",
     "validate_name",
 ]
 
@@ -87,6 +88,26 @@ GENERATOR_VENDOR: dict[str, str] = {
 
 class InvalidNameError(ValueError):
     """Raised when a context-gateway name fails validation."""
+
+
+# Skill sync stages into ``.staging-<name>-<pid>-<rand>.tmp`` and moves the
+# old tree aside as ``.old-<name>-<pid>-<rand>.tmp`` (``skills._stage_skill``
+# / ``skills._promote_staging``). A SIGKILL between those steps leaves a full
+# skill tree (including SKILL.md) behind, and the composite name passes
+# :func:`validate_name` — so every discovery loop must skip these explicitly
+# or the leftover shows up as a phantom diff row and even round-trips through
+# extract back into canonical (#1229).
+_INTERNAL_DIR_RE = re.compile(r"^\.(?:staging|old)-.*\.tmp$")
+
+
+def is_internal_artifact_dir(name: str) -> bool:
+    """True for context-gateway internal staging/move-aside directory names.
+
+    These are *our own* crash artifacts, not user content — discovery loops
+    (canonical listing, runtime scans, extract, detect, status) skip them
+    silently rather than warning about an invalid name.
+    """
+    return _INTERNAL_DIR_RE.match(name) is not None
 
 
 def validate_name(s: object, *, kind: str = "name") -> str:

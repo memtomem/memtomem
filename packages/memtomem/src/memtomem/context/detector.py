@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from memtomem.context._names import is_internal_artifact_dir
+
 DetectedKind = Literal["file", "skill_dir", "agent_file", "command_file"]
 
 
@@ -138,6 +140,10 @@ def detect_skill_dirs(project_root: Path) -> list[DetectedFile]:
                 if not skill_md.is_file():
                     # Silently skip non-skill sub-directories so that users can
                     # keep auxiliary folders side-by-side with real skills.
+                    continue
+                if is_internal_artifact_dir(skill_dir.name):
+                    # Crash-leftover staging/move-aside trees from skill sync
+                    # carry a SKILL.md mirror — never count them (#1229).
                     continue
                 found.append(
                     DetectedFile(

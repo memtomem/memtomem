@@ -44,7 +44,7 @@ import logging
 from pathlib import Path
 
 from memtomem.config import TargetScope
-from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._names import InvalidNameError, is_internal_artifact_dir, validate_name
 from memtomem.context.scope_resolver import ArtifactKind
 
 logger = logging.getLogger(__name__)
@@ -219,8 +219,15 @@ def runtime_artifact_names(
         entries = ((p.stem, p) for p in root.iterdir() if p.is_file() and p.suffix == file_suffix)
     else:
         assert dir_manifest is not None  # mypy narrow
+        # Skip our own crash-leftover staging/move-aside trees (silently —
+        # they are internal artifacts, not user content): they contain a
+        # full SKILL.md mirror and would otherwise surface as phantom
+        # "missing canonical" diff rows (#1229). Agents/commands leftovers
+        # are ``.tmp`` *files*, already excluded by the suffix match above.
         entries = (
-            (p.name, p) for p in root.iterdir() if p.is_dir() and (p / dir_manifest).is_file()
+            (p.name, p)
+            for p in root.iterdir()
+            if p.is_dir() and (p / dir_manifest).is_file() and not is_internal_artifact_dir(p.name)
         )
     for raw_name, path in entries:
         try:

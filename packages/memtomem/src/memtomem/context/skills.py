@@ -12,7 +12,7 @@ runtime-specific directories:
 
 Anthropic released the Agent Skills spec as an open standard in 2025-12 and
 OpenAI adopted the same SKILL.md format for Codex CLI, so the on-disk payload
-is byte-identical across all three runtimes today. We still route everything
+is byte-identical across all four runtimes today. We still route everything
 through a ``SkillGenerator`` registry so Phase 2+ can introduce per-runtime
 frontmatter rewriting without touching callers.
 """
@@ -40,7 +40,12 @@ from memtomem.context._atomic import (
 )
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
-from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
+from memtomem.context._names import (
+    GENERATOR_VENDOR,
+    InvalidNameError,
+    is_internal_artifact_dir,
+    validate_name,
+)
 from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
 from memtomem.context.privacy_scan import (
     raise_or_collect,
@@ -214,6 +219,12 @@ def list_canonical_skills(
     skills: list[Path] = []
     for entry in sorted(root.iterdir()):
         if entry.is_dir() and (entry / SKILL_MANIFEST).is_file():
+            if is_internal_artifact_dir(entry.name):
+                # Crash-leftover staging/move-aside trees from our own sync
+                # (#1229) — never list them as canonical skills, or the next
+                # generate fans the junk out to every runtime.
+                logger.debug("skip internal artifact dir %s", entry)
+                continue
             try:
                 validate_name(entry.name, kind="skill name")
             except InvalidNameError as exc:
@@ -278,6 +289,29 @@ def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return staging
+
+
+def _reap_stale_internal_dirs(dst: Path) -> None:
+    """Remove crash-leftover staging/move-aside trees for ``dst``.
+
+    A SIGKILL between :func:`_stage_skill` and the cleanup in
+    :func:`_promote_staging` leaves ``.staging-<name>-*.tmp`` /
+    ``.old-<name>-*.tmp`` trees behind that no later run reaps (the
+    staging-exists check only matches the new pid+rand suffix) (#1229).
+
+    Safe ONLY while holding ``_lock_path_for(dst)``: every gateway writer
+    for the same destination holds that lock across its stage→promote
+    sequence, so no live staging tree for this dst can exist while we do.
+    The extract/copy_skill path holds no locks — canonical-root leftovers
+    are handled by discovery filtering only, never by GC.
+    """
+    parent = dst.parent
+    if not parent.is_dir():
+        return
+    for pattern in (f".staging-{dst.name}-*.tmp", f".old-{dst.name}-*.tmp"):
+        for stale in parent.glob(pattern):
+            logger.debug("reaping stale internal artifact dir %s", stale)
+            shutil.rmtree(stale, ignore_errors=True)
 
 
 def _target_conflict(dst: Path) -> OSError | None:
@@ -470,6 +504,10 @@ def generate_all_skills(
                         )
                     )
                     return SkillSyncResult(generated=generated, skipped=skipped)
+                # All destination locks held — safe point to reap crash
+                # leftovers before they collide with fresh staging work.
+                for stale_dst in sorted({dst for _, _, _, dst in work}, key=str):
+                    _reap_stale_internal_dirs(stale_dst)
                 for target, _gen, skill_dir, dst in work:
                     # Preflight the promote refusal predicate while the
                     # destination locks are held, BEFORE anything stages: a
@@ -621,6 +659,8 @@ def generate_all_skills(
                 )
                 continue
             with dst_lock:
+                # Lock held — safe point to reap crash leftovers for this dst.
+                _reap_stale_internal_dirs(dst)
                 # Preflight the promote refusal predicate (same conversion to
                 # a typed skip as the project_shared batch above, #1229) —
                 # before staging so a conflicted destination wastes no
@@ -718,7 +758,7 @@ def extract_skills_to_canonical(
     """Import existing runtime skills into the scoped canonical directory.
 
     When the same skill name appears in multiple runtimes, the first one wins
-    (deterministic order: claude → gemini → codex). Existing canonical
+    (deterministic order: claude → gemini → codex → kimi). Existing canonical
     entries are preserved unless ``overwrite=True``.
 
     ``dry_run`` (rank-10 import preview) runs the full scan + name validation
@@ -772,7 +812,7 @@ def extract_skills_to_canonical(
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # skill_name → first runtime label
 
-    for runtime in ("claude", "gemini", "codex"):
+    for runtime in ("claude", "gemini", "codex", "kimi"):
         try:
             runtime_dir = runtime_fanout_root("skills", runtime, scope, project_root)
         except KeyError:
@@ -782,6 +822,11 @@ def extract_skills_to_canonical(
         runtime_label = f"{runtime} ({runtime_dir})"
         for skill_dir in sorted(runtime_dir.iterdir()):
             if not skill_dir.is_dir() or not (skill_dir / SKILL_MANIFEST).is_file():
+                continue
+            if is_internal_artifact_dir(skill_dir.name):
+                # Our own crash-leftover staging/move-aside trees — never
+                # import them as skills.
+                logger.debug("skip internal artifact dir %s", skill_dir)
                 continue
             skill_name = skill_dir.name
             if only_name is not None and skill_name != only_name:

@@ -414,6 +414,17 @@ def test_classify_status_scans_project_local_drafts(wiki_root: Path, tmp_path: P
         assert row.reason is None
 
 
+def test_draft_scan_skips_staging_leftovers(wiki_root: Path, tmp_path: Path) -> None:
+    """Crash-leftover staging trees under a draft-tier canonical root must
+    not surface as local-draft rows (#1229)."""
+    _initialized_wiki(wiki_root)
+    _seed_local_draft(tmp_path, "skills", ".staging-x-99999-abc123.tmp", "SKILL.md")
+
+    _, rows = classify_status(tmp_path)
+
+    assert not any(r.name == ".staging-x-99999-abc123.tmp" for r in rows)
+
+
 def test_classify_status_skips_directories_missing_kind_manifest(
     wiki_root: Path, tmp_path: Path
 ) -> None:

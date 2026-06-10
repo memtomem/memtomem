@@ -58,6 +58,16 @@ class TestCanonicalDiscovery:
         (tmp_path / CANONICAL_SKILL_ROOT / "not-a-skill").mkdir(parents=True)
         assert list_canonical_skills(tmp_path) == []
 
+    def test_skips_staging_leftovers(self, tmp_path):
+        """A crashed import leaves ``.staging-*.tmp`` under the canonical
+        root with a full SKILL.md mirror — listing it would fan the junk out
+        to every runtime on the next sync (#1229)."""
+        for leftover in (".staging-a-99999-abc123.tmp", ".old-a-99999-abc123.tmp"):
+            d = tmp_path / CANONICAL_SKILL_ROOT / leftover
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        assert list_canonical_skills(tmp_path) == []
+
 
 class TestCopySkill:
     def test_copies_manifest_only(self, tmp_path):
@@ -301,6 +311,14 @@ class TestDetectSkillDirs:
         found = detect_skill_dirs(tmp_path)
         assert found == []
 
+    def test_ignores_staging_leftovers(self, tmp_path):
+        """Crash-leftover staging trees carry a SKILL.md mirror — they must
+        not inflate detect/init preview counts (#1229)."""
+        d = tmp_path / ".claude/skills/.staging-a-99999-abc123.tmp"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        assert detect_skill_dirs(tmp_path) == []
+
     def test_empty_project(self, tmp_path):
         assert detect_skill_dirs(tmp_path) == []
 
@@ -325,6 +343,62 @@ class TestExtractSkills:
         assert len(result.skipped) == 1
         assert result.skipped[0][0] == "shared"
         assert "already imported" in result.skipped[0][1]
+
+    def test_imports_from_kimi(self, tmp_path):
+        """A kimi-only skill is importable — diff reported it as 'missing
+        canonical' while the extract loop never read .kimi/skills, making
+        Import a silent no-op with no skip record (#1229)."""
+        skill = tmp_path / ".kimi/skills/kimi-only"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        result = extract_skills_to_canonical(tmp_path)
+        assert len(result.imported) == 1
+        assert (tmp_path / CANONICAL_SKILL_ROOT / "kimi-only/SKILL.md").exists()
+        assert result.skipped == []
+
+    def test_kimi_loses_dedup_to_claude(self, tmp_path):
+        """Order pin: kimi is scanned LAST, so existing first-wins outcomes
+        are unchanged — a claude copy beats a kimi copy of the same name."""
+        for runtime_dir, body in ((".claude/skills", "claude wins\n"), (".kimi/skills", "kimi\n")):
+            skill = tmp_path / runtime_dir / "shared"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(body, encoding="utf-8")
+        result = extract_skills_to_canonical(tmp_path)
+        assert len(result.imported) == 1
+        canonical = tmp_path / CANONICAL_SKILL_ROOT / "shared/SKILL.md"
+        assert canonical.read_text(encoding="utf-8") == "claude wins\n"
+        assert len(result.skipped) == 1
+        assert "already imported" in result.skipped[0][1]
+
+    def test_kimi_missing_canonical_diff_row_is_importable(self, tmp_path):
+        """Diff↔extract parity: a 'missing canonical' row for a kimi-only
+        skill must be actionable by import (the regression shape from #1229
+        — the UI offered an Import CTA that 404'd)."""
+        skill = tmp_path / ".kimi/skills/kimi-only"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        rows = diff_skills(tmp_path)
+        assert ("kimi_skills", "kimi-only", "missing canonical") in rows
+
+        result = extract_skills_to_canonical(tmp_path, only_name="kimi-only")
+        assert len(result.imported) == 1
+
+    def test_staging_leftover_not_imported(self, tmp_path):
+        """A crash-leftover staging tree under a runtime root contains a full
+        SKILL.md mirror and passes validate_name — it must not round-trip
+        into canonical (#1229). Silent skip: no skip record, no warning."""
+        for leftover in (
+            ".staging-code-review-99999-abc123.tmp",
+            ".old-code-review-99999-abc123.tmp",
+        ):
+            d = tmp_path / ".claude/skills" / leftover
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        result = extract_skills_to_canonical(tmp_path)
+        assert result.imported == []
+        assert result.skipped == []
+        assert list_canonical_skills(tmp_path) == []
 
     def test_does_not_overwrite_without_flag(self, tmp_path):
         src = tmp_path / ".claude/skills/existing"
@@ -442,6 +516,19 @@ class TestDiffSkills:
         (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         rows = diff_skills(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
+
+    def test_staging_leftovers_produce_no_phantom_rows(self, tmp_path):
+        """Crash-leftover staging/move-aside trees under either root must not
+        surface as phantom 'missing canonical' / 'missing target' rows
+        (#1229)."""
+        runtime_leftover = tmp_path / ".claude/skills/.staging-a-99999-abc123.tmp"
+        runtime_leftover.mkdir(parents=True)
+        (runtime_leftover / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        canonical_leftover = tmp_path / CANONICAL_SKILL_ROOT / ".old-a-99999-abc123.tmp"
+        canonical_leftover.mkdir(parents=True)
+        (canonical_leftover / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        assert diff_skills(tmp_path) == []
 
     @pytest.mark.skipif(
         os.name == "nt" or os.geteuid() == 0,

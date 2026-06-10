@@ -169,3 +169,29 @@ def test_runtime_artifact_names_skips_invalid_manifest_dirs(
         and getattr(record, "artifact_name") == "-bad"
         for record in caplog.records
     )
+
+
+def test_runtime_artifact_names_skips_internal_staging_dirs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Crash-leftover staging/move-aside trees carry a SKILL.md mirror and
+    pass validate_name — the dir_manifest branch must drop them SILENTLY
+    (they are our own artifacts, not user content) so diff never shows a
+    phantom 'missing canonical' row (#1229)."""
+    good = tmp_path / ".claude" / "skills" / "ok"
+    good.mkdir(parents=True)
+    (good / "SKILL.md").write_text("", encoding="utf-8")
+    for leftover in (".staging-ok-99999-abc123.tmp", ".old-ok-99999-abc123.tmp"):
+        d = tmp_path / ".claude" / "skills" / leftover
+        d.mkdir()
+        (d / "SKILL.md").write_text("", encoding="utf-8")
+
+    names = runtime_artifact_names(
+        "skills", "claude", tmp_path, "project_shared", dir_manifest="SKILL.md"
+    )
+
+    assert names == {"ok"}
+    # Silent skip — contrast with the InvalidNameError warning path above.
+    assert not any(
+        record.message == "Skipping invalid runtime artifact name" for record in caplog.records
+    )

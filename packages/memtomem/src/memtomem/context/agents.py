@@ -804,8 +804,12 @@ def extract_agents_to_canonical(
     nothing touching disk.
 
     Codex TOML is **not** imported (one-way conversion; too lossy to round-trip
-    without reconstructing fields we dropped on the way out). First occurrence
-    wins across runtimes (Claude before Gemini — deterministic order).
+    without reconstructing fields we dropped on the way out). Kimi agent YAML
+    is likewise export-only: the renderer drops tools/model/skills/isolation/
+    kind/temperature and wraps description+body into
+    ``system_prompt_args.ROLE_ADDITIONAL`` — not round-trippable. First
+    occurrence wins across runtimes (Claude before Gemini — deterministic
+    order).
 
     ADR-0011 PR-E2: ``scope`` selects both the canonical destination and the
     runtime source (per-scope import — ``scope="user"`` reads

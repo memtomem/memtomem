@@ -412,7 +412,7 @@
   "settings.ctx.sync_lock_timeout": "동기화가 실행되지 않았습니다 — 다른 프로세스가 대상 잠금을 잡고 있습니다. 잠시 후 다시 시도하세요.",
   "settings.ctx.sync_target_conflict": "충돌하는 대상을 건너뛰었습니다 — {reason}",
   "settings.ctx.sync_dropped": "동기화 중 {count}개 필드가 제거됨",
-  "settings.ctx.import_priority": "같은 이름이 여러 런타임에 있으면 Claude 사본을 가져오고 그다음 Antigravity 순입니다. Codex 로는 내보내기만 하고 읽어오지 않습니다.",
+  "settings.ctx.import_priority": "같은 이름이 여러 런타임에 있으면 정해진 순서로 스캔해 처음 발견한 사본을 가져옵니다 (Claude 먼저, 그다음 Antigravity; 스킬은 Codex 와 Kimi 에서도 가져옵니다). 그 외 런타임으로는 내보내기만 하고 읽어오지 않습니다.",
   "settings.ctx.import_result": "{imported}개 가져옴, {skipped}개 건너뜀",
   "settings.ctx.import_success": "가져오기 완료",
   "settings.ctx.delete_success": "\"{name}\" 삭제됨",

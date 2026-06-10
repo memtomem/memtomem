@@ -135,6 +135,18 @@ def test_extract_skills_project_shared_reads_project_runtime(home: Path, proj: P
         assert (proj / ".memtomem" / "skills") in p.parents
 
 
+def test_extract_skills_user_reads_kimi_user_runtime(home: Path, proj: Path) -> None:
+    """Kimi joined the skills extract order (#1229) — at user scope the
+    source is ``~/.kimi/skills`` and the destination stays user-tier."""
+    _write_skill(home / ".kimi" / "skills", "kimi_user_skill")
+
+    result = extract_skills_to_canonical(proj, scope="user")
+    names = [p.name for p in result.imported]
+    assert "kimi_user_skill" in names
+    for p in result.imported:
+        assert (home / ".memtomem" / "skills") in p.parents
+
+
 def test_extract_skills_project_local_no_fanout(home: Path, proj: Path) -> None:
     _write_skill(home / ".claude" / "skills", "user_skill")
     result = extract_skills_to_canonical(proj, scope="project_local")
