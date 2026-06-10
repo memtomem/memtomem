@@ -16,6 +16,7 @@ const _ctxStatusCls = {
   // an error — the same red treatment as `parse error` over-signaled it.
   'missing canonical': 'ctx-runtime-badge--pending',
   'parse error':       'ctx-runtime-badge--error',
+  'invalid name':      'ctx-runtime-badge--error',
 };
 const _ctxStatusLabel = {
   'in sync':           'settings.ctx.status_in_sync',
@@ -23,6 +24,7 @@ const _ctxStatusLabel = {
   'missing target':    'settings.ctx.status_missing_target',
   'missing canonical': 'settings.ctx.status_missing_canonical',
   'parse error':       'settings.ctx.status_parse_error',
+  'invalid name':      'settings.ctx.status_invalid_name',
 };
 
 // Settings overview badge i18n map. Keys are the wire status values that
@@ -877,6 +879,7 @@ const _CTX_DEEP_LINK_FILTERS = new Set([
   'missing_target',
   'missing_canonical',
   'parse_error',
+  'invalid_name',
 ]);
 
 // ``card.dataset.statuses`` is a space-separated list of these tokens; the
@@ -961,6 +964,7 @@ function _ctxClearDeepLink() {
 function _ctxTileDominantFilter(d) {
   if (!d || d.error) return null;
   if ((d.parse_error || 0) > 0) return 'parse_error';
+  if ((d.invalid_name || 0) > 0) return 'invalid_name';
   if ((d.missing_target || 0) > 0) return 'missing_target';
   if ((d.missing_canonical || 0) > 0) return 'missing_canonical';
   if ((d.out_of_sync || 0) > 0) return 'out_of_sync';
@@ -1069,8 +1073,9 @@ function _renderCtxOverview(data) {
       const missingCanonical = d.missing_canonical || 0;
       const outOfSync = d.out_of_sync || 0;
       const parseError = d.parse_error || 0;
+      const invalidName = d.invalid_name || 0;
       const localDraft = d.local_draft || 0;
-      const issueCount = missingTarget + missingCanonical + outOfSync + parseError;
+      const issueCount = missingTarget + missingCanonical + outOfSync + parseError + invalidName;
       const hasIssue = d.error || issueCount > 0
         || d.status === 'out_of_sync' || d.status === 'error';
       // Empty state ≡ a tile with no actionable artifacts: settings carries
@@ -1116,6 +1121,8 @@ function _renderCtxOverview(data) {
         badgeText = key ? t(key) : (d.status || '').replace(/_/g, ' ');
       } else if (parseError > 0) {
         badgeText = `${parseError} ${t('settings.ctx.badge_parse_error')}`;
+      } else if (invalidName > 0) {
+        badgeText = `${invalidName} ${t('settings.ctx.badge_invalid_name')}`;
       } else if (missingTarget > 0) {
         badgeText = `${missingTarget} ${t('settings.ctx.badge_missing_target')}`;
       } else if (missingCanonical > 0) {

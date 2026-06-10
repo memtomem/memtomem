@@ -517,6 +517,24 @@ class TestDiffSkills:
         rows = diff_skills(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
+    def test_invalid_names_surface_on_both_sides(self, tmp_path):
+        """Invalid-named skill dirs — runtime AND canonical — get a dedicated
+        'invalid name' row instead of total invisibility (#1229; the
+        canonical side is filtered out of list_canonical_skills for sync, so
+        without this row it appeared nowhere at all)."""
+        runtime_bad = tmp_path / ".claude/skills/bad name"
+        runtime_bad.mkdir(parents=True)
+        (runtime_bad / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        canonical_bad = tmp_path / CANONICAL_SKILL_ROOT / "-bad"
+        canonical_bad.mkdir(parents=True)
+        (canonical_bad / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+
+        rows = diff_skills(tmp_path)
+        assert ("claude_skills", "bad name", "invalid name") in rows
+        assert ("claude_skills", "-bad", "invalid name") in rows
+        # Canonical-side rejects are per-runtime rows like every other status.
+        assert ("gemini_skills", "-bad", "invalid name") in rows
+
     def test_staging_leftovers_produce_no_phantom_rows(self, tmp_path):
         """Crash-leftover staging/move-aside trees under either root must not
         surface as phantom 'missing canonical' / 'missing target' rows

@@ -490,6 +490,42 @@ class TestDiffAgents:
         assert status_by_runtime["claude_agents"] == "out of sync"
         assert status_by_runtime["gemini_agents"] == "in sync"
 
+    def test_invalid_runtime_name_surfaces_as_invalid_name_row(self, tmp_path, codex_home):
+        """An invalid-named runtime file used to vanish from diff entirely
+        (log-only) — the dashboard read fully in-sync while an unmanaged
+        runtime artifact existed (#1229)."""
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "-bad.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+        rows = diff_agents(tmp_path)
+        assert ("claude_agents", "-bad", "invalid name") in rows
+        # Other runtimes don't have the file — no phantom rows there.
+        assert not any(r == "gemini_agents" and s == "invalid name" for r, _, s in rows)
+
+    def test_unparseable_canonical_reports_parse_error_not_missing_target(
+        self, tmp_path, codex_home
+    ):
+        """A canonical whose effective name is invalid (or that cannot be
+        parsed) used to report 'missing target' — implying sync would create
+        the runtime file, which it never can; the row was permanent drift no
+        sync clears (#1229)."""
+        _make_canonical_agent(tmp_path, "broken", "no frontmatter at all\n")
+        rows = diff_agents(tmp_path)
+        statuses = {s for _, n, s in rows if n == "broken"}
+        assert statuses == {"parse error"}
+
+    def test_invalid_canonical_stem_collision_prefers_parse_error(self, tmp_path, codex_home):
+        """When a canonical's invalid stem collides with an invalid runtime
+        name, the canonical 'parse error' row wins — no duplicate
+        (runtime, name) rows."""
+        _make_canonical_agent(tmp_path, "-bad", "no frontmatter at all\n")
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "-bad.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+        rows = diff_agents(tmp_path)
+        claude_rows = [(n, s) for r, n, s in rows if r == "claude_agents" and n == "-bad"]
+        assert claude_rows == [("-bad", "parse error")]
+
     def test_whitespace_only_drift_detected_and_converges(self, tmp_path, codex_home):
         """Whitespace-only drift is real drift: sync writes render output
         byte-exact, so diff must not ``.strip()`` it away — pre-fix a padded

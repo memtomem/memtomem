@@ -175,7 +175,7 @@ def runtime_fanout_root(
     return (project_root / entry).resolve()
 
 
-def runtime_artifact_names(
+def runtime_artifact_listing(
     artifact: ArtifactKind,
     runtime: str,
     project_root: Path | None,
@@ -183,8 +183,8 @@ def runtime_artifact_names(
     *,
     file_suffix: str | None = None,
     dir_manifest: str | None = None,
-) -> set[str]:
-    """Return artifact names present under the runtime fan-out root.
+) -> tuple[set[str], list[str]]:
+    """Return ``(valid_names, invalid_raw_names)`` under the runtime root.
 
     Replaces the per-module helpers ``_runtime_agent_names`` /
     ``_runtime_command_names`` and the inline runtime-listing in
@@ -202,19 +202,29 @@ def runtime_artifact_names(
       every directory containing the named manifest file. Used for
       skills where each artifact is a directory tree.
 
-    Returns the empty set when the table entry is ``NO_FANOUT`` or
+    ``invalid_raw_names`` carries entries that match the artifact shape
+    but fail :func:`validate_name` — diff surfaces them as a dedicated
+    ``"invalid name"`` status row instead of silently dropping them
+    (#1229: an unmanaged runtime artifact used to be invisible, so the
+    dashboard read fully in-sync while extract emitted a visible
+    ``INVALID_NAME`` skip for the very same file). The names are raw,
+    unsanitized strings — web rendering escapes them, and log emission
+    keeps going through the structured ``extra`` dict (never the message).
+
+    Returns ``(set(), [])`` when the table entry is ``NO_FANOUT`` or
     when the resolved root does not yet exist on disk (caller treats
     "no runtime listing" the same as "table says no fan-out").
     """
     if (file_suffix is None) == (dir_manifest is None):
         raise ValueError(
-            "runtime_artifact_names requires exactly one of file_suffix= or dir_manifest=."
+            "runtime_artifact_listing requires exactly one of file_suffix= or dir_manifest=."
         )
     root = runtime_fanout_root(artifact, runtime, scope, project_root)
     if root is None or not root.is_dir():
-        return set()
+        return set(), []
     kind = f"{artifact[:-1]} name"
     names: set[str] = set()
+    invalid: list[str] = []
     if file_suffix is not None:
         entries = ((p.stem, p) for p in root.iterdir() if p.is_file() and p.suffix == file_suffix)
     else:
@@ -233,6 +243,7 @@ def runtime_artifact_names(
         try:
             names.add(validate_name(raw_name, kind=kind))
         except InvalidNameError as exc:
+            invalid.append(raw_name)
             logger.warning(
                 "Skipping invalid runtime artifact name",
                 extra={
@@ -244,4 +255,25 @@ def runtime_artifact_names(
                     "reason": str(exc),
                 },
             )
+    return names, sorted(invalid)
+
+
+def runtime_artifact_names(
+    artifact: ArtifactKind,
+    runtime: str,
+    project_root: Path | None,
+    scope: TargetScope,
+    *,
+    file_suffix: str | None = None,
+    dir_manifest: str | None = None,
+) -> set[str]:
+    """Valid-names-only view of :func:`runtime_artifact_listing` (back-compat)."""
+    names, _invalid = runtime_artifact_listing(
+        artifact,
+        runtime,
+        project_root,
+        scope,
+        file_suffix=file_suffix,
+        dir_manifest=dir_manifest,
+    )
     return names

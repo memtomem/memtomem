@@ -471,6 +471,24 @@ class TestDiffCommands:
         assert status_by_runtime["claude_commands"] == "out of sync"
         assert status_by_runtime["gemini_commands"] == "in sync"
 
+    def test_invalid_runtime_name_surfaces_as_invalid_name_row(self, tmp_path):
+        """Invalid-named runtime commands surface as a dedicated row instead
+        of vanishing from diff (#1229)."""
+        d = tmp_path / ".claude/commands"
+        d.mkdir(parents=True)
+        (d / "bad name.md").write_text(SAMPLE_MINIMAL_COMMAND, encoding="utf-8")
+        rows = diff_commands(tmp_path)
+        assert ("claude_commands", "bad name", "invalid name") in rows
+
+    def test_unparseable_canonical_reports_parse_error_not_missing_target(self, tmp_path):
+        """Mirrors diff_agents: parse-error canonicals must not masquerade as
+        'missing target' (#1229). Commands tolerate missing frontmatter, so
+        the unparseable case here is an invalid effective name."""
+        _make_canonical_command(tmp_path, "broken", "---\nname: bad name\n---\n\nbody\n")
+        rows = diff_commands(tmp_path)
+        statuses = {s for _, n, s in rows if n == "broken"}
+        assert statuses == {"parse error"}
+
     def test_whitespace_only_drift_detected_and_converges(self, tmp_path):
         """Whitespace-only drift is real drift: sync writes render output
         byte-exact, so diff must not ``.strip()`` it away — pre-fix a padded

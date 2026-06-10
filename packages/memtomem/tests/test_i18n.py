@@ -1258,6 +1258,27 @@ class TestNoHardcodedStrings:
             f"'parse error' must map to settings.ctx.status_parse_error; got: {m.group(1)!r}"
         )
 
+    def test_invalid_name_status_mapped(self) -> None:
+        """#1229: ``_ctxStatusLabel`` must map the ``'invalid name'`` wire
+        status (emitted by diff_agents/diff_commands/diff_skills for
+        artifacts whose name fails validate_name) to
+        ``settings.ctx.status_invalid_name`` — same shape as the Drift-4
+        parse-error pin above; locale presence is covered by the en/ko
+        parity gate."""
+        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        block_match = re.search(
+            r"const _ctxStatusLabel\s*=\s*\{(.+?)\};",
+            text,
+            re.DOTALL,
+        )
+        assert block_match, "Could not locate _ctxStatusLabel block in context-gateway.js"
+        block = block_match.group(1)
+        m = re.search(r"'invalid name':\s*'([^']+)'", block)
+        assert m, "Missing 'invalid name' key in _ctxStatusLabel"
+        assert m.group(1) == "settings.ctx.status_invalid_name", (
+            f"'invalid name' must map to settings.ctx.status_invalid_name; got: {m.group(1)!r}"
+        )
+
     def test_q_pr4_langchange_listener_branches_per_type(self) -> None:
         """Q-PR4 (#826): the langchange listener must extend its overview-only
         gating from PR #824 to also cover the three per-type list sections
