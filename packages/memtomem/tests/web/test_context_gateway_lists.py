@@ -645,9 +645,11 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     banner_pre = (
         page.locator("#ctx-skills-list .ctx-runtime-only-banner").text_content() or ""
     ).strip()
-    # ``runtime_only_banner`` is a templated string; pin the EN-only token
-    # ``Click Import`` and the KO-only token ``눌러`` to keep the assertion
-    # robust against count/dir interpolation.
+    # The banner copy is a templated string; pin the EN-only token
+    # ``Click Import`` and the KO-only token ``가져오기`` to keep the
+    # assertion robust against count/dir interpolation. (Copy-polish pass
+    # reworded the KO body to ``가져오기를 누르거나`` — the KO marker is now
+    # the Import noun, not the old ``눌러`` verb form.)
     assert "Click Import" in banner_pre, (
         f"EN runtime-only banner should contain 'Click Import': {banner_pre!r}"
     )
@@ -656,14 +658,16 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     page.wait_for_function(
         "() => {"
         "  const el = document.querySelector('#ctx-skills-list .ctx-runtime-only-banner');"
-        "  return el && el.textContent.includes('눌러');"
+        "  return el && el.textContent.includes('가져오기');"
         "}",
         timeout=3_000,
     )
     banner_post = (
         page.locator("#ctx-skills-list .ctx-runtime-only-banner").text_content() or ""
     ).strip()
-    assert "눌러" in banner_post, f"KO runtime-only banner should contain '눌러': {banner_post!r}"
+    assert "가져오기" in banner_post, (
+        f"KO runtime-only banner should contain '가져오기': {banner_post!r}"
+    )
     assert "Click Import" not in banner_post, (
         f"EN literal must not survive KO toggle: {banner_post!r}"
     )
@@ -1601,9 +1605,9 @@ def test_q956_empty_hint_project_tier_preserves_existing_copy(page, mm_web_url: 
 
 def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
     """Korean copy for the user-tier empty hint (#956): contains the
-    ``사용자 canonical`` phrase (the technical-term carve-out keeps
-    ``canonical`` un-Koreanized, matching CLI/ADR vocabulary) and drops
-    the ``이 프로젝트의`` project framing.
+    ``사용자 티어`` phrase (the copy-polish pass dropped the mixed-script
+    ``사용자 canonical`` jargon in favor of plain Korean) and drops the
+    ``이 프로젝트의`` project framing.
     """
     install_default_stubs(page)
     _stub_projects_wide(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
@@ -1625,14 +1629,12 @@ def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
         "() => {"
         "  const el = document.querySelector("
         "    '#ctx-skills-list .empty-state .empty-state-hint');"
-        "  return el && el.textContent.includes('사용자 canonical');"
+        "  return el && el.textContent.includes('사용자 티어');"
         "}",
         timeout=3_000,
     )
     hint = page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
-    assert "사용자 canonical" in hint, (
-        f"KO user-tier empty hint should contain '사용자 canonical': {hint!r}"
-    )
+    assert "사용자 티어" in hint, f"KO user-tier empty hint should contain '사용자 티어': {hint!r}"
     assert "이 프로젝트의" not in hint, (
         f"KO user-tier empty hint must not say '이 프로젝트의': {hint!r}"
     )

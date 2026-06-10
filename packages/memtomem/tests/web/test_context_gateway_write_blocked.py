@@ -193,8 +193,12 @@ def test_project_local_tier_uses_project_local_specific_copy(page, mm_web_url: s
     banner = page.locator("#ctx-skills-list .ctx-write-blocked-banner[data-tier='project_local']")
     assert banner.count() == 1, "project_local-tier banner must be present exactly once"
     banner_text = (banner.text_content() or "").strip()
-    assert "project_local" in banner_text or "fan-out" in banner_text.lower(), (
-        f"banner must surface the project_local-tier copy; got {banner_text!r}"
+    # The copy-polish pass replaced the "no runtime fan-out (ADR-0011 §3)"
+    # jargon with plain draft-tier language; pin the new markers (draft
+    # framing + never-pushed direction) — still distinct from the user-tier
+    # read-only/CLI copy, which the negative below also guards.
+    assert "draft" in banner_text.lower() and "never pushed" in banner_text.lower(), (
+        f"banner must surface the project_local draft-tier copy; got {banner_text!r}"
     )
 
     # Negative: the user-tier banner must NOT also be present — the two
