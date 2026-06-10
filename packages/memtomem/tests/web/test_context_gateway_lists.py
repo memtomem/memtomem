@@ -1638,3 +1638,71 @@ def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
     assert "이 프로젝트의" not in hint, (
         f"KO user-tier empty hint must not say '이 프로젝트의': {hint!r}"
     )
+
+
+# --- 2026-06-10 diagnostics package (review W4 / U12) --------------------------
+
+
+def test_mcp_user_tier_empty_hint_says_project_only(page, mm_web_url: str) -> None:
+    """W4: MCP server definitions exist only at the project_shared tier — the
+    backend returns a constant empty payload for other tiers and nothing ever
+    reads ``~/.memtomem/mcp-servers``. Pre-change the user tier rendered the
+    generic user-tier hint, directing users to stock that never-read path
+    (and to press a Sync button the read-only tier disables).
+    """
+    install_default_stubs(page)
+    _stub_projects_wide(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    page.route(
+        "**/api/context/mcp-servers**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"mcp-servers": [], "scanned_dirs": []}),
+        ),
+    )
+    page.goto(mm_web_url)
+    page.evaluate("() => activateTab('settings')")
+    page.evaluate("() => switchSettingsSection('ctx-mcp-servers')")
+    page.wait_for_function(
+        "() => document.querySelectorAll('#ctx-mcp-servers-list .ctx-scope-group').length > 0",
+        timeout=5_000,
+    )
+
+    page.locator("#ctx-control-bar .ctx-tier-filter button[data-scope='user']").click()
+    page.wait_for_function(
+        "() => {"
+        "  const el = document.querySelector("
+        "    '#ctx-mcp-servers-list .empty-state .empty-state-hint');"
+        "  return el && el.textContent.includes('Project (shared)');"
+        "}",
+        timeout=3_000,
+    )
+    hint = page.locator("#ctx-mcp-servers-list .empty-state .empty-state-hint").text_content() or ""
+    assert "exist only at the Project (shared) tier" in hint, (
+        f"user-tier MCP hint must say the artifact is project-only, got {hint!r}"
+    )
+    assert "~/.memtomem/mcp-servers" not in hint, (
+        f"hint must not point at the never-read user-tier path, got {hint!r}"
+    )
+
+
+def test_import_receipt_priority_line_only_with_rows(page, mm_web_url: str) -> None:
+    """U12: the cross-runtime import-priority rule line must render only when
+    the receipt actually has imported/skipped rows — pre-change it
+    unconditionally led even the "nothing imported" receipt.
+    ``renderImportResult`` is a pure template helper, so pin it directly.
+    """
+    install_default_stubs(page)
+    _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
+    _stub_skills(page, _CWD_SKILLS_ITEMS)
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    empty_html = page.evaluate("() => renderImportResult({imported: [], skipped: []})")
+    assert "ctx-import-priority" not in empty_html, (
+        f"empty receipt must not lead with the priority rule, got {empty_html!r}"
+    )
+    rows_html = page.evaluate("() => renderImportResult({imported: [{name: 'x'}], skipped: []})")
+    assert "ctx-import-priority" in rows_html, (
+        f"receipt with rows must keep the priority rule, got {rows_html!r}"
+    )

@@ -1223,3 +1223,133 @@ def test_overview_last_sync_absent_when_null(page, mm_web_url: str) -> None:
     assert "Canonical updated" not in header_text, (
         f"label must not leak into header when value is null; got: {header_text!r}"
     )
+
+
+# --- 2026-06-10 diagnostics package (review U6 / U10 / U11) -------------------
+
+
+def test_error_tile_surfaces_error_kind_and_message(page, mm_web_url: str) -> None:
+    """U6: the overview error envelope (``error_kind`` + display-sanitized
+    ``error_message`` from ``_error_payload``/``_redact_message``) must reach
+    the tile — pre-change the frontend dropped both fields and the user saw a
+    bare lowercase "error" badge with nothing to act on.
+    """
+    install_default_stubs(page)
+    payload = dict(_HEALTHY_OVERVIEW)
+    payload["skills"] = {
+        "total": 0,
+        "error": True,
+        "error_kind": "permission",
+        "error_message": "~/.memtomem/skills: permission denied",
+    }
+    page.route(
+        "**/api/context/overview**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(payload)),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    tile = page.locator("#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']")
+    detail = tile.locator(".ctx-overview-error-detail")
+    detail.wait_for(timeout=3_000)
+    text = detail.text_content() or ""
+    assert "Permission denied" in text, f"kind label must render, got {text!r}"
+    assert "permission denied" in text, f"sanitized message must render, got {text!r}"
+    badge_title = tile.locator(".ctx-overview-badge .badge").get_attribute("title") or ""
+    assert "permission denied" in badge_title, (
+        f"badge title tooltip must carry the detail, got {badge_title!r}"
+    )
+    aria = tile.locator(".ctx-overview-stat-nav").get_attribute("aria-label") or ""
+    assert "permission" in aria, f"aria-label must include the diagnostics, got {aria!r}"
+
+
+def test_parse_error_does_not_suppress_other_pointers(page, mm_web_url: str) -> None:
+    """U11 / ADR-0009 §2 mixed-combination rule: one unparseable file must not
+    hide the remediation pointers for the OTHER statuses on the same tile.
+    Pre-change the pointer block was gated on ``parseError === 0``, so a tile
+    with 1 parse error and 2 missing-target entries lost its "Run Sync All"
+    line exactly when sync work was pending.
+    """
+    install_default_stubs(page)
+    payload = dict(_HEALTHY_OVERVIEW)
+    payload["skills"] = {
+        "total": 5,
+        "in_sync": 2,
+        "parse_error": 1,
+        "missing_target": 2,
+    }
+    page.route(
+        "**/api/context/overview**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(payload)),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    tile = page.locator("#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills']")
+    pointer = tile.locator(".ctx-overview-pointer[data-action='sync-all']")
+    pointer.wait_for(timeout=3_000)
+    text = pointer.text_content() or ""
+    assert "Run Sync All" in text, (
+        f"missing_target pointer must survive a co-occurring parse error, got {text!r}"
+    )
+    # The badge ladder still leads with the parse error (dominant severity).
+    badge = (tile.locator(".ctx-overview-badge .badge").text_content() or "").strip()
+    assert "parse error" in badge, f"badge must still surface the parse error, got {badge!r}"
+
+
+def test_empty_tiles_show_teaching_pointer(page, mm_web_url: str) -> None:
+    """U10 / ADR-0009 §4: an empty tile must teach the next step instead of a
+    bare "0 / Empty". Per-kind copy: artifact tiles say create-or-import, the
+    hooks tile says adopt (no create/import buttons on that leaf), the MCP
+    tile says create (no Import step for MCP).
+    """
+    install_default_stubs(page)
+    payload = {
+        "skills": {"total": 0, "in_sync": 0},
+        "commands": {"total": 0, "in_sync": 0},
+        "agents": {"total": 0, "in_sync": 0},
+        "mcp_servers": {"total": 0, "local_draft": 0},
+        "settings": {
+            "total": 0,
+            "in_sync": 0,
+            "out_of_sync": 0,
+            "missing_target": 0,
+            "error": 0,
+            "status": "in_sync",
+        },
+    }
+    page.route(
+        "**/api/context/overview**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body=json.dumps(payload)),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    skills_pointer = page.locator(
+        "#ctx-overview-content .ctx-overview-stat[data-section='ctx-skills'] .ctx-overview-pointer"
+    )
+    skills_pointer.wait_for(timeout=3_000)
+    text = skills_pointer.text_content() or ""
+    assert "Nothing here yet" in text and "Skills" in text, (
+        f"empty artifact tile must carry the teaching pointer, got {text!r}"
+    )
+    hooks_text = (
+        page.locator(
+            "#ctx-overview-content .ctx-overview-stat[data-section='hooks-sync'] "
+            ".ctx-overview-pointer"
+        ).text_content()
+        or ""
+    )
+    assert "adopt hooks" in hooks_text, (
+        f"hooks tile must use the adopt wording (no create/import on that leaf), got {hooks_text!r}"
+    )
+    mcp_text = (
+        page.locator(
+            "#ctx-overview-content .ctx-overview-stat[data-section='ctx-mcp-servers'] "
+            ".ctx-overview-pointer"
+        ).text_content()
+        or ""
+    )
+    assert "create one" in mcp_text and "import" not in mcp_text.lower(), (
+        f"MCP tile must not advertise an Import step that doesn't exist, got {mcp_text!r}"
+    )

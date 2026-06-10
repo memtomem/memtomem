@@ -121,7 +121,12 @@ function renderLabelChips(versionInfo) {
 
 function renderImportResult(data) {
   let html = `<div class="ctx-import-result">`;
-  html += `<div class="ctx-import-priority">${t('settings.ctx.import_priority')}</div>`;
+  // The cross-runtime priority rule only matters when the receipt actually
+  // has rows — leading an empty "nothing imported" receipt with it read as
+  // unexplained pipeline trivia (review 2026-06-10, U12).
+  if (data.imported?.length || data.skipped?.length) {
+    html += `<div class="ctx-import-priority">${t('settings.ctx.import_priority')}</div>`;
+  }
   if (data.imported && data.imported.length) {
     html += `<h4>${t('settings.ctx.import_success')}</h4>`;
     for (const item of data.imported) {
@@ -1130,10 +1135,14 @@ function _renderCtxOverview(data) {
       // import). ``parse_error`` and ``d.error`` are intentionally NOT
       // surfaced as pointers — both are direction-neutral diagnostics
       // already conveyed by the badge; the leaf is the right place to
-      // diagnose them. Settings tile cannot produce ``missing_canonical``
-      // by design (ADR-0009 §2 last paragraph, ADR-0001 §5).
+      // diagnose them. But per ADR-0009 §2's mixed-combination rule a
+      // parse error must not SUPPRESS the other pointers (1 unparseable
+      // file + 5 missing-target still needs its "Run Sync All" line), so
+      // only the whole-call failure shape (``d.error``) gates the block.
+      // Settings tile cannot produce ``missing_canonical`` by design
+      // (ADR-0009 §2 last paragraph, ADR-0001 §5).
       const pointers = [];
-      if (!d.error && parseError === 0) {
+      if (!d.error) {
         if (missingTarget > 0) {
           pointers.push({
             action: 'sync-all',
@@ -1156,6 +1165,22 @@ function _renderCtxOverview(data) {
               count: missingCanonical,
               leaf: typ.label,
             }),
+          });
+        }
+        // ADR-0009 §4 empty-state teaching copy: a bare "0 / Empty" tile
+        // told a first-run user nothing about how to get started — the ADR
+        // explicitly rejected that rendering. Per-kind keys because the
+        // leaves offer different verbs: hooks have no create/import button
+        // (you adopt runtime hooks there), MCP servers have no Import.
+        if (isEmpty) {
+          const emptyKey = typ.key === 'settings'
+            ? 'settings.ctx.pointer_empty_hooks'
+            : (typ.key === 'mcp_servers'
+                ? 'settings.ctx.pointer_empty_mcp'
+                : 'settings.ctx.pointer_empty');
+          pointers.push({
+            action: 'leaf',
+            text: t(emptyKey, { leaf: typ.label }),
           });
         }
       }
@@ -1193,12 +1218,39 @@ function _renderCtxOverview(data) {
       // because existing selectors (browser tests, deep-link applier,
       // CSS scoping) use them to identify the tile by kind — the click
       // handler reads them via ``navBtn.closest('.ctx-overview-stat')``.
-      const tileAriaLabel = `${badgeText} — ${typ.label}`;
+      // Whole-call failure diagnostics (#762 error taxonomy): the route
+      // ships a classified ``error_kind`` plus an ``error_message`` that
+      // ``_redact_message`` already sanitized FOR DISPLAY (HOME collapsed,
+      // secret-shapes replaced, ≤200 chars — context_gateway.py). Dropping
+      // them left the user a bare "error" badge with nothing to act on.
+      // Shape guard: artifact tiles emit boolean ``error: true``; the
+      // settings tile emits ``status: 'error'`` either for a whole-call
+      // failure (with kind/message) or for in-band per-file errors
+      // (without — those are diagnosed on the hooks leaf, so no line here).
+      const errorKind = (d.error === true || d.status === 'error') ? (d.error_kind || '') : '';
+      const errorMessage = (d.error === true || d.status === 'error') ? (d.error_message || '') : '';
+      let errorDetailHtml = '';
+      let badgeTitleAttr = '';
+      if (errorKind || errorMessage) {
+        // ``t()`` returns the key itself for unknown keys (no fallback
+        // arg) — fall back to the raw kind so future kinds stay visible.
+        const kindKey = `settings.ctx.error_kind_${errorKind}`;
+        const kindTranslated = errorKind ? t(kindKey) : '';
+        const kindLabel = kindTranslated === kindKey ? errorKind : kindTranslated;
+        const detailText = [kindLabel, errorMessage].filter(Boolean).join(' — ');
+        badgeTitleAttr = ` title="${escapeHtml(detailText)}"`;
+        errorDetailHtml =
+          `<div class="ctx-overview-error-detail" title="${escapeHtml(detailText)}">`
+          + `${escapeHtml(detailText)}</div>`;
+      }
+      const tileAriaLabel = `${badgeText} — ${typ.label}`
+        + (errorKind || errorMessage ? ` — ${[errorKind, errorMessage].filter(Boolean).join(': ')}` : '');
       html += `<div class="ctx-overview-stat" data-section="${typ.section}" data-tile-key="${typ.key}">
         <button type="button" class="ctx-overview-stat-nav" aria-label="${escapeHtml(tileAriaLabel)}">
           <div class="ctx-overview-count">${total}</div>
           <div class="ctx-overview-label">${escapeHtml(typ.label)}</div>
-          <div class="ctx-overview-badge"><span class="badge ${badgeCls}">${escapeHtml(badgeText)}</span></div>
+          <div class="ctx-overview-badge"><span class="badge ${badgeCls}"${badgeTitleAttr}>${escapeHtml(badgeText)}</span></div>
+          ${errorDetailHtml}
         </button>
         ${pointersHtml}
       </div>`;
@@ -1256,7 +1308,17 @@ function _renderCtxOverview(data) {
         acc.runtimeOnly += d.missing_canonical || 0;
         return acc;
       }, { total: 0, runtimeOnly: 0 });
-      if (totals.total > 0 && totals.runtimeOnly === totals.total) {
+      // ``settings`` participates in the all-empty gate too: its ``total``
+      // counts applicable generators with a stored source present, so 0
+      // means the settings phase would also be a pure no-op. Without it a
+      // fully-empty project kept Sync All live and the run ended in a
+      // "Sync completed" toast for a complete no-op.
+      const settingsTotal = (data.settings || {}).total || 0;
+      if (totals.total === 0 && settingsTotal === 0) {
+        syncAllBtn.dataset.runtimeOnly = 'true';
+        syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
+        syncAllBtn.setAttribute('aria-disabled', 'true');
+      } else if (totals.total > 0 && totals.runtimeOnly === totals.total) {
         syncAllBtn.dataset.runtimeOnly = 'true';
         syncAllBtn.title = t('settings.ctx.sync_all_disabled_tooltip');
         syncAllBtn.setAttribute('aria-disabled', 'true');
@@ -1939,6 +2001,15 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   const succeeded = [];
   let failed = null;
   let anyPhaseStarted = false;
+  // No-op detection: a run that writes nothing (0 generated everywhere,
+  // only ``no_canonical_root`` artifact skips, settings all-skipped) must
+  // not end in the "Sync completed" success toast — on an empty project
+  // that toast claims work that never happened. The pre-click gate above
+  // catches the common case from the overview counts; this catches a
+  // stale overview racing an emptied store.
+  let generatedTotal = 0;
+  let artifactNonEmptySkip = false;
+  let settingsNoop = false;
   // Declarative per-phase status: all pending up front, then each phase moves
   // pending → syncing → done | failed; phases never reached after a failure
   // are marked not_run at the end. ``setPhase`` mutates the shared object in
@@ -2005,7 +2076,17 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       // render formats them per-locale.
       const body = await resp.json().catch(() => ({}));
       succeeded.push(typ);
-      setPhase(typ, 'done', _ctxSyncArtifactCounts(body));
+      const phaseCounts = _ctxSyncArtifactCounts(body);
+      // ``dropped`` is field-level conversion metadata (a drop can only
+      // happen while generating a file, so dropped ⊆ generated runs) —
+      // counted anyway so the no-op condition stays correct even if a
+      // future engine emits drops standalone.
+      generatedTotal += (phaseCounts.generated || 0) + (phaseCounts.dropped || 0);
+      const phaseSkips = Array.isArray(body.skipped) ? body.skipped : [];
+      if (phaseSkips.some(s => s && s.reason_code !== 'no_canonical_root')) {
+        artifactNonEmptySkip = true;
+      }
+      setPhase(typ, 'done', phaseCounts);
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored
@@ -2068,6 +2149,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
             settingsSeverity = 'needs_confirmation';
           } else {
             settingsSeverity = 'ok';
+            // All-skipped (or empty) results ≡ the settings phase wrote
+            // nothing — feeds the run-level no-op toast decision below.
+            settingsNoop = settingsResults.length === 0
+              || settingsResults.every(r => r && r.status === 'skipped');
           }
         }
       }
@@ -2123,6 +2208,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
           },
         },
       );
+    } else if (generatedTotal === 0 && !artifactNonEmptySkip && settingsNoop) {
+      // Every artifact phase produced 0 files with only ``no_canonical_root``
+      // skips and settings was all-skipped — nothing on disk changed, so
+      // "Sync completed" would overstate the run. Mirror the pre-click
+      // empty gate with an explicit nothing-synced info toast.
+      showToast(t('settings.ctx.sync_all_nothing_synced'), 'info');
     } else {
       showToast(t('settings.ctx.sync_success'));
     }
@@ -2341,9 +2432,17 @@ function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
     .replace('{count}', count)
     .replace(/\{type\}/g, _ctxTypeName(type))
     .replace('{scan_dirs}', scanList);
-  const commands = _ctxMissingCanonicalCommands(scope)
-    .map(cmd => `<code>${escapeHtml(cmd)}</code>`)
-    .join('');
+  // The CLI bootstrap snippets cover skills/agents/commands only — there is
+  // no ``--include=mcp-servers`` in ``mm context``, so rendering them for the
+  // MCP section would hand the user commands that cannot touch MCP state.
+  // (Today this banner is effectively unreachable for mcp-servers — the list
+  // only shows stored definitions — but the guard keeps a future
+  // runtime-only MCP surface from inheriting wrong remediation.)
+  const commands = type === 'mcp-servers'
+    ? ''
+    : _ctxMissingCanonicalCommands(scope)
+        .map(cmd => `<code>${escapeHtml(cmd)}</code>`)
+        .join('');
   return `<div class="ctx-runtime-only-banner ctx-missing-canonical-remediation" role="status" data-tier="${escapeHtml(scope)}">
       <div class="ctx-missing-canonical-title">${escapeHtml(title)}</div>
       <div class="ctx-missing-canonical-body">${escapeHtml(body)}</div>
@@ -2371,11 +2470,18 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     // MCP servers have no Import affordance (single ``.mcp.json`` source, no
     // /import route), so the shared project-tier hint's "click Import" sentence
     // pointed at a button that doesn't exist for this section. Branch it.
+    // MCP must branch BEFORE the user-tier check: MCP definitions exist only
+    // at the project_shared tier (the overview route returns a constant
+    // empty payload for other tiers and nothing ever reads
+    // ``~/.memtomem/mcp-servers``), so the generic user-tier hint was
+    // directing users to stock a directory the backend never looks at.
     let hintKey;
-    if (isUser) {
+    if (type === 'mcp-servers') {
+      hintKey = _ctxTargetScope === 'project_shared'
+        ? 'settings.ctx.empty_hint_mcp'
+        : 'settings.ctx.empty_hint_mcp_project_only';
+    } else if (isUser) {
       hintKey = 'settings.ctx.empty_hint_user';
-    } else if (type === 'mcp-servers') {
-      hintKey = 'settings.ctx.empty_hint_mcp';
     } else {
       hintKey = 'settings.ctx.empty_hint';
     }
