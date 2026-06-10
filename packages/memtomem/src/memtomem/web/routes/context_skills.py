@@ -167,7 +167,14 @@ def _parse_skill_description(content: str) -> str:
     so a flat-YAML scrape mirrors the same shape ``context/agents.py``
     uses. Falls back to the first non-blank body line so the UI never
     renders a blank meta header for a description-less skill.
+
+    Display-only normalization: one leading UTF-8 BOM is stripped so a
+    Windows-authored SKILL.md doesn't fall past the anchored regex and show
+    the literal frontmatter fence as its description (#1229). The skill
+    *content* served to the editor stays byte-faithful — skills fan out and
+    diff byte-exact by design.
     """
+    content = content.removeprefix("﻿")
     m = _SKILL_FRONT_MATTER_RE.match(content)
     if m:
         for line in m.group(1).splitlines():

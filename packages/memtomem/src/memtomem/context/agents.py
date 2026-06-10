@@ -212,9 +212,12 @@ def _parse_canonical_agent_text(
     that captures bytes once to close the scan→write TOCTOU window
     (PR-E3 Codex review fold).
     """
-    # Normalize CRLF → LF so ``_FRONT_MATTER_RE`` (which anchors on ``\n``) matches
-    # files authored on Windows or by editors that emit CRLF.
-    content = content.replace("\r\n", "\n")
+    # Normalize a leading UTF-8 BOM and CRLF → LF so ``_FRONT_MATTER_RE``
+    # (which anchors at position 0 and on ``\n``) matches files authored on
+    # Windows or by editors that emit a BOM/CRLF. Exactly one leading BOM is
+    # stripped (mirroring the ``utf-8-sig`` decoder); a mid-file U+FEFF is a
+    # legitimate zero-width no-break space and is left alone.
+    content = content.removeprefix("﻿").replace("\r\n", "\n")
     m = _FRONT_MATTER_RE.match(content)
     if not m:
         raise AgentParseError(f"missing YAML frontmatter: {source}")
@@ -1072,22 +1075,21 @@ def diff_agents(
                 continue
 
             expected, _ = gen.render(agent)
-            # Lenient decode mirrors the canonical side (and sync): a stray
-            # non-UTF-8 byte means drift, not a diff-wide crash. An unreadable
-            # runtime file can't assert parity — report drift, never mask it.
+            # Byte-exact compare against what sync would write (Phase 2
+            # ``atomic_write_bytes`` of ``content.encode("utf-8")`` verbatim)
+            # — a ``.strip()`` compare reported whitespace-padded runtime
+            # files "in sync" while sync would rewrite them (#1229), and a
+            # lenient text decode collapses distinct invalid byte sequences
+            # to the same U+FFFD. Bytes cannot raise UnicodeDecodeError. An
+            # unreadable runtime file can't assert parity — report drift,
+            # never mask it.
             try:
-                actual = (
-                    target.read_bytes().decode("utf-8", errors="replace")
-                    if target.is_file()
-                    else ""
-                )
+                actual_bytes = target.read_bytes() if target.is_file() else b""
             except OSError:
                 results.append((gen_name, name, "out of sync"))
                 continue
-            if expected.strip() == actual.strip():
-                results.append((gen_name, name, "in sync"))
-            else:
-                results.append((gen_name, name, "out of sync"))
+            status = "in sync" if expected.encode("utf-8") == actual_bytes else "out of sync"
+            results.append((gen_name, name, status))
 
     return results
 

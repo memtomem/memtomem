@@ -108,10 +108,13 @@ def _parse_canonical_command_text(
     """
     default_name = source.parent.name if layout == "dir" else source.stem
 
-    # Share agents.py's CRLF normalization — the shared ``_FRONT_MATTER_RE``
-    # anchors on ``\n`` only, so a CRLF file would otherwise parse as "no
-    # frontmatter" and silently fall through to the filename-based default.
-    content = content.replace("\r\n", "\n")
+    # Share agents.py's BOM + CRLF normalization — the shared
+    # ``_FRONT_MATTER_RE`` anchors at position 0 and on ``\n`` only, so a
+    # BOM-prefixed or CRLF file would otherwise parse as "no frontmatter" and
+    # silently fall through to the filename-based default, dropping
+    # description/model/allowed-tools while diff still reported "in sync"
+    # (#1229). Exactly one leading BOM is stripped (``utf-8-sig`` semantics).
+    content = content.removeprefix("﻿").replace("\r\n", "\n")
     m = _FRONT_MATTER_RE.match(content)
     if m is None:
         # Commands without frontmatter are tolerated — treat the whole file
@@ -498,7 +501,10 @@ _CANONICAL_DESC_LINE = re.compile(r"^description\s*:\s*(.*)$", re.MULTILINE)
 
 def _gemini_toml_to_canonical(toml_path: Path) -> str:
     """Render a canonical Markdown+YAML file from a Gemini TOML command."""
-    data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    # ``utf-8-sig`` so a BOM-prefixed Windows-authored .toml imports instead
+    # of skipping with a TOML parse error (tomllib rejects a raw BOM); it is
+    # a byte-for-byte no-op for BOM-less files.
+    data = tomllib.loads(toml_path.read_text(encoding="utf-8-sig"))
     prompt = str(data.get("prompt", ""))
     description = str(data.get("description", ""))
     body = _gemini_to_claude_body(prompt).rstrip() + "\n"
@@ -848,22 +854,21 @@ def diff_commands(
                 continue
 
             expected, _ = gen.render(cmd)
-            # Lenient decode mirrors the canonical side (and sync): a stray
-            # non-UTF-8 byte means drift, not a diff-wide crash. An unreadable
-            # runtime file can't assert parity — report drift, never mask it.
+            # Byte-exact compare against what sync would write (Phase 2
+            # ``atomic_write_bytes`` of ``content.encode("utf-8")`` verbatim)
+            # — a ``.strip()`` compare reported whitespace-padded runtime
+            # files "in sync" while sync would rewrite them (#1229), and a
+            # lenient text decode collapses distinct invalid byte sequences
+            # to the same U+FFFD. Bytes cannot raise UnicodeDecodeError. An
+            # unreadable runtime file can't assert parity — report drift,
+            # never mask it.
             try:
-                actual = (
-                    target.read_bytes().decode("utf-8", errors="replace")
-                    if target.is_file()
-                    else ""
-                )
+                actual_bytes = target.read_bytes() if target.is_file() else b""
             except OSError:
                 results.append((gen_name, name, "out of sync"))
                 continue
-            if expected.strip() == actual.strip():
-                results.append((gen_name, name, "in sync"))
-            else:
-                results.append((gen_name, name, "out of sync"))
+            status = "in sync" if expected.encode("utf-8") == actual_bytes else "out of sync"
+            results.append((gen_name, name, status))
 
     return results
 

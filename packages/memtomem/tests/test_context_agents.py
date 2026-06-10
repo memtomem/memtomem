@@ -490,6 +490,23 @@ class TestDiffAgents:
         assert status_by_runtime["claude_agents"] == "out of sync"
         assert status_by_runtime["gemini_agents"] == "in sync"
 
+    def test_whitespace_only_drift_detected_and_converges(self, tmp_path, codex_home):
+        """Whitespace-only drift is real drift: sync writes render output
+        byte-exact, so diff must not ``.strip()`` it away — pre-fix a padded
+        runtime file showed "in sync" while sync would rewrite it (#1229).
+        One sync converges the drift back to "in sync"."""
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        generate_all_agents(tmp_path)
+        target = tmp_path / ".claude/agents/helper.md"
+        target.write_bytes(target.read_bytes() + b"\n")
+
+        status_by_runtime = {r: s for r, _, s in diff_agents(tmp_path)}
+        assert status_by_runtime["claude_agents"] == "out of sync"
+        assert status_by_runtime["gemini_agents"] == "in sync"
+
+        generate_all_agents(tmp_path)
+        assert all(s == "in sync" for _, _, s in diff_agents(tmp_path))
+
 
 class TestRuntimeAgentNames:
     """Pin the runtime-name lookup contract directly so a future revert of the
@@ -656,6 +673,44 @@ class TestCrlfParsing:
 
         assert rendered_first == rendered_second
         # And the rendered runtime file uses LF, not CRLF.
+        assert b"\r\n" not in rendered_first
+
+
+class TestBomParsing:
+    """#1229: the frontmatter regex anchors at position 0, so a leading UTF-8
+    BOM made BOM-prefixed canonical agents raise ``AgentParseError("missing
+    YAML frontmatter")`` — Windows-authored files must parse like clean ones."""
+
+    def test_bom_frontmatter_parses(self, tmp_path):
+        p = tmp_path / "bom.md"
+        p.write_bytes(b"\xef\xbb\xbf" + SAMPLE_FULL_AGENT.encode("utf-8"))
+        agent = parse_canonical_agent(p)
+        assert agent.name == "code-reviewer"
+        assert agent.model == "sonnet"
+        assert "﻿" not in agent.body
+
+    def test_mid_file_feff_preserved(self, tmp_path):
+        """Only the leading BOM is normalized — a mid-file U+FEFF is a
+        legitimate zero-width no-break space."""
+        p = tmp_path / "zwnbsp.md"
+        p.write_text(SAMPLE_MINIMAL_AGENT + "zero﻿width\n", encoding="utf-8")
+        agent = parse_canonical_agent(p)
+        assert "zero﻿width" in agent.body
+
+    def test_bom_crlf_roundtrip_is_idempotent(self, tmp_path):
+        """BOM+CRLF canonical → runtime must be byte-stable across re-syncs
+        and render BOM-free, LF-only runtime files."""
+        p = tmp_path / CANONICAL_AGENT_ROOT / "helper.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"\xef\xbb\xbf" + SAMPLE_MINIMAL_AGENT.replace("\n", "\r\n").encode("utf-8"))
+
+        generate_all_agents(tmp_path, runtimes=["claude_agents"])
+        rendered_first = (tmp_path / ".claude/agents/helper.md").read_bytes()
+        generate_all_agents(tmp_path, runtimes=["claude_agents"])
+        rendered_second = (tmp_path / ".claude/agents/helper.md").read_bytes()
+
+        assert rendered_first == rendered_second
+        assert b"\xef\xbb\xbf" not in rendered_first
         assert b"\r\n" not in rendered_first
 
 

@@ -471,6 +471,23 @@ class TestDiffCommands:
         assert status_by_runtime["claude_commands"] == "out of sync"
         assert status_by_runtime["gemini_commands"] == "in sync"
 
+    def test_whitespace_only_drift_detected_and_converges(self, tmp_path):
+        """Whitespace-only drift is real drift: sync writes render output
+        byte-exact, so diff must not ``.strip()`` it away — pre-fix a padded
+        runtime file showed "in sync" while sync would rewrite it (#1229).
+        One sync converges the drift back to "in sync"."""
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        generate_all_commands(tmp_path)
+        target = tmp_path / ".claude/commands/hi.md"
+        target.write_bytes(target.read_bytes() + b"\n")
+
+        status_by_runtime = {r: s for r, _, s in diff_commands(tmp_path)}
+        assert status_by_runtime["claude_commands"] == "out of sync"
+        assert status_by_runtime["gemini_commands"] == "in sync"
+
+        generate_all_commands(tmp_path)
+        assert all(s == "in sync" for _, _, s in diff_commands(tmp_path))
+
 
 class TestDetectCommandDirs:
     def test_empty(self, tmp_path):
@@ -579,3 +596,81 @@ class TestCrlfParsing:
         assert cmd.allowed_tools == ["Read", "Grep"]
         assert "$ARGUMENTS" in cmd.body
         assert "\r" not in cmd.body
+
+
+class TestBomParsing:
+    """#1229: the frontmatter regex anchors at position 0, so a BOM-prefixed
+    command parsed as frontmatter-less — description/argument-hint/
+    allowed-tools/model were SILENTLY dropped (the raw frontmatter became the
+    prompt body) while diff still reported "in sync"."""
+
+    def test_bom_frontmatter_parses(self, tmp_path):
+        p = tmp_path / CANONICAL_COMMAND_ROOT / "bom.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"\xef\xbb\xbf" + SAMPLE_FULL_COMMAND.encode("utf-8"))
+        cmd = parse_canonical_command(p)
+        assert cmd.name == "bom"
+        assert cmd.description == "Review a file for issues"
+        assert cmd.argument_hint == "[file-path]"
+        assert cmd.allowed_tools == ["Read", "Grep"]
+        assert cmd.model == "sonnet"
+        assert "﻿" not in cmd.body
+
+    def test_bom_crlf_combo_parses(self, tmp_path):
+        p = tmp_path / CANONICAL_COMMAND_ROOT / "bomcrlf.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"\xef\xbb\xbf" + SAMPLE_FULL_COMMAND.replace("\n", "\r\n").encode("utf-8"))
+        cmd = parse_canonical_command(p)
+        assert cmd.description == "Review a file for issues"
+        assert "\r" not in cmd.body
+        assert "﻿" not in cmd.body
+
+    def test_bom_frontmatterless_body_is_clean(self, tmp_path):
+        """The tolerated no-frontmatter branch no longer leaks the BOM into
+        the prompt body (``lstrip("\\n")`` never removed it)."""
+        p = tmp_path / CANONICAL_COMMAND_ROOT / "plain.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"\xef\xbb\xbfSay hi.\n")
+        cmd = parse_canonical_command(p)
+        assert cmd.name == "plain"
+        assert cmd.body == "Say hi.\n"
+
+    def test_mid_file_feff_preserved(self, tmp_path):
+        """Only the leading BOM is normalized — a mid-file U+FEFF is a
+        legitimate zero-width no-break space."""
+        p = tmp_path / CANONICAL_COMMAND_ROOT / "zwnbsp.md"
+        p.parent.mkdir(parents=True)
+        p.write_text(SAMPLE_MINIMAL_COMMAND + "zero﻿width\n", encoding="utf-8")
+        cmd = parse_canonical_command(p)
+        assert "zero﻿width" in cmd.body
+
+    def test_bom_canonical_fans_out_metadata_and_stays_in_sync(self, tmp_path):
+        """End-to-end: BOM canonical → generate → rendered runtime file is
+        BOM-free and carries the real description (pre-fix it was dropped and
+        the BOM leaked into the body), and diff is genuinely in sync."""
+        p = tmp_path / CANONICAL_COMMAND_ROOT / "bom-e2e.md"
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b"\xef\xbb\xbf" + SAMPLE_FULL_COMMAND.encode("utf-8"))
+        generate_all_commands(tmp_path)
+
+        rendered_path = tmp_path / ".claude/commands/bom-e2e.md"
+        assert b"\xef\xbb\xbf" not in rendered_path.read_bytes()
+        rendered = parse_canonical_command(rendered_path)
+        assert rendered.description == "Review a file for issues"
+        assert all(status == "in sync" for _, _, status in diff_commands(tmp_path))
+
+    def test_bom_gemini_toml_imports(self, tmp_path):
+        """tomllib rejects a raw BOM — reading Gemini TOML with ``utf-8-sig``
+        lets a BOM-prefixed Windows-authored .toml import instead of skipping
+        with a TOML parse error."""
+        d = tmp_path / ".gemini/commands"
+        d.mkdir(parents=True)
+        (d / "review.toml").write_bytes(
+            b"\xef\xbb\xbf" + b'description = "Review a file"\nprompt = "Review {{args}}."\n'
+        )
+        result = extract_commands_to_canonical(tmp_path)
+        assert len(result.imported) == 1
+        canonical = (tmp_path / CANONICAL_COMMAND_ROOT / "review" / "command.md").read_text(
+            encoding="utf-8"
+        )
+        assert "description: Review a file" in canonical

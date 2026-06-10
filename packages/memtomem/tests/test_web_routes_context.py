@@ -705,6 +705,22 @@ class TestReadSkill:
         assert r.status_code == 404
 
     @pytest.mark.anyio
+    async def test_bom_skill_description_parses(self, client: AsyncClient, tmp_path: Path):
+        """A BOM-prefixed SKILL.md must surface its frontmatter description,
+        not the literal frontmatter fence the anchored regex fell back to
+        pre-fix (#1229). The content payload stays byte-faithful."""
+        skill_dir = tmp_path / ".memtomem" / "skills" / "bom-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / SKILL_MANIFEST).write_bytes(
+            b"\xef\xbb\xbf---\ndescription: Windows-authored skill\n---\n\nBody.\n"
+        )
+        r = await client.get("/api/context/skills/bom-skill")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["fields"]["description"] == "Windows-authored skill"
+        assert data["content"].startswith("﻿")  # editor payload untouched
+
+    @pytest.mark.anyio
     async def test_auxiliary_files(self, client: AsyncClient, tmp_path: Path):
         _make_skill(tmp_path, "rich")
         scripts_dir = tmp_path / ".memtomem" / "skills" / "rich" / "scripts"
