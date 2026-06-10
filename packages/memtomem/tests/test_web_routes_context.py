@@ -12,6 +12,8 @@ from httpx import ASGITransport, AsyncClient
 from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.web.app import create_app
 
+from .helpers import set_home
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -860,6 +862,47 @@ class TestDiffSkill:
         assert claude_rt["status"] == "out of sync"
         assert claude_rt["runtime_content"] == "# V2\n"
 
+    @pytest.mark.anyio
+    async def test_diff_user_tier_resolves_user_runtime(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``target_scope=user`` must probe the user-tier fan-out roots
+        (``~/.claude/skills``), not the project's project_shared paths, so the
+        detail panel agrees with the scope-aware list diff (#1229)."""
+        home = tmp_path / "home"
+        set_home(monkeypatch, home)
+        content = "# User skill\n"
+        skill_dir = home / ".memtomem" / "skills" / "scoped"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+        rt_dir = home / ".claude" / "skills" / "scoped"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+
+        r = await client.get("/api/context/skills/scoped/diff", params={"target_scope": "user"})
+        assert r.status_code == 200
+        data = r.json()
+        claude_rt = [rt for rt in data["runtimes"] if rt["runtime"] == "claude_skills"][0]
+        assert claude_rt["status"] == "in sync"
+
+    @pytest.mark.anyio
+    async def test_diff_project_local_has_no_runtime_rows(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """project_local has no runtime fan-out (ADR-0011 §3): the detail diff
+        must not fabricate runtime rows against project_shared paths (#1229)."""
+        local_dir = tmp_path / ".memtomem" / "skills.local" / "draft"
+        local_dir.mkdir(parents=True)
+        (local_dir / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+
+        r = await client.get(
+            "/api/context/skills/draft/diff", params={"target_scope": "project_local"}
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["canonical_content"] == "# Draft\n"
+        assert data["runtimes"] == []
+
 
 # ---------------------------------------------------------------------------
 # Skills — Sync
@@ -1202,6 +1245,47 @@ class TestCommandCRUD:
         assert cmd_file.read_text(encoding="utf-8") == _CMD_CONTENT
 
 
+class TestDiffCommand:
+    @pytest.mark.anyio
+    async def test_diff_user_tier_resolves_user_runtime(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``target_scope=user`` must probe ``~/.claude/commands``, not the
+        project's project_shared paths (#1229)."""
+        home = tmp_path / "home"
+        set_home(monkeypatch, home)
+        cmd_dir = home / ".memtomem" / "commands"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "scoped.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        rt_dir = home / ".claude" / "commands"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "scoped.md").write_text(_CMD_CONTENT, encoding="utf-8")
+
+        r = await client.get("/api/context/commands/scoped/diff", params={"target_scope": "user"})
+        assert r.status_code == 200
+        data = r.json()
+        claude_rt = [rt for rt in data["runtimes"] if rt["runtime"] == "claude_commands"][0]
+        assert claude_rt["status"] == "in sync"
+
+    @pytest.mark.anyio
+    async def test_diff_project_local_has_no_runtime_rows(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """project_local has no runtime fan-out (ADR-0011 §3) — no fabricated
+        rows against project_shared paths (#1229)."""
+        local_dir = tmp_path / ".memtomem" / "commands.local"
+        local_dir.mkdir(parents=True)
+        (local_dir / "draft.md").write_text(_CMD_CONTENT, encoding="utf-8")
+
+        r = await client.get(
+            "/api/context/commands/draft/diff", params={"target_scope": "project_local"}
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["canonical_content"] == _CMD_CONTENT
+        assert data["runtimes"] == []
+
+
 class TestSyncCommands:
     @pytest.mark.anyio
     async def test_sync_with_dropped(self, client: AsyncClient, tmp_path: Path):
@@ -1448,6 +1532,47 @@ class TestAgentCRUD:
         assert data["status"] == "aborted"
         assert data["mtime_ns"] == str(agent_path.stat().st_mtime_ns)
         assert "overwritten" not in agent_path.read_text(encoding="utf-8")
+
+
+class TestDiffAgent:
+    @pytest.mark.anyio
+    async def test_diff_user_tier_resolves_user_runtime(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``target_scope=user`` must probe ``~/.claude/agents``, not the
+        project's project_shared paths (#1229)."""
+        home = tmp_path / "home"
+        set_home(monkeypatch, home)
+        agent_dir = home / ".memtomem" / "agents"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "scoped.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        rt_dir = home / ".claude" / "agents"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "scoped.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+
+        r = await client.get("/api/context/agents/scoped/diff", params={"target_scope": "user"})
+        assert r.status_code == 200
+        data = r.json()
+        claude_rt = [rt for rt in data["runtimes"] if rt["runtime"] == "claude_agents"][0]
+        assert claude_rt["status"] == "in sync"
+
+    @pytest.mark.anyio
+    async def test_diff_project_local_has_no_runtime_rows(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """project_local has no runtime fan-out (ADR-0011 §3) — no fabricated
+        rows against project_shared paths (#1229)."""
+        local_dir = tmp_path / ".memtomem" / "agents.local"
+        local_dir.mkdir(parents=True)
+        (local_dir / "draft.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+
+        r = await client.get(
+            "/api/context/agents/draft/diff", params={"target_scope": "project_local"}
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["canonical_content"] == _AGENT_CONTENT
+        assert data["runtimes"] == []
 
 
 class TestSyncAgents:

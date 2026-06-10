@@ -480,7 +480,9 @@ async def diff_agent(
 
     runtimes = []
     for gen_name, gen in AGENT_GENERATORS.items():
-        target = gen.target_file(project_root, name)
+        # Match the canonical side's tier — see context_skills.py diff_skill
+        # for the rationale (#1229). NO_FANOUT tiers return None → skipped.
+        target = gen.target_file(project_root, name, scope=target_scope)
         if target is None:
             continue
         if canonical_content is None and not target.is_file():

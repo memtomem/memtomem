@@ -416,7 +416,12 @@ async def diff_skill(
 
     runtimes = []
     for gen_name, gen in SKILL_GENERATORS.items():
-        target = gen.target_dir(project_root, name)
+        # Resolve the runtime side at the same tier as the canonical side —
+        # the engine diff (diff_skills) already does; without scope= this
+        # always probed project_shared paths and the detail panel
+        # contradicted the list view on user/project_local tiers (#1229).
+        # NO_FANOUT tiers (e.g. project_local) return None and are skipped.
+        target = gen.target_dir(project_root, name, scope=target_scope)
         if target is None:
             continue
         target_manifest = target / SKILL_MANIFEST
