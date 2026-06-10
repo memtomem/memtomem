@@ -1110,6 +1110,9 @@ class TestSettingsSync:
                     "proposed_hash": c["proposed_hash"],
                 },
             )
+            # Stale-write aborts are HTTP 409, matching the
+            # Skills/Commands/Agents envelope contract (#1229).
+            assert resp.status_code == 409
             body = resp.json()
             assert body["status"] == "aborted"
             assert "changed" in body["reason"].lower()

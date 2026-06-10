@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
@@ -580,11 +581,14 @@ async def resolve_conflict(
                         or candidate.get("matcher", "") != body.matcher
                         or _rule_hash(candidate) != body.rule_hash
                     ):
-                        return {
-                            "status": "aborted",
-                            "reason": "Target rule changed. Refresh and retry.",
-                            "mtime_ns": str(target_path.stat().st_mtime_ns),
-                        }
+                        return JSONResponse(
+                            status_code=409,
+                            content={
+                                "status": "aborted",
+                                "reason": "Target rule changed. Refresh and retry.",
+                                "mtime_ns": str(target_path.stat().st_mtime_ns),
+                            },
+                        )
                     rules[body.rule_index] = proposed
                 else:
                     replaced = False
@@ -599,15 +603,20 @@ async def resolve_conflict(
                 # mtime check before write — protects against cross-process
                 # writers (CLI, manual edit) that the in-process lock can't see.
                 # Echo the current ``mtime_ns`` on abort so clients can refresh
-                # local state without an extra round-trip — matches the
-                # Skills/Commands/Agents 409 envelope contract.
+                # local state without an extra round-trip — HTTP 409 with the
+                # same body shape as the Skills/Commands/Agents stale-write
+                # envelope (the comment used to CLAIM that parity while the
+                # route returned 200, #1229).
                 current_mtime_ns = target_path.stat().st_mtime_ns
                 if current_mtime_ns != mtime_ns:
-                    return {
-                        "status": "aborted",
-                        "reason": "Target file was modified by another process. Retry.",
-                        "mtime_ns": str(current_mtime_ns),
-                    }
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "status": "aborted",
+                            "reason": "Target file was modified by another process. Retry.",
+                            "mtime_ns": str(current_mtime_ns),
+                        },
+                    )
 
                 target_hooks[body.event] = rules
                 target["hooks"] = target_hooks
@@ -755,7 +764,7 @@ async def delete_target_rule(
                     check_canonical=False,
                 )
                 if stale:
-                    return stale
+                    return JSONResponse(status_code=409, content=stale)
                 target = _load_settings_record(target_path, label="Target")
                 match = _target_rule_for_action(
                     target,
@@ -764,7 +773,7 @@ async def delete_target_rule(
                     canonical_path=canonical_path,
                 )
                 if isinstance(match, dict):
-                    return match
+                    return JSONResponse(status_code=409, content=match)
                 rules, _rule = match
                 del rules[body.rule_index]
                 target_hooks = _hooks_record(target, label="Target")
@@ -807,7 +816,7 @@ async def promote_target_rule(
                     body, target_path=target_path, canonical_path=canonical_path
                 )
                 if stale:
-                    return stale
+                    return JSONResponse(status_code=409, content=stale)
 
                 target = _load_settings_record(target_path, label="Target")
                 match = _target_rule_for_action(
@@ -817,7 +826,7 @@ async def promote_target_rule(
                     canonical_path=canonical_path,
                 )
                 if isinstance(match, dict):
-                    return match
+                    return JSONResponse(status_code=409, content=match)
                 _rules, rule = match
                 if target_scope in ("user", "project_local") and not body.confirm_private_to_shared:
                     return {

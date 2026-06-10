@@ -1973,7 +1973,9 @@ class TestSettingsHttpLayer:
                 "canonical_mtime_ns": diff.json()["canonical_mtime_ns"],
             },
         )
-        assert resp.status_code == 200
+        # Stale-write aborts are HTTP 409 with the status-keyed envelope,
+        # matching the Skills/Commands/Agents contract (#1229).
+        assert resp.status_code == 409
         assert resp.json()["status"] == "aborted"
         assert "echo changed" in target.read_text(encoding="utf-8")
 
@@ -2015,11 +2017,48 @@ class TestSettingsHttpLayer:
                 "canonical_mtime_ns": body["canonical_mtime_ns"],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 409
         assert resp.json()["status"] == "aborted"
 
         written = json.loads(target.read_text(encoding="utf-8"))
         assert written["hooks"]["PreToolUse"] == [second, first]
+
+    async def test_promote_aborts_with_409_when_mtime_is_stale(self, client, claude_home):
+        """Promote shares the same stale-write 409 contract as delete (#1229)."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [_rule("Bash", "echo original")]}}, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        body = diff.json()
+        row = body["target_hooks"]["configured"][0]
+        import os as _os
+
+        st = target.stat()
+        _os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=user",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": body["target_mtime_ns"],
+                "canonical_mtime_ns": body["canonical_mtime_ns"],
+                "confirm_private_to_shared": True,
+            },
+        )
+        assert resp.status_code == 409
+        out = resp.json()
+        assert out["status"] == "aborted"
+        # The two-key freshness names are load-bearing for Promote All's
+        # token refresh — pin they survive the 409 flip.
+        assert "target_mtime_ns" in out
+        assert "canonical_mtime_ns" in out
 
     async def test_sync_route_round_trip_unidirectional(self, client, claude_home, tmp_path):
         """ADR-0001 §5 c2 — unidirectional round-trip via the route layer.
@@ -2078,9 +2117,11 @@ class TestSettingsHttpLayer:
         but exercises ``POST /api/context/settings/resolve``: the
         route captures ``target_path.stat().st_mtime_ns`` before the
         load and rechecks before write. We bump mtime as a side effect
-        of the load so the recheck mismatches → HTTP 200 + ``{"status":
+        of the load so the recheck mismatches → HTTP 409 + ``{"status":
         "aborted", "reason": <... modified by another process ...>,
-        "mtime_ns": <current st_mtime_ns>}``.
+        "mtime_ns": <current st_mtime_ns>}`` (#1229 unified the HTTP
+        status with the Skills/Commands/Agents stale-write envelope;
+        the body shape is unchanged).
 
         Asserts the same triplet the Skills/Commands/Agents conflict
         tests pin (status / no-write content / current mtime_ns echo)
@@ -2128,7 +2169,7 @@ class TestSettingsHttpLayer:
                 "action": "use_proposed",
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 409
         body = resp.json()
         assert body["status"] == "aborted"
         assert "modified by another process" in body["reason"]
