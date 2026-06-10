@@ -280,21 +280,40 @@ def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path
     return staging
 
 
+def _target_conflict(dst: Path) -> OSError | None:
+    """Why :func:`_promote_staging` would refuse to replace ``dst``, or ``None``.
+
+    Single source of truth for the refusal predicate, shared by the promote
+    itself and the sync/import preflights that convert the refusal into a
+    typed ``TARGET_CONFLICT`` skip — so the preflights can never drift from
+    what the promote actually enforces (#1229). An existing but EMPTY
+    non-skill directory is not a conflict (the promote replaces it).
+    """
+    if not dst.exists():
+        return None
+    if not dst.is_dir():
+        return NotADirectoryError(f"target exists and is not a directory: {dst}")
+    if not (dst / SKILL_MANIFEST).is_file() and any(dst.iterdir()):
+        return IsADirectoryError(
+            f"refusing to overwrite non-skill directory: {dst} "
+            f"(add a SKILL.md or remove the directory first)"
+        )
+    return None
+
+
 def _promote_staging(staging: Path, dst: Path) -> None:
     """Atomic-replace ``dst`` with ``staging`` (same-fs precondition).
 
     Cross-platform via :func:`os.replace`. When ``dst`` already exists,
     moves it aside first then renames staging into place; rolls back on
     any failure during the swap window (``feedback_stage_before_mutation_revert.md``).
+    Raises the :func:`_target_conflict` refusal (``NotADirectoryError`` /
+    ``IsADirectoryError``) when ``dst`` holds non-skill content.
     """
+    conflict = _target_conflict(dst)
+    if conflict is not None:
+        raise conflict
     if dst.exists():
-        if not dst.is_dir():
-            raise NotADirectoryError(f"target exists and is not a directory: {dst}")
-        if not (dst / SKILL_MANIFEST).is_file() and any(dst.iterdir()):
-            raise IsADirectoryError(
-                f"refusing to overwrite non-skill directory: {dst} "
-                f"(add a SKILL.md or remove the directory first)"
-            )
         # Move-aside name uses the same {pid}-{rand} discipline as staging
         # so concurrent runs (different pids) cannot collide.
         suffix = f"{os.getpid()}-{secrets.token_hex(3)}"
@@ -452,6 +471,18 @@ def generate_all_skills(
                     )
                     return SkillSyncResult(generated=generated, skipped=skipped)
                 for target, _gen, skill_dir, dst in work:
+                    # Preflight the promote refusal predicate while the
+                    # destination locks are held, BEFORE anything stages: a
+                    # pre-existing non-skill dst would otherwise make the
+                    # promote loop below raise mid-batch AFTER earlier
+                    # destinations were already promoted — an uncaught crash
+                    # AND a broken all-or-nothing contract (#1229). Typed
+                    # per-destination skip; the rest of the batch proceeds
+                    # (same isolation as the PARSE_ERROR skips below).
+                    conflict = _target_conflict(dst)
+                    if conflict is not None:
+                        skipped.append((skill_dir.name, str(conflict), skip_codes.TARGET_CONFLICT))
+                        continue
                     # Unreadable canonical: typed PARSE_ERROR skip rather than
                     # an exception bubbling up — symmetric with agents.py /
                     # commands.py read_bytes failure handling. Privacy block
@@ -505,7 +536,18 @@ def generate_all_skills(
                         )
 
                 for target, staging, dst in staged:
-                    _promote_staging(staging, dst)
+                    try:
+                        _promote_staging(staging, dst)
+                    except (IsADirectoryError, NotADirectoryError) as exc:
+                        # Residual race: only a NON-gateway writer (manual
+                        # shell, editor) can recreate conflicting content at
+                        # dst after the preflight above — the sidecar lock
+                        # held since before staging serializes every gateway
+                        # writer. Loud typed skip; the remaining destinations
+                        # still promote (the finally below reaps the
+                        # unconsumed staging tree).
+                        skipped.append((dst.name, str(exc), skip_codes.TARGET_CONFLICT))
+                        continue
                     generated.append((target, dst))
         finally:
             for _target, staging, _dst in staged:
@@ -579,6 +621,14 @@ def generate_all_skills(
                 )
                 continue
             with dst_lock:
+                # Preflight the promote refusal predicate (same conversion to
+                # a typed skip as the project_shared batch above, #1229) —
+                # before staging so a conflicted destination wastes no
+                # stage+scan work.
+                conflict = _target_conflict(dst)
+                if conflict is not None:
+                    skipped.append((skill_dir.name, str(conflict), skip_codes.TARGET_CONFLICT))
+                    continue
                 # Unreadable canonical: typed PARSE_ERROR skip rather than
                 # an exception bubbling up — symmetric with agents.py /
                 # commands.py read_bytes failure handling.
@@ -631,10 +681,18 @@ def generate_all_skills(
                         )
                         skipped.append((skill_dir.name, reason, code))
                     else:
-                        # 4. Promote — atomic os.replace into dst.
-                        _promote_staging(staging, dst)
-                        promoted = True
-                        generated.append((target, dst))
+                        # 4. Promote — atomic os.replace into dst. The
+                        # conflict refusal can still fire here if a
+                        # NON-gateway writer recreated content at dst after
+                        # the preflight (the held sidecar lock serializes
+                        # gateway writers only) — same typed-skip conversion.
+                        try:
+                            _promote_staging(staging, dst)
+                        except (IsADirectoryError, NotADirectoryError) as exc:
+                            skipped.append((skill_dir.name, str(exc), skip_codes.TARGET_CONFLICT))
+                        else:
+                            promoted = True
+                            generated.append((target, dst))
                 finally:
                     # 5. Cleanup. Promote consumes staging via rename, so we
                     # only remove it when something else (block/exception)
@@ -746,6 +804,16 @@ def extract_skills_to_canonical(
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                 seen[skill_name] = runtime_label
                 continue
+            # ``--overwrite`` onto a canonical dst holding non-skill content
+            # (or a plain file) would make copy_skill's promote raise
+            # mid-import — typed skip instead (#1229). Checked for dry-run
+            # too, so the preview's skip decisions match the real run.
+            conflict = _target_conflict(dst)
+            if conflict is not None:
+                skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
+                logger.warning("skip %s from %s: %s", skill_name, runtime_label, conflict)
+                seen[skill_name] = runtime_label
+                continue
 
             # Gate A — walk every file in the skill tree before copying.
             # One blocked file aborts the whole skill (atomic — never
@@ -802,7 +870,17 @@ def extract_skills_to_canonical(
             # mkdir + copy so the preview never mutates disk (rank-10).
             if not dry_run:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                copy_skill(skill_dir, dst)
+                try:
+                    copy_skill(skill_dir, dst)
+                except (IsADirectoryError, NotADirectoryError) as exc:
+                    # Residual race: the import path holds no locks, so any
+                    # writer can land conflicting content at dst between the
+                    # preflight above and the promote — typed skip, the
+                    # remaining imports proceed.
+                    skipped.append((skill_name, str(exc), skip_codes.TARGET_CONFLICT))
+                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                    seen[skill_name] = runtime_label
+                    continue
             imported.append(dst)
             seen[skill_name] = runtime_label
 
