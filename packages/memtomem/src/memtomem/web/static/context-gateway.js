@@ -576,11 +576,15 @@ function _ctxBumpActiveScopeDetailSeq() {
 }
 
 function _ctxTierControls(type) {
-  // The visible "Stored in" label reuses the active-project switcher's
-  // label markup (``.ctx-project-switcher span``) so the two bar controls
-  // read as one family without new CSS. The wrapper is a <div>, NOT a
-  // <label> — buttons are labelable elements, so a <label> wrapper would
-  // forward clicks on the label text to the first tier button.
+  // The visible "Stored in" label gets its own ``.ctx-tier-switcher``
+  // wrapper, styled by the same CSS rules as ``.ctx-project-switcher`` so
+  // the two bar controls read as one family. It must NOT reuse the
+  // project-switcher class itself: the rank-11 hoist guard
+  // (tests-js/ctx-control-bar-hoist.test.mjs) pins exactly one
+  // ``.ctx-project-switcher`` in the document and reads ``dataset.type``
+  // off the first match. The wrapper is a <div>, NOT a <label> — buttons
+  // are labelable elements, so a <label> wrapper would forward clicks on
+  // the label text to the first tier button.
   // ``data-type`` stays on ``.ctx-tier-filter`` (``_ctxWireTierControls``
   // reads it via ``btn.closest('.ctx-tier-filter')``), and the buttons stay
   // inside ``.ctx-tier-filter`` so the sync-lock / browser-test selectors
@@ -593,7 +597,7 @@ function _ctxTierControls(type) {
     + ` title="${escapeHtml(t(tooltipKey))}"`
     + ` class="${_ctxTargetScope === scope ? 'active' : ''}">`
     + `${escapeHtml(t(optionKey))}</button>`;
-  return `<div class="ctx-project-switcher">
+  return `<div class="ctx-tier-switcher">
     <span>${escapeHtml(t('settings.ctx.tier_filter'))}</span>
     <div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
     ${btn('user', 'settings.ctx.tier_option_user', 'settings.ctx.tier_tooltip_user')}
