@@ -247,9 +247,47 @@ class TestStaleLeftoverReaping:
             shutil.rmtree(staging, ignore_errors=True)
         # _promote_staging's move-aside shape (not exercised without a crash):
         assert is_internal_artifact_dir(".old-parity-12345-abc123.tmp")
-        # Negative pins: real skills and user dot-dirs never match.
+        # Negative pins: real skills and user dot-dirs never match — including
+        # valid user names that mimic the prefix/suffix but lack the generated
+        # pid+rand shape (Codex review: a looser match would hide and even
+        # delete them).
         assert not is_internal_artifact_dir("parity")
         assert not is_internal_artifact_dir(".hidden-skill")
+        assert not is_internal_artifact_dir(".staging-notes.tmp")
+        assert not is_internal_artifact_dir(".old-archive.tmp")
+        assert not is_internal_artifact_dir(".staging-parity-notes.tmp")
+        assert not is_internal_artifact_dir(".staging-parity-12345-xyz.tmp")
+
+    def test_reap_spares_user_dirs_matching_glob_but_not_shape(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A user skill dir whose name matches the reap GLOB but not the
+        generated pid+rand shape must survive the sync-time reaper."""
+        home = tmp_path / "home"
+        set_home(monkeypatch, str(home))
+        _seed_canonical_skill(tmp_path, name="hello")
+        gen = SKILL_GENERATORS["claude_skills"]
+        dst = gen.target_dir(tmp_path, "hello")
+        assert dst is not None
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        user_dir = dst.parent / ".staging-hello-notes.tmp"
+        user_dir.mkdir()
+        (user_dir / SKILL_MANIFEST).write_text("user content\n", encoding="utf-8")
+
+        generate_all_skills(tmp_path, runtimes=["claude_skills"])
+
+        assert user_dir.is_dir()
+        assert (user_dir / SKILL_MANIFEST).read_text(encoding="utf-8") == "user content\n"
+
+    def test_discovery_keeps_user_dirs_mimicking_prefix(self, tmp_path: Path) -> None:
+        """Discovery loops must still LIST a user skill named like the
+        staging prefix without the pid+rand shape."""
+        from memtomem.context.skills import list_canonical_skills
+
+        d = tmp_path / ".memtomem/skills/.staging-notes.tmp"
+        d.mkdir(parents=True)
+        (d / SKILL_MANIFEST).write_text("user content\n", encoding="utf-8")
+        assert [s.name for s in list_canonical_skills(tmp_path)] == [".staging-notes.tmp"]
 
     @pytest.mark.parametrize("scope", ["project_shared", "user"])
     def test_generate_reaps_stale_leftovers(

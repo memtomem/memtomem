@@ -310,6 +310,12 @@ def _reap_stale_internal_dirs(dst: Path) -> None:
         return
     for pattern in (f".staging-{dst.name}-*.tmp", f".old-{dst.name}-*.tmp"):
         for stale in parent.glob(pattern):
+            # The glob narrows by destination name; the shared predicate makes
+            # the kill decision — a user skill named e.g.
+            # ``.staging-<dst>-notes.tmp`` matches the glob but not the
+            # pid+rand shape and must never be deleted (Codex review, #1229).
+            if not is_internal_artifact_dir(stale.name):
+                continue
             logger.debug("reaping stale internal artifact dir %s", stale)
             shutil.rmtree(stale, ignore_errors=True)
 
