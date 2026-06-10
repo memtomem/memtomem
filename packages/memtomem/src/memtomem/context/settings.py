@@ -62,6 +62,19 @@ CANONICAL_SETTINGS_FILE = ".memtomem/settings.json"
 
 # Sentinel for malformed JSON detection (identity-compared via ``is``)
 _MALFORMED = object()
+
+
+class MalformedSettingsError(ValueError):
+    """A settings document carries a structurally unusable value (e.g.
+    ``hooks`` as a JSON array instead of a record keyed by event name).
+
+    Raised by the merge layer instead of silently coercing — coercion
+    destroyed the user's hook configuration and wrote it back with
+    ``status="ok"`` (#1229). Engine callers convert it to a per-target
+    ``status="error"`` so the file is never rewritten destructively.
+    """
+
+
 _KIMI_TOML_TEXT_KEY = "__memtomem_kimi_config_toml__"
 _KIMI_BEGIN = "# BEGIN memtomem managed hooks"
 _KIMI_END = "# END memtomem managed hooks"
@@ -327,14 +340,28 @@ def _merge_hooks_record(
     :func:`_ensure_gemini_handler_names`).
     """
     warnings: list[str] = []
+    if existing is not None and not isinstance(existing, dict):
+        raise MalformedSettingsError(
+            f"settings root must be a JSON object, found {type(existing).__name__}"
+        )
     merged = dict(existing) if existing else {}
 
     contrib_hooks: dict = contributions.get("hooks", {})
     if not isinstance(contrib_hooks, dict):
         contrib_hooks = {}
-    existing_hooks: dict = dict(merged.get("hooks", {}))
-    if not isinstance(existing_hooks, dict):
-        existing_hooks = {}
+    raw_hooks = merged.get("hooks", {})
+    if raw_hooks is None:
+        raw_hooks = {}
+    if not isinstance(raw_hooks, dict):
+        # Type-check BEFORE coercing: ``dict()`` over a list of rule dicts
+        # silently turns e.g. [{"matcher": ..., "hooks": [...]}] into the
+        # garbage {"matcher": "hooks"}, which then overwrites the user's
+        # entire hook configuration with status="ok" (#1229). Refuse loudly
+        # — the engine degrades this to a per-target error status.
+        raise MalformedSettingsError(
+            f"'hooks' must be a record keyed by event name, found {type(raw_hooks).__name__}"
+        )
+    existing_hooks: dict = dict(raw_hooks)
 
     for event, rules in contrib_hooks.items():
         if not isinstance(rules, list):
@@ -343,7 +370,16 @@ def _merge_hooks_record(
             existing_hooks[event] = list(rules)
             continue
 
-        existing_rules: list = list(existing_hooks[event])
+        # Same loud-refusal contract one level down: ``list()`` over a dict
+        # event value yields its key strings (written back as "rules"), and
+        # over a scalar raises TypeError past the MalformedSettingsError
+        # catch (Codex review on #1229).
+        raw_rules = existing_hooks[event]
+        if not isinstance(raw_rules, list):
+            raise MalformedSettingsError(
+                f"'hooks.{event}' must be a list of rules, found {type(raw_rules).__name__}"
+            )
+        existing_rules: list = list(raw_rules)
         contrib_rules: list[dict] = [r for r in rules if isinstance(r, dict)]
         # Contributions queued per matcher (FIFO, order preserved) so each
         # memtomem-owned slot consumes exactly one — never double-replacing or
@@ -1004,11 +1040,22 @@ def host_write_targets(project_root: Path, *, scope: str) -> list[Path]:
 
 
 def _safe_load_json(path: Path) -> dict | object:
-    """Load JSON from *path*, returning :data:`_MALFORMED` on parse error."""
+    """Load JSON from *path*, returning :data:`_MALFORMED` on parse error,
+    unreadable file, or a valid-JSON root that is not an object.
+
+    The non-dict root case matters: a settings file containing ``[]`` /
+    ``"text"`` / ``42`` used to flow into the merge layer and raise
+    ``AttributeError`` deep inside it, aborting EVERY runtime instead of
+    degrading to one target's ``status="error"`` (#1229).
+    ``settings_doctor._load_settings_dict`` and the web ``_compare_hooks``
+    already treat non-dict roots as malformed in-band — this brings the
+    sync/diff engine in line.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return _MALFORMED
+    return raw if isinstance(raw, dict) else _MALFORMED
 
 
 def _read_with_mtime(path: Path) -> tuple[dict | None | object, int]:
@@ -1033,10 +1080,12 @@ def _read_settings_target(name: str, path: Path) -> tuple[dict | None | object, 
     if not path.is_file():
         return None, 0
     mtime_ns = path.stat().st_mtime_ns
-    text = path.read_text(encoding="utf-8")
     try:
+        text = path.read_text(encoding="utf-8")
         tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # Unreadable / undecodable / unparseable: degrade to the same
+        # per-target error status as malformed JSON targets (#1229).
         return _MALFORMED, mtime_ns
     return {_KIMI_TOML_TEXT_KEY: text}, mtime_ns
 
@@ -1124,7 +1173,8 @@ def generate_all_settings(
         if raw is _MALFORMED:
             results[name] = SettingsSyncResult(
                 status="error",
-                reason=f"{canonical_path} is not valid JSON. Fix the file manually.",
+                reason=f"{canonical_path} is not valid JSON (or not a JSON object). "
+                f"Fix the file manually.",
             )
             continue
         contributions: dict = raw  # type: ignore[assignment]
@@ -1171,15 +1221,25 @@ def generate_all_settings(
                     syntax_label = "TOML" if name == "kimi_settings" else "JSON"
                     results[name] = SettingsSyncResult(
                         status="error",
-                        reason=f"{target_path} is not valid {syntax_label}. "
-                        f"Fix the file manually, then re-run "
+                        reason=f"{target_path} is not valid {syntax_label} "
+                        f"(or not an object). Fix the file manually, then re-run "
                         f"`mm context sync --include=settings`.",
                     )
                     continue
                 existing: dict | None = existing_raw  # type: ignore[assignment]
 
-                # Step 2: merge in memory
-                merged, warnings = gen.merge(existing, contributions)
+                # Step 2: merge in memory. A structurally unusable target
+                # value (e.g. array-format hooks) degrades to this target's
+                # error status — the file is never rewritten (#1229).
+                try:
+                    merged, warnings = gen.merge(existing, contributions)
+                except MalformedSettingsError as exc:
+                    results[name] = SettingsSyncResult(
+                        status="error",
+                        reason=f"{target_path}: {exc}. Fix the file manually, "
+                        f"then re-run `mm context sync --include=settings`.",
+                    )
+                    continue
 
                 # Step 3: mtime check (concurrent-write guard)
                 if target_path.is_file() and target_path.stat().st_mtime_ns != existing_mtime_ns:
@@ -1246,7 +1306,7 @@ def diff_settings(
         if raw is _MALFORMED:
             results[name] = SettingsSyncResult(
                 status="error",
-                reason=f"{canonical_path} is not valid JSON",
+                reason=f"{canonical_path} is not valid JSON (or not a JSON object)",
             )
             continue
         contributions: dict = raw  # type: ignore[assignment]
@@ -1263,12 +1323,19 @@ def diff_settings(
             syntax_label = "TOML" if name == "kimi_settings" else "JSON"
             results[name] = SettingsSyncResult(
                 status="error",
-                reason=f"{target_path} is not valid {syntax_label}",
+                reason=f"{target_path} is not valid {syntax_label} (or not an object)",
             )
             continue
         existing: dict | None = existing_raw  # type: ignore[assignment]
 
-        merged, warnings = gen.merge(existing, contributions)
+        try:
+            merged, warnings = gen.merge(existing, contributions)
+        except MalformedSettingsError as exc:
+            results[name] = SettingsSyncResult(
+                status="error",
+                reason=f"{target_path}: {exc}",
+            )
+            continue
 
         if existing is not None:
             existing_norm = _normalize_settings_target(name, existing)
@@ -1299,6 +1366,7 @@ __all__ = [
     "CodexSettingsGenerator",
     "GeminiSettingsGenerator",
     "KimiSettingsGenerator",
+    "MalformedSettingsError",
     "SETTINGS_GENERATORS",
     "SettingsGenerator",
     "SettingsSyncResult",
