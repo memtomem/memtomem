@@ -4250,6 +4250,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const emptyCanonical = generated.length === 0
         && skipped.some(s => s && s.reason_code === 'no_canonical_root');
       const lockTimeout = skipped.some(s => s && s.reason_code === 'lock_timeout');
+      const targetConflict = skipped.find(s => s && s.reason_code === 'target_conflict');
       if (emptyCanonical) {
         // ``{canonical}`` is a real path — keep the raw slug there.
         const msg = t('settings.ctx.sync_empty_canonical')
@@ -4262,6 +4263,18 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
         // tiers) of the fan-out happened. Falling through to
         // ``sync_success`` would report a sync that didn't run.
         showToast(t('settings.ctx.sync_lock_timeout'), 'warning');
+      } else if (targetConflict) {
+        // A fan-out destination holds non-skill content the engine refuses
+        // to overwrite — that destination was skipped (typed
+        // ``target_conflict``) while the rest fanned out. Falling through
+        // to ``sync_success`` would hide the skip; the backend reason names
+        // the conflicting path and how to resolve it (kept raw — it carries
+        // a real filesystem path).
+        showToast(
+          t('settings.ctx.sync_target_conflict')
+            .replace('{reason}', targetConflict.reason || ''),
+          'warning',
+        );
       } else if (dropped.length) {
         // commands/agents render dropped per-field omissions — keep the
         // existing warning so the user can investigate field-level loss.

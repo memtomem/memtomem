@@ -479,3 +479,167 @@ class TestLockBudget:
         other_runtimes = {rt for rt, _p in result.generated}
         assert other_runtimes, result.skipped
         assert "claude_skills" not in other_runtimes
+
+
+class TestTargetConflict:
+    """#1229: a pre-existing non-skill destination (a directory with content
+    but no SKILL.md, or a plain file) made ``_promote_staging`` raise
+    IsADirectoryError/NotADirectoryError out of ``generate_all_skills`` —
+    an uncaught mid-batch crash that also left the project_shared batch
+    partially promoted. The sync paths now preflight the same refusal
+    predicate (``_target_conflict``) under the destination locks and convert
+    it into a typed ``target_conflict`` skip; the promote calls keep a
+    residual catch for non-gateway writers landing between preflight and
+    promote (the sidecar lock only serializes gateway writers)."""
+
+    def test_project_shared_preexisting_conflict_skips_only_that_destination(
+        self, tmp_path: Path
+    ) -> None:
+        """Batch path: the conflicted destination becomes a typed skip BEFORE
+        anything is promoted; every other destination still fans out and the
+        conflicting user content is left byte-identical."""
+        _seed_canonical_skill(tmp_path, name="foo")
+        gemini_dst = SKILL_GENERATORS["gemini_skills"].target_dir(
+            tmp_path, "foo", scope="project_shared"
+        )
+        assert gemini_dst is not None
+        gemini_dst.mkdir(parents=True)
+        (gemini_dst / "notes.txt").write_text("hand-made WIP", encoding="utf-8")
+
+        result = generate_all_skills(tmp_path)  # must not raise
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert str(gemini_dst) in conflicts[0][1]
+        # The conflicting directory is untouched.
+        assert (gemini_dst / "notes.txt").read_text(encoding="utf-8") == "hand-made WIP"
+        assert not (gemini_dst / SKILL_MANIFEST).exists()
+        # All other runtimes promoted.
+        promoted = {rt for rt, _p in result.generated}
+        assert "gemini_skills" not in promoted
+        assert {"claude_skills", "codex_skills", "kimi_skills"} <= promoted
+        # No staging or move-aside leftovers anywhere.
+        assert not list(gemini_dst.parent.glob(".staging-*"))
+        assert not list(gemini_dst.parent.glob(".old-*"))
+
+    def test_conflict_with_plain_file_destination(self, tmp_path: Path) -> None:
+        """NotADirectoryError flavor: the destination path exists as a FILE."""
+        _seed_canonical_skill(tmp_path, name="foo")
+        kimi_dst = SKILL_GENERATORS["kimi_skills"].target_dir(
+            tmp_path, "foo", scope="project_shared"
+        )
+        assert kimi_dst is not None
+        kimi_dst.parent.mkdir(parents=True)
+        kimi_dst.write_text("i am a file, not a skill dir", encoding="utf-8")
+
+        result = generate_all_skills(tmp_path)  # must not raise
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert "not a directory" in conflicts[0][1]
+        assert kimi_dst.read_text(encoding="utf-8") == "i am a file, not a skill dir"
+        promoted = {rt for rt, _p in result.generated}
+        assert "kimi_skills" not in promoted
+        assert {"claude_skills", "codex_skills", "gemini_skills"} <= promoted
+
+    def test_batch_promote_conflict_after_preflight_is_typed_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Residual race in the batch path: a NON-gateway writer (the sidecar
+        lock only serializes gateway writers) lands conflicting content at a
+        destination after the preflight but before the promote loop. The
+        promote refusal is converted to the same typed skip and the rest of
+        the batch still promotes — previously this exact shape crashed with
+        earlier destinations already promoted."""
+        import memtomem.context.skills as skills_mod
+
+        _seed_canonical_skill(tmp_path, name="foo")
+        gemini_dst = SKILL_GENERATORS["gemini_skills"].target_dir(
+            tmp_path, "foo", scope="project_shared"
+        )
+        assert gemini_dst is not None
+
+        orig_scan = skills_mod.scan_artifact_tree
+
+        def planting_scan(staging, **kwargs):
+            out = orig_scan(staging, **kwargs)
+            if staging.parent == gemini_dst.parent:
+                # Simulated external writer: drops content at the destination
+                # AFTER its preflight ran (staging happens after preflight)
+                # and BEFORE the promote loop (which runs after all scans).
+                gemini_dst.mkdir(parents=True, exist_ok=True)
+                (gemini_dst / "intruder.txt").write_text("external", encoding="utf-8")
+            return out
+
+        monkeypatch.setattr(skills_mod, "scan_artifact_tree", planting_scan)
+        result = generate_all_skills(tmp_path)  # must not raise
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert (gemini_dst / "intruder.txt").read_text(encoding="utf-8") == "external"
+        promoted = {rt for rt, _p in result.generated}
+        assert "gemini_skills" not in promoted
+        assert {"claude_skills", "codex_skills", "kimi_skills"} <= promoted
+        assert not list(gemini_dst.parent.glob(".staging-*"))
+
+    def test_user_scope_preexisting_conflict_is_typed_per_item_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-item path (non-shared scope): the conflicted destination is a
+        typed skip before any stage/scan work; other runtimes still fan out."""
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+        _seed_canonical_skill(tmp_path, name="foo", scope="user")
+        claude_dst = SKILL_GENERATORS["claude_skills"].target_dir(tmp_path, "foo", scope="user")
+        assert claude_dst is not None
+        claude_dst.mkdir(parents=True)
+        (claude_dst / "notes.txt").write_text("hand-made WIP", encoding="utf-8")
+
+        result = generate_all_skills(tmp_path, scope="user")  # must not raise
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert (claude_dst / "notes.txt").read_text(encoding="utf-8") == "hand-made WIP"
+        assert not (claude_dst / SKILL_MANIFEST).exists()
+        promoted = {rt for rt, _p in result.generated}
+        assert "claude_skills" not in promoted
+        assert promoted, result.skipped  # other runtimes unaffected
+
+    def test_user_scope_promote_conflict_after_preflight_is_typed_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Residual-race catch on the per-item promote (same shape as the
+        batch-path race test above, exercising the second code path)."""
+        import memtomem.context.skills as skills_mod
+
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+        _seed_canonical_skill(tmp_path, name="foo", scope="user")
+        claude_dst = SKILL_GENERATORS["claude_skills"].target_dir(tmp_path, "foo", scope="user")
+        assert claude_dst is not None
+
+        orig_scan = skills_mod.scan_artifact_tree
+
+        def planting_scan(staging, **kwargs):
+            out = orig_scan(staging, **kwargs)
+            if staging.parent == claude_dst.parent:
+                claude_dst.mkdir(parents=True, exist_ok=True)
+                (claude_dst / "intruder.txt").write_text("external", encoding="utf-8")
+            return out
+
+        monkeypatch.setattr(skills_mod, "scan_artifact_tree", planting_scan)
+        result = generate_all_skills(tmp_path, scope="user")  # must not raise
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert (claude_dst / "intruder.txt").read_text(encoding="utf-8") == "external"
+        promoted = {rt for rt, _p in result.generated}
+        assert "claude_skills" not in promoted
+        assert promoted, result.skipped
+        assert not list(claude_dst.parent.glob(".staging-*"))

@@ -305,3 +305,53 @@ def test_section_sync_lock_timeout_skip_toasts_warning_not_success(page, mm_web_
     assert page.locator("#toast-container .toast.toast-success").count() == 0, (
         "a lock_timeout run must not toast 'Sync completed'"
     )
+
+
+def test_section_sync_target_conflict_skip_toasts_warning_not_success(
+    page, mm_web_url: str
+) -> None:
+    """#1229: a destination holding non-skill content is now a typed
+    ``target_conflict`` skip (previously the engine crashed mid-batch with
+    IsADirectoryError and the route returned HTTP 500). Same toast contract
+    as ``lock_timeout``: an HTTP-200 response whose only outcome is the
+    typed skip must warn — falling through to "Sync completed" would hide
+    the skipped destination."""
+    install_default_stubs(page)
+    _stub_skills_list(page)
+    page.route(
+        "**/api/context/skills/sync**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "generated": [],
+                    "skipped": [
+                        {
+                            "runtime": "claude_skills",
+                            "reason": (
+                                "refusing to overwrite non-skill directory: "
+                                "/fake/.claude/skills/foo (add a SKILL.md or "
+                                "remove the directory first)"
+                            ),
+                            "reason_code": "target_conflict",
+                        }
+                    ],
+                    "canonical_root": ".memtomem/skills",
+                }
+            ),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.locator("#settings-ctx-skills .ctx-sync-btn[data-type='skills']").click()
+    page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
+    page.locator("#confirm-ok-btn").click()
+
+    toast = page.wait_for_selector("#toast-container .toast.toast-warning", timeout=4_000)
+    text = toast.text_content() or ""
+    assert "non-skill" in text, f"warning toast should carry the conflict reason, got {text!r}"
+    assert page.locator("#toast-container .toast.toast-success").count() == 0, (
+        "a target_conflict run must not toast 'Sync completed'"
+    )

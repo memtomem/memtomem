@@ -30,6 +30,15 @@ NO_PROJECT_FANOUT_FOR_RUNTIME: Final = "no_project_fanout_for_runtime"
 # orphan a worker that writes after its request already timed out (#1145 shape).
 LOCK_TIMEOUT: Final = "lock_timeout"
 
+# The fan-out destination already holds non-skill content — a directory with
+# files but no SKILL.md manifest, or a plain file — that
+# ``skills._promote_staging`` refuses to overwrite. Emitted as a typed
+# per-destination skip instead of letting the IsADirectoryError /
+# NotADirectoryError crash the sync mid-batch (#1229, which also broke the
+# project_shared all-or-nothing promote). The human reason names the
+# conflicting path so the user can remove it (or add a SKILL.md) and re-run.
+TARGET_CONFLICT: Final = "target_conflict"
+
 # Import (runtime → canonical) skip codes.
 INVALID_NAME: Final = "invalid_name"
 ALREADY_IMPORTED: Final = "already_imported"
@@ -65,6 +74,7 @@ SkipCode = Literal[
     "parse_error",
     "no_project_fanout_for_runtime",
     "lock_timeout",
+    "target_conflict",
     "invalid_name",
     "already_imported",
     "canonical_exists",

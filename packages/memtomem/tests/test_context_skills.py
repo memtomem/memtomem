@@ -479,3 +479,63 @@ class TestRoundtrip:
             encoding="utf-8"
         )
         assert script == SAMPLE_SCRIPT
+
+
+class TestExtractTargetConflict:
+    """#1229: ``--overwrite`` onto a canonical destination holding non-skill
+    content used to crash extract mid-batch with IsADirectoryError (the web
+    import routes surfaced it as HTTP 500). It is now a typed
+    ``target_conflict`` skip, and the dry-run preview reports the same skip
+    so the preview matches the real run."""
+
+    def _seed_runtime_skill(self, tmp_path, name="foo"):
+        d = tmp_path / ".claude" / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
+        return d
+
+    def _seed_conflicted_canonical(self, tmp_path, name="foo"):
+        canonical = tmp_path / CANONICAL_SKILL_ROOT / name
+        canonical.mkdir(parents=True)
+        (canonical / "junk.txt").write_text("keep me", encoding="utf-8")
+        return canonical
+
+    def test_overwrite_onto_non_skill_canonical_is_typed_skip(self, tmp_path):
+        self._seed_runtime_skill(tmp_path)
+        canonical = self._seed_conflicted_canonical(tmp_path)
+
+        result = extract_skills_to_canonical(tmp_path, overwrite=True)  # must not raise
+
+        assert result.imported == []
+        conflicts = [s for s in result.skipped if s[2] == "target_conflict"]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert str(canonical) in conflicts[0][1]
+        # The conflicting canonical content is untouched.
+        assert (canonical / "junk.txt").read_text(encoding="utf-8") == "keep me"
+        assert not (canonical / "SKILL.md").exists()
+
+    def test_dry_run_previews_the_same_conflict_skip(self, tmp_path):
+        """dry_run parity: the preview reports the conflict exactly like the
+        real run would (rank-10 contract: skip decisions identical)."""
+        self._seed_runtime_skill(tmp_path)
+        canonical = self._seed_conflicted_canonical(tmp_path)
+
+        result = extract_skills_to_canonical(tmp_path, overwrite=True, dry_run=True)
+
+        assert result.imported == []
+        conflicts = [s for s in result.skipped if s[2] == "target_conflict"]
+        assert len(conflicts) == 1, result.skipped
+        assert (canonical / "junk.txt").read_text(encoding="utf-8") == "keep me"
+
+    def test_without_overwrite_existing_canonical_still_wins(self, tmp_path):
+        """Ordering pin: without --overwrite the long-standing
+        ``canonical_exists`` skip fires first — the conflict skip only
+        applies to the overwrite path."""
+        self._seed_runtime_skill(tmp_path)
+        self._seed_conflicted_canonical(tmp_path)
+
+        result = extract_skills_to_canonical(tmp_path, overwrite=False)
+
+        codes = [s[2] for s in result.skipped]
+        assert codes == ["canonical_exists"], result.skipped
