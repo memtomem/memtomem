@@ -988,10 +988,26 @@ def diff_agents(
     pre-PR-E3 behavior.
     """
     results: list[tuple[str, str, str]] = []
-    canonical_index = {
-        path.parent.name if layout == "dir" else path.stem: (path, layout)
-        for path, layout in list_canonical_agents(project_root, scope=scope)
-    }
+    # Key canonicals by the parsed frontmatter ``name:`` — the identity sync
+    # targets (``_sync_atomic`` Phase 1: bytes → decode errors="replace" →
+    # parse → ``name_of``). Keying by file stem reported permanent phantom
+    # drift after a successful sync whenever stem and frontmatter name
+    # disagree: ('<stem>', 'missing target') + ('<name>', 'missing
+    # canonical') on every runtime, forever (#1229). The lenient decode also
+    # keeps a stray non-UTF-8 byte from aborting the whole diff with an
+    # uncaught UnicodeDecodeError while sync handles the same file fine.
+    # Unreadable / unparseable canonicals keep the stem / dir-name key
+    # (``None`` value) so their "parse error" row still names the file.
+    canonical_index: dict[str, SubAgent | None] = {}
+    for path, layout in list_canonical_agents(project_root, scope=scope):
+        fallback_name = path.parent.name if layout == "dir" else path.stem
+        try:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+            parsed = _parse_canonical_agent_text(text, source=path, layout=layout)
+        except (OSError, AgentParseError):
+            canonical_index[fallback_name] = None
+        else:
+            canonical_index[parsed.name] = parsed
     canonical_names = set(canonical_index)
 
     for gen_name, gen in AGENT_GENERATORS.items():
@@ -1014,10 +1030,8 @@ def diff_agents(
                 results.append((gen_name, name, "missing canonical"))
                 continue
 
-            src, layout = canonical_index[name]
-            try:
-                agent = parse_canonical_agent(src, layout=layout)
-            except AgentParseError:
+            agent = canonical_index[name]
+            if agent is None:
                 results.append((gen_name, name, "parse error"))
                 continue
             # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
@@ -1047,13 +1061,29 @@ def diff_agents(
                     # so we can't assert parity — report drift, never mask it.
                     results.append((gen_name, name, "out of sync"))
                     continue
-                actual_bytes = target.read_bytes() if target.is_file() else b""
+                try:
+                    actual_bytes = target.read_bytes() if target.is_file() else b""
+                except OSError:
+                    # Unreadable runtime file — same contract as above.
+                    results.append((gen_name, name, "out of sync"))
+                    continue
                 status = "in sync" if expected_bytes == actual_bytes else "out of sync"
                 results.append((gen_name, name, status))
                 continue
 
             expected, _ = gen.render(agent)
-            actual = target.read_text(encoding="utf-8") if target.is_file() else ""
+            # Lenient decode mirrors the canonical side (and sync): a stray
+            # non-UTF-8 byte means drift, not a diff-wide crash. An unreadable
+            # runtime file can't assert parity — report drift, never mask it.
+            try:
+                actual = (
+                    target.read_bytes().decode("utf-8", errors="replace")
+                    if target.is_file()
+                    else ""
+                )
+            except OSError:
+                results.append((gen_name, name, "out of sync"))
+                continue
             if expected.strip() == actual.strip():
                 results.append((gen_name, name, "in sync"))
             else:

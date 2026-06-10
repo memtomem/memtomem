@@ -1,5 +1,6 @@
 """Tests for context/skills.py — canonical ⇄ runtime skill fan-out."""
 
+import os
 import shutil
 
 import pytest
@@ -441,6 +442,25 @@ class TestDiffSkills:
         (skill / "SKILL.md").write_text(SAMPLE_SKILL_MD, encoding="utf-8")
         rows = diff_skills(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
+
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="needs POSIX permissions and a non-root user",
+    )
+    def test_unreadable_runtime_file_reports_drift_not_crash(self, tmp_path):
+        """A PermissionError inside either tree must not abort the whole diff
+        — parity can't be asserted, so report drift, never mask it (#1229)."""
+        _make_canonical_skill(tmp_path, "a")
+        generate_all_skills(tmp_path)
+        manifest = tmp_path / ".claude/skills/a/SKILL.md"
+        manifest.chmod(0)
+        try:
+            rows = diff_skills(tmp_path)
+        finally:
+            manifest.chmod(0o644)
+        status_by_runtime = {runtime: status for runtime, _, status in rows}
+        assert status_by_runtime["claude_skills"] == "out of sync"
+        assert status_by_runtime["gemini_skills"] == "in sync"
 
 
 class TestRoundtrip:

@@ -258,3 +258,50 @@ def test_portal_sync_confirm_names_project(page, mm_web_url: str) -> None:
     message = page.locator("#confirm-message").text_content() or ""
     assert "Alpha" in message, f"portal sync confirm should name the project, got {message!r}"
     page.locator("#confirm-cancel-btn").click()
+
+
+def test_section_sync_lock_timeout_skip_toasts_warning_not_success(page, mm_web_url: str) -> None:
+    """#1229: when the engine aborts on a held destination lock, the response
+    is HTTP 200 with ``skipped=[{reason_code: 'lock_timeout'}]`` and zero
+    ``generated``. The handler previously special-cased only
+    ``no_canonical_root`` and ``dropped``, so a lock-timeout run fell through
+    to the "Sync completed" success toast — reporting a sync that never ran.
+    """
+    install_default_stubs(page)
+    _stub_skills_list(page)
+    page.route(
+        "**/api/context/skills/sync**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "generated": [],
+                    "skipped": [
+                        {
+                            "runtime": "<all>",
+                            "reason": (
+                                "another process held a destination lock past "
+                                "the 30s acquisition budget — re-run sync to retry"
+                            ),
+                            "reason_code": "lock_timeout",
+                        }
+                    ],
+                    "canonical_root": ".memtomem/skills",
+                }
+            ),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.locator("#settings-ctx-skills .ctx-sync-btn[data-type='skills']").click()
+    page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
+    page.locator("#confirm-ok-btn").click()
+
+    toast = page.wait_for_selector("#toast-container .toast.toast-warning", timeout=4_000)
+    text = toast.text_content() or ""
+    assert "lock" in text.lower(), f"warning toast should explain the lock, got {text!r}"
+    assert page.locator("#toast-container .toast.toast-success").count() == 0, (
+        "a lock_timeout run must not toast 'Sync completed'"
+    )

@@ -41,8 +41,8 @@ EN_PAUSED = "Project sync is paused — resume it on the Projects board."
 EN_NOT_ENROLLED = "Project is not enrolled for sync — enroll it on the Projects board."
 KO_PAUSED = "프로젝트 동기화가 중지되었습니다 — 프로젝트 보드에서 재개하세요."
 EN_CASCADE_HINT = (
-    "Sync is paused or not enrolled for this project, so only the canonical "
-    "copy is deleted (no runtime fan-out)."
+    "Sync is paused or not enrolled for this project, so only the stored "
+    "copy is deleted — runtime files are left in place."
 )
 
 

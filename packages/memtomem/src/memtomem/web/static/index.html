@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=99" />
+  <link rel="stylesheet" href="/style.css?v=101" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -493,12 +493,12 @@
       <nav class="settings-nav" data-i18n-aria-label="settings.nav.gateway_sections_aria" aria-label="Context Gateway sections">
         <button class="settings-nav-group" type="button" data-group="integrations" aria-expanded="true">
           <span class="nav-group-caret" aria-hidden="true">▾</span>
-          <span data-i18n="settings.nav.integrations">Agent Integrations</span>
+          <span data-i18n="settings.nav.integrations">Context Gateway</span>
         </button>
         <button class="settings-nav-btn settings-nav-btn--landing" data-ui-tier="prod" data-section="ctx-overview" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">🔄</span>
           <span class="nav-labels">
-            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Context Gateway</span>
+            <span class="nav-label" data-i18n="settings.nav.ctx_overview">Overview</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
           </span>
         </button>
@@ -620,7 +620,7 @@
 
         <!-- Context Gateway: Commands -->
         <div class="settings-section" id="settings-ctx-commands">
-          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project-scoped slash commands kept in .claude/commands/, synced to detected runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project slash commands stored in .memtomem/commands/ and synced out to each runtime's command folder (.claude/commands/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Custom Commands</h2>
             <div class="ctx-toolbar" data-type="commands"></div>
@@ -1467,7 +1467,7 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=16"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=61"></script>
+  <script src="/context-gateway.js?v=64"></script>
   <script src="/context-portal.js?v=2"></script>
   <script src="/path-picker.js?v=3"></script>
 </body>

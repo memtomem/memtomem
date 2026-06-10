@@ -110,7 +110,11 @@ def _stub_overview_with_counter(page, payloads: list[dict]) -> dict:
             body=json.dumps(payloads[idx]),
         )
 
-    page.route("**/api/context/overview", _handler)
+    # ``**`` suffix: with a registered active project the overview GET
+    # carries ``?scope_id=<id>`` — a bare glob misses it and the request
+    # falls through to the conftest all-zero default, which (since the
+    # all-empty Sync All gate) disables the button under test.
+    page.route("**/api/context/overview**", _handler)
     return state
 
 
@@ -990,3 +994,111 @@ def test_sync_all_mid_run_cache_refresh_pins_scope_to_start_project(page, mm_web
         f"harness must have emptied _ctxProjectsCache mid-run (got "
         f"{cleared_len!r}); the pin assertion would otherwise be vacuous"
     )
+
+
+# --- 2026-06-10 diagnostics package (review U5) -------------------------------
+
+_ALL_EMPTY_OVERVIEW = {
+    "skills": {"total": 0, "in_sync": 0},
+    "commands": {"total": 0, "in_sync": 0},
+    "agents": {"total": 0, "in_sync": 0},
+    "mcp_servers": {"total": 0, "local_draft": 0},
+    "settings": {
+        "total": 0,
+        "in_sync": 0,
+        "out_of_sync": 0,
+        "missing_target": 0,
+        "error": 0,
+        "status": "in_sync",
+    },
+}
+
+
+def test_sync_all_all_empty_pre_click_gate(page, mm_web_url: str) -> None:
+    """U5(a): with zero stored artifacts everywhere (settings included),
+    Sync All must be gated pre-click — pre-change the empty project kept the
+    button live, ran five no-op phases, and toasted "Sync completed".
+    """
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_ALL_EMPTY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _record(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/context/*/sync**", _record)
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    btn = page.locator("#ctx-sync-all-btn")
+    assert btn.get_attribute("data-runtime-only") == "true", (
+        "all-empty overview must gate Sync All pre-click"
+    )
+    assert btn.get_attribute("aria-disabled") == "true"
+    title = btn.get_attribute("title") or ""
+    assert "Nothing to push yet" in title, f"gate tooltip must explain why, got {title!r}"
+
+    # ``aria-disabled`` blocks Playwright's actionability click; the real
+    # browser still dispatches the event, which the handler turns into the
+    # explanatory toast (clicks-fire-a-toast pattern, see #1075).
+    page.evaluate("() => document.getElementById('ctx-sync-all-btn').click()")
+    page.wait_for_selector("#toast-container .toast.toast-info", timeout=3_000)
+    assert sync_calls == [], f"no phase may fire on a gated click, got {sync_calls!r}"
+
+
+def test_sync_all_noop_run_shows_nothing_synced_toast(page, mm_web_url: str) -> None:
+    """U5(b): a run whose phases all return only ``no_canonical_root`` skips
+    (0 generated) with an all-skipped settings phase wrote nothing — the
+    final toast must say so instead of "Sync completed". Covers a stale
+    overview racing an emptied store past the pre-click gate.
+    """
+    install_default_stubs(page)
+    # Healthy counts keep the pre-click gate open; the *run* is the no-op.
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    noop_body = json.dumps(
+        {"generated": [], "dropped": [], "skipped": [{"reason_code": "no_canonical_root"}]}
+    )
+
+    def _noop_handler(route):
+        route.fulfill(status=200, content_type="application/json", body=noop_body)
+
+    for typ in ("skills", "commands", "agents", "mcp-servers"):
+        page.route(f"**/api/context/{typ}/sync**", _noop_handler)
+    page.route(
+        "**/api/context/settings/sync**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "results": [
+                        {
+                            "name": "claude",
+                            "status": "skipped",
+                            "reason": "no canonical settings",
+                            "warnings": [],
+                            "target": None,
+                        }
+                    ],
+                    "duplicate_tier_warnings": [],
+                }
+            ),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function("() => !document.getElementById('confirm-modal').hidden", timeout=2_000)
+    page.locator("#confirm-ok-btn").click()
+
+    toast = page.wait_for_selector("#toast-container .toast.toast-info", timeout=4_000)
+    text = toast.text_content() or ""
+    assert "Nothing to sync yet" in text, (
+        f"no-op run must surface the nothing-synced toast, got {text!r}"
+    )
+    success = page.locator("#toast-container .toast.toast-success")
+    assert success.count() == 0, "a no-op run must not toast 'Sync completed'"

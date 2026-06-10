@@ -402,3 +402,80 @@ class TestOverridePreservation:
         assert len(privacy_skips) == 1, result.skipped
         # Negative: dst not created.
         assert not dst.exists()
+
+
+class TestLockBudget:
+    """#1229 (review 2026-06-10): destination sidecar-lock acquisition in
+    ``generate_all_skills`` is bounded by a whole-call budget so the engine can
+    be offloaded to a worker thread by the web route without an unbounded
+    cross-process lock wait blocking forever (the #1145 settings shape —
+    ``asyncio.timeout`` on the caller's loop cannot fire while the loop thread
+    itself is blocked, and ``asyncio.to_thread`` cannot cancel a wedged
+    thread).
+    """
+
+    def test_held_lock_aborts_batch_within_bound_not_hangs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """project_shared batch path: a foreign holder on ANY destination lock
+        aborts the WHOLE batch (all-or-nothing is preserved — locks are taken
+        before any staging) with a typed ``lock_timeout`` skip, instead of
+        blocking indefinitely."""
+        import time as _time
+
+        import memtomem.context.skills as skills_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        _seed_canonical_skill(tmp_path, name="foo")
+        dst = SKILL_GENERATORS["claude_skills"].target_dir(tmp_path, "foo", scope="project_shared")
+        assert dst is not None
+
+        monkeypatch.setattr(skills_mod, "_SKILLS_LOCK_BUDGET_S", 0.2)
+        start = _time.monotonic()
+        # Foreign holder: separate open-file-description — portalocker
+        # contends per-OFD even within one process.
+        with _file_lock(_lock_path_for(dst)):
+            result = generate_all_skills(tmp_path)
+        elapsed = _time.monotonic() - start
+
+        assert result.generated == []
+        assert [s for s in result.skipped if s[2] == skip_codes.LOCK_TIMEOUT], result.skipped
+        skip = next(s for s in result.skipped if s[2] == skip_codes.LOCK_TIMEOUT)
+        assert skip[0] == "<all>"
+        assert "acquisition budget" in skip[1]
+        # Bounded: ~one budget + overhead, never an indefinite block. Loose
+        # bound — CI runners are slow; the point is "seconds, not forever".
+        assert elapsed < 10, f"abort took {elapsed:.1f}s — budget not applied?"
+        # Nothing promoted while the lock was held.
+        assert not dst.exists()
+
+    def test_held_lock_skips_only_contended_destination_on_user_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """user-scope per-destination path: only the contended destination is
+        skipped (typed ``lock_timeout``); the remaining runtimes still fan
+        out — non-shared scopes carry no all-or-nothing batch contract."""
+        import memtomem.context.skills as skills_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+        _seed_canonical_skill(tmp_path, name="foo", scope="user")
+
+        held_dst = SKILL_GENERATORS["claude_skills"].target_dir(tmp_path, "foo", scope="user")
+        assert held_dst is not None
+
+        monkeypatch.setattr(skills_mod, "_SKILLS_LOCK_BUDGET_S", 0.2)
+        with _file_lock(_lock_path_for(held_dst)):
+            result = generate_all_skills(tmp_path, scope="user")
+
+        lock_skips = [s for s in result.skipped if s[2] == skip_codes.LOCK_TIMEOUT]
+        assert len(lock_skips) == 1, result.skipped
+        assert lock_skips[0][0] == "foo"
+        # The contended claude destination was not written...
+        assert not held_dst.exists()
+        # ...but at least one other runtime destination was.
+        other_runtimes = {rt for rt, _p in result.generated}
+        assert other_runtimes, result.skipped
+        assert "claude_skills" not in other_runtimes

@@ -3708,7 +3708,12 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 
 .ctx-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; gap: 8px; }
 .ctx-header div { display: flex; gap: 6px; }
-.ctx-project-switcher {
+/* ``.ctx-tier-switcher`` (the labeled storage-tier group) shares the
+   project-switcher's layout so the two bar controls read as one family.
+   It is a distinct class on purpose — the rank-11 hoist guard pins
+   exactly one ``.ctx-project-switcher`` in the document. */
+.ctx-project-switcher,
+.ctx-tier-switcher {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3716,7 +3721,8 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   font-size: 0.82rem;
   color: var(--muted);
 }
-.ctx-project-switcher span {
+.ctx-project-switcher span,
+.ctx-tier-switcher span {
   font-weight: 600;
   color: var(--text);
 }
@@ -3769,6 +3775,7 @@ body.help-hidden #help-toggle { opacity: 0.5; }
   z-index: 20;
 }
 .ctx-control-bar .ctx-project-switcher,
+.ctx-control-bar .ctx-tier-switcher,
 .ctx-control-bar .ctx-tier-filter {
   margin: 0;
 }
@@ -3847,6 +3854,10 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-count { font-size: 2rem; font-weight: 700; color: var(--accent); }
 .ctx-overview-label { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
 .ctx-overview-badge { font-size: 0.72rem; margin-top: 8px; }
+/* One-line whole-call failure detail under the error badge (error_kind +
+   sanitized error_message from the overview envelope). Single line with
+   ellipsis — the full text rides the title tooltip and the aria-label. */
+.ctx-overview-error-detail { font-size: 0.72rem; color: var(--muted); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Pointer line sits BELOW the nav button (sibling, not child). Inset it
    horizontally to match the nav button's 16px padding so the visual gutter
    stays continuous, and pull it up against the nav button's bottom padding
@@ -4233,6 +4244,26 @@ button.ctx-runtime-chip--greyed:focus-visible {
 #ctx-sync-all-btn[data-runtime-only="true"] {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Disabled/blocked primary buttons must not keep the saturated accent
+   fill — at 0.45 opacity an accent-colored button still reads as
+   clickable (2026-06-10 review, W5). Swap to the neutral pair; the
+   opacity dim from ``button:disabled`` / the gate rules stacks on top.
+   The load-bearing signal is losing the accent color. */
+.btn-primary:disabled,
+.btn-primary[aria-disabled="true"],
+.btn-primary[data-write-blocked],
+#ctx-sync-all-btn[data-runtime-only="true"],
+/* The empty-section rule above promotes the (btn-ghost) Import button to
+   an accent fill; when that promoted button is itself write-blocked it
+   must drop the accent too — the promotion rule's (0,2,1) specificity
+   would otherwise outrank the bare attribute selectors. */
+.settings-section[data-canonical-count="0"] .ctx-import-btn[data-write-blocked],
+.settings-section[data-canonical-count="0"] .ctx-import-btn[aria-disabled="true"],
+.settings-section[data-canonical-count="0"] .ctx-import-btn:disabled {
+  background: var(--border);
+  color: var(--muted);
 }
 
 /* Tier-aware write-block gate (#943 / ADR-0011 §5 / ADR-0016 §7). When

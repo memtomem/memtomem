@@ -23,6 +23,7 @@ import logging
 import os
 import secrets
 import shutil
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +52,16 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_SKILL_ROOT = ".memtomem/skills"
 SKILL_MANIFEST = "SKILL.md"
+# Whole-call budget for destination sidecar-lock acquisition in
+# :func:`generate_all_skills` — one shared deadline across every lock, not a
+# fresh bound per destination (N dsts × per-lock bound could overrun the web
+# handler's 60s ``asyncio.timeout`` and re-open the orphaned-worker window —
+# the #1145 settings review shape; see ``settings._SETTINGS_LOCK_BUDGET_S``).
+# The budget applies to EVERY caller (web, CLI, MCP) — matching the settings
+# precedent: a CLI run that would otherwise block forever now aborts with a
+# typed ``lock_timeout`` skip and a retry hint, and an ``asyncio.to_thread``
+# web caller can never be wedged by a stuck cross-process lock holder.
+_SKILLS_LOCK_BUDGET_S = 30.0
 # Canonical-side subdirectory that holds per-vendor SKILL.md overrides
 # (``<canonical>/<name>/overrides/<vendor>.<ext>`` — see
 # :mod:`memtomem.context.override`). It is the SOURCE of overrides, never part
@@ -382,6 +393,17 @@ def generate_all_skills(
 
     targets = runtimes if runtimes is not None else list(SKILL_GENERATORS.keys())
 
+    # One shared deadline for ALL destination sidecar-lock waits — the whole
+    # call, not each destination, is bounded by ``_SKILLS_LOCK_BUDGET_S``.
+    # A timed-out acquisition becomes a typed ``lock_timeout`` skip instead
+    # of blocking forever, so a thread-offloaded web caller can never be
+    # wedged (or orphaned past its own timeout) by a stuck cross-process
+    # holder (#1145 shape).
+    lock_deadline = time.monotonic() + _SKILLS_LOCK_BUDGET_S
+
+    def _lock_timeout() -> float:
+        return max(0.0, lock_deadline - time.monotonic())
+
     # ``project_shared`` is a hard-refusal surface: if any skill or
     # runtime override fails Gate A, no runtime fan-out should be
     # promoted. Hold all destination locks, stage+scan every final tree,
@@ -409,8 +431,26 @@ def generate_all_skills(
         staged: list[tuple[str, Path, Path]] = []
         try:
             with ExitStack() as stack:
-                for lock_path in sorted({_lock_path_for(dst) for _, _, _, dst in work}, key=str):
-                    stack.enter_context(_file_lock(lock_path))
+                # Locks are acquired before any staging work, so a budget
+                # overrun here aborts the batch with nothing to roll back —
+                # all-or-nothing is preserved (this scope is the hard-refusal
+                # surface; promoting a partial batch is never acceptable).
+                try:
+                    for lock_path in sorted(
+                        {_lock_path_for(dst) for _, _, _, dst in work}, key=str
+                    ):
+                        stack.enter_context(_file_lock(lock_path, timeout=_lock_timeout()))
+                except TimeoutError:
+                    skipped.append(
+                        (
+                            "<all>",
+                            "another process held a destination lock past the "
+                            f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
+                            "re-run sync to retry",
+                            skip_codes.LOCK_TIMEOUT,
+                        )
+                    )
+                    return SkillSyncResult(generated=generated, skipped=skipped)
                 for target, _gen, skill_dir, dst in work:
                     # Unreadable canonical: typed PARSE_ERROR skip rather than
                     # an exception bubbling up — symmetric with agents.py /
@@ -520,7 +560,25 @@ def generate_all_skills(
             # swaps. Without the lock, a second invocation could
             # recreate ``dst`` between the move-aside and the rename-in,
             # leaving the rollback path with no clean dst to restore.
-            with _file_lock(_lock_path_for(dst)):
+            # Acquisition is bounded by the shared call budget; a timed-out
+            # destination becomes a typed per-item skip (the other
+            # destinations still proceed — non-shared scopes have no
+            # all-or-nothing batch contract).
+            dst_lock = ExitStack()
+            try:
+                dst_lock.enter_context(_file_lock(_lock_path_for(dst), timeout=_lock_timeout()))
+            except TimeoutError:
+                skipped.append(
+                    (
+                        skill_dir.name,
+                        "another process held the destination lock past the "
+                        f"{_SKILLS_LOCK_BUDGET_S:g}s acquisition budget — "
+                        "re-run sync to retry",
+                        skip_codes.LOCK_TIMEOUT,
+                    )
+                )
+                continue
+            with dst_lock:
                 # Unreadable canonical: typed PARSE_ERROR skip rather than
                 # an exception bubbling up — symmetric with agents.py /
                 # commands.py read_bytes failure handling.
@@ -879,7 +937,15 @@ def diff_skills(
                             # un-overridden canonical (which could mask it).
                             results.append((gen_name, name, "out of sync"))
                             continue
-                if _skill_effective_equal(src, dst, override_bytes):
+                # An unreadable file inside either tree (PermissionError etc.)
+                # must not abort the whole diff — we can't assert parity, so
+                # report drift, never mask it (same contract as the override
+                # read above; #1229).
+                try:
+                    equal = _skill_effective_equal(src, dst, override_bytes)
+                except OSError:
+                    equal = False
+                if equal:
                     results.append((gen_name, name, "in sync"))
                 else:
                     results.append((gen_name, name, "out of sync"))
