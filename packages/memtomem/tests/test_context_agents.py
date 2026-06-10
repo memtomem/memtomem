@@ -453,6 +453,43 @@ class TestDiffAgents:
         rows = diff_agents(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
+    def test_frontmatter_name_wins_over_stem_after_sync(self, tmp_path, codex_home):
+        """Sync targets the parsed frontmatter ``name:``; diff must key
+        canonicals the same way, or a stem/name mismatch reports two phantom
+        rows per runtime ('missing target' + 'missing canonical') that
+        re-syncing never clears (#1229)."""
+        body = SAMPLE_MINIMAL_AGENT.replace("helper", "code-reviewer")
+        _make_canonical_agent(tmp_path, "reviewer", body)  # stem != frontmatter name
+        generate_all_agents(tmp_path)
+        rows = diff_agents(tmp_path)
+        assert rows
+        assert {name for _, name, _ in rows} == {"code-reviewer"}
+        assert all(status == "in sync" for _, _, status in rows)
+
+    def test_non_utf8_canonical_byte_does_not_abort_diff(self, tmp_path, codex_home):
+        """A stray latin-1 byte must not abort the whole diff with an uncaught
+        UnicodeDecodeError — sync decodes the same file with errors='replace'
+        and succeeds, so diff must agree with what sync wrote (#1229)."""
+        root = tmp_path / CANONICAL_AGENT_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "cafe.md").write_bytes(b"---\nname: cafe\ndescription: caf\xe9\n---\n\nBody.\n")
+        generate_all_agents(tmp_path)
+        rows = diff_agents(tmp_path)
+        assert {status for _, name, status in rows if name == "cafe"} == {"in sync"}
+
+    def test_non_utf8_runtime_byte_reports_drift_not_crash(self, tmp_path, codex_home):
+        """A non-UTF-8 byte in a runtime copy is drift, not a diff-wide crash
+        (#1229)."""
+        _make_canonical_agent(tmp_path, "helper", SAMPLE_MINIMAL_AGENT)
+        generate_all_agents(tmp_path)
+        (tmp_path / ".claude/agents/helper.md").write_bytes(
+            b"---\nname: helper\ndescription: caf\xe9 drift\n---\n\nBody.\n"
+        )
+        rows = diff_agents(tmp_path)
+        status_by_runtime = {r: s for r, _, s in rows}
+        assert status_by_runtime["claude_agents"] == "out of sync"
+        assert status_by_runtime["gemini_agents"] == "in sync"
+
 
 class TestRuntimeAgentNames:
     """Pin the runtime-name lookup contract directly so a future revert of the

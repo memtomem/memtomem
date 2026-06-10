@@ -937,7 +937,15 @@ def diff_skills(
                             # un-overridden canonical (which could mask it).
                             results.append((gen_name, name, "out of sync"))
                             continue
-                if _skill_effective_equal(src, dst, override_bytes):
+                # An unreadable file inside either tree (PermissionError etc.)
+                # must not abort the whole diff — we can't assert parity, so
+                # report drift, never mask it (same contract as the override
+                # read above; #1229).
+                try:
+                    equal = _skill_effective_equal(src, dst, override_bytes)
+                except OSError:
+                    equal = False
+                if equal:
                     results.append((gen_name, name, "in sync"))
                 else:
                     results.append((gen_name, name, "out of sync"))

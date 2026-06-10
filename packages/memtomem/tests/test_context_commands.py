@@ -401,6 +401,40 @@ class TestDiffCommands:
         rows = diff_commands(tmp_path)
         assert any(status == "missing canonical" for _, _, status in rows)
 
+    def test_frontmatter_name_wins_over_stem_after_sync(self, tmp_path):
+        """Sync targets the parsed frontmatter ``name:``; diff must key
+        canonicals the same way, or a stem/name mismatch reports two phantom
+        rows per runtime that re-syncing never clears (#1229)."""
+        body = "---\nname: run-review\ndescription: Simple prompt\n---\n\nSay hi.\n"
+        _make_canonical_command(tmp_path, "review", body)  # stem != frontmatter name
+        generate_all_commands(tmp_path)
+        rows = diff_commands(tmp_path)
+        assert rows
+        assert {name for _, name, _ in rows} == {"run-review"}
+        assert all(status == "in sync" for _, _, status in rows)
+
+    def test_non_utf8_canonical_byte_does_not_abort_diff(self, tmp_path):
+        """A stray latin-1 byte must not abort the whole diff with an uncaught
+        UnicodeDecodeError — sync decodes the same file with errors='replace'
+        and succeeds, so diff must agree with what sync wrote (#1229)."""
+        root = tmp_path / CANONICAL_COMMAND_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "cafe.md").write_bytes(b"---\ndescription: caf\xe9\n---\n\nSay hi.\n")
+        generate_all_commands(tmp_path)
+        rows = diff_commands(tmp_path)
+        assert {status for _, name, status in rows if name == "cafe"} == {"in sync"}
+
+    def test_non_utf8_runtime_byte_reports_drift_not_crash(self, tmp_path):
+        """A non-UTF-8 byte in a runtime copy is drift, not a diff-wide crash
+        (#1229)."""
+        _make_canonical_command(tmp_path, "hi", SAMPLE_MINIMAL_COMMAND)
+        generate_all_commands(tmp_path)
+        (tmp_path / ".claude/commands/hi.md").write_bytes(b"caf\xe9 drift\n")
+        rows = diff_commands(tmp_path)
+        status_by_runtime = {r: s for r, _, s in rows}
+        assert status_by_runtime["claude_commands"] == "out of sync"
+        assert status_by_runtime["gemini_commands"] == "in sync"
+
 
 class TestDetectCommandDirs:
     def test_empty(self, tmp_path):
