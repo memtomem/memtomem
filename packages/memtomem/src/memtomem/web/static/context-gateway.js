@@ -49,6 +49,27 @@ function _ctxBadge(status) {
   return `<span class="ctx-runtime-badge ${cls}">${escapeHtml(_ctxStatusText(status))}</span>`;
 }
 
+// Localized display name for an artifact-type route slug (``skills`` /
+// ``commands`` / ``agents`` / ``mcp-servers``). User-visible copy must never
+// interpolate the raw slug — it produced "Fan out mcp-servers to all
+// runtimes?" and English slugs inside Korean sentences. Element ids, URLs,
+// dataset keys, and the ``.${type}/`` scan-dir fallback path keep the raw
+// slug; only rendered prose routes through these helpers.
+// NOTE: ``t()`` has no fallback-string second argument — a missing key
+// returns the KEY itself — so the unknown-slug fallback is explicit here.
+function _ctxTypeName(type) {
+  const key = `settings.ctx.type_names.${type}`;
+  const label = t(key);
+  return label === key ? type : label;
+}
+
+// Singular variant for one-artifact copy ("Import this skill").
+function _ctxTypeNameSingular(type) {
+  const key = `settings.ctx.type_names_singular.${type}`;
+  const label = t(key);
+  return label === key ? type : label;
+}
+
 // Display label for a runtime key. Only ``gemini`` needs remapping — it is the
 // Antigravity client (RUNTIME_TO_CLIENT: gemini→antigravity), so printing the
 // raw key leaks an internal name the Projects portal already shows as
@@ -555,10 +576,30 @@ function _ctxBumpActiveScopeDetailSeq() {
 }
 
 function _ctxTierControls(type) {
-  return `<div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
-    <button type="button" data-scope="user" class="${_ctxTargetScope === 'user' ? 'active' : ''}">${escapeHtml(t('settings.ctx.tier_option_user'))}</button>
-    <button type="button" data-scope="project_shared" class="${_ctxTargetScope === 'project_shared' ? 'active' : ''}">${escapeHtml(t('settings.ctx.tier_option_project_shared'))}</button>
-    <button type="button" data-scope="project_local" class="${_ctxTargetScope === 'project_local' ? 'active' : ''}">${escapeHtml(t('settings.ctx.tier_option_project_local'))}</button>
+  // The visible "Stored in" label reuses the active-project switcher's
+  // label markup (``.ctx-project-switcher span``) so the two bar controls
+  // read as one family without new CSS. The wrapper is a <div>, NOT a
+  // <label> — buttons are labelable elements, so a <label> wrapper would
+  // forward clicks on the label text to the first tier button.
+  // ``data-type`` stays on ``.ctx-tier-filter`` (``_ctxWireTierControls``
+  // reads it via ``btn.closest('.ctx-tier-filter')``), and the buttons stay
+  // inside ``.ctx-tier-filter`` so the sync-lock / browser-test selectors
+  // (``#ctx-control-bar .ctx-tier-filter button``) keep matching.
+  // ``aria-pressed`` + per-tier ``title`` answer "what does this tier mean"
+  // on hover / to AT; both re-render with the bar, so no wiring change.
+  const btn = (scope, optionKey, tooltipKey) =>
+    `<button type="button" data-scope="${scope}"`
+    + ` aria-pressed="${_ctxTargetScope === scope}"`
+    + ` title="${escapeHtml(t(tooltipKey))}"`
+    + ` class="${_ctxTargetScope === scope ? 'active' : ''}">`
+    + `${escapeHtml(t(optionKey))}</button>`;
+  return `<div class="ctx-project-switcher">
+    <span>${escapeHtml(t('settings.ctx.tier_filter'))}</span>
+    <div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
+    ${btn('user', 'settings.ctx.tier_option_user', 'settings.ctx.tier_tooltip_user')}
+    ${btn('project_shared', 'settings.ctx.tier_option_project_shared', 'settings.ctx.tier_tooltip_project_shared')}
+    ${btn('project_local', 'settings.ctx.tier_option_project_local', 'settings.ctx.tier_tooltip_project_local')}
+  </div>
   </div>`;
 }
 
@@ -2294,7 +2335,7 @@ function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
   const title = t(`settings.ctx.missing_canonical_${scopeForKey}_title`);
   const body = t(`settings.ctx.missing_canonical_${scopeForKey}_body`)
     .replace('{count}', count)
-    .replace(/\{type\}/g, type)
+    .replace(/\{type\}/g, _ctxTypeName(type))
     .replace('{scan_dirs}', scanList);
   const commands = _ctxMissingCanonicalCommands(scope)
     .map(cmd => `<code>${escapeHtml(cmd)}</code>`)
@@ -2334,8 +2375,10 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     } else {
       hintKey = 'settings.ctx.empty_hint';
     }
+    // ``{canonical}`` stays the raw-slug path (``.memtomem/skills``) — it
+    // names a real directory; only the prose ``{type}`` is localized.
     let hint = t(hintKey)
-      .replace(/\{type\}/g, type)
+      .replace(/\{type\}/g, _ctxTypeName(type))
       .replace('{canonical}', canonical);
     if (!isUser) {
       // Same fallback as the runtime-only banner so the hint stays
@@ -2345,7 +2388,7 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
     }
     return emptyState(
       '',
-      t('settings.ctx.no_artifacts').replace('{type}', type),
+      t('settings.ctx.no_artifacts').replace('{type}', _ctxTypeName(type)),
       hint,
     );
   }
@@ -2430,7 +2473,7 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
       <div class="ctx-card-header">
         <div>
           <div class="ctx-card-name">${escapeHtml(item.name)}${tierBadge}</div>
-          ${item.canonical_path ? `<div class="ctx-card-path">${escapeHtml(item.canonical_path)}</div>` : '<div class="ctx-card-path text-muted">(runtime only)</div>'}
+          ${item.canonical_path ? `<div class="ctx-card-path">${escapeHtml(item.canonical_path)}</div>` : `<div class="ctx-card-path text-muted">${escapeHtml(t('settings.ctx.runtime_only_label'))}</div>`}
         </div>
         ${renderRuntimeBadges(item.runtimes)}
       </div>
@@ -2531,7 +2574,7 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // ``emptyState`` over the fresh container the newer ``loadCtxList``
     // rebuilt — same false-overwrite class as the success path above.
     if (seq !== _ctxListSeq[type]) return;
-    container.innerHTML = emptyState('', t('settings.ctx.load_failed', { type }), err.message);
+    container.innerHTML = emptyState('', t('settings.ctx.load_failed', { type: _ctxTypeName(type) }), err.message);
   }
 }
 
@@ -2783,7 +2826,7 @@ async function loadCtxList(type) {
       html += `<div class="ctx-scope-group-wrap">
         <details class="ctx-scope-group" data-scope-id="${escapeHtml(scope.scope_id)}" data-tier="${escapeHtml(scope.tier)}"${isActive ? ' open' : ''}>
           <summary class="ctx-scope-summary" ${rootTitle}>
-            <span class="ctx-scope-summary-label">${escapeHtml(scope.label)}</span>
+            <span class="ctx-scope-summary-label">${escapeHtml(_ctxScopeDisplayLabel(scope))}</span>
             <span class="ctx-scope-summary-count">${count}</span>
             ${_ctxScopeBadges(scope)}
           </summary>
@@ -2881,7 +2924,7 @@ async function loadCtxList(type) {
     }
   } catch (err) {
     if (seq !== _ctxListSeq[type]) return;
-    listEl.innerHTML = emptyState('', t('settings.ctx.load_failed', { type }), err.message);
+    listEl.innerHTML = emptyState('', t('settings.ctx.load_failed', { type: _ctxTypeName(type) }), err.message);
   }
 }
 
@@ -3984,13 +4027,12 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       }
     }
 
-    // ``type`` is always the plural section name (skills/commands/agents);
-    // strip the trailing ``s`` for the singular CTA copy. Both i18n strings
-    // expose ``{type}`` so the same placeholder works across en/ko.
-    const singular = type.endsWith('s') ? type.slice(0, -1) : type;
+    // ``type`` is always the plural section slug (skills/commands/agents);
+    // the localized singular display name feeds the one-artifact CTA copy
+    // ("Import this skill" / "이 스킬 가져오기").
     html += `<div class="ctx-edit-actions" style="margin-top:12px">
       <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
-        ${t('settings.ctx.import_this').replace('{type}', singular)}
+        ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
       </button>
     </div>`;
 
@@ -4059,7 +4101,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     if (section?.dataset.canonicalCount === '0') {
       const message = section?.dataset.noFanout === 'true'
         ? t('settings.ctx.project_local_no_fanout_tooltip')
-        : t('settings.ctx.sync_disabled_tooltip').replace('{type}', type);
+        : t('settings.ctx.sync_disabled_tooltip').replace('{type}', _ctxTypeName(type));
       showToast(message, 'info');
       return;
     }
@@ -4069,7 +4111,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       // before committing. ``canonicalCount`` is already in the section
       // dataset (the '0' case bailed to a toast above), so no fetch needed.
       message: t('settings.ctx.confirm_sync', {
-        type,
+        type: _ctxTypeName(type),
         count: section?.dataset.canonicalCount || '0',
       }),
       confirmText: t('settings.ctx.sync'),
@@ -4098,8 +4140,9 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const emptyCanonical = generated.length === 0
         && skipped.some(s => s && s.reason_code === 'no_canonical_root');
       if (emptyCanonical) {
+        // ``{canonical}`` is a real path — keep the raw slug there.
         const msg = t('settings.ctx.sync_empty_canonical')
-          .replace('{type}', type)
+          .replace('{type}', _ctxTypeName(type))
           .replace('{canonical}', data.canonical_root || `.memtomem/${type}`);
         showToast(msg, 'info');
       } else if (dropped.length) {
@@ -4163,7 +4206,10 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       btnLoading(btn, false);
     }
     const importDest = _ctxImportDestinationLabel(pinnedScopeOpts.scopeId);
-    let importMessage = t('settings.ctx.confirm_import', { type, dest: importDest });
+    let importMessage = t('settings.ctx.confirm_import', {
+      type: _ctxTypeName(type),
+      dest: importDest,
+    });
     if (preview) {
       const wouldImport = preview.imported.length;
       // Only ``canonical_exists`` skips are what the Overwrite checkbox governs.
@@ -4239,7 +4285,7 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
         const scanList = (data.scanned_dirs || []).join(', ') || '—';
         const rootLabel = _ctxBasename(data.project_root) || '.';
         const msg = t('settings.ctx.import_no_runtimes')
-          .replace('{type}', type)
+          .replace('{type}', _ctxTypeName(type))
           .replace('{root}', rootLabel)
           .replace('{scan_dirs}', scanList);
         showToast(msg, 'info');

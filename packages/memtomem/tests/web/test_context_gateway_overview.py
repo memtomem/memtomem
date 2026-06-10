@@ -385,9 +385,11 @@ _OVERVIEW_USER_TIER = {
 
 def test_overview_header_user_tier_shows_user_canonical_label(page, mm_web_url: str) -> None:
     """#952 pin: when ``target_scope=user`` the header must swap from
-    ``Project: <root>`` to ``User canonical: ~/.memtomem/``. User-scope
+    ``Project: <root>`` to ``User store: ~/.memtomem/``. User-scope
     canonicals live under ``~/.memtomem/`` (host-global), so the
-    ``Project:`` framing was misleading on this tier.
+    ``Project:`` framing was misleading on this tier. (Copy-polish pass
+    renamed the label value "User canonical" → "User store"; the tier
+    branch under pin is unchanged.)
 
     Four pins:
 
@@ -415,8 +417,8 @@ def test_overview_header_user_tier_shows_user_canonical_label(page, mm_web_url: 
     root_label = (
         page.locator("#ctx-overview-content .ctx-overview-root-label").text_content() or ""
     ).strip()
-    assert root_label == "User canonical", (
-        f"user-tier header label must read 'User canonical'; got {root_label!r}"
+    assert root_label == "User store", (
+        f"user-tier header label must read 'User store'; got {root_label!r}"
     )
 
     root_path = (

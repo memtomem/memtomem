@@ -1680,29 +1680,36 @@ class TestNoHardcodedStrings:
         )
 
     def test_q_pr2_nav_label_translated_in_ko(self, en: dict[str, str], ko: dict[str, str]) -> None:
-        """Q-PR2 Drift-1: the Context Gateway sidebar nav label
-        (``settings.nav.ctx_overview``) used to be the English literal
-        ``"Context Gateway"`` in ko.json, while the body H2
-        (``settings.ctx.overview_title``) was already
-        ``"컨텍스트 게이트웨이"``. The KO sidebar→body inconsistency was
-        the bug; pin the symmetric pair so a future revert fails on both
-        the positive value and the sidebar/H2 parity that the user sees.
+        """Q-PR2 Drift-1 (updated for the U9 feature-naming pass): the
+        Context Gateway sidebar used to name the same feature four ways.
+        The feature name now lives on the sidebar *group* header
+        (``settings.nav.integrations``, formerly "Agent Integrations"),
+        matching the body H2 (``settings.ctx.overview_title``), while the
+        first nav *item* (``settings.nav.ctx_overview``) is the generic
+        "Overview"/"개요" entry under it. Pin the group↔H2 parity that
+        the user sees, plus the original Drift-1 invariant that the KO
+        sidebar labels are actually translated.
 
         Negative cross-locale assertion catches the silent ``ko = en``
         regression that ``test_ko_has_all_en_keys`` (key parity) cannot
         detect — that test only checks the *key* exists in ko, not that
         the *value* is translated."""
-        assert ko["settings.nav.ctx_overview"] == "컨텍스트 게이트웨이", (
-            f"ko sidebar label must be translated; got: {ko['settings.nav.ctx_overview']!r}"
+        assert ko["settings.nav.ctx_overview"] == "개요", (
+            f"ko sidebar item label must be translated; got: {ko['settings.nav.ctx_overview']!r}"
         )
         assert ko["settings.nav.ctx_overview"] != en["settings.nav.ctx_overview"], (
             "ko settings.nav.ctx_overview must not silently equal the en "
             "value (Drift-1 regression — KO sidebar showing English literal)"
         )
-        assert ko["settings.nav.ctx_overview"] == ko["settings.ctx.overview_title"], (
-            "KO sidebar label and body H2 must match — that parity is what "
-            "the user actually sees when clicking the nav entry"
+        assert ko["settings.nav.integrations"] == "컨텍스트 게이트웨이", (
+            f"ko sidebar group label must be translated; got: {ko['settings.nav.integrations']!r}"
         )
+        for name, locale in (("en", en), ("ko", ko)):
+            assert locale["settings.nav.integrations"] == locale["settings.ctx.overview_title"], (
+                f"{name} sidebar group label and body H2 must match — the "
+                "feature name parity is what the user actually sees when "
+                "clicking into the Context Gateway group (U9)"
+            )
 
     def test_q_pr2_overview_desc_is_tier_agnostic(
         self, en: dict[str, str], ko: dict[str, str]
