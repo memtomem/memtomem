@@ -412,7 +412,7 @@
   "settings.ctx.sync_lock_timeout": "Sync didn't run — another process is holding a destination lock. Try again in a moment.",
   "settings.ctx.sync_target_conflict": "Sync skipped a conflicting destination — {reason}",
   "settings.ctx.sync_dropped": "{count} field(s) dropped during sync",
-  "settings.ctx.import_priority": "When the same name exists in more than one runtime, the Claude copy is imported (then Antigravity). Codex is pushed to but never read back.",
+  "settings.ctx.import_priority": "When the same name exists in more than one runtime, the first copy found is imported, scanning runtimes in a fixed order (Claude first, then Antigravity; skills also import from Codex and Kimi). Other runtimes are export-only and never read back.",
   "settings.ctx.import_result": "{imported} imported, {skipped} skipped",
   "settings.ctx.import_success": "Import completed",
   "settings.ctx.delete_success": "\"{name}\" deleted",

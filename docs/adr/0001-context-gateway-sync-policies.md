@@ -15,14 +15,17 @@ traversal order:
 | Artifact   | Priority (first wins)                |
 |------------|--------------------------------------|
 | Agents     | `.claude/agents` → `.gemini/agents`  |
-| Skills     | `claude_skills` → `gemini_skills` → `codex_skills` (detector order) |
+| Skills     | `claude_skills` → `gemini_skills` → `codex_skills` → `kimi_skills` (detector order) |
 | Commands   | `.claude/commands` → `.gemini/commands` |
 
 Codex agents fan out to project-scope `<project>/.codex/agents/` (symmetric
 with Claude/Gemini); Codex prompts remain user-scope (`~/.codex/prompts/`,
 no project-scope equivalent). Both are **never** imported — fan-out is
 one-way (canonical → Codex) so the canonical entry stays the single source
-of truth.
+of truth. Kimi agents are likewise export-only: the YAML rendering is lossy
+(drops tools/model/skills/isolation/kind/temperature) and not
+round-trippable. Kimi *skills* are byte-identical SKILL.md trees and are
+imported (last in detector order).
 
 **Why this order:** Claude Code is the primary authoring surface in most
 memtomem workflows.  Gemini CLI is experimental and Codex is

@@ -1050,6 +1050,18 @@ class TestImportOneSkill:
         assert not (tmp_path / ".memtomem" / "skills" / "beta").exists()
 
     @pytest.mark.anyio
+    async def test_import_single_kimi_only(self, client: AsyncClient, tmp_path: Path):
+        """A kimi-only skill is importable — the extract loop skipped
+        .kimi/skills, so this exact request 404'd while the diff pane showed
+        'missing canonical' with an Import CTA (#1229)."""
+        _make_runtime_skill(tmp_path, ".kimi/skills", "kimi-only", "# K\n")
+        r = await client.post("/api/context/skills/kimi-only/import", json={})
+        assert r.status_code == 200
+        data = r.json()
+        assert [i["name"] for i in data["imported"]] == ["kimi-only"]
+        assert (tmp_path / ".memtomem" / "skills" / "kimi-only" / SKILL_MANIFEST).is_file()
+
+    @pytest.mark.anyio
     async def test_404_when_no_runtime_match(self, client: AsyncClient, tmp_path: Path):
         _make_runtime_skill(tmp_path, ".claude/skills", "alpha", "# A\n")
         r = await client.post("/api/context/skills/ghost/import", json={})
