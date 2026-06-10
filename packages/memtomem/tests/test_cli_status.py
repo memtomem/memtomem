@@ -8,9 +8,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import click
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+from memtomem.cli.status_cmd import _style_status_report
 from memtomem.config import Mem2MemConfig
 
 
@@ -183,6 +185,71 @@ class TestStatusOutput:
         result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0, result.output
         assert "Dense vectors:" not in result.output
+
+    def test_colored_output_preserves_plain_text(self) -> None:
+        plain = "\n".join(
+            [
+                "memtomem Status",
+                "==============",
+                "Storage:   sqlite",
+                r"DB path:   C:\Users\TonyStark\.memtomem\memtomem.db",
+                "Embedding: onnx / bge-m3",
+                "Dimension: 1024",
+                "Top-K:     10",
+                "RRF k:     60",
+                "",
+                "Index stats",
+                "-----------",
+                "Total chunks:  53",
+                "Source files:  25",
+                "Dense vectors: 53/53 (100.0%)",
+                "",
+                "Immutable fields (set once at init)",
+                "------------------------------------",
+                "embedding.provider:  onnx",
+                "embedding.model:     bge-m3",
+                "embedding.dimension: 1024",
+                "search.tokenizer:    kiwipiepy",
+                "storage.backend:     sqlite",
+                "  -> To change: re-run `mm init` for provider/tokenizer/backend, "
+                "or `mm embedding-reset` to switch embedder (re-index required).",
+            ]
+        )
+
+        styled = _style_status_report(plain)
+
+        assert click.unstyle(styled) == plain
+        assert "\x1b[" in styled
+        assert "\x1b[36m" in styled  # cyan title/path/commands
+        assert "\x1b[32m" in styled  # full dense coverage
+        assert "\x1b[33m" in styled  # immutable guidance
+
+    @pytest.mark.parametrize(
+        ("line", "ansi_color"),
+        [
+            ("Dense vectors: 42/42 (100.0%)", "\x1b[32m"),
+            (
+                "Dense vectors: 21/42 (50.0%)  (partial dense coverage — some chunks BM25-only)",
+                "\x1b[33m",
+            ),
+            (
+                "Dense vectors: 0/42 (0.0%)  (BM25-only — dense retrieval will return nothing)",
+                "\x1b[31m",
+            ),
+            ("Dense vectors: 0/0", "\x1b[33m"),
+        ],
+    )
+    def test_dense_coverage_color_thresholds(self, line: str, ansi_color: str) -> None:
+        styled = _style_status_report(line)
+
+        assert click.unstyle(styled) == line
+        assert ansi_color in styled
+
+    def test_no_color_disables_status_styling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        plain = "memtomem Status\n==============\nDense vectors: 42/42 (100.0%)"
+        monkeypatch.setenv("NO_COLOR", "1")
+
+        assert _style_status_report(plain) == plain
 
     def test_embedding_mismatch_warning_block_emitted(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
