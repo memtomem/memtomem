@@ -367,7 +367,11 @@ def _merge_hooks_record(
         if not isinstance(rules, list):
             continue
         if event not in existing_hooks:
-            existing_hooks[event] = list(rules)
+            # An empty contribution list only matters for events already in
+            # the target (Pass 1 prunes stale owned rules there); copying it
+            # into a target that never had the event is pure noise.
+            if rules:
+                existing_hooks[event] = list(rules)
             continue
 
         # Same loud-refusal contract one level down: ``list()`` over a dict
@@ -475,7 +479,13 @@ def _merge_hooks_record(
         else:
             del existing_hooks[event]
 
-    merged["hooks"] = existing_hooks
+    # Write the worked copy back only when the target already had the key
+    # (Pass 1/2 replacements and the stale-owned prune must land) or the merge
+    # produced content — injecting a cosmetic ``"hooks": {}`` into a target
+    # that never had one made diff report a false "out of sync" and sync
+    # rewrite the user's file just to add the empty key (#1229).
+    if "hooks" in merged or existing_hooks:
+        merged["hooks"] = existing_hooks
     return merged, warnings
 
 
@@ -718,7 +728,7 @@ def _render_kimi_hooks(contributions: dict) -> tuple[str, list[str]]:
                     f"command = {_toml_string(command)}",
                 ]
                 timeout = handler.get("timeout")
-                if isinstance(timeout, (int, float)):
+                if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
                     rows.append(f"timeout = {timeout}")
                 chunks.append("\n".join(rows))
     return "\n\n".join(chunks), warnings

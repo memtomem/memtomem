@@ -143,7 +143,8 @@ class TestClaudeSettingsMergeSemantic:
         assert written["permissions"] == existing["permissions"]
         assert written["env"] == existing["env"]
         assert written["mcpServers"] == existing["mcpServers"]
-        assert written["hooks"] == {}
+        # No cosmetic "hooks": {} key for an empty canonical (#1229).
+        assert "hooks" not in written
 
 
 class TestClaudeSettingsMergeAdditive:
@@ -731,6 +732,104 @@ class TestKimiSettingsMerge:
         # TOML source (backslash backslash before ``bfoo``) must survive the
         # re-sync — template processing halved it to a single backslash.
         assert "\\\\bfoo" in text
+
+    def test_bool_timeout_omitted_from_rendered_toml(self, kimi_home, tmp_path):
+        """``timeout: true`` in a canonical handler must not render as
+        ``timeout = True`` — Python's ``str(True)`` is not valid TOML, and the
+        invalid write bricked the target into a permanent per-target error
+        status on every later sync and diff (#1229)."""
+        target = kimi_home / ".kimi" / "config.toml"
+        target.write_text('theme = "dark"\n', encoding="utf-8")
+        _make_canonical_settings(
+            tmp_path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        _rule("Bash", "echo bool", timeout=True),
+                        _rule("Bash", "echo int", timeout=5000),
+                    ]
+                }
+            },
+        )
+
+        first = generate_all_settings(tmp_path, scope="user")["kimi_settings"]
+        assert first.status == "ok"
+        text = target.read_text(encoding="utf-8")
+        assert "timeout = True" not in text  # the invalid-TOML signature
+        assert "timeout = 5000" in text  # numeric timeouts still rendered
+        parsed = tomllib.loads(text)  # whole file must stay valid TOML
+        assert [h["command"] for h in parsed["hooks"]] == ["echo bool", "echo int"]
+
+        # Pre-fix, the corrupting first sync itself reported ok and every
+        # LATER pass was bricked: re-sync and diff must stay healthy.
+        second = generate_all_settings(tmp_path, scope="user")["kimi_settings"]
+        assert second.status == "ok"
+        assert diff_settings(tmp_path, scope="user")["kimi_settings"].status == "in sync"
+
+
+class TestNoCosmeticHooksKey:
+    """Empty/absent canonical hooks must not inject a cosmetic ``"hooks": {}``
+    key into targets that never had one (#1229) — diff reported a false
+    "out of sync" and sync rewrote the user's settings file just to add it."""
+
+    @pytest.mark.parametrize("canonical", [{}, {"hooks": {}}])
+    def test_sync_does_not_inject_hooks_key(self, claude_home, tmp_path, canonical):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+        _make_canonical_settings(tmp_path, canonical)
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "ok"
+        written = _read_target(claude_home)
+        assert written["model"] == "opus"
+        assert "hooks" not in written
+
+    @pytest.mark.parametrize("canonical", [{}, {"hooks": {}}])
+    def test_diff_reports_in_sync(self, claude_home, tmp_path, canonical):
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+        _make_canonical_settings(tmp_path, canonical)
+
+        results = diff_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "in sync"
+
+    def test_preexisting_empty_hooks_key_is_kept(self, claude_home, tmp_path):
+        """A user-authored ``"hooks": {}`` key is never removed."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"hooks": {}}) + "\n", encoding="utf-8")
+        _make_canonical_settings(tmp_path, {"hooks": {}})
+
+        assert diff_settings(tmp_path, scope="user")["claude_settings"].status == "in sync"
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "ok"
+        assert _read_target(claude_home)["hooks"] == {}
+
+    def test_empty_contrib_event_not_copied_into_hookless_target(self, claude_home, tmp_path):
+        """An event mapped to an empty list contributes nothing — it must not
+        materialize a hooks record in a target that never had one."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(json.dumps({"model": "opus"}) + "\n", encoding="utf-8")
+        _make_canonical_settings(tmp_path, {"hooks": {"PreToolUse": []}})
+
+        assert diff_settings(tmp_path, scope="user")["claude_settings"].status == "in sync"
+        generate_all_settings(tmp_path, scope="user")
+        assert "hooks" not in _read_target(claude_home)
+
+    def test_empty_contrib_event_still_prunes_owned_rules(self, claude_home, tmp_path):
+        """Guard: skipping empty contribution events applies only to events the
+        target never had — an existing event must still go through Pass 1 so
+        stale memtomem-owned rules are pruned."""
+        target = claude_home / ".claude" / "settings.json"
+        owned = _marked(_rule("Write", "mm index"), "PostToolUse")
+        user_rule = _rule("Bash", "echo user")
+        target.write_text(
+            json.dumps({"hooks": {"PostToolUse": [owned, user_rule]}}) + "\n", encoding="utf-8"
+        )
+        _make_canonical_settings(tmp_path, {"hooks": {"PostToolUse": []}})
+
+        results = generate_all_settings(tmp_path, scope="user")
+        assert results["claude_settings"].status == "ok"
+        assert _read_target(claude_home)["hooks"]["PostToolUse"] == [user_rule]
 
 
 class TestClaudeSettingsMergeConcurrent:
