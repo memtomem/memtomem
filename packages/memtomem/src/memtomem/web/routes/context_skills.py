@@ -472,7 +472,18 @@ async def sync_skills(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = generate_all_skills(project_root)
+                # Offload to a worker thread — the engine acquires
+                # cross-process destination sidecar locks (skills hold them
+                # across the whole staging swap, _locks.py), which would
+                # otherwise block this synchronous call ON the event loop
+                # thread, stalling every request AND preventing the enclosing
+                # ``asyncio.timeout(60)`` from firing (its expiry callback
+                # runs on the very loop that is blocked) — the exact shape
+                # #1145 fixed for settings. The engine's own
+                # ``_SKILLS_LOCK_BUDGET_S`` (30s < 60s) bounds the lock
+                # waits, so a timed-out request cannot orphan a worker
+                # thread that writes after the 503 already went out.
+                result = await asyncio.to_thread(generate_all_skills, project_root)
     except TimeoutError:
         raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
     except PrivacyScanError as exc:

@@ -4143,12 +4143,19 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const skipped = data.skipped || [];
       const emptyCanonical = generated.length === 0
         && skipped.some(s => s && s.reason_code === 'no_canonical_root');
+      const lockTimeout = skipped.some(s => s && s.reason_code === 'lock_timeout');
       if (emptyCanonical) {
         // ``{canonical}`` is a real path — keep the raw slug there.
         const msg = t('settings.ctx.sync_empty_canonical')
           .replace('{type}', _ctxTypeName(type))
           .replace('{canonical}', data.canonical_root || `.memtomem/${type}`);
         showToast(msg, 'info');
+      } else if (lockTimeout) {
+        // A foreign process held a destination lock past the engine's
+        // acquisition budget — none (batch tier) or only part (per-dst
+        // tiers) of the fan-out happened. Falling through to
+        // ``sync_success`` would report a sync that didn't run.
+        showToast(t('settings.ctx.sync_lock_timeout'), 'warning');
       } else if (dropped.length) {
         // commands/agents render dropped per-field omissions — keep the
         // existing warning so the user can investigate field-level loss.

@@ -24,6 +24,12 @@ PARSE_ERROR: Final = "parse_error"
 # user-only). Loud emit, not silent — feedback_defensive_noise.md.
 NO_PROJECT_FANOUT_FOR_RUNTIME: Final = "no_project_fanout_for_runtime"
 
+# Another process held a destination sidecar lock past the engine's whole-call
+# acquisition budget (``skills._SKILLS_LOCK_BUDGET_S``). Emitted instead of
+# blocking indefinitely so an async web caller offloading to a thread can never
+# orphan a worker that writes after its request already timed out (#1145 shape).
+LOCK_TIMEOUT: Final = "lock_timeout"
+
 # Import (runtime → canonical) skip codes.
 INVALID_NAME: Final = "invalid_name"
 ALREADY_IMPORTED: Final = "already_imported"
@@ -58,6 +64,7 @@ SkipCode = Literal[
     "unknown_runtime",
     "parse_error",
     "no_project_fanout_for_runtime",
+    "lock_timeout",
     "invalid_name",
     "already_imported",
     "canonical_exists",
