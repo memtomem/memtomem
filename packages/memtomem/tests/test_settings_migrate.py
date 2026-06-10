@@ -749,3 +749,289 @@ class TestApplyTimeDrift:
 
         assert result.exit_code == 1
         assert "PostToolUse:Edit|Write" in result.output
+
+
+class TestApplyConcurrencyGuards:
+    """apply_migration's classify → write → clean transaction runs while
+    holding BOTH tiers' sidecar ``_file_lock``\\ s — the same locks
+    ``generate_all_settings`` takes for these files (#1123 B3-3; #1229
+    catalog) — acquired in sorted order (pair-lock discipline), with the
+    ``st_mtime_ns`` recheck kept as a second layer against direct disk
+    edits, a shared acquisition budget so a held lock aborts instead of
+    blocking forever (#1145 shape), and a loud refusal to rewrite a
+    malformed tier."""
+
+    def _plan(self, project_root, fake_home) -> MigratePlan:
+        _write_canonical(project_root, _bundled_hook())
+        _write_settings(fake_home / ".claude" / "settings.json", _settings_doc(_bundled_hook()))
+        plan = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        assert plan.applicable_moves
+        return plan
+
+    def test_apply_holds_both_tier_locks_across_transaction(
+        self, project_root, fake_home, monkeypatch
+    ):
+        """BOTH sidecar locks are acquired (sorted order, nested) before any
+        write and released only after all writes — holding the pair is what
+        makes the source clean-up decision safe (see the opposite-direction
+        regression below)."""
+        import contextlib
+
+        from memtomem.context import settings_migrate as migrate_mod
+        from memtomem.context._atomic import _lock_path_for
+
+        plan = self._plan(project_root, fake_home)
+        events: list[str] = []
+        orig_file_lock = migrate_mod._file_lock
+        orig_write_json = migrate_mod._write_json
+
+        @contextlib.contextmanager
+        def spy_file_lock(lock_path, *, timeout=None):
+            events.append(f"enter:{lock_path.name}")
+            with orig_file_lock(lock_path, timeout=timeout):
+                yield
+            events.append(f"exit:{lock_path.name}")
+
+        def spy_write_json(path, data):
+            events.append(f"write:{path.name}")
+            return orig_write_json(path, data)
+
+        monkeypatch.setattr(migrate_mod, "_file_lock", spy_file_lock)
+        monkeypatch.setattr(migrate_mod, "_write_json", spy_write_json)
+
+        result = apply_migration(plan)
+        assert result.target_written is True
+        assert result.source_written is True
+
+        first_lock, second_lock = [
+            p.name
+            for p in sorted(
+                [_lock_path_for(plan.target_path), _lock_path_for(plan.source_path)],
+                key=str,
+            )
+        ]
+        writes = [i for i, e in enumerate(events) if e.startswith("write:")]
+        assert writes  # both tier writes happened
+        # Sorted acquisition, nested release (ExitStack unwinds in reverse).
+        assert events.index(f"enter:{first_lock}") < events.index(f"enter:{second_lock}")
+        assert events.index(f"exit:{second_lock}") < events.index(f"exit:{first_lock}")
+        # Every write happens while BOTH locks are held.
+        assert events.index(f"enter:{second_lock}") < min(writes)
+        assert max(writes) < events.index(f"exit:{second_lock}")
+
+    def test_held_target_lock_aborts_within_budget(self, project_root, fake_home, monkeypatch):
+        """A foreign holder of the target sidecar (e.g. a concurrent
+        ``mm context sync --include=settings``) makes apply abort cleanly
+        within the budget — nothing written, warning surfaced (exit 1 via
+        the existing CLI warnings plumbing)."""
+        from memtomem.context import settings_migrate as migrate_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        plan = self._plan(project_root, fake_home)
+        source_before = _read_settings(plan.source_path)
+        monkeypatch.setattr(migrate_mod, "_SETTINGS_LOCK_BUDGET_S", 0.2)
+        # Separate fd in the same process contends (portalocker locks are
+        # per open-file-description).
+        with _file_lock(_lock_path_for(plan.target_path)):
+            result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert any("held a settings tier lock" in w for w in result.warnings)
+        assert not plan.target_path.exists()
+        assert _read_settings(plan.source_path) == source_before
+
+    def test_held_source_lock_aborts_whole_apply(self, project_root, fake_home, monkeypatch):
+        """A held SOURCE lock aborts the whole apply — both locks are needed
+        before anything is written, so nothing moves and nothing is cleaned
+        (no half-applied state to heal)."""
+        from memtomem.context import settings_migrate as migrate_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        plan = self._plan(project_root, fake_home)
+        source_before = _read_settings(plan.source_path)
+        monkeypatch.setattr(migrate_mod, "_SETTINGS_LOCK_BUDGET_S", 0.2)
+        with _file_lock(_lock_path_for(plan.source_path)):
+            result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert any("held a settings tier lock" in w for w in result.warnings)
+        assert not plan.target_path.exists()
+        assert _read_settings(plan.source_path) == source_before
+
+    def test_aborts_on_target_mtime_change(self, project_root, fake_home):
+        """A direct disk edit landing on the target between migrate's read and
+        write (bypassing the sidecar lock) trips the ``st_mtime_ns`` recheck:
+        nothing is written, the concurrent edit survives intact."""
+        import os
+        import unittest.mock
+
+        from memtomem.context import settings_migrate as migrate_mod
+
+        plan = self._plan(project_root, fake_home)
+        source_before = _read_settings(plan.source_path)
+        concurrent = {"hooks": {}, "_concurrent": True}
+        orig_read = migrate_mod._read_with_mtime
+
+        def patched_read(path):
+            result = orig_read(path)
+            if path == plan.target_path:
+                _write_settings(plan.target_path, concurrent)
+                # Bump explicitly so the simulated concurrent write is
+                # distinguishable regardless of OS timer granularity (same
+                # discipline as the generate_all_settings mtime-abort test).
+                st = plan.target_path.stat()
+                os.utime(plan.target_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            return result
+
+        with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
+            result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert any("modified by another process" in w for w in result.warnings)
+        # The concurrent edit was NOT clobbered, the source NOT cleaned.
+        assert _read_settings(plan.target_path) == concurrent
+        assert _read_settings(plan.source_path) == source_before
+
+    def test_aborts_on_source_mtime_change_after_target_write(self, project_root, fake_home):
+        """Same second layer on the source clean-up: a direct edit during the
+        strip computation survives; only the clean-up is refused (the target
+        write already landed and stays)."""
+        import os
+        import unittest.mock
+
+        from memtomem.context import settings_migrate as migrate_mod
+
+        plan = self._plan(project_root, fake_home)
+        concurrent = _settings_doc(_bundled_hook())
+        concurrent["_concurrent"] = True
+        orig_read = migrate_mod._read_with_mtime
+
+        def patched_read(path):
+            result = orig_read(path)
+            if path == plan.source_path:
+                _write_settings(plan.source_path, concurrent)
+                st = plan.source_path.stat()
+                os.utime(plan.source_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            return result
+
+        with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
+            result = apply_migration(plan)
+
+        assert result.target_written is True
+        assert result.source_written is False
+        assert any("modified by another process" in w for w in result.warnings)
+        assert _read_settings(plan.source_path) == concurrent
+
+    def test_malformed_target_refused_nothing_written(self, project_root, fake_home):
+        """A target tier that exists but is not a JSON object is never
+        rewritten — treating it as empty would replace the user's file with
+        just the migrated rules (the apply-side analogue of the sync engine's
+        ``MalformedSettingsError`` refusal)."""
+        plan = self._plan(project_root, fake_home)
+        source_before = _read_settings(plan.source_path)
+        plan.target_path.parent.mkdir(parents=True, exist_ok=True)
+        # VALID JSON whose root is not an object — the sneakier flavor
+        # (the source-side test below covers the decode-error flavor).
+        plan.target_path.write_text("[1, 2]", encoding="utf-8")
+
+        result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert any("not valid JSON" in w for w in result.warnings)
+        assert plan.target_path.read_text(encoding="utf-8") == "[1, 2]"
+        assert _read_settings(plan.source_path) == source_before
+
+    def test_malformed_source_warns_and_is_left_alone(self, project_root, fake_home):
+        """A source tier corrupted after planning blocks only the clean-up:
+        the target write proceeds, the corrupt source is left byte-identical,
+        and the warning says the entries were not cleaned (previously this
+        case was silent)."""
+        plan = self._plan(project_root, fake_home)
+        plan.source_path.write_text("[1, 2", encoding="utf-8")
+
+        result = apply_migration(plan)
+
+        assert result.target_written is True
+        assert result.source_written is False
+        assert any("not cleaned" in w for w in result.warnings)
+        assert plan.source_path.read_text(encoding="utf-8") == "[1, 2"
+
+    def test_opposite_direction_applies_cannot_clean_both_tiers(self, project_root, fake_home):
+        """Codex review blocker on the first cut of this fix: with sequential
+        per-tier locking, two opposite-direction applies starting from a
+        duplicate state (both tiers carry the entry, e.g. after a crash
+        between migrate's two writes) could BOTH classify their target as
+        ``exact`` and then each clean its own source — deleting the entry
+        from both tiers. The pair lock forces the whole classify→clean
+        transaction to serialize, so the second apply re-classifies against
+        the first one's outcome and exactly one tier keeps the entry.
+
+        The barrier rendezvous in ``_target_rule_lookup`` (called once per
+        apply, right after the locked target read) deterministically forces
+        the broken interleaving when it is possible: under sequential locks
+        both threads classify together, then both clean. Under the pair lock
+        the second thread cannot even reach classification until the first
+        releases, so the barrier times out (broken) and both proceed
+        serialized."""
+        import threading
+        import unittest.mock
+
+        from memtomem.context import settings_migrate as migrate_mod
+
+        _write_canonical(project_root, _bundled_hook())
+        user_path = fake_home / ".claude" / "settings.json"
+        local_path = project_root / ".claude" / "settings.local.json"
+        # Duplicate state: BOTH tiers carry the canonical entry.
+        _write_settings(user_path, _settings_doc(_bundled_hook()))
+        _write_settings(local_path, _settings_doc(_bundled_hook()))
+
+        plan_ab = plan_migration(project_root, source_scope="user", target_scope="project_local")
+        plan_ba = plan_migration(project_root, source_scope="project_local", target_scope="user")
+        assert plan_ab.applicable_moves and plan_ba.applicable_moves
+
+        barrier = threading.Barrier(2)
+        orig_lookup = migrate_mod._target_rule_lookup
+
+        def rendezvous_lookup(target_hooks):
+            try:
+                barrier.wait(timeout=1.5)
+            except threading.BrokenBarrierError:
+                pass
+            return orig_lookup(target_hooks)
+
+        results: dict[str, MigrateResult] = {}
+        errors: list[BaseException] = []
+
+        def run(name: str, plan: MigratePlan) -> None:
+            try:
+                results[name] = apply_migration(plan)
+            except BaseException as exc:  # surfaced via the errors list
+                errors.append(exc)
+
+        with unittest.mock.patch.object(migrate_mod, "_target_rule_lookup", rendezvous_lookup):
+            t1 = threading.Thread(target=run, args=("ab", plan_ab))
+            t2 = threading.Thread(target=run, args=("ba", plan_ba))
+            t1.start()
+            t2.start()
+            t1.join(timeout=30)
+            t2.join(timeout=30)
+
+        assert not t1.is_alive() and not t2.is_alive()
+        assert not errors
+        assert set(results) == {"ab", "ba"}
+
+        def _has_entry(path) -> bool:
+            doc = _read_settings(path)
+            return any(
+                i.get("command") == "mm session start"
+                for r in doc.get("hooks", {}).get("PostToolUse", [])
+                for i in r.get("hooks", [])
+                if isinstance(i, dict)
+            )
+
+        # Exactly ONE tier still carries the canonical entry — never zero.
+        assert [_has_entry(user_path), _has_entry(local_path)].count(True) == 1

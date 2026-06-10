@@ -23,12 +23,17 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from memtomem.context._atomic import atomic_write_text
+from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
+    _MALFORMED,
+    _SETTINGS_LOCK_BUDGET_S,
+    _read_with_mtime,
     _rule_content_equal,
     _stamp_status_markers,
     resolve_scope_path,
@@ -513,60 +518,161 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
     refused per-move: the target is not appended to and the source entry is
     not cleaned, and a human-readable note is added to
     :attr:`MigrateResult.warnings` for the CLI to surface.
+
+    Concurrency: the whole classify → target-write → source-clean transaction
+    runs while holding BOTH tiers' sidecar ``_file_lock``\\ s — the same locks
+    :func:`~memtomem.context.settings.generate_all_settings` takes for these
+    exact files (issue #1123 B3-3) — acquired in sorted ``str(lock_path)``
+    order (the pair-lock discipline of ``migrate._acquire_pair_lock``).
+    Holding the pair, not one lock at a time, is load-bearing: the source
+    clean-up is only valid while "the target carries the entry" stays true,
+    and with sequential per-tier locking two opposite-direction applies
+    starting from a duplicate state (both tiers carrying the entry, e.g.
+    after a crash between the two writes) could each classify their target
+    as ``exact`` and then each clean its own source — deleting the entry
+    from BOTH tiers. Sorted-pair acquisition cannot deadlock: every
+    pair-holder takes the same global order, and ``generate_all_settings``
+    is a strict single-lock holder (it never waits while holding), so no
+    wait cycle can form. Acquisition shares one ``_SETTINGS_LOCK_BUDGET_S``
+    budget across both locks (#1145 shape); on expiry the apply is refused
+    with a warning instead of blocking forever. The ``st_mtime_ns`` recheck
+    before each write is the same second layer ``generate_all_settings``
+    keeps: it catches a non-gateway direct disk edit that bypasses the
+    sidecar lock entirely. A tier that exists but is not readable as a JSON
+    object is refused loudly rather than treated as empty — rewriting it
+    would destroy the user's file (the apply-side analogue of the sync
+    engine's ``MalformedSettingsError`` contract).
     """
     result = MigrateResult(plan=plan)
     if plan.is_noop:
         return result
 
-    # Re-read + re-classify the target against its current on-disk state,
-    # deriving the write-set and the source-clean-set from the LIVE target
-    # rather than the plan-time snapshot.
-    target_existing = _safe_load_json_dict(plan.target_path) or {}
-    target_index = _target_rule_lookup(target_existing.get("hooks", {}))
+    retry_hint = "Re-run `mm context settings-migrate --apply` to retry."
+    heal_hint = (
+        "Re-run `mm context settings-migrate --apply` to finish the "
+        "clean-up (the target already carries the entries)."
+    )
+    # One shared deadline for BOTH sidecar-lock acquisitions, so the whole
+    # apply — not each tier — is bounded by ``_SETTINGS_LOCK_BUDGET_S``
+    # (mirrors generate_all_settings; #1145 review shape).
+    lock_deadline = time.monotonic() + _SETTINGS_LOCK_BUDGET_S
 
-    moves_to_write: list[MigrateMove] = []
+    def _lock_timeout() -> float:
+        return max(0.0, lock_deadline - time.monotonic())
+
+    # Both tier locks are held for the whole transaction, in sorted order
+    # (see the docstring). The set() dedupes the degenerate same-sidecar
+    # spelling (plan_migration rejects same-path upstream, but a symlinked
+    # alias could still collapse here — _file_lock does not nest).
+    lock_paths = sorted(
+        {_lock_path_for(plan.target_path), _lock_path_for(plan.source_path)}, key=str
+    )
     sigs_to_drop: set[HookSignature] = set()
-    for move in plan.applicable_moves:
-        status, reason = _classify_target(target_index, move.signature, _canonical_inner_of(move))
-        if status == "conflict":
-            # Drift introduced after planning: refuse this move. Appending
-            # would duplicate the matcher; cleaning source would leave the
-            # target permanently drifted from the canonical contract.
-            result.warnings.append(reason)
-            continue
-        if status == "missing":
-            # No rule under (event, matcher) at target → append it.
-            moves_to_write.append(move)
-        # status == "exact": target already carries the canonical inner —
-        # skip the append, but still drop the now-redundant source entry.
-        sigs_to_drop.add(move.signature)
+    try:
+        with ExitStack() as stack:
+            for lock_path in lock_paths:
+                stack.enter_context(_file_lock(lock_path, timeout=_lock_timeout()))
 
-    # --- Target write ---------------------------------------------------
-    if moves_to_write:
-        # ``already_at_target`` is forced False so _add_target_rules appends
-        # every move we decided to write — including a plan-time "already"
-        # move that re-classified to "missing" because the target lost the
-        # entry between plan and apply.
-        target_merged = _add_target_rules(
-            target_existing,
-            [replace(m, already_at_target=False) for m in moves_to_write],
+            # --- Target read-modify-write -------------------------------
+            # Re-read + re-classify the target against its current on-disk
+            # state, deriving the write-set and the source-clean-set from the
+            # LIVE target rather than the plan-time snapshot.
+            target_raw, target_mtime_ns = _read_with_mtime(plan.target_path)
+            if target_raw is _MALFORMED:
+                result.warnings.append(
+                    f"{plan.target_path} is not valid JSON (or not a JSON "
+                    f"object); refusing to rewrite it. Fix the file manually, "
+                    f"then re-run `mm context settings-migrate --apply`."
+                )
+                return result
+            target_existing: dict = target_raw if isinstance(target_raw, dict) else {}
+            target_index = _target_rule_lookup(target_existing.get("hooks", {}))
+
+            moves_to_write: list[MigrateMove] = []
+            for move in plan.applicable_moves:
+                status, reason = _classify_target(
+                    target_index, move.signature, _canonical_inner_of(move)
+                )
+                if status == "conflict":
+                    # Drift introduced after planning: refuse this move.
+                    # Appending would duplicate the matcher; cleaning source
+                    # would leave the target permanently drifted from the
+                    # canonical contract.
+                    result.warnings.append(reason)
+                    continue
+                if status == "missing":
+                    # No rule under (event, matcher) at target → append it.
+                    moves_to_write.append(move)
+                # status == "exact": target already carries the canonical
+                # inner — skip the append, but still drop the now-redundant
+                # source entry.
+                sigs_to_drop.add(move.signature)
+
+            if moves_to_write:
+                # mtime recheck (second layer, like generate_all_settings
+                # Step 3): catches a direct disk edit that bypassed the
+                # sidecar lock during classification. Abort the whole apply —
+                # the target was not written, so the source must not be
+                # cleaned either.
+                if (
+                    plan.target_path.is_file()
+                    and plan.target_path.stat().st_mtime_ns != target_mtime_ns
+                ):
+                    result.warnings.append(
+                        f"{plan.target_path} was modified by another process "
+                        f"during apply; nothing was written. {retry_hint}"
+                    )
+                    return result
+                # ``already_at_target`` is forced False so _add_target_rules
+                # appends every move we decided to write — including a
+                # plan-time "already" move that re-classified to "missing"
+                # because the target lost the entry between plan and apply.
+                target_merged = _add_target_rules(
+                    target_existing,
+                    [replace(m, already_at_target=False) for m in moves_to_write],
+                )
+                _write_json(plan.target_path, target_merged)
+                result.target_written = True
+
+            # --- Source clean-up (target state still pinned by our locks) -
+            if not sigs_to_drop:
+                return result
+            source_raw, source_mtime_ns = _read_with_mtime(plan.source_path)
+            if source_raw is None:
+                # Source vanished between plan and apply (rare). Source is
+                # already clean from this command's POV; leave as-is.
+                return result
+            if source_raw is _MALFORMED:
+                result.warnings.append(
+                    f"{plan.source_path} is not valid JSON (or not a JSON "
+                    f"object); the migrated entries were not cleaned from it. "
+                    f"Fix the file manually, then re-run "
+                    f"`mm context settings-migrate --apply`."
+                )
+                return result
+            source_existing: dict = source_raw  # type: ignore[assignment]
+
+            source_new = _strip_source_inner_entries(source_existing, sigs_to_drop)
+            if source_new != source_existing:
+                # Same second-layer mtime recheck as the target write above.
+                if (
+                    plan.source_path.is_file()
+                    and plan.source_path.stat().st_mtime_ns != source_mtime_ns
+                ):
+                    result.warnings.append(
+                        f"{plan.source_path} was modified by another process "
+                        f"during apply; the source was not cleaned. {heal_hint}"
+                    )
+                    return result
+                _write_json(plan.source_path, source_new)
+                result.source_written = True
+    except TimeoutError:
+        result.warnings.append(
+            f"another process held a settings tier lock past the "
+            f"{_SETTINGS_LOCK_BUDGET_S:g}s acquisition budget "
+            f"({plan.target_path} / {plan.source_path}); nothing was written. "
+            f"{retry_hint}"
         )
-        _write_json(plan.target_path, target_merged)
-        result.target_written = True
-
-    # --- Source write ---------------------------------------------------
-    if not sigs_to_drop:
-        return result
-    source_existing = _safe_load_json_dict(plan.source_path)
-    if source_existing is None:
-        # Source vanished between plan and apply (rare). Source is already
-        # clean from this command's POV; leave as-is.
-        return result
-
-    source_new = _strip_source_inner_entries(source_existing, sigs_to_drop)
-    if source_new != source_existing:
-        _write_json(plan.source_path, source_new)
-        result.source_written = True
 
     return result
 
