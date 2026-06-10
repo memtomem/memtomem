@@ -502,6 +502,14 @@ def _gemini_toml_to_canonical(toml_path: Path) -> str:
     prompt = str(data.get("prompt", ""))
     description = str(data.get("description", ""))
     body = _gemini_to_claude_body(prompt).rstrip() + "\n"
+    # TOML strings are multi-line-capable but the canonical frontmatter value
+    # is one line — collapse line breaks to spaces BEFORE interpolating.
+    # Interpolating raw let a description like "helper\nmodel: gpt-4" inject
+    # arbitrary frontmatter keys into the canonical (which then fan out to
+    # every runtime), and a "---" line terminate the frontmatter early
+    # (#1229). The flat-YAML parser reads quoted scalars without decoding
+    # escapes, so quoting instead of collapsing would corrupt the value.
+    description = " ".join(description.split())
     if description:
         return f"---\ndescription: {description}\n---\n\n{body}"
     # No description — frontmatter-less canonical (parser tolerates this).
