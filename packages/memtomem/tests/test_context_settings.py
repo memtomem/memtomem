@@ -583,6 +583,42 @@ class TestKimiSettingsMerge:
         assert 'matcher = "WriteFile"' in text
         assert tomllib.loads(text)["hooks"][0]["command"] == "mm index ~/memories"
 
+    def test_resync_preserves_backslashes_and_newlines_in_command(self, kimi_home, tmp_path):
+        """Regression: ``_replace_kimi_managed_block`` used the rendered block
+        as a plain-string ``re.sub`` replacement, so template processing halved
+        the doubled-backslash escapes ``_toml_string`` emits (regex ``\\b``,
+        Windows paths) and turned a literal backslash-n into a raw newline
+        inside the TOML string. The FIRST sync takes the no-block concat branch
+        and was always correct; the SECOND sync (block present →
+        ``pattern.sub``) corrupted ``config.toml`` into unparseable TOML.
+        Sync twice and require an exact command round-trip both times.
+        """
+        target = kimi_home / ".kimi" / "config.toml"
+        target.write_text('theme = "dark"\n', encoding="utf-8")
+        nasty = 'grep "\\bfoo" C:\\tools\\hook.exe && printf "a\\nb"'
+        _make_canonical_settings(
+            tmp_path,
+            {"hooks": {"PreToolUse": [_rule("Bash", nasty)]}},
+        )
+
+        first = generate_all_settings(tmp_path, scope="user")["kimi_settings"]
+        assert first.status == "ok"
+        parsed_first = tomllib.loads(target.read_text(encoding="utf-8"))
+        assert parsed_first["hooks"][0]["command"] == nasty
+
+        # Second sync: the managed block now exists, so this run exercises
+        # the ``pattern.sub`` replacement path that did the corrupting.
+        second = generate_all_settings(tmp_path, scope="user")["kimi_settings"]
+        assert second.status == "ok"
+        text = target.read_text(encoding="utf-8")
+        parsed_second = tomllib.loads(text)  # corrupted output raises TOMLDecodeError
+        assert parsed_second["hooks"][0]["command"] == nasty
+        assert parsed_second["theme"] == "dark"
+        # Negative pin on the corruption signature: the doubled escape in the
+        # TOML source (backslash backslash before ``bfoo``) must survive the
+        # re-sync — template processing halved it to a single backslash.
+        assert "\\\\bfoo" in text
+
 
 class TestClaudeSettingsMergeConcurrent:
     """Mtime changed between read and write → abort."""

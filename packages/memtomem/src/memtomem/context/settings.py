@@ -695,7 +695,13 @@ def _replace_kimi_managed_block(existing: str, body: str) -> str:
         r"(?ms)^# BEGIN memtomem managed hooks\n.*?^# END memtomem managed hooks\n?"
     )
     if pattern.search(existing):
-        updated = pattern.sub(block, existing)
+        # Callable replacement — a plain-string replacement is processed as a
+        # template, so the ``\\`` sequences ``_toml_string`` emits for
+        # backslash-bearing hook commands (regex ``\b``, Windows paths) get
+        # halved and literal ``\n`` becomes a raw newline, corrupting the
+        # TOML on the second and every later sync (the first sync takes the
+        # concat branch below and was unaffected).
+        updated = pattern.sub(lambda _m: block, existing)
     else:
         updated = existing.rstrip()
         if updated and block:
