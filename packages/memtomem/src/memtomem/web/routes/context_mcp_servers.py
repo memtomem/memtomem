@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -31,6 +32,8 @@ from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_writable_scope_root,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["context-mcp-servers"])
 
@@ -213,14 +216,24 @@ async def _update_mcp_server_impl(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 current_mtime_ns = path.stat().st_mtime_ns
-                if current_mtime_ns != body_mtime_ns and not body.force:
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "status": "aborted",
-                            "reason": "File was modified by another process. Reload and retry.",
-                            "mtime_ns": str(current_mtime_ns),
-                        },
+                if current_mtime_ns != body_mtime_ns:
+                    if not body.force:
+                        return JSONResponse(
+                            status_code=409,
+                            content={
+                                "status": "aborted",
+                                "reason": (
+                                    "File was modified by another process. Reload and retry."
+                                ),
+                                "mtime_ns": str(current_mtime_ns),
+                            },
+                        )
+                    logger.warning(
+                        "force-save bypassed mtime check on %s "
+                        "(client_mtime_ns=%s server_mtime_ns=%s)",
+                        path,
+                        body_mtime_ns,
+                        current_mtime_ns,
                     )
                 atomic_write_text(path, body.content)
                 new_mtime_ns = path.stat().st_mtime_ns

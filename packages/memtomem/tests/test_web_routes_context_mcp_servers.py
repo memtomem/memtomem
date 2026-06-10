@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -144,3 +145,84 @@ async def test_create_rejects_secret_shaped_content(client: AsyncClient) -> None
     assert r.status_code == 422
     assert "privacy pattern" in r.json()["detail"]
     assert secret not in r.text
+
+
+def _seed_canonical(tmp_path: Path, name: str) -> Path:
+    path = tmp_path / ".memtomem" / "mcp-servers" / f"{name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_definition(), encoding="utf-8")
+    return path
+
+
+@pytest.mark.anyio
+async def test_PUT_force_bypasses_mtime_and_logs_warning(
+    client: AsyncClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Force-save parity with skills/commands/agents (#1229): every mtime
+    bypass emits a WARNING with the path plus BOTH mtime values so the
+    override is reconstructable from logs alone."""
+    path = _seed_canonical(tmp_path, "force-log")
+    server_mtime_ns = path.stat().st_mtime_ns
+    new_content = _definition("node")
+
+    with caplog.at_level(logging.WARNING):
+        r = await client.put(
+            "/api/context/mcp-servers/force-log",
+            json={"content": new_content, "mtime_ns": "0", "force": True},
+        )
+    assert r.status_code == 200, r.text
+    assert path.read_text(encoding="utf-8") == new_content
+
+    bypass_records = [rec for rec in caplog.records if "force-save bypassed" in rec.getMessage()]
+    assert bypass_records, caplog.text
+    msg = bypass_records[-1].getMessage()
+    assert str(path) in msg
+    assert "client_mtime_ns=0" in msg
+    assert f"server_mtime_ns={server_mtime_ns}" in msg
+
+
+@pytest.mark.anyio
+async def test_PATCH_force_logs_warning_too(
+    client: AsyncClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The PATCH alias routes through the same impl — same audit contract."""
+    _seed_canonical(tmp_path, "force-patch")
+    with caplog.at_level(logging.WARNING):
+        r = await client.patch(
+            "/api/context/mcp-servers/force-patch",
+            json={"content": _definition("node"), "mtime_ns": "0", "force": True},
+        )
+    assert r.status_code == 200, r.text
+    assert any("force-save bypassed" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_PUT_force_with_matching_mtime_stays_silent(
+    client: AsyncClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """force=True with a matching mtime bypasses nothing — no WARNING."""
+    path = _seed_canonical(tmp_path, "force-clean")
+    with caplog.at_level(logging.WARNING):
+        r = await client.put(
+            "/api/context/mcp-servers/force-clean",
+            json={
+                "content": _definition("node"),
+                "mtime_ns": str(path.stat().st_mtime_ns),
+                "force": True,
+            },
+        )
+    assert r.status_code == 200, r.text
+    assert not any("force-save bypassed" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_PUT_force_default_false_still_409s(client: AsyncClient, tmp_path: Path) -> None:
+    path = _seed_canonical(tmp_path, "stale")
+    original = path.read_text(encoding="utf-8")
+    r = await client.put(
+        "/api/context/mcp-servers/stale",
+        json={"content": _definition("node"), "mtime_ns": "0"},
+    )
+    assert r.status_code == 409
+    assert r.json()["status"] == "aborted"
+    assert path.read_text(encoding="utf-8") == original

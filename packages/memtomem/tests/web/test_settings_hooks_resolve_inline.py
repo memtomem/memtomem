@@ -3,22 +3,27 @@
 Audit goal (``scripts/context-gateway-review-plan.md`` 갭 3): pin the
 mtime-guard envelope contract for ``POST /api/context/settings/resolve``.
 
-The route returns HTTP 200 with ``{"status": "aborted", "reason": "...",
+The route returns HTTP 409 with ``{"status": "aborted", "reason": "...",
 "mtime_ns": "..."}`` when an external write changes the target file
-between the read and the write — **not** HTTP 409 (see
-``web/routes/settings_sync.py:329-334``). A regression that treats this
-envelope as success would silently overwrite a cross-process write — the
-exact failure mode this spec is meant to lock out.
+between the read and the write — matching the Skills/Commands/Agents
+stale-write envelope contract (#1229; this used to be HTTP 200). A
+regression that treats this envelope as success would silently overwrite
+a cross-process write — the exact failure mode this spec is meant to
+lock out.
 
-The handler's contract (``static/settings-hooks-watchdog.js:117-150``):
+The handler's contract (``static/settings-hooks-watchdog.js``):
 
 * ``showConfirm`` first; cancel returns without firing the POST.
 * On confirm, ``POST /api/context/settings/resolve``.
-* ``!r.ok`` (HTTP 4xx/5xx) → toast.error + return (no ``loadHooksSync``).
+* ``!r.ok`` and not a status-keyed 409 → toast.error + return (no
+  ``loadHooksSync``). The sync-eligibility write-guard's 409 carries
+  ``{detail: {reason_code, ...}}`` with no ``status`` key and stays on
+  this generic path.
 * ``r.ok`` (HTTP 200) → parse body. ``status === 'ok'`` → toast +
   ``loadHooksSync()`` (the conflict card vanishes after the GET).
-* Any other status (``aborted`` included) → toast.error + return; no
-  ``loadHooksSync`` call, so the conflict card stays in place.
+* Any other status-keyed body (the 409 ``aborted`` included) →
+  toast.error + return; no ``loadHooksSync`` call, so the conflict card
+  stays in place.
 """
 
 from __future__ import annotations
@@ -233,16 +238,18 @@ def test_resolve_ok_removes_conflict_card(page, mm_web_url: str) -> None:
 
 
 def test_resolve_aborted_envelope_keeps_card_and_emits_error_toast(page, mm_web_url: str) -> None:
-    """S3-b: POST ``/resolve`` returns HTTP 200 + ``{status: 'aborted',
+    """S3-b: POST ``/resolve`` returns HTTP 409 + ``{status: 'aborted',
     reason: ..., mtime_ns: ...}`` → error toast + conflict card stays +
     no post-resolve GET reload. Audit P0 mtime-guard regression lock.
 
-    The mtime guard contract returns HTTP 200 (not 409) — a regression
-    that only checks ``resp.ok`` and ignores ``result.status`` would
-    silently overwrite a cross-process write. The card-stays assertion
-    is the true regression catch: a buggy handler that calls
-    ``loadHooksSync()`` despite the aborted status would clear the card
-    even though the resolve never happened.
+    The mtime guard contract returns HTTP 409 with a status-keyed body
+    (#1229; previously 200) — a handler that only checks ``resp.ok``
+    would degrade the precise reason toast to a generic failure, and a
+    regression that ignores ``result.status`` would silently overwrite a
+    cross-process write. The card-stays assertion is the true regression
+    catch: a buggy handler that calls ``loadHooksSync()`` despite the
+    aborted status would clear the card even though the resolve never
+    happened.
 
     Symmetric pin: positive on the error toast text, negative on the
     conflict card not vanishing AND on the GET count not incrementing
@@ -259,7 +266,7 @@ def test_resolve_aborted_envelope_keeps_card_and_emits_error_toast(page, mm_web_
     def _resolve_aborted(route):
         resolve_calls.append(route.request.post_data_json or {})
         route.fulfill(
-            status=200,
+            status=409,
             content_type="application/json",
             body=json.dumps(
                 {

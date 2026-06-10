@@ -173,11 +173,19 @@ async function _hooksPostRuleAction(action, entry, confirmPrivateToShared) {
     headers,
     body: JSON.stringify(_hooksRuleActionPayload(entry, confirmPrivateToShared)),
   });
+  const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
+    // Stale-write aborts arrive as HTTP 409 with a status-keyed envelope
+    // ({status: 'aborted', reason, ...}) — pass them through to the callers'
+    // result.status handling. Any other failure (incl. the sync-eligibility
+    // write-guard's 409, whose body is {detail: {reason_code, ...}} with no
+    // status key) keeps throwing so its localized detail mapping renders.
+    if (res.status === 409 && typeof body.status === 'string') {
+      return body;
+    }
+    throw new Error(_hooksErrDetail(body.detail, `Request failed: ${res.status}`));
   }
-  return res.json();
+  return body;
 }
 
 async function _confirmHooksPromote(count, label) {
@@ -730,12 +738,17 @@ async function loadHooksSync() {
             headers,
             body: JSON.stringify(resolveBody),
           });
-          if (!r.ok) {
-            const err = await r.json().catch(() => ({}));
-            showToast(_hooksErrDetail(err.detail, t('toast.request_failed')), 'error');
+          const result = await r.json().catch(() => ({}));
+          // Stale-write aborts arrive as HTTP 409 with a status-keyed body
+          // ({status: 'aborted', reason, mtime_ns}) — route them into the
+          // existing result.status handling (error toast with the precise
+          // reason, conflict card stays, no reload). Other failures — incl.
+          // the sync-eligibility write-guard 409 whose body carries only
+          // {detail: {reason_code, ...}} — keep the generic detail toast.
+          if (!r.ok && !(r.status === 409 && typeof result.status === 'string')) {
+            showToast(_hooksErrDetail(result.detail, t('toast.request_failed')), 'error');
             return;
           }
-          const result = await r.json();
           if (result.status === 'ok') {
             showToast(result.reason);
             loadHooksSync();
