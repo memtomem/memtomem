@@ -2066,6 +2066,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   // phase URL agree on one (project, tier).
   const syncAllScopeId = _ctxEffectiveScopeId(_ctxActiveScopeId);
   const syncAllTier = _ctxTargetScope;
+  // Display label captured WITH the pin — a project switch during the
+  // preview fetch must not make the dialog name a different project than
+  // the one the phases write to (Codex review).
+  const syncAllDestLabel = _ctxScopeDisplayLabelById(_ctxActiveScopeId);
   const pinnedScopeOpts = {
     scopeId: syncAllScopeId,
     scopeResolved: true,
@@ -2101,19 +2105,28 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   } finally {
     btnLoading(btn, false);
   }
-  let message = t('settings.ctx.confirm_sync_all', {
-    dest: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
-  });
+  let message = t('settings.ctx.confirm_sync_all', { dest: syncAllDestLabel });
   let warningText = '';
   if (impact) {
-    message += ' ' + _ctxSyncImpactMessage(impact);
-    if (settingsImpact && (settingsImpact.create > 0 || settingsImpact.overwrite > 0)) {
-      message += ' ' + t('settings.ctx.confirm_sync_settings_impact', {
-        create: settingsImpact.create,
-        overwrite: settingsImpact.overwrite,
-      });
+    const sCreate = settingsImpact?.create || 0;
+    const sOverwrite = settingsImpact?.overwrite || 0;
+    // "Already in sync" must reflect the COMBINED artifact + settings totals
+    // — an artifact-only no-change sentence followed by a settings impact
+    // segment reads as a contradiction (Codex review).
+    if (impact.create + impact.overwrite + sCreate + sOverwrite === 0) {
+      message += ' ' + t('settings.ctx.confirm_sync_no_changes');
+    } else {
+      if (impact.create + impact.overwrite > 0) {
+        message += ' ' + _ctxSyncImpactMessage(impact);
+      }
+      if (sCreate + sOverwrite > 0) {
+        message += ' ' + t('settings.ctx.confirm_sync_settings_impact', {
+          create: sCreate,
+          overwrite: sOverwrite,
+        });
+      }
     }
-    const totalOverwrite = impact.overwrite + (settingsImpact?.overwrite || 0);
+    const totalOverwrite = impact.overwrite + sOverwrite;
     if (totalOverwrite > 0) {
       warningText = t('settings.ctx.confirm_sync_overwrite_warning', {
         overwrite: totalOverwrite,
@@ -4359,6 +4372,10 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       scopeResolved: true,
       targetScope: _ctxTargetScope,
     };
+    // Snapshot the count WITH the pin — a project/tier switch during the
+    // preview fetch re-renders the section dataset, and the confirm must
+    // describe the same (project, tier) the POST writes to (Codex review).
+    const canonicalCount = section?.dataset.canonicalCount || '0';
     btnLoading(btn, true);
     let impact = null;
     try {
@@ -4374,7 +4391,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
     }
     let message = t('settings.ctx.confirm_sync', {
       type: _ctxTypeName(type),
-      count: section?.dataset.canonicalCount || '0',
+      count: canonicalCount,
     });
     if (impact) message += ' ' + _ctxSyncImpactMessage(impact);
     const ok = await showConfirm({
