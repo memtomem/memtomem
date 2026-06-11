@@ -550,3 +550,51 @@ def test_cli_install_privacy_block_exit_and_message(
     assert "Gate A" in result.output
     assert "AKIA1234567890ABCDEF" not in result.output
     assert "Traceback" not in result.output
+
+
+# ── interrupted-install hint (#1247 id 4) ────────────────────────────────
+
+
+def test_install_interrupted_before_lockfile_hint_breaks_circle(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """#1247 id 4: the dest-only state must not point at `mm context update`.
+
+    A copy that succeeds but whose lockfile upsert fails (disk full,
+    Ctrl-C) leaves dest with no entry. Pre-fix, install's refusal said
+    "run `mm context update`" unconditionally, and update raised
+    NotInstalledError saying "run `mm context install` first" — a closed
+    circle with no in-product exit."""
+    from memtomem.context.install import NotInstalledError, update_skill
+
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
+    project = tmp_path
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with pytest.MonkeyPatch.context() as patch_ctx:
+        patch_ctx.setattr(Lockfile, "upsert_entry", _boom)
+        with pytest.raises(OSError):
+            install_skill(project, "foo")
+
+    dest = project / ".memtomem" / "skills" / "foo"
+    assert dest.is_dir()  # half-installed: copy landed, lockfile write failed
+
+    with pytest.raises(AlreadyInstalledError) as excinfo:
+        install_skill(project, "foo")
+    msg = str(excinfo.value)
+    # Pin-and-invert: the old circular hint must be gone for dest-only...
+    assert "mm context update" not in msg
+    assert "lockfile_entry=no" in msg
+    assert "dest=yes" in msg
+    assert "interrupted" in msg
+    assert "mm context install skill foo" in msg
+    assert str(dest) in msg
+
+    # ...and the other half of the old circle still dead-ends by design:
+    # update without an entry refuses toward install. Proves the pre-fix
+    # hint pair really was a closed loop.
+    with pytest.raises(NotInstalledError):
+        update_skill(project, "foo")

@@ -214,12 +214,30 @@ def _is_flat_file_dirty(flat_path: Path, lock_entry: dict[str, Any]) -> bool:
     Timezone handling matches ``dirty.py`` — ``datetime.fromisoformat``
     on the ISO-8601Z string. Python 3.11+ accepts the ``Z`` suffix
     natively, so no manual replacement is needed.
+
+    Callers must pre-validate ``installed_at`` with
+    :func:`_installed_at_parseable` (``_classify_row`` demotes unusable
+    entries to ``lock_entry=None`` before reaching here). Deliberately NOT
+    catching ``ValueError`` here — returning ``False`` would mean "clean"
+    and approve overwriting user edits on a corrupt entry (#1247 id 1).
     """
     installed_at = lock_entry.get("installed_at")
     if not isinstance(installed_at, str):
         return False
     installed_at_epoch = datetime.fromisoformat(installed_at).timestamp()
     return flat_path.stat().st_mtime > installed_at_epoch
+
+
+def _installed_at_parseable(lock_entry: dict[str, Any]) -> bool:
+    """``True`` when the entry's ``installed_at`` is a parseable ISO-8601 string."""
+    installed_at = lock_entry.get("installed_at")
+    if not isinstance(installed_at, str):
+        return False
+    try:
+        datetime.fromisoformat(installed_at)
+    except ValueError:
+        return False
+    return True
 
 
 def _flat_path_for(project_root: Path, asset_type: str, name: str) -> Path:
@@ -250,11 +268,14 @@ def _classify_row(
 
     # Treat a lockfile entry without a usable ``installed_at`` as "no
     # entry" — mirrors :func:`memtomem.context.dirty.is_asset_dirty`,
-    # which collapses both "no entry" and "entry but missing/non-string
-    # installed_at" into ``never_installed``. Otherwise migrate would
-    # silently proceed against a corrupt entry (no dirty check possible)
-    # and could overwrite user edits.
-    if lock_entry is not None and not isinstance(lock_entry.get("installed_at"), str):
+    # which collapses "no entry", "entry but missing/non-string
+    # installed_at" and "unparseable installed_at string" into
+    # ``never_installed``. Otherwise migrate would silently proceed
+    # against a corrupt entry (no dirty check possible) and could
+    # overwrite user edits. The parse probe (not just isinstance) keeps
+    # an unparseable string from reaching ``_is_flat_file_dirty``'s
+    # deliberately-unguarded ``fromisoformat`` (#1247 id 1).
+    if lock_entry is not None and not _installed_at_parseable(lock_entry):
         logger.warning(
             "migrate: %s/%s lockfile entry missing or invalid installed_at; "
             "treating as never installed",

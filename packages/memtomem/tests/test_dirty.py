@@ -470,3 +470,44 @@ def test_malformed_or_stale_manifest_ignored(
     report = is_asset_dirty(tmp_path, "skills", "web")
     assert report.reason == "clean"
     assert report.missing_files == ()
+
+
+# ── malformed installed_at degrades, never crashes (#1247 id 1) ──────────
+
+
+def _corrupt_installed_at(project: Path, asset_type: str, name: str, value: str) -> None:
+    lock_path = project / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc[asset_type][name]["installed_at"] = value
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+@pytest.mark.parametrize("malformed", ["yesterday", "2026-05-1", ""])
+def test_malformed_installed_at_degrades_to_never_installed(tmp_path: Path, malformed: str) -> None:
+    """An unparseable installed_at STRING degrades exactly like its
+    missing/non-string siblings (#1247 id 1) — previously
+    ``datetime.fromisoformat`` raised an uncaught ValueError whenever the
+    dest dir existed, crashing status/update/install-all classification."""
+    _setup_installed(tmp_path, "skills", "web", {"SKILL.md": b"v1\n"})
+    _corrupt_installed_at(tmp_path, "skills", "web", malformed)
+
+    report = is_asset_dirty(tmp_path, "skills", "web")
+
+    assert report.reason == "never_installed"
+    assert report.installed_at is None
+    assert report.dirty_files == ()
+    assert report.checked_files == 0
+
+
+def test_malformed_installed_at_with_missing_dest_degrades_too(tmp_path: Path) -> None:
+    """Consistency half of #1247 id 1: malformed + dest gone is also
+    never_installed (it used to return missing_dest because the dest probe
+    ran before the parse) — malformed ≡ non-string in EVERY branch."""
+    _setup_installed(tmp_path, "skills", "web", {"SKILL.md": b"v1\n"})
+    shutil.rmtree(tmp_path / ".memtomem" / "skills" / "web")
+    _corrupt_installed_at(tmp_path, "skills", "web", "yesterday")
+
+    report = is_asset_dirty(tmp_path, "skills", "web")
+
+    assert report.reason == "never_installed"
+    assert report.installed_at is None

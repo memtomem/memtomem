@@ -1398,3 +1398,152 @@ class TestUpdatePrivacyGate:
         # contract: path + hit count only).
         assert "AKIA1234567890ABCDEF" not in result.output
         assert "Traceback" not in result.output
+
+
+# ── flat-layout guard (#1247 id 0) ───────────────────────────────────────
+
+
+def _seed_wiki_agent(wiki_root_path: Path, name: str, files: dict[str, bytes]) -> str:
+    """Add ``agents/<name>/`` to wiki + commit. Returns the commit SHA."""
+    agent_dir = wiki_root_path / "agents" / name
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    for relpath, data in files.items():
+        target = agent_dir / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    subprocess.run(["git", "-C", str(wiki_root_path), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root_path), "commit", "-m", f"agents/{name}"],
+        check=True,
+        capture_output=True,
+    )
+    return WikiStore.at_default().current_commit()
+
+
+def _seed_flat_installed_agent(
+    project: Path, name: str, pin: str, *, installed_at: str | None = None
+) -> Path:
+    """Seed the #1247 id 0 population: flat ``agents/<name>.md`` + lock entry, no dir.
+
+    By default the flat file's mtime is backdated 10s before
+    ``installed_at`` so the strict ``>`` rule lands deterministically on
+    the clean side (float↔ns mtime round-trips make exact equality
+    unreliable). Pass an explicit ``installed_at`` to simulate corrupt
+    entries (mtime is left alone — the unprovable arm doesn't compare).
+    """
+    from memtomem.context.lockfile import Lockfile
+
+    flat = project / ".memtomem" / "agents" / f"{name}.md"
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_bytes(b"# flat agent\n")
+    if installed_at is None:
+        installed_at = datetime.now(timezone.utc).isoformat()
+        past = datetime.now(timezone.utc).timestamp() - 10.0
+        os.utime(flat, (past, past))
+    Lockfile.at(project).upsert_entry("agents", name, wiki_commit=pin, installed_at=installed_at)
+    return flat
+
+
+def test_update_refuses_dirty_flat_layout(wiki_root: Path, tmp_path: Path) -> None:
+    """#1247 id 0: flat file + lock entry + local edit → refuse, not silent shadow.
+
+    Pre-fix: the flat population classified ``missing_dest``, sailed past
+    the dirty gate, the dir layout landed next to the flat file, and
+    dir-wins fan-out silently stopped serving the user's edited bytes —
+    no refusal, no --force, no .bak."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v1\n"})
+    flat = _seed_flat_installed_agent(tmp_path, "foo", pin)
+    flat.write_bytes(b"# local edit\n")
+    _bump_mtime(flat)
+    _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v2\n"})  # HEAD advances
+
+    with pytest.raises(StaleInstallError) as excinfo:
+        update_agent(tmp_path, "foo")
+
+    msg = str(excinfo.value)
+    assert "flat-layout" in msg
+    assert "mm context migrate agent foo" in msg
+    assert "--force" in msg
+    # Refusal left zero residue: no dir layout, flat bytes untouched.
+    assert not (tmp_path / ".memtomem" / "agents" / "foo").exists()
+    assert flat.read_bytes() == b"# local edit\n"
+
+
+def test_update_force_shadows_flat_but_preserves_it(wiki_root: Path, tmp_path: Path) -> None:
+    """--force writes the dir layout; the flat file stays on disk, no .bak.
+
+    Nothing overwrites the flat bytes (they are merely shadowed by
+    dir-wins), so a .bak would be a redundant copy — design-gate Q1."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v1\n"})
+    flat = _seed_flat_installed_agent(tmp_path, "foo", pin)
+    flat.write_bytes(b"# local edit\n")
+    _bump_mtime(flat)
+    _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v2\n"})
+
+    result = update_agent(tmp_path, "foo", force=True)
+
+    assert result.was_no_op is False
+    dir_file = tmp_path / ".memtomem" / "agents" / "foo" / "agent.md"
+    assert dir_file.read_bytes() == b"wiki v2\n"
+    assert flat.read_bytes() == b"# local edit\n"
+    assert not flat.with_suffix(".md.bak").exists()
+    assert result.bak_files_written == ()
+
+
+def test_update_clean_flat_proceeds_and_warns(
+    wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A provably-clean flat file doesn't block (no user-authored bytes at
+    risk) — but the shadowing is logged with a migrate hint."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v1\n"})
+    flat = _seed_flat_installed_agent(tmp_path, "foo", pin)
+    _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v2\n"})
+
+    with caplog.at_level("WARNING", logger="memtomem.context.install"):
+        result = update_agent(tmp_path, "foo")
+
+    assert result.was_no_op is False
+    assert (tmp_path / ".memtomem" / "agents" / "foo" / "agent.md").read_bytes() == b"wiki v2\n"
+    assert flat.is_file()
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("shadow" in m for m in messages)
+    assert any("mm context migrate" in m for m in messages)
+
+
+def test_update_refuses_flat_with_unprovable_installed_at(wiki_root: Path, tmp_path: Path) -> None:
+    """Design-gate M1: a malformed installed_at classifies never_installed
+    and must NOT skip the flat guard — unprovable counts as dirty."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v1\n"})
+    flat = _seed_flat_installed_agent(tmp_path, "foo", pin, installed_at="yesterday")
+    _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v2\n"})
+
+    with pytest.raises(StaleInstallError) as excinfo:
+        update_agent(tmp_path, "foo")
+
+    assert "flat-layout" in str(excinfo.value)
+    assert not (tmp_path / ".memtomem" / "agents" / "foo").exists()
+    assert flat.is_file()
+
+
+def test_classify_for_all_update_flat_dirty_is_refuse(wiki_root: Path, tmp_path: Path) -> None:
+    """The --all preview shows the same refusal the execute gate raises
+    (#1247 id 0 preview/execute parity)."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v1\n"})
+    flat = _seed_flat_installed_agent(tmp_path, "foo", pin)
+    flat.write_bytes(b"# local edit\n")
+    _bump_mtime(flat)
+    _seed_wiki_agent(wiki_root, "foo", {"agent.md": b"wiki v2\n"})
+
+    _new_commit, classifications = _classify_for_all_update(
+        "agents", "foo", wiki=WikiStore.at_default(), projects=[tmp_path]
+    )
+
+    [c] = classifications
+    assert c.state == "refuse"
+    assert "flat layout" in (c.reason or "")
+    assert "migrate" in (c.reason or "")

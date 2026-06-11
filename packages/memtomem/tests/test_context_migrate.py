@@ -2433,3 +2433,34 @@ def test_adopt_flat_to_dir_unknown_type_raises(tmp_path: Path) -> None:
     flat = _write_flat(tmp_path, "agents", "foo", b"x\n")
     with pytest.raises(ValueError):
         adopt_flat_to_dir("skills", flat, tmp_path / ".memtomem" / "skills" / "foo")
+
+
+def test_classify_lockfile_entry_unparseable_installed_at(tmp_path: Path) -> None:
+    """A malformed installed_at STRING demotes to skip_manual, not a crash
+    and not "clean" (#1247 id 1).
+
+    Pre-fix the isinstance-only guard let the string through to
+    ``_is_flat_file_dirty``'s unguarded ``fromisoformat`` → ValueError.
+    Returning False there instead would be worse — False means clean,
+    which would let migrate remove/overwrite a possibly-edited flat file
+    on a corrupt entry."""
+    import json
+
+    _write_flat(tmp_path, "agents", "foo", b"v1\n")
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {"foo": {"wiki_commit": "0" * 40, "installed_at": "yesterday"}},
+            }
+        )
+    )
+
+    rows = classify_migrate(tmp_path)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.state == "skip_manual"
+    assert row.has_lock_entry is False
+    assert row.flat_dirty is None

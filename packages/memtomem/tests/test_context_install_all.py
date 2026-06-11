@@ -793,3 +793,119 @@ class TestPrivacyGateBatchIngress:
         by_tool = privacy.snapshot()["by_tool"]
         assert by_tool["cli_context_update_all"]["blocked"] >= 1
         assert "cli_context_update" not in by_tool
+
+
+# ── asset missing at reachable pin (#1247 id 5) ──────────────────────────
+
+
+def _retarget_pin(project: Path, asset_type: str, name: str, pin: str) -> None:
+    lock_path = project / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc[asset_type][name]["wiki_commit"] = pin
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_classify_error_when_asset_missing_at_pin(wiki_root: Path, tmp_path: Path) -> None:
+    """#1247 id 5: a reachable pin lacking the asset path must preview as
+    state="error", not green "install".
+
+    Pre-fix the classifier checked only pin presence + reachability +
+    dest existence, so the row previewed as install and the user found
+    out via the execute phase's AssetNotFoundError — a preview/execute
+    contract mismatch against ProjectInstallClassification's docstring."""
+    from memtomem.context.install import _classify_for_install_all
+
+    _initialized_wiki(wiki_root)
+    c1 = _seed_wiki_asset(wiki_root, "skills", "alpha", {"SKILL.md": b"a\n"})
+    install_skill(tmp_path, "alpha")
+    _seed_wiki_asset(wiki_root, "skills", "beta", {"SKILL.md": b"b\n"})
+    install_skill(tmp_path, "beta")
+
+    # beta pinned to c1 — reachable, but skills/beta has no tree entry there.
+    _retarget_pin(tmp_path, "skills", "beta", c1)
+    shutil.rmtree(tmp_path / ".memtomem" / "skills" / "beta")
+
+    rows = _classify_for_install_all(tmp_path, wiki=WikiStore.at_default())
+
+    by_name = {(r.asset_type, r.name): r for r in rows}
+    beta = by_name[("skills", "beta")]
+    assert beta.state == "error"
+    assert "not present at pin" in (beta.reason or "")
+    assert beta.pin_commit == c1
+    alpha = by_name[("skills", "alpha")]
+    assert alpha.state == "skip"
+
+
+def test_cli_install_all_error_row_in_preview_not_execute(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The preview table itself must carry the red error row; the execute
+    phase must not be the first place the bad pin surfaces."""
+    _initialized_wiki(wiki_root)
+    c1 = _seed_wiki_asset(wiki_root, "skills", "alpha", {"SKILL.md": b"a\n"})
+    install_skill(tmp_path, "alpha")
+    _seed_wiki_asset(wiki_root, "skills", "beta", {"SKILL.md": b"b\n"})
+    install_skill(tmp_path, "beta")
+    _retarget_pin(tmp_path, "skills", "beta", c1)
+    shutil.rmtree(tmp_path / ".memtomem" / "skills" / "beta")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes"])
+
+    # alpha=skip + beta=error → nothing actionable; the error row exits 1.
+    assert "error" in result.output
+    assert "not present at pin" in result.output
+    assert "Nothing to install" in result.output
+    assert result.exit_code == 1
+
+
+# ── flat-layout guard (#1247 id 0, install --all) ────────────────────────
+
+
+def test_install_all_refuses_dirty_flat_sibling(wiki_root: Path, tmp_path: Path) -> None:
+    """Restoring the dir layout next to a dirty flat file must classify
+    refuse — extraction would silently stop the flat bytes being served."""
+    from memtomem.context.install import _classify_for_install_all
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "agents", "foo", {"agent.md": b"wiki\n"})
+    install_agent(tmp_path, "foo")
+
+    # Convert to the flat population: dir gone, flat present, entry kept.
+    shutil.rmtree(tmp_path / ".memtomem" / "agents" / "foo")
+    flat = tmp_path / ".memtomem" / "agents" / "foo.md"
+    flat.write_bytes(b"# local flat\n")
+    _bump_mtime(flat)
+
+    rows = _classify_for_install_all(tmp_path, wiki=WikiStore.at_default())
+
+    [row] = rows
+    assert row.state == "refuse"
+    assert "flat layout" in (row.reason or "")
+    assert "migrate" in (row.reason or "")
+    assert row.dirty_report is not None
+
+
+def test_install_all_force_extracts_dir_and_preserves_flat(wiki_root: Path, tmp_path: Path) -> None:
+    """--force on the flat-refuse row extracts the dir; the flat file stays
+    on disk with no .bak (nothing was overwritten)."""
+    from memtomem.context.install import _apply_pinned_install, _classify_for_install_all
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "agents", "foo", {"agent.md": b"wiki\n"})
+    install_agent(tmp_path, "foo")
+    shutil.rmtree(tmp_path / ".memtomem" / "agents" / "foo")
+    flat = tmp_path / ".memtomem" / "agents" / "foo.md"
+    flat.write_bytes(b"# local flat\n")
+    _bump_mtime(flat)
+
+    [row] = _classify_for_install_all(tmp_path, wiki=WikiStore.at_default())
+    assert row.state == "refuse"
+
+    result = _apply_pinned_install(tmp_path, row, wiki=WikiStore.at_default(), force=True)
+
+    assert result.files_written >= 1
+    assert (tmp_path / ".memtomem" / "agents" / "foo" / "agent.md").read_bytes() == b"wiki\n"
+    assert flat.read_bytes() == b"# local flat\n"
+    assert not flat.with_suffix(".md.bak").exists()

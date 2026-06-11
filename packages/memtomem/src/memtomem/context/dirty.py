@@ -28,6 +28,7 @@ the dest tree separately.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,8 @@ from typing import Any, Literal
 
 from memtomem.context._atomic import iter_installed_files
 from memtomem.context.lockfile import Lockfile, manifest_from_entry
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DirtyReason",
@@ -58,9 +61,11 @@ class DirtyReport:
       ``missing_files``) — a user deletion is a local edit too (#1247).
     - ``reason="never_installed"`` — no usable lockfile entry;
       ``installed_at`` is ``None`` and ``dirty_files`` / ``checked_files``
-      are empty. Returned for both "no entry at all" and "entry exists
-      but missing/non-string ``installed_at``" — both are unrecoverable
-      states for a strict mtime compare.
+      are empty. Returned for "no entry at all" and "entry exists but
+      missing / non-string / unparseable ``installed_at``" — all are
+      unrecoverable states for a strict mtime compare (#1247: an
+      unparseable ISO string previously crashed with ``ValueError``
+      instead of degrading like its non-string siblings).
     - ``reason="missing_dest"`` — lockfile entry exists but
       ``<project>/.memtomem/<type>/<name>/`` was deleted; ``installed_at``
       is the lockfile value, ``dirty_files`` empty.
@@ -121,8 +126,23 @@ def is_asset_dirty(
             checked_files=0,
         )
 
+    # Parse before the dest probe so a malformed string degrades to
+    # never_installed in EVERY branch, exactly like its non-string
+    # siblings — previously a malformed string returned missing_dest when
+    # the dest was gone but crashed with ValueError when it existed (#1247).
     installed_at = lock_entry.get("installed_at")
-    if not isinstance(installed_at, str):
+    installed_at_epoch: float | None = None
+    if isinstance(installed_at, str):
+        try:
+            installed_at_epoch = datetime.fromisoformat(installed_at).timestamp()
+        except ValueError:
+            logger.warning(
+                "%s/%s: lockfile installed_at %r is not ISO-8601; treating as never installed",
+                asset_type,
+                name,
+                installed_at,
+            )
+    if installed_at_epoch is None:
         return DirtyReport(
             reason="never_installed",
             installed_at=None,
@@ -138,8 +158,6 @@ def is_asset_dirty(
             dirty_files=(),
             checked_files=0,
         )
-
-    installed_at_epoch = datetime.fromisoformat(installed_at).timestamp()
 
     dirty: list[Path] = []
     checked = 0

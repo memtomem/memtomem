@@ -820,3 +820,210 @@ def test_cli_status_user_scope_empty_message(monkeypatch, tmp_path: Path) -> Non
 
     assert result.exit_code == 0
     assert "No user-scope assets found" in result.output
+
+
+# ── flat-layout reason (#1247 id 0) ──────────────────────────────────────
+
+
+def _seed_flat_installed(project: Path, asset_type: str, name: str, pin: str) -> Path:
+    """Seed the #1247 id 0 population: flat ``<type>/<name>.md`` + lock entry, no dir."""
+    flat = project / ".memtomem" / asset_type / f"{name}.md"
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_bytes(b"# flat\n")
+    installed_at = datetime.fromtimestamp(flat.stat().st_mtime, tz=timezone.utc).isoformat()
+    Lockfile.at(project).upsert_entry(asset_type, name, wiki_commit=pin, installed_at=installed_at)
+    return flat
+
+
+def test_status_flat_layout_row_points_at_migrate(wiki_root: Path, tmp_path: Path) -> None:
+    """#1247 id 0: a flat-layout install must not render as "dest missing" —
+    the flat file exists and is what fan-out actually serves. The reason
+    points at the migrate verb instead."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "anchor", {"SKILL.md": b"x\n"})
+    _seed_flat_installed(tmp_path, "agents", "foo", pin)
+
+    _wiki_head, rows = classify_status(tmp_path)
+
+    [row] = [r for r in rows if r.asset_type == "agents" and r.name == "foo"]
+    assert row.state == "missing"
+    assert row.tier == "project_shared"
+    assert "migrate agent foo" in (row.reason or "")
+    assert "dest missing" not in (row.reason or "")
+
+
+def test_status_missing_without_flat_keeps_dest_missing_reason(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Negative pin for the flat hint: no flat sibling → reason unchanged."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"x\n"})
+    _setup_installed_at_pin(tmp_path, "agents", "bar", {"agent.md": b"x\n"}, pin)
+    shutil.rmtree(tmp_path / ".memtomem" / "agents" / "bar")
+
+    _wiki_head, rows = classify_status(tmp_path)
+
+    [row] = [r for r in rows if r.name == "bar"]
+    assert row.state == "missing"
+    assert row.reason == "dest missing"
+
+
+# ── malformed installed_at end-to-end (#1247 id 1) ───────────────────────
+
+
+def test_classify_status_survives_malformed_installed_at(wiki_root: Path, tmp_path: Path) -> None:
+    """One corrupt entry must not crash the whole status walk — the healthy
+    sibling still classifies and the corrupt row degrades to missing."""
+    _initialized_wiki(wiki_root)
+    pin_a = _seed_wiki_skill(wiki_root, "alpha", {"SKILL.md": b"a\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "alpha", {"SKILL.md": b"a\n"}, pin_a)
+    pin_b = _seed_wiki_skill(wiki_root, "beta", {"SKILL.md": b"b\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "beta", {"SKILL.md": b"b\n"}, pin_b)
+
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc["skills"]["alpha"]["installed_at"] = "yesterday"
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    _wiki_head, rows = classify_status(tmp_path)  # pre-fix: ValueError escaped
+
+    by_name = {r.name: r for r in rows}
+    assert by_name["beta"].state == "ok"
+    assert by_name["alpha"].state == "missing"
+
+
+# ── untracked project_shared canonicals (#1247 id 8) ─────────────────────
+
+
+def test_classify_status_lists_untracked_project_shared_canonicals(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """init-imported / migrate-moved-in canonicals (no lockfile entry) must
+    surface as state="untracked" — they are actively served by sync fan-out,
+    and ADR-0016 §6 names status as the per-tier inspection surface."""
+    _initialized_wiki(wiki_root)
+    agent_dir = tmp_path / ".memtomem" / "agents" / "foo"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "agent.md").write_text("# foo\n", encoding="utf-8")
+    flat_cmd = tmp_path / ".memtomem" / "commands" / "bar.md"
+    flat_cmd.parent.mkdir(parents=True)
+    flat_cmd.write_text("# bar\n", encoding="utf-8")
+
+    _wiki_head, rows = classify_status(tmp_path)  # pre-fix: zero rows
+
+    by_key = {(r.asset_type, r.name): r for r in rows}
+    foo = by_key[("agents", "foo")]
+    assert foo.state == "untracked"
+    assert foo.tier == "project_shared"
+    assert foo.pin_commit == "" and foo.installed_at == ""
+    assert "not lockfile-tracked" in (foo.reason or "")
+    bar = by_key[("commands", "bar")]
+    assert bar.state == "untracked"
+
+
+def test_untracked_scan_skips_lockfile_tracked_names(wiki_root: Path, tmp_path: Path) -> None:
+    """A lockfile-tracked install renders exactly one row — the untracked
+    scan must not double-report it."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"x\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"x\n"}, pin)
+
+    _wiki_head, rows = classify_status(tmp_path)
+
+    rows_for_foo = [r for r in rows if r.name == "foo"]
+    assert len(rows_for_foo) == 1
+    assert rows_for_foo[0].state != "untracked"
+
+
+def test_untracked_scan_skips_tracked_flat_population(wiki_root: Path, tmp_path: Path) -> None:
+    """The id 0 population (flat + entry) renders as the lockfile "missing"
+    row with the migrate hint — not additionally as untracked."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "anchor", {"SKILL.md": b"x\n"})
+    _seed_flat_installed(tmp_path, "agents", "foo", pin)
+
+    _wiki_head, rows = classify_status(tmp_path)
+
+    rows_for_foo = [r for r in rows if r.name == "foo"]
+    assert len(rows_for_foo) == 1
+    assert rows_for_foo[0].state == "missing"
+
+
+def test_cli_status_renders_untracked_rows(wiki_root: Path, tmp_path: Path, monkeypatch) -> None:
+    _initialized_wiki(wiki_root)
+    agent_dir = tmp_path / ".memtomem" / "agents" / "foo"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "agent.md").write_text("# foo\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["status"])
+
+    assert result.exit_code == 0
+    assert "foo" in result.output
+    assert "0 asset(s) installed (+ 1 untracked)" in result.output
+    assert "1 untracked" in result.output
+    assert "No wiki assets installed" not in result.output
+
+
+# ── degraded wiki (#1247 id 9) ───────────────────────────────────────────
+
+
+def test_classify_status_degrades_when_wiki_has_no_head(wiki_root: Path, tmp_path: Path) -> None:
+    """A wiki with .git but no HEAD (clone of an empty remote) must degrade
+    like the absent-wiki case, not escape as a RuntimeError traceback."""
+    wiki_root.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "init", "-b", "main"], check=True, capture_output=True
+    )
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"x\n"}, "0" * 40)
+
+    wiki_head, rows = classify_status(tmp_path)  # pre-fix: RuntimeError escaped
+
+    assert wiki_head is None
+    [row] = rows
+    assert row.state == "stale-pin"
+    assert "wiki unusable" in (row.reason or "")
+
+
+def test_classify_status_degrades_when_git_binary_missing(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """git vanishing from PATH surfaces as OSError from subprocess — same
+    degrade path (the probe's OSError arm)."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"x\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"x\n"}, pin)
+
+    def _no_git(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr("memtomem.wiki.store.subprocess.run", _no_git)
+
+    wiki_head, rows = classify_status(tmp_path)
+
+    assert wiki_head is None
+    [row] = rows
+    assert row.state == "stale-pin"
+    assert "wiki unusable" in (row.reason or "")
+
+
+def test_cli_status_degraded_wiki_exits_zero(wiki_root: Path, tmp_path: Path, monkeypatch) -> None:
+    """Exit-0 contract: status is the diagnostic verb; a degraded wiki must
+    render an annotated header, not a traceback (pre-fix: exit 1 + raw
+    RuntimeError). The header must say unusable, not "not present" — the
+    wiki IS on disk."""
+    wiki_root.mkdir(parents=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "init", "-b", "main"], check=True, capture_output=True
+    )
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"x\n"}, "0" * 40)
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "present but unusable" in result.output
+    assert "wiki not present" not in result.output
+    assert "stale-pin" in result.output

@@ -225,6 +225,44 @@ def _installed_at_epoch(lock_entry: dict[str, Any]) -> float | None:
         return None
 
 
+def _flat_layout_probe(
+    dest: Path,
+    asset_type: str,
+    name: str,
+    lock_entry: dict[str, Any] | None,
+) -> tuple[Path | None, bool]:
+    """Probe the legacy flat-layout sibling of a dir-layout dest (#1247).
+
+    Returns ``(flat_path, dirty_or_unprovable)``. ``flat_path`` is
+    ``<dest_parent>/<name>.md`` when it exists as a file AND ``dest`` itself
+    is not a directory, else ``None``. Writing the dir layout next to a live
+    flat file flips fan-out serving from the flat bytes to the wiki bytes
+    (dir wins in ``list_canonical_agents``/``commands``), so callers must
+    refuse when the flat file can't be proven clean. The ``dest.is_dir()``
+    short-circuit scopes the guard to that serving FLIP: when the dir
+    already exists, dir-wins already happened and this write isn't what
+    shadows the flat file.
+
+    The dirty rule matches ``migrate._is_flat_file_dirty`` — strict
+    ``mtime > installed_at_epoch`` — with one addition: an entry whose
+    ``installed_at`` is missing/non-string/unparseable
+    (:func:`_installed_at_epoch` → ``None``) counts as dirty-or-unprovable.
+    "Can't prove clean" must protect, not proceed — without this, a
+    malformed timestamp (classified ``never_installed``) would skip the
+    guard entirely (#1247 design gate M1). Skills have no flat layout;
+    other asset types return ``(None, False)``.
+    """
+    if asset_type not in ("agents", "commands") or dest.is_dir():
+        return None, False
+    flat = dest.parent / f"{name}.md"
+    if not flat.is_file():
+        return None, False
+    epoch = _installed_at_epoch(lock_entry or {})
+    if epoch is None:
+        return flat, True
+    return flat, flat.stat().st_mtime > epoch
+
+
 def _manifest_relpaths(dest: Path) -> list[str]:
     """The asset's installed file set as sorted POSIX relpaths.
 
@@ -457,12 +495,30 @@ def _install_asset(
     has_dest = dest.exists()
     if has_lock or has_dest:
         asset_type_singular = asset_type.removesuffix("s")
+        if has_dest and not has_lock:
+            # Half-install leftovers (copy succeeded, lockfile write failed
+            # or interrupted) and hand-placed trees both land here. The
+            # update hint would dead-end (`mm context update` raises
+            # NotInstalledError without an entry and points back at
+            # install — a circle, #1247 id 4). No auto-adopt either:
+            # install can't tell a leftover from hand-placed content it
+            # must not clobber.
+            hint = (
+                f"dest exists with no lockfile entry — hand-placed files or an "
+                f"install interrupted before its lockfile write; inspect {dest}, "
+                f"remove the directory if it's disposable, then re-run "
+                f"`mm context install {asset_type_singular} {validated}`"
+            )
+        else:
+            hint = (
+                f"run `mm context update {asset_type_singular} {validated}` "
+                f"to refresh from wiki HEAD"
+            )
         raise AlreadyInstalledError(
             f"{asset_type}/{validated}: "
             f"lockfile_entry={'yes' if has_lock else 'no'}, "
             f"dest={'yes' if has_dest else 'no'}; "
-            f"run `mm context update {asset_type_singular} {validated}` "
-            f"to refresh from wiki HEAD"
+            f"{hint}"
         )
 
     # Gate A (ADR-0011 §5, #1247): wiki bytes are user-tier — secrets are
@@ -667,6 +723,35 @@ def _apply_update(
             f"(each modified file gets a .bak sibling; deleted files are restored)"
         )
 
+    # Flat-layout guard (#1247 id 0): a flat file + lockfile entry with no
+    # dest dir classifies missing_dest (or never_installed when the entry's
+    # installed_at is unusable), which sails past the dirty gate above —
+    # yet writing the dir layout silently stops the flat file being served.
+    # Refuse like migrate's refuse_dirty unless --force. No .bak and no
+    # deletion under --force: nothing overwrites the flat file (it stays on
+    # disk, merely shadowed) and consolidation is `mm context migrate`'s job.
+    if dirty_report.reason in ("missing_dest", "never_installed"):
+        flat_path, flat_dirty = _flat_layout_probe(dest, asset_type, name, lock_entry)
+        if flat_path is not None:
+            kind = asset_type.removesuffix("s")
+            if flat_dirty and not force:
+                raise StaleInstallError(
+                    f"{asset_type}/{name}: flat-layout file {flat_path.name} has local "
+                    f"edits (or no provable install time) and the dir-layout install "
+                    f"would stop it being served; run `mm context migrate {kind} {name}` "
+                    f"first, or pass --force to write the dir layout anyway (the flat "
+                    f"file is kept on disk but stops being served)"
+                )
+            logger.warning(
+                "%s/%s: dir layout will shadow flat file %s (dir wins at fan-out); "
+                "run `mm context migrate %s %s` to consolidate",
+                asset_type,
+                name,
+                flat_path,
+                kind,
+                name,
+            )
+
     # Gate A (ADR-0011 §5, #1247): both scans precede the .bak loop — the
     # first dest mutation with no rollback — so a privacy refusal leaves
     # no .bak, no copied bytes, and (upserts trail copies) no lockfile drift.
@@ -852,9 +937,28 @@ def _classify_for_all_update(
 
         # Wiki advanced — classify dirty/clean for this project.
         report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
+        flat_path, flat_dirty = (
+            _flat_layout_probe(
+                project_root / ".memtomem" / asset_type / name,
+                asset_type,
+                name,
+                lock_entry,
+            )
+            if report.reason in ("missing_dest", "never_installed")
+            else (None, False)
+        )
         if report.reason == "dirty":
             state: Literal["update", "unchanged", "refuse", "error"] = "refuse"
             reason: str | None = f"{report.summary()} since install"
+        elif flat_path is not None and flat_dirty:
+            # Preview parity with _apply_update's flat-layout guard
+            # (#1247 id 0): the batch table must show the refusal the
+            # execute phase would raise.
+            state = "refuse"
+            reason = (
+                f"flat layout with local edits; run "
+                f"`mm context migrate {asset_type.removesuffix('s')} {name}` first"
+            )
         else:
             state = "update"
             reason = None
@@ -931,9 +1035,17 @@ def _classify_for_install_all(
     1. Read pin from the entry; missing/empty → state=``error``.
     2. Reachability via :meth:`WikiStore.commit_is_reachable`; missing →
        state=``orphan``.
-    3. Dest existence check:
+    3. Asset-path presence at the pin via
+       :meth:`WikiStore.asset_files_at_commit` (the extractor's own
+       ls-tree shape); absent → state=``error`` (#1247 id 5 —
+       preview/execute parity with the extract phase's
+       ``AssetNotFoundError``).
+    4. Dest existence check:
 
-       - missing → state=``install`` (no dirty walk needed).
+       - missing → probe the flat-layout sibling
+         (:func:`_flat_layout_probe`, #1247 id 0): dirty/unprovable flat
+         → state=``refuse``; else state=``install`` (no dirty walk
+         needed).
        - present → run :func:`is_asset_dirty` against the cached entry:
          clean → state=``skip``, dirty → state=``refuse``.
 
@@ -979,8 +1091,71 @@ def _classify_for_install_all(
             )
             continue
 
+        # Preview/execute parity (#1247 id 5): the state="error" docstring
+        # promises "asset path missing at the pinned commit", but nothing
+        # probed it — such rows previewed green as install/skip and only the
+        # execute phase hit AssetNotFoundError from the extractor. Probe with
+        # the extractor's own ls-tree helper so the two can't drift. Sits
+        # before the dest check: a skip/refuse row at an unrestorable pin is
+        # just as unrestorable (--force re-extracts at the pin).
+        try:
+            wiki.asset_files_at_commit(pin, asset_type, name)
+        except AssetNotFoundError:
+            out.append(
+                ProjectInstallClassification(
+                    asset_type=asset_type,  # type: ignore[arg-type]
+                    name=name,
+                    pin_commit=pin,
+                    state="error",
+                    reason=f"{asset_type}/{name} not present at pin {pin[:12]}",
+                    lock_entry=entry,
+                    dirty_report=None,
+                )
+            )
+            continue
+        except CommitNotFoundError:
+            # Race: reachable in the check above, gone by the ls-tree probe.
+            out.append(
+                ProjectInstallClassification(
+                    asset_type=asset_type,  # type: ignore[arg-type]
+                    name=name,
+                    pin_commit=pin,
+                    state="orphan",
+                    reason=f"pin {pin[:12]} not reachable",
+                    lock_entry=entry,
+                    dirty_report=None,
+                )
+            )
+            continue
+
         dest = project_root / ".memtomem" / asset_type / name
         if not dest.exists():
+            flat_path, flat_dirty = _flat_layout_probe(dest, asset_type, name, entry)
+            if flat_path is not None and flat_dirty:
+                # Flat-layout guard (#1247 id 0): extracting the dir layout
+                # next to a dirty (or unprovable) flat file would silently
+                # stop the user's flat bytes being served. dirty_report is
+                # attached (a missing_dest/never_installed report) so
+                # _apply_pinned_install's refuse-state invariants hold; its
+                # --force .bak loop iterates dirty_files=() — nothing is
+                # overwritten, the flat file stays on disk.
+                out.append(
+                    ProjectInstallClassification(
+                        asset_type=asset_type,  # type: ignore[arg-type]
+                        name=name,
+                        pin_commit=pin,
+                        state="refuse",
+                        reason=(
+                            f"flat layout with local edits; run `mm context migrate "
+                            f"{asset_type.removesuffix('s')} {name}` first"
+                        ),
+                        lock_entry=entry,
+                        dirty_report=is_asset_dirty(
+                            project_root, asset_type, name, lock_entry=entry
+                        ),
+                    )
+                )
+                continue
             out.append(
                 ProjectInstallClassification(
                     asset_type=asset_type,  # type: ignore[arg-type]

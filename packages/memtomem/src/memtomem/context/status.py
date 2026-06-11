@@ -13,19 +13,27 @@ State semantics for each lockfile entry:
 - ``dirty`` — dest has local edits since ``installed_at``
 - ``missing`` — lockfile entry exists but ``<project>/.memtomem/<type>/<name>/``
   is gone (collapses :data:`memtomem.context.dirty.DirtyReport.reason`
-  values ``missing_dest`` and ``never_installed``)
-- ``stale-pin`` — wiki absent OR pin not reachable in the wiki repo
-  (history rewrite, force-push past the pin, etc.)
+  values ``missing_dest`` and ``never_installed``); when a legacy
+  flat-layout sibling (``<type>/<name>.md``) is what actually serves the
+  asset, the row's reason points at ``mm context migrate`` instead of
+  claiming "dest missing" (#1247)
+- ``stale-pin`` — wiki absent or unusable, OR pin not reachable in the
+  wiki repo (history rewrite, force-push past the pin, etc.)
+- ``untracked`` — project_shared canonical on disk with no lockfile entry
+  (reverse-imported via ``mm context init`` or moved in via ``mm context
+  migrate --to project_shared``); actively served by sync fan-out, just
+  not a wiki install (#1247)
 
-The wiki-absent case still renders rows: status is read-only and the
-lockfile is local; we just can't compute ``behind``/``stale-pin``
-without a wiki to compare against.
+The wiki-absent (or present-but-unusable, e.g. a clone of an empty
+remote with no HEAD) case still renders rows: status is read-only and
+the lockfile is local; we just can't compute ``behind``/``stale-pin``
+without a usable wiki to compare against.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -47,7 +55,7 @@ __all__ = [
 ]
 
 
-StatusState = Literal["ok", "behind", "dirty", "missing", "stale-pin", "local-draft"]
+StatusState = Literal["ok", "behind", "dirty", "missing", "stale-pin", "local-draft", "untracked"]
 
 _LOCAL_DRAFT_MANIFEST: dict[str, str] = {
     "agents": AGENT_DIR_FILENAME,
@@ -75,7 +83,9 @@ class StatusRow:
 
     ``tier`` distinguishes lockfile-tracked installs (``project_shared``)
     from author-managed drafts. :func:`classify_status` walks the
-    project-rooted tiers — lockfile installs plus
+    project-rooted tiers — lockfile installs, non-lockfile project_shared
+    canonicals (``state="untracked"``: reverse-imported / migrated-in
+    artifacts with no wiki pin, #1247), plus
     ``<proj>/.memtomem/<artifact>.local/`` (``project_local``) drafts. The
     global ``~/.memtomem/<artifact>/`` (``user``) tier is enumerated
     separately by :func:`scan_user_artifacts`, which the CLI surfaces for
@@ -129,6 +139,7 @@ def classify_status(
 
     wiki_head: str | None = None
     wiki_present = False
+    wiki_unavailable_reason = "wiki not present"
     if wiki is None:
         wiki = WikiStore.at_default()
     try:
@@ -137,9 +148,25 @@ def classify_status(
     except WikiNotFoundError:
         wiki_head = None
         wiki_present = False
+    except (RuntimeError, OSError) as exc:
+        # Degraded wiki (#1247 id 9): present but unusable — a clone of an
+        # empty remote has .git but no HEAD (`rev-parse HEAD` fails as a
+        # bare RuntimeError from WikiStore._git), the object store may be
+        # corrupt, or git itself is missing from PATH (OSError). status is
+        # the read-only diagnostic verb a user would run to investigate, so
+        # it must degrade like the absent-wiki case instead of escaping as
+        # a traceback. WikiNotFoundError subclasses RuntimeError — its arm
+        # above must stay first.
+        wiki_head = None
+        wiki_present = False
+        detail_lines = str(exc).strip().splitlines()
+        detail = detail_lines[0] if detail_lines else exc.__class__.__name__
+        wiki_unavailable_reason = f"wiki unusable: {detail}"
 
     rows: list[StatusRow] = []
+    tracked: set[tuple[str, str]] = set()
     for asset_type, name, entry in _tolerant_iter_entries(lockfile):
+        tracked.add((asset_type, name))
         if asset_type not in ("skills", "agents", "commands"):
             # Unknown asset_type — forward-compat shape is preserved
             # by iter_entries, but we can only render the three known
@@ -159,6 +186,18 @@ def classify_status(
         if report.reason in ("missing_dest", "never_installed"):
             state = "missing"
             reason = "dest missing"
+            # Flat-layout population (#1247 id 0): the dir-layout dest is
+            # missing but a legacy flat sibling exists and is what fan-out
+            # actually serves — "dest missing" would misreport a live
+            # asset. Point at the migrate verb instead. Mirrors
+            # install._flat_layout_probe's scope (agents/commands only;
+            # dest dir absent).
+            dest = project_root_path / ".memtomem" / asset_type / name
+            flat = project_root_path / ".memtomem" / asset_type / f"{name}.md"
+            if asset_type in ("agents", "commands") and not dest.is_dir() and flat.is_file():
+                reason = (
+                    f"flat layout; run `mm context migrate {asset_type.removesuffix('s')} {name}`"
+                )
         elif report.reason == "dirty":
             state = "dirty"
             dirty_count = len(report.dirty_files) + len(report.missing_files)
@@ -166,7 +205,7 @@ def classify_status(
         else:  # report.reason == "clean"
             if not wiki_present:
                 state = "stale-pin"
-                reason = "wiki not present"
+                reason = wiki_unavailable_reason
             elif not pin_commit:
                 state = "stale-pin"
                 reason = "lockfile entry missing wiki_commit"
@@ -193,6 +232,7 @@ def classify_status(
         )
 
     rows.extend(_scan_project_local_drafts(project_root_path))
+    rows.extend(_scan_project_shared_untracked(project_root_path, tracked))
 
     # Final order: alphabetical by (asset_type, name); within a name,
     # project_shared (lockfile-tracked install) renders before
@@ -289,6 +329,36 @@ def _scan_draft_tier(scope: TargetScope, project_root: Path | None) -> Iterator[
                 reason=None,
                 tier=scope,
             )
+
+
+def _scan_project_shared_untracked(
+    project_root: Path,
+    tracked: set[tuple[str, str]],
+) -> Iterator[StatusRow]:
+    """Yield ``untracked`` rows for project_shared canonicals with no lockfile entry.
+
+    ``mm context init --include ...`` (reverse import) and ``mm context
+    migrate <kind> <name> --to project_shared`` both write the project_shared
+    canonical tier without a lockfile entry — they are not wiki installs, so
+    there is no pin to record. Those artifacts are actively served (sync fans
+    them out from disk via ``list_canonical_*``), and ADR-0016 §6 names
+    ``mm context status --scope <tier>`` as the per-tier inspection surface,
+    so omitting them misreported a populated tier as "0 asset(s) installed"
+    (#1247 id 8).
+
+    Reuses :func:`_scan_draft_tier`'s walk (dir-with-manifest + flat layouts,
+    internal-dir skip, dir-wins-on-collision) and rewrites the rows:
+    ``state="untracked"`` — deliberately NOT ``local-draft``, because
+    project_shared canonicals fan out while drafts don't — with a fixed
+    reason. *tracked* carries the lockfile-tracked ``(asset_type, name)``
+    pairs to drop: those names already render as lockfile rows (including
+    the flat-layout ``missing`` hint, #1247 id 0), so emitting them here
+    would double-report.
+    """
+    for row in _scan_draft_tier("project_shared", project_root):
+        if (row.asset_type, row.name) in tracked:
+            continue
+        yield replace(row, state="untracked", reason="not lockfile-tracked; no wiki pin")
 
 
 def _scan_project_local_drafts(project_root: Path) -> Iterator[StatusRow]:

@@ -1680,7 +1680,8 @@ def _run_update_all(
     if needs_force and not force:
         click.secho(
             f"\n{len(needs_force)} project(s) have local edits; "
-            f"pass --force to overwrite (each dirty file gets a .bak sibling). "
+            f"pass --force to proceed (modified files in the dest tree get a .bak "
+            f"sibling; flat-layout files are kept on disk but stop being served). "
             f"Refusing to write any project — re-run with --force or resolve manually.",
             fg="red",
             err=True,
@@ -1796,6 +1797,7 @@ _STATUS_GLYPH: dict[str, tuple[str, str]] = {
     "missing": ("!", "red"),
     "stale-pin": ("⚠", "red"),
     "local-draft": ("·", "magenta"),
+    "untracked": ("○", "yellow"),
 }
 
 # ADR-0011 §3 / ADR-0016 §7: project_local agents / commands / skills never
@@ -1844,25 +1846,38 @@ def status_cmd(scope_flag: TargetScope) -> None:
     if lockfile_error is not None:
         click.secho(f"  ✗ lock.json: {lockfile_error}", fg="red", err=True)
 
-    # Header — counts + wiki HEAD (or "wiki not present" annotation).
+    # Header — counts + wiki HEAD (or wiki absent/unusable annotation).
     # Lockfile-tracked installs (project_shared) drive the "installed"
-    # count; project_local rows are surfaced separately so the header
-    # word ("installed") stays accurate for both groups.
-    installed_count = sum(1 for r in rows if r.state != "local-draft")
+    # count; local-draft and untracked rows are surfaced separately so the
+    # header word ("installed") stays accurate for every group (#1247).
+    installed_count = sum(1 for r in rows if r.state not in ("local-draft", "untracked"))
     draft_count = sum(1 for r in rows if r.state == "local-draft")
-    draft_suffix = (
-        f" (+ {draft_count} local draft{'s' if draft_count != 1 else ''})" if draft_count else ""
-    )
+    untracked_count = sum(1 for r in rows if r.state == "untracked")
+    extra_parts: list[str] = []
+    if draft_count:
+        extra_parts.append(f"{draft_count} local draft{'s' if draft_count != 1 else ''}")
+    if untracked_count:
+        extra_parts.append(f"{untracked_count} untracked")
+    extra_suffix = f" (+ {', '.join(extra_parts)})" if extra_parts else ""
     scope_suffix = f" — scope {scope_flag}"
     if wiki_head is None:
         wiki_root = wiki.root
+        # Absent vs present-but-unusable (#1247 id 9): exists() is a pure
+        # stat probe — classify_status already degraded the row reasons;
+        # this only keeps the header from claiming "not present" about a
+        # wiki that IS on disk (e.g. a clone of an empty remote, no HEAD).
+        wiki_note = (
+            f"wiki at {wiki_root} is present but unusable"
+            if wiki.exists()
+            else f"wiki not present at {wiki_root}"
+        )
         click.echo(
-            f".memtomem/ — {installed_count} asset(s) installed{draft_suffix} — "
-            f"wiki not present at {wiki_root}; pin reachability not checked{scope_suffix}"
+            f".memtomem/ — {installed_count} asset(s) installed{extra_suffix} — "
+            f"{wiki_note}; pin reachability not checked{scope_suffix}"
         )
     else:
         click.echo(
-            f".memtomem/ — {installed_count} asset(s) installed{draft_suffix} — "
+            f".memtomem/ — {installed_count} asset(s) installed{extra_suffix} — "
             f"wiki HEAD {wiki_head[:12]}{scope_suffix}"
         )
 
@@ -1872,7 +1887,10 @@ def status_cmd(scope_flag: TargetScope) -> None:
         elif scope_flag == "user":
             click.echo("\nNo user-scope assets found under ~/.memtomem/.")
         else:
-            click.echo(f"\nNo wiki assets installed in this project for scope {scope_flag}.")
+            click.echo(
+                f"\nNo wiki assets installed and no untracked canonicals "
+                f"in this project for scope {scope_flag}."
+            )
         return
 
     # Sectioned by asset type, preserving classify_status() order
@@ -1885,6 +1903,7 @@ def status_cmd(scope_flag: TargetScope) -> None:
         "dirty": 0,
         "missing": 0,
         "stale-pin": 0,
+        "untracked": 0,
         "local-draft": 0,
     }
     for row in rows:
@@ -1892,12 +1911,12 @@ def status_cmd(scope_flag: TargetScope) -> None:
             click.secho(f"\n{row.asset_type}", fg="cyan")
             last_type = row.asset_type
         glyph, color = _STATUS_GLYPH[row.state]
-        # Local-draft rows have no lockfile metadata — render the
-        # pin and installed-at columns as dashes rather than the
-        # "?"/"—" placeholders the lockfile-tracked branches use, so
+        # Local-draft and untracked rows have no lockfile metadata —
+        # render the pin and installed-at columns as dashes rather than
+        # the "?"/"—" placeholders the lockfile-tracked branches use, so
         # the visual distinction is obvious to a reader scanning the
         # column.
-        if row.state == "local-draft":
+        if row.state in ("local-draft", "untracked"):
             line = f"  {glyph}  {row.name:24s}  {'—':<12}  {'(no install record)':<23}"
         else:
             installed_date = row.installed_at[:10] if row.installed_at else "—"
@@ -1915,7 +1934,7 @@ def status_cmd(scope_flag: TargetScope) -> None:
     if rows:
         parts = [
             f"{summary[k]} {k}"
-            for k in ("ok", "behind", "dirty", "missing", "stale-pin", "local-draft")
+            for k in ("ok", "behind", "dirty", "missing", "stale-pin", "untracked", "local-draft")
             if summary[k] > 0
         ]
         if parts:
@@ -1987,7 +2006,8 @@ def _run_install_all(
     if needs_force and not force:
         click.secho(
             f"\n{len(needs_force)} entry(ies) have local edits; "
-            f"pass --force to overwrite (each dirty file gets a .bak sibling). "
+            f"pass --force to proceed (modified files in the dest tree get a .bak "
+            f"sibling; flat-layout files are kept on disk but stop being served). "
             f"Refusing to write any entry — re-run with --force or resolve manually.",
             fg="red",
             err=True,
