@@ -1315,6 +1315,14 @@ def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -
         f"  to   {result.to_scope}: {result.dst_path}",
     ]
     if not apply_:
+        if result.fanout_planned:
+            lines.append(
+                f"  will remove {len(result.fanout_planned)} stale runtime "
+                f"fan-out target(s) at scope='{result.from_scope}' (content "
+                f"that diverges from the canonical render is snapshotted to "
+                f"a .bak first):"
+            )
+            lines.extend(f"    - {path}" for path in result.fanout_planned)
         lines.append("\nRe-call with apply=True to execute.")
         lines.append(
             f"After apply, run mem_context_sync(scope='{result.to_scope}') "
@@ -1326,6 +1334,13 @@ def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -
     if result.fanout_cleaned:
         lines.append(f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out target(s):")
         lines.extend(f"    - {path}" for path in result.fanout_cleaned)
+    if result.fanout_backed_up:
+        lines.append(
+            f"  {len(result.fanout_backed_up)} target(s) diverged from the "
+            f"canonical render — snapshotted before removal (review and "
+            f"delete manually):"
+        )
+        lines.extend(f"    - {path}" for path in result.fanout_backed_up)
     lines.append(
         f"\nNext: run mem_context_sync(scope='{result.to_scope}') "
         "to regenerate runtime fan-out at the new tier."

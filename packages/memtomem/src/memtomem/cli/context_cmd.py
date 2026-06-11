@@ -2261,6 +2261,15 @@ def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> 
     click.echo(f"  to   {result.to_scope}: {result.dst_path}")
 
     if not apply_:
+        if result.fanout_planned:
+            click.echo(
+                f"  will remove {len(result.fanout_planned)} stale runtime "
+                f"fan-out target(s) at scope='{result.from_scope}' (content "
+                f"that diverges from the canonical render is snapshotted to "
+                f"a .bak first):"
+            )
+            for path in result.fanout_planned:
+                click.echo(f"    - {path}")
         click.echo("\nRun with --apply to execute.")
         click.echo(
             f"After apply, run `mm context sync --scope {result.to_scope}` "
@@ -2278,6 +2287,15 @@ def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> 
             f"target(s) at scope='{result.from_scope}':"
         )
         for path in result.fanout_cleaned:
+            click.echo(f"    - {path}")
+    if result.fanout_backed_up:
+        click.secho(
+            f"  {len(result.fanout_backed_up)} target(s) diverged from the "
+            f"canonical render — snapshotted before removal (review and "
+            f"delete manually):",
+            fg="yellow",
+        )
+        for path in result.fanout_backed_up:
             click.echo(f"    - {path}")
     click.echo(
         f"\nNext: run `mm context sync --scope {result.to_scope}` to "

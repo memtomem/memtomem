@@ -43,18 +43,25 @@ from typing import Any, Iterator, Literal
 import click
 
 from memtomem.config import TargetScope
+from memtomem.context import override as _override
 from memtomem.context._atomic import _file_lock, _lock_path_for
-from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.agents import (
     AGENT_DIR_FILENAME,
+    AGENT_GENERATORS,
     CANONICAL_AGENT_ROOT,
+    AgentParseError,
     list_canonical_agents,
+    parse_canonical_agent,
 )
 from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
     COMMAND_DIR_FILENAME,
+    COMMAND_GENERATORS,
+    CommandParseError,
     list_canonical_commands,
+    parse_canonical_command,
 )
 from memtomem.context.lockfile import Lockfile
 from memtomem.context.privacy_scan import (
@@ -66,7 +73,11 @@ from memtomem.context.scope_resolver import (
     ContextScopeError,
     canonical_artifact_dir,
 )
-from memtomem.context.skills import SKILL_MANIFEST
+from memtomem.context.skills import (
+    SKILL_GENERATORS,
+    SKILL_MANIFEST,
+    _skill_effective_equal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -654,6 +665,14 @@ class MigrateScopeResult:
     layout: Literal["dir", "flat"]
     moved: bool
     fanout_cleaned: list[Path] = field(default_factory=list)
+    # Diverged-target snapshots taken before removal (apply only) — see
+    # ``_backup_fanout_target``. Independent of ``fanout_cleaned``: a
+    # snapshot whose target then failed to delete still appears here.
+    fanout_backed_up: list[Path] = field(default_factory=list)
+    # Dry-run only (#1247 id 6): the runtime fan-out targets that exist
+    # now and would be removed by an apply — previously the deletion half
+    # of the move was invisible until after the fact.
+    fanout_planned: list[Path] = field(default_factory=list)
 
 
 @contextmanager
@@ -719,11 +738,19 @@ def _stage_move(src: Path, dst_parent: Path, name_hint: str) -> tuple[Path, bool
                         staging.unlink()
             raise
         # EXDEV fallback: copy bytes into staging without touching src.
+        # ``symlinks=True`` / ``follow_symlinks=False`` keep cross-FS
+        # semantics identical to the same-FS ``os.rename`` path above,
+        # which moves symlinks as links. The stdlib default would
+        # dereference them, materializing out-of-tree target bytes into
+        # staging — and from there into the (possibly git-tracked)
+        # destination tier — violating the package's no-deref mirror
+        # contract (``_atomic.copy_tree_atomic``). Preserving links also
+        # makes dangling ones non-fatal (#1247 id 7).
         try:
             if src.is_dir():
-                shutil.copytree(src, staging)
+                shutil.copytree(src, staging, symlinks=True)
             else:
-                shutil.copy2(src, staging)
+                shutil.copy2(src, staging, follow_symlinks=False)
         except BaseException:
             if staging.exists():
                 if staging.is_dir():
@@ -764,24 +791,48 @@ _NON_SKILL_FANOUT_SUFFIX: dict[ArtifactKind, dict[str, str]] = {
 }
 
 
-def _remove_runtime_fanout_for(
+# Generator registries by artifact kind, for the fan-out divergence check.
+# Keyed ``f"{runtime}_{kind}"`` (``claude_agents``, ``gemini_commands``, …)
+# — the registries' own ``gen.name`` convention. A missing key means sync
+# has no writer for that (kind, runtime) at all (today: codex commands —
+# the ``~/.codex/prompts`` table row is a reserved placeholder), so a file
+# found there is necessarily foreign.
+_FANOUT_GENERATORS: dict[ArtifactKind, dict[str, Any]] = {
+    "agents": AGENT_GENERATORS,
+    "commands": COMMAND_GENERATORS,
+    "skills": SKILL_GENERATORS,
+}
+
+
+def _existing_fanout_targets(
     kind: ArtifactKind,
     name: str,
     scope: TargetScope,
     project_root: Path | None,
-) -> list[Path]:
-    """Remove runtime fan-out targets for one artifact at one scope.
+) -> list[tuple[str, Path]]:
+    """``(runtime, target)`` pairs the fan-out cleanup would act on.
 
-    Best-effort cleanup invoked after a successful canonical move so the
-    pre-migration scope's runtime entries (``~/.claude/agents/foo.md``,
-    ``~/.gemini/commands/foo.toml``, ``~/.codex/agents/foo.toml`` etc.)
-    do not linger as orphans. Returns the list of removed paths for
-    telemetry / verification.
+    Shared by the dry-run preview (``MigrateScopeResult.fanout_planned``)
+    and the post-move cleanup so the two can never disagree about the
+    deletion half of a migrate (#1247 id 6; Codex design review — the
+    preview must not list paths apply intentionally leaves alone).
 
-    Walks every known runtime (claude / gemini / codex / kimi). Tuples that
-    :func:`runtime_fanout_root` reports as ``NO_FANOUT`` are skipped
-    (project_local entries, codex commands at project tiers, etc.).
-    KeyError surfaces a programming error in the table — fail-loud.
+    Walks every known runtime (claude / gemini / codex / kimi). Excluded,
+    with a warning where the exclusion is news:
+
+    * tuples :func:`runtime_fanout_root` reports as ``NO_FANOUT``
+      (project_local entries, codex commands at project tiers, etc.);
+    * unknown (kind, runtime, scope) tuples — table gap; skip rather
+      than fail the migration (the table is the contract source of
+      truth and a missing tuple should be caught by the unit tests on
+      ``_runtime_targets``, not here);
+    * targets that don't exist on disk;
+    * symlinked targets — never follow / deref / remove one (a symlink
+      in a runtime root is user hand-routing, not sync output: the
+      generators only ever ``os.replace`` regular files into place);
+    * (kind, runtime) pairs with no registered generator — sync can
+      never have written the file, so removing it would be pure
+      collateral on a hand-authored file. Leave it in place.
 
     Per-runtime suffix: agents/codex and commands/gemini write
     ``.toml``, the other non-skill pairs write ``.md``. The cleanup
@@ -789,16 +840,12 @@ def _remove_runtime_fanout_for(
     stale artifact survives and the runtime can still discover and
     invoke the moved-away command/agent (#895 P2 review #2).
     """
-    removed: list[Path] = []
+    targets: list[tuple[str, Path]] = []
+    generators = _FANOUT_GENERATORS[kind]
     for runtime in ("claude", "gemini", "codex", "kimi"):
         try:
             root = runtime_fanout_root(kind, runtime, scope, project_root)
         except KeyError:
-            # Unknown (kind, runtime, scope) tuple — table gap. Skip
-            # rather than fail the migration (canonical is already
-            # moved at this point); the table is the contract source-
-            # of-truth and a missing tuple should be caught by the
-            # unit tests on _runtime_targets, not here.
             logger.warning(
                 "fanout cleanup: no table entry for (%s, %s, %s); skipping",
                 kind,
@@ -810,26 +857,216 @@ def _remove_runtime_fanout_for(
             continue
         if kind == "skills":
             target = root / name
-            if target.is_symlink():
-                # Defensive: never follow / rmtree a symlink — could
-                # point outside the runtime root.
-                continue
-            if target.is_dir():
-                try:
-                    shutil.rmtree(target)
-                    removed.append(target)
-                except OSError as exc:
-                    logger.warning("fanout cleanup: failed to remove %s: %s", target, exc)
+            exists = target.is_dir()
         else:
             suffix = _NON_SKILL_FANOUT_SUFFIX[kind].get(runtime, ".md")
             target = root / f"{name}{suffix}"
-            if target.is_file():
-                try:
-                    target.unlink()
-                    removed.append(target)
-                except OSError as exc:
-                    logger.warning("fanout cleanup: failed to remove %s: %s", target, exc)
-    return removed
+            exists = target.is_file()
+        if target.is_symlink():
+            logger.warning(
+                "fanout cleanup: %s is a symlink; leaving it in place (never deref)",
+                target,
+            )
+            continue
+        if not exists:
+            continue
+        if generators.get(f"{runtime}_{kind}") is None:
+            logger.warning(
+                "fanout cleanup: no %s generator for runtime %s — sync never "
+                "wrote %s; leaving the foreign file in place",
+                kind,
+                runtime,
+                target,
+            )
+            continue
+        targets.append((runtime, target))
+    return targets
+
+
+def _fanout_target_matches(
+    kind: ArtifactKind,
+    name: str,
+    runtime: str,
+    target: Path,
+    parsed_item: Any | None,
+    dst_path: Path,
+    to_scope: TargetScope,
+    project_root: Path,
+) -> bool:
+    """True when *target* byte-matches what sync would write for this artifact.
+
+    Reconstructs the expected fan-out content from the canonical **at its
+    post-move location** (``dst_path``): the moved bytes are identical to
+    what sync last read at the source scope, and per-vendor overrides live
+    inside the artifact dir (``<name>/overrides/<vendor>.<ext>``) so they
+    moved with it. The expected-bytes rule mirrors ``_sync_atomic`` Phase 2
+    exactly — override bytes verbatim when one resolves, else the
+    generator render — the same comparison ``diff_agents`` /
+    ``diff_commands`` / ``_skill_effective_equal`` already pin.
+
+    Any read failure returns ``False`` — the same "report drift, never
+    mask it" posture as diff — so uncertainty routes to the backup path
+    rather than a silent delete.
+    """
+    gen = _FANOUT_GENERATORS[kind][f"{runtime}_{kind}"]
+    vendor = GENERATOR_VENDOR.get(gen.name)
+    override_bytes: bytes | None = None
+    if vendor is not None:
+        override_path = _override.resolve(project_root, kind, name, vendor, scope=to_scope)
+        if override_path is not None:
+            try:
+                override_bytes = override_path.read_bytes()
+            except OSError:
+                return False
+    if kind == "skills":
+        try:
+            return _skill_effective_equal(dst_path, target, override_bytes)
+        except OSError:
+            return False
+    if override_bytes is not None:
+        expected = override_bytes
+    elif parsed_item is None:
+        # Canonical unreadable/unparseable — sync would skip it, so the
+        # target's provenance is unknowable. Treat as diverged.
+        return False
+    else:
+        content, _dropped = gen.render(parsed_item)
+        expected = content.encode("utf-8")
+    try:
+        return expected == target.read_bytes()
+    except OSError:
+        return False
+
+
+def _backup_fanout_target(target: Path) -> Path | None:
+    """Snapshot a diverged runtime fan-out target before removal.
+
+    Files: sibling ``<name>.<ext>.bak`` via ``shutil.copy2`` (mirrors
+    ``_execute_cleanup_flat``; an older ``.bak`` is overwritten —
+    newest snapshot wins). Suffix-filtered discovery never lists it and
+    runtimes don't load ``.bak``.
+
+    Skill dirs: ``<runtime_root>/.bak/<name>/`` via
+    ``shutil.copytree(symlinks=True)`` — deliberately NOT a sibling
+    ``<name>.bak``: ``validate_name`` accepts dots, so a skill-shaped
+    sibling would surface as a phantom "missing canonical" diff row, be
+    re-imported into canonical by ``extract_skills_to_canonical``
+    (#1229's round-trip failure mode), and be discoverable by the real
+    runtimes. One level down under a manifest-less ``.bak/`` parent,
+    every single-level ``<root>/*/SKILL.md`` discovery (ours and the
+    runtimes') stays blind to it. Internal-pattern names
+    (``.old-…-<pid>-<hex>.tmp``) are off the table — the sync-time
+    reaper (``skills._reap_stale_internal_dirs``) deletes those.
+
+    Backups are never auto-deleted by memtomem; the warning at the call
+    site and the CLI/MCP move summary name them for manual review.
+
+    Returns the backup path, or ``None`` (with a loud warning) when the
+    snapshot could not be taken — the caller must then KEEP the target,
+    because deleting without a backup is exactly the loss this guard
+    exists to prevent.
+    """
+    try:
+        if target.is_dir():
+            bak = target.parent / ".bak" / target.name
+            if bak.is_dir():
+                shutil.rmtree(bak)
+            elif bak.exists():
+                bak.unlink()
+            bak.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(target, bak, symlinks=True)
+        else:
+            bak = target.with_name(target.name + ".bak")
+            shutil.copy2(target, bak)
+    except (OSError, shutil.Error) as exc:
+        logger.warning(
+            "fanout cleanup: failed to snapshot diverged %s (%s); leaving the target in place",
+            target,
+            exc,
+        )
+        return None
+    return bak
+
+
+def _remove_runtime_fanout_for(
+    kind: ArtifactKind,
+    name: str,
+    scope: TargetScope,
+    project_root: Path,
+    *,
+    dst_path: Path,
+    to_scope: TargetScope,
+    layout: Literal["dir", "flat"],
+) -> tuple[list[Path], list[Path]]:
+    """Remove runtime fan-out targets for one artifact at one scope.
+
+    Best-effort cleanup invoked after a successful canonical move so the
+    pre-migration scope's runtime entries (``~/.claude/agents/foo.md``,
+    ``~/.gemini/commands/foo.toml``, ``~/.codex/agents/foo.toml`` etc.)
+    do not linger as orphans (#895 P2). Target selection — including the
+    symlink / foreign-file exclusions — lives in
+    :func:`_existing_fanout_targets`, shared with the dry-run preview.
+
+    #1247 id 6: deletion is no longer unconditional. Each target is
+    byte-compared against what sync would write
+    (:func:`_fanout_target_matches`); a diverged or unverifiable target
+    is snapshotted (:func:`_backup_fanout_target`) before removal, and
+    KEPT if the snapshot fails. Runtime-side edits and hand-authored
+    name collisions stay recoverable while the moved-away name still
+    stops being discoverable (#895's original point).
+
+    Returns ``(removed, backed_up)`` for telemetry / verification —
+    independent lists: a snapshot whose target then failed to delete
+    still appears in ``backed_up``.
+    """
+    removed: list[Path] = []
+    backed_up: list[Path] = []
+    targets = _existing_fanout_targets(kind, name, scope, project_root)
+    if not targets:
+        return removed, backed_up
+
+    # Parse the canonical once (agents/commands; skills compare trees).
+    parsed_item: Any | None = None
+    if kind != "skills":
+        manifest = dst_path if layout == "flat" else dst_path / _DIR_MANIFEST[kind]
+        try:
+            if kind == "agents":
+                parsed_item = parse_canonical_agent(manifest, layout=layout)
+            else:
+                parsed_item = parse_canonical_command(manifest, layout=layout)
+        except (OSError, AgentParseError, CommandParseError) as exc:
+            logger.warning(
+                "fanout cleanup: canonical at %s unreadable/unparseable (%s); "
+                "treating every runtime target as diverged",
+                manifest,
+                exc,
+            )
+
+    for runtime, target in targets:
+        matches = _fanout_target_matches(
+            kind, name, runtime, target, parsed_item, dst_path, to_scope, project_root
+        )
+        if not matches:
+            bak = _backup_fanout_target(target)
+            if bak is None:
+                continue
+            backed_up.append(bak)
+            logger.warning(
+                "fanout cleanup: %s diverged from the canonical render; "
+                "snapshotted to %s before removal — review and delete the "
+                "backup manually",
+                target,
+                bak,
+            )
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            removed.append(target)
+        except OSError as exc:
+            logger.warning("fanout cleanup: failed to remove %s: %s", target, exc)
+    return removed, backed_up
 
 
 def _detect_source_scope(
@@ -935,6 +1172,10 @@ def migrate_scope(
     10. Best-effort cleanup of stale src runtime fan-out targets
         (``~/.claude/agents/<name>.md`` etc.) — outside the lock so a
         partial cleanup failure does not roll back the canonical move.
+        Targets that diverge from the canonical render (or whose
+        provenance can't be verified) are snapshotted to a ``.bak``
+        before removal; symlinks and files sync can't have written
+        (no generator) are left in place (#1247 id 6).
 
     Args:
         surface: Gate A audit identifier forwarded to the step-7
@@ -945,8 +1186,10 @@ def migrate_scope(
 
     Returns:
         :class:`MigrateScopeResult` with ``moved=True`` on apply
-        success, ``moved=False`` on dry-run, and ``fanout_cleaned``
-        listing every runtime path removed.
+        success, ``moved=False`` on dry-run. ``fanout_cleaned`` lists
+        every runtime path removed and ``fanout_backed_up`` every
+        ``.bak`` snapshot taken for diverged targets (apply);
+        ``fanout_planned`` previews the same target selection (dry-run).
     """
     if kind not in SCOPE_MIGRATABLE_KINDS:
         raise click.ClickException(
@@ -975,7 +1218,10 @@ def migrate_scope(
         )
 
     if not apply_:
-        # Dry-run: compute plan, no mutation.
+        # Dry-run: compute plan, no mutation. ``fanout_planned`` previews
+        # the deletion half of the move (#1247 id 6) — the same selection
+        # the apply-side cleanup uses, so preview and apply cannot
+        # disagree about what gets removed.
         return MigrateScopeResult(
             kind=kind,
             name=name,
@@ -985,6 +1231,12 @@ def migrate_scope(
             dst_path=dst_path,
             layout=layout,
             moved=False,
+            fanout_planned=[
+                target
+                for _runtime, target in _existing_fanout_targets(
+                    kind, name, src_scope, project_root
+                )
+            ],
         )
 
     # ── apply path ───────────────────────────────────────────────────
@@ -1141,7 +1393,15 @@ def migrate_scope(
             )
 
     # Cleanup stale src runtime fan-out (best-effort).
-    fanout_cleaned = _remove_runtime_fanout_for(kind, name, src_scope, project_root)
+    fanout_cleaned, fanout_backed_up = _remove_runtime_fanout_for(
+        kind,
+        name,
+        src_scope,
+        project_root,
+        dst_path=dst_path,
+        to_scope=to_scope,
+        layout=layout,
+    )
 
     return MigrateScopeResult(
         kind=kind,
@@ -1153,4 +1413,5 @@ def migrate_scope(
         layout=layout,
         moved=True,
         fanout_cleaned=fanout_cleaned,
+        fanout_backed_up=fanout_backed_up,
     )

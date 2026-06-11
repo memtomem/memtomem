@@ -741,7 +741,15 @@ _RUNTIME_REL = {
         # so the user-tier path can still seed for the codex regression.
         "codex": ".codex/prompts",
     },
-    "skills": {"claude": ".claude/skills", "gemini": ".gemini/skills"},
+    "skills": {
+        "claude": ".claude/skills",
+        "gemini": ".gemini/skills",
+        # Codex skills live under the vendor-neutral Agent Skills path,
+        # kimi under .kimi/ — mirrored from RUNTIME_FANOUT_TABLE so the
+        # divergence-guard tests can exercise non-claude skill runtimes.
+        "codex": ".agents/skills",
+        "kimi": ".kimi/skills",
+    },
 }
 _AGENT_BODY_CLEAN = "---\nname: foo\ndescription: a clean test agent\n---\n\nhello world\n"
 _COMMAND_BODY_CLEAN = "---\nname: foo\ndescription: a clean test command\n---\n\nhello $ARGUMENTS\n"
@@ -1983,6 +1991,382 @@ def test_e4_project_shared_blocked_override_leaves_no_partial_fanout_commands(sc
         "claude_commands — partial fan-out violates ADR §5 atomicity."
     )
     assert not gemini_fanout.exists()
+
+
+# ── #1247 id 7: EXDEV fallback must not dereference symlinks ─────────
+
+
+def _exdev_once(monkeypatch) -> dict[str, bool]:
+    """Make the first ``os.rename`` inside migrate raise EXDEV (Row-11 pattern)."""
+    import os as os_mod
+
+    real_rename = os_mod.rename
+    raised: dict[str, bool] = {"once": False}
+
+    def fake_rename(a, b):
+        if not raised["once"]:
+            raised["once"] = True
+            import errno as _errno
+
+            raise OSError(_errno.EXDEV, "Cross-device link", str(a))
+        return real_rename(a, b)
+
+    monkeypatch.setattr("memtomem.context.migrate.os.rename", fake_rename)
+    return raised
+
+
+@pytest.mark.requires_symlinks
+def test_exdev_symlink_in_skill_tree_stays_a_link(scope_layout, monkeypatch, tmp_path):
+    """#1247 id 7: cross-FS staging must mirror the same-FS rename semantics.
+
+    Pre-fix, the EXDEV fallback used ``shutil.copytree`` with the stdlib
+    default ``symlinks=False``, dereferencing a resolvable symlink and
+    materializing its out-of-tree target bytes into staging — and from
+    there into the git-shareable ``.memtomem/`` tier — while the same-FS
+    rename path moves the link as a link. This violates the package's own
+    no-deref mirror contract (``_atomic.copy_tree_atomic``).
+    """
+    marker = "OUT_OF_TREE_MARKER_1247_ID7"
+    out_of_tree = tmp_path / "outside" / "secret-notes.md"
+    out_of_tree.parent.mkdir(parents=True)
+    out_of_tree.write_text(marker + "\n", encoding="utf-8")
+
+    src_manifest = _write_canonical_dir(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+    (src_manifest.parent / "link.md").symlink_to(out_of_tree)
+
+    raised = _exdev_once(monkeypatch)
+    result = _invoke_migrate(
+        _migrate_args(
+            "skills",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+    assert raised["once"], "EXDEV path should have triggered"
+
+    dst_dir = _canonical_root_for(scope_layout, "skills", "project_shared") / "foo"
+    link = dst_dir / "link.md"
+    # POSITIVE: the link survived as a link, still pointing out of tree.
+    assert link.is_symlink(), "EXDEV staging dereferenced the symlink"
+    assert link.resolve() == out_of_tree.resolve()
+    # NEGATIVE: no regular file in the promoted tree carries the target bytes.
+    for p in dst_dir.rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            assert marker not in p.read_text(encoding="utf-8"), (
+                f"out-of-tree bytes materialized into {p}"
+            )
+
+
+@pytest.mark.requires_symlinks
+def test_exdev_flat_symlink_canonical_stays_a_link(scope_layout, monkeypatch, tmp_path):
+    """Flat-artifact sibling of the tree case: ``shutil.copy2`` must not
+    follow a symlinked canonical on the EXDEV path (``follow_symlinks=False``
+    parity with the rename path, which moves the link itself)."""
+    target_body = "---\nname: foo\ndescription: linked agent\n---\n\nlinked body\n"
+    out_of_tree = tmp_path / "outside" / "real-agent.md"
+    out_of_tree.parent.mkdir(parents=True)
+    out_of_tree.write_text(target_body, encoding="utf-8")
+
+    flat_root = _canonical_root_for(scope_layout, "agents", "user")
+    flat_root.mkdir(parents=True, exist_ok=True)
+    flat = flat_root / "foo.md"
+    flat.symlink_to(out_of_tree)
+
+    raised = _exdev_once(monkeypatch)
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+    assert raised["once"], "EXDEV path should have triggered"
+
+    dst = _canonical_root_for(scope_layout, "agents", "project_local") / "foo.md"
+    # POSITIVE: the moved flat canonical is still a symlink to the same target.
+    assert dst.is_symlink(), "EXDEV copy2 materialized the symlinked flat canonical"
+    assert dst.resolve() == out_of_tree.resolve()
+    # The out-of-tree target itself is untouched.
+    assert out_of_tree.read_text(encoding="utf-8") == target_body
+    # EXDEV cleanup removed the src link, not the link target.
+    assert not flat.exists()
+
+
+# ── #1247 id 6: fan-out cleanup divergence guard + dry-run preview ───
+
+
+def _rendered_fanout_bytes(manifest: Path, kind: str, runtime: str) -> bytes:
+    """Exactly what sync would write for this canonical at this runtime."""
+    if kind == "agents":
+        from memtomem.context.agents import AGENT_GENERATORS, parse_canonical_agent
+
+        item = parse_canonical_agent(manifest, layout="dir")
+        content, _ = AGENT_GENERATORS[f"{runtime}_agents"].render(item)
+    else:
+        from memtomem.context.commands import COMMAND_GENERATORS, parse_canonical_command
+
+        item = parse_canonical_command(manifest, layout="dir")
+        content, _ = COMMAND_GENERATORS[f"{runtime}_commands"].render(item)
+    return content.encode("utf-8")
+
+
+def test_fanout_diverged_agent_snapshotted_to_bak(scope_layout):
+    """#1247 id 6: a runtime-side edit made after the last sync must survive
+    the migrate cleanup as a ``.bak`` sibling instead of being destroyed.
+
+    Pre-fix, ``_remove_runtime_fanout_for`` unlinked by name with no
+    content check and no backup — the diverged bytes existed nowhere else.
+    """
+    src = _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    target = _runtime_fanout_path(scope_layout, "agents", "claude", "project_shared", "foo")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    diverged = _rendered_fanout_bytes(src, "agents", "claude") + b"\n# local runtime edit\n"
+    target.write_bytes(diverged)
+    # Sibling negative pin: gemini holds EXACTLY what sync wrote — must be
+    # removed clean, with no backup.
+    in_sync = _runtime_fanout_path(scope_layout, "agents", "gemini", "project_shared", "foo")
+    in_sync.parent.mkdir(parents=True, exist_ok=True)
+    in_sync.write_bytes(_rendered_fanout_bytes(src, "agents", "gemini"))
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="project_shared", to_scope="user")
+    )
+    assert result.exit_code == 0, result.output
+
+    # POSITIVE: both targets removed; the diverged one left a .bak with
+    # the edited bytes.
+    assert not target.exists()
+    assert not in_sync.exists()
+    bak = target.with_name(target.name + ".bak")
+    assert bak.is_file(), "diverged fan-out target deleted without a backup"
+    assert bak.read_bytes() == diverged
+    assert "snapshotted before removal" in result.output
+    assert str(bak) in result.output
+    # NEGATIVE (pin-and-invert): the in-sync target must NOT leave a .bak.
+    assert not in_sync.with_name(in_sync.name + ".bak").exists()
+
+
+def test_fanout_override_carrying_agent_in_sync_no_bak(scope_layout):
+    """A per-vendor override REPLACES the rendered file at sync time
+    (ADR-0008 Invariant 4); the divergence check must compare against the
+    override bytes — overrides moved with the artifact dir — or every
+    override-carrying artifact would false-positive a .bak on migrate."""
+    src = _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    override = src.parent / "overrides" / "claude.md"
+    override.parent.mkdir(parents=True)
+    override_body = b"override body: claude-specific\n"
+    override.write_bytes(override_body)
+    target = _runtime_fanout_path(scope_layout, "agents", "claude", "project_shared", "foo")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(override_body)
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="project_shared", to_scope="user")
+    )
+    assert result.exit_code == 0, result.output
+
+    assert not target.exists()
+    # POSITIVE: clean delete — no backup, no divergence warning.
+    assert not target.with_name(target.name + ".bak").exists()
+    assert "snapshotted before removal" not in result.output
+
+
+def test_fanout_hand_authored_skill_content_snapshotted(scope_layout):
+    """The heaviest id-6 loss path: ``rmtree`` of a skill dir holding files
+    sync never wrote. The extra bytes must survive under
+    ``<runtime_root>/.bak/<name>/`` — one level down so neither our
+    discovery loops (diff/extract: ``<root>/*/SKILL.md``) nor the real
+    runtimes can rediscover the stale skill, and extract cannot round-trip
+    it back into canonical (#1229's failure mode with a sibling name).
+    """
+    _write_canonical_dir(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+    target = _runtime_fanout_path(scope_layout, "skills", "claude", "user", "foo")
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text(_SKILL_BODY_CLEAN, encoding="utf-8")
+    notes = "hand-authored runtime-only notes\n"
+    (target / "notes.txt").write_text(notes, encoding="utf-8")
+
+    result = _invoke_migrate(
+        _migrate_args(
+            "skills",
+            "foo",
+            from_scope="user",
+            to_scope="project_shared",
+            confirm_project_shared=True,
+        )
+    )
+    assert result.exit_code == 0, result.output
+
+    assert not target.exists(), "stale runtime skill dir must still be removed"
+    bak = target.parent / ".bak" / "foo"
+    assert (bak / "notes.txt").read_text(encoding="utf-8") == notes
+    assert (bak / "SKILL.md").read_text(encoding="utf-8") == _SKILL_BODY_CLEAN
+    # The backup parent holds no SKILL.md itself — single-level discovery
+    # (diff, extract, real runtimes) cannot see the snapshot as a skill.
+    assert not (target.parent / ".bak" / "SKILL.md").exists()
+
+
+def test_fanout_diverged_kimi_skill_snapshotted(scope_layout):
+    """Non-claude skill runtime coverage (Codex design review): the same
+    guard must hold for the kimi fan-out tree."""
+    _write_canonical_dir(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+    target = _runtime_fanout_path(scope_layout, "skills", "kimi", "user", "foo")
+    target.mkdir(parents=True)
+    edited = _SKILL_BODY_CLEAN + "\nkimi-side local edit\n"
+    (target / "SKILL.md").write_text(edited, encoding="utf-8")
+
+    result = _invoke_migrate(
+        _migrate_args("skills", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    assert not target.exists()
+    bak = target.parent / ".bak" / "foo"
+    assert (bak / "SKILL.md").read_text(encoding="utf-8") == edited
+
+
+def test_fanout_exact_skill_copy_removed_without_bak(scope_layout):
+    """Negative pin (pin-and-invert): a runtime skill tree that byte-matches
+    the canonical is removed with NO backup — the .bak valve is for
+    diverged content only, not a tombstone for every migrate."""
+    _write_canonical_dir(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+    target = _runtime_fanout_path(scope_layout, "skills", "claude", "user", "foo")
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text(_SKILL_BODY_CLEAN, encoding="utf-8")
+
+    result = _invoke_migrate(
+        _migrate_args("skills", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    assert not target.exists()
+    assert not (target.parent / ".bak").exists()
+    assert "snapshotted before removal" not in result.output
+
+
+def test_fanout_foreign_codex_prompt_left_in_place(scope_layout):
+    """``~/.codex/prompts`` is a reserved table row with NO generator —
+    sync can never have written there, so a hand-authored prompt that
+    happens to share the command's name must survive the migrate, and the
+    dry-run preview must not claim it as planned cleanup (Codex design
+    review: preview/apply parity). Pre-fix, both halves were wrong: the
+    file was deleted, invisibly."""
+    _write_canonical_dir(scope_layout, "commands", "user", "foo", _COMMAND_BODY_CLEAN)
+    prompt = scope_layout["user_home"] / ".codex" / "prompts" / "foo.md"
+    prompt.parent.mkdir(parents=True)
+    hand_authored = "# my hand-written codex prompt — not memtomem's\n"
+    prompt.write_text(hand_authored, encoding="utf-8")
+
+    preview = _invoke_migrate(
+        _migrate_args(
+            "commands", "foo", from_scope="user", to_scope="project_local", apply_=False, yes=False
+        )
+    )
+    assert preview.exit_code == 0, preview.output
+    # NEGATIVE: not in the planned-cleanup preview.
+    assert str(prompt) not in preview.output
+
+    result = _invoke_migrate(
+        _migrate_args("commands", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+    # POSITIVE: the foreign file survived, byte-identical, no .bak churn.
+    assert prompt.read_text(encoding="utf-8") == hand_authored
+    assert not prompt.with_name("foo.md.bak").exists()
+
+
+@pytest.mark.requires_symlinks
+def test_fanout_symlink_target_left_in_place(scope_layout, tmp_path):
+    """A symlinked runtime target is user hand-routing, not sync output
+    (generators only ever ``os.replace`` regular files): never deref,
+    back up, or remove it. Pre-fix it was unlinked."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    referent = tmp_path / "outside" / "routed-agent.md"
+    referent.parent.mkdir(parents=True)
+    referent.write_bytes(_rendered_fanout_bytes(src, "agents", "claude"))
+    target = _runtime_fanout_path(scope_layout, "agents", "claude", "user", "foo")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(referent)
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    assert target.is_symlink(), "symlinked fan-out target must be left in place"
+    assert referent.is_file()
+    assert str(target) not in result.output
+
+
+def test_fanout_dry_run_previews_deletion_half(scope_layout):
+    """#1247 id 6: the dry-run plan must show the deletion half of the
+    move — pre-fix the fan-out paths were only reported AFTER apply."""
+    _write_canonical_dir(scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN)
+    seeded = _seed_runtime_fanout(
+        scope_layout, "agents", "project_shared", "foo", _AGENT_BODY_CLEAN
+    )
+
+    preview = _invoke_migrate(
+        _migrate_args(
+            "agents", "foo", from_scope="project_shared", to_scope="user", apply_=False, yes=False
+        )
+    )
+    assert preview.exit_code == 0, preview.output
+    assert "will remove 2 stale runtime fan-out target(s)" in preview.output
+    for path in seeded:
+        assert str(path) in preview.output
+        assert path.exists(), "dry-run must not delete anything"
+
+
+def test_fanout_backup_failure_keeps_file_target(scope_layout, monkeypatch):
+    """When the .bak snapshot of a diverged FILE target fails, the target
+    must be KEPT — deleting without a backup is exactly the loss the
+    guard exists to prevent."""
+    src = _write_canonical_dir(scope_layout, "agents", "user", "foo", _AGENT_BODY_CLEAN)
+    target = _runtime_fanout_path(scope_layout, "agents", "claude", "user", "foo")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    diverged = _rendered_fanout_bytes(src, "agents", "claude") + b"\n# edit\n"
+    target.write_bytes(diverged)
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("memtomem.context.migrate.shutil.copy2", boom)
+
+    result = _invoke_migrate(
+        _migrate_args("agents", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output  # cleanup stays best-effort
+
+    assert target.read_bytes() == diverged, "target deleted despite failed backup"
+    assert not target.with_name(target.name + ".bak").exists()
+
+
+def test_fanout_backup_failure_keeps_skill_dir(scope_layout, monkeypatch):
+    """Skill-tree sibling of the file case (Codex design review): a failed
+    ``copytree`` snapshot must keep the whole runtime skill dir — the
+    heaviest id-6 loss path is the dir ``rmtree``."""
+    _write_canonical_dir(scope_layout, "skills", "user", "foo", _SKILL_BODY_CLEAN)
+    target = _runtime_fanout_path(scope_layout, "skills", "claude", "user", "foo")
+    target.mkdir(parents=True)
+    (target / "SKILL.md").write_text(_SKILL_BODY_CLEAN, encoding="utf-8")
+    notes = "runtime-only bytes\n"
+    (target / "notes.txt").write_text(notes, encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("memtomem.context.migrate.shutil.copytree", boom)
+
+    result = _invoke_migrate(
+        _migrate_args("skills", "foo", from_scope="user", to_scope="project_local")
+    )
+    assert result.exit_code == 0, result.output
+
+    assert (target / "notes.txt").read_text(encoding="utf-8") == notes, (
+        "skill dir rmtree'd despite failed backup"
+    )
+    assert not (target.parent / ".bak" / "foo" / "notes.txt").exists()
 
 
 # ── adopt_flat_to_dir (ADR-0022 rank 6) ──────────────────────────────────
