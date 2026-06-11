@@ -308,6 +308,54 @@ class TestStrictMode:
         assert list(runtime_dir.glob(".beta-full.md.*.tmp")) == []
 
 
+class TestDuplicateAgentName:
+    """Two canonicals (different stems) declaring the same frontmatter
+    ``name:`` (#1247): the engine keeps the first-seen canonical (sorted
+    order) and emits a typed ``duplicate_name`` skip for the later claimant
+    instead of silently last-writer-winning the shared runtime file.
+    """
+
+    def _seed_collision(self, project_root):
+        body = SAMPLE_MINIMAL_AGENT.replace("helper", "code-reviewer")
+        winner = _make_canonical_agent(
+            project_root, "a-reviewer", body.replace("Help with things.", "Body from A.")
+        )
+        loser = _make_canonical_agent(
+            project_root, "b-reviewer", body.replace("Help with things.", "Body from B.")
+        )
+        return winner, loser
+
+    def test_first_seen_wins_single_write(self, tmp_path):
+        self._seed_collision(tmp_path)
+        result = generate_all_agents(tmp_path, runtimes=["claude_agents"])
+
+        out = tmp_path / ".claude/agents/code-reviewer.md"
+        # Exactly one generated tuple — pre-fix both canonicals queued the
+        # same out_path and both writes were reported.
+        assert result.generated == [("claude_agents", out)]
+        text = out.read_text(encoding="utf-8")
+        assert "Body from A." in text
+        assert "Body from B." not in text
+
+        dup_rows = [row for row in result.skipped if row[2] == "duplicate_name"]
+        assert len(dup_rows) == 1
+        name, reason, _code = dup_rows[0]
+        assert name == "code-reviewer"
+        assert "a-reviewer.md" in reason and "b-reviewer.md" in reason
+
+    def test_post_sync_diff_reports_in_sync(self, tmp_path, codex_home):
+        """diff keys canonicals by parsed name with the SAME first-seen
+        precedence as sync — last-wins there would diff the runtime file
+        against the canonical sync never wrote, reporting permanent
+        phantom drift the user cannot clear."""
+        self._seed_collision(tmp_path)
+        generate_all_agents(tmp_path)
+
+        rows = [r for r in diff_agents(tmp_path) if r[1] == "code-reviewer"]
+        assert rows, "expected diff rows for the colliding name"
+        assert {r[2] for r in rows} == {"in sync"}
+
+
 class TestExtractAgentsToCanonical:
     def test_imports_claude_agent(self, tmp_path):
         claude_dir = tmp_path / ".claude/agents"

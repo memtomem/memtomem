@@ -50,6 +50,7 @@ from memtomem.context._runtime_targets import (
     runtime_fanout_root,
 )
 from memtomem.context._sync_atomic import (
+    ON_DROP_LEVELS,
     AtomicSyncAdapter,
     AtomicSyncResult,
     StrictDropError as _EngineStrictDropError,
@@ -811,7 +812,16 @@ def diff_commands(
             parse_failures[fallback_name] = str(exc)
             logger.warning("canonical command %s failed to parse: %s", path, exc)
         else:
-            canonical_index[parsed.name] = parsed
+            # First-parsed-wins on a frontmatter-name collision, matching the
+            # sync engine's duplicate-name dedupe (#1247) — see diff_agents.
+            if canonical_index.get(parsed.name) is not None:
+                logger.warning(
+                    "duplicate command name %r: keeping first-seen canonical, ignoring %s",
+                    parsed.name,
+                    path,
+                )
+            else:
+                canonical_index[parsed.name] = parsed
     canonical_names = set(canonical_index)
 
     for gen_name, gen in COMMAND_GENERATORS.items():
@@ -917,6 +927,7 @@ __all__ = [
     "CommandSyncResult",
     "ExtractResult",
     "GeminiCommandsGenerator",
+    "ON_DROP_LEVELS",
     "SlashCommand",
     "StrictDropError",
     "canonical_command_name",

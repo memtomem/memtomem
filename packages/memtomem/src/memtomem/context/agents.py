@@ -1038,7 +1038,22 @@ def diff_agents(
             parse_failures[fallback_name] = str(exc)
             logger.warning("canonical agent %s failed to parse: %s", path, exc)
         else:
-            canonical_index[parsed.name] = parsed
+            # First-parsed-wins on a frontmatter-name collision, matching the
+            # sync engine's duplicate-name dedupe (#1247) — last-wins here
+            # would diff the runtime file against the canonical sync never
+            # wrote, reporting permanent phantom drift. The loser surfaces in
+            # the sync result as a ``duplicate_name`` skip, not as a diff row
+            # (flat-vs-dir precedent: log-only in diff). A ``None`` entry
+            # (parse-failure fallback name) stays overwritable — pre-existing
+            # interplay, unchanged.
+            if canonical_index.get(parsed.name) is not None:
+                logger.warning(
+                    "duplicate agent name %r: keeping first-seen canonical, ignoring %s",
+                    parsed.name,
+                    path,
+                )
+            else:
+                canonical_index[parsed.name] = parsed
     canonical_names = set(canonical_index)
 
     for gen_name, gen in AGENT_GENERATORS.items():

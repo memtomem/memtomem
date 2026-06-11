@@ -39,6 +39,15 @@ LOCK_TIMEOUT: Final = "lock_timeout"
 # conflicting path so the user can remove it (or add a SKILL.md) and re-run.
 TARGET_CONFLICT: Final = "target_conflict"
 
+# Two canonical files (different stems) declare the same frontmatter ``name:``.
+# ``out_path`` is a pure function of (target, name), so both would land on the
+# SAME runtime file — last-writer-wins with both writes reported as generated
+# (#1247). ``sync_atomic_artifact`` keeps the first-seen canonical (sorted
+# order, deterministic) and emits this typed skip for every later claimant.
+# The human reason names both source paths so the user can rename one.
+# Loud emit, not silent — feedback_defensive_noise.md.
+DUPLICATE_NAME: Final = "duplicate_name"
+
 # Import (runtime → canonical) skip codes.
 INVALID_NAME: Final = "invalid_name"
 ALREADY_IMPORTED: Final = "already_imported"
@@ -75,6 +84,7 @@ SkipCode = Literal[
     "no_project_fanout_for_runtime",
     "lock_timeout",
     "target_conflict",
+    "duplicate_name",
     "invalid_name",
     "already_imported",
     "canonical_exists",
