@@ -439,6 +439,7 @@
   "settings.ctx.status_missing_canonical": "Not yet imported",
   "settings.ctx.status_parse_error": "Parse error",
   "settings.ctx.status_invalid_name": "Invalid name",
+  "settings.ctx.parse_error_hint": "Fix the file at {path}, then click Refresh.",
   "settings.ctx.badge_synced": "synced",
   "settings.ctx.badge_missing_target": "not in runtime",
   "settings.ctx.badge_missing_canonical": "not imported",

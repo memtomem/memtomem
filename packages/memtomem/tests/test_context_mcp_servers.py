@@ -89,3 +89,21 @@ def test_no_canonical_root_returns_empty_skip(tmp_path: Path) -> None:
     assert result.skipped == [
         ("project_mcp", "No canonical MCP server definitions found", "no_canonical_root")
     ]
+
+
+def test_diff_parse_error_reasons_distinguish_canonical_from_target(tmp_path: Path) -> None:
+    """U7 (#1229): a canonical-parse failure names the canonical file; a
+    broken .mcp.json marks every canonical row 'parse error' with a reason
+    naming .mcp.json — so the user never chases N healthy canonical files."""
+    bad = tmp_path / ".memtomem" / "mcp-servers" / "bad.json"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("{not json", encoding="utf-8")
+    rows = diff_mcp_servers(tmp_path)
+    assert rows[0][2] == "parse error"
+    assert "bad.json" in (rows[0].reason or "")
+
+    bad.write_text(json.dumps({"command": "uvx"}), encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text("{broken", encoding="utf-8")
+    rows = diff_mcp_servers(tmp_path)
+    assert rows[0][2] == "parse error"
+    assert ".mcp.json" in (rows[0].reason or "")

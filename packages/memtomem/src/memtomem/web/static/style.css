@@ -3861,6 +3861,11 @@ body.help-hidden #help-toggle { opacity: 0.5; }
    sanitized error_message from the overview envelope). Single line with
    ellipsis — the full text rides the title tooltip and the aria-label. */
 .ctx-overview-error-detail { font-size: 0.72rem; color: var(--muted); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* U7 (#1229): per-runtime diagnostic block under a parse-error / invalid-name
+   badge in the diff / runtime-only panes — sanitized reason + fix-it hint. */
+.ctx-diagnostic-detail { margin-top: 4px; font-size: 0.78rem; }
+.ctx-diagnostic-reason { color: var(--muted); font-family: var(--mono, monospace); word-break: break-word; }
+.ctx-diagnostic-hint { color: var(--muted); margin-top: 2px; }
 /* Pointer line sits BELOW the nav button (sibling, not child). Inset it
    horizontally to match the nav button's 16px padding so the visual gutter
    stays continuous, and pull it up against the nav button's bottom padding

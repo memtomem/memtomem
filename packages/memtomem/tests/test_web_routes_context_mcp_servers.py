@@ -226,3 +226,30 @@ async def test_PUT_force_default_false_still_409s(client: AsyncClient, tmp_path:
     assert r.status_code == 409
     assert r.json()["status"] == "aborted"
     assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.anyio
+async def test_diff_reasons_distinguish_canonical_vs_mcp_json(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    """U7 (#1229): per-name diff reasons name the file that actually broke —
+    canonical .json vs the project .mcp.json — and the payload carries
+    canonical_path for the fix-it hint."""
+    bad = tmp_path / ".memtomem" / "mcp-servers" / "bad.json"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("{not json", encoding="utf-8")
+    r = await client.get("/api/context/mcp-servers/bad/diff")
+    assert r.status_code == 200
+    data = r.json()
+    assert Path(data["canonical_path"]) == Path(".memtomem/mcp-servers/bad.json")
+    rt = data["runtimes"][0]
+    assert rt["status"] == "parse error"
+    assert "bad.json" in rt["reason"]
+    assert str(tmp_path) not in rt["reason"]
+
+    bad.write_text(json.dumps({"command": "uvx"}), encoding="utf-8")
+    (tmp_path / ".mcp.json").write_text("{broken", encoding="utf-8")
+    r = await client.get("/api/context/mcp-servers/bad/diff")
+    rt = r.json()["runtimes"][0]
+    assert rt["status"] == "parse error"
+    assert ".mcp.json" in rt["reason"]

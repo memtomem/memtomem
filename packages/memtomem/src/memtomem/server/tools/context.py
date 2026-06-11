@@ -753,8 +753,11 @@ async def mem_context_diff(
             if lines:
                 lines.append("")
             lines.append("Skills:")
-            for runtime, name, status in rows:
-                lines.append(f"  {runtime}: {name} [{status}]")
+            for row in rows:
+                runtime, name, status = row
+                reason = getattr(row, "reason", None)
+                suffix = f" — {reason}" if reason else ""
+                lines.append(f"  {runtime}: {name} [{status}]{suffix}")
         else:
             lines.append("No skills to compare.")
 
@@ -764,8 +767,11 @@ async def mem_context_diff(
             if lines:
                 lines.append("")
             lines.append("Sub-agents:")
-            for runtime, name, status in rows:
-                lines.append(f"  {runtime}: {name} [{status}]")
+            for row in rows:
+                runtime, name, status = row
+                reason = getattr(row, "reason", None)
+                suffix = f" — {reason}" if reason else ""
+                lines.append(f"  {runtime}: {name} [{status}]{suffix}")
         else:
             lines.append("No sub-agents to compare.")
 
@@ -775,8 +781,11 @@ async def mem_context_diff(
             if lines:
                 lines.append("")
             lines.append("Commands:")
-            for runtime, name, status in rows:
-                lines.append(f"  {runtime}: {name} [{status}]")
+            for row in rows:
+                runtime, name, status = row
+                reason = getattr(row, "reason", None)
+                suffix = f" — {reason}" if reason else ""
+                lines.append(f"  {runtime}: {name} [{status}]{suffix}")
         else:
             lines.append("No commands to compare.")
 

@@ -526,6 +526,41 @@ class TestDiffAgents:
         claude_rows = [(n, s) for r, n, s in rows if r == "claude_agents" and n == "-bad"]
         assert claude_rows == [("-bad", "parse error")]
 
+    def test_parse_error_row_carries_reason_with_source_path(self, tmp_path, codex_home):
+        """U7 (#1229): the 'parse error' row carries the exception text —
+        which embeds the source path — instead of a bare status; healthy
+        rows keep reason None (pin-and-invert)."""
+        _make_canonical_agent(tmp_path, "broken", "no frontmatter at all\n")
+        _make_canonical_agent(tmp_path, "healthy", SAMPLE_MINIMAL_AGENT)
+        rows = diff_agents(tmp_path)
+        broken = [r for r in rows if r[1] == "broken"]
+        assert broken
+        for row in broken:
+            assert row[2] == "parse error"
+            assert "frontmatter" in (row.reason or "")
+            assert "broken.md" in (row.reason or "")
+        healthy = [r for r in rows if r[1] == "helper"]
+        assert healthy
+        assert all(getattr(r, "reason", None) is None for r in healthy)
+
+    def test_invalid_name_row_carries_validation_reason(self, tmp_path, codex_home):
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "-bad.md").write_text(SAMPLE_MINIMAL_AGENT, encoding="utf-8")
+        rows = diff_agents(tmp_path)
+        row = next(r for r in rows if r[2] == "invalid name")
+        assert "invalid agent name" in (row.reason or "")
+
+    def test_diff_rows_still_unpack_as_three_tuples(self, tmp_path, codex_home):
+        """API-compat pin: DiffRow iterates as the historical 3-tuple, and
+        equality against plain tuples holds — external positional consumers
+        of the public diff_* functions must not break."""
+        _make_canonical_agent(tmp_path, "broken", "no frontmatter at all\n")
+        rows = diff_agents(tmp_path)
+        for runtime, name, status in rows:  # raises ValueError if widened
+            assert isinstance(runtime, str) and isinstance(name, str) and isinstance(status, str)
+        assert ("claude_agents", "broken", "parse error") in rows
+
     def test_whitespace_only_drift_detected_and_converges(self, tmp_path, codex_home):
         """Whitespace-only drift is real drift: sync writes render output
         byte-exact, so diff must not ``.strip()`` it away — pre-fix a padded

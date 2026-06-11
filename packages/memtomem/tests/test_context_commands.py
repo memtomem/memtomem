@@ -489,6 +489,16 @@ class TestDiffCommands:
         statuses = {s for _, n, s in rows if n == "broken"}
         assert statuses == {"parse error"}
 
+    def test_parse_error_row_carries_reason(self, tmp_path):
+        """U7 (#1229): mirrors diff_agents — the row reason embeds the
+        source path via the exception text."""
+        _make_canonical_command(tmp_path, "broken", "---\nname: bad name\n---\n\nbody\n")
+        rows = diff_commands(tmp_path)
+        row = next(r for r in rows if r[1] == "broken")
+        assert row[2] == "parse error"
+        assert "invalid command name" in (row.reason or "")
+        assert "broken.md" in (row.reason or "")
+
     def test_whitespace_only_drift_detected_and_converges(self, tmp_path):
         """Whitespace-only drift is real drift: sync writes render output
         byte-exact, so diff must not ``.strip()`` it away — pre-fix a padded

@@ -87,7 +87,11 @@ function renderRuntimeBadges(runtimes) {
   return '<div class="ctx-runtime-badges">' +
     runtimes.map(r => {
       const short = r.runtime.replace(/_skills|_commands|_agents/g, '');
-      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(r.runtime)}">${escapeHtml(_ctxRuntimeLabel(short))}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
+      // U7 (#1229): surface the server-sanitized diagnostic reason as a
+      // tooltip on the list-card badge — the leaf pane carries the full
+      // rendering; the card gets the at-a-glance cause.
+      const title = r.reason ? `${r.runtime} — ${r.reason}` : r.runtime;
+      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(title)}">${escapeHtml(_ctxRuntimeLabel(short))}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
     }).join('') + '</div>';
 }
 
@@ -133,6 +137,26 @@ function _ctxSyncOverwriteWarning(impact) {
   return impact && impact.overwrite > 0
     ? t('settings.ctx.confirm_sync_overwrite_warning', { overwrite: impact.overwrite })
     : '';
+}
+
+// U7 (#1229): per-runtime diagnostic block under a parse-error /
+// invalid-name badge — server-sanitized reason text plus a fix-it hint
+// naming the canonical file. Empty for healthy rows and for rows whose
+// payload predates the reason field (older cached responses).
+function _ctxDiagnosticDetail(rt, canonicalPath) {
+  const broken = rt.status === 'parse error' || rt.status === 'invalid name';
+  if (!broken) return '';
+  let html = '<div class="ctx-diagnostic-detail">';
+  if (rt.reason) {
+    html += `<div class="ctx-diagnostic-reason">${escapeHtml(rt.reason)}</div>`;
+  }
+  if (rt.status === 'parse error' && canonicalPath) {
+    html += `<div class="ctx-diagnostic-hint">${escapeHtml(
+      t('settings.ctx.parse_error_hint', { path: canonicalPath }),
+    )}</div>`;
+  }
+  html += '</div>';
+  return html === '<div class="ctx-diagnostic-detail"></div>' ? '' : html;
 }
 
 function renderDroppedChips(fields) {
@@ -4211,6 +4235,7 @@ async function _ctxLoadDiff(type, name, detailEl) {
       for (const rt of data.runtimes) {
         html += `<div style="margin-bottom:12px">`;
         html += `<strong>${escapeHtml(rt.runtime)}</strong> ${_ctxBadge(rt.status)}`;
+        html += _ctxDiagnosticDetail(rt, data.canonical_path);
         if (rt.dropped_fields && rt.dropped_fields.length) {
           html += `<div style="margin-top:4px">${renderDroppedChips(rt.dropped_fields)}</div>`;
         }
@@ -4277,6 +4302,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       for (const rt of data.runtimes) {
         html += `<div style="margin-bottom:12px">`;
         html += `<strong>${escapeHtml(rt.runtime)}</strong> ${_ctxBadge(rt.status)}`;
+        html += _ctxDiagnosticDetail(rt, data.canonical_path);
         if (rt.runtime_content != null) {
           html += `<pre class="ctx-content-pre" style="margin-top:6px">${escapeHtml(rt.runtime_content)}</pre>`;
         }

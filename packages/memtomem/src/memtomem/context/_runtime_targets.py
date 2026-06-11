@@ -175,6 +175,49 @@ def runtime_fanout_root(
     return (project_root / entry).resolve()
 
 
+class DiffRow(tuple):
+    """One diff result row, optionally carrying a diagnostic ``reason``.
+
+    Iterates and unpacks as the historical 3-tuple ``(runtime, name,
+    status)`` — every existing positional consumer (CLI printers, MCP
+    tools, web groupers, external callers of the public ``diff_*``
+    functions) keeps working unchanged, and equality against a plain
+    3-tuple still holds. Consumers that want diagnostics read
+    ``row.reason`` (#1229 U7: the bare "parse error" status carried no
+    file path or cause anywhere; "invalid name" rows ride the same
+    field with the ``validate_name`` message).
+
+    ``reason`` is raw, unsanitized engine text (exception messages embed
+    absolute source paths) — web routes sanitize at the wire boundary,
+    CLI/MCP print it for the local operator verbatim.
+    """
+
+    reason: str | None
+
+    def __new__(cls, runtime: str, name: str, status: str, reason: str | None = None) -> "DiffRow":
+        row = super().__new__(cls, (runtime, name, status))
+        row.reason = reason
+        return row
+
+    @property
+    def runtime(self) -> str:
+        return self[0]
+
+    @property
+    def name(self) -> str:
+        return self[1]
+
+    @property
+    def status(self) -> str:
+        return self[2]
+
+    def __repr__(self) -> str:  # diagnostics show up in test failures
+        return (
+            f"DiffRow(runtime={self[0]!r}, name={self[1]!r}, "
+            f"status={self[2]!r}, reason={self.reason!r})"
+        )
+
+
 def runtime_artifact_listing(
     artifact: ArtifactKind,
     runtime: str,
@@ -183,8 +226,8 @@ def runtime_artifact_listing(
     *,
     file_suffix: str | None = None,
     dir_manifest: str | None = None,
-) -> tuple[set[str], list[str]]:
-    """Return ``(valid_names, invalid_raw_names)`` under the runtime root.
+) -> tuple[set[str], list[tuple[str, str]]]:
+    """Return ``(valid_names, invalid_entries)`` under the runtime root.
 
     Replaces the per-module helpers ``_runtime_agent_names`` /
     ``_runtime_command_names`` and the inline runtime-listing in
@@ -202,11 +245,12 @@ def runtime_artifact_listing(
       every directory containing the named manifest file. Used for
       skills where each artifact is a directory tree.
 
-    ``invalid_raw_names`` carries entries that match the artifact shape
-    but fail :func:`validate_name` — diff surfaces them as a dedicated
-    ``"invalid name"`` status row instead of silently dropping them
-    (#1229: an unmanaged runtime artifact used to be invisible, so the
-    dashboard read fully in-sync while extract emitted a visible
+    ``invalid_entries`` carries ``(raw_name, reason)`` pairs for entries
+    that match the artifact shape but fail :func:`validate_name` — diff
+    surfaces them as a dedicated ``"invalid name"`` status row (with the
+    validation message as the row reason) instead of silently dropping
+    them (#1229: an unmanaged runtime artifact used to be invisible, so
+    the dashboard read fully in-sync while extract emitted a visible
     ``INVALID_NAME`` skip for the very same file). The names are raw,
     unsanitized strings — web rendering escapes them, and log emission
     keeps going through the structured ``extra`` dict (never the message).
@@ -224,7 +268,7 @@ def runtime_artifact_listing(
         return set(), []
     kind = f"{artifact[:-1]} name"
     names: set[str] = set()
-    invalid: list[str] = []
+    invalid: list[tuple[str, str]] = []
     if file_suffix is not None:
         entries = ((p.stem, p) for p in root.iterdir() if p.is_file() and p.suffix == file_suffix)
     else:
@@ -243,7 +287,7 @@ def runtime_artifact_listing(
         try:
             names.add(validate_name(raw_name, kind=kind))
         except InvalidNameError as exc:
-            invalid.append(raw_name)
+            invalid.append((raw_name, str(exc)))
             logger.warning(
                 "Skipping invalid runtime artifact name",
                 extra={

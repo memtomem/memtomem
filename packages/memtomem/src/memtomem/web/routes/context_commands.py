@@ -16,6 +16,7 @@ from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.commands import (
+    _parse_canonical_command_text,
     CANONICAL_COMMAND_ROOT,
     COMMAND_DIR_FILENAME,
     COMMAND_GENERATORS,
@@ -30,6 +31,7 @@ from memtomem.context.commands import (
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
+from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -115,8 +117,12 @@ async def list_commands(
     diffs = diff_commands(project_root, scope=target_scope)
 
     by_name: dict[str, list[dict]] = {}
-    for runtime, cmd_name, status in diffs:
-        by_name.setdefault(cmd_name, []).append({"runtime": runtime, "status": status})
+    for row in diffs:
+        entry: dict[str, object] = {"runtime": row[0], "status": row[2]}
+        reason = sanitize_diff_reason(getattr(row, "reason", None), project_root)
+        if reason:
+            entry["reason"] = reason
+        by_name.setdefault(row[1], []).append(entry)
 
     commands: list[dict[str, object]] = []
     canonical_names: set[str] = set()
@@ -467,9 +473,19 @@ async def diff_command(
     name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
 
     canonical_content = None
+    canonical_path = None
+    parse_error_reason = None
     if resolved is not None:
-        cmd_path, _layout = resolved
-        canonical_content = cmd_path.read_text(encoding="utf-8")
+        cmd_path, layout = resolved
+        canonical_path = _safe_rel(cmd_path, project_root)
+        # Lenient read + re-parse — mirrors diff_agent: the pane must agree
+        # with the list badge instead of raw-comparing a malformed canonical
+        # into "out of sync" / "in sync" (#1229 U7).
+        canonical_content = cmd_path.read_bytes().decode("utf-8", errors="replace")
+        try:
+            _parse_canonical_command_text(canonical_content, source=cmd_path, layout=layout)
+        except CommandParseError as exc:
+            parse_error_reason = sanitize_diff_reason(str(exc), project_root)
 
     runtimes = []
     for gen_name, gen in COMMAND_GENERATORS.items():
@@ -477,6 +493,16 @@ async def diff_command(
         # for the rationale (#1229). NO_FANOUT tiers return None → skipped.
         target = gen.target_file(project_root, name, scope=target_scope)
         if target is None:
+            continue
+        if parse_error_reason is not None:
+            entry: dict[str, object] = {
+                "runtime": gen_name,
+                "status": "parse error",
+                "reason": parse_error_reason,
+            }
+            if target.is_file():
+                entry["runtime_content"] = target.read_bytes().decode("utf-8", errors="replace")
+            runtimes.append(entry)
             continue
         if canonical_content is None and not target.is_file():
             continue
@@ -487,11 +513,11 @@ async def diff_command(
                 {
                     "runtime": gen_name,
                     "status": "missing canonical",
-                    "runtime_content": target.read_text(encoding="utf-8"),
+                    "runtime_content": target.read_bytes().decode("utf-8", errors="replace"),
                 }
             )
         else:
-            runtime_content = target.read_text(encoding="utf-8")
+            runtime_content = target.read_bytes().decode("utf-8", errors="replace")
             # For commands, content won't be byte-identical (placeholder rewrites)
             # so we always provide the runtime content for diff view.
             runtimes.append(
@@ -502,7 +528,12 @@ async def diff_command(
                 }
             )
 
-    return {"name": name, "canonical_content": canonical_content, "runtimes": runtimes}
+    return {
+        "name": name,
+        "canonical_content": canonical_content,
+        "canonical_path": canonical_path,
+        "runtimes": runtimes,
+    }
 
 
 # ── Sync ─────────────────────────────────────────────────────────────────

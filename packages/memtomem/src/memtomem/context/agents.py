@@ -47,6 +47,7 @@ from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
+    DiffRow,
     runtime_artifact_listing,
     runtime_artifact_names,
     runtime_fanout_root,
@@ -1012,13 +1013,23 @@ def diff_agents(
     # Unreadable / unparseable canonicals keep the stem / dir-name key
     # (``None`` value) so their "parse error" row still names the file.
     canonical_index: dict[str, SubAgent | None] = {}
+    # Parse failures keep the exception text (it embeds the source path) so
+    # the "parse error" row can carry a diagnostic reason — pre-#1229 the
+    # exception was swallowed here without even a log line.
+    parse_failures: dict[str, str] = {}
     for path, layout in list_canonical_agents(project_root, scope=scope):
         fallback_name = path.parent.name if layout == "dir" else path.stem
         try:
             text = path.read_bytes().decode("utf-8", errors="replace")
             parsed = _parse_canonical_agent_text(text, source=path, layout=layout)
-        except (OSError, AgentParseError):
+        except OSError as exc:
             canonical_index[fallback_name] = None
+            parse_failures[fallback_name] = f"unreadable: {exc}"
+            logger.warning("canonical agent %s unreadable: %s", path, exc)
+        except AgentParseError as exc:
+            canonical_index[fallback_name] = None
+            parse_failures[fallback_name] = str(exc)
+            logger.warning("canonical agent %s failed to parse: %s", path, exc)
         else:
             canonical_index[parsed.name] = parsed
     canonical_names = set(canonical_index)
@@ -1040,9 +1051,9 @@ def diff_agents(
         # runtime artifact existed (#1229). Surface them as a dedicated row;
         # a canonical "parse error" row of the same fallback name wins
         # (only possible when the canonical stem itself is invalid).
-        for raw_name in invalid_runtime_names:
+        for raw_name, invalid_reason in invalid_runtime_names:
             if raw_name not in canonical_names:
-                results.append((gen_name, raw_name, "invalid name"))
+                results.append(DiffRow(gen_name, raw_name, "invalid name", invalid_reason))
         for name in sorted(canonical_names | runtime_names):
             # Unparseable canonical (including an invalid *effective* name —
             # frontmatter name, or stem fallback) checked BEFORE the
@@ -1050,7 +1061,7 @@ def diff_agents(
             # create the runtime file, which it never can — the row showed
             # a permanent drift no sync clears (#1229).
             if name in canonical_names and canonical_index[name] is None:
-                results.append((gen_name, name, "parse error"))
+                results.append(DiffRow(gen_name, name, "parse error", parse_failures.get(name)))
                 continue
             if name in canonical_names and name not in runtime_names:
                 results.append((gen_name, name, "missing target"))

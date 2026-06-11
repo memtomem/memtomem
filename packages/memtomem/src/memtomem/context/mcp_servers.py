@@ -23,6 +23,7 @@ from typing import Any
 from memtomem import privacy
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import validate_name
+from memtomem.context._runtime_targets import DiffRow
 
 CANONICAL_MCP_SERVER_ROOT = ".memtomem/mcp-servers"
 PROJECT_MCP_CONFIG = ".mcp.json"
@@ -166,22 +167,27 @@ def _read_project_mcp_config(path: Path) -> dict[str, Any]:
 
 def diff_mcp_servers(project_root: Path) -> list[tuple[str, str, str]]:
     target = _project_mcp_path(project_root)
+    target_parse_reason: str | None = None
     try:
         target_config = _read_project_mcp_config(target)
         target_servers = target_config.get("mcpServers") or {}
-    except McpServerParseError:
+    except McpServerParseError as exc:
         target_servers = None
+        # A broken .mcp.json marks EVERY canonical row "parse error" — the
+        # reason must say so, or the user chases N healthy canonical files
+        # (#1229 U7).
+        target_parse_reason = str(exc)
 
     rows: list[tuple[str, str, str]] = []
     for path in list_canonical_mcp_servers(project_root):
         name = path.stem
         try:
             canonical = parse_canonical_mcp_server(path).definition
-        except McpServerParseError:
-            rows.append((MCP_RUNTIME, name, "parse error"))
+        except McpServerParseError as exc:
+            rows.append(DiffRow(MCP_RUNTIME, name, "parse error", str(exc)))
             continue
         if target_servers is None:
-            rows.append((MCP_RUNTIME, name, "parse error"))
+            rows.append(DiffRow(MCP_RUNTIME, name, "parse error", target_parse_reason))
             continue
         if name not in target_servers:
             rows.append((MCP_RUNTIME, name, "missing target"))

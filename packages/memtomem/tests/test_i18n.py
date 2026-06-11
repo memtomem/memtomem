@@ -1022,6 +1022,7 @@ class TestNoHardcodedStrings:
             "settings.ctx.badge_empty",
             "settings.ctx.badge_error",
             "settings.ctx.status_parse_error",
+            "settings.ctx.parse_error_hint",
             "settings.ctx.refresh",
             "settings.ctx.refresh_tooltip",
             "settings.ctx.refresh_aria",

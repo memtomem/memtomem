@@ -21,6 +21,7 @@ from memtomem.context.agents import (
     CANONICAL_AGENT_ROOT,
     AgentParseError,
     SubAgent,
+    _parse_canonical_agent_text,
     canonical_agent_name,
     diff_agents,
     extract_agents_to_canonical,
@@ -31,6 +32,7 @@ from memtomem.context.agents import (
 )
 from memtomem.context.detector import AGENT_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
+from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -125,8 +127,12 @@ async def list_agents(
     diffs = diff_agents(project_root, scope=target_scope)
 
     by_name: dict[str, list[dict]] = {}
-    for runtime, agent_name, status in diffs:
-        by_name.setdefault(agent_name, []).append({"runtime": runtime, "status": status})
+    for row in diffs:
+        entry: dict[str, object] = {"runtime": row[0], "status": row[2]}
+        reason = sanitize_diff_reason(getattr(row, "reason", None), project_root)
+        if reason:
+            entry["reason"] = reason
+        by_name.setdefault(row[1], []).append(entry)
 
     agents: list[dict[str, object]] = []
     canonical_names: set[str] = set()
@@ -474,9 +480,21 @@ async def diff_agent(
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
 
     canonical_content = None
+    canonical_path = None
+    parse_error_reason = None
     if resolved is not None:
-        agent_path, _layout = resolved
-        canonical_content = agent_path.read_text(encoding="utf-8")
+        agent_path, layout = resolved
+        canonical_path = _safe_rel(agent_path, project_root)
+        # Lenient read — a non-UTF-8 canonical must render a diagnosable
+        # parse-error pane, not crash the endpoint (#1233 contract).
+        canonical_content = agent_path.read_bytes().decode("utf-8", errors="replace")
+        # Re-parse so this pane agrees with the list badge: the raw string
+        # compare below reported a malformed canonical as "out of sync" /
+        # "in sync" while the list said "parse error" (#1229 U7).
+        try:
+            _parse_canonical_agent_text(canonical_content, source=agent_path, layout=layout)
+        except AgentParseError as exc:
+            parse_error_reason = sanitize_diff_reason(str(exc), project_root)
 
     runtimes = []
     for gen_name, gen in AGENT_GENERATORS.items():
@@ -484,6 +502,16 @@ async def diff_agent(
         # for the rationale (#1229). NO_FANOUT tiers return None → skipped.
         target = gen.target_file(project_root, name, scope=target_scope)
         if target is None:
+            continue
+        if parse_error_reason is not None:
+            entry: dict[str, object] = {
+                "runtime": gen_name,
+                "status": "parse error",
+                "reason": parse_error_reason,
+            }
+            if target.is_file():
+                entry["runtime_content"] = target.read_bytes().decode("utf-8", errors="replace")
+            runtimes.append(entry)
             continue
         if canonical_content is None and not target.is_file():
             continue
@@ -494,11 +522,11 @@ async def diff_agent(
                 {
                     "runtime": gen_name,
                     "status": "missing canonical",
-                    "runtime_content": target.read_text(encoding="utf-8"),
+                    "runtime_content": target.read_bytes().decode("utf-8", errors="replace"),
                 }
             )
         else:
-            runtime_content = target.read_text(encoding="utf-8")
+            runtime_content = target.read_bytes().decode("utf-8", errors="replace")
             runtimes.append(
                 {
                     "runtime": gen_name,
@@ -507,7 +535,12 @@ async def diff_agent(
                 }
             )
 
-    return {"name": name, "canonical_content": canonical_content, "runtimes": runtimes}
+    return {
+        "name": name,
+        "canonical_content": canonical_content,
+        "canonical_path": canonical_path,
+        "runtimes": runtimes,
+    }
 
 
 # ── Sync ─────────────────────────────────────────────────────────────────

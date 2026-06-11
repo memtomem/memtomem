@@ -235,9 +235,14 @@ def _print_skills_diff(root: Path, *, scope: TargetScope = "project_shared") -> 
     if not rows:
         click.echo(f"  (no skills to compare in {scope})")
         return
-    for runtime, name, status in rows:
+    for row in rows:
+        runtime, name, status = row
         color = "green" if status == "in sync" else "yellow"
-        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}", fg=color)
+        # Diagnostic reason (parse error / invalid name rows, #1229 U7) —
+        # raw engine text is fine for the local operator.
+        reason = getattr(row, "reason", None)
+        suffix = f"  — {reason}" if reason else ""
+        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}{suffix}", fg=color)
 
 
 # ── Sub-agent sub-handlers (Phase 2) ─────────────────────────────────
@@ -338,9 +343,14 @@ def _print_agents_diff(root: Path, *, scope: TargetScope = "project_shared") -> 
     if not rows:
         click.echo(f"  (no sub-agents to compare in {scope})")
         return
-    for runtime, name, status in rows:
+    for row in rows:
+        runtime, name, status = row
         color = "green" if status == "in sync" else "yellow"
-        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}", fg=color)
+        # Diagnostic reason (parse error / invalid name rows, #1229 U7) —
+        # raw engine text is fine for the local operator.
+        reason = getattr(row, "reason", None)
+        suffix = f"  — {reason}" if reason else ""
+        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}{suffix}", fg=color)
 
 
 # ── Slash-command sub-handlers (Phase 3) ─────────────────────────────
@@ -444,9 +454,14 @@ def _print_commands_diff(root: Path, *, scope: TargetScope = "project_shared") -
     if not rows:
         click.echo(f"  (no commands to compare in {scope})")
         return
-    for runtime, name, status in rows:
+    for row in rows:
+        runtime, name, status = row
         color = "green" if status == "in sync" else "yellow"
-        click.secho(f"  {runtime:17s}  {name}  [{status}]  scope={scope}", fg=color)
+        # Diagnostic reason (parse error / invalid name rows, #1229 U7) —
+        # raw engine text is fine for the local operator.
+        reason = getattr(row, "reason", None)
+        suffix = f"  — {reason}" if reason else ""
+        click.secho(f"  {runtime:17s}  {name}  [{status}]  scope={scope}{suffix}", fg=color)
 
 
 # ── Settings sub-handlers (Phase D) ─────────────────────────────────

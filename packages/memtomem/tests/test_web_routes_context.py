@@ -1564,6 +1564,42 @@ class TestAgentCRUD:
 
 class TestDiffAgent:
     @pytest.mark.anyio
+    async def test_malformed_canonical_reports_parse_error_with_reason(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """U7 (#1229): the per-name diff used to raw-compare a malformed
+        canonical into 'out of sync'/'in sync' while the list badge said
+        'parse error' — it now re-parses and emits the parse-error rows with
+        a sanitized reason and the canonical_path for the fix-it hint."""
+        _make_agent(tmp_path, "broken", "no frontmatter at all\n")
+        rt_dir = tmp_path / ".claude" / "agents"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / "broken.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+
+        r = await client.get("/api/context/agents/broken/diff")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["canonical_path"] == ".memtomem/agents/broken.md"
+        claude_rt = [rt for rt in data["runtimes"] if rt["runtime"] == "claude_agents"][0]
+        assert claude_rt["status"] == "parse error"
+        assert "frontmatter" in claude_rt["reason"]
+        # Sanitized: the absolute tmp_path root never crosses the wire.
+        assert str(tmp_path) not in claude_rt["reason"]
+        # Runtime content still previews for the side-by-side view.
+        assert "runtime_content" in claude_rt
+
+    @pytest.mark.anyio
+    async def test_healthy_canonical_payload_has_canonical_path_and_no_reason(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        _make_agent(tmp_path, "fine")
+        r = await client.get("/api/context/agents/fine/diff")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["canonical_path"] == ".memtomem/agents/fine.md"
+        assert all("reason" not in rt for rt in data["runtimes"])
+
+    @pytest.mark.anyio
     async def test_diff_user_tier_resolves_user_runtime(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -1855,3 +1891,34 @@ class TestImportSurfaceAttribution:
         r = await client.post("/api/context/skills/solo/import", json={})
         assert r.status_code == 200
         assert set(surfaces) == {"web_context_skills_import"}
+
+
+# ---------------------------------------------------------------------------
+# U7 (#1229) — list endpoints carry sanitized diagnostic reasons
+# ---------------------------------------------------------------------------
+
+
+class TestListDiagnosticReasons:
+    @pytest.mark.anyio
+    async def test_parse_error_entry_carries_sanitized_reason(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        _make_agent(tmp_path, "broken", "no frontmatter at all\n")
+        r = await client.get("/api/context/agents")
+        assert r.status_code == 200
+        item = [a for a in r.json()["agents"] if a["name"] == "broken"][0]
+        entries = [e for e in item["runtimes"] if e["status"] == "parse error"]
+        assert entries
+        for e in entries:
+            assert "frontmatter" in e["reason"]
+            assert "broken.md" in e["reason"]
+            # Embedded absolute path stripped at the route boundary — the
+            # engine reason text embeds str(source_path).
+            assert str(tmp_path) not in e["reason"]
+
+    @pytest.mark.anyio
+    async def test_healthy_entries_have_no_reason_key(self, client: AsyncClient, tmp_path: Path):
+        _make_agent(tmp_path, "fine")
+        r = await client.get("/api/context/agents")
+        item = [a for a in r.json()["agents"] if a["name"] == "fine"][0]
+        assert all("reason" not in e for e in item["runtimes"])

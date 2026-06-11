@@ -46,7 +46,11 @@ from memtomem.context._names import (
     is_internal_artifact_dir,
     validate_name,
 )
-from memtomem.context._runtime_targets import runtime_artifact_listing, runtime_fanout_root
+from memtomem.context._runtime_targets import (
+    DiffRow,
+    runtime_artifact_listing,
+    runtime_fanout_root,
+)
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -1030,7 +1034,7 @@ def diff_skills(
     # for SYNC (generate must never fan out an invalid dir), which made them
     # fully invisible — no diff row anywhere (#1229). Enumerate them once
     # here for the dedicated "invalid name" status.
-    invalid_canonical_names: list[str] = []
+    invalid_canonical_names: list[tuple[str, str]] = []
     if canonical_root.is_dir():
         for entry in sorted(canonical_root.iterdir()):
             if not entry.is_dir() or not (entry / SKILL_MANIFEST).is_file():
@@ -1039,8 +1043,8 @@ def diff_skills(
                 continue
             try:
                 validate_name(entry.name, kind="skill name")
-            except InvalidNameError:
-                invalid_canonical_names.append(entry.name)
+            except InvalidNameError as exc:
+                invalid_canonical_names.append((entry.name, str(exc)))
 
     for gen_name, gen in SKILL_GENERATORS.items():
         # ADR-0011 PR-E3 cleanup item #1: query the table directly via
@@ -1057,8 +1061,10 @@ def diff_skills(
         # that failed validation plus the canonical-side rejects above
         # (#1229; deduplicated when the same invalid name exists on both
         # sides).
-        for raw_name in sorted({*invalid_runtime_names, *invalid_canonical_names}):
-            results.append((gen_name, raw_name, "invalid name"))
+        invalid_by_name = dict(invalid_canonical_names)
+        invalid_by_name.update(dict(invalid_runtime_names))
+        for raw_name in sorted(invalid_by_name):
+            results.append(DiffRow(gen_name, raw_name, "invalid name", invalid_by_name[raw_name]))
 
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:

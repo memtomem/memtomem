@@ -211,7 +211,9 @@ def test_runtime_artifact_listing_returns_invalid_names(tmp_path: Path) -> None:
         "agents", "claude", tmp_path, "project_shared", file_suffix=".md"
     )
     assert names == {"ok"}
-    assert invalid == ["-bad", "bad name"]
+    # (raw_name, reason) pairs — the reason rides the diff row (#1229 U7).
+    assert [n for n, _ in invalid] == ["-bad", "bad name"]
+    assert all("invalid agent name" in r for _, r in invalid)
 
     assert runtime_artifact_names(
         "agents", "claude", tmp_path, "project_shared", file_suffix=".md"

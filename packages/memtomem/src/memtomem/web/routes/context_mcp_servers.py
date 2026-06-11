@@ -28,6 +28,7 @@ from memtomem.context.mcp_servers import (
     scan_mcp_server_text,
 )
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_writable_scope_root,
@@ -83,10 +84,13 @@ async def list_mcp_servers(
             "canonical_root": CANONICAL_MCP_SERVER_ROOT,
             "scanned_dirs": [".mcp.json"],
         }
-    diff_by_name = {
-        name: [{"runtime": runtime, "status": status}]
-        for runtime, name, status in diff_mcp_servers(project_root)
-    }
+    diff_by_name: dict[str, list[dict]] = {}
+    for row in diff_mcp_servers(project_root):
+        entry: dict[str, object] = {"runtime": row[0], "status": row[2]}
+        reason = sanitize_diff_reason(getattr(row, "reason", None), project_root)
+        if reason:
+            entry["reason"] = reason
+        diff_by_name[row[1]] = [entry]
     servers = []
     for path in list_canonical_mcp_servers(project_root):
         name = path.stem
@@ -330,6 +334,7 @@ async def diff_mcp_server(
         return {
             "name": name,
             "canonical_content": None,
+            "canonical_path": None,
             "runtimes": [
                 {"runtime": MCP_RUNTIME, "status": "missing canonical", "runtime_content": None}
             ],
@@ -337,12 +342,19 @@ async def diff_mcp_server(
     path = canonical_mcp_server_path(project_root, name)
     canonical_content = None
     canonical_definition = None
+    reason: str | None = None
     if path.is_file():
-        canonical_content = path.read_text(encoding="utf-8")
+        # Lenient read — a non-UTF-8 canonical must render a diagnosable
+        # parse-error pane, not crash the endpoint.
+        canonical_content = path.read_bytes().decode("utf-8", errors="replace")
         try:
-            canonical_definition = parse_canonical_mcp_server(path).definition
-        except McpServerParseError:
-            pass
+            canonical_definition = parse_mcp_server_text(
+                canonical_content, name=name, source=path
+            ).definition
+        except McpServerParseError as exc:
+            # Canonical-side parse failure — the reason names the canonical
+            # file (#1229 U7; previously discarded).
+            reason = sanitize_diff_reason(str(exc), project_root)
 
     status = "missing target"
     runtime_content = None
@@ -353,26 +365,31 @@ async def diff_mcp_server(
         try:
             import json
 
-            config = json.loads(mcp_path.read_text(encoding="utf-8"))
+            config = json.loads(mcp_path.read_bytes().decode("utf-8", errors="replace"))
             target_definition = (config.get("mcpServers") or {}).get(name)
             if target_definition is None:
                 status = "missing target"
             else:
                 runtime_content = format_mcp_server_definition(target_definition)
                 status = "in sync" if target_definition == canonical_definition else "out of sync"
-        except Exception:
+        except Exception as exc:
             status = "parse error"
+            # Target-side failure: the canonical is healthy — the reason must
+            # point at .mcp.json so the user doesn't chase the canonical file.
+            reason = sanitize_diff_reason(f"invalid JSON in .mcp.json: {exc}", project_root)
 
+    runtime_entry: dict[str, object] = {
+        "runtime": MCP_RUNTIME,
+        "status": status,
+        "runtime_content": runtime_content,
+    }
+    if reason:
+        runtime_entry["reason"] = reason
     return {
         "name": name,
         "canonical_content": canonical_content,
-        "runtimes": [
-            {
-                "runtime": MCP_RUNTIME,
-                "status": status,
-                "runtime_content": runtime_content,
-            }
-        ],
+        "canonical_path": _safe_rel(path, project_root),
+        "runtimes": [runtime_entry],
     }
 
 

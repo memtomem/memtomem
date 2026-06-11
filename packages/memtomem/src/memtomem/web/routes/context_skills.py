@@ -28,6 +28,7 @@ from memtomem.context.skills import (
 )
 from memtomem.config import TargetScope
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes.context_gateway import sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -117,8 +118,12 @@ async def list_skills(
 
     # Group diff tuples by skill name
     by_name: dict[str, list[dict]] = {}
-    for runtime, skill_name, status in diffs:
-        by_name.setdefault(skill_name, []).append({"runtime": runtime, "status": status})
+    for row in diffs:
+        entry: dict[str, object] = {"runtime": row[0], "status": row[2]}
+        reason = sanitize_diff_reason(getattr(row, "reason", None), project_root)
+        if reason:
+            entry["reason"] = reason
+        by_name.setdefault(row[1], []).append(entry)
 
     skills: list[dict[str, object]] = []
     for skill_dir in canonicals:
