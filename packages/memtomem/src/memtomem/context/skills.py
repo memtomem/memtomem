@@ -46,7 +46,7 @@ from memtomem.context._names import (
     is_internal_artifact_dir,
     validate_name,
 )
-from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context._runtime_targets import runtime_artifact_listing, runtime_fanout_root
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -1016,6 +1016,9 @@ def diff_skills(
     * ``"out of sync"`` — both sides exist but differ.
     * ``"missing target"`` — canonical has it, runtime does not.
     * ``"missing canonical"`` — runtime has it, canonical does not.
+    * ``"invalid name"`` — a skill-shaped directory exists (either side)
+      whose name fails :func:`memtomem.context._names.validate_name`;
+      sync/extract will never touch it.
 
     ADR-0011 PR-E3: ``scope`` selects both the canonical root and the
     runtime fan-out roots (default ``project_shared``).
@@ -1023,6 +1026,21 @@ def diff_skills(
     results: list[tuple[str, str, str]] = []
     canonical_root = canonical_skills_root(project_root, scope=scope)
     canonical_names = {p.name for p in list_canonical_skills(project_root, scope=scope)}
+    # Canonical-side invalid names: list_canonical_skills filters them out
+    # for SYNC (generate must never fan out an invalid dir), which made them
+    # fully invisible — no diff row anywhere (#1229). Enumerate them once
+    # here for the dedicated "invalid name" status.
+    invalid_canonical_names: list[str] = []
+    if canonical_root.is_dir():
+        for entry in sorted(canonical_root.iterdir()):
+            if not entry.is_dir() or not (entry / SKILL_MANIFEST).is_file():
+                continue
+            if is_internal_artifact_dir(entry.name):
+                continue
+            try:
+                validate_name(entry.name, kind="skill name")
+            except InvalidNameError:
+                invalid_canonical_names.append(entry.name)
 
     for gen_name, gen in SKILL_GENERATORS.items():
         # ADR-0011 PR-E3 cleanup item #1: query the table directly via
@@ -1032,9 +1050,15 @@ def diff_skills(
         runtime = gen_name.split("_", 1)[0]
         if runtime_fanout_root("skills", runtime, scope, project_root) is None:
             continue
-        runtime_names = runtime_artifact_names(
+        runtime_names, invalid_runtime_names = runtime_artifact_listing(
             "skills", runtime, project_root, scope, dir_manifest=SKILL_MANIFEST
         )
+        # One "invalid name" row per (runtime, name) — runtime-side entries
+        # that failed validation plus the canonical-side rejects above
+        # (#1229; deduplicated when the same invalid name exists on both
+        # sides).
+        for raw_name in sorted({*invalid_runtime_names, *invalid_canonical_names}):
+            results.append((gen_name, raw_name, "invalid name"))
 
         for name in sorted(canonical_names | runtime_names):
             if name in canonical_names and name not in runtime_names:

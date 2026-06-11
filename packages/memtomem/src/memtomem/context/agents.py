@@ -46,7 +46,11 @@ from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context._runtime_targets import (
+    runtime_artifact_listing,
+    runtime_artifact_names,
+    runtime_fanout_root,
+)
 from memtomem.context._sync_atomic import (
     ON_DROP_LEVELS,
     AtomicSyncAdapter,
@@ -990,7 +994,7 @@ def diff_agents(
 
     Returns a list of ``(runtime, agent_name, status)`` where status is one of
     ``"in sync"``, ``"out of sync"``, ``"missing target"``, ``"missing canonical"``,
-    ``"parse error"``.
+    ``"parse error"``, ``"invalid name"``.
 
     ADR-0011 PR-E3: ``scope`` selects both the canonical source and the
     runtime fan-out roots. Default ``project_shared`` preserves
@@ -1028,10 +1032,26 @@ def diff_agents(
         if runtime_fanout_root("agents", runtime, scope, project_root) is None:
             continue
         suffix = _AGENT_RUNTIME_SUFFIX.get(runtime, ".md")
-        runtime_names = runtime_artifact_names(
+        runtime_names, invalid_runtime_names = runtime_artifact_listing(
             "agents", runtime, project_root, scope, file_suffix=suffix
         )
+        # Invalid-named runtime files used to vanish from diff entirely
+        # (log-only) — the dashboard read fully in-sync while an unmanaged
+        # runtime artifact existed (#1229). Surface them as a dedicated row;
+        # a canonical "parse error" row of the same fallback name wins
+        # (only possible when the canonical stem itself is invalid).
+        for raw_name in invalid_runtime_names:
+            if raw_name not in canonical_names:
+                results.append((gen_name, raw_name, "invalid name"))
         for name in sorted(canonical_names | runtime_names):
+            # Unparseable canonical (including an invalid *effective* name —
+            # frontmatter name, or stem fallback) checked BEFORE the
+            # missing-target branch: "missing target" implied sync would
+            # create the runtime file, which it never can — the row showed
+            # a permanent drift no sync clears (#1229).
+            if name in canonical_names and canonical_index[name] is None:
+                results.append((gen_name, name, "parse error"))
+                continue
             if name in canonical_names and name not in runtime_names:
                 results.append((gen_name, name, "missing target"))
                 continue
@@ -1040,9 +1060,7 @@ def diff_agents(
                 continue
 
             agent = canonical_index[name]
-            if agent is None:
-                results.append((gen_name, name, "parse error"))
-                continue
+            assert agent is not None  # consumed by the parse-error branch above
             # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
             # above guarantees this runtime+scope has a fan-out root, so
             # ``gen.target_file`` cannot return ``None`` for any name.

@@ -44,7 +44,7 @@ from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import runtime_artifact_names, runtime_fanout_root
+from memtomem.context._runtime_targets import runtime_artifact_listing, runtime_fanout_root
 from memtomem.context._sync_atomic import (
     AtomicSyncAdapter,
     AtomicSyncResult,
@@ -772,7 +772,7 @@ def diff_commands(
 
     Returns ``(runtime, command_name, status)`` where status is one of
     ``"in sync"``, ``"out of sync"``, ``"missing target"``,
-    ``"missing canonical"``, or ``"parse error"``.
+    ``"missing canonical"``, ``"parse error"``, or ``"invalid name"``.
 
     ADR-0011 PR-E3: ``scope`` selects both the canonical source and the
     runtime fan-out roots. Default ``project_shared`` preserves
@@ -803,11 +803,24 @@ def diff_commands(
         if runtime_fanout_root("commands", runtime, scope, project_root) is None:
             continue
         suffix = _COMMAND_RUNTIME_SUFFIX.get(runtime, ".md")
-        runtime_names = runtime_artifact_names(
+        runtime_names, invalid_runtime_names = runtime_artifact_listing(
             "commands", runtime, project_root, scope, file_suffix=suffix
         )
+        # Invalid-named runtime files used to vanish from diff entirely
+        # (log-only) — surface them as a dedicated row; a canonical "parse
+        # error" row of the same fallback name wins (#1229, mirrors
+        # diff_agents).
+        for raw_name in invalid_runtime_names:
+            if raw_name not in canonical_names:
+                results.append((gen_name, raw_name, "invalid name"))
 
         for name in sorted(canonical_names | runtime_names):
+            # Unparseable canonical checked BEFORE missing-target — the
+            # "missing target" label implied sync would create the file,
+            # which it never can (#1229, mirrors diff_agents).
+            if name in canonical_names and canonical_index[name] is None:
+                results.append((gen_name, name, "parse error"))
+                continue
             if name in canonical_names and name not in runtime_names:
                 results.append((gen_name, name, "missing target"))
                 continue
@@ -816,9 +829,7 @@ def diff_commands(
                 continue
 
             cmd = canonical_index[name]
-            if cmd is None:
-                results.append((gen_name, name, "parse error"))
-                continue
+            assert cmd is not None  # consumed by the parse-error branch above
             # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
             # above guarantees this runtime+scope has a fan-out root, so
             # ``gen.target_file`` cannot return ``None`` for any name.

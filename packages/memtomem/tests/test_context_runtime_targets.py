@@ -14,6 +14,7 @@ import pytest
 from memtomem.context._runtime_targets import (
     KNOWN_RUNTIMES,
     RUNTIME_FANOUT_TABLE,
+    runtime_artifact_listing,
     runtime_artifact_names,
     runtime_fanout_root,
 )
@@ -195,3 +196,23 @@ def test_runtime_artifact_names_skips_internal_staging_dirs(
     assert not any(
         record.message == "Skipping invalid runtime artifact name" for record in caplog.records
     )
+
+
+def test_runtime_artifact_listing_returns_invalid_names(tmp_path: Path) -> None:
+    """#1229: the listing variant exposes invalid raw names so diff can emit
+    a dedicated 'invalid name' row; the names-only wrapper stays valid-only."""
+    root = tmp_path / ".claude" / "agents"
+    root.mkdir(parents=True)
+    (root / "ok.md").write_text("", encoding="utf-8")
+    (root / "-bad.md").write_text("", encoding="utf-8")
+    (root / "bad name.md").write_text("", encoding="utf-8")
+
+    names, invalid = runtime_artifact_listing(
+        "agents", "claude", tmp_path, "project_shared", file_suffix=".md"
+    )
+    assert names == {"ok"}
+    assert invalid == ["-bad", "bad name"]
+
+    assert runtime_artifact_names(
+        "agents", "claude", tmp_path, "project_shared", file_suffix=".md"
+    ) == {"ok"}
