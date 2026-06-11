@@ -91,6 +91,50 @@ function renderRuntimeBadges(runtimes) {
     }).join('') + '</div>';
 }
 
+// U4 (#1229): pre-confirm sync impact. Counts are per (runtime, name) FILE
+// copies — the same semantics as the overview tile counts. 'missing
+// canonical' / 'parse error' / 'invalid name' are NOT sync writes (sync
+// never deletes or pulls), so they don't contribute.
+function _ctxImpactRuntimeLabel(runtime) {
+  // Generator names are ``<vendor>_<kind>`` (claude_skills, gemini_commands…)
+  // except the MCP fan-out's ``project_mcp``, whose target is .mcp.json.
+  if (runtime === 'project_mcp') return '.mcp.json';
+  return _ctxRuntimeLabel(runtime.split('_', 1)[0]);
+}
+
+function _ctxSyncImpact(items) {
+  const impact = { create: 0, overwrite: 0, runtimes: new Set() };
+  for (const item of items || []) {
+    for (const rt of item.runtimes || []) {
+      if (rt.status === 'missing target') {
+        impact.create += 1;
+        impact.runtimes.add(_ctxImpactRuntimeLabel(rt.runtime));
+      } else if (rt.status === 'out of sync') {
+        impact.overwrite += 1;
+        impact.runtimes.add(_ctxImpactRuntimeLabel(rt.runtime));
+      }
+    }
+  }
+  return impact;
+}
+
+function _ctxSyncImpactMessage(impact) {
+  if (impact.create === 0 && impact.overwrite === 0) {
+    return t('settings.ctx.confirm_sync_no_changes');
+  }
+  return t('settings.ctx.confirm_sync_impact', {
+    create: impact.create,
+    overwrite: impact.overwrite,
+    runtimes: [...impact.runtimes].sort().join(', '),
+  });
+}
+
+function _ctxSyncOverwriteWarning(impact) {
+  return impact && impact.overwrite > 0
+    ? t('settings.ctx.confirm_sync_overwrite_warning', { overwrite: impact.overwrite })
+    : '';
+}
+
 function renderDroppedChips(fields) {
   if (!fields || !fields.length) return '';
   return fields.map(f => `<span class="ctx-dropped-chip">${escapeHtml(t('settings.ctx.dropped_fields'))}: ${escapeHtml(f)}</span>`).join('');
@@ -1475,23 +1519,12 @@ async function loadCtxOverview() {
 }
 
 async function _ctxSyncProjectScope(scopeId, btn) {
-  const ok = await showConfirm({
-    title: t('settings.ctx.sync_all'),
-    // rank-10: name the specific project this portal card syncs (the raw
-    // ``scopeId`` resolves to its label; '' === Server CWD).
-    message: t('settings.ctx.confirm_sync_all', {
-      dest: _ctxScopeDisplayLabelById(scopeId),
-    }),
-    confirmText: t('settings.ctx.sync'),
-    danger: false,
-  });
-  if (!ok) return;
-
-  btnLoading(btn, true);
-  showToast(t('settings.ctx.sync_started') || 'Syncing project...', 'info');
-
-  // Pin BOTH scope and tier once, up front, then pass them frozen to every
-  // phase. ``_ctxWithTargetScope`` otherwise re-reads the mutable
+  // Pin BOTH scope and tier once, BEFORE the confirm (U4 #1229 moved this
+  // above the dialog so the impact preview shares the pin). The card's scope
+  // is usually NOT the active scope, so ``_ctxOverviewCache`` does not
+  // apply — fetch the overview for the pinned (project, tier) best-effort;
+  // overview has no per-runtime split, so the portal confirm is counts-only.
+  // ``_ctxWithTargetScope`` otherwise re-reads the mutable
   // ``_ctxTargetScope`` global and re-resolves the id against the live
   // ``_ctxProjectsCache`` on every call, so a mid-run tier-filter flip OR a
   // projects-cache refresh (marking the pinned scope missing) could send later
@@ -1506,6 +1539,51 @@ async function _ctxSyncProjectScope(scopeId, btn) {
     scopeResolved: true,
     targetScope: pinnedTier,
   };
+
+  btnLoading(btn, true);
+  let create = 0;
+  let overwrite = 0;
+  let haveImpact = false;
+  try {
+    const pr = await fetch(_ctxWithTargetScope('/api/context/overview', pinnedScopeOpts));
+    if (pr.ok) {
+      const data = await pr.json();
+      for (const key of ['skills', 'commands', 'agents', 'mcp_servers', 'settings']) {
+        const d = data?.[key];
+        if (!d) continue;
+        create += d.missing_target || 0;
+        overwrite += d.out_of_sync || 0;
+      }
+      haveImpact = true;
+    }
+  } catch {
+    /* best-effort impact preview */
+  } finally {
+    btnLoading(btn, false);
+  }
+  let message = t('settings.ctx.confirm_sync_all', {
+    dest: _ctxScopeDisplayLabelById(scopeId),
+  });
+  if (haveImpact) {
+    message += ' ' + (create === 0 && overwrite === 0
+      ? t('settings.ctx.confirm_sync_no_changes')
+      : t('settings.ctx.confirm_sync_counts', { create, overwrite }));
+  }
+  const ok = await showConfirm({
+    title: t('settings.ctx.sync_all'),
+    // rank-10: name the specific project this portal card syncs (the raw
+    // ``scopeId`` resolves to its label; '' === Server CWD).
+    message,
+    warningText: overwrite > 0
+      ? t('settings.ctx.confirm_sync_overwrite_warning', { overwrite })
+      : '',
+    confirmText: t('settings.ctx.sync'),
+    danger: false,
+  });
+  if (!ok) return;
+
+  btnLoading(btn, true);
+  showToast(t('settings.ctx.sync_started') || 'Syncing project...', 'info');
 
   const succeeded = [];
   let failed = null;
@@ -1983,13 +2061,71 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     showToast(t(msgKey), 'info');
     return;
   }
+  // U4 (#1229): pin BOTH dimensions BEFORE the confirm (previously
+  // snapshotted after it) so the impact preview, the dialog copy, and every
+  // phase URL agree on one (project, tier).
+  const syncAllScopeId = _ctxEffectiveScopeId(_ctxActiveScopeId);
+  const syncAllTier = _ctxTargetScope;
+  const pinnedScopeOpts = {
+    scopeId: syncAllScopeId,
+    scopeResolved: true,
+    targetScope: syncAllTier,
+  };
+  // Best-effort impact preview: refetch the four artifact lists AND the
+  // overview (for the settings tile counts — settings are multi-runtime
+  // targets with no per-runtime list payload, so they get their own
+  // segment) under the pinned scope. Any failure → count-free fallback copy.
+  btnLoading(btn, true);
+  let impact = null;
+  let settingsImpact = null;
+  try {
+    const types = ['skills', 'commands', 'agents', 'mcp-servers'];
+    const responses = await Promise.all([
+      ...types.map((typ) => fetch(_ctxWithTargetScope(`/api/context/${typ}`, pinnedScopeOpts))),
+      fetch(_ctxWithTargetScope('/api/context/overview', pinnedScopeOpts)),
+    ]);
+    if (responses.every((r) => r.ok)) {
+      const bodies = await Promise.all(responses.map((r) => r.json()));
+      const allItems = types.flatMap((typ, i) => bodies[i]?.[typ] || []);
+      impact = _ctxSyncImpact(allItems);
+      const settings = bodies[types.length]?.settings;
+      if (settings) {
+        settingsImpact = {
+          create: settings.missing_target || 0,
+          overwrite: settings.out_of_sync || 0,
+        };
+      }
+    }
+  } catch {
+    /* best-effort impact preview */
+  } finally {
+    btnLoading(btn, false);
+  }
+  let message = t('settings.ctx.confirm_sync_all', {
+    dest: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
+  });
+  let warningText = '';
+  if (impact) {
+    message += ' ' + _ctxSyncImpactMessage(impact);
+    if (settingsImpact && (settingsImpact.create > 0 || settingsImpact.overwrite > 0)) {
+      message += ' ' + t('settings.ctx.confirm_sync_settings_impact', {
+        create: settingsImpact.create,
+        overwrite: settingsImpact.overwrite,
+      });
+    }
+    const totalOverwrite = impact.overwrite + (settingsImpact?.overwrite || 0);
+    if (totalOverwrite > 0) {
+      warningText = t('settings.ctx.confirm_sync_overwrite_warning', {
+        overwrite: totalOverwrite,
+      });
+    }
+  }
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
     // rank-10: name the active project being fanned out so the user sees
     // WHERE the artifacts come from before committing.
-    message: t('settings.ctx.confirm_sync_all', {
-      dest: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
-    }),
+    message,
+    warningText,
     confirmText: t('settings.ctx.sync'),
     danger: false,
   });
@@ -2033,19 +2169,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   };
   _renderCtxSyncStatus(phaseStates);
   try {
-    // Snapshot BOTH dimensions once, right after confirm and before the first
-    // await, then pass them fixed to every phase URL. ``_ctxWithTargetScope``
-    // otherwise re-reads the mutable ``_ctxTargetScope`` global (tier) and
-    // re-resolves the scope against the live ``_ctxProjectsCache`` on each
-    // call, so a mid-run tier flip OR a cache refresh could send later phases
-    // to a different (project, tier) — violating "one (project, tier) per
-    // invocation" (ADR-0016 §5 / ADR-0021 §C Major-1). The scope is resolved to
-    // its effective value here (Server-CWD collapses to '') and passed with
-    // ``scopeResolved`` so it is emitted verbatim. Pinning, not bailing: the
-    // run completes on the (project, tier) the confirm dialog was shown for;
-    // any flip applies to the next run.
-    const syncAllScopeId = _ctxEffectiveScopeId(_ctxActiveScopeId);
-    const syncAllTier = _ctxTargetScope;
+    // BOTH dimensions were snapshotted BEFORE the confirm (U4) — the impact
+    // preview, the dialog copy, and every phase URL share one (project,
+    // tier); a mid-run tier flip OR a cache refresh applies to the next run
+    // (ADR-0016 §5 / ADR-0021 §C Major-1).
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
@@ -4222,15 +4349,38 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       showToast(message, 'info');
       return;
     }
+    // U4 (#1229): pin scope + tier ONCE at click time (the Import preview
+    // pattern) and reuse the snapshot for the impact fetch AND the sync
+    // POST, so the counts and the write can't disagree after a mid-flight
+    // project/tier switch. The impact preview is best-effort — any failure
+    // falls back to the count-only confirm; Sync is never blocked by it.
+    const pinnedScopeOpts = {
+      scopeId: _ctxEffectiveScopeId(_ctxActiveScopeId),
+      scopeResolved: true,
+      targetScope: _ctxTargetScope,
+    };
+    btnLoading(btn, true);
+    let impact = null;
+    try {
+      const pr = await fetch(_ctxWithTargetScope(`/api/context/${type}`, pinnedScopeOpts));
+      if (pr.ok) {
+        const data = await pr.json();
+        if (Array.isArray(data?.[type])) impact = _ctxSyncImpact(data[type]);
+      }
+    } catch {
+      /* best-effort impact preview */
+    } finally {
+      btnLoading(btn, false);
+    }
+    let message = t('settings.ctx.confirm_sync', {
+      type: _ctxTypeName(type),
+      count: section?.dataset.canonicalCount || '0',
+    });
+    if (impact) message += ' ' + _ctxSyncImpactMessage(impact);
     const ok = await showConfirm({
       title: t('settings.ctx.sync'),
-      // rank-10: name the artifact count so the user sees WHAT fans out
-      // before committing. ``canonicalCount`` is already in the section
-      // dataset (the '0' case bailed to a toast above), so no fetch needed.
-      message: t('settings.ctx.confirm_sync', {
-        type: _ctxTypeName(type),
-        count: section?.dataset.canonicalCount || '0',
-      }),
+      message,
+      warningText: _ctxSyncOverwriteWarning(impact),
       confirmText: t('settings.ctx.sync'),
       danger: false,
     });
@@ -4242,7 +4392,7 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
       const r = await fetch(
-        _ctxWithTargetScope(`/api/context/${type}/sync`),
+        _ctxWithTargetScope(`/api/context/${type}/sync`, pinnedScopeOpts),
         { method: 'POST', headers },
       );
       if (!r.ok) {

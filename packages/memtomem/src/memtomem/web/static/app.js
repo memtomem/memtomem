@@ -1157,6 +1157,9 @@ function showToast(message, type = 'success', options = {}) {
 function showConfirm({
   title,
   message = '',
+  // Optional second line styled as a warning (e.g. "N files will be
+  // overwritten") — hidden when absent so existing callers are unaffected.
+  warningText = '',
   confirmText = t('common.confirm'),
   extraOption = null,
   // ``danger`` (default true) styles the OK button red. The shared dialog is
@@ -1169,6 +1172,9 @@ function showConfirm({
     const modal = qs('confirm-modal');
     qs('confirm-title').textContent = title;
     qs('confirm-message').textContent = message;
+    const warningEl = qs('confirm-warning');
+    warningEl.textContent = warningText || '';
+    warningEl.hidden = !warningText;
     const okBtn = qs('confirm-ok-btn');
     okBtn.textContent = confirmText;
     okBtn.className = danger ? 'btn-danger' : 'btn-primary';
@@ -1212,6 +1218,9 @@ function showConfirm({
       // doesn't inherit the previous label / checked state.
       extraRow.hidden = true;
       extraCheckbox.checked = false;
+      // Same discipline for the warning line.
+      warningEl.textContent = '';
+      warningEl.hidden = true;
       modal.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey, true);
       if (extraOption) {

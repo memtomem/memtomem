@@ -77,9 +77,63 @@ def test_section_sync_confirm_names_artifact_count(page, mm_web_url: str) -> Non
     page.locator("#settings-ctx-skills .ctx-sync-btn[data-type='skills']").click()
     page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
     message = page.locator("#confirm-message").text_content() or ""
-    # EN: "Fan out 2 skills to all runtimes?" — the count is the rank-10 win.
+    # EN: "Push 2 skills to the runtimes configured for this tier?" — the
+    # count is the rank-10 win.
     assert "2 skills" in message, f"sync confirm should name the count, got {message!r}"
     page.locator("#confirm-cancel-btn").click()
+
+
+def test_section_sync_confirm_shows_impact_and_overwrite_warning(page, mm_web_url: str) -> None:
+    """U4 (#1229): the sync confirm folds per-item runtime statuses into a
+    create/overwrite impact sentence, and out-of-sync overwrites surface in
+    the styled #confirm-warning line (hidden when nothing is overwritten)."""
+    install_default_stubs(page)
+    page.route(
+        "**/api/context/skills**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "skills": [
+                        {
+                            "name": "alpha",
+                            "canonical_path": "/srv/cwd/.memtomem/skills/alpha",
+                            "runtimes": [
+                                {"runtime": "claude_skills", "status": "missing target"},
+                                {"runtime": "codex_skills", "status": "out of sync"},
+                            ],
+                        },
+                        {
+                            "name": "beta",
+                            "canonical_path": "/srv/cwd/.memtomem/skills/beta",
+                            "runtimes": [
+                                {"runtime": "claude_skills", "status": "in sync"},
+                            ],
+                        },
+                    ],
+                    "scanned_dirs": ["/srv/cwd/.claude/skills/"],
+                }
+            ),
+        ),
+    )
+    page.goto(mm_web_url)
+    _open_skills_list(page)
+
+    page.locator("#settings-ctx-skills .ctx-sync-btn[data-type='skills']").click()
+    page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
+    message = page.locator("#confirm-message").text_content() or ""
+    assert "create 1" in message, f"impact sentence missing create count: {message!r}"
+    assert "overwrite 1" in message, f"impact sentence missing overwrite count: {message!r}"
+    assert "claude, codex" in message, f"impact sentence missing runtimes: {message!r}"
+    warning = page.locator("#confirm-warning")
+    assert warning.is_visible(), "overwrite warning line must be visible"
+    assert "1" in (warning.text_content() or "")
+    page.locator("#confirm-cancel-btn").click()
+    # Symmetric negative: the warning resets when the dialog closes (cleanup
+    # discipline shared with the extra-option row).
+    page.wait_for_selector("#confirm-modal", state="hidden", timeout=2_000)
+    assert page.locator("#confirm-warning").is_hidden()
 
 
 def test_import_confirm_names_destination_and_dry_run_preview(page, mm_web_url: str) -> None:

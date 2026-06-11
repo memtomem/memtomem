@@ -2329,6 +2329,9 @@ select:focus-visible {
 /* ── A3: Confirm Dialog ── */
 .confirm-dialog { max-width: 400px; }
 .confirm-message { color: var(--muted); line-height: 1.5; margin-bottom: 20px; font-size: 0.875rem; }
+/* Optional warning line under the confirm message (showConfirm warningText)
+   — e.g. "N runtime files will be overwritten" before a Sync (#1229 U4). */
+.confirm-warning { color: var(--warning, #b58900); line-height: 1.5; margin: -12px 0 20px; font-size: 0.875rem; font-weight: 600; }
 .confirm-extra {
   display: flex; align-items: center; gap: 8px;
   margin: -8px 0 16px 0;
