@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=104" />
+  <link rel="stylesheet" href="/style.css?v=105" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -665,6 +665,10 @@
                     data-i18n-aria-label="settings.hooks.sync_now_aria">Sync Now</button>
           </div>
           <div id="hooks-sync-status"></div>
+          <!-- ADR-0010 §3 read-only signal: memtomem-managed hooks duplicated
+               across tiers (filled from the GET /api/settings-sync payload's
+               duplicate_tier_warnings; #1247 id 32). -->
+          <div id="hooks-duplicate-banner" class="hooks-duplicate-banner" hidden></div>
           <div id="hooks-sync-content"></div>
         </div>
 
@@ -1473,7 +1477,7 @@
   <script src="/settings-maintenance.js?v=4"></script>
   <script src="/settings-namespaces.js?v=9"></script>
   <script src="/settings-harness.js?v=2"></script>
-  <script src="/settings-hooks-watchdog.js?v=17"></script>
+  <script src="/settings-hooks-watchdog.js?v=18"></script>
   <script src="/timeline.js?v=3"></script>
   <script src="/context-gateway.js?v=71"></script>
   <script src="/context-portal.js?v=2"></script>

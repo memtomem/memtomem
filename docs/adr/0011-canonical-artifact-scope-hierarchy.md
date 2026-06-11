@@ -119,6 +119,7 @@ The canonical / runtime layout per scope per artifact type:
 | **skills**   | `~/.memtomem/skills/<name>/SKILL.md`          | `<proj>/.memtomem/skills/<name>/SKILL.md`        | `<proj>/.memtomem/skills.local/<name>/SKILL.md`          | user → `~/.claude/skills/<name>/`; project_shared → `<proj>/.claude/skills/<name>/`; project_local → no fan-out |
 | **commands** | `~/.memtomem/commands/<name>.md`              | `<proj>/.memtomem/commands/<name>.md`            | `<proj>/.memtomem/commands.local/<name>.md`              | user → `~/.claude/commands/`; project_shared → `<proj>/.claude/commands/`; project_local → no fan-out |
 | **settings** (ADR-0010, special case per ADR-0016 §2) | `<proj>/.memtomem/settings.json` (canonical is single regardless of tier) | ↑ same | ↑ same | `user` → `~/.claude/settings.json`; `project_shared` → `<proj>/.claude/settings.json`; `project_local` → `<proj>/.claude/settings.local.json` |
+| **mcp_servers** (#1165, single-tier — see note below) | — (no user tier) | `<proj>/.memtomem/mcp-servers/<name>.json` | — (no local tier) | project_shared → `<proj>/.mcp.json` (`mcpServers` object); no user / project_local fan-out |
 
 Settings inverts the tier ↔ residency mapping the other rows share: per
 ADR-0016 §2, the `target_scope` axis on settings hooks selects the
@@ -127,6 +128,15 @@ is `<proj>/.memtomem/settings.json` by ADR-0010 §Background, regardless
 of the configured `target_scope`). The other four artifacts in this
 table couple canonical residency and runtime fan-out through
 `RUNTIME_FANOUT_TABLE`; settings is the documented exception.
+
+> **2026-06 (#1247):** The `mcp_servers` row was added when that surface
+> shipped (#1165, post-dating this ADR). It is the only single-tier
+> artifact: canonical exists at `project_shared` only, and the fan-out
+> target is a *shared* file (`.mcp.json`) merged additively per server
+> name rather than a per-artifact file/dir. Web write routes reject
+> non-`project_shared` tiers for it like every sibling (see the ADR-0015
+> §4c note); the dashboard's fifth tile envelope is recorded in the
+> ADR-0009 §5 note.
 
 ### 2. v1 defaults preserve current behavior, zero behavior change for existing installs
 

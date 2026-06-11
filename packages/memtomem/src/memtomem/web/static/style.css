@@ -2549,6 +2549,27 @@ select:focus-visible {
   white-space: pre-line;
   overflow-wrap: anywhere;
 }
+/* ADR-0010 §3 duplicate-tier banner: read-only warning that memtomem-managed
+ * hook entries also live in a non-active tier (#1247 id 32). Same warning
+ * tokens as .hooks-sync-needs-confirmation; hidden attr toggled by JS. */
+.hooks-duplicate-banner {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning, #b58900);
+  border-radius: var(--radius);
+  background: rgba(181, 137, 0, 0.08);
+  font-size: 0.78rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hooks-duplicate-banner[hidden] { display: none; }
+.hooks-duplicate-banner-row { overflow-wrap: anywhere; }
+.hooks-duplicate-banner-row code {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
 .hooks-sync-card {
   border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px; margin-bottom: 12px; background: var(--surface);

@@ -120,6 +120,18 @@ removes its `STATE.uiMode === 'dev'` UI gate(s) when **all four** hold:
    that the conflict semantics are pinned by a test, not the specific
    status code.
 
+> **2026-06 (#1247):** Criterion 2's "no reverse-import API by design"
+> parenthetical for Settings is now narrower than reality: ADR-0019's
+> ownership markers made memtomem-authored rules distinguishable from
+> user-authored ones, which enabled a **consent-gated, per-rule**
+> reverse-import — `POST /context/settings/rules/promote` (web hooks
+> panel; Gate-A-scanned per the ADR-0011 §5 note). The original rationale
+> still holds for the bulk path: there is still no
+> `extract_settings_to_canonical`, because outside marked rules the
+> additive merge cannot attribute authorship. Settings remains a
+> unidirectional *phase* for this section's round-trip criteria. See the
+> matching ADR-0009 §2 note.
+
 **Why these four:** the round-trip test catches lossy serialization
 (the most common context-gateway regression class); the i18n parity
 test catches missing translations (the most common prod-only UX gap);

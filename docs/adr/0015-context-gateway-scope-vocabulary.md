@@ -250,6 +250,17 @@ Affects: sync routes per §2d. The artifact sync service in #900
 inherits this contract — one pair per invocation, no cross-product
 batch.
 
+> **2026-06 (#1247):** v1 web routes implement a narrower slice of Option B
+> than this section implies: every artifact **write** route (create /
+> update / delete / import / sync, across skills / commands / agents /
+> mcp-servers) rejects `target_scope != project_shared` with 400
+> (`_reject_non_shared_write` — "intentionally deferred" in its
+> docstring). `target_scope` is resolved per-request exactly as decided
+> here, but only the `project_shared` value is accepted on writes;
+> list/read routes accept the full tier set. The engine already supports
+> user-tier sync (ADR-0011 PR-E3); exposing it through the web write
+> routes is tracked in #1263.
+
 #### 4d. Mutator routes accepting `project_scope_id` — Option C (sync only)
 
 Sync routes accept `?project_scope_id=` (and `?target_scope=` per §4c).

@@ -420,8 +420,9 @@ class TestSyncWarning:
 class TestWebDuplicateTierWarnings:
     """``GET /api/settings-sync`` and ``POST /api/settings-sync`` both
     expose ``duplicate_tier_warnings`` (ADR-0010 §4 data surface). The
-    frontend banner that consumes this is gated for a follow-up PR;
-    these tests pin the data layer."""
+    consuming frontend banner ships alongside (#1247 id 32,
+    ``settings-hooks-watchdog.js`` + vitest pins); these tests pin the
+    data layer."""
 
     @pytest.fixture
     def app(self, project_root, fake_home, monkeypatch):
