@@ -165,9 +165,11 @@ _CWD_SKILLS_RUNTIME_ONLY = {
 }
 
 
-# Diff-endpoint payload for the canonical detail's Diff tab; ``dropped_fields``
-# triggers ``renderDroppedChips`` rendering.
-_DIFF_WITH_DROPPED = {
+# Diff-endpoint payload for the canonical detail's Diff tab. Mirrors the real
+# wire shape: per-runtime entries carry runtime/status/runtime_content only
+# (no ``dropped_fields`` — /diff never sends it, #1247 id 35). The localized
+# status badge is the langchange marker the Q-PR4 test keys on.
+_DIFF_OUT_OF_SYNC = {
     "canonical_content": "name: demo\n",
     "runtimes": [
         {
@@ -175,7 +177,6 @@ _DIFF_WITH_DROPPED = {
             "status": "out of sync",
             "runtime_path": "/srv/cwd/.claude/skills/demo-skill.md",
             "runtime_content": "name: demo\nextra: yes\n",
-            "dropped_fields": ["extra"],
         }
     ],
 }
@@ -1058,14 +1059,16 @@ def test_q_pr4_rapid_toggle_preserves_edit_buffer(page, mm_web_url: str) -> None
     )
 
 
-def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url: str) -> None:
-    """``renderDroppedChips`` lives inside the Diff pane of the canonical
-    detail. Without active-tab capture, a ``loadCtxDetail`` re-mount
-    lands on the Canonical pane (``Click Diff tab to load...``) and the
-    chips don't re-render until the user re-clicks Diff. The listener
-    must capture ``.ctx-detail-tab[data-pane="diff"].active`` and pass
-    ``autoOpenDiff: true`` so ``_ctxLoadDiff`` runs on re-mount —
-    review finding P1.
+def test_q_pr4_langchange_rerenders_diff_pane(page, mm_web_url: str) -> None:
+    """The Diff pane's localized content (per-runtime status badges) must
+    follow a locale flip. Without active-tab capture, a ``loadCtxDetail``
+    re-mount lands on the Canonical pane (``Click Diff tab to load...``)
+    and the diff pane doesn't re-render until the user re-clicks Diff. The
+    listener must capture ``.ctx-detail-tab[data-pane="diff"].active`` and
+    pass ``autoOpenDiff: true`` so ``_ctxLoadDiff`` runs on re-mount —
+    review finding P1. (Marker: the ``Out of sync`` / ``불일치`` runtime
+    badge — the payload's only localized fragment on the real /diff wire
+    shape; the diff pane renders the ``status_*`` long labels.)
     """
     install_default_stubs(page)
     _stub_projects(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
@@ -1090,7 +1093,7 @@ def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url:
     page.route(
         "**/api/context/skills/demo-skill/diff**",
         lambda r: r.fulfill(
-            status=200, content_type="application/json", body=json.dumps(_DIFF_WITH_DROPPED)
+            status=200, content_type="application/json", body=json.dumps(_DIFF_OUT_OF_SYNC)
         ),
     )
     page.goto(mm_web_url)
@@ -1106,14 +1109,15 @@ def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url:
     # Click the Diff tab to make it the active pane (so the listener
     # captures ``wasDiffActive = true``).
     page.locator("#ctx-skills-detail .ctx-detail-tab[data-pane='diff']").click()
+    # The diff PANE's badge, not the list card's — scope to the pane id.
     page.wait_for_function(
-        "() => document.querySelectorAll('#ctx-skills-detail .ctx-dropped-chip').length > 0",
+        "() => document.querySelectorAll(  '#ctx-pane-skills-diff .ctx-runtime-badge').length > 0",
         timeout=3_000,
     )
-    pre_chip = (
-        page.locator("#ctx-skills-detail .ctx-dropped-chip").first.text_content() or ""
+    pre_badge = (
+        page.locator("#ctx-pane-skills-diff .ctx-runtime-badge").first.text_content() or ""
     ).strip()
-    assert "Dropped" in pre_chip, f"EN dropped chip should contain 'Dropped': {pre_chip!r}"
+    assert "Out of sync" in pre_badge, f"EN diff badge should read 'Out of sync': {pre_badge!r}"
 
     page.evaluate("async () => { await I18N.setLang('ko'); }")
     # The listener should:
@@ -1121,21 +1125,21 @@ def test_q_pr4_langchange_rerenders_dropped_chips_in_diff_pane(page, mm_web_url:
     # 2. Call loadCtxList('skills') — wipes detail.
     # 3. Call loadCtxDetail(..., { autoOpenDiff: true }) — re-mounts and
     #    fires _ctxLoadDiff via diffTab.click().
-    # End state: chips re-render with KO text.
+    # End state: the diff pane re-renders with the KO badge text.
     page.wait_for_function(
         "() => {"
         "  const els = Array.from(document.querySelectorAll("
-        "    '#ctx-skills-detail .ctx-dropped-chip'));"
-        "  return els.length > 0 && els.every(el => el.textContent.includes('제거됨'));"
+        "    '#ctx-pane-skills-diff .ctx-runtime-badge'));"
+        "  return els.length > 0 && els.every(el => el.textContent.includes('불일치'));"
         "}",
         timeout=4_000,
     )
-    post_chip = (
-        page.locator("#ctx-skills-detail .ctx-dropped-chip").first.text_content() or ""
+    post_badge = (
+        page.locator("#ctx-pane-skills-diff .ctx-runtime-badge").first.text_content() or ""
     ).strip()
-    assert "제거됨" in post_chip, f"KO dropped chip should contain '제거됨': {post_chip!r}"
-    assert "Dropped" not in post_chip, (
-        f"EN literal must not survive KO toggle in dropped chip: {post_chip!r}"
+    assert "불일치" in post_badge, f"KO diff badge should read '불일치': {post_badge!r}"
+    assert "Out of sync" not in post_badge, (
+        f"EN literal must not survive KO toggle in the diff badge: {post_badge!r}"
     )
 
 

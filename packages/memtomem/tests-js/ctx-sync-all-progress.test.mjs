@@ -76,16 +76,24 @@ async function bootSyncAll(syncBodies) {
 
 describe('Sync All — per-phase progress + result summary', () => {
   it('renders a done summary per phase with generated/dropped/skipped counts', async () => {
+    // Skip rows carry BENIGN reason codes — benign skips keep the row in the
+    // plain ``done`` state (failure-class codes demote it to ``attention``,
+    // pinned separately below).
     const window = await bootSyncAll({
       skills: { body: { generated: [{ runtime: 'claude' }, { runtime: 'codex' }], skipped: [] } },
       commands: {
         body: {
           generated: [{ runtime: 'claude' }],
           dropped: [{ runtime: 'codex', name: 'x' }],
-          skipped: [{ runtime: 'kimi', reason: 'r' }],
+          skipped: [{ runtime: 'kimi', reason: 'r', reason_code: 'no_project_fanout_for_runtime' }],
         },
       },
-      agents: { body: { generated: [], skipped: [{ runtime: 'codex', reason: 'r' }] } },
+      agents: {
+        body: {
+          generated: [],
+          skipped: [{ runtime: 'codex', reason: 'r', reason_code: 'in_sync' }],
+        },
+      },
       'mcp-servers': { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
       settings: { body: { results: [{ name: 'claude', status: 'ok' }], duplicate_tier_warnings: [] } },
     });
@@ -129,6 +137,61 @@ describe('Sync All — per-phase progress + result summary', () => {
     const toast = window.document.querySelector('#toast-container .toast-success .toast-msg');
     expect(toast).not.toBeNull();
     expect(toast.textContent).toBe(I18N.t('settings.ctx.sync_success'));
+  });
+
+  it('demotes phases with failure-class skips to attention and warns naming the items', async () => {
+    // #1247 id 21 + B4: an HTTP-200 phase whose body carries failure-class
+    // skips (parse_error / duplicate_name / unknown_runtime / …) used to
+    // render as plain "done" and end in the unqualified "Sync completed"
+    // success toast — masking that the engine left items behind. The row now
+    // reads ``attention`` (counts still rendered) and the final toast is a
+    // warning naming each skipped item once (skips repeat per runtime).
+    const window = await bootSyncAll({
+      skills: { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
+      commands: {
+        body: {
+          generated: [{ runtime: 'claude' }],
+          skipped: [
+            { runtime: 'review', reason: 'duplicate name', reason_code: 'duplicate_name' },
+            { runtime: 'review', reason: 'duplicate name', reason_code: 'duplicate_name' },
+          ],
+        },
+      },
+      agents: {
+        body: {
+          generated: [],
+          skipped: [{ runtime: 'broken.md', reason: 'parse error: no frontmatter', reason_code: 'parse_error' }],
+        },
+      },
+      'mcp-servers': { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
+      settings: { body: { results: [{ name: 'claude', status: 'ok' }] } },
+    });
+    const { I18N } = window;
+
+    window.document.getElementById('ctx-sync-all-btn').click();
+    await flush(window);
+
+    const region = window.document.getElementById('ctx-sync-status');
+    // commands + agents demoted to attention; skills / mcp-servers / settings done.
+    expect(region.querySelectorAll('.ctx-sync-phase--attention').length).toBe(2);
+    expect(region.querySelectorAll('.ctx-sync-phase--done').length).toBe(3);
+    // Artifact attention rows render their counts (the skipped column carries
+    // the signal), NOT the settings-specific needs-confirmation copy.
+    const attentionRows = Array.from(region.querySelectorAll('.ctx-sync-phase--attention'));
+    const agentsRow = attentionRows
+      .map((li) => li.textContent)
+      .find((tx) => tx.includes(I18N.t('settings.ctx.agents_phase_title')));
+    expect(agentsRow).toContain(I18N.t('settings.ctx.sync_count_skipped', { count: 1 }));
+    expect(agentsRow).not.toContain(I18N.t('settings.ctx.sync_state_needs_confirmation'));
+
+    // Warning toast names each item ONCE with its code; no success toast.
+    const warning = window.document.querySelector('#toast-container .toast-warning .toast-msg');
+    expect(warning).not.toBeNull();
+    expect(warning.textContent).toBe(I18N.t('settings.ctx.sync_skipped_attention', {
+      count: 2,
+      items: 'review (duplicate_name), broken.md (parse_error)',
+    }));
+    expect(window.document.querySelector('#toast-container .toast-success')).toBeNull();
   });
 
   it('marks phases after a mid-run failure as not_run, not a frozen spinner', async () => {

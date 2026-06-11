@@ -26,10 +26,23 @@
   // default Index-tab path.
   let onSelectCb = null;
   let pickerPurpose = 'index';
+  // Navigation sequence (#1247 id 28): list responses resolve out of order
+  // under rapid clicks, and the last RESPONSE used to win regardless of
+  // which directory was clicked last. Each ``navigate`` takes a ticket;
+  // only the holder of the current ticket may paint. ``close`` bumps it so
+  // a response landing after close can't paint (or steal focus) into the
+  // hidden — or reopened — modal.
+  let navSeq = 0;
+  // Path of the last failed navigation — consumed by the in-modal Retry
+  // button. ``null`` is a valid value (roots view), so the error VIEW
+  // visibility, not this variable, signals the error state.
+  let retryPath = null;
 
   function modal() { return qs('path-picker-modal'); }
   function listEl() { return qs('path-picker-list'); }
   function emptyEl() { return qs('path-picker-empty'); }
+  function errorEl() { return qs('path-picker-error'); }
+  function retryBtn() { return qs('path-picker-retry-btn'); }
   function crumbEl() { return qs('path-picker-breadcrumb'); }
   function selectBtn() { return qs('path-picker-select-btn'); }
   function cancelBtn() { return qs('path-picker-cancel-btn'); }
@@ -43,6 +56,15 @@
     if (typeof showToast === 'function') showToast(message, type || 'error');
   }
 
+  // Resolves to ``{ body }`` on success, else ``{ error: 'scope' | 'load' }``.
+  // The two failure kinds need different navigate-side handling: a scope
+  // refusal (422 outside_picker_scope) means "you can't go there" — the
+  // current listing is still valid, keep it; a load failure means the view
+  // the user asked for couldn't be produced — show the in-modal error +
+  // Retry state. Deliberately SIDE-EFFECT-FREE (no toasts here): the caller
+  // toasts only after its sequence guard accepts the result, so a stale
+  // failure superseded by a newer navigation (or by close) stays fully
+  // silent (Codex review on #1247 id 28).
   async function _fetchList(path) {
     const params = new URLSearchParams();
     if (path) params.set('path', path);
@@ -53,20 +75,23 @@
     try {
       resp = await fetch(url);
     } catch (err) {
-      _toast(_t('picker.error'), 'error');
-      return null;
+      return { error: 'load' };
     }
     if (!resp.ok) {
       let detail = '';
       try { detail = (await resp.json()).detail || ''; } catch (_) { /* keep '' */ }
       if (resp.status === 422 && detail === 'outside_picker_scope') {
-        _toast(_t('picker.outside'), 'info');
-      } else {
-        _toast(_t('picker.error'), 'error');
+        return { error: 'scope' };
       }
-      return null;
+      return { error: 'load' };
     }
-    return await resp.json();
+    try {
+      return { body: await resp.json() };
+    } catch (_) {
+      // 200 with an unreadable body — same load-failure class as a 5xx
+      // (previously this threw out of ``navigate`` as an unhandled rejection).
+      return { error: 'load' };
+    }
   }
 
   function _segments(path) {
@@ -167,9 +192,39 @@
     });
   }
 
+  // Replace the listing with the load-failure state: message + Retry wired
+  // to the path that failed. Select is disabled — ``currentPath`` still
+  // holds the PREVIOUS view's path, and committing a path the user is no
+  // longer looking at would be a misclick trap.
+  function _renderLoadError(path) {
+    retryPath = path;
+    listEl().textContent = '';
+    currentEntries = [];
+    emptyEl().hidden = true;
+    errorEl().hidden = false;
+    selectBtn().disabled = true;
+    retryBtn().focus();
+  }
+
   async function navigate(path) {
-    const body = await _fetchList(path);
-    if (!body) return;
+    const seq = ++navSeq;
+    const result = await _fetchList(path);
+    // A newer navigation (or close) superseded this one — the response is
+    // stale no matter what it says (#1247 id 28). Toasts are emitted HERE,
+    // after the guard, so a stale failure can't toast over a newer success.
+    if (seq !== navSeq) return;
+    if (result.error === 'scope') {
+      // Current listing still valid — keep it, just explain the refusal.
+      _toast(_t('picker.outside'), 'info');
+      return;
+    }
+    if (result.error) {
+      _toast(_t('picker.error'), 'error');
+      _renderLoadError(path);
+      return;
+    }
+    const body = result.body;
+    errorEl().hidden = true;
     currentPath = body.path;
     _renderBreadcrumb(body);
     _renderEntries(body.entries);
@@ -203,13 +258,18 @@
     if (_releaseA11y) { _releaseA11y(); _releaseA11y = null; }
     document.removeEventListener('keydown', _onKey, true);
     modal().removeEventListener('click', _onBackdrop);
+    // Invalidate any in-flight navigation: a late response must not paint
+    // into (or pull focus back to) the now-hidden modal.
+    navSeq += 1;
     currentPath = null;
     currentEntries = [];
     onSelectCb = null;
     pickerPurpose = 'index';
+    retryPath = null;
     listEl().textContent = '';
     crumbEl().textContent = '';
     emptyEl().hidden = true;
+    errorEl().hidden = true;
   }
 
   function commit() {
@@ -236,7 +296,9 @@
   function _focusables() {
     const items = Array.from(listEl().querySelectorAll('li'));
     const crumbs = Array.from(crumbEl().querySelectorAll('.crumb[tabindex="0"]'));
-    const buttons = [cancelBtn()];
+    const buttons = [];
+    if (!errorEl().hidden) buttons.push(retryBtn());
+    buttons.push(cancelBtn());
     if (!selectBtn().disabled) buttons.push(selectBtn());
     return [...crumbs, ...items, ...buttons];
   }
@@ -271,6 +333,9 @@
     if (browseBtn) browseBtn.addEventListener('click', () => open());
     if (cancelBtn()) cancelBtn().addEventListener('click', close);
     if (selectBtn()) selectBtn().addEventListener('click', commit);
+    // Retry re-attempts the navigation that failed (``retryPath`` may be
+    // null — that's the roots view, a valid target).
+    if (retryBtn()) retryBtn().addEventListener('click', () => navigate(retryPath));
     if (window.registerModalCloser) window.registerModalCloser(modal(), close);
   }
 
