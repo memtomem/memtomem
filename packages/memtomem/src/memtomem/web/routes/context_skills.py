@@ -545,7 +545,12 @@ async def import_skills(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = extract_skills_to_canonical(
+                # Thread offload (#1247 id 18): the import engine now blocks
+                # on the destination sidecar flock (budget-bounded), and
+                # ``asyncio.timeout`` cannot fire while the loop thread
+                # itself is blocked — same shape as the sync route above.
+                result = await asyncio.to_thread(
+                    extract_skills_to_canonical,
                     project_root,
                     overwrite=overwrite,
                     dry_run=dry_run,
@@ -594,7 +599,9 @@ async def import_skill(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = extract_skills_to_canonical(
+                # Thread offload (#1247 id 18): see import_skills above.
+                result = await asyncio.to_thread(
+                    extract_skills_to_canonical,
                     project_root,
                     overwrite=overwrite,
                     only_name=name,
