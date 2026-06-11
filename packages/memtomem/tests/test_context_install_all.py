@@ -527,3 +527,22 @@ def test_force_reextraction_removes_stale_dest_only_file(
     # Manifest recorded against the pin on re-extraction.
     assert lock_doc["skills"]["foo"]["files"] == ["SKILL.md"]
     assert lock_doc["skills"]["foo"]["files_commit"] == pin
+
+
+def test_classify_install_all_missing_only_dirty_reason(wiki_root: Path, tmp_path: Path) -> None:
+    """Codex implementation-gate M2: a manifest-detected deletion with zero
+    modified files must not classify-print as '0 file(s) modified locally'."""
+    from memtomem.context.install import _classify_for_install_all
+
+    store = _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"x\n", "gone.md": b"y\n"})
+    install_skill(tmp_path, "foo")
+    (tmp_path / ".memtomem" / "skills" / "foo" / "gone.md").unlink()
+
+    rows = _classify_for_install_all(tmp_path, wiki=store)
+
+    assert len(rows) == 1
+    assert rows[0].state == "refuse"
+    assert rows[0].reason is not None
+    assert "deleted locally" in rows[0].reason
+    assert "0 file(s) modified" not in rows[0].reason

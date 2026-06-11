@@ -540,12 +540,17 @@ def _apply_update(
     files_written = copy_tree_atomic(src, dest)
 
     # Mirror semantics (#1247): drop dest files the wiki no longer ships.
-    # The guard epoch is the PRE-update install timestamp (the same basis
-    # ``dirty_report`` classified against) — the freshly captured value
-    # below is >= every current mtime and would approve deleting anything.
+    # Membership uses the COPIER's effective file set (iter_installed_files
+    # shares copy_tree_atomic's skip rules) — a bare (src / rel).is_file()
+    # would count a symlink the copier skips as present, stranding the old
+    # regular file in dest (Codex implementation-gate M1). The guard epoch
+    # is the PRE-update install timestamp (the same basis ``dirty_report``
+    # classified against) — the freshly captured value below is >= every
+    # current mtime and would approve deleting anything.
+    src_files = {p.relative_to(src).as_posix() for p in iter_installed_files(src)}
     files_removed = _reconcile_removed_files(
         dest,
-        src_has=lambda rel: (src / rel).is_file(),
+        src_has=lambda rel: rel in src_files,
         old_installed_at_epoch=_installed_at_epoch(lock_entry),
         baked=(
             frozenset(dirty_report.dirty_files)
@@ -831,7 +836,7 @@ def _classify_for_install_all(
         report = is_asset_dirty(project_root, asset_type, name, lock_entry=entry)
         if report.reason == "dirty":
             state: Literal["install", "skip", "refuse", "orphan", "error"] = "refuse"
-            reason: str | None = f"{len(report.dirty_files)} file(s) modified locally"
+            reason: str | None = report.summary()
         else:
             # clean / missing_dest / never_installed all collapse to "skip" here:
             # missing_dest is impossible (we already saw dest.exists()), and

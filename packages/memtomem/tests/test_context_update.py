@@ -1213,3 +1213,31 @@ def test_update_stale_manifest_guard_ignores_mismatched_files_commit(
     report = is_asset_dirty(tmp_path, "skills", "web")
     assert report.reason == "clean"
     assert report.missing_files == ()
+
+
+def test_update_removes_file_replaced_by_symlink_upstream(wiki_root: Path, tmp_path: Path) -> None:
+    """Codex implementation-gate M1: ``copy_tree_atomic`` skips symlinks, so
+    a wiki file replaced by a symlink is NOT written to dest — reconcile
+    membership must use the copier's effective file set, or the old regular
+    file survives and is recorded clean in the manifest."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "link.md": b"regular\n"})
+    install_skill(tmp_path, "web")
+
+    src_link = wiki_root / "skills" / "web" / "link.md"
+    src_link.unlink()
+    src_link.symlink_to("SKILL.md")
+    subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "replace link.md with symlink"],
+        check=True,
+        capture_output=True,
+    )
+
+    result = update_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    assert not (dest / "link.md").exists()
+    assert [p.name for p in result.files_removed] == ["link.md"]
+    entry = _lock_entry(tmp_path, "skills", "web")
+    assert entry["files"] == ["SKILL.md"]
