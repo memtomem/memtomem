@@ -16,14 +16,19 @@ v1 is intentionally narrow on two axes:
 from __future__ import annotations
 
 import json
+import logging
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from memtomem import privacy
+from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._atomic import atomic_write_text
-from memtomem.context._names import validate_name
+from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context._runtime_targets import DiffRow
+
+logger = logging.getLogger(__name__)
 
 CANONICAL_MCP_SERVER_ROOT = ".memtomem/mcp-servers"
 PROJECT_MCP_CONFIG = ".mcp.json"
@@ -62,7 +67,14 @@ def list_canonical_mcp_servers(project_root: Path) -> list[Path]:
     for path in sorted(root.glob("*.json")):
         if not path.is_file():
             continue
-        validate_name(path.stem, kind="MCP server")
+        try:
+            validate_name(path.stem, kind="MCP server")
+        except InvalidNameError as exc:
+            # One stray invalid-named file must not abort the whole panel /
+            # diff / sync (#1247 id 40) — skip for sync like skills, while
+            # diff_mcp_servers surfaces the dedicated "invalid name" row.
+            logger.warning("skip canonical MCP server %r: invalid name (%s)", path.name, exc)
+            continue
         out.append(path)
     return out
 
@@ -150,11 +162,9 @@ def _project_mcp_path(project_root: Path) -> Path:
     return (project_root / PROJECT_MCP_CONFIG).resolve()
 
 
-def _read_project_mcp_config(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
+def _parse_project_mcp_text(text: str) -> dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise McpServerParseError(f"invalid JSON in {PROJECT_MCP_CONFIG}: {exc.msg}") from exc
     if not isinstance(data, dict):
@@ -163,6 +173,12 @@ def _read_project_mcp_config(path: Path) -> dict[str, Any]:
     if mcp_servers is not None and not isinstance(mcp_servers, dict):
         raise McpServerParseError(f"{PROJECT_MCP_CONFIG} field 'mcpServers' must be an object")
     return data
+
+
+def _read_project_mcp_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return _parse_project_mcp_text(path.read_text(encoding="utf-8"))
 
 
 def diff_mcp_servers(project_root: Path) -> list[tuple[str, str, str]]:
@@ -178,9 +194,28 @@ def diff_mcp_servers(project_root: Path) -> list[tuple[str, str, str]]:
         # (#1229 U7).
         target_parse_reason = str(exc)
 
+    # Canonical-side invalid names: list_canonical_mcp_servers filters them
+    # out for SYNC (fan-out must never propagate an invalid name), which would
+    # make them fully invisible — enumerate them here for the dedicated
+    # "invalid name" row, mirroring skills/commands/agents (#1243 / #1247
+    # id 40). Runtime-side invalid keys join the same dict below; on a
+    # name collision the runtime-side reason wins, matching diff_skills.
+    invalid_by_name: dict[str, str] = {}
+    root = canonical_mcp_server_root(project_root)
+    if root.is_dir():
+        for path in sorted(root.glob("*.json")):
+            if not path.is_file():
+                continue
+            try:
+                validate_name(path.stem, kind="MCP server")
+            except InvalidNameError as exc:
+                invalid_by_name[path.stem] = str(exc)
+
     rows: list[tuple[str, str, str]] = []
+    canonical_names: set[str] = set()
     for path in list_canonical_mcp_servers(project_root):
         name = path.stem
+        canonical_names.add(name)
         try:
             canonical = parse_canonical_mcp_server(path).definition
         except McpServerParseError as exc:
@@ -194,12 +229,37 @@ def diff_mcp_servers(project_root: Path) -> list[tuple[str, str, str]]:
             continue
         status = "in sync" if target_servers.get(name) == canonical else "out of sync"
         rows.append((MCP_RUNTIME, name, status))
+
+    # Runtime side (#1247 id 31): .mcp.json entries with no canonical were
+    # invisible end-to-end — the panel implied no servers beyond canonicals.
+    # Valid runtime-only keys get the family-standard "missing canonical"
+    # row; invalid keys ride the "invalid name" dict. Skipped entirely when
+    # .mcp.json failed to parse (the per-canonical parse-error rows above
+    # already name the broken file).
+    if target_servers is not None:
+        for raw_name in target_servers:
+            if raw_name in canonical_names:
+                continue
+            try:
+                validate_name(raw_name, kind="MCP server")
+            except InvalidNameError as exc:
+                invalid_by_name[raw_name] = str(exc)
+                continue
+            rows.append((MCP_RUNTIME, raw_name, "missing canonical"))
+
+    for raw_name in sorted(invalid_by_name):
+        rows.append(DiffRow(MCP_RUNTIME, raw_name, "invalid name", invalid_by_name[raw_name]))
     return rows
 
 
 @dataclass(frozen=True)
 class McpServerSyncResult:
-    generated: list[tuple[str, Path]]
+    """``generated`` rows are ``(runtime, server_name, path)`` — the name is
+    load-bearing because every server fans into the SAME ``.mcp.json`` file;
+    nameless ``(runtime, path)`` rows rendered as N identical duplicates
+    (#1247 id 42)."""
+
+    generated: list[tuple[str, str, Path]]
     skipped: list[tuple[str, str, str]]
 
 
@@ -209,7 +269,11 @@ def generate_all_mcp_servers(project_root: Path) -> McpServerSyncResult:
         return McpServerSyncResult(
             generated=[],
             skipped=[
-                (MCP_RUNTIME, "No canonical MCP server definitions found", "no_canonical_root")
+                (
+                    MCP_RUNTIME,
+                    "No canonical MCP server definitions found",
+                    skip_codes.NO_CANONICAL_ROOT,
+                )
             ],
         )
 
@@ -226,14 +290,41 @@ def generate_all_mcp_servers(project_root: Path) -> McpServerSyncResult:
         definitions[parsed.name] = parsed.definition
 
     target = _project_mcp_path(project_root)
-    config = _read_project_mcp_config(target)
+    current_text = target.read_text(encoding="utf-8") if target.exists() else None
+    config = _parse_project_mcp_text(current_text) if current_text is not None else {}
     mcp_servers = dict(config.get("mcpServers") or {})
     for name, definition in definitions.items():
         mcp_servers[name] = definition
     config["mcpServers"] = mcp_servers
-    atomic_write_text(target, json.dumps(config, indent=2, sort_keys=False) + "\n")
+    merged_text = json.dumps(config, indent=2, sort_keys=False) + "\n"
+
+    if merged_text == current_text:
+        # Nothing to change — rewriting anyway churned mtime, reflowed user
+        # formatting, and chmodded the file every run (#1247 id 43). Typed
+        # skip, not silent: an MCP-only project that is fully in sync must
+        # not read as "nothing to sync" in the Sync All no-op detection.
+        return McpServerSyncResult(
+            generated=[],
+            skipped=[
+                (
+                    MCP_RUNTIME,
+                    f"all {len(definitions)} canonical server(s) already in sync "
+                    f"with {PROJECT_MCP_CONFIG}",
+                    skip_codes.IN_SYNC,
+                )
+            ],
+        )
+
+    # Mode policy (Codex design gate): a NEW file holds only Gate-A-scanned
+    # canonical content → 0o644 like every other fan-out target. A REWRITE
+    # preserves the existing mode in both directions — the merge carries
+    # foreign ``mcpServers`` entries verbatim without scanning them, so
+    # widening a user's 0600 file could expose unscanned secret env values,
+    # and forcing 0600 onto a 0644 file was the original id 43 complaint.
+    mode = 0o644 if current_text is None else stat.S_IMODE(target.stat().st_mode)
+    atomic_write_text(target, merged_text, mode=mode)
 
     return McpServerSyncResult(
-        generated=[(MCP_RUNTIME, target) for _name in definitions],
+        generated=[(MCP_RUNTIME, name, target) for name in definitions],
         skipped=[],
     )

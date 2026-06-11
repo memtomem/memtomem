@@ -48,6 +48,13 @@ TARGET_CONFLICT: Final = "target_conflict"
 # Loud emit, not silent — feedback_defensive_noise.md.
 DUPLICATE_NAME: Final = "duplicate_name"
 
+# The fan-out target already matches the merged canonical state byte-for-byte,
+# so the engine skipped the write (#1247 id 43 — MCP servers, where N
+# definitions converge on the single ``.mcp.json``). Typed rather than a bare
+# empty result: the Sync All no-op detector treats "only no_canonical_root
+# skips" as nothing-to-sync, and a fully-in-sync MCP-only project is NOT that.
+IN_SYNC: Final = "in_sync"
+
 # Import (runtime → canonical) skip codes.
 INVALID_NAME: Final = "invalid_name"
 ALREADY_IMPORTED: Final = "already_imported"
@@ -85,6 +92,7 @@ SkipCode = Literal[
     "lock_timeout",
     "target_conflict",
     "duplicate_name",
+    "in_sync",
     "invalid_name",
     "already_imported",
     "canonical_exists",

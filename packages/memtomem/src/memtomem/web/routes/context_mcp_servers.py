@@ -91,9 +91,11 @@ async def list_mcp_servers(
         if reason:
             entry["reason"] = reason
         diff_by_name[row[1]] = [entry]
-    servers = []
+    servers: list[dict[str, object]] = []
+    canonical_names: set[str] = set()
     for path in list_canonical_mcp_servers(project_root):
         name = path.stem
+        canonical_names.add(name)
         servers.append(
             {
                 "name": name,
@@ -102,6 +104,21 @@ async def list_mcp_servers(
                 "runtimes": diff_by_name.get(name, []),
             }
         )
+    # Runtime-only servers — entries diff_mcp_servers found beyond the
+    # canonical set (``missing canonical`` from .mcp.json, plus ``invalid
+    # name`` strays on either side). Mirror of the skills list route; without
+    # these rows the panel implies no servers exist beyond canonicals
+    # (#1247 id 31).
+    for name, runtimes in diff_by_name.items():
+        if name not in canonical_names:
+            servers.append(
+                {
+                    "name": name,
+                    "canonical_path": None,
+                    "target_scope": target_scope,
+                    "runtimes": runtimes,
+                }
+            )
     return {
         "mcp-servers": servers,
         "canonical_root": CANONICAL_MCP_SERVER_ROOT,
@@ -360,27 +377,40 @@ async def diff_mcp_server(
                 # canonical file (#1229 U7; previously discarded).
                 reason = sanitize_diff_reason(str(exc), project_root)
 
-    status = "missing target"
+    # Runtime side is read INDEPENDENTLY of canonical health (#1247 id 31):
+    # the runtime-only detail pane fetches this route, and a server that
+    # lives only in .mcp.json must render its actual definition instead of
+    # an empty "missing canonical" shell.
     runtime_content = None
+    target_definition = None
+    target_error: str | None = None
     mcp_path = project_root / ".mcp.json"
-    if canonical_definition is None:
-        status = "parse error" if canonical_content is not None else "missing canonical"
-    elif mcp_path.is_file():
+    if mcp_path.is_file():
         try:
             import json
 
             config = json.loads(mcp_path.read_bytes().decode("utf-8", errors="replace"))
             target_definition = (config.get("mcpServers") or {}).get(name)
-            if target_definition is None:
-                status = "missing target"
-            else:
+            if target_definition is not None:
                 runtime_content = format_mcp_server_definition(target_definition)
-                status = "in sync" if target_definition == canonical_definition else "out of sync"
         except Exception as exc:
-            status = "parse error"
-            # Target-side failure: the canonical is healthy — the reason must
-            # point at .mcp.json so the user doesn't chase the canonical file.
-            reason = sanitize_diff_reason(f"invalid JSON in .mcp.json: {exc}", project_root)
+            target_error = f"invalid JSON in .mcp.json: {exc}"
+
+    if canonical_definition is None:
+        status = "parse error" if canonical_content is not None else "missing canonical"
+        if target_error is not None and reason is None:
+            # Runtime-only request against a broken .mcp.json — the pane has
+            # nothing to show on either side; say why.
+            reason = sanitize_diff_reason(target_error, project_root)
+    elif target_error is not None:
+        status = "parse error"
+        # Target-side failure: the canonical is healthy — the reason must
+        # point at .mcp.json so the user doesn't chase the canonical file.
+        reason = sanitize_diff_reason(target_error, project_root)
+    elif target_definition is None:
+        status = "missing target"
+    else:
+        status = "in sync" if target_definition == canonical_definition else "out of sync"
 
     runtime_entry: dict[str, object] = {
         "runtime": MCP_RUNTIME,
@@ -418,8 +448,8 @@ async def sync_mcp_servers(
         raise HTTPException(422, str(exc)) from exc
     return {
         "generated": [
-            {"runtime": runtime, "path": _safe_rel(path, project_root)}
-            for runtime, path in result.generated
+            {"runtime": runtime, "name": name, "path": _safe_rel(path, project_root)}
+            for runtime, name, path in result.generated
         ],
         "skipped": [
             {"runtime": runtime, "reason": reason, "reason_code": code}

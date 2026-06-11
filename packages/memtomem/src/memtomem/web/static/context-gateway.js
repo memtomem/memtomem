@@ -3489,6 +3489,17 @@ function _ctxRenderDetailMetaHeader(type, data) {
       ['command_model', fields.model],
     ];
     chipsHtml = _ctxRenderDetailChipsHtml(chips);
+  } else if (type === 'mcp-servers') {
+    // #1247 id 36: read_mcp_server has always returned these — they just
+    // never rendered. Numeric 0 passes the chips filter intentionally:
+    // "Args 0" confirms the definition parsed (an unparseable canonical
+    // yields fields == {} and no chips at all).
+    const chips = [
+      ['mcp_command', fields.command],
+      ['mcp_args_count', fields.args_count],
+      ['mcp_env_count', fields.env_count],
+    ];
+    chipsHtml = _ctxRenderDetailChipsHtml(chips);
   }
 
   if (!rows.length && !chipsHtml) return '';
@@ -4312,12 +4323,18 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
     // ``type`` is always the plural section slug (skills/commands/agents);
     // the localized singular display name feeds the one-artifact CTA copy
-    // ("Import this skill" / "이 스킬 가져오기").
-    html += `<div class="ctx-edit-actions" style="margin-top:12px">
-      <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
-        ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
-      </button>
-    </div>`;
+    // ("Import this skill" / "이 스킬 가져오기"). Gated on the same capability
+    // map as the section toolbar: mcp-servers has NO /import route, and once
+    // runtime-only rows exist for it (#1247 id 31) an ungated button here
+    // would 404 — the residual dead-import leg #1223's toolbar map missed.
+    const caps = _CTX_TOOLBAR_CAPS[type] || {};
+    if (caps.import !== false) {
+      html += `<div class="ctx-edit-actions" style="margin-top:12px">
+        <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
+          ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
+        </button>
+      </div>`;
+    }
 
     html += '</div>';
     detailEl.innerHTML = html;
