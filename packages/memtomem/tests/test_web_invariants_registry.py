@@ -141,6 +141,10 @@ _REDACTION_PROTECTED: frozenset[str] = frozenset(
     {
         "chunks.edit_chunk",
         "scratch.promote_scratch",
+        # Promote appends a private-tier hook rule (free-form command
+        # strings + a free-string event key) into the git-tracked shared
+        # canonical — Gate A fragment scan in-route (#1247).
+        "settings_sync.promote_target_rule",
         "system.add_memory",
         "system.upload_files",
     }
@@ -214,7 +218,6 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "outside the LTM trust boundary; redaction not applicable",
     "settings_sync.apply_settings_sync": "structured settings merge; no free-form prose",
     "settings_sync.delete_target_rule": "structured settings hook rule deletion; no free-form prose",
-    "settings_sync.promote_target_rule": "structured settings hook rule promotion; no free-form prose",
     "settings_sync.resolve_conflict": "structured settings conflict resolution; no free-form prose",
     "system.embed_text": "ephemeral compute; no persistence",
     "system.add_memory_dir": "path-only payload, no prose",
@@ -277,8 +280,14 @@ def _iter_unsafe_route_handlers() -> list[tuple[str, str, str]]:
 
 
 def _function_calls_write_guard(module: str, function_name: str) -> bool:
-    """True iff ``function_name`` in ``module`` calls
-    ``privacy.enforce_write_guard`` somewhere in its body."""
+    """True iff ``function_name`` in ``module`` calls the privacy chokepoint.
+
+    Accepts ``privacy.enforce_write_guard(...)`` (direct chokepoint) and
+    ``scan_text_content(...)`` (the ``context.privacy_scan`` Gate A wrapper,
+    which calls ``enforce_write_guard`` internally — used by route handlers
+    that scan an in-memory fragment before a ``project_shared`` write,
+    e.g. ``settings_sync.promote_target_rule``, #1247).
+    """
     path = ROUTES_DIR / f"{module}.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
@@ -301,6 +310,12 @@ def _function_calls_write_guard(module: str, function_name: str) -> bool:
             # Match bare ``enforce_write_guard(...)`` after
             # ``from memtomem.privacy import enforce_write_guard``.
             if isinstance(f, ast.Name) and f.id == "enforce_write_guard":
+                return True
+            # Match ``scan_text_content(...)`` (qualified or bare) — the
+            # Gate A wrapper around enforce_write_guard.
+            if isinstance(f, ast.Name) and f.id == "scan_text_content":
+                return True
+            if isinstance(f, ast.Attribute) and f.attr == "scan_text_content":
                 return True
     return False
 

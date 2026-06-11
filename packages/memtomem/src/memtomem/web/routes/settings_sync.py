@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
+from memtomem.context.privacy_scan import format_scan_block_message, scan_text_content
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
@@ -828,6 +829,47 @@ async def promote_target_rule(
                 if isinstance(match, dict):
                     return JSONResponse(status_code=409, content=match)
                 _rules, rule = match
+
+                # Gate A (ADR-0011 §5, #1247): the canonical
+                # .memtomem/settings.json is git-tracked project_shared. Scan
+                # the EXACT fragment the append would write — {event: [rule]}
+                # — because body.event is a free string that lands as a JSON
+                # key (a secret-shaped event key must block too, not just a
+                # secret in the rule body). Scope is hardcoded
+                # project_shared: the route's target_scope is the tier being
+                # READ from; using it would skip-warn private tiers, the
+                # exact case this gate exists for. Placed before the consent
+                # gate so a doomed promote never completes a
+                # needs_confirmation round-trip.
+                fragment = json.dumps(
+                    {body.event: [rule]},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                fragment_scan = scan_text_content(
+                    fragment,
+                    source_path=target_path,
+                    surface="web_settings_rule_promote",
+                    scope="project_shared",
+                    project_root=project_root,
+                )
+                if fragment_scan.decision in ("blocked", "blocked_project_shared"):
+                    raise HTTPException(
+                        422,
+                        format_scan_block_message(
+                            fragment_scan,
+                            scope="project_shared",
+                            kind="hook rule",
+                            artifact_name=label,
+                            remediation_hint=(
+                                f"Remove the secret from the hook rule in "
+                                f"{target_path}, or keep the rule in your "
+                                f"private tier."
+                            ),
+                        ),
+                    )
+
                 if target_scope in ("user", "project_local") and not body.confirm_private_to_shared:
                     return {
                         "status": "needs_confirmation",

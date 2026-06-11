@@ -478,6 +478,10 @@ mm context sync --include=agents,commands --label production # deploy the labele
 
 Run `mm context --help` for the full fan-out matrix across editors (Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot) and per-runtime field-drop details.
 
+> **Note:** writes targeting `project_shared` (sync, install/update, version
+> create, hook-rule promote) are privacy-scanned and refuse on detected
+> secrets — git history is forever, so there is no force bypass (ADR-0011 §5).
+
 For multi-device use, treat the project-shared `.memtomem/` tree as part of
 that project repo. Commit `.memtomem/context.md`, `.memtomem/agents/`,
 `.memtomem/skills/`, `.memtomem/commands/`, and `.memtomem/settings.json`

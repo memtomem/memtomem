@@ -58,7 +58,12 @@ def _seed_wiki_asset(
         target = asset_dir / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    subprocess.run(["git", "-C", str(wiki_root_path), "add", "."], check=True, capture_output=True)
+    # ``-f`` so a developer/global gitignore (e.g. ``*.bak``) cannot
+    # silently drop a deliberately seeded file and make a test vacuous —
+    # mirrors test_wiki_store's ``_seed_skill(force_add=...)`` pattern.
+    subprocess.run(
+        ["git", "-C", str(wiki_root_path), "add", "-f", "."], check=True, capture_output=True
+    )
     subprocess.run(
         ["git", "-C", str(wiki_root_path), "commit", "-m", f"add {asset_type}/{name}"],
         check=True,
@@ -546,3 +551,245 @@ def test_classify_install_all_missing_only_dirty_reason(wiki_root: Path, tmp_pat
     assert rows[0].reason is not None
     assert "deleted locally" in rows[0].reason
     assert "0 file(s) modified" not in rows[0].reason
+
+
+# ── B2: Gate A on batch wiki ingress (#1247 ids 3) ──────────────────────
+
+# AKIA fixture per feedback_force_unsafe_redaction_valve_only.md — a clean
+# string would let force_unsafe=False scans pass and false-negative every
+# block assertion below.
+SECRET = "api_key=AKIA1234567890ABCDEF"
+
+
+def _repin_lockfile_entry(project_root: Path, asset_type: str, name: str, pin: str) -> Path:
+    """Re-point a lockfile entry at *pin* without an ingress install — a
+    poisoned HEAD install would itself be gated post-fix, so the poisoned
+    pin must be planted directly. Drops the manifest keys so they can't
+    disagree with the new pin."""
+    lock_path = project_root / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc[asset_type][name]["wiki_commit"] = pin
+    doc[asset_type][name].pop("files", None)
+    doc[asset_type][name].pop("files_commit", None)
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+    return lock_path
+
+
+def _seed_known_projects(path: Path, project_roots: list[Path]) -> None:
+    """Write a ``known_projects.json`` listing the given roots (mirrors
+    ``test_context_update.py`` so update --all behavior parity is easy
+    to reason about)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "version": 1,
+        "projects": [
+            {"root": str(p), "added_at": "2026-01-01T00:00:00.000000Z", "label": None}
+            for p in project_roots
+        ],
+    }
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _patch_known_projects_path(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """Make ``ContextGatewayConfig()`` in the CLI return *path* (mirrors
+    ``test_context_update.py``)."""
+
+    class _FakeCfg:
+        known_projects_path = path
+
+    monkeypatch.setattr(
+        "memtomem.cli.context_cmd.ContextGatewayConfig",
+        lambda: _FakeCfg(),
+    )
+
+
+class TestPrivacyGateBatchIngress:
+    """ADR-0011 §5 Gate A on the wiki-install batch ingress surfaces
+    (``install --all`` pinned re-extraction, ``update --all`` --force
+    dirty-file ``.bak`` copies) — #1247 id 3."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_privacy_counters(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    def test_pinned_parity_wiki_shipped_bak_no_false_block_no_bak_in_dest(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scan set == copy set: a wiki-shipped secret ``.bak`` never lands
+        in dest (#1250), so the pinned re-extraction must not false-block
+        on it (design test 4b — pins existing behavior pre-fix)."""
+        _initialized_wiki(wiki_root)
+        _seed_wiki_asset(
+            wiki_root,
+            "skills",
+            "foo",
+            {
+                "SKILL.md": b"pinned\n",
+                "foo.md": b"doc\n",
+                "foo.md.bak": (SECRET + "\n").encode(),
+            },
+        )
+        # Precondition: the secret .bak really is committed at the pin —
+        # otherwise the no-false-block assertion below would pass vacuously.
+        ls_tree = subprocess.run(
+            ["git", "-C", str(wiki_root), "ls-tree", "-r", "--name-only", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "skills/foo/foo.md.bak" in ls_tree.stdout
+
+        install_skill(tmp_path, "foo")
+        dest = tmp_path / ".memtomem" / "skills" / "foo"
+        shutil.rmtree(dest)
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(context_group, ["install", "--all", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "1 installed" in result.output
+        # No false block — the .bak is outside the copier's effective set.
+        assert "Gate A" not in result.output
+        assert (dest / "SKILL.md").read_bytes() == b"pinned\n"
+        assert (dest / "foo.md").read_bytes() == b"doc\n"
+        assert list(dest.rglob("*.bak")) == []
+
+    def test_pinned_non_utf8_blob_with_embedded_secret_blocks(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``errors="replace"`` decode policy: ASCII AKIA bytes between
+        undecodable garbage at the pin must still block (design test 4d)."""
+        from memtomem import privacy
+
+        _initialized_wiki(wiki_root)
+        _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"clean\n"})
+        install_skill(tmp_path, "foo")
+        poisoned_pin = _advance_wiki(
+            wiki_root,
+            "skills",
+            "foo",
+            {"blob.bin": b"\xff\xfe" + SECRET.encode() + b"\xff"},
+        )
+        lock_path = _repin_lockfile_entry(tmp_path, "skills", "foo", poisoned_pin)
+        dest = tmp_path / ".memtomem" / "skills" / "foo"
+        shutil.rmtree(dest)
+
+        monkeypatch.chdir(tmp_path)
+        privacy.reset_for_tests()  # drop setup-time install attributions
+        runner = CliRunner()
+        result = runner.invoke(context_group, ["install", "--all", "--yes"])
+
+        assert result.exit_code == 1, result.output
+        assert "Gate A" in result.output
+        assert "1 failed" in result.output
+        # Zero residue: refusal precedes any dest write or lockfile upsert.
+        assert not dest.exists()
+        doc_after = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert doc_after["skills"]["foo"]["wiki_commit"] == poisoned_pin
+        assert "files" not in doc_after["skills"]["foo"]
+        # Matched bytes never echo back through the CLI.
+        assert "AKIA1234567890ABCDEF" not in result.output
+        # Surface attribution: the batch ingress, not the single-install surface.
+        by_tool = privacy.snapshot()["by_tool"]
+        assert by_tool["cli_context_install_all"]["blocked"] >= 1
+        assert "cli_context_install" not in by_tool
+
+    def test_install_all_isolates_poisoned_row_clean_sibling_lands(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Row isolation: one poisoned pin red-✗s its own row only — the
+        clean sibling still lands (dest + lockfile), exit 1 (design test 5,
+        install --all leg)."""
+        _initialized_wiki(wiki_root)
+        good_pin = _seed_wiki_asset(wiki_root, "skills", "good", {"SKILL.md": b"good\n"})
+        install_skill(tmp_path, "good")
+        _seed_wiki_asset(wiki_root, "skills", "bad", {"SKILL.md": b"clean\n"})
+        install_skill(tmp_path, "bad")
+        poisoned_pin = _advance_wiki(
+            wiki_root, "skills", "bad", {"SKILL.md": ("# doc\n" + SECRET + "\n").encode()}
+        )
+        _repin_lockfile_entry(tmp_path, "skills", "bad", poisoned_pin)
+        shutil.rmtree(tmp_path / ".memtomem" / "skills" / "good")
+        shutil.rmtree(tmp_path / ".memtomem" / "skills" / "bad")
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(context_group, ["install", "--all", "--yes"])
+
+        assert result.exit_code == 1, result.output
+        assert "Gate A" in result.output
+        assert "1 installed" in result.output
+        assert "1 failed" in result.output
+        # Clean row landed: dest bytes + lockfile pin both intact.
+        good_dest = tmp_path / ".memtomem" / "skills" / "good"
+        assert (good_dest / "SKILL.md").read_bytes() == b"good\n"
+        lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text(encoding="utf-8"))
+        assert lock_doc["skills"]["good"]["wiki_commit"] == good_pin
+        assert lock_doc["skills"]["good"]["files"] == ["SKILL.md"]
+        # Poisoned row left zero residue.
+        assert not (tmp_path / ".memtomem" / "skills" / "bad").exists()
+        assert "AKIA1234567890ABCDEF" not in result.output
+
+    def test_update_all_isolates_secret_dirty_project_no_bak(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``update --all --force`` row isolation: a secret in project A's
+        dirty dest blocks A's ``.bak`` copy without sinking clean project B
+        (design test 5, update --all leg — R2 major 2 shape)."""
+        from memtomem import privacy
+
+        _initialized_wiki(wiki_root)
+        v1 = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"v1\n"})
+        proj_a = tmp_path / "proj_a"
+        proj_a.mkdir()
+        proj_b = tmp_path / "proj_b"
+        proj_b.mkdir()
+        install_skill(proj_a, "foo")
+        install_skill(proj_b, "foo")
+
+        edited = proj_a / ".memtomem" / "skills" / "foo" / "SKILL.md"
+        dirty_bytes = ("# local\n" + SECRET + "\n").encode()
+        edited.write_bytes(dirty_bytes)
+        _bump_mtime(edited)
+
+        v2 = _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"v2\n"})
+
+        known = tmp_path / "known.json"
+        _seed_known_projects(known, [proj_a, proj_b])
+        _patch_known_projects_path(monkeypatch, known)
+
+        cwd = tmp_path / "cwdproj"
+        cwd.mkdir()
+        (cwd / ".git").mkdir()
+        monkeypatch.chdir(cwd)
+
+        privacy.reset_for_tests()  # drop setup-time install attributions
+        runner = CliRunner()
+        result = runner.invoke(
+            context_group, ["update", "skill", "foo", "--all", "--yes", "--force"]
+        )
+
+        assert result.exit_code == 1, result.output
+        assert "Gate A" in result.output
+        assert "1 updated" in result.output
+        assert "1 failed" in result.output
+        # Project A: refusal precedes the .bak copy — no .bak, dirty bytes
+        # intact, lockfile pin unchanged.
+        assert list(proj_a.rglob("*.bak")) == []
+        assert edited.read_bytes() == dirty_bytes
+        lock_a = json.loads((proj_a / ".memtomem" / "lock.json").read_text(encoding="utf-8"))
+        assert lock_a["skills"]["foo"]["wiki_commit"] == v1
+        # Project B: updated to wiki HEAD.
+        assert (proj_b / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
+        lock_b = json.loads((proj_b / ".memtomem" / "lock.json").read_text(encoding="utf-8"))
+        assert lock_b["skills"]["foo"]["wiki_commit"] == v2
+        assert "AKIA1234567890ABCDEF" not in result.output
+        # Surface attribution: the batch surface, not the single-update one.
+        by_tool = privacy.snapshot()["by_tool"]
+        assert by_tool["cli_context_update_all"]["blocked"] >= 1
+        assert "cli_context_update" not in by_tool

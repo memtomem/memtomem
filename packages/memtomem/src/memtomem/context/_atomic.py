@@ -26,7 +26,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterator
 
 import portalocker
@@ -40,6 +40,7 @@ __all__ = [
     "atomic_write_text",
     "copy_tree_atomic",
     "installed_at_from_dest",
+    "is_copy_skipped_rel",
     "iter_installed_files",
 ]
 
@@ -241,6 +242,26 @@ def copy_tree_atomic(
             # skip_top_level intentionally not threaded into the recursion.
             written += copy_tree_atomic(entry, target, mode=mode, skip_suffixes=skip_suffixes)
     return written
+
+
+def is_copy_skipped_rel(rel: str | PurePosixPath) -> bool:
+    """True when :func:`copy_tree_atomic` (with ``DIRTY_SKIP_SUFFIXES``) would not mirror *rel*.
+
+    Rel-path form of the walker skip rules, for callers that enumerate
+    relative paths instead of dirents (the pinned-install scan and
+    extraction over ``git ls-tree`` output, #1247). A rel is skipped when
+    ANY path segment is named in :data:`COPY_SKIP_NAMES` or carries a
+    suffix in :data:`DIRTY_SKIP_SUFFIXES` — matching the copier, which
+    applies both checks to files and directories at every depth. Keep the
+    three rule carriers in lockstep: this predicate,
+    :func:`copy_tree_atomic`, and :func:`iter_installed_files` (symlink
+    skipping is dirent-only and cannot be expressed on a rel string).
+    """
+    parts = PurePosixPath(rel).parts
+    return any(
+        part in COPY_SKIP_NAMES or PurePosixPath(part).suffix in DIRTY_SKIP_SUFFIXES
+        for part in parts
+    )
 
 
 def iter_installed_files(root: Path) -> Iterator[Path]:

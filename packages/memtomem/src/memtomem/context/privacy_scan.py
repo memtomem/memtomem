@@ -290,6 +290,7 @@ def format_scan_block_message(
     scope: TargetScope,
     kind: str,
     artifact_name: str | None = None,
+    remediation_hint: str | None = None,
 ) -> str:
     """User-facing message body for project_shared sync block.
 
@@ -313,10 +314,26 @@ def format_scan_block_message(
             "leak"). Used in the remediation hint —
             ``mm context migrate <kind>s <artifact_name> ...``. ``None``
             falls back to a generic hint.
+        remediation_hint: Caller-supplied replacement for the default
+            sync-side remediation lines. The stock hint prescribes
+            ``mm context migrate ... --to project_local`` — wrong for
+            ingress surfaces where the secret lives upstream (wiki
+            install/update: fix the wiki asset; settings promote: fix
+            the hook rule) rather than in a canonical the user could
+            migrate (#1247). ``None`` keeps the historical message
+            byte-identical for the existing sync/migrate callers.
 
     Returns:
         Multi-line string carried by :class:`PrivacyBlockedError`.
     """
+    if remediation_hint is not None:
+        return (
+            f"Gate A: {blocked.path.name} contains {blocked.hits_count} privacy "
+            f"pattern hit(s); write to scope='{scope}' rejected. git history "
+            f"is forever — no force bypass available for project_shared "
+            f"(ADR-0011 §5).\n"
+            f"  {remediation_hint}"
+        )
     cli_kind = f"{kind}s"  # singular → plural for the migrate CLI choice
     target_hint = (
         f"mm context migrate {cli_kind} {artifact_name} --to project_local"
@@ -340,6 +357,7 @@ def raise_or_collect(
     scope: TargetScope,
     kind: str,
     artifact_name: str | None = None,
+    remediation_hint: str | None = None,
 ) -> tuple[skip_codes.SkipCode, str]:
     """Branch on ``scope``: raise for project_shared, return skip tuple otherwise.
 
@@ -352,7 +370,11 @@ def raise_or_collect(
     """
     if scope == "project_shared":
         message = format_scan_block_message(
-            blocked, scope=scope, kind=kind, artifact_name=artifact_name
+            blocked,
+            scope=scope,
+            kind=kind,
+            artifact_name=artifact_name,
+            remediation_hint=remediation_hint,
         )
         raise PrivacyBlockedError(
             message,

@@ -15,6 +15,7 @@ from memtomem.context._atomic import (
     _lock_path_for,
     atomic_write_bytes,
     atomic_write_text,
+    iter_installed_files,
 )
 
 
@@ -186,3 +187,64 @@ class TestFileLockTimeout:
         lock = _lock_path_for(tmp_path / "data.json")
         with _file_lock(lock):
             pass
+
+
+class TestIsCopySkippedRel:
+    """``is_copy_skipped_rel`` is the single enumerator behind the pinned-path
+    scan/copy parity (#1247) — its verdict must match the walkers' skip rules.
+
+    The predicate ships with the privacy-gate fix, so it is imported inside
+    each test: pre-fix that errors per-test without breaking file collection."""
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "foo.md.bak",  # DIRTY_SKIP_SUFFIXES at the top level
+            "nested/dir/foo.md.bak",  # …and at depth
+            "__pycache__/x.py",  # COPY_SKIP_NAMES as a leading dir part
+            "a/.git/b",  # …as an interior dir part
+            ".DS_Store",  # …as the filename itself
+        ],
+    )
+    def test_true_for_skipped_rels(self, rel: str) -> None:
+        from memtomem.context._atomic import is_copy_skipped_rel
+
+        assert is_copy_skipped_rel(rel) is True
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "notes.md",
+            "nested/dir/file.md",
+            "bak",  # bare filename, not a .bak suffix
+            "foo.bak.md",  # final suffix is .md — an interior .bak doesn't count
+        ],
+    )
+    def test_false_for_kept_rels(self, rel: str) -> None:
+        from memtomem.context._atomic import is_copy_skipped_rel
+
+        assert is_copy_skipped_rel(rel) is False
+
+    def test_agrees_with_installed_file_walker(self, tmp_path: Path) -> None:
+        """Both directions on a real tree: predicate-skipped ⇔ walker-skipped,
+        so the pinned-path enumerator cannot drift from the HEAD-path walker."""
+        from memtomem.context._atomic import is_copy_skipped_rel
+
+        verdicts = {
+            "SKILL.md": False,
+            "scripts/run.sh": False,
+            "foo.md.bak": True,
+            "nested/old.md.bak": True,
+            "__pycache__/junk.pyc": True,
+            ".DS_Store": True,
+        }
+        root = tmp_path / "asset"
+        for rel in verdicts:
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"x")
+
+        walked = {p.relative_to(root).as_posix() for p in iter_installed_files(root)}
+        for rel, skipped in verdicts.items():
+            assert is_copy_skipped_rel(rel) is skipped
+            assert (rel in walked) is (not skipped)

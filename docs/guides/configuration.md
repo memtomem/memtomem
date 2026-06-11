@@ -814,6 +814,12 @@ read-only in the Web UI, so use the matching `--scope user` CLI flow. The
 `project_local` tier is a gitignored draft tier; use `--scope project_local`
 to seed drafts, and expect sync to report the no-runtime-fan-out skip.
 
+All writes into the git-tracked `.memtomem/` tree — sync fan-out, `mm context
+install`/`update` from the wiki, version create, and the web hook-rule
+promote — pass the ADR-0011 §5 privacy gate first: a detected secret
+hard-refuses the write with no bypass flag, because git history cannot be
+retracted.
+
 For multi-device sync, treat project-shared Context Gateway files as part of
 the project repo: commit `<project>/.memtomem/context.md`,
 `<project>/.memtomem/{agents,skills,commands}/`, and

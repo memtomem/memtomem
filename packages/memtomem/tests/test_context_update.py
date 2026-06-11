@@ -22,6 +22,7 @@ import pytest
 from click.testing import CliRunner
 
 import memtomem.context.install as install_module
+from memtomem import privacy
 from memtomem.cli.context_cmd import context as context_group
 from memtomem.context._names import InvalidNameError
 from memtomem.context.install import (
@@ -34,6 +35,7 @@ from memtomem.context.install import (
     update_command,
     update_skill,
 )
+from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.wiki.store import WikiStore
 
 
@@ -899,7 +901,10 @@ def test_cli_update_all_mid_loop_fs_error_continues(
     runner = CliRunner()
     result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
 
-    assert result.exit_code == 0, result.output
+    # Row failures now exit 1 (mirrors install --all, #1247) — the point
+    # pinned here is CONTINUATION, not a clean exit: the batch must not
+    # abort on the first row's failure.
+    assert result.exit_code == 1, result.output
     # First project marked ✗, second project marked ✓ — both rows reached.
     assert "✗" in result.output
     assert "simulated fs error" in result.output
@@ -1272,3 +1277,104 @@ def test_wiki_shipped_bak_never_installed_or_stranded(wiki_root: Path, tmp_path:
     upd = update_skill(tmp_path, "web")
     assert upd.files_removed == ()
     assert not (dest / "leftover.md.bak").exists()
+
+
+# ── B2: Gate A on update ingress (#1247 id 3) ────────────────────────────
+
+
+# AKIA fixture per feedback_force_unsafe_redaction_valve_only.md — clean
+# strings would pass the scan and false-negative every block assertion.
+SECRET = "api_key=AKIA1234567890ABCDEF"
+
+
+class TestUpdatePrivacyGate:
+    """Gate A on the update ingress (ADR-0011 §5, design tests 2 / 3 / 9)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_privacy_counters(self):
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    def test_update_blocks_on_poisoned_wiki_src(self, wiki_root: Path, tmp_path: Path) -> None:
+        """Design test 2: secret lands in the wiki → update hard-refuses
+        BEFORE any dest write — zero residue (old bytes, old pin, no .bak)."""
+        _initialized_wiki(wiki_root)
+        old_commit = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+        project = tmp_path
+        install_skill(project, "foo")
+
+        lock_path = project / ".memtomem" / "lock.json"
+        pre_lock_bytes = lock_path.read_bytes()
+
+        _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": f"v2\n{SECRET}\n".encode()})
+
+        with pytest.raises(PrivacyBlockedError):
+            update_skill(project, "foo")
+
+        dest = project / ".memtomem" / "skills" / "foo"
+        # Zero-residue: dest still carries the OLD clean bytes.
+        assert (dest / "SKILL.md").read_bytes() == b"v1\n"
+        # Lockfile untouched — wiki_commit is still the install-time pin.
+        assert _lock_entry(project, "skills", "foo")["wiki_commit"] == old_commit
+        assert lock_path.read_bytes() == pre_lock_bytes
+        # No .bak anywhere under dest (no preservation pass ran).
+        assert list(dest.rglob("*.bak")) == []
+
+    def test_force_update_blocks_on_secret_in_dirty_dest_file(
+        self, wiki_root: Path, tmp_path: Path
+    ) -> None:
+        """Design test 3: --force scans each dirty file BEFORE its .bak
+        copy2 — the secret never gets a second tracked copy."""
+        _initialized_wiki(wiki_root)
+        _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+        project = tmp_path
+        install_skill(project, "foo")
+
+        dest = project / ".memtomem" / "skills" / "foo"
+        edited = dest / "SKILL.md"
+        dirty_bytes = f"local edit\n{SECRET}\n".encode()
+        edited.write_bytes(dirty_bytes)
+        _bump_mtime(edited)
+
+        # Wiki advance is CLEAN — the block must come from the dirty-file
+        # scan, not the src scan.
+        _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+        lock_path = project / ".memtomem" / "lock.json"
+        pre_lock_bytes = lock_path.read_bytes()
+
+        with pytest.raises(PrivacyBlockedError):
+            update_skill(project, "foo", force=True)
+
+        # NO .bak landed; the dirty bytes are intact; lockfile untouched.
+        assert list(dest.rglob("*.bak")) == []
+        assert edited.read_bytes() == dirty_bytes
+        assert lock_path.read_bytes() == pre_lock_bytes
+        # Surface attribution (#1246/#1248 real-ingress rule): single-asset
+        # update audits as cli_context_update, never the batch surface.
+        by_tool = privacy.snapshot()["by_tool"]
+        assert by_tool["cli_context_update"]["blocked"] >= 1
+        assert "cli_context_update_all" not in by_tool
+
+    def test_cli_update_maps_block_to_exit_1_without_secret_echo(
+        self, wiki_root: Path, project_cwd: Path
+    ) -> None:
+        """Design test 9 (update leg): PrivacyBlockedError → ClickException,
+        exit 1, Gate A message shown, no secret echo, no traceback dump."""
+        _initialized_wiki(wiki_root)
+        _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+        install_skill(project_cwd, "foo")
+        _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": f"v2\n{SECRET}\n".encode()})
+
+        runner = CliRunner()
+        result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+        assert result.exit_code == 1, result.output
+        # ClickException mapping pin: the Gate A message reaches stdout
+        # (an unhandled PrivacyBlockedError would leave output empty).
+        assert "Gate A" in result.output
+        # The block message must never echo the secret back (privacy.py
+        # contract: path + hit count only).
+        assert "AKIA1234567890ABCDEF" not in result.output
+        assert "Traceback" not in result.output

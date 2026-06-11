@@ -9,6 +9,7 @@ ADR-0008's roadmap.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ WIKI_ASSET_TYPES: tuple[str, ...] = ("skills", "agents", "commands")
 """Asset directory names at the wiki root. Order is significant for listing."""
 
 _INITIAL_COMMIT_MESSAGE = "Initialize memtomem wiki"
+
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+"""Canonical lockfile-pin shape — full 40-hex lowercase object id."""
 
 _README_TEMPLATE = """# memtomem wiki
 
@@ -181,8 +185,15 @@ class WikiStore:
         before attempting per-file extraction.
 
         Returns ``False`` when the commit is missing OR when *commit*
-        is malformed (empty string, non-hex chars, etc.) — the caller
-        should not need to validate the SHA shape upfront.
+        is malformed — the caller should not need to validate the SHA
+        shape upfront. "Malformed" is enforced as anything that is not
+        a full 40-hex object id: a symbolic ref (``main``) or an
+        abbreviated SHA would otherwise satisfy ``cat-file`` while
+        breaking the pin contract — refs move, so a hand-edited
+        lockfile pin of ``main`` would let the scanned bytes diverge
+        from the extracted bytes and make ``install --all`` restores
+        non-reproducible (#1247 Gate A review). Pins written by mm are
+        always full-length (:meth:`current_commit`).
 
         Raises :class:`WikiNotFoundError` if the wiki itself is missing
         — the caller decides whether that's a hard error or a
@@ -190,7 +201,7 @@ class WikiStore:
         reachability info; install --all refuses).
         """
         self.require_exists()
-        if not commit:
+        if not commit or _FULL_SHA_RE.fullmatch(commit) is None:
             return False
         result = subprocess.run(
             ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
@@ -251,25 +262,47 @@ class WikiStore:
         """
         # Deferred import: install.py imports wiki.store at module load;
         # the reverse import here would cycle. Local resolves at call time.
-        from memtomem.context._atomic import DIRTY_SKIP_SUFFIXES, copy_tree_atomic
+        from memtomem.context._atomic import (
+            DIRTY_SKIP_SUFFIXES,
+            copy_tree_atomic,
+            is_copy_skipped_rel,
+        )
 
-        src_prefix = f"{asset_type}/{name}/"
         inner_relpaths = self.asset_files_at_commit(commit, asset_type, name)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=dest.parent) as tmpdir:
             tmpdir_path = Path(tmpdir)
             for inner in inner_relpaths:
+                # Filter BEFORE reading: the final copy would skip these
+                # anyway, but materializing them first would park unscanned
+                # wiki bytes inside the git-tracked ``.memtomem/`` tree —
+                # surviving a crash/SIGKILL as commit-able residue, and
+                # invisible to the pinned-install Gate A scan, which uses
+                # the same predicate (#1247).
+                if is_copy_skipped_rel(inner):
+                    continue
                 target = tmpdir_path / inner
                 target.parent.mkdir(parents=True, exist_ok=True)
-                content = subprocess.run(
-                    ["git", "show", f"{commit}:{src_prefix}{inner}"],
-                    cwd=self.root,
-                    check=True,
-                    capture_output=True,
-                )
-                target.write_bytes(content.stdout)
+                target.write_bytes(self.read_asset_file_at_commit(commit, asset_type, name, inner))
             return copy_tree_atomic(tmpdir_path, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
+
+    def read_asset_file_at_commit(self, commit: str, asset_type: str, name: str, rel: str) -> bytes:
+        """Read one asset file's bytes at *commit* straight from git objects.
+
+        ``git show <commit>:<asset_type>/<name>/<rel>`` — the wiki working
+        tree is never consulted, so the bytes are immutable for a given
+        commit. Shared by :meth:`copy_asset_at_commit` (extraction) and the
+        pinned-install Gate A privacy scan (#1247), which must observe
+        exactly the bytes the extractor would write.
+        """
+        result = subprocess.run(
+            ["git", "show", f"{commit}:{asset_type}/{name}/{rel}"],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        )
+        return result.stdout
 
     def asset_files_at_commit(self, commit: str, asset_type: str, name: str) -> list[str]:
         """List the asset's file relpaths (relative to the asset dir) at *commit*.

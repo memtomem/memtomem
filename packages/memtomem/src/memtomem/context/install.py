@@ -35,11 +35,17 @@ from memtomem.context._atomic import (
     DIRTY_SKIP_SUFFIXES,
     copy_tree_atomic,
     installed_at_from_dest,
+    is_copy_skipped_rel,
     iter_installed_files,
 )
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
 from memtomem.context.lockfile import Lockfile, LockfileVersionError, manifest_from_entry
+from memtomem.context.privacy_scan import (
+    raise_or_collect,
+    scan_artifact_tree,
+    scan_text_content,
+)
 from memtomem.wiki.store import CommitNotFoundError as CommitNotFoundError
 from memtomem.wiki.store import WikiStore
 
@@ -287,6 +293,128 @@ def _reconcile_removed_files(
     return tuple(removed)
 
 
+def _gate_a_scan_src_tree(
+    src: Path,
+    *,
+    surface: str,
+    project_root: Path,
+    asset_type: str,
+    name: str,
+) -> None:
+    """Gate A over the copier's effective file set of a wiki working-tree asset.
+
+    Iterates :func:`iter_installed_files` rather than handing the directory
+    to :func:`scan_artifact_tree` directly — the walker shares
+    ``copy_tree_atomic``'s skip rules, so a wiki-shipped ``*.bak`` that the
+    copier would never install cannot false-block the install (#1247;
+    scan set == copy set). Raises
+    :class:`memtomem.context.privacy_scan.PrivacyBlockedError` on the first
+    hit; callers run this BEFORE any dest mutation so refusal leaves zero
+    residue.
+    """
+    kind = asset_type.removesuffix("s")
+    for path in iter_installed_files(src):
+        result = scan_artifact_tree(
+            path, surface=surface, scope="project_shared", project_root=project_root
+        )
+        if result.blocked:
+            blocked = result.blocked[0]
+            raise_or_collect(
+                blocked,
+                scope="project_shared",
+                kind=kind,
+                artifact_name=name,
+                remediation_hint=(
+                    f"Remove the secret from the wiki copy at {blocked.path} "
+                    f"and re-run — wiki bytes must be clean before they can land "
+                    f"in the git-tracked project tree."
+                ),
+            )
+
+
+def _gate_a_scan_dirty_files(
+    dirty_files: tuple[Path, ...] | list[Path] | frozenset[Path],
+    *,
+    surface: str,
+    project_root: Path,
+    asset_type: str,
+    name: str,
+) -> None:
+    """Gate A over the dirty dest files a ``--force`` run would ``.bak``-snapshot.
+
+    The ``.bak`` sibling is a NEW file in the git-tracked tree (mirroring the
+    version-create snapshot standard): a secret in a locally edited file must
+    refuse the forced update before any ``.bak`` lands, not silently
+    duplicate into a second commit-able path (#1247).
+    """
+    kind = asset_type.removesuffix("s")
+    for path in sorted(dirty_files):
+        result = scan_artifact_tree(
+            path, surface=surface, scope="project_shared", project_root=project_root
+        )
+        if result.blocked:
+            blocked = result.blocked[0]
+            raise_or_collect(
+                blocked,
+                scope="project_shared",
+                kind=kind,
+                artifact_name=name,
+                remediation_hint=(
+                    f"Remove the secret from {blocked.path} (a local edit that "
+                    f"--force would preserve as a .bak sibling in the git-tracked "
+                    f"tree), then re-run with --force."
+                ),
+            )
+
+
+def _gate_a_scan_pinned_asset(
+    wiki: WikiStore,
+    pin: str,
+    asset_type: str,
+    name: str,
+    *,
+    surface: str,
+    project_root: Path,
+) -> None:
+    """Gate A over the bytes a pinned re-extraction would write.
+
+    The wiki working tree is irrelevant here — the extractor reads git
+    objects at *pin*, so the scan does too (:meth:`WikiStore.
+    read_asset_file_at_commit`), which also closes the scan→write TOCTOU:
+    a commit's bytes are immutable. Rels are filtered with
+    :func:`is_copy_skipped_rel`, the same predicate the extractor applies,
+    so the scan observes exactly the file set that would land. Bytes decode
+    with ``errors="replace"`` mirroring :func:`scan_artifact_tree`'s
+    contract — an ASCII secret embedded in a non-UTF8 blob still blocks.
+    """
+    kind = asset_type.removesuffix("s")
+    for rel in wiki.asset_files_at_commit(pin, asset_type, name):
+        if is_copy_skipped_rel(rel):
+            continue
+        text = wiki.read_asset_file_at_commit(pin, asset_type, name, rel).decode(
+            "utf-8", errors="replace"
+        )
+        scan = scan_text_content(
+            text,
+            source_path=wiki.root / asset_type / name / rel,
+            surface=surface,
+            scope="project_shared",
+            project_root=project_root,
+        )
+        if scan.decision in ("blocked", "blocked_project_shared"):
+            raise_or_collect(
+                scan,
+                scope="project_shared",
+                kind=kind,
+                artifact_name=name,
+                remediation_hint=(
+                    f"The pinned wiki commit {pin[:12]} ships a secret in "
+                    f"{asset_type}/{name}/{rel}; fix the asset in the wiki and "
+                    f"re-pin to a clean commit before restoring."
+                ),
+            )
+
+
 def _install_asset(
     project_root: Path | str,
     asset_type: str,
@@ -336,6 +464,18 @@ def _install_asset(
             f"run `mm context update {asset_type_singular} {validated}` "
             f"to refresh from wiki HEAD"
         )
+
+    # Gate A (ADR-0011 §5, #1247): wiki bytes are user-tier — secrets are
+    # legal there — but dest is the git-tracked project_shared canonical.
+    # Scan before mkdir so refusal leaves zero residue (no empty type dir,
+    # no dest bytes, no lockfile entry).
+    _gate_a_scan_src_tree(
+        src,
+        surface="cli_context_install",
+        project_root=project_root,
+        asset_type=asset_type,
+        name=validated,
+    )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
@@ -493,6 +633,7 @@ def _apply_update(
     lock_entry: dict[str, Any],
     dirty_report: DirtyReport,
     force: bool,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Execute an already-classified update.
 
@@ -524,6 +665,25 @@ def _apply_update(
             f"since install at {dirty_report.installed_at}; "
             f"pass --force to overwrite "
             f"(each modified file gets a .bak sibling; deleted files are restored)"
+        )
+
+    # Gate A (ADR-0011 §5, #1247): both scans precede the .bak loop — the
+    # first dest mutation with no rollback — so a privacy refusal leaves
+    # no .bak, no copied bytes, and (upserts trail copies) no lockfile drift.
+    _gate_a_scan_src_tree(
+        src,
+        surface=surface,
+        project_root=project_root,
+        asset_type=asset_type,
+        name=name,
+    )
+    if force and dirty_report.reason == "dirty":
+        _gate_a_scan_dirty_files(
+            dirty_report.dirty_files,
+            surface=surface,
+            project_root=project_root,
+            asset_type=asset_type,
+            name=name,
         )
 
     bak_paths: list[Path] = []
@@ -867,6 +1027,7 @@ def _apply_pinned_install(
     *,
     wiki: WikiStore,
     force: bool,
+    surface: str = "cli_context_install_all",
 ) -> InstallResult:
     """Execute one install at the pinned commit.
 
@@ -911,6 +1072,28 @@ def _apply_pinned_install(
         raise StaleInstallError(
             f"{asset_type}/{name}: {local_edits} would be clobbered; "
             f"pass --force to overwrite (each modified file gets a .bak sibling)"
+        )
+
+    # Gate A (ADR-0011 §5, #1247): scan the pin's git objects (the exact
+    # bytes the extractor would write) plus any dirty files a --force run
+    # would .bak — both BEFORE the .bak loop, the first dest mutation.
+    _gate_a_scan_pinned_asset(
+        wiki,
+        pin,
+        asset_type,
+        name,
+        surface=surface,
+        project_root=project_root,
+    )
+    if classification.state == "refuse" and force:
+        report = classification.dirty_report
+        assert report is not None  # state=refuse always carries a report
+        _gate_a_scan_dirty_files(
+            report.dirty_files,
+            surface=surface,
+            project_root=project_root,
+            asset_type=asset_type,
+            name=name,
         )
 
     bak_paths: list[Path] = []

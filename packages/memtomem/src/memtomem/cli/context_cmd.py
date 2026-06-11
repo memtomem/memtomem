@@ -1456,6 +1456,11 @@ def install_cmd(
         raise click.ClickException(str(exc)) from exc
     except LockfileVersionError as exc:
         raise click.ClickException(str(exc)) from exc
+    except PrivacyScanError as exc:
+        # Gate A refusal (ADR-0011 §5, #1247) — exc.message carries the
+        # remediation hint; ClickException keeps the secret-free message
+        # and exits 1 without a traceback.
+        raise click.ClickException(exc.message) from exc
 
     click.secho(
         f"Installed {result.asset_type}/{result.name} (wiki {result.wiki_commit[:12]})",
@@ -1549,6 +1554,9 @@ def update_cmd(
         raise click.ClickException(str(exc)) from exc
     except LockfileVersionError as exc:
         raise click.ClickException(str(exc)) from exc
+    except PrivacyScanError as exc:
+        # Gate A refusal (ADR-0011 §5, #1247) — see install_cmd's arm.
+        raise click.ClickException(exc.message) from exc
 
     if result.was_no_op:
         click.secho(
@@ -1709,9 +1717,16 @@ def _run_update_all(
                 lock_entry=c.lock_entry,
                 dirty_report=c.dirty_report,
                 force=force,
+                surface="cli_context_update_all",
             )
         except StaleInstallError as exc:
             click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
+            failures += 1
+        except PrivacyScanError as exc:
+            # Gate A refusal (ADR-0011 §5, #1247): this project's row fails,
+            # the batch continues — a secret in one project's tree must not
+            # block clean siblings.
+            click.secho(f"  ✗ {c.project_root}: {exc.message}", fg="red")
             failures += 1
         except OSError as exc:
             click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
@@ -1727,6 +1742,12 @@ def _run_update_all(
         f"\nSummary: {successes} updated, {failures} failed, "
         f"{len(classifications) - successes - failures} unchanged."
     )
+
+    # Mirror _run_install_all: row failures must surface as a non-zero exit
+    # so scripts can detect a partially failed batch (#1247 — previously
+    # update --all always exited 0, even with red rows).
+    if failures:
+        raise click.exceptions.Exit(1)
 
 
 def _print_classification_table(
@@ -2007,6 +2028,11 @@ def _run_install_all(
         except StaleInstallError as exc:
             # state=refuse without --force shouldn't reach here; defense in depth.
             click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc}", fg="red")
+            failures += 1
+        except PrivacyScanError as exc:
+            # Gate A refusal (ADR-0011 §5, #1247): poisoned asset's row
+            # fails, clean siblings still install.
+            click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc.message}", fg="red")
             failures += 1
         except CommitNotFoundError as exc:
             # Race: commit was reachable at classify time, gone now.

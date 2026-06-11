@@ -225,6 +225,18 @@ and the runtime fan-out is about to write. A new
 content before each fan-out write; if hits exist and the canonical is
 project_shared, the sync write is blocked regardless of `--force-unsafe`.
 
+> **2026-06 (#1247):** Gate A also fires on wiki ingress — `mm context
+> install` / `update` (incl. `--all` and the `--force` `.bak`
+> preservation copy) scan the wiki bytes (HEAD or pinned git objects)
+> before anything lands in `project_shared` — and on the web settings
+> `rules/promote` write, which scans the exact appended hooks fragment
+> (event key included). Every first-party byte path into
+> `project_shared` now scans before landing. Gate B's confirm prompt is
+> intentionally absent on install/update: those verbs have no `--scope`
+> choice (dest is `project_shared` by construction), so the explicit
+> command itself carries the surface intent; only the scan half was
+> missing.
+
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
 confirm prompt at the CLI/MCP write surface (`mm mem add`,
 `mm context init`, `mm context migrate --to project_shared`). The flag must be passed

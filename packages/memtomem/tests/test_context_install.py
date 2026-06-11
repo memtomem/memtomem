@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from memtomem import privacy
 from memtomem.cli.context_cmd import context as context_group
 from memtomem.context._names import InvalidNameError
 from memtomem.context.install import (
@@ -26,6 +27,7 @@ from memtomem.context.install import (
     install_skill,
 )
 from memtomem.context.lockfile import LOCKFILE_VERSION, Lockfile
+from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 
 
@@ -449,3 +451,82 @@ def test_lockfile_contains_only_mandated_keys_per_entry(wiki_root: Path, tmp_pat
     assert set(entry) == {"wiki_commit", "installed_at", "files", "files_commit"}
     assert entry["files"] == ["SKILL.md"]
     assert entry["files_commit"] == entry["wiki_commit"]
+
+
+# ── Gate A on wiki-install ingress (ADR-0011 §5, #1247 id 3) ─────────────
+
+# AKIA fixture per feedback_force_unsafe_redaction_valve_only.md — a clean
+# string never trips the scan, so every block assertion below would
+# false-pass without it.
+SECRET = "api_key=AKIA1234567890ABCDEF"
+
+
+@pytest.fixture(autouse=True)
+def _reset_privacy_counters():
+    """Zeroed counters so surface-attribution asserts see only their own test."""
+    privacy.reset_for_tests()
+    yield
+    privacy.reset_for_tests()
+
+
+def test_install_blocks_secret_in_wiki_src_zero_residue(wiki_root: Path, tmp_path: Path) -> None:
+    """Gate A fires on wiki ingress: a poisoned ``SKILL.md`` never lands —
+    scan precedes ``dest.parent.mkdir`` and the lockfile upsert, so a
+    refusal leaves zero residue in the project tree."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "leak", {"SKILL.md": b"# leak skill\n" + SECRET.encode() + b"\n"})
+    project = tmp_path
+
+    with pytest.raises(PrivacyBlockedError) as excinfo:
+        install_skill(project, "leak")
+
+    assert not (project / ".memtomem" / "skills" / "leak").exists()
+    assert Lockfile.at(project).read_entry("skills", "leak") is None
+    # Matched bytes never reach the error message (path + hit count only).
+    assert "AKIA1234567890ABCDEF" not in excinfo.value.message
+    # Audit attributes the block to the single-install ingress surface
+    # (#1246/#1248 rule), not a sibling sync/migrate surface.
+    by_tool = privacy.snapshot()["by_tool"]
+    assert by_tool.get("cli_context_install", {}).get("blocked", 0) == 1
+    assert "cli_context_sync" not in by_tool
+
+
+def test_install_no_false_block_on_wiki_shipped_bak(wiki_root: Path, tmp_path: Path) -> None:
+    """Scan set == copy set: a wiki-shipped secret ``.bak`` is outside the
+    copier's effective set (#1250), so it must neither land in dest nor
+    false-block the otherwise-clean install."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(
+        wiki_root,
+        "foo",
+        {
+            "SKILL.md": b"# clean skill\n",
+            "foo.md.bak": SECRET.encode() + b"\n",
+        },
+    )
+    project = tmp_path
+
+    result = install_skill(project, "foo")  # must NOT raise
+
+    dest = project / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").read_bytes() == b"# clean skill\n"
+    assert result.files_written == 1
+    assert not list(dest.rglob("*.bak"))
+
+
+def test_cli_install_privacy_block_exit_and_message(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """CLI boundary: Gate A block maps to ``click.ClickException`` (exit 1)
+    with the remediation message — never a traceback, never the secret."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "leak", {"SKILL.md": b"# leak skill\n" + SECRET.encode() + b"\n"})
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "skill", "leak"])
+
+    assert result.exit_code == 1, result.output
+    assert "Gate A" in result.output
+    assert "AKIA1234567890ABCDEF" not in result.output
+    assert "Traceback" not in result.output

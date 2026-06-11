@@ -225,21 +225,51 @@ class TestIsDirty:
 # ── helpers for commit-bound tests ──────────────────────────────────────
 
 
-def _seed_skill(wiki_root_path: Path, name: str, files: dict[str, bytes]) -> str:
-    """Add ``skills/<name>/`` to wiki + commit. Returns the commit SHA."""
+def _seed_skill(
+    wiki_root_path: Path,
+    name: str,
+    files: dict[str, bytes],
+    *,
+    force_add: bool = False,
+) -> str:
+    """Add ``skills/<name>/`` to wiki + commit. Returns the commit SHA.
+
+    ``force_add`` uses ``git add -f`` so names a developer's global gitignore
+    commonly covers (``*.bak``, ``__pycache__``) reliably land in the commit."""
     skill_dir = wiki_root_path / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     for relpath, data in files.items():
         target = skill_dir / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    subprocess.run(["git", "-C", str(wiki_root_path), "add", "."], check=True, capture_output=True)
+    add_cmd = ["git", "-C", str(wiki_root_path), "add"]
+    if force_add:
+        add_cmd.append("-f")
+    add_cmd.append(".")
+    subprocess.run(add_cmd, check=True, capture_output=True)
     subprocess.run(
         ["git", "-C", str(wiki_root_path), "commit", "-m", f"add {name}"],
         check=True,
         capture_output=True,
     )
     return WikiStore.at_default().current_commit()
+
+
+def _record_store_git_argv(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Spy every argv ``wiki.store`` hands to ``subprocess.run`` (delegating to
+    the real one) — pins which git objects ``copy_asset_at_commit`` reads."""
+    import memtomem.wiki.store as store_module
+
+    recorded: list[list[str]] = []
+    real_run = subprocess.run
+
+    def _recording_run(args: object, *pargs: object, **kwargs: object) -> object:
+        if isinstance(args, list | tuple):
+            recorded.append([str(a) for a in args])
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr(store_module.subprocess, "run", _recording_run)
+    return recorded
 
 
 class TestCommitIsReachable:
@@ -258,6 +288,21 @@ class TestCommitIsReachable:
         store = WikiStore.at_default()
         store.init()
         assert store.commit_is_reachable("") is False
+
+    def test_symbolic_ref_is_not_reachable(self, wiki_root: Path) -> None:
+        """``main`` resolves for ``git cat-file`` but is NOT a pin — refs
+        move, so a hand-edited lockfile ref would let scanned bytes
+        diverge from extracted bytes (#1247 Gate A review)."""
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_reachable("main") is False
+        assert store.commit_is_reachable("HEAD") is False
+
+    def test_abbreviated_sha_is_not_reachable(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()
+        assert store.commit_is_reachable(head[:12]) is False
 
     def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
         store = WikiStore.at_default()
@@ -339,3 +384,75 @@ class TestCopyAssetAtCommit:
         store.copy_asset_at_commit(pin, "skills", "foo", dest)
 
         assert (dest / "SKILL.md").read_bytes() == b"committed\n"
+
+    def test_pinned_bak_rel_never_read_or_materialized(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wiki-shipped ``*.bak`` at the pin is filtered BEFORE ``git show`` —
+        its bytes must never reach a tempdir inside the project tree (#1247)."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(
+            wiki_root,
+            "foo",
+            {
+                "SKILL.md": b"# foo\n",
+                "foo.md.bak": b"api_key=AKIA1234567890ABCDEF\n",
+            },
+            force_add=True,
+        )
+        # Guard: seeding really tracked the .bak (force-add beat any global
+        # gitignore) — otherwise the spy assertions below pass vacuously.
+        ls_result = subprocess.run(
+            ["git", "-C", str(wiki_root), "ls-tree", "-r", "--name-only", pin],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "skills/foo/foo.md.bak" in ls_result.stdout.splitlines()
+
+        recorded = _record_store_git_argv(monkeypatch)
+        dest = tmp_path / "out" / "foo"
+        files_written = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+
+        show_args = [arg for argv in recorded if argv[:2] == ["git", "show"] for arg in argv]
+        assert any(arg.endswith(":skills/foo/SKILL.md") for arg in show_args)  # spy is live
+        assert not any("foo.md.bak" in arg for argv in recorded for arg in argv)
+        assert files_written == 1
+        assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
+        assert not list(dest.rglob("*.bak"))
+
+    def test_pinned_pycache_rel_never_read_or_materialized(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``COPY_SKIP_NAMES`` rels (``__pycache__``) get the same pre-``git
+        show`` filter as ``.bak`` suffixes — one shared skip predicate (#1247)."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(
+            wiki_root,
+            "foo",
+            {
+                "SKILL.md": b"# foo\n",
+                "__pycache__/junk.pyc": b"\x00not real bytecode\n",
+            },
+            force_add=True,
+        )
+        ls_result = subprocess.run(
+            ["git", "-C", str(wiki_root), "ls-tree", "-r", "--name-only", pin],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "skills/foo/__pycache__/junk.pyc" in ls_result.stdout.splitlines()
+
+        recorded = _record_store_git_argv(monkeypatch)
+        dest = tmp_path / "out" / "foo"
+        files_written = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+
+        show_args = [arg for argv in recorded if argv[:2] == ["git", "show"] for arg in argv]
+        assert any(arg.endswith(":skills/foo/SKILL.md") for arg in show_args)  # spy is live
+        assert not any("__pycache__" in arg for argv in recorded for arg in argv)
+        assert files_written == 1
+        assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
+        assert not (dest / "__pycache__").exists()

@@ -40,10 +40,13 @@ Introduce four new surfaces, each governed by an invariant:
 
 `mm context install` snapshots a wiki artifact as a **directory tree**
 (`shutil.copytree` semantics) into the project — including any
-`overrides/` subdirectory. Fan-out (`generate_all_skills`,
-`generate_all_agents`, `generate_all_commands`) reads only from the
-project tree, never from the wiki. CI machines, archived projects, and
-machines without the wiki all run fan-out unchanged.
+`overrides/` subdirectory. Install runs the ADR-0011 Gate A privacy
+scan over the wiki bytes before the copy; a `project_shared` hit
+refuses with no dest or lockfile residue (#1247). Fan-out
+(`generate_all_skills`, `generate_all_agents`, `generate_all_commands`)
+reads only from the project tree, never from the wiki. CI machines,
+archived projects, and machines without the wiki all run fan-out
+unchanged.
 
 ### Invariant 2 — Explicit conflict surface for local edits
 
@@ -52,7 +55,10 @@ modified after install (mtime > `lockfile.installed_at`).
 
 Default behavior: refuse with a clear error. `--force` overwrites and
 leaves a `.bak` copy of each clobbered file. This mirrors ADR-0001's
-on_drop policy of never silently dropping data.
+on_drop policy of never silently dropping data. The `.bak` write is
+itself a `project_shared` write: `--force` scans each dirty file before
+its `.bak` lands, and a privacy hit refuses the whole update before any
+`.bak` or copy is written (#1247, ADR-0011 Gate A).
 
 ### Invariant 3 — Wiki is optional, project is authoritative
 

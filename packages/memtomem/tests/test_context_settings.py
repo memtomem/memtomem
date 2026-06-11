@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 from httpx import ASGITransport, AsyncClient
 
+from memtomem import privacy
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     ClaudeSettingsGenerator,
@@ -101,6 +102,11 @@ def _read_target(claude_home) -> dict:
     """Read the merged settings.json from the fake HOME."""
     path = claude_home / ".claude" / "settings.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# AKIA fixture per feedback_force_unsafe_redaction_valve_only.md — a generic
+# placeholder would pass the real scanner and false-negative every block assert.
+SECRET = "api_key=AKIA1234567890ABCDEF"
 
 
 # ── Merge tests ─────────────────────────────────────────────────────
@@ -2246,3 +2252,107 @@ class TestSettingsHttpLayer:
         )
         # The user-tier file was NOT touched.
         assert user_target.read_text(encoding="utf-8") == user_authored
+
+    # ── Promote privacy gate (ADR-0011 §5 Gate A — #1247 id 50) ──────────────
+
+    async def test_promote_blocks_secret_in_rule_command(self, client, claude_home, tmp_path):
+        """Gate A fires on promote — a secret-bearing rule never reaches shared canonical."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [_rule("Bash", SECRET)]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        assert diff.status_code == 200
+        body = diff.json()
+        row = body["target_hooks"]["configured"][0]
+
+        before = privacy.snapshot()["by_tool"].get("web_settings_rule_promote", {})
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=user",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": body["target_mtime_ns"],
+                "canonical_mtime_ns": body["canonical_mtime_ns"],
+                "confirm_private_to_shared": True,
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        # The detail names the gate; the matched bytes never echo back.
+        assert "Gate A" in resp.json()["detail"]
+        assert "AKIA1234567890ABCDEF" not in resp.text
+        assert not (tmp_path / CANONICAL_SETTINGS_FILE).exists()
+        # Surface attribution: the block records against the web promote
+        # ingress, not a borrowed CLI/sync surface (#1246/#1248 rule).
+        after = privacy.snapshot()["by_tool"]["web_settings_rule_promote"]
+        assert after["blocked"] == before.get("blocked", 0) + 1
+
+    async def test_promote_scans_before_private_consent_gate(self, client, claude_home, tmp_path):
+        """Gate A fail-fasts ahead of the needs_confirmation consent round-trip."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [_rule("Bash", SECRET)]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        assert diff.status_code == 200
+        body = diff.json()
+        row = body["target_hooks"]["configured"][0]
+
+        # No confirm_private_to_shared: pre-gate this returned the 200
+        # needs_confirmation envelope. The scan must win even though the
+        # write was still one confirmation away — and the 422 also pins
+        # the hardcoded project_shared scan scope: passing the route's
+        # target_scope ("user") would make raise_or_collect return a skip
+        # tuple instead of raising, so no 422 could surface here.
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=user",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": body["target_mtime_ns"],
+                "canonical_mtime_ns": body["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert "needs_confirmation" not in resp.text
+        assert "Gate A" in resp.json()["detail"]
+        assert "AKIA1234567890ABCDEF" not in resp.text
+        assert not (tmp_path / CANONICAL_SETTINGS_FILE).exists()
+
+    async def test_promote_blocks_secret_shaped_event_key(self, client, claude_home, tmp_path):
+        """The scanned fragment covers the event key, not just the rule body."""
+        target = claude_home / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {SECRET: [_rule("", "echo clean")]}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=user")
+        assert diff.status_code == 200
+        body = diff.json()
+        row = body["target_hooks"]["configured"][0]
+        assert row["event"] == SECRET  # sanity: the poisoned key is the promote target
+
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=user",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": body["target_mtime_ns"],
+                "canonical_mtime_ns": body["canonical_mtime_ns"],
+                "confirm_private_to_shared": True,
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        assert "AKIA1234567890ABCDEF" not in resp.text
+        assert not (tmp_path / CANONICAL_SETTINGS_FILE).exists()
