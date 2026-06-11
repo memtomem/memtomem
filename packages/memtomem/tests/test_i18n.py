@@ -615,6 +615,63 @@ class TestNoHardcodedStrings:
             "Use the cmd.* locale keys via t(...) instead."
         )
 
+    def test_dedup_results_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The Dedup scan results area (#1025) — empty/timeout/error/no-result
+        states, the candidate summary (pluralized), and the row badges /
+        buttons / chunk labels / line ranges — must route through
+        ``settings.dedup.*`` keys with their interpolation placeholders."""
+        required = {
+            "settings.dedup.scan_timeout": set(),
+            "settings.dedup.scan_error": {"error"},
+            "settings.dedup.scan_failed": set(),
+            "settings.dedup.no_results": {"threshold"},
+            "settings.dedup.summary_one": {"count"},
+            "settings.dedup.summary_other": {"count"},
+            "settings.dedup.badge_exact": set(),
+            "settings.dedup.keep_a": set(),
+            "settings.dedup.keep_a_title": set(),
+            "settings.dedup.keep_b": set(),
+            "settings.dedup.keep_b_title": set(),
+            "settings.dedup.skip": set(),
+            "settings.dedup.chunk_a_label": set(),
+            "settings.dedup.chunk_b_label": set(),
+            "settings.dedup.lines": {"start", "end"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Dedup keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Dedup keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Dedup placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_dedup_results(self) -> None:
+        """``settings-maintenance.js`` dedup rendering must not rebuild its
+        result strings (#1025) as English literals."""
+        text = (_STATIC_JS_DIR / "settings-maintenance.js").read_text(encoding="utf-8")
+        forbidden = [
+            "'Scan timed out (120 s). Try a smaller Max Scan.'",
+            "'Scan error: '",
+            "No duplicates found (threshold=",
+            "candidate pair${candidates.length",
+            ">Exact</span>",
+            ">Keep A</button>",
+            ">Keep B</button>",
+            ">Skip</button>",
+            "A — keep candidate",
+            "B — duplicate candidate",
+            "lines ${c.chunk_a",
+        ]
+        bad = [s for s in forbidden if s in text]
+        assert not bad, (
+            f"Found re-introduced #1025 dedup-result literals in settings-maintenance.js: {bad}. "
+            "Use the settings.dedup.* locale keys via t(...) instead."
+        )
+
     def test_named_html_offenders_have_i18n(self) -> None:
         """``index.html`` elements claimed by #698 must carry ``data-i18n``
         bindings. These IDs displayed English-only fallback text before the

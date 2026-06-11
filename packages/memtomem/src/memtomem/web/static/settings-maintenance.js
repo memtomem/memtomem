@@ -13,13 +13,29 @@ qs('dedup-scan-btn').addEventListener('click', runDedupScan);
 // STATE.dedupScanActive, STATE.dedupAbortCtrl now in STATE
 const DEDUP_SCAN_TIMEOUT_MS = 120_000;
 
+// Which message ``dedup-empty`` is showing ('initial' | 'failed' |
+// 'no_results'; null while the candidate list is visible), plus the
+// threshold baked into the no-results text. The langchange listener at
+// the end of this section re-renders the JS-owned strings from these.
+let _dedupEmptyKind = 'initial';
+let _dedupLastThreshold = null;
+
+function _renderDedupEmpty(kind) {
+  _dedupEmptyKind = kind;
+  const message = kind === 'failed' ? t('settings.dedup.scan_failed')
+    : kind === 'no_results' ? t('settings.dedup.no_results', { threshold: _dedupLastThreshold })
+    : t('settings.dedup.empty_text');
+  // Icon must stay a trusted literal — ``emptyState`` inserts its icon
+  // slot into innerHTML unescaped, so translated values can't go there.
+  qs('dedup-empty').innerHTML = emptyState('📋', message);
+}
+
 function resetDedupPanel() {
   // Don't reset while a scan is still running — keep the UI consistent
   if (STATE.dedupScanActive) return;
   hide(qs('dedup-list'));
-  const empty = qs('dedup-empty');
-  empty.innerHTML = emptyState('📋', 'Run Scan to see duplicate candidates');
-  show(empty);
+  _renderDedupEmpty('initial');
+  show(qs('dedup-empty'));
 }
 
 async function runDedupScan() {
@@ -51,9 +67,9 @@ async function runDedupScan() {
     const data = await res.json();
     renderDedupCandidates(data.candidates, threshold);
   } catch (err) {
-    const msg = err.name === 'AbortError' ? 'Scan timed out (120 s). Try a smaller Max Scan.' : err.message;
-    setMsg(qs('dedup-msg'), 'Scan error: ' + msg, true);
-    empty.innerHTML = emptyState('📋', 'Scan failed');
+    const msg = err.name === 'AbortError' ? t('settings.dedup.scan_timeout') : err.message;
+    setMsg(qs('dedup-msg'), t('settings.dedup.scan_error', { error: msg }), true);
+    _renderDedupEmpty('failed');
   } finally {
     clearTimeout(timeoutId);
     STATE.dedupScanActive = false;
@@ -67,21 +83,33 @@ function renderDedupCandidates(candidates, threshold) {
 
   if (!candidates.length) {
     hide(list);
-    empty.innerHTML = emptyState('📋', `No duplicates found (threshold=${threshold})`);
+    _dedupLastThreshold = threshold;
+    _renderDedupEmpty('no_results');
     show(empty);
     return;
   }
 
   hide(empty);
   show(list);
-  list.innerHTML = `<div class="dedup-summary">Found <strong>${candidates.length}</strong> candidate pair${candidates.length !== 1 ? 's' : ''}. Review each and choose which chunk to keep.</div>`;
+  _dedupEmptyKind = null;
+
+  // Translated text enters through data-i18n* attributes (applyDOM writes
+  // textContent/title only) or through the text-node helpers below — never
+  // through innerHTML — so a locale value containing markup stays inert.
+  const summary = document.createElement('div');
+  summary.className = 'dedup-summary';
+  summary.dataset.summaryKey =
+    candidates.length === 1 ? 'settings.dedup.summary_one' : 'settings.dedup.summary_other';
+  _setDedupSummaryText(summary, candidates.length);
+  list.innerHTML = '';
+  list.appendChild(summary);
 
   candidates.forEach((c, i) => {
     const row = document.createElement('div');
     row.className = 'dedup-row';
 
     const badge = c.exact
-      ? `<span class="badge badge-danger">Exact</span>`
+      ? '<span class="badge badge-danger" data-i18n="settings.dedup.badge_exact"></span>'
       : `<span class="badge badge-warn">~${c.score.toFixed(3)}</span>`;
 
     row.innerHTML = `
@@ -89,25 +117,29 @@ function renderDedupCandidates(candidates, threshold) {
         <span class="dedup-index">#${i + 1}</span>
         ${badge}
         <div class="dedup-actions">
-          <button class="btn-primary keep-a-btn" title="Keep A, delete B">Keep A</button>
-          <button class="btn-ghost keep-b-btn" title="Keep B, delete A">Keep B</button>
-          <button class="btn-ghost skip-btn">Skip</button>
+          <button class="btn-primary keep-a-btn" data-i18n="settings.dedup.keep_a"
+                  data-i18n-title="settings.dedup.keep_a_title"></button>
+          <button class="btn-ghost keep-b-btn" data-i18n="settings.dedup.keep_b"
+                  data-i18n-title="settings.dedup.keep_b_title"></button>
+          <button class="btn-ghost skip-btn" data-i18n="settings.dedup.skip"></button>
         </div>
       </div>
       <div class="dedup-chunks">
         <div class="dedup-chunk">
-          <div class="dedup-chunk-label">A — keep candidate</div>
+          <div class="dedup-chunk-label" data-i18n="settings.dedup.chunk_a_label"></div>
           <div class="dedup-chunk-meta">
             <span class="file-path">${escapeHtml(c.chunk_a.source_file)}</span>
-            <span class="lines-info">lines ${c.chunk_a.start_line}–${c.chunk_a.end_line}</span>
+            <span class="lines-info" data-start="${escapeAttr(c.chunk_a.start_line)}"
+                  data-end="${escapeAttr(c.chunk_a.end_line)}"></span>
           </div>
           <div class="dedup-chunk-content">${escapeHtml(truncate(c.chunk_a.content, 240))}</div>
         </div>
         <div class="dedup-chunk">
-          <div class="dedup-chunk-label">B — duplicate candidate</div>
+          <div class="dedup-chunk-label" data-i18n="settings.dedup.chunk_b_label"></div>
           <div class="dedup-chunk-meta">
             <span class="file-path">${escapeHtml(c.chunk_b.source_file)}</span>
-            <span class="lines-info">lines ${c.chunk_b.start_line}–${c.chunk_b.end_line}</span>
+            <span class="lines-info" data-start="${escapeAttr(c.chunk_b.start_line)}"
+                  data-end="${escapeAttr(c.chunk_b.end_line)}"></span>
           </div>
           <div class="dedup-chunk-content">${escapeHtml(truncate(c.chunk_b.content, 240))}</div>
         </div>
@@ -135,7 +167,50 @@ function renderDedupCandidates(candidates, threshold) {
 
     list.appendChild(row);
   });
+
+  // Fill the freshly created data-i18n* nodes now; langchange re-fills
+  // them automatically via the same applyDOM pass.
+  if (typeof I18N !== 'undefined') I18N.applyDOM();
+  _applyDedupLinesText(list);
 }
+
+// "Found <strong>N</strong> candidate pairs…" — the count is a real
+// element (doMerge rewrites it in place, Bug #12) and the surrounding
+// translation is inserted as text nodes around it.
+function _setDedupSummaryText(el, count) {
+  const [before, after = ''] = t(el.dataset.summaryKey).split('{count}');
+  const strong = document.createElement('strong');
+  strong.textContent = count;
+  el.textContent = '';
+  el.append(before, strong, after);
+}
+
+function _applyDedupLinesText(scope) {
+  scope.querySelectorAll('.lines-info').forEach(el => {
+    el.textContent = t('settings.dedup.lines', { start: el.dataset.start, end: el.dataset.end });
+  });
+}
+
+// data-i18n* nodes are re-translated by applyDOM before langchange fires;
+// the JS-owned strings (empty-state message, summary text around the
+// count, line ranges) are re-rendered here so scan results stay readable
+// across EN/KO toggles.
+window.addEventListener('langchange', () => {
+  const list = qs('dedup-list');
+  if (!list.hidden) {
+    const summary = list.querySelector('.dedup-summary');
+    if (summary) {
+      const strong = summary.querySelector('strong');
+      _setDedupSummaryText(summary, strong ? strong.textContent : '');
+    }
+    _applyDedupLinesText(list);
+  }
+  // Skip while a scan is running — ``dedup-empty`` holds the spinner then,
+  // and the post-scan render uses the new locale anyway.
+  if (!STATE.dedupScanActive && !qs('dedup-empty').hidden && _dedupEmptyKind) {
+    _renderDedupEmpty(_dedupEmptyKind);
+  }
+});
 
 async function doMerge(rowEl, keepId, deleteIds) {
   const btns = rowEl.querySelectorAll('button');
