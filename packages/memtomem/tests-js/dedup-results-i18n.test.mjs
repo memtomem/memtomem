@@ -110,6 +110,28 @@ describe('dedup results — langchange re-translation', () => {
     expect(list.querySelectorAll('.dedup-row')).toHaveLength(1);
   });
 
+  it('re-derives the pluralized summary key after a merge lowers the count', async () => {
+    const window = await bootDedup();
+    const { document, I18N } = window;
+
+    window.renderDedupCandidates(CANDIDATES, 0.92);
+    const list = document.getElementById('dedup-list');
+    const summary = list.querySelector('.dedup-summary');
+    expect(summary.textContent).toBe(window.t('settings.dedup.summary_other', { count: '2' }));
+
+    // Merge the first pair directly (the confirm dialog wraps this in the
+    // UI); the fetch stub answers the POST with an empty 200.
+    await window.doMerge(list.querySelectorAll('.dedup-row')[0], '1', ['2']);
+    expect(summary.querySelector('strong').textContent).toBe('1');
+    expect(summary.textContent).toBe(window.t('settings.dedup.summary_one', { count: '1' }));
+
+    // KO one/other strings are identical, so round-trip back to EN to
+    // observe the key choice on a langchange re-render.
+    await I18N.setLang('ko');
+    await I18N.setLang('en');
+    expect(summary.textContent).toBe(window.t('settings.dedup.summary_one', { count: '1' }));
+  });
+
   it('re-translates the JS-owned empty states on toggle', async () => {
     const window = await bootDedup();
     const { document, I18N } = window;

@@ -98,8 +98,6 @@ function renderDedupCandidates(candidates, threshold) {
   // through innerHTML — so a locale value containing markup stays inert.
   const summary = document.createElement('div');
   summary.className = 'dedup-summary';
-  summary.dataset.summaryKey =
-    candidates.length === 1 ? 'settings.dedup.summary_one' : 'settings.dedup.summary_other';
   _setDedupSummaryText(summary, candidates.length);
   list.innerHTML = '';
   list.appendChild(summary);
@@ -175,10 +173,15 @@ function renderDedupCandidates(candidates, threshold) {
 }
 
 // "Found <strong>N</strong> candidate pairs…" — the count is a real
-// element (doMerge rewrites it in place, Bug #12) and the surrounding
-// translation is inserted as text nodes around it.
+// element and the surrounding translation is inserted as text nodes
+// around it. The pluralized key is derived from the count on every call:
+// doMerge lowers the count after the initial render, so a key stored at
+// render time would go stale (2→1 merge + langchange showed
+// "Found 1 candidate pairs").
 function _setDedupSummaryText(el, count) {
-  const [before, after = ''] = t(el.dataset.summaryKey).split('{count}');
+  const key = Number(count) === 1
+    ? 'settings.dedup.summary_one' : 'settings.dedup.summary_other';
+  const [before, after = ''] = t(key).split('{count}');
   const strong = document.createElement('strong');
   strong.textContent = count;
   el.textContent = '';
@@ -224,11 +227,12 @@ async function doMerge(rowEl, keepId, deleteIds) {
     STATE.lastResults = STATE.lastResults.filter(r => !deleteIds.includes(String(r.chunk.id)));
     renderResults(STATE.lastResults);
     _markDataStale();
-    // Bug #12: update dedup summary count
-    const summaryEl = qs('dedup-list')?.querySelector('.dedup-summary strong');
+    // Bug #12: update dedup summary count (through the shared helper so
+    // the pluralized wording tracks the new count too)
+    const summaryEl = qs('dedup-list')?.querySelector('.dedup-summary');
     if (summaryEl) {
       const remaining = qs('dedup-list').querySelectorAll('.dedup-row').length - 1;
-      summaryEl.textContent = Math.max(0, remaining);
+      _setDedupSummaryText(summaryEl, Math.max(0, remaining));
     }
     loadStats();
   } catch (err) {
