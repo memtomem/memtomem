@@ -252,6 +252,37 @@ class WikiStore:
         # Deferred import: install.py imports wiki.store at module load;
         # the reverse import here would cycle. Local resolves at call time.
         from memtomem.context._atomic import copy_tree_atomic
+
+        src_prefix = f"{asset_type}/{name}/"
+        inner_relpaths = self.asset_files_at_commit(commit, asset_type, name)
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=dest.parent) as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            for inner in inner_relpaths:
+                target = tmpdir_path / inner
+                target.parent.mkdir(parents=True, exist_ok=True)
+                content = subprocess.run(
+                    ["git", "show", f"{commit}:{src_prefix}{inner}"],
+                    cwd=self.root,
+                    check=True,
+                    capture_output=True,
+                )
+                target.write_bytes(content.stdout)
+            return copy_tree_atomic(tmpdir_path, dest)
+
+    def asset_files_at_commit(self, commit: str, asset_type: str, name: str) -> list[str]:
+        """List the asset's file relpaths (relative to the asset dir) at *commit*.
+
+        ``git ls-tree -r --name-only`` against the commit's objects — the
+        wiki working tree is never consulted. Raises
+        :class:`CommitNotFoundError` for an unreachable SHA and
+        :class:`memtomem.context.install.AssetNotFoundError` when the asset
+        path has no files at that revision. Used by
+        :meth:`copy_asset_at_commit` for extraction and by
+        ``mm context install --all`` reconciliation, which needs the
+        expected file set without re-extracting (#1247).
+        """
         from memtomem.context.install import AssetNotFoundError
 
         self.require_exists()
@@ -263,31 +294,19 @@ class WikiStore:
             ["ls-tree", "-r", "--name-only", commit, "--", src_prefix],
             cwd=self.root,
         )
-        relpaths = [line for line in ls_result.stdout.splitlines() if line.startswith(src_prefix)]
-        if not relpaths:
+        inner_relpaths = [
+            line[len(src_prefix) :]
+            for line in ls_result.stdout.splitlines()
+            # The startswith filter guards against odd git path output; the
+            # truthiness check drops a bare prefix row (ls-tree -r shouldn't
+            # yield one, but guard against odd git versions).
+            if line.startswith(src_prefix) and line[len(src_prefix) :]
+        ]
+        if not inner_relpaths:
             raise AssetNotFoundError(
                 f"{asset_type}/{name} not present at commit {commit[:12]} in {self.root}"
             )
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=dest.parent) as tmpdir:
-            tmpdir_path = Path(tmpdir)
-            for relpath in relpaths:
-                inner = relpath[len(src_prefix) :]
-                if not inner:
-                    # The prefix itself; ls-tree -r shouldn't yield this
-                    # but guard against odd git versions.
-                    continue
-                target = tmpdir_path / inner
-                target.parent.mkdir(parents=True, exist_ok=True)
-                content = subprocess.run(
-                    ["git", "show", f"{commit}:{relpath}"],
-                    cwd=self.root,
-                    check=True,
-                    capture_output=True,
-                )
-                target.write_bytes(content.stdout)
-            return copy_tree_atomic(tmpdir_path, dest)
+        return inner_relpaths
 
     def list_assets(self, asset_type: str | None = None) -> list[WikiAsset]:
         """Enumerate asset directories under the wiki.

@@ -18,8 +18,10 @@ and construct dest + lockfile via the live install path so the
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -484,3 +486,44 @@ def test_classify_execute_race_pin_pruned_mid_loop(
 
 # silence "imported but unused" if a future test needs the fixture
 _ = pytest
+
+
+# ── B1: pinned re-extraction reconciles dest-only files (#1247) ──────────
+
+
+def test_force_reextraction_removes_stale_dest_only_file(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """``install --all --force`` re-extracts at the pin; a dest-only file
+    whose mtime predates ``installed_at`` (a pre-B1 additive-update leftover)
+    must be reconciled away, not carried forever."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"pinned\n"})
+    install_skill(tmp_path, "foo")
+
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+    stale = dest / "leftover.md"
+    stale.write_bytes(b"stale wiki bytes\n")
+    # Backdate so the file reads as old wiki bytes (mtime <= installed_at):
+    # the legacy-entry deletion rule, not the user-added keep rule.
+    past = datetime.now(timezone.utc).timestamp() - 3600
+    os.utime(stale, (past, past))
+    # Pre-B1 entries carry no manifest — simulate one by stripping the keys.
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc["skills"]["foo"].pop("files", None)
+    doc["skills"]["foo"].pop("files_commit", None)
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert not stale.exists()
+    assert (dest / "SKILL.md").read_bytes() == b"pinned\n"
+    lock_doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
+    # Manifest recorded against the pin on re-extraction.
+    assert lock_doc["skills"]["foo"]["files"] == ["SKILL.md"]
+    assert lock_doc["skills"]["foo"]["files_commit"] == pin

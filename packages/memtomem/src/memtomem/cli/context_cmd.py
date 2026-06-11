@@ -1565,6 +1565,11 @@ def update_cmd(
     rel_dest = result.dest.relative_to(root) if result.dest.is_relative_to(root) else result.dest
     click.echo(f"  → {rel_dest}/")
     click.echo(f"  {result.files_written} file(s) updated")
+    if result.files_removed:
+        click.secho(
+            f"  {len(result.files_removed)} file(s) removed (deleted upstream)",
+            fg="yellow",
+        )
     if result.bak_files_written:
         click.secho(
             f"  {len(result.bak_files_written)} dirty file(s) preserved as .bak",
@@ -1694,7 +1699,7 @@ def _run_update_all(
         src = wiki.root / asset_type_plural / name
         dest = c.project_root / ".memtomem" / asset_type_plural / name
         try:
-            _apply_update(
+            upd = _apply_update(
                 c.project_root,
                 asset_type_plural,
                 name,
@@ -1712,7 +1717,10 @@ def _run_update_all(
             click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
             failures += 1
         else:
-            click.secho(f"  ✓ {c.project_root}: updated", fg="green")
+            removed_note = (
+                f" ({len(upd.files_removed)} file(s) removed)" if upd.files_removed else ""
+            )
+            click.secho(f"  ✓ {c.project_root}: updated{removed_note}", fg="green")
             successes += 1
 
     click.echo(
@@ -1995,7 +2003,7 @@ def _run_install_all(
 
         # state ∈ {"install", "skip" with --force, "refuse"} — execute
         try:
-            _apply_pinned_install(root, c, wiki=wiki, force=force)
+            pinned = _apply_pinned_install(root, c, wiki=wiki, force=force)
         except StaleInstallError as exc:
             # state=refuse without --force shouldn't reach here; defense in depth.
             click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc}", fg="red")
@@ -2011,8 +2019,14 @@ def _run_install_all(
             click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc}", fg="red")
             failures += 1
         else:
+            removed_note = (
+                f" ({len(pinned.files_removed)} leftover file(s) removed)"
+                if pinned.files_removed
+                else ""
+            )
             click.secho(
-                f"  ✓ {c.asset_type}/{c.name}: installed at pin {c.pin_commit[:12]}", fg="green"
+                f"  ✓ {c.asset_type}/{c.name}: installed at pin {c.pin_commit[:12]}{removed_note}",
+                fg="green",
             )
             successes += 1
 

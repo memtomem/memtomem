@@ -1019,3 +1019,197 @@ def test_cli_update_no_wiki_dirty_warn_when_clean(
 
     assert result.exit_code == 0, result.output
     assert "wiki has uncommitted changes" not in result.output
+
+
+# ── B1: upstream-deletion reconcile + deletion-dirty (#1247) ─────────────
+
+
+def _delete_wiki_skill_file(wiki_root_path: Path, name: str, relpath: str) -> str:
+    """``git rm`` one file from a wiki skill + commit. Returns the new SHA.
+
+    Removes the file from the wiki working tree too (``git rm``), so the
+    live-tree copy source ``_update_asset`` reads matches the new commit.
+    """
+    subprocess.run(
+        ["git", "-C", str(wiki_root_path), "rm", "-q", f"skills/{name}/{relpath}"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_root_path), "commit", "-m", f"delete {name}/{relpath}"],
+        check=True,
+        capture_output=True,
+    )
+    return WikiStore.at_default().current_commit()
+
+
+def _lock_entry(project: Path, asset_type: str, name: str) -> dict:
+    doc = json.loads((project / ".memtomem" / "lock.json").read_text(encoding="utf-8"))
+    return doc[asset_type][name]
+
+
+def _rewrite_lock_entry(project: Path, asset_type: str, name: str, entry: dict) -> None:
+    lock_path = project / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc[asset_type][name] = entry
+    lock_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+
+def test_update_removes_upstream_deleted_file(wiki_root: Path, tmp_path: Path) -> None:
+    """Core #1247 reported-critical: update must delete files removed upstream.
+
+    Pre-B1 the additive copy left ``scripts/run-old.py`` on disk forever
+    while the lockfile claimed the new commit and status said ``ok``.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "scripts/run-old.py": b"old\n"})
+    install_skill(tmp_path, "web")
+
+    new_sha = _delete_wiki_skill_file(wiki_root, "web", "scripts/run-old.py")
+    result = update_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    assert not (dest / "scripts" / "run-old.py").exists()
+    # The directory the removal emptied is pruned too.
+    assert not (dest / "scripts").exists()
+    assert (dest / "SKILL.md").read_bytes() == b"v1\n"
+
+    assert [p.name for p in result.files_removed] == ["run-old.py"]
+
+    entry = _lock_entry(tmp_path, "skills", "web")
+    assert entry["wiki_commit"] == new_sha
+    assert entry["files"] == ["SKILL.md"]
+    assert entry["files_commit"] == new_sha
+
+
+def test_update_force_removes_deleted_and_edited_file_with_bak(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Upstream-deleted + locally-edited: refuse without --force; with
+    --force the edit is preserved as ``.bak`` and the live file is removed."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "notes.md": b"wiki\n"})
+    install_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    (dest / "notes.md").write_bytes(b"user edit\n")
+    _bump_mtime(dest / "notes.md")
+
+    _delete_wiki_skill_file(wiki_root, "web", "notes.md")
+
+    with pytest.raises(StaleInstallError):
+        update_skill(tmp_path, "web")
+
+    result = update_skill(tmp_path, "web", force=True)
+
+    assert (dest / "notes.md.bak").read_bytes() == b"user edit\n"
+    assert not (dest / "notes.md").exists()
+    assert [p.name for p in result.files_removed] == ["notes.md"]
+
+
+def test_update_force_keeps_user_added_file_when_manifest_present(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Manifest rule 1: a dest-only file NOT in the recorded manifest is
+    user-authored content — never silently deleted, even under --force."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    (dest / "extra.md").write_bytes(b"mine\n")
+    _bump_mtime(dest / "extra.md")
+
+    _modify_wiki_skill(wiki_root, "web", {"SKILL.md": b"v2\n"})
+
+    result = update_skill(tmp_path, "web", force=True)
+
+    assert (dest / "extra.md").read_bytes() == b"mine\n"
+    assert result.files_removed == ()
+
+
+def test_update_legacy_entry_removes_stale_dest_only_file(wiki_root: Path, tmp_path: Path) -> None:
+    """Legacy lock entry (no manifest): a dest-only file whose mtime is
+    ``<= installed_at`` is provably old wiki bytes — removed."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "old.md": b"old\n"})
+    install_skill(tmp_path, "web")
+
+    # Simulate a pre-B1 entry: strip the manifest keys.
+    entry = _lock_entry(tmp_path, "skills", "web")
+    entry.pop("files", None)
+    entry.pop("files_commit", None)
+    _rewrite_lock_entry(tmp_path, "skills", "web", entry)
+
+    _delete_wiki_skill_file(wiki_root, "web", "old.md")
+    result = update_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    assert not (dest / "old.md").exists()
+    assert [p.name for p in result.files_removed] == ["old.md"]
+
+
+def test_update_noop_with_user_deleted_file_does_not_resurrect(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Codex design-gate M1 regression: unchanged wiki HEAD short-circuits
+    to a no-op BEFORE the dirty walk — nothing is written, so a user-deleted
+    file must stay deleted (diagnosis surface is ``mm context status``)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "extra.md": b"x\n"})
+    install_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    (dest / "extra.md").unlink()
+
+    result = update_skill(tmp_path, "web")
+
+    assert result.was_no_op is True
+    assert not (dest / "extra.md").exists()
+
+
+def test_update_refuses_on_user_deleted_file_after_wiki_advance(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Deletion-dirty (#1247 item 12): after the wiki advances, a user-deleted
+    file counts as a local edit — refuse without --force; --force restores it
+    as an explicit, informed action."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "keep.md": b"k\n"})
+    install_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    (dest / "keep.md").unlink()
+
+    _modify_wiki_skill(wiki_root, "web", {"SKILL.md": b"v2\n"})
+
+    with pytest.raises(StaleInstallError) as excinfo:
+        update_skill(tmp_path, "web")
+    assert "deleted" in str(excinfo.value)
+
+    result = update_skill(tmp_path, "web", force=True)
+    assert (dest / "keep.md").read_bytes() == b"k\n"
+    assert result.was_no_op is False
+
+
+def test_update_stale_manifest_guard_ignores_mismatched_files_commit(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """An entry whose ``files_commit`` doesn't match ``wiki_commit`` (older
+    tool rewrote the entry, or a hand-merged lock.json) must behave as if no
+    manifest exists: no missing-file dirty, legacy mtime rule applies."""
+    from memtomem.context.dirty import is_asset_dirty
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "a.md": b"a\n"})
+    install_skill(tmp_path, "web")
+
+    entry = _lock_entry(tmp_path, "skills", "web")
+    entry["files_commit"] = "0" * 40
+    _rewrite_lock_entry(tmp_path, "skills", "web", entry)
+
+    (tmp_path / ".memtomem" / "skills" / "web" / "a.md").unlink()
+
+    report = is_asset_dirty(tmp_path, "skills", "web")
+    assert report.reason == "clean"
+    assert report.missing_files == ()
