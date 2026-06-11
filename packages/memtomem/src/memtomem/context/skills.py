@@ -19,6 +19,7 @@ frontmatter rewriting without touching callers.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import secrets
@@ -306,8 +307,9 @@ def _reap_stale_internal_dirs(dst: Path) -> None:
     Safe ONLY while holding ``_lock_path_for(dst)``: every gateway writer
     for the same destination holds that lock across its stage→promote
     sequence, so no live staging tree for this dst can exist while we do.
-    The extract/copy_skill path holds no locks — canonical-root leftovers
-    are handled by discovery filtering only, never by GC.
+    Both the sync fan-out paths and the reverse-import path
+    (:func:`extract_skills_to_canonical`, #1247 id 18) hold that lock, so
+    runtime-side AND canonical-side leftovers get reaped.
     """
     parent = dst.parent
     if not parent.is_dir():
@@ -345,6 +347,29 @@ def _target_conflict(dst: Path) -> OSError | None:
     return None
 
 
+def _promote_race_conflict(exc: OSError) -> bool:
+    """Whether a :func:`_promote_staging` ``OSError`` is a destination race.
+
+    ``True`` only for the shapes a NON-gateway writer (manual shell, editor)
+    can produce by landing content at ``dst`` mid-swap — the
+    :func:`_target_conflict` refusal pair, and ENOTEMPTY/EEXIST from the
+    rename-in hitting a recreated destination. Callers convert those into a
+    typed ``target_conflict`` skip and keep going.
+
+    Everything else stays ``False`` so it RE-RAISES: ENOSPC, permission
+    errors, and — critically — the rollback-failure chain from #1123
+    (``raise promote_exc from rollback_exc``), where the only surviving copy
+    of the original tree is stranded in ``.old-*``. A non-``None``
+    ``__cause__`` is that chain's marker (promote errors are otherwise raised
+    bare), and demoting it to a skip would bury the operator breadcrumb.
+    """
+    if exc.__cause__ is not None:
+        return False
+    if isinstance(exc, (IsADirectoryError, NotADirectoryError)):
+        return True
+    return exc.errno in (errno.ENOTEMPTY, errno.EEXIST)
+
+
 def _promote_staging(staging: Path, dst: Path) -> None:
     """Atomic-replace ``dst`` with ``staging`` (same-fs precondition).
 
@@ -373,6 +398,8 @@ def _promote_staging(staging: Path, dst: Path) -> None:
             # orphaned without a trace. Log a breadcrumb naming ``old`` and
             # ``dst`` so an operator can recover the tree manually, then re-raise
             # the ORIGINAL error with the rollback failure chained (#1123 B3-4).
+            # The ``from`` chain is load-bearing: ``_promote_race_conflict``
+            # reads ``__cause__`` to refuse demoting THIS state to a skip.
             try:
                 os.replace(old, dst)
             except BaseException as rollback_exc:
@@ -392,10 +419,13 @@ def _promote_staging(staging: Path, dst: Path) -> None:
 def copy_skill(src: Path, dst: Path) -> None:
     """Mirror a skill directory from ``src`` to ``dst`` via staging-then-promote.
 
-    Thin wrapper kept for callers that don't care about the staging step
-    (no privacy scan, no override merge — pure file copy). E3
-    sync-side flow uses :func:`_stage_skill` + :func:`_promote_staging`
-    directly so it can scan + override-apply between the two halves.
+    Thin public wrapper (``__all__``) kept for external callers that don't
+    care about the staging step (no privacy scan, no override merge, no
+    destination lock — pure file copy). The gateway's own flows use
+    :func:`_stage_skill` + :func:`_promote_staging` directly: sync scans +
+    override-applies between the two halves, and the reverse import
+    (#1247 id 18) converts each half's failure into its own typed skip
+    while holding the destination sidecar lock.
 
     Individual files are written atomically via
     :func:`memtomem.context._atomic.atomic_write_bytes`. Directory-level
@@ -598,14 +628,19 @@ def generate_all_skills(
                 for target, staging, dst in staged:
                     try:
                         _promote_staging(staging, dst)
-                    except (IsADirectoryError, NotADirectoryError) as exc:
+                    except OSError as exc:
                         # Residual race: only a NON-gateway writer (manual
                         # shell, editor) can recreate conflicting content at
                         # dst after the preflight above — the sidecar lock
                         # held since before staging serializes every gateway
-                        # writer. Loud typed skip; the remaining destinations
-                        # still promote (the finally below reaps the
-                        # unconsumed staging tree).
+                        # writer. Loud typed skip for the verified race
+                        # shapes (refusal pair + ENOTEMPTY/EEXIST, #1247
+                        # id 18); the remaining destinations still promote
+                        # (the finally below reaps the unconsumed staging
+                        # tree). Anything else — ENOSPC, permissions, the
+                        # #1123 rollback-failure chain — re-raises loud.
+                        if not _promote_race_conflict(exc):
+                            raise
                         skipped.append((dst.name, str(exc), skip_codes.TARGET_CONFLICT))
                         continue
                     generated.append((target, dst))
@@ -744,13 +779,17 @@ def generate_all_skills(
                         skipped.append((skill_dir.name, reason, code))
                     else:
                         # 4. Promote — atomic os.replace into dst. The
-                        # conflict refusal can still fire here if a
+                        # conflict refusal (or a recreated-destination
+                        # ENOTEMPTY/EEXIST) can still fire here if a
                         # NON-gateway writer recreated content at dst after
                         # the preflight (the held sidecar lock serializes
                         # gateway writers only) — same typed-skip conversion.
+                        # Non-race OSErrors re-raise loud (#1247 id 18).
                         try:
                             _promote_staging(staging, dst)
-                        except (IsADirectoryError, NotADirectoryError) as exc:
+                        except OSError as exc:
+                            if not _promote_race_conflict(exc):
+                                raise
                             skipped.append((skill_dir.name, str(exc), skip_codes.TARGET_CONFLICT))
                         else:
                             promoted = True
@@ -788,9 +827,23 @@ def extract_skills_to_canonical(
     + Gate A privacy walk + cross-runtime dedup + canonical-exists check, then
     **skips only the directory copy**: the returned ``imported`` lists the
     destinations that *would* be written and ``skipped`` carries the same
-    reasons a real run would, but nothing touches disk. The skip decisions are
-    identical to a real run because both evaluate ``dst.exists()`` before any
-    write, so the preview is accurate (modulo the documented TOCTOU window).
+    reasons a real run would, but nothing touches disk — including the
+    destination sidecar lockfile, which only a real run creates. The skip
+    decisions are identical to a real run because both evaluate
+    ``dst.exists()`` before any write, so the preview is accurate (modulo
+    the documented TOCTOU window).
+
+    Concurrency (#1247 id 18): the write phase (reap → re-check → stage →
+    promote) runs inside the same per-destination sidecar flock the sync
+    paths hold (``_lock_path_for(dst)``), so parallel gateway writers cannot
+    interleave their ``dst → .old-* → staging → dst`` swaps and strand the
+    canonical tree in ``.old-*``. The Gate A scan stays OUTSIDE the lock
+    (it reads only the source tree); acquisition is bounded by one
+    whole-call ``_SKILLS_LOCK_BUDGET_S`` budget and a timed-out destination
+    becomes a typed ``lock_timeout`` skip. Only non-gateway writers (manual
+    shell, editor) can still race the promote — those surface as typed
+    ``target_conflict`` skips for the verified race shapes and re-raise
+    loud otherwise.
 
     ADR-0011 PR-E2: ``scope`` selects both the canonical destination
     (:func:`canonical_artifact_dir`) and the source runtime root
@@ -805,7 +858,7 @@ def extract_skills_to_canonical(
     ``project_shared`` destinations hard-abort via :class:`click.ClickException`
     on the first hit (with or without ``force_unsafe_import``).
 
-    Threat model — Gate A walks the source tree once and :func:`copy_skill`
+    Threat model — Gate A walks the source tree once and :func:`_stage_skill`
     re-reads the same files when the import proceeds; an adversarial
     filesystem could swap bytes between the two reads (a TOCTOU window).
     The current threat model is "accidental leak", not "adversarial
@@ -834,6 +887,15 @@ def extract_skills_to_canonical(
     imported: list[Path] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # skill_name → first runtime label
+
+    # One shared deadline for ALL destination sidecar-lock waits — the whole
+    # call, not each destination, is bounded by ``_SKILLS_LOCK_BUDGET_S``
+    # (mirror of ``generate_all_skills``; #1145 shape — a thread-offloaded
+    # web/MCP caller must never be wedged by a stuck cross-process holder).
+    lock_deadline = time.monotonic() + _SKILLS_LOCK_BUDGET_S
+
+    def _lock_timeout() -> float:
+        return max(0.0, lock_deadline - time.monotonic())
 
     for runtime in ("claude", "gemini", "codex", "kimi"):
         try:
@@ -896,10 +958,10 @@ def extract_skills_to_canonical(
                 try:
                     content_text = src_file.read_text(encoding="utf-8", errors="replace")
                 except OSError:
-                    # Truly unreadable file — skip the scan; copy_skill
-                    # will surface the OSError during the actual copy if
-                    # it is real, otherwise the file passes through as
-                    # a binary asset.
+                    # Truly unreadable file — skip the scan; _stage_skill
+                    # will surface the OSError during the actual copy as a
+                    # typed ``parse_error`` skip if it is real, otherwise
+                    # the file passes through as a binary asset.
                     continue
                 outcome = apply_gate_a(
                     content_text=content_text,
@@ -936,20 +998,78 @@ def extract_skills_to_canonical(
 
             # All files clean — copy the whole tree (atomic at directory level).
             # ``dry_run`` records the would-import destination but skips the
-            # mkdir + copy so the preview never mutates disk (rank-10).
+            # mkdir + lock + copy so the preview never mutates disk (rank-10).
             if not dry_run:
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                # Stage→promote runs inside the destination sidecar lock —
+                # mirror of the sync paths (#1247 id 18). Without it, two
+                # parallel importers interleave their dst→.old-*→staging→dst
+                # swaps and a racing promote can strand the only copy of the
+                # canonical tree in ``.old-*``.
+                dst_lock = ExitStack()
                 try:
-                    copy_skill(skill_dir, dst)
-                except (IsADirectoryError, NotADirectoryError) as exc:
-                    # Residual race: the import path holds no locks, so any
-                    # writer can land conflicting content at dst between the
-                    # preflight above and the promote — typed skip, the
-                    # remaining imports proceed.
-                    skipped.append((skill_name, str(exc), skip_codes.TARGET_CONFLICT))
-                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
-                    seen[skill_name] = runtime_label
+                    dst_lock.enter_context(_file_lock(_lock_path_for(dst), timeout=_lock_timeout()))
+                except TimeoutError:
+                    reason = (
+                        "another process held the canonical destination lock "
+                        f"past the {_SKILLS_LOCK_BUDGET_S:g}s acquisition "
+                        "budget — re-run the import to retry"
+                    )
+                    # No ``seen`` mark: contention is transient and
+                    # destination-lock-specific, so a later runtime's copy of
+                    # the same name keeps its fallback chance (and, with the
+                    # per-call budget exhausted, fails fast into this same
+                    # skip rather than blocking).
+                    skipped.append((skill_name, reason, skip_codes.LOCK_TIMEOUT))
+                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                     continue
+                with dst_lock:
+                    # Lock held — safe point to reap crash leftovers for this
+                    # canonical dst (previously unreachable for the import
+                    # path, which relied on discovery filtering alone).
+                    _reap_stale_internal_dirs(dst)
+                    # Re-check the no-overwrite contract under the lock: a
+                    # parallel importer can land dst between the lock-free
+                    # preflight above and our acquisition, and replacing its
+                    # fresh import would violate ``overwrite=False``.
+                    if dst.exists() and not overwrite:
+                        reason = "canonical exists (use --overwrite)"
+                        skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
+                        seen[skill_name] = runtime_label
+                        continue
+                    # Inlined ``_stage_skill`` + ``_promote_staging`` (rather
+                    # than ``copy_skill``) so each half converts to its own
+                    # typed skip — sync-path parity. No ``seen`` mark on a
+                    # stage failure: unreadability is source-runtime-specific
+                    # (agents/commands parity), so a later runtime's clean
+                    # copy of the same name still imports.
+                    try:
+                        staging = _stage_skill(skill_dir, dst)
+                    except OSError as exc:
+                        skipped.append((skill_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                        continue
+                    try:
+                        _promote_staging(staging, dst)
+                    except OSError as exc:
+                        # Verified destination races (refusal pair +
+                        # ENOTEMPTY/EEXIST from a NON-gateway writer — the
+                        # held lock serializes gateway writers) become typed
+                        # skips; anything else, including the #1123
+                        # rollback-failure chain, re-raises loud.
+                        shutil.rmtree(staging, ignore_errors=True)
+                        if not _promote_race_conflict(exc):
+                            raise
+                        skipped.append((skill_name, str(exc), skip_codes.TARGET_CONFLICT))
+                        logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
+                        seen[skill_name] = runtime_label
+                        continue
+                    except BaseException:
+                        # Non-OSError escape (KeyboardInterrupt, …): keep
+                        # ``copy_skill``'s staging hygiene before propagating.
+                        shutil.rmtree(staging, ignore_errors=True)
+                        raise
             imported.append(dst)
             seen[skill_name] = runtime_label
 

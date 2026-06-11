@@ -34,6 +34,7 @@ from memtomem.context.skills import (
     _stage_skill,
     canonical_skills_root,
     copy_skill,
+    extract_skills_to_canonical,
     generate_all_skills,
 )
 
@@ -735,3 +736,368 @@ class TestTargetConflict:
         assert "claude_skills" not in promoted
         assert promoted, result.skipped
         assert not list(claude_dst.parent.glob(".staging-*"))
+
+
+def _seed_runtime_skill(
+    project_root: Path,
+    runtime_dir: str = ".claude/skills",
+    name: str = "foo",
+    body: str = "---\nname: foo\n---\nbody\n",
+) -> Path:
+    """Seed a runtime-side skill for reverse-import tests."""
+    skill_dir = project_root / runtime_dir / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / SKILL_MANIFEST).write_text(body, encoding="utf-8")
+    return skill_dir
+
+
+class TestExtractLock:
+    """#1247 id 18 — the reverse import promotes into canonical under the
+    same per-destination sidecar flock the sync paths hold. Without it, two
+    parallel importers could interleave their ``dst → .old-* → staging → dst``
+    swaps: the racing promote raised a plain ``OSError`` (ENOTEMPTY) that
+    escaped the refusal-pair catch and aborted the whole import, and a failed
+    rollback stranded the only copy of the canonical tree in ``.old-*``.
+    """
+
+    def test_held_lock_skips_only_contended_destination(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A foreign holder on one canonical destination lock produces a
+        typed ``lock_timeout`` skip for that skill only — the other skill
+        still imports, and the call stays bounded (never blocks forever)."""
+        import time as _time
+
+        import memtomem.context.skills as skills_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        _seed_runtime_skill(tmp_path, name="foo")
+        _seed_runtime_skill(tmp_path, name="bar", body="---\nname: bar\n---\nbody\n")
+        canonical = canonical_skills_root(tmp_path)
+
+        monkeypatch.setattr(skills_mod, "_SKILLS_LOCK_BUDGET_S", 0.2)
+        start = _time.monotonic()
+        with _file_lock(_lock_path_for(canonical / "foo")):
+            result = extract_skills_to_canonical(tmp_path)
+        elapsed = _time.monotonic() - start
+
+        lock_skips = [s for s in result.skipped if s[2] == skip_codes.LOCK_TIMEOUT]
+        assert len(lock_skips) == 1, result.skipped
+        assert lock_skips[0][0] == "foo"
+        assert "acquisition budget" in lock_skips[0][1]
+        assert not (canonical / "foo").exists()
+        assert [p.name for p in result.imported] == ["bar"]
+        assert elapsed < 10, f"abort took {elapsed:.1f}s — budget not applied?"
+
+    def test_lock_timeout_leaves_no_seen_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Contention is transient and destination-specific, so a timed-out
+        name is NOT marked ``seen``: the later runtime's copy gets its own
+        (fail-fast) attempt instead of a misleading ``already imported``
+        skip. Deterministic pin: with copies in two runtimes and the lock
+        held throughout, BOTH attempts surface as ``lock_timeout``."""
+        import memtomem.context.skills as skills_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        _seed_runtime_skill(tmp_path, runtime_dir=".claude/skills", name="foo")
+        _seed_runtime_skill(tmp_path, runtime_dir=".gemini/skills", name="foo")
+        canonical = canonical_skills_root(tmp_path)
+
+        monkeypatch.setattr(skills_mod, "_SKILLS_LOCK_BUDGET_S", 0.2)
+        with _file_lock(_lock_path_for(canonical / "foo")):
+            result = extract_skills_to_canonical(tmp_path)
+
+        codes = [s[2] for s in result.skipped]
+        assert codes.count(skip_codes.LOCK_TIMEOUT) == 2, result.skipped
+        assert skip_codes.ALREADY_IMPORTED not in codes, result.skipped
+        assert result.imported == []
+
+    def test_promote_race_oserror_typed_skip_continues(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A racing promote's ENOTEMPTY (plain OSError — NOT the refusal
+        pair) becomes a typed ``target_conflict`` skip; the remaining imports
+        proceed and the orphaned staging tree is cleaned. Pre-fix this
+        escaped the loop and aborted the whole import."""
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        _seed_runtime_skill(tmp_path, name="foo")
+        _seed_runtime_skill(tmp_path, name="bar", body="---\nname: bar\n---\nbody\n")
+        canonical = canonical_skills_root(tmp_path)
+
+        orig_promote = skills_mod._promote_staging
+
+        def racing_promote(staging: Path, dst: Path) -> None:
+            if dst.name == "foo":
+                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
+            orig_promote(staging, dst)
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
+        result = extract_skills_to_canonical(tmp_path)
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert [p.name for p in result.imported] == ["bar"]
+        assert not list(canonical.glob(".staging-*")), "orphaned staging tree left behind"
+
+    def test_promote_nonrace_oserror_reraises_loud(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-race promote failures (permissions, ENOSPC, …) must NOT be
+        demoted to a skip — they re-raise after staging cleanup."""
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        _seed_runtime_skill(tmp_path, name="foo")
+        canonical = canonical_skills_root(tmp_path)
+
+        def failing_promote(staging: Path, dst: Path) -> None:
+            raise PermissionError(_errno.EACCES, "Permission denied", str(dst))
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", failing_promote)
+        with pytest.raises(PermissionError):
+            extract_skills_to_canonical(tmp_path)
+        assert not list(canonical.glob(".staging-*")), "orphaned staging tree left behind"
+
+    def test_promote_rollback_failure_chain_reraises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #1123 rollback-failure chain (``raise promote_exc from
+        rollback_exc``) means the original tree is stranded in ``.old-*`` —
+        even a race-shaped errno must stay loud, never a skip. The
+        ``__cause__`` marker is the classifier's contract."""
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        _seed_runtime_skill(tmp_path, name="foo")
+
+        def stranding_promote(staging: Path, dst: Path) -> None:
+            try:
+                raise OSError(_errno.EACCES, "rollback rename failed")
+            except OSError as rollback_exc:
+                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst)) from rollback_exc
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", stranding_promote)
+        with pytest.raises(OSError) as excinfo:
+            extract_skills_to_canonical(tmp_path)
+        assert excinfo.value.errno == _errno.ENOTEMPTY
+        assert excinfo.value.__cause__ is not None
+
+    def test_stage_oserror_parse_error_skip_allows_runtime_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable SOURCE is runtime-specific: typed ``parse_error``
+        skip with no ``seen`` mark, so a clean same-name copy in a later
+        runtime still imports (agents/commands parity). Pre-fix the OSError
+        crashed the whole import."""
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        _seed_runtime_skill(tmp_path, runtime_dir=".claude/skills", name="foo")
+        _seed_runtime_skill(
+            tmp_path, runtime_dir=".gemini/skills", name="foo", body="---\nname: foo\n---\ngemini\n"
+        )
+        canonical = canonical_skills_root(tmp_path)
+
+        orig_stage = skills_mod._stage_skill
+
+        def failing_stage(src: Path, dst: Path, **kwargs):
+            if ".claude" in src.parts:
+                raise OSError(_errno.EIO, "Input/output error", str(src))
+            return orig_stage(src, dst, **kwargs)
+
+        monkeypatch.setattr(skills_mod, "_stage_skill", failing_stage)
+        result = extract_skills_to_canonical(tmp_path)
+
+        parse_skips = [s for s in result.skipped if s[2] == skip_codes.PARSE_ERROR]
+        assert len(parse_skips) == 1, result.skipped
+        assert parse_skips[0][0] == "foo"
+        assert "unreadable" in parse_skips[0][1]
+        # The gemini copy won the fallback — not an ``already imported`` skip.
+        assert [p.name for p in result.imported] == ["foo"]
+        text = (canonical / "foo" / SKILL_MANIFEST).read_text(encoding="utf-8")
+        assert text == "---\nname: foo\n---\ngemini\n"
+        codes = [s[2] for s in result.skipped]
+        assert skip_codes.ALREADY_IMPORTED not in codes, result.skipped
+
+    def test_reaps_canonical_crash_leftovers_under_lock(self, tmp_path: Path) -> None:
+        """Canonical-side ``.old-*``/``.staging-*`` crash leftovers were
+        previously never reaped (reaping is lock-gated and the import path
+        held no lock — only discovery filtering hid them). With the lock
+        held the import now GCs them; non-internal-shaped siblings survive."""
+        _seed_runtime_skill(tmp_path, name="foo")
+        canonical = canonical_skills_root(tmp_path)
+        stale = canonical / ".old-foo-99999-abc123.tmp"
+        stale.mkdir(parents=True)
+        (stale / SKILL_MANIFEST).write_text("stale", encoding="utf-8")
+        user_dir = canonical / ".old-foo-notes"
+        user_dir.mkdir(parents=True)
+        (user_dir / "keep.txt").write_text("keep", encoding="utf-8")
+
+        result = extract_skills_to_canonical(tmp_path)
+
+        assert [p.name for p in result.imported] == ["foo"]
+        assert not stale.exists(), "crash leftover not reaped"
+        assert (user_dir / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    def test_overwrite_false_recheck_under_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A parallel importer landing ``dst`` between the lock-free
+        preflight and our lock acquisition must NOT be silently replaced
+        when ``overwrite=False`` — the contract is re-checked under the
+        lock. Simulated by planting dst from the Gate A hook (which runs
+        after the preflight, before the lock)."""
+        import memtomem.context.skills as skills_mod
+
+        _seed_runtime_skill(tmp_path, name="foo")
+        canonical = canonical_skills_root(tmp_path)
+        racer_dst = canonical / "foo"
+
+        orig_gate = skills_mod.apply_gate_a
+
+        def planting_gate(**kwargs):
+            out = orig_gate(**kwargs)
+            if not racer_dst.exists():
+                racer_dst.mkdir(parents=True)
+                (racer_dst / SKILL_MANIFEST).write_text("racer won\n", encoding="utf-8")
+            return out
+
+        monkeypatch.setattr(skills_mod, "apply_gate_a", planting_gate)
+        result = extract_skills_to_canonical(tmp_path)
+
+        exists_skips = [s for s in result.skipped if s[2] == skip_codes.CANONICAL_EXISTS]
+        assert len(exists_skips) == 1, result.skipped
+        assert exists_skips[0][0] == "foo"
+        assert result.imported == []
+        text = (racer_dst / SKILL_MANIFEST).read_text(encoding="utf-8")
+        assert text == "racer won\n", "racing importer's tree was replaced despite overwrite=False"
+
+    def test_promote_runs_under_destination_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Direct pin of the serialization property: at promote time the
+        destination sidecar lock is HELD (a non-blocking acquisition from
+        a second open-file-description fails)."""
+        import memtomem.context.skills as skills_mod
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        _seed_runtime_skill(tmp_path, name="foo")
+        contended: list[bool] = []
+
+        orig_promote = skills_mod._promote_staging
+
+        def probing_promote(staging: Path, dst: Path) -> None:
+            try:
+                with _file_lock(_lock_path_for(dst), timeout=0):
+                    contended.append(False)
+            except TimeoutError:
+                contended.append(True)
+            orig_promote(staging, dst)
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", probing_promote)
+        result = extract_skills_to_canonical(tmp_path)
+
+        assert [p.name for p in result.imported] == ["foo"]
+        assert contended == [True], "promote ran without the destination sidecar lock held"
+
+    def test_dry_run_takes_no_lock_and_mutates_nothing(self, tmp_path: Path) -> None:
+        """rank-10 preview contract: dry_run must not create the canonical
+        root, the sidecar lockfile, or any staging artifact — the lock is
+        a disk mutation too."""
+        _seed_runtime_skill(tmp_path, name="foo")
+        canonical = canonical_skills_root(tmp_path)
+
+        result = extract_skills_to_canonical(tmp_path, dry_run=True)
+
+        assert [p.name for p in result.imported] == ["foo"]
+        assert not canonical.exists(), "dry_run touched disk"
+
+
+class TestSyncPromoteRaceClassification:
+    """#1247 id 18 same-shape sweep: the sync promote catches were limited to
+    the refusal pair, so a NON-gateway writer's mid-swap race (ENOTEMPTY)
+    crashed the fan-out mid-batch — same isolation break #1229 fixed for the
+    refusal types. Verified race shapes now convert to typed skips at all
+    three promote sites; everything else (ENOSPC, permissions, the #1123
+    rollback-failure chain) still re-raises."""
+
+    def test_project_shared_race_oserror_typed_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        _seed_canonical_skill(tmp_path, name="foo")
+        _seed_canonical_skill(tmp_path, name="bar", skill_md="---\nname: bar\n---\nbody\n")
+
+        orig_promote = skills_mod._promote_staging
+
+        def racing_promote(staging: Path, dst: Path) -> None:
+            if dst.name == "foo":
+                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
+            orig_promote(staging, dst)
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
+        result = generate_all_skills(tmp_path, runtimes=["claude_skills"])
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        generated_names = {p.name for _rt, p in result.generated}
+        assert generated_names == {"bar"}, result.generated
+
+    def test_project_shared_nonrace_oserror_reraises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        _seed_canonical_skill(tmp_path, name="foo")
+
+        def failing_promote(staging: Path, dst: Path) -> None:
+            raise PermissionError(_errno.EACCES, "Permission denied", str(dst))
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", failing_promote)
+        with pytest.raises(PermissionError):
+            generate_all_skills(tmp_path, runtimes=["claude_skills"])
+
+    def test_user_scope_race_oserror_typed_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno as _errno
+
+        import memtomem.context.skills as skills_mod
+
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
+        _seed_canonical_skill(tmp_path, name="foo", scope="user")
+        claude_dst = SKILL_GENERATORS["claude_skills"].target_dir(tmp_path, "foo", scope="user")
+        assert claude_dst is not None
+
+        orig_promote = skills_mod._promote_staging
+
+        def racing_promote(staging: Path, dst: Path) -> None:
+            if dst == claude_dst:
+                raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
+            orig_promote(staging, dst)
+
+        monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
+        result = generate_all_skills(tmp_path, scope="user")  # must not raise
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        promoted = {rt for rt, _p in result.generated}
+        assert "claude_skills" not in promoted
+        assert promoted, result.skipped

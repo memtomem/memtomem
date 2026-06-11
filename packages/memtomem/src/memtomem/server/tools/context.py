@@ -335,7 +335,11 @@ async def mem_context_init(
 
     if "skills" in inc:
         try:
-            skill_result = extract_skills_to_canonical(
+            # Thread offload (#1247 id 18): the skills import engine blocks
+            # on the destination sidecar flock (budget-bounded) — keep that
+            # wait off the event loop.
+            skill_result = await asyncio.to_thread(
+                extract_skills_to_canonical,
                 root,
                 overwrite=overwrite,
                 scope=artifact_scope,
@@ -610,8 +614,11 @@ async def mem_context_generate(
 
     if "skills" in inc:
         try:
-            skill_result = generate_all_skills(
-                root, scope=artifact_scope, surface="mcp_context_generate"
+            # Thread offload: ``generate_all_skills`` blocks on destination
+            # sidecar flocks since #1229 — keep the (budget-bounded) wait
+            # off the event loop (#1247 id 18 sweep).
+            skill_result = await asyncio.to_thread(
+                generate_all_skills, root, scope=artifact_scope, surface="mcp_context_generate"
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
@@ -947,8 +954,9 @@ async def mem_context_sync(
 
     if "skills" in inc:
         try:
-            skill_result = generate_all_skills(
-                root, scope=artifact_scope, surface="mcp_context_sync"
+            # Thread offload: same rationale as mem_context_generate.
+            skill_result = await asyncio.to_thread(
+                generate_all_skills, root, scope=artifact_scope, surface="mcp_context_sync"
             )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
