@@ -418,9 +418,9 @@ async def update_agent(
 
 def _safe_rel(p: Path, project_root: Path) -> str:
     try:
-        return str(p.relative_to(project_root))
+        return p.relative_to(project_root).as_posix()
     except ValueError:
-        return str(p)
+        return p.as_posix()
 
 
 @router.delete("/context/agents/{name}")

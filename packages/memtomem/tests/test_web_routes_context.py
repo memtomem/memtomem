@@ -73,6 +73,11 @@ def _make_runtime_skill(
     return skill_dir
 
 
+def _write_text_lf(path: Path, content: str) -> None:
+    """Write fixtures with sync-style LF bytes on every platform."""
+    path.write_bytes(content.encode("utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # Overview
 # ---------------------------------------------------------------------------
@@ -1131,7 +1136,7 @@ def _make_command(tmp_path: Path, name: str, content: str = _CMD_CONTENT) -> Pat
     cmd_dir = tmp_path / ".memtomem" / "commands"
     cmd_dir.mkdir(parents=True, exist_ok=True)
     cmd_file = cmd_dir / f"{name}.md"
-    cmd_file.write_text(content, encoding="utf-8")
+    _write_text_lf(cmd_file, content)
     return cmd_file
 
 
@@ -1141,7 +1146,7 @@ def _make_runtime_command(
     rt_dir = tmp_path / runtime_dir
     rt_dir.mkdir(parents=True, exist_ok=True)
     f = rt_dir / f"{name}{ext}"
-    f.write_text(content, encoding="utf-8")
+    _write_text_lf(f, content)
     return f
 
 
@@ -1174,7 +1179,7 @@ class TestListCommands:
     ):
         local_dir = tmp_path / ".memtomem" / "commands.local"
         local_dir.mkdir(parents=True)
-        (local_dir / "draft.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        _write_text_lf(local_dir / "draft.md", _CMD_CONTENT)
 
         default = await client.get("/api/context/commands")
         assert all(c["name"] != "draft" for c in default.json()["commands"])
@@ -1302,7 +1307,7 @@ class TestDiffCommand:
         cmd_dir = home / ".memtomem" / "commands"
         cmd_dir.mkdir(parents=True)
         cmd_file = cmd_dir / "scoped.md"
-        cmd_file.write_text(_CMD_CONTENT, encoding="utf-8")
+        _write_text_lf(cmd_file, _CMD_CONTENT)
         rt_dir = home / ".claude" / "commands"
         rt_dir.mkdir(parents=True)
         # The runtime side holds what sync would write (rendered output) —
@@ -1311,7 +1316,7 @@ class TestDiffCommand:
         rendered, _ = COMMAND_GENERATORS["claude_commands"].render(
             parse_canonical_command(cmd_file, layout="flat")
         )
-        (rt_dir / "scoped.md").write_text(rendered, encoding="utf-8")
+        _write_text_lf(rt_dir / "scoped.md", rendered)
 
         r = await client.get("/api/context/commands/scoped/diff", params={"target_scope": "user"})
         assert r.status_code == 200
@@ -1327,7 +1332,7 @@ class TestDiffCommand:
         rows against project_shared paths (#1229)."""
         local_dir = tmp_path / ".memtomem" / "commands.local"
         local_dir.mkdir(parents=True)
-        (local_dir / "draft.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        _write_text_lf(local_dir / "draft.md", _CMD_CONTENT)
 
         r = await client.get(
             "/api/context/commands/draft/diff", params={"target_scope": "project_local"}
@@ -1385,9 +1390,9 @@ class TestDiffCommand:
         "out of sync" (#1247 id 30)."""
         art = tmp_path / ".memtomem" / "commands" / "ov"
         (art / "overrides").mkdir(parents=True)
-        (art / "command.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        _write_text_lf(art / "command.md", _CMD_CONTENT)
         override = "# claude-specific replacement\n"
-        (art / "overrides" / "claude.md").write_text(override, encoding="utf-8")
+        _write_text_lf(art / "overrides" / "claude.md", override)
         _make_runtime_command(tmp_path, ".claude/commands", "ov", ".md", override)
 
         r = await client.get("/api/context/commands/ov/diff")
@@ -1426,7 +1431,7 @@ class TestDeleteCommandCascade:
         r = await client.delete("/api/context/commands/ghost?cascade=true")
         assert r.status_code == 200
         data = r.json()
-        assert str(Path(".claude/commands/ghost.md")) in data["deleted"]
+        assert ".claude/commands/ghost.md" in data["deleted"]
         assert data["skipped"] == []
         assert not rt.exists()
 
@@ -1579,7 +1584,7 @@ def _make_agent(tmp_path: Path, name: str, content: str = _AGENT_CONTENT) -> Pat
     agent_dir = tmp_path / ".memtomem" / "agents"
     agent_dir.mkdir(parents=True, exist_ok=True)
     agent_file = agent_dir / f"{name}.md"
-    agent_file.write_text(content, encoding="utf-8")
+    _write_text_lf(agent_file, content)
     return agent_file
 
 
@@ -1592,7 +1597,7 @@ def _make_runtime_agent(
     rt_dir = tmp_path / runtime_dir
     rt_dir.mkdir(parents=True, exist_ok=True)
     f = rt_dir / f"{name}.md"
-    f.write_text(content, encoding="utf-8")
+    _write_text_lf(f, content)
     return f
 
 
@@ -1627,7 +1632,7 @@ class TestListAgents:
     ):
         local_dir = tmp_path / ".memtomem" / "agents.local"
         local_dir.mkdir(parents=True)
-        (local_dir / "draft.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        _write_text_lf(local_dir / "draft.md", _AGENT_CONTENT)
 
         default = await client.get("/api/context/agents")
         assert all(a["name"] != "draft" for a in default.json()["agents"])
@@ -1751,7 +1756,7 @@ class TestDiffAgent:
         _make_agent(tmp_path, "broken", "no frontmatter at all\n")
         rt_dir = tmp_path / ".claude" / "agents"
         rt_dir.mkdir(parents=True)
-        (rt_dir / "broken.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        _write_text_lf(rt_dir / "broken.md", _AGENT_CONTENT)
 
         r = await client.get("/api/context/agents/broken/diff")
         assert r.status_code == 200
@@ -1812,7 +1817,7 @@ class TestDiffAgent:
         agent_dir = home / ".memtomem" / "agents"
         agent_dir.mkdir(parents=True)
         agent_file = agent_dir / "scoped.md"
-        agent_file.write_text(_AGENT_CONTENT, encoding="utf-8")
+        _write_text_lf(agent_file, _AGENT_CONTENT)
         rt_dir = home / ".claude" / "agents"
         rt_dir.mkdir(parents=True)
         # The runtime side holds what sync would write (rendered output) —
@@ -1821,7 +1826,7 @@ class TestDiffAgent:
         rendered, _ = AGENT_GENERATORS["claude_agents"].render(
             parse_canonical_agent(agent_file, layout="flat")
         )
-        (rt_dir / "scoped.md").write_text(rendered, encoding="utf-8")
+        _write_text_lf(rt_dir / "scoped.md", rendered)
 
         r = await client.get("/api/context/agents/scoped/diff", params={"target_scope": "user"})
         assert r.status_code == 200
@@ -1837,7 +1842,7 @@ class TestDiffAgent:
         rows against project_shared paths (#1229)."""
         local_dir = tmp_path / ".memtomem" / "agents.local"
         local_dir.mkdir(parents=True)
-        (local_dir / "draft.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        _write_text_lf(local_dir / "draft.md", _AGENT_CONTENT)
 
         r = await client.get(
             "/api/context/agents/draft/diff", params={"target_scope": "project_local"}
@@ -1863,7 +1868,7 @@ class TestDiffAgent:
             rendered, _ = AGENT_GENERATORS[gen_name].render(parsed)
             rt_dir = tmp_path / runtime_dir
             rt_dir.mkdir(parents=True, exist_ok=True)
-            (rt_dir / f"shaped{ext}").write_text(rendered, encoding="utf-8")
+            _write_text_lf(rt_dir / f"shaped{ext}", rendered)
 
         r = await client.get("/api/context/agents/shaped/diff")
         assert r.status_code == 200
@@ -1877,9 +1882,9 @@ class TestDiffAgent:
         (#1247 id 30; same contract as the commands sibling test)."""
         art = tmp_path / ".memtomem" / "agents" / "ov"
         (art / "overrides").mkdir(parents=True)
-        (art / "agent.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        _write_text_lf(art / "agent.md", _AGENT_CONTENT)
         override = "# claude-specific replacement\n"
-        (art / "overrides" / "claude.md").write_text(override, encoding="utf-8")
+        _write_text_lf(art / "overrides" / "claude.md", override)
         _make_runtime_agent(tmp_path, ".claude/agents", "ov", override)
 
         r = await client.get("/api/context/agents/ov/diff")
@@ -1974,7 +1979,7 @@ def _make_local_agent(tmp_path: Path, name: str, content: str = _AGENT_CONTENT) 
     agent_dir = tmp_path / ".memtomem" / "agents.local"
     agent_dir.mkdir(parents=True, exist_ok=True)
     agent_file = agent_dir / f"{name}.md"
-    agent_file.write_text(content, encoding="utf-8")
+    _write_text_lf(agent_file, content)
     return agent_file
 
 
@@ -1982,7 +1987,7 @@ def _make_local_command(tmp_path: Path, name: str, content: str = _CMD_CONTENT) 
     cmd_dir = tmp_path / ".memtomem" / "commands.local"
     cmd_dir.mkdir(parents=True, exist_ok=True)
     cmd_file = cmd_dir / f"{name}.md"
-    cmd_file.write_text(content, encoding="utf-8")
+    _write_text_lf(cmd_file, content)
     return cmd_file
 
 
@@ -2110,10 +2115,10 @@ class TestImportSurfaceAttribution:
         _make_runtime_skill(tmp_path, ".claude/skills", "s1", "# S\n")
         agents_dir = tmp_path / ".claude" / "agents"
         agents_dir.mkdir(parents=True)
-        (agents_dir / "a1.md").write_text("---\nname: a1\n---\nbody\n", encoding="utf-8")
+        _write_text_lf(agents_dir / "a1.md", "---\nname: a1\n---\nbody\n")
         commands_dir = tmp_path / ".claude" / "commands"
         commands_dir.mkdir(parents=True)
-        (commands_dir / "c1.md").write_text("---\nname: c1\n---\nbody\n", encoding="utf-8")
+        _write_text_lf(commands_dir / "c1.md", "---\nname: c1\n---\nbody\n")
 
         surfaces = self._spy_surfaces(monkeypatch)
 
