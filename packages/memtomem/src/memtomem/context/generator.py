@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from memtomem.context.parser import iter_markdown_sections, split_preamble
+from memtomem.context.parser import (
+    AGENT_SPECIFIC_ALIASES,
+    iter_markdown_sections,
+    split_preamble,
+)
 
 
 class AgentGenerator(Protocol):
@@ -54,13 +58,11 @@ _RESERVED_SECTION_KEYS = {
     "Copilot",
 }
 
-_RESERVED_SECTION_KEYS_CASEFOLD = {
-    "claude-specific",
-    "cursor-specific",
-    "gemini-specific",
-    "codex-specific",
-    "copilot-specific",
-}
+# The "<agent>-specific" headings the generators emit; parse_context folds
+# these into the short keys above (#1247 id 38), and this suppression set
+# keeps any that still reach a sections dict (e.g. hand-built) out of the
+# unknown passthrough. Derived from the same map so the two can't drift.
+_RESERVED_SECTION_KEYS_CASEFOLD = frozenset(AGENT_SPECIFIC_ALIASES)
 
 
 def _append_unknown_sections(lines: list[str], sections: dict[str, str]) -> None:
@@ -249,6 +251,10 @@ class CopilotGenerator:
             lines.append("## Commands\n")
             lines.append(sections["Commands"])
             lines.append("")
+        if "Architecture" in sections:
+            lines.append("## Architecture\n")
+            lines.append(sections["Architecture"])
+            lines.append("")
         if "Copilot" in sections:
             lines.append("## Copilot-Specific\n")
             lines.append(sections["Copilot"])
@@ -371,12 +377,10 @@ def extract_sections_from_agent_file(content: str, source: str | None = None) ->
         "rules": "Rules",
         "style": "Style",
         # Agent-specific override sections — must round-trip through
-        # generate() which emits "## <Agent>-Specific" headings.
-        "claude-specific": "Claude",
-        "cursor-specific": "Cursor",
-        "gemini-specific": "Gemini",
-        "codex-specific": "Codex",
-        "copilot-specific": "Copilot",
+        # generate() which emits "## <Agent>-Specific" headings. Shared with
+        # parse_context, which folds the same headings on the canonical side
+        # (#1247 id 38).
+        **AGENT_SPECIFIC_ALIASES,
     }
 
     # Every ## heading starts a section; the text before the first one is the

@@ -943,3 +943,82 @@ def test_install_all_unusable_record_refuses_then_force_baks_all(
     assert result.files_written >= 1
     assert edited.read_bytes() == b"wiki\n"  # pin bytes restored
     assert edited.with_suffix(".md.bak").read_bytes() == b"local edit\n"
+
+
+# ── #1247 id 13: edits during the --all confirm prompt ───────────────────
+
+
+def test_cli_install_all_force_baks_file_edited_during_confirm_prompt(
+    wiki_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skip(clean) row edited DURING the confirm prompt must get a .bak
+    under ``--force`` (#1247 id 13).
+
+    Pre-fix ``_apply_pinned_install`` trusted the classify-phase report:
+    skip rows carried a clean report, so ``--force`` re-extracted the pin
+    over the mid-prompt edit with no ``.bak`` at all.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+
+    edited = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+
+    def _edit_then_confirm(*args: object, **kwargs: object) -> bool:
+        edited.write_bytes(b"edited during prompt\n")
+        _bump_mtime(edited)
+        return True
+
+    monkeypatch.setattr("memtomem.cli.context_cmd.click.confirm", _edit_then_confirm)
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert edited.read_bytes() == b"v1\n"  # pin bytes restored
+    bak = edited.with_suffix(".md.bak")
+    assert bak.exists(), result.output
+    assert bak.read_bytes() == b"edited during prompt\n"
+
+
+def test_cli_install_all_refuses_flat_sibling_appearing_during_confirm_prompt(
+    wiki_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dirty flat-layout sibling that APPEARS during the confirm prompt
+    must refuse at apply time, not be silently shadowed (#1247 id 13
+    design gate).
+
+    The row classifies ``install`` (dest absent, no flat yet), so the
+    classify-time flat probe sees nothing. Pre-fix the execute phase went
+    straight to extraction: ``.memtomem/agents/foo/`` was created next to
+    the live flat file, flipping fan-out serving away from the user's
+    bytes with exit 0.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "agents", "foo", {"agent.md": b"wiki\n"})
+    install_agent(tmp_path, "foo")
+    shutil.rmtree(tmp_path / ".memtomem" / "agents" / "foo")
+
+    flat = tmp_path / ".memtomem" / "agents" / "foo.md"
+
+    def _plant_flat_then_confirm(*args: object, **kwargs: object) -> bool:
+        flat.write_bytes(b"# local flat\n")
+        _bump_mtime(flat)
+        return True
+
+    monkeypatch.setattr("memtomem.cli.context_cmd.click.confirm", _plant_flat_then_confirm)
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all"])
+
+    assert result.exit_code == 1, result.output
+    assert "flat-layout" in result.output
+    assert "migrate" in result.output
+    assert flat.read_bytes() == b"# local flat\n"
+    assert not (tmp_path / ".memtomem" / "agents" / "foo").exists()

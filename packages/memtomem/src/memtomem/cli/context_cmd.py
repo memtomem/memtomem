@@ -1610,16 +1610,21 @@ def _run_update_all(
        correction; the design's earlier ``list_entries()`` reference does
        not exist in the actual API).
     2. Classify across all roots in one pass — ``current_commit`` and
-       ``is_asset_dirty`` each run at most once per project, all cached
-       on :class:`ProjectClassification` for the execute phase.
+       ``is_asset_dirty`` each run at most once per project during
+       classification; ``lock_entry`` is cached on
+       :class:`ProjectClassification` for the execute phase (the dirty
+       walk is preview-only — see step 7).
     3. Print a 4-state preview table.
     4. Empty store / "no projects have asset" exit 0 informationally —
        cron/CI safety so a first-run before any registration succeeds.
     5. ``refuse`` without ``--force`` aborts the entire batch (no partial
        writes).
     6. ``--yes --force`` prints WARNING + skips prompt + executes.
-    7. Serial execute consumes cached ``dirty_report`` / ``lock_entry``;
-       no second walk per project.
+    7. Serial execute consumes the cached ``lock_entry``; the dest tree
+       is re-classified inside ``_apply_update`` (#1247 id 13 — the
+       classify-phase ``dirty_report`` only renders the preview table,
+       because the confirm prompt between classify and execute is
+       unbounded).
     """
     cfg = ContextGatewayConfig()
     store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
@@ -1711,9 +1716,11 @@ def _run_update_all(
             continue
 
         # state in {"update", "refuse"} — execute via _apply_update with
-        # cached dirty_report + lock_entry (no re-walk).
+        # the cached lock_entry; the dest tree is re-classified at apply
+        # time (#1247 id 13 — the classify-phase dirty_report is
+        # preview-only; an edit made during the confirm prompt must still
+        # refuse / get its .bak).
         assert c.lock_entry is not None
-        assert c.dirty_report is not None
         src = wiki.root / asset_type_plural / name
         dest = c.project_root / ".memtomem" / asset_type_plural / name
         try:
@@ -1725,7 +1732,6 @@ def _run_update_all(
                 dest=dest,
                 wiki_commit=new_commit,
                 lock_entry=c.lock_entry,
-                dirty_report=c.dirty_report,
                 force=force,
                 surface="cli_context_update_all",
             )
@@ -1964,8 +1970,10 @@ def _run_install_all(
        irrelevant — intentionally diverges from ``update --all`` which
        does warn (it cares about HEAD).
     3. Classify every entry in ``<project>/.memtomem/lock.json`` once
-       via ``_classify_for_install_all`` (cached lock_entry +
-       dirty_report passed through to execute).
+       via ``_classify_for_install_all``. ``lock_entry`` is cached for
+       execute; the classify-phase ``dirty_report`` is preview-only —
+       ``_apply_pinned_install`` re-classifies before its gates
+       (#1247 id 13).
     4. Empty lockfile → "No entries..." stderr, exit 0.
     5. Print 5-state preview table.
     6. If only skip/orphan/error rows (no install/refuse) → exit 0.

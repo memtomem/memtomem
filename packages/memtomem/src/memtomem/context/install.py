@@ -145,9 +145,11 @@ class UpdateResult:
 class ProjectClassification:
     """Per-project classification produced by :func:`_classify_for_all_update`.
 
-    The dataclass *caches* the per-project lockfile read and the dirty walk
-    so the execute phase can reuse them — the same expensive operations
-    must not run twice between preview and write.
+    The dataclass caches the per-project lockfile read (``lock_entry``) for
+    the execute phase. ``dirty_report`` is **preview-only** (#1247 id 13):
+    it renders the table the user confirms against, and
+    :func:`_apply_update` re-classifies the dest tree at apply time because
+    the confirm prompt between preview and write is unbounded.
 
     State semantics:
 
@@ -618,12 +620,13 @@ def _update_asset(
     5. **True no-op short-circuit**: when ``new_commit`` matches the lockfile
        pin, return early *without touching the lockfile*. ``installed_at``
        is echoed from the existing entry; ``was_no_op=True``.
-    6. Classify the dest tree via :func:`is_asset_dirty` (using the lock
-       entry we already loaded — no second lockfile read).
-    7. Delegate to :func:`_apply_update` for the refuse-or-write step.
+    6. Delegate to :func:`_apply_update`, which classifies the dest tree
+       via :func:`is_asset_dirty` immediately before its gates (#1247
+       id 13) and then refuses or writes.
 
-    The split lets ``mm context update --all`` (commit 4) reuse step 7
-    after performing classification across all known projects up front.
+    The split lets ``mm context update --all`` (commit 4) reuse step 6
+    after rendering a preview classification across all known projects
+    up front.
     """
     validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     project_root = Path(project_root).expanduser()
@@ -666,8 +669,6 @@ def _update_asset(
             files_written=0,
         )
 
-    dirty_report = is_asset_dirty(project_root, asset_type, validated, lock_entry=lock_entry)
-
     return _apply_update(
         project_root,
         asset_type,
@@ -676,7 +677,6 @@ def _update_asset(
         dest=dest,
         wiki_commit=new_commit,
         lock_entry=lock_entry,
-        dirty_report=dirty_report,
         force=force,
     )
 
@@ -690,11 +690,10 @@ def _apply_update(
     dest: Path,
     wiki_commit: str,
     lock_entry: dict[str, Any],
-    dirty_report: DirtyReport,
     force: bool,
     surface: str = "cli_context_update",
 ) -> UpdateResult:
-    """Execute an already-classified update.
+    """Execute an update against apply-time dirty evidence.
 
     Pre-conditions enforced by callers (``_update_asset`` for the single-
     asset path, ``mm context update --all`` orchestration for the batch
@@ -703,8 +702,16 @@ def _apply_update(
     - ``lock_entry`` is non-None (``NotInstalledError`` is raised earlier).
     - The no-op case (``lock_entry["wiki_commit"] == wiki_commit``) was
       already short-circuited; this helper unconditionally writes.
-    - ``dirty_report`` was already computed; this helper does **not**
-      re-walk the dest tree.
+
+    The dest tree is classified HERE, immediately before the gates. A
+    report computed earlier — in particular before ``--all``'s unbounded
+    confirm prompt — is preview-only and must never gate writes: a
+    stale-clean report would silently clobber an edit made while the user
+    sat on the prompt, and a stale dirty set would ``.bak`` too few files
+    under ``--force`` (#1247 id 13; same plan-time-trust bug as #1135
+    B4-3). The single-asset path pays no extra walk (it no longer
+    pre-computes); ``--all`` walks twice per actionable project — once for
+    the preview table, once here for the gate.
 
     Refuses with :class:`StaleInstallError` when ``dirty_report.reason ==
     "dirty"`` and ``force=False``. With ``force=True`` and a dirty tree,
@@ -722,6 +729,8 @@ def _apply_update(
     mirroring the C2a (#630) install invariant so a follow-up dirty
     check can't false-positive on this update's own writes.
     """
+    dirty_report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
+
     if dirty_report.reason == "dirty" and not force:
         raise StaleInstallError(
             f"{asset_type}/{name}: {dirty_report.summary()} "
@@ -886,7 +895,11 @@ def _classify_for_all_update(
       (only populated when ``state in {"update", "refuse"}``; the
       ``unchanged`` short-circuit skips the walk entirely since the
       lockfile pin matches HEAD and the dest tree is, by definition,
-      what was installed at that pin).
+      what was installed at that pin). **Preview-only** (#1247 id 13):
+      it renders the table the user confirms against, but the execute
+      phase re-classifies inside :func:`_apply_update` — an unbounded
+      confirm prompt sits between the two, so apply-time gates must not
+      trust this snapshot.
 
     Projects without a lockfile entry for this asset are silently
     skipped (no result row): they were never in scope for this
@@ -1043,7 +1056,9 @@ class ProjectInstallClassification:
 
     ``lock_entry`` carries the live entry (``wiki_commit`` + ``installed_at``);
     ``dirty_report`` is populated only when the dirty walk actually
-    ran (state ∈ {``skip``, ``refuse``}).
+    ran (state ∈ {``skip``, ``refuse``}) and is **preview-only** (#1247
+    id 13): :func:`_apply_pinned_install` re-classifies at apply time
+    because ``--all``'s confirm prompt sits between classify and execute.
     """
 
     asset_type: Literal["skills", "agents", "commands"]
@@ -1261,16 +1276,23 @@ def _apply_pinned_install(
       preserved, ``installed_at`` refreshed).
     - ``state="skip"`` + ``force=False``: caller skips; this helper
       shouldn't be reached (defense in depth — raises if it is).
-    - ``state="skip"`` + ``force=True``: re-extract at pin, no ``.bak``
-      (clean dest had nothing to preserve).
     - ``state="refuse"`` + ``force=False``: raise
       :class:`StaleInstallError` (caller already aborted batch; defense
       in depth).
-    - ``state="refuse"`` + ``force=True``: ``shutil.copy2`` the at-risk
-      dest files to ``<file>.bak`` (the dirty subset, or EVERY current
-      file when the install record is unusable — mirroring
-      ``_apply_update``, #1247), then extract at pin. Flat-layout refuse
-      rows have no dest to preserve; the flat file stays in place.
+    - The dest tree is then **re-classified here** (#1247 id 13): the
+      classify-phase ``dirty_report`` predates ``--all``'s unbounded
+      confirm prompt and is preview-only. Fresh ``dirty`` — or an
+      unusable install record over an existing dest — without ``force``
+      raises :class:`StaleInstallError` (covers install/skip rows that
+      went dirty during the prompt; the CLI loop degrades it to a red
+      row). With ``force`` the FRESH at-risk set (dirty subset, or
+      EVERY current file when unprovable — mirroring ``_apply_update``)
+      is ``shutil.copy2``'d to ``<file>.bak`` before extraction, so a
+      clean-at-classify row edited mid-prompt still gets its ``.bak``.
+    - A dirty flat-layout sibling is re-probed the same way (design-gate
+      fold): one that APPEARED during the prompt refuses without
+      ``force``; with ``force`` the flat file stays on disk (shadowed,
+      no ``.bak``) exactly like the classify-time flat-refuse rows.
     """
     pin = classification.pin_commit
     asset_type = classification.asset_type
@@ -1291,6 +1313,55 @@ def _apply_pinned_install(
             f"pass --force to overwrite (each modified file gets a .bak sibling)"
         )
 
+    # Apply-time re-classification (#1247 id 13): the classify-phase report
+    # predates --all's unbounded confirm prompt, so every gate and the .bak
+    # set below use FRESH evidence — mirroring _apply_update. A row that
+    # classified install/skip and went dirty during the prompt refuses loud
+    # here (the CLI loop catches → red row, file intact).
+    report = is_asset_dirty(project_root, asset_type, name, lock_entry=classification.lock_entry)
+    unprovable = report.reason == "never_installed" and dest.is_dir()
+    if report.reason == "dirty" and not force:
+        raise StaleInstallError(
+            f"{asset_type}/{name}: {report.summary()} since classification; "
+            f"pass --force to overwrite (each modified file gets a .bak sibling)"
+        )
+    if unprovable and not force:
+        raise StaleInstallError(
+            f"{asset_type}/{name}: install record unusable (missing or malformed "
+            f"installed_at) — local edits cannot be ruled out; pass --force to "
+            f"overwrite (every current file gets a .bak sibling)"
+        )
+
+    # Flat-layout re-probe (#1247 id 13 design gate): a dirty flat sibling
+    # that appeared during the prompt while dest is absent would be silently
+    # shadowed by the extraction below — classify probed too early to see
+    # it. The probe self-short-circuits when dest is a dir or the asset
+    # type has no flat layout, so classify-time flat-refuse rows re-probe
+    # to the same verdict here.
+    if report.reason in ("missing_dest", "never_installed"):
+        flat_path, flat_dirty = _flat_layout_probe(
+            dest, asset_type, name, classification.lock_entry
+        )
+        if flat_path is not None:
+            kind = asset_type.removesuffix("s")
+            if flat_dirty and not force:
+                raise StaleInstallError(
+                    f"{asset_type}/{name}: flat-layout file {flat_path.name} has local "
+                    f"edits (or no provable install time) and the dir-layout install "
+                    f"would stop it being served; run `mm context migrate {kind} {name}` "
+                    f"first, or pass --force to write the dir layout anyway (the flat "
+                    f"file is kept on disk but stops being served)"
+                )
+            logger.warning(
+                "%s/%s: dir layout will shadow flat file %s (dir wins at fan-out); "
+                "run `mm context migrate %s %s` to consolidate",
+                asset_type,
+                name,
+                flat_path,
+                kind,
+                name,
+            )
+
     # Gate A (ADR-0011 §5, #1247): scan the pin's git objects (the exact
     # bytes the extractor would write) plus any dirty files a --force run
     # would .bak — both BEFORE the .bak loop, the first dest mutation.
@@ -1303,19 +1374,16 @@ def _apply_pinned_install(
         project_root=project_root,
     )
     files_to_bak: tuple[Path, ...] = ()
-    if classification.state == "refuse" and force:
-        report = classification.dirty_report
-        assert report is not None  # state=refuse always carries a report
-        if report.reason == "dirty":
-            files_to_bak = report.dirty_files
-        elif report.reason == "never_installed" and dest.is_dir():
-            # Unprovable install record over an existing dest (#1247 impl
-            # gate): no epoch to subset by, so preserve EVERY current file
-            # before the pin re-extraction — mirrors _apply_update. (The
-            # flat-refuse rows also carry never_installed/missing_dest
-            # reports, but their dest is absent → no bak set, the flat
-            # file is preserved in place.)
-            files_to_bak = tuple(iter_installed_files(dest))
+    if force and report.reason == "dirty":
+        files_to_bak = report.dirty_files
+    elif force and unprovable:
+        # Unprovable install record over an existing dest (#1247 impl
+        # gate): no epoch to subset by, so preserve EVERY current file
+        # before the pin re-extraction — mirrors _apply_update. (The
+        # flat-refuse rows carry never_installed/missing_dest reports,
+        # but their dest is absent → no bak set, the flat file is
+        # preserved in place.)
+        files_to_bak = tuple(iter_installed_files(dest))
     if files_to_bak:
         _gate_a_scan_dirty_files(
             files_to_bak,

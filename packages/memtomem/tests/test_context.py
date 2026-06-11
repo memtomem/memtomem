@@ -163,6 +163,20 @@ class TestGenerator:
         for name, content in result.items():
             assert len(content) > 0
 
+    @pytest.mark.parametrize("agent", sorted(GENERATORS))
+    def test_every_generator_emits_all_canonical_section_bodies(self, agent):
+        """No generator may silently drop a canonical section (#1247 id 39).
+
+        Canonical section names are in _RESERVED_SECTION_KEYS, so the
+        unknown-section passthrough skips them — a generator missing a branch
+        for one (copilot had no Architecture branch) makes that content vanish
+        from its output with no warning.
+        """
+        sections = self._sections()
+        content = generate_for_agent(agent, sections)
+        for body in sections.values():
+            assert body in content
+
     @pytest.mark.parametrize("agent", ["claude", "cursor", "gemini", "codex", "copilot"])
     def test_generate_preserves_unknown_sections(self, agent):
         sections = {
@@ -299,6 +313,73 @@ class TestSpecificSectionRoundTrip:
         regenerated = generate_for_agent(agent, sections)
         assert heading in regenerated
         assert marker in regenerated
+
+
+class TestCanonicalAgentSpecificAlias:
+    """Canonical `## <Agent>-Specific` headings must reach the right generator.
+
+    Sibling of TestSpecificSectionRoundTrip, which covers the reverse-import
+    leg (extract_sections_from_agent_file). This is the canonical-parse leg
+    (#1247 id 38): parse_context kept the verbatim `Claude-Specific` key, the
+    generators look up the short key (`Claude`), and _append_unknown_sections
+    suppresses `<agent>-specific` headings — so the section was silently
+    dropped from every generated file, including that agent's own. Generated
+    files *display* `## Claude-Specific`, so canonical authors copy it.
+    """
+
+    @pytest.mark.parametrize(
+        "heading,canonical",
+        [
+            ("Claude-Specific", "Claude"),
+            ("Cursor-Specific", "Cursor"),
+            ("Gemini-Specific", "Gemini"),
+            ("Codex-Specific", "Codex"),
+            ("Copilot-Specific", "Copilot"),
+        ],
+    )
+    def test_parse_context_folds_agent_specific_heading(self, tmp_path, heading, canonical):
+        ctx = tmp_path / "context.md"
+        ctx.write_text(f"# Project Context\n\n## {heading}\n\noverride body\n", encoding="utf-8")
+        sections = parse_context(ctx)
+        assert canonical in sections
+        assert heading not in sections
+        assert sections[canonical] == "override body"
+
+    def test_parse_context_folds_case_variants(self, tmp_path):
+        ctx = tmp_path / "context.md"
+        ctx.write_text("## CLAUDE-SPECIFIC\n\nshout body\n", encoding="utf-8")
+        assert parse_context(ctx)["Claude"] == "shout body"
+
+    def test_parse_context_merges_short_key_and_specific_heading(self, tmp_path):
+        ctx = tmp_path / "context.md"
+        ctx.write_text(
+            "## Claude\n\nfirst body\n\n## Claude-Specific\n\nsecond body\n",
+            encoding="utf-8",
+        )
+        sections = parse_context(ctx)
+        assert sections["Claude"] == "first body\n\nsecond body"
+        assert "Claude-Specific" not in sections
+
+    def test_parse_context_leaves_non_agent_specific_headings_unknown(self, tmp_path):
+        # The alias map must not over-match lookalike headings.
+        ctx = tmp_path / "context.md"
+        ctx.write_text("## Claudette-Specific\n\nnot an agent\n", encoding="utf-8")
+        sections = parse_context(ctx)
+        assert sections == {"Claudette-Specific": "not an agent"}
+
+    def test_canonical_specific_section_reaches_own_agent_only(self, tmp_path):
+        ctx = tmp_path / "context.md"
+        ctx.write_text(
+            "# Project Context\n\n## Project\n\nIntro.\n\n"
+            "## Claude-Specific\n\nclaude override body\n",
+            encoding="utf-8",
+        )
+        sections = parse_context(ctx)
+        claude_out = generate_for_agent("claude", sections)
+        gemini_out = generate_for_agent("gemini", sections)
+        assert "## Claude-Specific" in claude_out
+        assert "claude override body" in claude_out
+        assert "claude override body" not in gemini_out
 
 
 class TestParserHardening:

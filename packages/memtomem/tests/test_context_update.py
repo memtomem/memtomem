@@ -934,20 +934,24 @@ def test_cli_update_all_mid_loop_fs_error_continues(
     assert "1 failed" in result.output
 
 
-def test_cli_update_all_does_not_re_walk_for_dirty(
+def test_cli_update_all_re_walks_dirty_at_apply_time(
     wiki_root: Path,
     project_cwd: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Execute phase MUST consume the cached ``dirty_report`` from
-    classification — no second ``is_asset_dirty`` call per project.
+    """Execute phase MUST re-classify the dest tree at apply time — exactly
+    one extra ``is_asset_dirty`` call per actionable project (#1247 id 13).
 
-    Spy counts ``is_asset_dirty`` invocations during the whole flow:
-    classify calls it once for the dirty project (state=refuse with
-    --force allowed), and execute reuses the cached report. Total = 1
-    per project that needed classification. Without the cache, total
-    would be 2 per project.
+    Inverted pin: this test previously asserted ``call_count == 1`` ("the
+    execute phase consumes the cached dirty_report, no re-walk") — which
+    pinned the bug. The confirm prompt between classify and execute is
+    unbounded, so gating writes on the classify-time report silently
+    clobbered edits made during the prompt (and ``--force`` baked too few
+    files). Now: classify walks once for the preview table, and
+    ``_apply_update`` walks once for the gate. Total = 2 per actionable
+    project; a count of 1 means apply-time gating regressed to the stale
+    snapshot, 3+ means an accidental extra walk crept in.
     """
     _initialized_wiki(wiki_root)
     _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
@@ -977,9 +981,137 @@ def test_cli_update_all_does_not_re_walk_for_dirty(
     result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes", "--force"])
 
     assert result.exit_code == 0, result.output
-    # 1 = classification's call only. Execute used the cached DirtyReport
-    # from ProjectClassification — no second walk.
+    # 2 = classification's preview walk + _apply_update's gate walk.
+    assert call_count["n"] == 2
+
+
+def test_single_asset_update_walks_dirty_exactly_once(
+    wiki_root: Path,
+    project_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-batch path has no confirm prompt between classify and apply,
+    so moving the walk into ``_apply_update`` (#1247 id 13) must not add a
+    second walk there: ``_update_asset`` no longer pre-computes.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    real_is_asset_dirty = install_module.is_asset_dirty
+    call_count = {"n": 0}
+
+    def _spy(*args: object, **kwargs: object):
+        call_count["n"] += 1
+        return real_is_asset_dirty(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(install_module, "is_asset_dirty", _spy)
+
+    result = update_skill(project_cwd, "foo")
+
+    assert result.was_no_op is False
     assert call_count["n"] == 1
+
+
+# ── #1247 id 13: edits during the --all confirm prompt ──────────────────
+
+
+def test_cli_update_all_refuses_edit_made_during_confirm_prompt(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A project clean at classify whose dest is edited DURING the confirm
+    prompt must be refused at apply time, not silently overwritten (#1247
+    id 13).
+
+    The confirm window is unbounded — a human sits on the multi-project
+    preview table while other sessions write. Pre-fix the execute phase
+    consumed the stale clean ``dirty_report`` from classification, so
+    ``copy_tree_atomic`` replaced the mid-prompt edit with wiki bytes:
+    exit 0, no refusal, no .bak.
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj = tmp_path / "race_proj"
+    proj.mkdir()
+    install_skill(proj, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    target = proj / ".memtomem" / "skills" / "foo" / "SKILL.md"
+
+    def _edit_then_confirm(*args: object, **kwargs: object) -> bool:
+        target.write_bytes(b"edited during prompt\n")
+        _bump_mtime(target)
+        return True
+
+    monkeypatch.setattr("memtomem.cli.context_cmd.click.confirm", _edit_then_confirm)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all"])
+
+    assert result.exit_code == 1, result.output
+    assert target.read_bytes() == b"edited during prompt\n"
+    assert not target.with_suffix(".md.bak").exists()
+
+
+def test_cli_update_all_force_baks_file_dirtied_during_confirm_prompt(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--force`` must .bak files that became dirty DURING the confirm
+    prompt, not just the classify-time dirty set (#1247 id 13).
+
+    Pre-fix the .bak loop iterated the stale ``dirty_files`` — a file edited
+    mid-prompt was clobbered bak-less even though --force promises "each
+    modified file gets a .bak sibling".
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n", "EXTRA.md": b"e1\n"})
+
+    proj = tmp_path / "race_proj"
+    proj.mkdir()
+    install_skill(proj, "foo")
+
+    dest = proj / ".memtomem" / "skills" / "foo"
+    first = dest / "SKILL.md"
+    second = dest / "EXTRA.md"
+    first.write_bytes(b"edited before classify\n")
+    _bump_mtime(first)
+
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n", "EXTRA.md": b"e2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    def _edit_then_confirm(*args: object, **kwargs: object) -> bool:
+        second.write_bytes(b"edited during prompt\n")
+        _bump_mtime(second)
+        return True
+
+    monkeypatch.setattr("memtomem.cli.context_cmd.click.confirm", _edit_then_confirm)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--force"])
+
+    assert result.exit_code == 0, result.output
+    first_bak = first.with_suffix(".md.bak")
+    second_bak = second.with_suffix(".md.bak")
+    assert first_bak.exists()
+    assert first_bak.read_bytes() == b"edited before classify\n"
+    assert second_bak.exists(), result.output
+    assert second_bak.read_bytes() == b"edited during prompt\n"
+    assert second.read_bytes() == b"e2\n"
 
 
 # ── CLI: wiki dirty warn timing (single-asset & --all) ──────────────────

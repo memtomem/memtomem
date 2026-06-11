@@ -11,6 +11,20 @@ CONTEXT_FILENAME = ".memtomem/context.md"
 # Known section names (case-insensitive matching)
 KNOWN_SECTIONS = {"project", "commands", "architecture", "rules", "style"}
 
+# Canonical short keys for the per-agent override sections, keyed by the
+# casefolded "<agent>-specific" heading the generators *emit*. Shared by
+# :func:`parse_context` and the reverse-import alias map in
+# :func:`memtomem.context.generator.extract_sections_from_agent_file`, and
+# the source for the generator module's unknown-section suppression set —
+# single source of truth so the three can't drift (#1247 id 38).
+AGENT_SPECIFIC_ALIASES: dict[str, str] = {
+    "claude-specific": "Claude",
+    "cursor-specific": "Cursor",
+    "gemini-specific": "Gemini",
+    "codex-specific": "Codex",
+    "copilot-specific": "Copilot",
+}
+
 _HEADING_RE = re.compile(r"^##\s+(.+)$")
 # A Markdown code fence: 3+ backticks or tildes, indented up to 3 spaces
 # (CommonMark). group(1) is the fence run — its marker char and length
@@ -126,6 +140,15 @@ def parse_context(path: Path) -> dict[str, str]:
     Unknown sections are preserved as-is. Repeated headings are merged
     (content concatenated) rather than the earlier copy being overwritten.
 
+    A `## <Agent>-Specific` heading (any case) folds into the canonical short
+    key (`Claude`, `Cursor`, …) via :data:`AGENT_SPECIFIC_ALIASES` — the
+    generators look up the short key and suppress the literal `-specific`
+    headings from unknown-section passthrough, so without the fold a
+    canonical-authored override section (copied from a generated file, which
+    *displays* `## Claude-Specific`) was silently dropped from every output
+    (#1247 id 38). A folded heading merges with an existing short-key section
+    exactly like a repeated heading.
+
     Text before the first `## SectionName` heading is not a section and is
     not preserved — put project description under `## Project`. (Runtime-file
     reverse-import via
@@ -139,10 +162,11 @@ def parse_context(path: Path) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     sections: dict[str, str] = {}
     for name, body in iter_markdown_sections(text):
-        if name in sections:
-            sections[name] = f"{sections[name]}\n\n{body}".strip()
+        key = AGENT_SPECIFIC_ALIASES.get(name.lower(), name)
+        if key in sections:
+            sections[key] = f"{sections[key]}\n\n{body}".strip()
         else:
-            sections[name] = body
+            sections[key] = body
 
     return sections
 
