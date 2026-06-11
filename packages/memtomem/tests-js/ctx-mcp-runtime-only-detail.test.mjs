@@ -74,6 +74,22 @@ describe('MCP runtime-only detail (#1247 id 31)', () => {
   });
 });
 
+describe('MCP missing-canonical banner copy (#1247 id 31, Codex impl review)', () => {
+  it('does not tell the user to click a nonexistent Import button', async () => {
+    const { window } = await bootApp({ scripts: SCRIPTS });
+    await window.I18N.init();
+
+    const mcpHtml = window._ctxMissingCanonicalRemediationHtml('mcp-servers', 2, ['.mcp.json']);
+    expect(mcpHtml).not.toContain('Click Import above');
+    expect(mcpHtml).toContain('Create');
+
+    // Sibling families keep the Import-oriented copy — the branch must not
+    // over-reach.
+    const skillsHtml = window._ctxMissingCanonicalRemediationHtml('skills', 1, ['.claude/skills']);
+    expect(skillsHtml).toContain('Click Import above');
+  });
+});
+
 describe('MCP detail meta chips (#1247 id 36)', () => {
   it('renders command / args / env chips, keeping numeric zero', async () => {
     const { window } = await bootApp({ scripts: SCRIPTS });

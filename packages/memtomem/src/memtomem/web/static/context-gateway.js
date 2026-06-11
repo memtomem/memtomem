@@ -2599,16 +2599,20 @@ function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
     ? 'project_shared'
     : (scope === 'project_local' ? 'project_local' : 'user');
   const title = t(`settings.ctx.missing_canonical_${scopeForKey}_title`);
-  const body = t(`settings.ctx.missing_canonical_${scopeForKey}_body`)
+  // MCP servers take a dedicated body: the generic project_shared copy says
+  // "Click Import above", and mcp-servers has no Import button or /import
+  // route (#1247 id 31 made these rows reachable — Codex impl review). MCP
+  // canonicals are project_shared-only, so one un-tiered key is enough.
+  const bodyKey = type === 'mcp-servers'
+    ? 'settings.ctx.missing_canonical_mcp_body'
+    : `settings.ctx.missing_canonical_${scopeForKey}_body`;
+  const body = t(bodyKey)
     .replace('{count}', count)
     .replace(/\{type\}/g, _ctxTypeName(type))
     .replace('{scan_dirs}', scanList);
   // The CLI bootstrap snippets cover skills/agents/commands only — there is
   // no ``--include=mcp-servers`` in ``mm context``, so rendering them for the
   // MCP section would hand the user commands that cannot touch MCP state.
-  // (Today this banner is effectively unreachable for mcp-servers — the list
-  // only shows stored definitions — but the guard keeps a future
-  // runtime-only MCP surface from inheriting wrong remediation.)
   const commands = type === 'mcp-servers'
     ? ''
     : _ctxMissingCanonicalCommands(scope)
