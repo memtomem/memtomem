@@ -34,7 +34,12 @@ from memtomem.context.agents import (
 )
 from memtomem.context.detector import AGENT_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
+from memtomem.web.routes.context_gateway import (
+    delete_skip_entry,
+    expected_vs_runtime_row,
+    read_text_lenient,
+    sanitize_diff_reason,
+)
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -443,9 +448,7 @@ async def delete_agent(
                         agent_path.unlink()
                         removed.append(_safe_rel(agent_path, project_root))
                     except OSError as e:
-                        skipped.append(
-                            {"path": _safe_rel(agent_path, project_root), "reason": str(e)}
-                        )
+                        skipped.append(delete_skip_entry(agent_path, e, project_root))
 
                 if cascade:
                     for gen in AGENT_GENERATORS.values():
@@ -458,9 +461,7 @@ async def delete_agent(
                             target.unlink()
                             removed.append(_safe_rel(target, project_root))
                         except OSError as e:
-                            skipped.append(
-                                {"path": _safe_rel(target, project_root), "reason": str(e)}
-                            )
+                            skipped.append(delete_skip_entry(target, e, project_root))
     except TimeoutError:
         raise HTTPException(503, "Agent delete timed out — another sync may be in progress")
 
@@ -484,6 +485,7 @@ async def diff_agent(
     canonical_content = None
     canonical_path = None
     parse_error_reason = None
+    parsed = None
     if resolved is not None:
         agent_path, layout = resolved
         canonical_path = _safe_rel(agent_path, project_root)
@@ -500,7 +502,9 @@ async def diff_agent(
             parse_error_reason = sanitize_diff_reason(f"unreadable: {agent_path}", project_root)
         else:
             try:
-                _parse_canonical_agent_text(canonical_content, source=agent_path, layout=layout)
+                parsed = _parse_canonical_agent_text(
+                    canonical_content, source=agent_path, layout=layout
+                )
             except AgentParseError as exc:
                 parse_error_reason = sanitize_diff_reason(str(exc), project_root)
 
@@ -536,15 +540,22 @@ async def diff_agent(
                 }
             )
         else:
-            # Unreadable runtime ≡ parity can't be asserted — report drift,
-            # never mask it (the engine diff contract).
-            runtime_content = read_text_lenient(target)
+            # Compare on the engine's basis — vendor override bytes, else
+            # rendered output — NOT the raw canonical text: codex/kimi targets
+            # are TOML/YAML, so a raw compare pinned this pane to a permanent
+            # "out of sync" under an "in sync" list badge (#1247 id 30).
+            assert parsed is not None  # parse failures took the branch above
+            agent = parsed
             runtimes.append(
-                {
-                    "runtime": gen_name,
-                    "status": "out of sync" if runtime_content != canonical_content else "in sync",
-                    "runtime_content": runtime_content,
-                }
+                expected_vs_runtime_row(
+                    kind="agents",
+                    gen_name=gen_name,
+                    render=lambda gen=gen, agent=agent: gen.render(agent)[0],
+                    target=target,
+                    name=name,
+                    project_root=project_root,
+                    scope=target_scope,
+                )
             )
 
     return {

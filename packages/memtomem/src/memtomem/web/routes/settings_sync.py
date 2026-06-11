@@ -527,8 +527,18 @@ async def resolve_conflict(
                 # canonical; otherwise we keep the first-match-by-matcher
                 # behavior for old label-only clients.
                 proposed = None
-                canonical_hooks: dict = canonical.get("hooks", {})
-                for rule in canonical_hooks.get(body.event, []):
+                # Shape guards mirroring the target side below (and the promote
+                # route): array-form hooks / a non-list event value in valid
+                # JSON escaped as an AttributeError 500 while the GET diff
+                # reports a structured error (#1247 id 51). ``create=True``
+                # only inserts into the local dict — this path never writes
+                # the canonical file, so a missing ``hooks`` key stays the
+                # legacy "rule not found" 404, not a 422.
+                canonical_hooks = _hooks_record(canonical, label="Canonical", create=True)
+                canonical_event_rules = canonical_hooks.get(body.event, [])
+                if not isinstance(canonical_event_rules, list):
+                    raise HTTPException(422, detail="Canonical hook event is not a list")
+                for rule in canonical_event_rules:
                     if not (isinstance(rule, dict) and rule.get("matcher", "") == body.matcher):
                         continue
                     stamped = _stamp_status_markers({"hooks": {body.event: [rule]}})["hooks"][

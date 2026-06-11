@@ -1871,6 +1871,36 @@ class TestSettingsHttpLayer:
         canonical = json.loads((tmp_path / CANONICAL_SETTINGS_FILE).read_text(encoding="utf-8"))
         assert canonical["hooks"]["PostToolUse"] == [_rule("Write", "echo canonical")]
 
+    async def test_promote_non_list_canonical_event_returns_422(self, client, tmp_path):
+        """Route-local contract pin (#1247 id 51 sibling): promote refuses to
+        append into a non-list canonical event value with a structured 422.
+        The guard predates the resolve-side fix — pinned while aligning
+        resolve so the two canonical-side guards can't drift apart."""
+        _make_canonical_settings(tmp_path, {"hooks": {"PreToolUse": 42}})
+        (tmp_path / ".claude").mkdir()
+        target = tmp_path / ".claude" / "settings.json"
+        target.write_text(
+            json.dumps({"hooks": {"PreToolUse": [_rule("Bash", "echo target")]}}),
+            encoding="utf-8",
+        )
+
+        diff = await client.get("/api/context/settings?target_scope=project_shared")
+        assert diff.status_code == 200
+        row = diff.json()["target_hooks"]["configured"][0]
+        resp = await client.post(
+            "/api/context/settings/rules/promote?target_scope=project_shared",
+            json={
+                "event": row["event"],
+                "matcher": row["matcher"],
+                "rule_index": row["rule_index"],
+                "rule_hash": row["rule_hash"],
+                "target_mtime_ns": diff.json()["target_mtime_ns"],
+                "canonical_mtime_ns": diff.json()["canonical_mtime_ns"],
+            },
+        )
+        assert resp.status_code == 422
+        assert "Canonical hook event is not a list" in resp.json()["detail"]
+
     async def test_delete_target_rule_uses_index_and_hash_for_duplicate_matchers(
         self, client, claude_home
     ):

@@ -9,6 +9,12 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem.context.agents import AGENT_GENERATORS, parse_canonical_agent
+from memtomem.context.commands import (
+    COMMAND_GENERATORS,
+    diff_commands,
+    parse_canonical_command,
+)
 from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.web.app import create_app
 
@@ -1284,10 +1290,17 @@ class TestDiffCommand:
         set_home(monkeypatch, home)
         cmd_dir = home / ".memtomem" / "commands"
         cmd_dir.mkdir(parents=True)
-        (cmd_dir / "scoped.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        cmd_file = cmd_dir / "scoped.md"
+        cmd_file.write_text(_CMD_CONTENT, encoding="utf-8")
         rt_dir = home / ".claude" / "commands"
         rt_dir.mkdir(parents=True)
-        (rt_dir / "scoped.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        # The runtime side holds what sync would write (rendered output) —
+        # the pane compares on the engine's basis, not raw canonical text
+        # (#1247 id 30), and claude's render is near- but not byte-identity.
+        rendered, _ = COMMAND_GENERATORS["claude_commands"].render(
+            parse_canonical_command(cmd_file, layout="flat")
+        )
+        (rt_dir / "scoped.md").write_text(rendered, encoding="utf-8")
 
         r = await client.get("/api/context/commands/scoped/diff", params={"target_scope": "user"})
         assert r.status_code == 200
@@ -1312,6 +1325,159 @@ class TestDiffCommand:
         data = r.json()
         assert data["canonical_content"] == _CMD_CONTENT
         assert data["runtimes"] == []
+
+    @pytest.mark.anyio
+    async def test_diff_gemini_compares_rendered_not_raw(self, client: AsyncClient, tmp_path: Path):
+        """The pane must compare on the engine's basis — rendered output —
+        not the raw canonical text: gemini targets are TOML, so the raw
+        compare pinned this pane to a permanent "out of sync" under an
+        "in sync" list badge (#1247 id 30)."""
+        path = _make_command(tmp_path, "review")
+        rendered, _ = COMMAND_GENERATORS["gemini_commands"].render(
+            parse_canonical_command(path, layout="flat")
+        )
+        _make_runtime_command(tmp_path, ".gemini/commands", "review", ".toml", rendered)
+
+        r = await client.get("/api/context/commands/review/diff")
+        assert r.status_code == 200
+        gem = [rt for rt in r.json()["runtimes"] if rt["runtime"] == "gemini_commands"][0]
+        assert gem["status"] == "in sync"
+        assert gem["expected_content"] == rendered
+
+    @pytest.mark.anyio
+    async def test_diff_out_of_sync_expected_is_rendered(self, client: AsyncClient, tmp_path: Path):
+        """``expected_content`` is what sync would write — the pane's diff
+        baseline — so a drifted runtime diffs against the rendered output
+        instead of md-vs-toml noise (#1247 id 30)."""
+        path = _make_command(tmp_path, "review")
+        rendered, _ = COMMAND_GENERATORS["gemini_commands"].render(
+            parse_canonical_command(path, layout="flat")
+        )
+        stale = 'description = "stale"\n'
+        _make_runtime_command(tmp_path, ".gemini/commands", "review", ".toml", stale)
+
+        r = await client.get("/api/context/commands/review/diff")
+        data = r.json()
+        gem = [rt for rt in data["runtimes"] if rt["runtime"] == "gemini_commands"][0]
+        assert gem["status"] == "out of sync"
+        assert gem["expected_content"] == rendered
+        assert gem["expected_content"] != data["canonical_content"]
+        assert gem["runtime_content"] == stale
+
+    @pytest.mark.anyio
+    async def test_diff_override_carrying_command_in_sync(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """A vendor override replaces the rendered output at sync time
+        (ADR-0008 Invariant 4) — the pane must compare against the override
+        bytes like the engine, or override-carrying commands read permanently
+        "out of sync" (#1247 id 30)."""
+        art = tmp_path / ".memtomem" / "commands" / "ov"
+        (art / "overrides").mkdir(parents=True)
+        (art / "command.md").write_text(_CMD_CONTENT, encoding="utf-8")
+        override = "# claude-specific replacement\n"
+        (art / "overrides" / "claude.md").write_text(override, encoding="utf-8")
+        _make_runtime_command(tmp_path, ".claude/commands", "ov", ".md", override)
+
+        r = await client.get("/api/context/commands/ov/diff")
+        claude_rt = [rt for rt in r.json()["runtimes"] if rt["runtime"] == "claude_commands"][0]
+        assert claude_rt["status"] == "in sync"
+        assert claude_rt["expected_content"] == override
+
+    @pytest.mark.anyio
+    async def test_diff_pane_status_matches_engine_badge(self, client: AsyncClient, tmp_path: Path):
+        """Parity pin — the invariant #1247 id 30 is actually about: for the
+        same rows, the per-item pane status equals the engine diff status
+        that feeds the list badge."""
+        path = _make_command(tmp_path, "parity")
+        parsed = parse_canonical_command(path, layout="flat")
+        claude_rendered, _ = COMMAND_GENERATORS["claude_commands"].render(parsed)
+        _make_runtime_command(tmp_path, ".claude/commands", "parity", ".md", claude_rendered)
+        _make_runtime_command(
+            tmp_path, ".gemini/commands", "parity", ".toml", 'description = "stale"\n'
+        )
+
+        r = await client.get("/api/context/commands/parity/diff")
+        pane = {rt["runtime"]: rt["status"] for rt in r.json()["runtimes"]}
+        engine = {rt: status for rt, n, status in diff_commands(tmp_path) if n == "parity"}
+        assert pane == engine
+        assert engine == {"claude_commands": "in sync", "gemini_commands": "out of sync"}
+
+
+class TestDeleteCommandCascade:
+    @pytest.mark.anyio
+    async def test_cascade_deletes_runtime_only_command(self, client: AsyncClient, tmp_path: Path):
+        """``if cascade:`` was nested under ``resolved is not None`` — a
+        runtime-only command + cascade=true silently no-opped with
+        ``{deleted: [], skipped: []}`` (#1247 id 46; agents and skills run
+        cascade as a sibling branch)."""
+        rt = _make_runtime_command(tmp_path, ".claude/commands", "ghost", ".md", _CMD_CONTENT)
+        r = await client.delete("/api/context/commands/ghost?cascade=true")
+        assert r.status_code == 200
+        data = r.json()
+        assert str(Path(".claude/commands/ghost.md")) in data["deleted"]
+        assert data["skipped"] == []
+        assert not rt.exists()
+
+
+class TestDeleteSkipReasonSanitized:
+    """A failed delete leg's ``skipped[].reason`` crosses the wire through
+    ``sanitize_diff_reason`` — ``str(OSError)`` embeds the absolute target
+    path, which used to ship raw (#1247 id 49; all three artifact types)."""
+
+    @staticmethod
+    def _refuse_unlink(self_path: Path, *args, **kwargs):
+        raise OSError(13, "Permission denied", str(self_path))
+
+    @pytest.mark.anyio
+    async def test_command_unlink_failure_reason_sanitized(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        cmd_path = _make_command(tmp_path, "stuck")
+        monkeypatch.setattr(Path, "unlink", self._refuse_unlink)
+        r = await client.delete("/api/context/commands/stuck")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["deleted"] == []
+        [skip] = data["skipped"]
+        assert str(tmp_path) not in skip["reason"]
+        assert "Permission denied" in skip["reason"]
+        assert cmd_path.exists()
+
+    @pytest.mark.anyio
+    async def test_agent_cascade_failure_reasons_sanitized(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _make_agent(tmp_path, "stuck")
+        _make_runtime_agent(tmp_path, ".claude/agents", "stuck")
+        monkeypatch.setattr(Path, "unlink", self._refuse_unlink)
+        r = await client.delete("/api/context/agents/stuck?cascade=true")
+        assert r.status_code == 200
+        skipped = r.json()["skipped"]
+        # Canonical leg + at least the claude cascade leg both failed.
+        assert len(skipped) >= 2
+        for skip in skipped:
+            assert str(tmp_path) not in skip["reason"]
+            assert "Permission denied" in skip["reason"]
+
+    @pytest.mark.anyio
+    async def test_skill_rmtree_failure_reason_sanitized(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        skill_dir = _make_skill(tmp_path, "stuck")
+
+        def _refuse_rmtree(path, *args, **kwargs):
+            raise OSError(13, "Permission denied", str(path))
+
+        import memtomem.web.routes.context_skills as skills_routes
+
+        monkeypatch.setattr(skills_routes.shutil, "rmtree", _refuse_rmtree)
+        r = await client.delete("/api/context/skills/stuck")
+        assert r.status_code == 200
+        [skip] = r.json()["skipped"]
+        assert str(tmp_path) not in skip["reason"]
+        assert "Permission denied" in skip["reason"]
+        assert skill_dir.exists()
 
 
 class TestSyncCommands:
@@ -1634,10 +1800,17 @@ class TestDiffAgent:
         set_home(monkeypatch, home)
         agent_dir = home / ".memtomem" / "agents"
         agent_dir.mkdir(parents=True)
-        (agent_dir / "scoped.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        agent_file = agent_dir / "scoped.md"
+        agent_file.write_text(_AGENT_CONTENT, encoding="utf-8")
         rt_dir = home / ".claude" / "agents"
         rt_dir.mkdir(parents=True)
-        (rt_dir / "scoped.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        # The runtime side holds what sync would write (rendered output) —
+        # the pane compares on the engine's basis, not raw canonical text
+        # (#1247 id 30), and claude's render is near- but not byte-identity.
+        rendered, _ = AGENT_GENERATORS["claude_agents"].render(
+            parse_canonical_agent(agent_file, layout="flat")
+        )
+        (rt_dir / "scoped.md").write_text(rendered, encoding="utf-8")
 
         r = await client.get("/api/context/agents/scoped/diff", params={"target_scope": "user"})
         assert r.status_code == 200
@@ -1662,6 +1835,46 @@ class TestDiffAgent:
         data = r.json()
         assert data["canonical_content"] == _AGENT_CONTENT
         assert data["runtimes"] == []
+
+    @pytest.mark.anyio
+    async def test_diff_codex_kimi_compare_rendered_not_raw(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """Commands #1247 id 30 mirror: codex renders TOML and kimi renders
+        YAML, so the raw canonical-vs-runtime compare pinned both panes to a
+        permanent "out of sync" under an "in sync" list badge."""
+        path = _make_agent(tmp_path, "shaped")
+        parsed = parse_canonical_agent(path, layout="flat")
+        for gen_name, runtime_dir, ext in (
+            ("codex_agents", ".codex/agents", ".toml"),
+            ("kimi_agents", ".kimi/agents", ".yaml"),
+        ):
+            rendered, _ = AGENT_GENERATORS[gen_name].render(parsed)
+            rt_dir = tmp_path / runtime_dir
+            rt_dir.mkdir(parents=True, exist_ok=True)
+            (rt_dir / f"shaped{ext}").write_text(rendered, encoding="utf-8")
+
+        r = await client.get("/api/context/agents/shaped/diff")
+        assert r.status_code == 200
+        rows = {rt["runtime"]: rt for rt in r.json()["runtimes"]}
+        assert rows["codex_agents"]["status"] == "in sync"
+        assert rows["kimi_agents"]["status"] == "in sync"
+
+    @pytest.mark.anyio
+    async def test_diff_override_carrying_agent_in_sync(self, client: AsyncClient, tmp_path: Path):
+        """Override bytes are the expected side when present — engine parity
+        (#1247 id 30; same contract as the commands sibling test)."""
+        art = tmp_path / ".memtomem" / "agents" / "ov"
+        (art / "overrides").mkdir(parents=True)
+        (art / "agent.md").write_text(_AGENT_CONTENT, encoding="utf-8")
+        override = "# claude-specific replacement\n"
+        (art / "overrides" / "claude.md").write_text(override, encoding="utf-8")
+        _make_runtime_agent(tmp_path, ".claude/agents", "ov", override)
+
+        r = await client.get("/api/context/agents/ov/diff")
+        claude_rt = [rt for rt in r.json()["runtimes"] if rt["runtime"] == "claude_agents"][0]
+        assert claude_rt["status"] == "in sync"
+        assert claude_rt["expected_content"] == override
 
 
 class TestSyncAgents:

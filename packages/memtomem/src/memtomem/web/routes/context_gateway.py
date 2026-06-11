@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
 
 from memtomem.privacy import scan as _privacy_scan
 from memtomem.config import TargetScope
+from memtomem.context import override as _override
+from memtomem.context._names import GENERATOR_VENDOR
 from memtomem.web.routes.context_projects import resolve_scope_root
 
 try:
@@ -144,6 +147,84 @@ def read_text_lenient(path: Path) -> str | None:
         return path.read_bytes().decode("utf-8", errors="replace")
     except OSError:
         return None
+
+
+def expected_vs_runtime_row(
+    *,
+    kind: str,
+    gen_name: str,
+    render: Callable[[], str],
+    target: Path,
+    name: str,
+    project_root: Path,
+    scope: TargetScope,
+) -> dict[str, object]:
+    """Both-sides-exist diff row on the engine's comparison basis (#1247 id 30).
+
+    The per-item diff panes used to compare the RAW canonical text against the
+    runtime file, while the list badge (engine ``diff_commands`` /
+    ``diff_agents``) compares **vendor override bytes → else rendered output**
+    — so a TOML/YAML-rendering runtime (gemini commands, codex/kimi agents)
+    showed a permanent "out of sync" pane under an "in sync" badge. Shared by
+    the commands and agents per-name diff routes so the comparison basis
+    cannot drift per kind (same rationale as ``sanitize_diff_reason``).
+
+    ``render`` is lazy so an override-carrying runtime never pays for (or
+    crashes on) a render it doesn't use. Error parity with the engine: an
+    unreadable override or runtime file means parity can't be asserted —
+    report drift, never mask it; the unreadable side's content key is omitted.
+    ``expected_content`` is what sync would write — the pane's diff baseline.
+    """
+    vendor = GENERATOR_VENDOR.get(gen_name)
+    override_path = (
+        _override.resolve(project_root, kind, name, vendor, scope=scope)
+        if vendor is not None
+        else None
+    )
+    expected_bytes: bytes | None
+    if override_path is not None:
+        try:
+            expected_bytes = override_path.read_bytes()
+        except OSError:
+            expected_bytes = None
+    else:
+        expected_bytes = render().encode("utf-8")
+
+    runtime_bytes: bytes | None
+    try:
+        runtime_bytes = target.read_bytes()
+    except OSError:
+        runtime_bytes = None
+
+    entry: dict[str, object] = {"runtime": gen_name}
+    if expected_bytes is None or runtime_bytes is None:
+        entry["status"] = "out of sync"
+    else:
+        entry["status"] = "in sync" if expected_bytes == runtime_bytes else "out of sync"
+    if expected_bytes is not None:
+        entry["expected_content"] = expected_bytes.decode("utf-8", errors="replace")
+    if runtime_bytes is not None:
+        entry["runtime_content"] = runtime_bytes.decode("utf-8", errors="replace")
+    return entry
+
+
+def delete_skip_entry(path: Path, exc: OSError, project_root: Path) -> dict[str, str]:
+    """``skipped[]`` row for a failed delete leg (#1247 id 49).
+
+    ``str(OSError)`` embeds absolute paths — including ``$HOME``-rooted
+    cascade targets — so the reason crosses the wire through
+    ``sanitize_diff_reason`` like every other route-surfaced exception text.
+    Shared by the skills/commands/agents delete routes (6 call sites) so the
+    sanitization boundary cannot drift per kind.
+    """
+    try:
+        rel = str(path.relative_to(project_root))
+    except ValueError:
+        rel = str(path)
+    return {
+        "path": rel,
+        "reason": sanitize_diff_reason(str(exc), project_root) or "",
+    }
 
 
 def _compute_last_synced_at(project_root: Path, target_scope: TargetScope) -> str | None:

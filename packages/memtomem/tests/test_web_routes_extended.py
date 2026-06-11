@@ -907,6 +907,60 @@ class TestSettingsSync:
             elif target.is_file():
                 target.unlink()
 
+    async def test_resolve_array_form_canonical_hooks_returns_422(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Array-form canonical hooks (valid JSON, wrong shape) escaped the
+        canonical-side read as an AttributeError 500 while the GET diff
+        reports a structured shape error — mirror the target-side guard
+        instead (#1247 id 51). Fires before the target file is touched, so
+        no target fixture is needed."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": [self._rule("Write")]}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        assert resp.status_code == 422
+        assert "Canonical hooks is not a record" in resp.json()["detail"]
+
+    async def test_resolve_non_list_canonical_event_returns_422(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """A non-list canonical event value must 422 like the target-side
+        guard, not crash mid-iteration (#1247 id 51)."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"hooks": {"PostToolUse": 42}}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        assert resp.status_code == 422
+        assert "Canonical hook event is not a list" in resp.json()["detail"]
+
+    async def test_resolve_missing_hooks_key_stays_404(self, app, client: AsyncClient, tmp_path):
+        """Regression guard for the shape fix (#1247 id 51, Codex design
+        round): a canonical with NO hooks key keeps the legacy "rule not
+        found" 404 — the record guard must not turn the missing-key case
+        into a 422."""
+        canonical = tmp_path / ".memtomem" / "settings.json"
+        canonical.parent.mkdir()
+        canonical.write_text(json.dumps({"editor": "vim"}), encoding="utf-8")
+        app.state.project_root = tmp_path
+
+        resp = await client.post(
+            "/api/settings-sync/resolve?target_scope=user",
+            json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
+        )
+        assert resp.status_code == 404
+        assert "not in canonical source" in resp.json()["detail"]
+
     async def test_conflict_payload_carries_rule_identity(self, app, client: AsyncClient, tmp_path):
         """Issue #1112: each conflict row exposes a stable identity for both
         the target row (``target_rule_index`` + ``target_rule_hash``) and the
