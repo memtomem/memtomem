@@ -457,6 +457,7 @@ def generate_all_commands(
     *,
     scope: TargetScope = "project_shared",
     label: str | None = None,
+    surface: str = "cli_context_sync",
 ) -> CommandSyncResult:
     """Fan out every canonical command to the requested runtimes.
 
@@ -479,6 +480,11 @@ def generate_all_commands(
             the working ``command.md``. ``None`` / ``"latest"`` preserve
             today's behavior byte-for-byte. Per-artifact resolution failures
             isolate as skips.
+        surface: Gate A audit identifier, forwarded verbatim to the
+            engine's privacy scans. The CLI relies on the default
+            ``"cli_context_sync"``; the Web sync route passes
+            ``"web_context_commands_sync"`` and the MCP tools pass
+            ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246).
     """
     adapter = _COMMAND_ADAPTER
     if label is not None and label != "latest":
@@ -493,6 +499,7 @@ def generate_all_commands(
             strict=strict,
             on_drop=on_drop,
             scope=scope,
+            surface=surface,
         ),
     )
 

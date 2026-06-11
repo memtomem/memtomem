@@ -601,7 +601,9 @@ async def mem_context_generate(
 
     if "skills" in inc:
         try:
-            skill_result = generate_all_skills(root, scope=artifact_scope)
+            skill_result = generate_all_skills(
+                root, scope=artifact_scope, surface="mcp_context_generate"
+            )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         if skill_result.generated:
@@ -616,7 +618,12 @@ async def mem_context_generate(
     if "agents" in inc:
         try:
             agent_result = generate_all_agents(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
+                root,
+                strict=strict,
+                on_drop=on_drop,
+                scope=artifact_scope,
+                label=label_norm,
+                surface="mcp_context_generate",
             )
         except StrictDropError as exc:
             return f"strict error: {exc}"
@@ -639,7 +646,12 @@ async def mem_context_generate(
     if "commands" in inc:
         try:
             command_result = generate_all_commands(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
+                root,
+                strict=strict,
+                on_drop=on_drop,
+                scope=artifact_scope,
+                label=label_norm,
+                surface="mcp_context_generate",
             )
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
@@ -923,7 +935,9 @@ async def mem_context_sync(
 
     if "skills" in inc:
         try:
-            skill_result = generate_all_skills(root, scope=artifact_scope)
+            skill_result = generate_all_skills(
+                root, scope=artifact_scope, surface="mcp_context_sync"
+            )
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         if skill_result.generated:
@@ -939,7 +953,12 @@ async def mem_context_sync(
     if "agents" in inc:
         try:
             agent_result = generate_all_agents(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
+                root,
+                strict=strict,
+                on_drop=on_drop,
+                scope=artifact_scope,
+                label=label_norm,
+                surface="mcp_context_sync",
             )
         except StrictDropError as exc:
             return f"strict error: {exc}"
@@ -963,7 +982,12 @@ async def mem_context_sync(
     if "commands" in inc:
         try:
             command_result = generate_all_commands(
-                root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label_norm
+                root,
+                strict=strict,
+                on_drop=on_drop,
+                scope=artifact_scope,
+                label=label_norm,
+                surface="mcp_context_sync",
             )
         except CommandStrictDropError as exc:
             return f"strict error: {exc}"
@@ -1413,6 +1437,7 @@ async def mem_context_artifact_migrate(
                 to_scope=cast(TargetScope, to),
                 project_root=project_root,
                 apply_=apply,
+                surface="mcp_context_artifact_migrate",
             )
         except (FileNotFoundError, ValueError) as exc:
             return f"error: {exc}"

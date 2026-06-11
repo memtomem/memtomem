@@ -1947,3 +1947,51 @@ class TestListDiagnosticReasons:
         r = await client.get("/api/context/agents")
         item = [a for a in r.json()["agents"] if a["name"] == "fine"][0]
         assert all("reason" not in e for e in item["runtimes"])
+
+
+# ---------------------------------------------------------------------------
+# Gate A sync surface attribution (#1246)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncSurfaceAttribution:
+    """Web syncs must reach the privacy audit log under their own surface
+    string — pre-#1246 every sync ingress was misattributed to the CLI
+    literal ``cli_context_sync``. Sibling of the import-side
+    ``TestImportSurfaceAttribution`` pins (#1229/#1242); the spy point
+    differs because sync funnels through ``privacy_scan``, not ``_gate_a``.
+    """
+
+    def _spy_surfaces(self, monkeypatch) -> list[str]:
+        from memtomem.privacy import WriteGuardResult
+
+        surfaces: list[str] = []
+
+        def spy(content_text, *, surface, **kw):
+            surfaces.append(surface)
+            return WriteGuardResult("pass", [])
+
+        monkeypatch.setattr("memtomem.context.privacy_scan.privacy.enforce_write_guard", spy)
+        return surfaces
+
+    @pytest.mark.anyio
+    async def test_syncs_use_web_surfaces(self, client: AsyncClient, tmp_path: Path, monkeypatch):
+        _make_skill(tmp_path, "s1")
+        _make_agent(tmp_path, "a1")
+        _make_command(tmp_path, "c1")
+
+        surfaces = self._spy_surfaces(monkeypatch)
+
+        r = await client.post("/api/context/skills/sync")
+        assert r.status_code == 200, r.text
+        assert surfaces and set(surfaces) == {"web_context_skills_sync"}
+
+        surfaces.clear()
+        r = await client.post("/api/context/agents/sync", json={})
+        assert r.status_code == 200, r.text
+        assert surfaces and set(surfaces) == {"web_context_agents_sync"}
+
+        surfaces.clear()
+        r = await client.post("/api/context/commands/sync", json={})
+        assert r.status_code == 200, r.text
+        assert surfaces and set(surfaces) == {"web_context_commands_sync"}

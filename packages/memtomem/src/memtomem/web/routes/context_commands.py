@@ -567,7 +567,9 @@ async def sync_commands(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = generate_all_commands(project_root, on_drop=on_drop)
+                result = generate_all_commands(
+                    project_root, on_drop=on_drop, surface="web_context_commands_sync"
+                )
     except TimeoutError:
         raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
     except PrivacyScanError as exc:

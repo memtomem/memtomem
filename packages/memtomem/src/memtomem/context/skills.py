@@ -433,6 +433,7 @@ def generate_all_skills(
     runtimes: list[str] | None = None,
     *,
     scope: TargetScope = "project_shared",
+    surface: str = "cli_context_sync",
 ) -> SkillSyncResult:
     """Fan out every canonical skill to the requested runtime targets.
 
@@ -443,6 +444,17 @@ def generate_all_skills(
         scope: ADR-0011 PR-E3 — selects canonical root and runtime
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
+        surface: Audit identifier forwarded verbatim to
+            :func:`privacy.enforce_write_guard` via both
+            :func:`scan_artifact_tree` sites (the project_shared batch
+            and the per-destination path) — it dimensions the privacy
+            ``record()`` counter and tags the blocked/bypassed audit
+            log line. Callers pass their own literal: the CLI relies on
+            the default ``"cli_context_sync"``, the Web sync route
+            passes ``"web_context_skills_sync"``, and the MCP tools
+            pass ``"mcp_context_generate"`` / ``"mcp_context_sync"``
+            (#1246 — previously every surface was misattributed to the
+            CLI literal; sibling of the import-side #1242 fix).
     """
     generated: list[tuple[str, Path]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
@@ -570,7 +582,7 @@ def generate_all_skills(
 
                     scan = scan_artifact_tree(
                         staging,
-                        surface="cli_context_sync",
+                        surface=surface,
                         scope=scope,
                         project_root=project_root,
                         on_blocked="fail_fast",
@@ -714,7 +726,7 @@ def generate_all_skills(
                     # 3. Scan.
                     scan = scan_artifact_tree(
                         staging,
-                        surface="cli_context_sync",
+                        surface=surface,
                         scope=scope,
                         project_root=project_root,
                         on_blocked="fail_fast",

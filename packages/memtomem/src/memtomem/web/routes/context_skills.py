@@ -500,7 +500,9 @@ async def sync_skills(
                 # ``_SKILLS_LOCK_BUDGET_S`` (30s < 60s) bounds the lock
                 # waits, so a timed-out request cannot orphan a worker
                 # thread that writes after the 503 already went out.
-                result = await asyncio.to_thread(generate_all_skills, project_root)
+                result = await asyncio.to_thread(
+                    generate_all_skills, project_root, surface="web_context_skills_sync"
+                )
     except TimeoutError:
         raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
     except PrivacyScanError as exc:
