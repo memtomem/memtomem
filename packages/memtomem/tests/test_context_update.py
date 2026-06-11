@@ -35,6 +35,7 @@ from memtomem.context.install import (
     update_command,
     update_skill,
 )
+from memtomem.context.lockfile import LockfileCorruptError
 from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.wiki.store import WikiStore
 
@@ -202,6 +203,25 @@ def test_not_installed_raises(wiki_root: Path, tmp_path: Path) -> None:
     msg = str(excinfo.value)
     assert "no lockfile entry" in msg
     assert "mm context install skill foo" in msg
+
+
+def test_update_over_corrupt_lockfile_names_the_lockfile(wiki_root: Path, tmp_path: Path) -> None:
+    """A corrupt lock.json used to read as "no entry" → NotInstalledError
+    pointing at install, which then raised AlreadyInstalled (dest exists) —
+    the #1247 id 16 wedge. The strict read now names the real problem, and
+    the update's lockfile upsert can no longer persist a silent reset."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+
+    install_skill(project, "foo")
+    lock_json = project / ".memtomem" / "lock.json"
+    corrupt = b"not valid json {{"
+    lock_json.write_bytes(corrupt)
+
+    with pytest.raises(LockfileCorruptError, match="lock.json"):
+        update_skill(project, "foo")
+    assert lock_json.read_bytes() == corrupt  # refusal left the file untouched
 
 
 # ── no-op invariant pin (lockfile mtime + installed_at + flag) ──────────

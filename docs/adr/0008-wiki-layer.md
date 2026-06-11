@@ -198,6 +198,17 @@ through plain `dict` is sufficient). The `version` field is reserved for
 schema migrations; future fields (`skill_version`, `compat`, `mode`) can
 be added forward-compatibly.
 
+A lockfile that exists but cannot be read as a JSON object (unreadable,
+invalid JSON / invalid UTF-8, non-object top level) MUST refuse mutations
+rather than silently re-baseline: write paths load-then-write the whole
+doc, so a tolerant "fresh empty doc" fallback would be persisted, wiping
+every sibling entry's install record. Strict reads raise
+(`LockfileCorruptError`, sibling of the version-mismatch error);
+diagnostic surfaces (`mm context status`) may degrade tolerantly but
+never write. A *missing* lockfile is the normal pre-install state and
+stays a write-safe empty default. The same refuse-don't-rebaseline rule
+applies to `known_projects.json` mutations (`KnownProjectsCorruptError`).
+
 ## Vendor format matrix
 
 `OVERRIDE_FORMATS = { (asset_type, vendor): (alias, extension) }` lives

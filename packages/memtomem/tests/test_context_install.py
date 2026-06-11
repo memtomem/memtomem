@@ -26,7 +26,7 @@ from memtomem.context.install import (
     AssetNotFoundError,
     install_skill,
 )
-from memtomem.context.lockfile import LOCKFILE_VERSION, Lockfile
+from memtomem.context.lockfile import LOCKFILE_VERSION, Lockfile, LockfileCorruptError
 from memtomem.context.privacy_scan import PrivacyBlockedError
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 
@@ -315,6 +315,26 @@ def test_install_refuses_when_only_dest_present(wiki_root: Path, tmp_path: Path)
     assert "dest=yes" in msg
     # Hand-placed file must not be clobbered.
     assert (pre / "stray.txt").read_text() == "hand-placed"
+
+
+def test_install_over_corrupt_lockfile_names_the_lockfile(wiki_root: Path, tmp_path: Path) -> None:
+    """Corrupt lock.json + dest on disk used to wedge: install said
+    AlreadyInstalled ("run update"), update said NotInstalled ("run
+    install") — each pointing at the other while the tolerant reset was
+    one upsert away from wiping every sibling entry (#1247 id 16). The
+    strict read now names the real problem before either check runs."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
+    project = tmp_path
+
+    install_skill(project, "foo")
+    lock_json = project / ".memtomem" / "lock.json"
+    corrupt = b"not valid json {{"
+    lock_json.write_bytes(corrupt)
+
+    with pytest.raises(LockfileCorruptError, match="lock.json"):
+        install_skill(project, "foo")
+    assert lock_json.read_bytes() == corrupt  # refusal left the file untouched
 
 
 def test_install_invalid_name(wiki_root: Path, tmp_path: Path) -> None:

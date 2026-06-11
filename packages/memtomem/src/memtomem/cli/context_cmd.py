@@ -61,7 +61,7 @@ from memtomem.context.migrate import (
     migrate_scope,
 )
 from memtomem.context.projects import KnownProjectsStore
-from memtomem.context.lockfile import LockfileVersionError
+from memtomem.context.lockfile import LockfileError
 from memtomem.context.status import classify_status, load_with_recovery, scan_user_artifacts
 from memtomem.context.generator import (
     GENERATORS,
@@ -1454,7 +1454,7 @@ def install_cmd(
         raise click.ClickException(str(exc)) from exc
     except InvalidNameError as exc:
         raise click.ClickException(str(exc)) from exc
-    except LockfileVersionError as exc:
+    except LockfileError as exc:
         raise click.ClickException(str(exc)) from exc
     except PrivacyScanError as exc:
         # Gate A refusal (ADR-0011 §5, #1247) — exc.message carries the
@@ -1552,7 +1552,7 @@ def update_cmd(
         raise click.ClickException(str(exc)) from exc
     except InvalidNameError as exc:
         raise click.ClickException(str(exc)) from exc
-    except LockfileVersionError as exc:
+    except LockfileError as exc:
         raise click.ClickException(str(exc)) from exc
     except PrivacyScanError as exc:
         # Gate A refusal (ADR-0011 §5, #1247) — see install_cmd's arm.
@@ -1955,7 +1955,7 @@ def _run_install_all(
 
     try:
         classifications = _classify_for_install_all(root, wiki=wiki)
-    except LockfileVersionError as exc:
+    except LockfileError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if not classifications:

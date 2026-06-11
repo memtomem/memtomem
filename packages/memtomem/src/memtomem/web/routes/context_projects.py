@@ -34,6 +34,7 @@ from memtomem.context.commands import (
 )
 from memtomem.context.projects import (
     _MARKER_DIRS,
+    KnownProjectsCorruptError,
     KnownProjectsStore,
     ProjectScope,
     compute_scope_id,
@@ -449,7 +450,12 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
     # precedence in discovery, an unnormalized "   " here would otherwise render
     # a blank project name.
     label = (body.label or "").strip() or None
-    entry = store.add(candidate, label=label)
+    try:
+        entry = store.add(candidate, label=label)
+    except KnownProjectsCorruptError as exc:
+        # Server-side state file is corrupt — 500, not 4xx: the request was
+        # valid, the store refused the write to avoid wiping registrations.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     project_scope_id = compute_scope_id(entry.root)
 
     response: dict = {
@@ -514,13 +520,17 @@ async def update_known_project(
     # Single atomic store write — applying label + enabled in one lock window so a
     # concurrent DELETE / PATCH can't interleave and partially apply the combined
     # update (Codex review). ``set_*`` flags gate which fields are touched.
-    updated = store.update_entry_by_scope_id(
-        scope_id,
-        label=(body.label or "").strip() or None,
-        set_label=label_present,
-        enabled=bool(body.enabled),
-        set_enabled=set_enabled,
-    )
+    try:
+        updated = store.update_entry_by_scope_id(
+            scope_id,
+            label=(body.label or "").strip() or None,
+            set_label=label_present,
+            enabled=bool(body.enabled),
+            set_enabled=set_enabled,
+        )
+    except KnownProjectsCorruptError as exc:
+        # Corrupt store must surface as a server error, not a misleading 404.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
     return {
@@ -545,7 +555,12 @@ async def delete_known_project(scope_id: str, request: Request) -> dict:
     """
     cfg = _gateway_config(request)
     store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
-    if not store.remove_by_scope_id(scope_id):
+    try:
+        removed = store.remove_by_scope_id(scope_id)
+    except KnownProjectsCorruptError as exc:
+        # Corrupt store must surface as a server error, not a misleading 404.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not removed:
         raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
     return {"deleted": scope_id}
 

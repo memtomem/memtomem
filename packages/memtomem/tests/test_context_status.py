@@ -358,6 +358,28 @@ def test_cli_status_corrupt_lockfile_exits_1(
     assert "lock.json" in result.output
 
 
+def test_cli_status_invalid_json_lockfile_exits_1_no_traceback(
+    wiki_root: Path,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Outright JSON corruption degrades the same way the version mismatch
+    does — error message + exit 1, never a traceback (#1247 id 16: status is
+    read-only, so it reports instead of refusing)."""
+    _initialized_wiki(wiki_root)
+    lockfile_path = tmp_path / ".memtomem" / "lock.json"
+    lockfile_path.parent.mkdir(parents=True)
+    lockfile_path.write_text("not valid json {{", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["status"])
+
+    assert result.exit_code == 1
+    assert "lock.json" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_cli_status_wiki_absent_renders_with_annotation(
     wiki_root: Path,  # fixture sets MEMTOMEM_WIKI_PATH but we don't init
     tmp_path: Path,

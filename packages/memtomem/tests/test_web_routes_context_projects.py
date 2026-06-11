@@ -776,3 +776,61 @@ async def test_patch_label_and_enabled_together(client, tmp_path: Path) -> None:
     assert scope["label"] == "Both"
     assert scope["enabled"] is False
     assert scope["sync_eligible"] is False
+
+
+# ── corrupt known_projects.json → 500, never re-baselined (#1247 id 16) ──
+
+
+CORRUPT_STORE_VARIANTS = [
+    pytest.param(b"not valid {json", id="invalid-json"),
+    pytest.param(b'{"version": 999, "projects": []}', id="future-version"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt", CORRUPT_STORE_VARIANTS)
+async def test_post_over_corrupt_store_500_preserves_bytes(
+    client, known_projects_path: Path, tmp_path: Path, corrupt: bytes
+) -> None:
+    """Registering over a corrupt store must 500 and leave the file alone —
+    pre-fix, ``add()`` re-baselined the registered-project list to just the
+    new entry."""
+    await _register(client, tmp_path / "existing")
+    known_projects_path.write_bytes(corrupt)
+
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    assert resp.status_code == 500, resp.text
+    assert known_projects_path.read_bytes() == corrupt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt", CORRUPT_STORE_VARIANTS)
+async def test_patch_over_corrupt_store_500_preserves_bytes(
+    client, known_projects_path: Path, tmp_path: Path, corrupt: bytes
+) -> None:
+    """All three PATCH shapes 500 over a corrupt store (not a misleading
+    404) and never write."""
+    sid = await _register(client, tmp_path / "proj")
+    known_projects_path.write_bytes(corrupt)
+
+    for payload in ({"label": "x"}, {"enabled": False}, {"label": "x", "enabled": False}):
+        resp = await client.patch(f"/api/context/known-projects/{sid}", json=payload)
+        assert resp.status_code == 500, f"{payload}: {resp.text}"
+    assert known_projects_path.read_bytes() == corrupt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt", CORRUPT_STORE_VARIANTS)
+async def test_delete_over_corrupt_store_500_preserves_bytes(
+    client, known_projects_path: Path, tmp_path: Path, corrupt: bytes
+) -> None:
+    """DELETE over a corrupt store is a server error, not "already gone"."""
+    sid = await _register(client, tmp_path / "proj")
+    known_projects_path.write_bytes(corrupt)
+
+    resp = await client.delete(f"/api/context/known-projects/{sid}")
+    assert resp.status_code == 500, resp.text
+    assert known_projects_path.read_bytes() == corrupt

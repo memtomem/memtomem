@@ -2,7 +2,9 @@
 
 Covers ADR-0008 lockfile schema invariants: dict round-trip preserves
 unknown fields, sidecar lock survives concurrent writers, recovery posture
-on missing/invalid/unknown-version files.
+on missing/invalid/unknown-version files — strict (default) reads refuse a
+corrupt file so write paths can never persist a silent reset (#1247 id 16);
+only ``strict=False`` diagnostic reads degrade to the empty default.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ import pytest
 from memtomem.context.lockfile import (
     LOCKFILE_VERSION,
     Lockfile,
+    LockfileCorruptError,
+    LockfileError,
     LockfileVersionError,
 )
 
@@ -29,20 +33,54 @@ def test_load_missing_returns_default_v1(tmp_path: Path) -> None:
     assert doc == {"version": LOCKFILE_VERSION}
 
 
-def test_load_invalid_json_recovers_to_default(tmp_path: Path) -> None:
+def test_load_invalid_json_raises_when_strict(tmp_path: Path) -> None:
     project = tmp_path
     (project / ".memtomem").mkdir()
     (project / ".memtomem" / "lock.json").write_text("not valid json {{", encoding="utf-8")
     lock = Lockfile.at(project)
-    assert lock.load() == {"version": LOCKFILE_VERSION}
+    with pytest.raises(LockfileCorruptError, match="not valid JSON"):
+        lock.load()
 
 
-def test_load_top_level_not_object_recovers(tmp_path: Path) -> None:
+def test_load_invalid_utf8_raises_when_strict(tmp_path: Path) -> None:
+    """``json.loads(bytes)`` decodes before parsing — invalid UTF-8 raises
+    ``UnicodeDecodeError``, not ``JSONDecodeError``; both are the same
+    corrupt-file class (Codex design review)."""
+    project = tmp_path
+    (project / ".memtomem").mkdir()
+    (project / ".memtomem" / "lock.json").write_bytes(b"\xff")
+    lock = Lockfile.at(project)
+    with pytest.raises(LockfileCorruptError, match="not valid JSON"):
+        lock.load()
+    assert lock.load(strict=False) == {"version": LOCKFILE_VERSION}
+
+
+def test_load_top_level_not_object_raises_when_strict(tmp_path: Path) -> None:
     project = tmp_path
     (project / ".memtomem").mkdir()
     (project / ".memtomem" / "lock.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
     lock = Lockfile.at(project)
-    assert lock.load() == {"version": LOCKFILE_VERSION}
+    with pytest.raises(LockfileCorruptError, match="not a JSON object"):
+        lock.load()
+
+
+def test_load_corrupt_recovers_to_default_when_not_strict(tmp_path: Path) -> None:
+    project = tmp_path
+    (project / ".memtomem").mkdir()
+    lock_json = project / ".memtomem" / "lock.json"
+    lock = Lockfile.at(project)
+
+    lock_json.write_text("not valid json {{", encoding="utf-8")
+    assert lock.load(strict=False) == {"version": LOCKFILE_VERSION}
+
+    lock_json.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert lock.load(strict=False) == {"version": LOCKFILE_VERSION}
+
+
+def test_corrupt_and_version_errors_share_lockfile_error_base() -> None:
+    """Degrading surfaces (status, CLI) catch the base in one clause."""
+    assert issubclass(LockfileCorruptError, LockfileError)
+    assert issubclass(LockfileVersionError, LockfileError)
 
 
 def test_load_unknown_version_raises_when_strict(tmp_path: Path) -> None:
@@ -307,3 +345,91 @@ def test_upsert_without_manifest_preserves_existing_manifest_keys(tmp_path: Path
     assert entry["files"] == ["SKILL.md"]
     assert entry["files_commit"] == "a" * 40  # now stale — guard ignores it
     assert entry["wiki_commit"] == "b" * 40
+
+
+# ── corrupt-file write refusal (#1247 id 16) ─────────────────────────────
+
+
+def test_upsert_over_corrupt_file_refuses_and_preserves_bytes(tmp_path: Path) -> None:
+    """A corrupt lockfile (e.g. git merge-conflict markers in a tracked
+    ``.memtomem/``) must refuse the upsert — pre-fix, the tolerant load
+    reset the doc and the write persisted it with ONLY the new entry,
+    wiping every sibling asset's install record."""
+    lock = Lockfile.at(tmp_path)
+    lock.upsert_entry(
+        "skills", "alpha", wiki_commit="a" * 40, installed_at="2026-01-01T00:00:00.000000Z"
+    )
+    lock.upsert_entry(
+        "agents", "beta", wiki_commit="b" * 40, installed_at="2026-01-02T00:00:00.000000Z"
+    )
+
+    corrupt = b'<<<<<<< HEAD\n{"version": 1}\n=======\n'
+    lock.path.write_bytes(corrupt)
+
+    with pytest.raises(LockfileCorruptError, match="not valid JSON"):
+        lock.upsert_entry(
+            "skills", "gamma", wiki_commit="c" * 40, installed_at="2026-01-03T00:00:00.000000Z"
+        )
+    assert lock.path.read_bytes() == corrupt  # refusal left the file byte-identical
+
+
+def test_upsert_transient_oserror_refuses_and_siblings_survive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One transient read failure (AV scanner / EACCES) during the in-lock
+    load must refuse the upsert — pre-fix it silently re-baselined and the
+    written file contained only the new entry."""
+    lock = Lockfile.at(tmp_path)
+    lock.upsert_entry(
+        "skills", "alpha", wiki_commit="a" * 40, installed_at="2026-01-01T00:00:00.000000Z"
+    )
+    lock.upsert_entry(
+        "skills", "beta", wiki_commit="b" * 40, installed_at="2026-01-02T00:00:00.000000Z"
+    )
+
+    real_read_bytes = Path.read_bytes
+    tripped = {"done": False}
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        if self == lock.path and not tripped["done"]:
+            tripped["done"] = True
+            raise PermissionError(13, "transient access denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+    with pytest.raises(LockfileCorruptError, match="unreadable"):
+        lock.upsert_entry(
+            "skills", "gamma", wiki_commit="c" * 40, installed_at="2026-01-03T00:00:00.000000Z"
+        )
+
+    doc = lock.load()
+    assert set(doc["skills"]) == {"alpha", "beta"}  # siblings survived the refusal
+
+
+def test_remove_entry_over_corrupt_file_refuses(tmp_path: Path) -> None:
+    project = tmp_path
+    (project / ".memtomem").mkdir()
+    corrupt = b"not valid json {{"
+    lock_json = project / ".memtomem" / "lock.json"
+    lock_json.write_bytes(corrupt)
+    lock = Lockfile.at(project)
+
+    with pytest.raises(LockfileCorruptError):
+        lock.remove_entry("skills", "anything")
+    assert lock_json.read_bytes() == corrupt
+
+
+def test_read_paths_raise_over_corrupt_file(tmp_path: Path) -> None:
+    """``read_entry`` feeds install's already-installed check and update's
+    not-installed check; a tolerant ``None`` there produced the
+    AlreadyInstalled/NotInstalled wedge where each command points at the
+    other. Raising names the real problem."""
+    project = tmp_path
+    (project / ".memtomem").mkdir()
+    (project / ".memtomem" / "lock.json").write_text("not valid json {{", encoding="utf-8")
+    lock = Lockfile.at(project)
+
+    with pytest.raises(LockfileCorruptError):
+        lock.read_entry("skills", "foo")
+    with pytest.raises(LockfileCorruptError):
+        list(lock.iter_entries())

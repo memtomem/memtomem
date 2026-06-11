@@ -36,6 +36,8 @@ __all__ = [
     "LOCKFILE_NAME",
     "LOCKFILE_VERSION",
     "Lockfile",
+    "LockfileCorruptError",
+    "LockfileError",
     "LockfileVersionError",
     "manifest_from_entry",
     "utcnow_iso8601_z",
@@ -46,12 +48,35 @@ LOCKFILE_NAME = "lock.json"
 LOCKFILE_VERSION = 1
 
 
-class LockfileVersionError(RuntimeError):
+class LockfileError(RuntimeError):
+    """Base for lockfile read failures raised by :meth:`Lockfile.load`.
+
+    Catch this to handle :class:`LockfileVersionError` and
+    :class:`LockfileCorruptError` in one clause — surfaces that degrade
+    (``mm context status``) or message-and-exit (CLI) treat both the same.
+    """
+
+
+class LockfileVersionError(LockfileError):
     """The lockfile carries a ``version`` this build does not understand.
 
     Raised by :meth:`Lockfile.load` with ``strict=True`` (the default for
     write paths). Diagnostic surfaces (e.g. a future ``mm context status``)
     can pass ``strict=False`` to recover the raw dict for inspection.
+    """
+
+
+class LockfileCorruptError(LockfileError):
+    """The lockfile exists but cannot be read as a JSON object.
+
+    Raised by :meth:`Lockfile.load` with ``strict=True`` (the default, and
+    what every write path uses) when the file is unreadable (``OSError``
+    other than missing), not valid JSON, or its top level is not an object.
+    Refusing here is load-bearing: ``upsert_entry`` loads inside the sidecar
+    lock and writes the doc back, so a tolerant reset would be *persisted*
+    with only the upserted entry, wiping every sibling asset's install
+    record (#1247 id 16). Only ``strict=False`` diagnostic reads keep the
+    tolerant empty-doc fallback.
     """
 
 
@@ -126,8 +151,14 @@ class Lockfile:
     def load(self, *, strict: bool = True) -> dict[str, Any]:
         """Return the lockfile dict.
 
-        - Missing file → ``{"version": LOCKFILE_VERSION}`` (write-safe default).
-        - Invalid JSON → log warning, return ``{"version": LOCKFILE_VERSION}``.
+        - Missing file → ``{"version": LOCKFILE_VERSION}`` (write-safe default,
+          both modes — an absent lockfile is the normal pre-install state).
+        - Unreadable / invalid JSON / non-object top level and ``strict=True``
+          → raise :class:`LockfileCorruptError`. Write paths load-then-write,
+          so a tolerant reset here would be persisted, destroying every
+          sibling entry (#1247 id 16).
+        - Same corrupt cases with ``strict=False`` → log warning, return
+          ``{"version": LOCKFILE_VERSION}`` (diagnostic surfaces degrade).
         - ``version`` ≠ ``LOCKFILE_VERSION`` and ``strict=True`` → raise
           :class:`LockfileVersionError` (canonical record; silent reset
           would clobber a forward-compatible lockfile written by a newer
@@ -135,21 +166,37 @@ class Lockfile:
         - ``version`` ≠ ``LOCKFILE_VERSION`` and ``strict=False`` → return
           the raw dict so diagnostic surfaces can render a useful message.
         """
+        hint = "fix or remove it (e.g. restore it from version control), then retry"
         try:
             raw = self._path.read_bytes()
         except FileNotFoundError:
             return {"version": LOCKFILE_VERSION}
         except OSError as exc:
+            if strict:
+                raise LockfileCorruptError(
+                    f"lockfile at {self._path} is unreadable ({exc}); {hint}"
+                ) from exc
             logger.warning("lockfile: read failed at %s: %s", self._path, exc)
             return {"version": LOCKFILE_VERSION}
 
         try:
             doc = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError: json.loads(bytes) decodes before parsing,
+            # so invalid UTF-8 raises it instead of JSONDecodeError — same
+            # corrupt-file class, same handling (Codex design review).
+            if strict:
+                raise LockfileCorruptError(
+                    f"lockfile at {self._path} is not valid JSON ({exc}); {hint}"
+                ) from exc
             logger.warning("lockfile: invalid JSON at %s, ignoring file: %s", self._path, exc)
             return {"version": LOCKFILE_VERSION}
 
         if not isinstance(doc, dict):
+            if strict:
+                raise LockfileCorruptError(
+                    f"lockfile at {self._path} top level is not a JSON object; {hint}"
+                )
             logger.warning("lockfile: top-level not an object at %s, ignoring", self._path)
             return {"version": LOCKFILE_VERSION}
 

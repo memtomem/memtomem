@@ -33,11 +33,27 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ProjectScope",
     "ProjectHealth",
+    "KnownProjectsCorruptError",
     "KnownProjectsStore",
     "compute_scope_id",
     "discover_project_scopes",
     "annotate_project_health",
 ]
+
+
+class KnownProjectsCorruptError(RuntimeError):
+    """``known_projects.json`` exists but cannot be read as the expected doc.
+
+    Raised by :meth:`KnownProjectsStore.load` with ``strict=True`` (what every
+    mutator uses) when the file is unreadable (``OSError`` other than missing),
+    not valid JSON, not a dict, or carries an unknown ``version``. Mutators
+    load-then-rewrite the whole doc, so the tolerant ``[]`` fallback would be
+    *persisted* — ``add()`` would re-baseline the registered-project list to
+    just the new entry (#1247 id 16). Read-only discovery keeps the tolerant
+    default. Version mismatch is folded in (no separate version error like the
+    lockfile's): ``_write`` re-renders at the current version, so mutating a
+    future-version file is the same clobber hazard as mutating a corrupt one.
+    """
 
 
 # ── Scope id ─────────────────────────────────────────────────────────────
@@ -145,27 +161,52 @@ class KnownProjectsStore:
     def path(self) -> Path:
         return self._path
 
-    def load(self) -> list[_KnownProjectEntry]:
-        """Return entries in registration order; ``[]`` if file missing or unreadable."""
+    def load(self, *, strict: bool = False) -> list[_KnownProjectEntry]:
+        """Return entries in registration order.
+
+        Missing file → ``[]`` in both modes (the normal pre-registration
+        state). For an *existing* file that is unreadable, invalid JSON,
+        not a dict, or an unknown ``version``: ``strict=False`` (default —
+        read-only discovery) logs a warning and degrades to ``[]``;
+        ``strict=True`` (mutators) raises
+        :class:`KnownProjectsCorruptError` so the follow-up ``_write``
+        cannot persist the degraded empty list over the user's
+        registrations (#1247 id 16).
+        """
+        hint = "fix or remove it (e.g. restore it from version control), then retry"
         try:
             raw = self._path.read_bytes()
         except FileNotFoundError:
             return []
         except OSError as exc:
+            if strict:
+                raise KnownProjectsCorruptError(
+                    f"known_projects file at {self._path} is unreadable ({exc}); {hint}"
+                ) from exc
             logger.warning("known_projects: read failed: %s", exc)
             return []
 
         try:
             doc = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError: json.loads(bytes) decodes before parsing,
+            # so invalid UTF-8 raises it instead of JSONDecodeError — same
+            # corrupt-file class, same handling (Codex design review).
+            if strict:
+                raise KnownProjectsCorruptError(
+                    f"known_projects file at {self._path} is not valid JSON ({exc}); {hint}"
+                ) from exc
             logger.warning("known_projects: invalid JSON, ignoring file: %s", exc)
             return []
 
         if not isinstance(doc, dict) or doc.get("version") != _KNOWN_PROJECTS_VERSION:
-            logger.warning(
-                "known_projects: unexpected version %r, ignoring",
-                doc.get("version") if isinstance(doc, dict) else None,
-            )
+            version = doc.get("version") if isinstance(doc, dict) else None
+            if strict:
+                raise KnownProjectsCorruptError(
+                    f"known_projects file at {self._path} has unexpected version "
+                    f"{version!r} (this build writes version {_KNOWN_PROJECTS_VERSION}); {hint}"
+                )
+            logger.warning("known_projects: unexpected version %r, ignoring", version)
             return []
 
         entries: list[_KnownProjectEntry] = []
@@ -191,10 +232,13 @@ class KnownProjectsStore:
     def add(self, root: Path, label: str | None = None) -> _KnownProjectEntry:
         """Register *root*. Idempotent — re-registering an existing root is a no-op
         (returns the existing entry).
+
+        Raises :class:`KnownProjectsCorruptError` instead of re-baselining
+        the list to ``[new_entry]`` when the file exists but is corrupt.
         """
         normalized = Path(root).expanduser()
         with _file_lock(_lock_path_for(self._path)):
-            entries = self.load()
+            entries = self.load(strict=True)
             for existing in entries:
                 if _normalize_for_scope_id(existing.root) == _normalize_for_scope_id(normalized):
                     return existing
@@ -215,7 +259,7 @@ class KnownProjectsStore:
         existence-derived.
         """
         with _file_lock(_lock_path_for(self._path)):
-            entries = self.load()
+            entries = self.load(strict=True)
             kept = [e for e in entries if compute_scope_id(e.root) != scope_id]
             if len(kept) == len(entries):
                 return False
@@ -250,7 +294,7 @@ class KnownProjectsStore:
         ``add`` dedups by resolved path, so duplicates never arise via the API.
         """
         with _file_lock(_lock_path_for(self._path)):
-            entries = self.load()
+            entries = self.load(strict=True)
             first_updated: _KnownProjectEntry | None = None
             new_entries: list[_KnownProjectEntry] = []
             for e in entries:

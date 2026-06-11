@@ -34,7 +34,7 @@ from memtomem.context._names import is_internal_artifact_dir
 from memtomem.context.agents import AGENT_DIR_FILENAME
 from memtomem.context.commands import COMMAND_DIR_FILENAME
 from memtomem.context.dirty import is_asset_dirty
-from memtomem.context.lockfile import Lockfile, LockfileVersionError
+from memtomem.context.lockfile import Lockfile, LockfileError
 from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
@@ -322,34 +322,35 @@ def load_with_recovery(project_root: Path | str) -> tuple[dict, str | None]:
     """Read the lockfile in diagnostic mode, returning ``(doc, error_or_None)``.
 
     Used by ``status_cmd`` to surface a corrupt-lockfile error row at
-    the top of the output without crashing. Wraps
-    :meth:`Lockfile.load` with ``strict=False`` so a forward-compat
-    version mismatch returns the raw dict; outright JSON corruption
-    falls through to ``Lockfile.load``'s warning path which returns
-    a fresh ``{"version": LOCKFILE_VERSION}``.
+    the top of the output without crashing. Catches the
+    :class:`LockfileError` base so both a forward-compat version mismatch
+    (``strict=False`` then returns the raw dict) and outright corruption
+    (``strict=False`` degrades to a fresh ``{"version": LOCKFILE_VERSION}``)
+    render as an error message instead of a traceback.
     """
     lockfile = Lockfile.at(project_root)
     try:
         doc = lockfile.load(strict=True)
         return doc, None
-    except LockfileVersionError as exc:
+    except LockfileError as exc:
         return lockfile.load(strict=False), str(exc)
 
 
 def _tolerant_iter_entries(
     lockfile: Lockfile,
 ) -> Iterator[tuple[str, str, dict[str, Any]]]:
-    """Like :meth:`Lockfile.iter_entries` but tolerant of version mismatches.
+    """Like :meth:`Lockfile.iter_entries` but tolerant of unreadable lockfiles.
 
     Mirrors the alphabetical ``(asset_type, name)`` ordering contract.
     Used by :func:`classify_status` so a forward-compat lockfile (or a
-    user editing ``version`` by hand) still surfaces its entries —
+    user editing ``version`` by hand) still surfaces its entries, and an
+    outright corrupt lockfile yields zero entries instead of crashing —
     callers separately render a top-row error message via
     :func:`load_with_recovery`.
     """
     try:
         doc = lockfile.load(strict=True)
-    except LockfileVersionError:
+    except LockfileError:
         doc = lockfile.load(strict=False)
     for asset_type in sorted(doc):
         section = doc.get(asset_type)

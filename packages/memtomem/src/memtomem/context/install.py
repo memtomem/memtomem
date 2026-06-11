@@ -40,7 +40,7 @@ from memtomem.context._atomic import (
 )
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
-from memtomem.context.lockfile import Lockfile, LockfileVersionError, manifest_from_entry
+from memtomem.context.lockfile import Lockfile, LockfileError, manifest_from_entry
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -810,7 +810,7 @@ def _classify_for_all_update(
         try:
             lock = Lockfile.at(project_root)
             lock_entry = lock.read_entry(asset_type, name)
-        except LockfileVersionError as exc:
+        except LockfileError as exc:
             out.append(
                 ProjectClassification(
                     project_root=project_root,
