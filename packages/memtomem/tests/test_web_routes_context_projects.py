@@ -784,6 +784,7 @@ async def test_patch_label_and_enabled_together(client, tmp_path: Path) -> None:
 CORRUPT_STORE_VARIANTS = [
     pytest.param(b"not valid {json", id="invalid-json"),
     pytest.param(b'{"version": 999, "projects": []}', id="future-version"),
+    pytest.param(b'{"version": 1, "projects": {"root": "/old"}}', id="projects-not-list"),
 ]
 
 

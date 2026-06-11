@@ -166,12 +166,13 @@ class KnownProjectsStore:
 
         Missing file → ``[]`` in both modes (the normal pre-registration
         state). For an *existing* file that is unreadable, invalid JSON,
-        not a dict, or an unknown ``version``: ``strict=False`` (default —
-        read-only discovery) logs a warning and degrades to ``[]``;
-        ``strict=True`` (mutators) raises
+        not a dict, an unknown ``version``, a non-list ``projects`` member,
+        or containing a row without a usable ``root``: ``strict=False``
+        (default — read-only discovery) logs a warning and degrades to
+        ``[]`` / skips the row; ``strict=True`` (mutators) raises
         :class:`KnownProjectsCorruptError` so the follow-up ``_write``
-        cannot persist the degraded empty list over the user's
-        registrations (#1247 id 16).
+        cannot persist the degraded list over the user's registrations
+        (#1247 id 16).
         """
         hint = "fix or remove it (e.g. restore it from version control), then retry"
         try:
@@ -209,12 +210,39 @@ class KnownProjectsStore:
             logger.warning("known_projects: unexpected version %r, ignoring", version)
             return []
 
+        # Shape guards below the version check: a row the parser drops here
+        # is *destroyed* by the next mutation — unlike the lockfile store,
+        # ``_write`` re-renders from parsed entries, so anything skipped does
+        # not round-trip. Strict mode therefore refuses any unrepresentable
+        # shape (Codex impl review: ``{"projects": {...}}`` was re-baselined
+        # to one entry). Designed legacy defaults (missing ``added_at`` /
+        # ``label`` / ``enabled``) are NOT corruption and parse normally.
+        projects_member = doc.get("projects", [])
+        if not isinstance(projects_member, list):
+            if strict:
+                raise KnownProjectsCorruptError(
+                    f"known_projects file at {self._path} has a non-list 'projects' "
+                    f"member ({type(projects_member).__name__}); {hint}"
+                )
+            logger.warning("known_projects: 'projects' is not a list, ignoring file")
+            return []
+
         entries: list[_KnownProjectEntry] = []
-        for item in doc.get("projects", []):
+        for item in projects_member:
             if not isinstance(item, dict):
+                if strict:
+                    raise KnownProjectsCorruptError(
+                        f"known_projects file at {self._path} has a non-object project "
+                        f"row ({type(item).__name__}); {hint}"
+                    )
                 continue
             root = item.get("root")
             if not isinstance(root, str) or not root:
+                if strict:
+                    raise KnownProjectsCorruptError(
+                        f"known_projects file at {self._path} has a project row without "
+                        f"a usable 'root'; {hint}"
+                    )
                 continue
             entries.append(
                 _KnownProjectEntry(

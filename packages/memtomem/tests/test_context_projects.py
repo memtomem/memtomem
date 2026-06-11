@@ -332,6 +332,19 @@ def test_store_unknown_version_recovers_to_empty(tmp_path: Path) -> None:
     assert store.load() == []
 
 
+def test_store_projects_not_list_recovers_to_empty(tmp_path: Path) -> None:
+    """Tolerant read degrades on a non-list ``projects`` member — including
+    a non-iterable, which used to crash the loop with TypeError."""
+    kp = tmp_path / "kp.json"
+    store = KnownProjectsStore(kp)
+
+    kp.write_text(json.dumps({"version": 1, "projects": {"root": "/old"}}))
+    assert store.load() == []
+
+    kp.write_text(json.dumps({"version": 1, "projects": 5}))
+    assert store.load() == []
+
+
 # ── corrupt-file mutation refusal (#1247 id 16) ──────────────────────────
 
 
@@ -353,6 +366,13 @@ def _seed_then_corrupt(tmp_path: Path, corrupt: bytes) -> tuple[KnownProjectsSto
         pytest.param(b"not valid {json", id="invalid-json"),
         pytest.param(b"\xff", id="invalid-utf8"),
         pytest.param(b'{"version": 999, "projects": []}', id="future-version"),
+        # Valid version-1 JSON whose shape the parser cannot represent —
+        # without the strict shape guard these silently re-baseline too
+        # (Codex impl review): _write re-renders from parsed entries, so a
+        # dropped member/row does not round-trip.
+        pytest.param(b'{"version": 1, "projects": {"root": "/old"}}', id="projects-not-list"),
+        pytest.param(b'{"version": 1, "projects": ["stray-string"]}', id="row-not-object"),
+        pytest.param(b'{"version": 1, "projects": [{"label": "no-root"}]}', id="row-without-root"),
     ],
 )
 def test_store_add_over_corrupt_file_refuses_and_preserves_bytes(
