@@ -28,7 +28,7 @@ from memtomem.context.skills import (
 )
 from memtomem.config import TargetScope
 from memtomem.web.routes._locks import _gateway_lock
-from memtomem.web.routes.context_gateway import sanitize_diff_reason
+from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -382,9 +382,7 @@ async def delete_skill(
                         shutil.rmtree(skill_dir)
                         removed.append(_safe_rel(skill_dir, project_root))
                     except OSError as e:
-                        skipped.append(
-                            {"path": _safe_rel(skill_dir, project_root), "reason": str(e)}
-                        )
+                        skipped.append(delete_skip_entry(skill_dir, e, project_root))
 
                 if cascade:
                     for gen in SKILL_GENERATORS.values():
@@ -397,9 +395,7 @@ async def delete_skill(
                             shutil.rmtree(target)
                             removed.append(_safe_rel(target, project_root))
                         except OSError as e:
-                            skipped.append(
-                                {"path": _safe_rel(target, project_root), "reason": str(e)}
-                            )
+                            skipped.append(delete_skip_entry(target, e, project_root))
     except TimeoutError:
         raise HTTPException(503, "Skill delete timed out — another sync may be in progress")
 

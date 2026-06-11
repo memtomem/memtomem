@@ -4141,7 +4141,24 @@ async function loadCtxDetail(type, name, opts = {}) {
           return;
         }
         const data = await r.json();
-        if (data.deleted) {
+        // Branch on lengths, not truthiness — ``deleted``/``skipped`` are
+        // always arrays and ``[]`` is truthy, so a fully-failed delete
+        // (every unlink skipped) used to show the success toast and hide
+        // the detail (#1247 id 33). Reasons are sanitized server-side.
+        const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+        if (skipped.length) {
+          // Partial/failed delete: name the first failure, keep the detail
+          // open (the artifact may still exist — matches the error path
+          // above), and reload so list badges repaint to on-disk truth.
+          showToast(t('settings.ctx.delete_partial', {
+            count: skipped.length,
+            path: (skipped[0] && skipped[0].path) || '',
+            reason: (skipped[0] && skipped[0].reason) || '',
+          }), 'warning');
+          loadCtxList(type);
+        } else {
+          // Includes the zero-deleted idempotent no-op: nothing existed,
+          // which is the state the user asked for.
           showToast(t('settings.ctx.delete_success').replace('{name}', name));
           detailEl.hidden = true;
           loadCtxList(type);
@@ -4254,8 +4271,14 @@ async function _ctxLoadDiff(type, name, detailEl) {
         if (rt.dropped_fields && rt.dropped_fields.length) {
           html += `<div style="margin-top:4px">${renderDroppedChips(rt.dropped_fields)}</div>`;
         }
-        if (rt.status === 'out of sync' && data.canonical_content != null && rt.runtime_content != null) {
-          const ops = diffLines(data.canonical_content, rt.runtime_content);
+        // ``expected_content`` (commands/agents, #1247 id 30) is what sync
+        // would actually write — vendor override or rendered output — so the
+        // diff shows the real pending change instead of a raw canonical-vs-
+        // runtime compare (permanently red for TOML/YAML-rendering runtimes).
+        // Skills/mcp-servers responses don't send it; fall back to canonical.
+        const expected = rt.expected_content != null ? rt.expected_content : data.canonical_content;
+        if (rt.status === 'out of sync' && expected != null && rt.runtime_content != null) {
+          const ops = diffLines(expected, rt.runtime_content);
           html += `<div class="diff-view" style="margin-top:6px">${renderDiff(ops)}</div>`;
         } else if (rt.runtime_content) {
           html += `<pre class="ctx-content-pre" style="margin-top:6px">${escapeHtml(rt.runtime_content)}</pre>`;

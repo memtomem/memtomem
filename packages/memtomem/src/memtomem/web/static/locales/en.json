@@ -421,6 +421,7 @@
   "settings.ctx.import_result": "{imported} imported, {skipped} skipped",
   "settings.ctx.import_success": "Import completed",
   "settings.ctx.delete_success": "\"{name}\" deleted",
+  "settings.ctx.delete_partial": "Delete incomplete — {count} path(s) not removed. {path}: {reason}",
   "settings.ctx.save_success": "\"{name}\" saved",
   "settings.ctx.create_success": "\"{name}\" created",
   "settings.ctx.mtime_conflict": "File was modified externally. Reloading...",

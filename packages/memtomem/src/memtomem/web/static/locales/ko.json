@@ -421,6 +421,7 @@
   "settings.ctx.import_result": "{imported}개 가져옴, {skipped}개 건너뜀",
   "settings.ctx.import_success": "가져오기 완료",
   "settings.ctx.delete_success": "\"{name}\" 삭제됨",
+  "settings.ctx.delete_partial": "삭제 미완료 — 경로 {count}개를 제거하지 못했습니다. {path}: {reason}",
   "settings.ctx.save_success": "\"{name}\" 저장됨",
   "settings.ctx.create_success": "\"{name}\" 생성됨",
   "settings.ctx.mtime_conflict": "파일이 외부에서 수정되었습니다. 다시 불러오는 중...",

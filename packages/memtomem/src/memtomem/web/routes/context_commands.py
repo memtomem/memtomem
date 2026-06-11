@@ -33,7 +33,12 @@ from memtomem.context.commands import (
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
+from memtomem.web.routes.context_gateway import (
+    delete_skip_entry,
+    expected_vs_runtime_row,
+    read_text_lenient,
+    sanitize_diff_reason,
+)
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -436,24 +441,24 @@ async def delete_command(
                         cmd_path.unlink()
                         removed.append(_safe_rel(cmd_path, project_root))
                     except OSError as e:
-                        skipped.append(
-                            {"path": _safe_rel(cmd_path, project_root), "reason": str(e)}
-                        )
+                        skipped.append(delete_skip_entry(cmd_path, e, project_root))
 
-                    if cascade:
-                        for gen in COMMAND_GENERATORS.values():
-                            target = gen.target_file(project_root, name)
-                            if target is None:
-                                continue
-                            if not target.is_file():
-                                continue
-                            try:
-                                target.unlink()
-                                removed.append(_safe_rel(target, project_root))
-                            except OSError as e:
-                                skipped.append(
-                                    {"path": _safe_rel(target, project_root), "reason": str(e)}
-                                )
+                # Sibling of the canonical branch, not nested inside it — a
+                # runtime-only command (no canonical) + cascade=true must still
+                # remove the runtime copies; the nested shape silently no-opped
+                # (#1247 id 46). Matches delete_agent / delete_skill.
+                if cascade:
+                    for gen in COMMAND_GENERATORS.values():
+                        target = gen.target_file(project_root, name)
+                        if target is None:
+                            continue
+                        if not target.is_file():
+                            continue
+                        try:
+                            target.unlink()
+                            removed.append(_safe_rel(target, project_root))
+                        except OSError as e:
+                            skipped.append(delete_skip_entry(target, e, project_root))
     except TimeoutError:
         raise HTTPException(503, "Command delete timed out — another sync may be in progress")
 
@@ -477,6 +482,7 @@ async def diff_command(
     canonical_content = None
     canonical_path = None
     parse_error_reason = None
+    parsed = None
     if resolved is not None:
         cmd_path, layout = resolved
         canonical_path = _safe_rel(cmd_path, project_root)
@@ -491,7 +497,9 @@ async def diff_command(
             parse_error_reason = sanitize_diff_reason(f"unreadable: {cmd_path}", project_root)
         else:
             try:
-                _parse_canonical_command_text(canonical_content, source=cmd_path, layout=layout)
+                parsed = _parse_canonical_command_text(
+                    canonical_content, source=cmd_path, layout=layout
+                )
             except CommandParseError as exc:
                 parse_error_reason = sanitize_diff_reason(str(exc), project_root)
 
@@ -527,17 +535,22 @@ async def diff_command(
                 }
             )
         else:
-            # Unreadable runtime ≡ parity can't be asserted — report drift,
-            # never mask it (the engine diff contract).
-            runtime_content = read_text_lenient(target)
-            # For commands, content won't be byte-identical (placeholder rewrites)
-            # so we always provide the runtime content for diff view.
+            # Compare on the engine's basis — vendor override bytes, else
+            # rendered output — NOT the raw canonical text: gemini targets
+            # are TOML, so a raw compare pinned this pane to a permanent
+            # "out of sync" under an "in sync" list badge (#1247 id 30).
+            assert parsed is not None  # parse failures took the branch above
+            cmd = parsed
             runtimes.append(
-                {
-                    "runtime": gen_name,
-                    "status": "out of sync" if runtime_content != canonical_content else "in sync",
-                    "runtime_content": runtime_content,
-                }
+                expected_vs_runtime_row(
+                    kind="commands",
+                    gen_name=gen_name,
+                    render=lambda gen=gen, cmd=cmd: gen.render(cmd)[0],
+                    target=target,
+                    name=name,
+                    project_root=project_root,
+                    scope=target_scope,
+                )
             )
 
     return {
