@@ -1547,3 +1547,77 @@ def test_classify_for_all_update_flat_dirty_is_refuse(wiki_root: Path, tmp_path:
     assert c.state == "refuse"
     assert "flat layout" in (c.reason or "")
     assert "migrate" in (c.reason or "")
+
+
+# ── unprovable install record (#1247 impl gate) ──────────────────────────
+
+
+def _corrupt_installed_at(project: Path, asset_type: str, name: str, value: str) -> None:
+    lock_path = project / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc[asset_type][name]["installed_at"] = value
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def test_update_refuses_unusable_install_record_over_existing_dest(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Impl-gate: malformed installed_at over an EXISTING dest must refuse,
+    not silently overwrite. Pre-#1247 this crashed with a ValueError; the
+    id-1 degrade (crash → never_installed) must not turn the crash into
+    data loss by sailing past the dirty gate."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    edited = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local edit\n")
+    _bump_mtime(edited)
+    _corrupt_installed_at(tmp_path, "skills", "foo", "yesterday")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    with pytest.raises(StaleInstallError) as excinfo:
+        update_skill(tmp_path, "foo")
+
+    msg = str(excinfo.value)
+    assert "install record unusable" in msg
+    assert "--force" in msg
+    assert edited.read_bytes() == b"local edit\n"  # nothing overwritten
+    assert not edited.with_suffix(".md.bak").exists()  # refusal leaves zero residue
+
+
+def test_update_force_unusable_record_baks_every_file(wiki_root: Path, tmp_path: Path) -> None:
+    """--force over an unprovable record preserves EVERY current dest file
+    as .bak — with no epoch there is no dirty subset to limit to."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n", "extra.md": b"e1\n"})
+    install_skill(tmp_path, "foo")
+    edited = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local edit\n")
+    _bump_mtime(edited)
+    _corrupt_installed_at(tmp_path, "skills", "foo", "yesterday")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    result = update_skill(tmp_path, "foo", force=True)
+
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").read_bytes() == b"v2\n"
+    assert (dest / "SKILL.md.bak").read_bytes() == b"local edit\n"
+    assert (dest / "extra.md.bak").read_bytes() == b"e1\n"
+    assert len(result.bak_files_written) == 2
+
+
+def test_classify_for_all_update_unusable_record_is_refuse(wiki_root: Path, tmp_path: Path) -> None:
+    """Batch preview parity for the unprovable gate."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    _corrupt_installed_at(tmp_path, "skills", "foo", "yesterday")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    _new_commit, classifications = _classify_for_all_update(
+        "skills", "foo", wiki=WikiStore.at_default(), projects=[tmp_path]
+    )
+
+    [c] = classifications
+    assert c.state == "refuse"
+    assert "install record unusable" in (c.reason or "")

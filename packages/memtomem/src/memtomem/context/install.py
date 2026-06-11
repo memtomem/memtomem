@@ -155,8 +155,11 @@ class ProjectClassification:
       copy wiki bytes when the user confirms.
     - ``"unchanged"`` — wiki HEAD == lockfile pin. No-op; ``dirty_report``
       stays ``None`` because the dirty walk was skipped (cheap by design).
-    - ``"refuse"`` — wiki HEAD ≠ lockfile pin AND dest has local edits.
-      Without ``--force`` the entire batch refuses.
+    - ``"refuse"`` — wiki HEAD ≠ lockfile pin AND the write can't be
+      proven safe: dest has local edits, a live flat-layout sibling
+      would be shadowed, or the entry's ``installed_at`` is unusable
+      over an existing dest (#1247). Without ``--force`` the entire
+      batch refuses.
     - ``"error"`` — the project's lockfile is corrupt or unreadable;
       ``reason`` carries the detail. Propagates as a row-level failure
       in the execute summary.
@@ -706,9 +709,13 @@ def _apply_update(
     Refuses with :class:`StaleInstallError` when ``dirty_report.reason ==
     "dirty"`` and ``force=False``. With ``force=True`` and a dirty tree,
     each dirty file is preserved alongside the wiki bytes as
-    ``<file>.bak`` before the copy. ``shutil.copy2`` is used so the
-    user's edit-mtime survives onto the ``.bak`` (atomic_write_bytes
-    would lose it). After the copy, dest files absent from the wiki
+    ``<file>.bak`` before the copy. An existing dest whose entry has an
+    unusable ``installed_at`` (``reason == "never_installed"``) refuses
+    the same way — nothing is provably clean — and ``--force`` preserves
+    EVERY current dest file as ``.bak`` (#1247). ``shutil.copy2`` is used
+    so the user's edit-mtime survives onto the ``.bak``
+    (atomic_write_bytes would lose it). After the copy, dest files absent
+    from the wiki
     source are reconciled away (:func:`_reconcile_removed_files`,
     #1247) so the refreshed tree mirrors the wiki instead of growing
     additively. ``installed_at`` is captured *after* copy + reconcile,
@@ -721,6 +728,22 @@ def _apply_update(
             f"since install at {dirty_report.installed_at}; "
             f"pass --force to overwrite "
             f"(each modified file gets a .bak sibling; deleted files are restored)"
+        )
+
+    # Unprovable install record (#1247 impl gate): the entry exists but its
+    # installed_at is missing/non-string/unparseable, so NO file in an
+    # EXISTING dest tree can be proven clean — refusing is the only
+    # non-destructive default. (Pre-#1247 a malformed string crashed with a
+    # ValueError here; degrading that crash to never_installed must not
+    # degrade it into a silent overwrite.) --force proceeds with EVERY
+    # current dest file preserved as .bak, not just a dirty subset — there
+    # is no epoch to subset by.
+    unprovable = dirty_report.reason == "never_installed" and dest.is_dir()
+    if unprovable and not force:
+        raise StaleInstallError(
+            f"{asset_type}/{name}: install record unusable (missing or malformed "
+            f"installed_at) — local edits cannot be ruled out; pass --force to "
+            f"overwrite (every current file gets a .bak sibling)"
         )
 
     # Flat-layout guard (#1247 id 0): a flat file + lockfile entry with no
@@ -762,9 +785,14 @@ def _apply_update(
         asset_type=asset_type,
         name=name,
     )
+    files_to_bak: tuple[Path, ...] = ()
     if force and dirty_report.reason == "dirty":
+        files_to_bak = dirty_report.dirty_files
+    elif force and unprovable:
+        files_to_bak = tuple(iter_installed_files(dest))
+    if files_to_bak:
         _gate_a_scan_dirty_files(
-            dirty_report.dirty_files,
+            files_to_bak,
             surface=surface,
             project_root=project_root,
             asset_type=asset_type,
@@ -772,15 +800,14 @@ def _apply_update(
         )
 
     bak_paths: list[Path] = []
-    if force and dirty_report.reason == "dirty":
-        for f in dirty_report.dirty_files:
-            bak = f.with_suffix(f.suffix + ".bak")
-            # shutil.copy2 preserves user edit's mtime — atomic_write_bytes
-            # would lose it. Race window between copy2 and copy_tree_atomic
-            # is sub-ms; acceptable for v1. Overwrite-if-exists policy
-            # (prior .bak from earlier --force gets replaced).
-            shutil.copy2(f, bak)
-            bak_paths.append(bak)
+    for f in files_to_bak:
+        bak = f.with_suffix(f.suffix + ".bak")
+        # shutil.copy2 preserves user edit's mtime — atomic_write_bytes
+        # would lose it. Race window between copy2 and copy_tree_atomic
+        # is sub-ms; acceptable for v1. Overwrite-if-exists policy
+        # (prior .bak from earlier --force gets replaced).
+        shutil.copy2(f, bak)
+        bak_paths.append(bak)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
@@ -798,11 +825,7 @@ def _apply_update(
         dest,
         src_has=lambda rel: rel in src_files,
         old_installed_at_epoch=_installed_at_epoch(lock_entry),
-        baked=(
-            frozenset(dirty_report.dirty_files)
-            if force and dirty_report.reason == "dirty"
-            else frozenset()
-        ),
+        baked=frozenset(files_to_bak),
         manifest=manifest_from_entry(lock_entry),
     )
 
@@ -937,13 +960,9 @@ def _classify_for_all_update(
 
         # Wiki advanced — classify dirty/clean for this project.
         report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
+        dest = project_root / ".memtomem" / asset_type / name
         flat_path, flat_dirty = (
-            _flat_layout_probe(
-                project_root / ".memtomem" / asset_type / name,
-                asset_type,
-                name,
-                lock_entry,
-            )
+            _flat_layout_probe(dest, asset_type, name, lock_entry)
             if report.reason in ("missing_dest", "never_installed")
             else (None, False)
         )
@@ -958,6 +977,15 @@ def _classify_for_all_update(
             reason = (
                 f"flat layout with local edits; run "
                 f"`mm context migrate {asset_type.removesuffix('s')} {name}` first"
+            )
+        elif report.reason == "never_installed" and dest.is_dir():
+            # Unprovable install record over an existing dest — preview
+            # parity with _apply_update's unprovable gate (#1247 impl
+            # gate): nothing is provably clean, so the batch must refuse
+            # rather than silently overwrite.
+            state = "refuse"
+            reason = (
+                "install record unusable (malformed installed_at); local edits cannot be ruled out"
             )
         else:
             state = "update"
@@ -997,9 +1025,13 @@ class ProjectInstallClassification:
     - ``"skip"`` — dest exists and is clean. Default behavior is no-op;
       ``--force`` re-extracts at the pin (no ``.bak`` since there's
       nothing to preserve).
-    - ``"refuse"`` — dest exists and has local edits. Without ``--force``
-      the entire batch refuses (no writes). With ``--force`` each dirty
-      file is preserved as ``<file>.bak`` then the pin is re-extracted.
+    - ``"refuse"`` — the restore can't be proven safe: dest exists with
+      local edits, the entry's ``installed_at`` is unusable over an
+      existing dest, or a live flat-layout sibling would be shadowed
+      (#1247). Without ``--force`` the entire batch refuses (no writes).
+      With ``--force`` the at-risk dest files (dirty subset, or every
+      current file when unprovable) are preserved as ``<file>.bak`` then
+      the pin is re-extracted; flat siblings are kept in place.
     - ``"orphan"`` — the pinned ``wiki_commit`` is not reachable in the
       wiki repo (history rewrite, force-push past the pin). Per-entry
       skip with a yellow warning row; the batch continues so the user
@@ -1173,11 +1205,19 @@ def _classify_for_install_all(
         if report.reason == "dirty":
             state: Literal["install", "skip", "refuse", "orphan", "error"] = "refuse"
             reason: str | None = report.summary()
+        elif report.reason == "never_installed":
+            # Dest exists here, so this is exactly "entry present but
+            # unusable installed_at" — unprovable. Collapsing it to "skip"
+            # would let --force re-extract over possible local edits with
+            # no .bak (#1247 impl gate); mirror _apply_update's refuse.
+            state = "refuse"
+            reason = (
+                "install record unusable (malformed installed_at); local edits cannot be ruled out"
+            )
         else:
-            # clean / missing_dest / never_installed all collapse to "skip" here:
-            # missing_dest is impossible (we already saw dest.exists()), and
-            # never_installed shouldn't happen (we read the entry above), so
-            # this is effectively the clean path.
+            # clean / missing_dest collapse to "skip" here: missing_dest is
+            # impossible (we already saw dest.exists()), so this is
+            # effectively the clean path.
             state = "skip"
             reason = "already installed"
 
@@ -1226,9 +1266,11 @@ def _apply_pinned_install(
     - ``state="refuse"`` + ``force=False``: raise
       :class:`StaleInstallError` (caller already aborted batch; defense
       in depth).
-    - ``state="refuse"`` + ``force=True``: ``shutil.copy2`` each dirty
-      file to ``<file>.bak`` (mirroring ``_apply_update``), then extract
-      at pin.
+    - ``state="refuse"`` + ``force=True``: ``shutil.copy2`` the at-risk
+      dest files to ``<file>.bak`` (the dirty subset, or EVERY current
+      file when the install record is unusable — mirroring
+      ``_apply_update``, #1247), then extract at pin. Flat-layout refuse
+      rows have no dest to preserve; the flat file stays in place.
     """
     pin = classification.pin_commit
     asset_type = classification.asset_type
@@ -1260,11 +1302,23 @@ def _apply_pinned_install(
         surface=surface,
         project_root=project_root,
     )
+    files_to_bak: tuple[Path, ...] = ()
     if classification.state == "refuse" and force:
         report = classification.dirty_report
         assert report is not None  # state=refuse always carries a report
+        if report.reason == "dirty":
+            files_to_bak = report.dirty_files
+        elif report.reason == "never_installed" and dest.is_dir():
+            # Unprovable install record over an existing dest (#1247 impl
+            # gate): no epoch to subset by, so preserve EVERY current file
+            # before the pin re-extraction — mirrors _apply_update. (The
+            # flat-refuse rows also carry never_installed/missing_dest
+            # reports, but their dest is absent → no bak set, the flat
+            # file is preserved in place.)
+            files_to_bak = tuple(iter_installed_files(dest))
+    if files_to_bak:
         _gate_a_scan_dirty_files(
-            report.dirty_files,
+            files_to_bak,
             surface=surface,
             project_root=project_root,
             asset_type=asset_type,
@@ -1272,13 +1326,10 @@ def _apply_pinned_install(
         )
 
     bak_paths: list[Path] = []
-    if classification.state == "refuse" and force:
-        report = classification.dirty_report
-        assert report is not None  # state=refuse always carries a report
-        for f in report.dirty_files:
-            bak = f.with_suffix(f.suffix + ".bak")
-            shutil.copy2(f, bak)
-            bak_paths.append(bak)
+    for f in files_to_bak:
+        bak = f.with_suffix(f.suffix + ".bak")
+        shutil.copy2(f, bak)
+        bak_paths.append(bak)
 
     files_written = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
 
@@ -1295,11 +1346,7 @@ def _apply_pinned_install(
             dest,
             src_has=lambda rel: rel in expected,
             old_installed_at_epoch=_installed_at_epoch(entry),
-            baked=(
-                frozenset(classification.dirty_report.dirty_files)
-                if classification.state == "refuse" and classification.dirty_report is not None
-                else frozenset()
-            ),
+            baked=frozenset(files_to_bak),
             manifest=manifest_from_entry(entry),
         )
 

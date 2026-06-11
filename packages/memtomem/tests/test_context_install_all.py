@@ -909,3 +909,37 @@ def test_install_all_force_extracts_dir_and_preserves_flat(wiki_root: Path, tmp_
     assert (tmp_path / ".memtomem" / "agents" / "foo" / "agent.md").read_bytes() == b"wiki\n"
     assert flat.read_bytes() == b"# local flat\n"
     assert not flat.with_suffix(".md.bak").exists()
+
+
+# ── unprovable install record (#1247 impl gate) ──────────────────────────
+
+
+def test_install_all_unusable_record_refuses_then_force_baks_all(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Malformed installed_at over an existing dest must classify refuse —
+    not skip — and --force must preserve every current file before the pin
+    re-extraction. Pre-fix the row collapsed to skip, so --force re-extracted
+    over possible local edits with no .bak."""
+    from memtomem.context.install import _apply_pinned_install, _classify_for_install_all
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_asset(wiki_root, "agents", "foo", {"agent.md": b"wiki\n"})
+    install_agent(tmp_path, "foo")
+    edited = tmp_path / ".memtomem" / "agents" / "foo" / "agent.md"
+    edited.write_bytes(b"local edit\n")
+    _bump_mtime(edited)
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc["agents"]["foo"]["installed_at"] = "yesterday"
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    [row] = _classify_for_install_all(tmp_path, wiki=WikiStore.at_default())
+    assert row.state == "refuse"
+    assert "install record unusable" in (row.reason or "")
+
+    result = _apply_pinned_install(tmp_path, row, wiki=WikiStore.at_default(), force=True)
+
+    assert result.files_written >= 1
+    assert edited.read_bytes() == b"wiki\n"  # pin bytes restored
+    assert edited.with_suffix(".md.bak").read_bytes() == b"local edit\n"

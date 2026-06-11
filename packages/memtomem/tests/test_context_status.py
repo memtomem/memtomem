@@ -890,6 +890,9 @@ def test_classify_status_survives_malformed_installed_at(wiki_root: Path, tmp_pa
     by_name = {r.name: r for r in rows}
     assert by_name["beta"].state == "ok"
     assert by_name["alpha"].state == "missing"
+    # The dest dir EXISTS here — "dest missing" would be flatly wrong;
+    # the reason mirrors the update/install-all unprovable refusal.
+    assert "install record unusable" in (by_name["alpha"].reason or "")
 
 
 # ── untracked project_shared canonicals (#1247 id 8) ─────────────────────

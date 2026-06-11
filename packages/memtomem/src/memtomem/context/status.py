@@ -198,6 +198,11 @@ def classify_status(
                 reason = (
                     f"flat layout; run `mm context migrate {asset_type.removesuffix('s')} {name}`"
                 )
+            elif report.reason == "never_installed" and dest.is_dir():
+                # Entry present but unusable installed_at over an existing
+                # dest — "dest missing" would be flatly wrong. Mirrors the
+                # update/install-all "unprovable" refuse reason (#1247).
+                reason = "install record unusable (malformed installed_at)"
         elif report.reason == "dirty":
             state = "dirty"
             dirty_count = len(report.dirty_files) + len(report.missing_files)
