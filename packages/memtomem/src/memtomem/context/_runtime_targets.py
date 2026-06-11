@@ -211,6 +211,13 @@ class DiffRow(tuple):
     def status(self) -> str:
         return self[2]
 
+    def __getnewargs__(self) -> tuple[str, str, str, str | None]:
+        # Pickle reconstructs via ``__new__(cls, *args)`` — without this the
+        # 3-element tuple state reaches a 4-arg constructor and unpickling
+        # fails, breaking public diff_* callers that cache rows or pass them
+        # through multiprocessing (Codex review).
+        return (self[0], self[1], self[2], self.reason)
+
     def __repr__(self) -> str:  # diagnostics show up in test failures
         return (
             f"DiffRow(runtime={self[0]!r}, name={self[1]!r}, "

@@ -1589,6 +1589,31 @@ class TestDiffAgent:
         assert "runtime_content" in claude_rt
 
     @pytest.mark.anyio
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="needs POSIX permissions and a non-root user",
+    )
+    async def test_unreadable_canonical_diagnoses_instead_of_500(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """A PermissionError on the canonical must produce parse-error rows
+        with an 'unreadable' reason — the engine diff reports the same file
+        as a typed row, so a 500 here would contradict the list badge
+        (Codex review on U7)."""
+        path = _make_agent(tmp_path, "locked")
+        path.chmod(0)
+        try:
+            r = await client.get("/api/context/agents/locked/diff")
+        finally:
+            path.chmod(0o644)
+        assert r.status_code == 200
+        data = r.json()
+        rows = data["runtimes"]
+        assert rows
+        assert all(rt["status"] == "parse error" for rt in rows)
+        assert all("unreadable" in rt["reason"] for rt in rows)
+
+    @pytest.mark.anyio
     async def test_healthy_canonical_payload_has_canonical_path_and_no_reason(
         self, client: AsyncClient, tmp_path: Path
     ):

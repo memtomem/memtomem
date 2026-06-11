@@ -218,3 +218,22 @@ def test_runtime_artifact_listing_returns_invalid_names(tmp_path: Path) -> None:
     assert runtime_artifact_names(
         "agents", "claude", tmp_path, "project_shared", file_suffix=".md"
     ) == {"ok"}
+
+
+def test_diff_row_pickles_and_unpacks_like_a_tuple() -> None:
+    """DiffRow compat pins (#1229 U7): 3-unpack, tuple equality, and pickle
+    round-trip (Codex review — unpickling calls __new__ with the tuple state,
+    which needs __getnewargs__ to carry all four constructor args)."""
+    import pickle
+
+    from memtomem.context._runtime_targets import DiffRow
+
+    row = DiffRow("claude_agents", "broken", "parse error", "missing YAML frontmatter")
+    runtime, name, status = row
+    assert (runtime, name, status) == ("claude_agents", "broken", "parse error")
+    assert row == ("claude_agents", "broken", "parse error")
+    assert hash(row) == hash(("claude_agents", "broken", "parse error"))
+
+    clone = pickle.loads(pickle.dumps(row))
+    assert clone == row
+    assert clone.reason == "missing YAML frontmatter"

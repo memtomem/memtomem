@@ -28,7 +28,7 @@ from memtomem.context.mcp_servers import (
     scan_mcp_server_text,
 )
 from memtomem.web.routes._locks import _gateway_lock
-from memtomem.web.routes.context_gateway import sanitize_diff_reason
+from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_writable_scope_root,
@@ -344,17 +344,21 @@ async def diff_mcp_server(
     canonical_definition = None
     reason: str | None = None
     if path.is_file():
-        # Lenient read — a non-UTF-8 canonical must render a diagnosable
-        # parse-error pane, not crash the endpoint.
-        canonical_content = path.read_bytes().decode("utf-8", errors="replace")
-        try:
-            canonical_definition = parse_mcp_server_text(
-                canonical_content, name=name, source=path
-            ).definition
-        except McpServerParseError as exc:
-            # Canonical-side parse failure — the reason names the canonical
-            # file (#1229 U7; previously discarded).
-            reason = sanitize_diff_reason(str(exc), project_root)
+        # Lenient read — a non-UTF-8 or unreadable canonical must render a
+        # diagnosable parse-error pane, not crash the endpoint.
+        canonical_content = read_text_lenient(path)
+        if canonical_content is None:
+            reason = sanitize_diff_reason(f"unreadable: {path}", project_root)
+            canonical_content = ""
+        else:
+            try:
+                canonical_definition = parse_mcp_server_text(
+                    canonical_content, name=name, source=path
+                ).definition
+            except McpServerParseError as exc:
+                # Canonical-side parse failure — the reason names the
+                # canonical file (#1229 U7; previously discarded).
+                reason = sanitize_diff_reason(str(exc), project_root)
 
     status = "missing target"
     runtime_content = None

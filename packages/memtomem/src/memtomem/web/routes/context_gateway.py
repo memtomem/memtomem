@@ -132,6 +132,20 @@ def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
     return _redact_message(cleaned)
 
 
+def read_text_lenient(path: Path) -> str | None:
+    """Best-effort text read for diff payload previews (#1229 U7).
+
+    ``None`` on any OSError (permission, race-deleted) — a per-name diff
+    endpoint must keep diagnosing instead of 500ing while the engine diff
+    reports the same file as a typed row; non-UTF-8 bytes decode with
+    U+FFFD replacement (the #1233 lenient-read contract).
+    """
+    try:
+        return path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
 def _compute_last_synced_at(project_root: Path, target_scope: TargetScope) -> str | None:
     """Return ISO8601 UTC timestamp of the most recently touched canonical artifact.
 

@@ -31,7 +31,7 @@ from memtomem.context.commands import (
 )
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
-from memtomem.web.routes.context_gateway import sanitize_diff_reason
+from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -481,11 +481,17 @@ async def diff_command(
         # Lenient read + re-parse — mirrors diff_agent: the pane must agree
         # with the list badge instead of raw-comparing a malformed canonical
         # into "out of sync" / "in sync" (#1229 U7).
-        canonical_content = cmd_path.read_bytes().decode("utf-8", errors="replace")
-        try:
-            _parse_canonical_command_text(canonical_content, source=cmd_path, layout=layout)
-        except CommandParseError as exc:
-            parse_error_reason = sanitize_diff_reason(str(exc), project_root)
+        canonical_content = read_text_lenient(cmd_path)
+        if canonical_content is None:
+            # Unreadable canonical (permission, race) — same tolerant path as
+            # the engine diff: every runtime row reports a diagnosable parse
+            # error instead of a 500 (Codex review).
+            parse_error_reason = sanitize_diff_reason(f"unreadable: {cmd_path}", project_root)
+        else:
+            try:
+                _parse_canonical_command_text(canonical_content, source=cmd_path, layout=layout)
+            except CommandParseError as exc:
+                parse_error_reason = sanitize_diff_reason(str(exc), project_root)
 
     runtimes = []
     for gen_name, gen in COMMAND_GENERATORS.items():
@@ -501,7 +507,9 @@ async def diff_command(
                 "reason": parse_error_reason,
             }
             if target.is_file():
-                entry["runtime_content"] = target.read_bytes().decode("utf-8", errors="replace")
+                runtime_preview = read_text_lenient(target)
+                if runtime_preview is not None:
+                    entry["runtime_content"] = runtime_preview
             runtimes.append(entry)
             continue
         if canonical_content is None and not target.is_file():
@@ -513,11 +521,13 @@ async def diff_command(
                 {
                     "runtime": gen_name,
                     "status": "missing canonical",
-                    "runtime_content": target.read_bytes().decode("utf-8", errors="replace"),
+                    "runtime_content": read_text_lenient(target),
                 }
             )
         else:
-            runtime_content = target.read_bytes().decode("utf-8", errors="replace")
+            # Unreadable runtime ≡ parity can't be asserted — report drift,
+            # never mask it (the engine diff contract).
+            runtime_content = read_text_lenient(target)
             # For commands, content won't be byte-identical (placeholder rewrites)
             # so we always provide the runtime content for diff view.
             runtimes.append(
