@@ -130,6 +130,15 @@ authored from user-authored entries (ADR-0001 §5 unidirectional
 readiness contract). Its inline pointer reduces to the first and third
 rules above.
 
+> **2026-06 (#1247):** Narrowed since: the per-rule, consent-gated
+> `rules/promote` endpoint (enabled by ADR-0019 ownership markers;
+> Gate-A-scanned per the ADR-0011 §5 note) is a settings reverse-import
+> path on the hooks **leaf**. The tile contract above is unchanged — the
+> settings tile still never renders `missing canonical` (promote operates
+> on conflict/diff rows, not the count envelope), and the dashboard stays
+> push-only with leaf-only pull per this section. See the matching
+> ADR-0001 §5 note.
+
 **Why not add `Import All`:** bidirectional bulk actions create a class
 of UX-traps where the user clicks the wrong direction and silently
 overwrites local edits or canonical content. ADR-0001's `extract_*` is
@@ -210,6 +219,16 @@ the client's perspective:
 **Why additive:** preserves the Q-PR3 envelope clients (Web UI v0.1.36+)
 already understand. Older clients ignore unknown fields. The four
 existing tile envelopes are unchanged.
+
+> **2026-06 (#1247):** `/api/context/overview` has since gained a **fifth**
+> tile envelope — `mcp_servers` (#1165, `context_gateway.py`) — with the
+> same count shape, plus a matching dashboard tile and Sync All phase. The
+> "four tile envelopes" wording above is historical; this section's
+> additive-fields contract is unchanged. MCP servers are a
+> project_shared-only artifact (canonical
+> `.memtomem/mcp-servers/<name>.json` fanning out to the project
+> `.mcp.json` `mcpServers` object) — see the ADR-0011 §1 table row and the
+> ADR-0016 §3 note.
 
 **Direction signal source for §2.** The four-status core shared by
 `diff_skills` / `diff_commands` / `diff_agents` (`in sync`,

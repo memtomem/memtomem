@@ -38,6 +38,17 @@ an Accepted ADR).
    memtomem-owned and will be overwritten on re-sync. Hand-editing such a rule
    while keeping the prefix loses the edit — to take ownership, drop the marker.
 
+   > **2026-06 (#1247):** Kimi (the fourth runtime — see the ADR-0018 note)
+   > uses a different ownership mechanism than the per-rule markers above:
+   > its TOML config carries one memtomem-managed block
+   > (`# BEGIN memtomem managed hooks` / `# END memtomem managed hooks`)
+   > that re-sync replaces wholesale. The block delimiters are the ownership
+   > marker; rules inside the block are memtomem-owned by position, user
+   > TOML outside it is never touched, and a hand-edit inside the block is
+   > lost on the next sync (this ADR's per-rule "user rules win" merge does
+   > not apply inside the block). The per-rule marker contract applies to
+   > the JSON runtimes (Claude / Codex / Gemini) only.
+
 2. **Stamping is idempotent and preserves author text.** `statusMessage` is set
    to `"memtomem · {event}"` when absent, prefixed (`"memtomem · {text}"`) when
    the canonical handler already supplies text, and left untouched when already

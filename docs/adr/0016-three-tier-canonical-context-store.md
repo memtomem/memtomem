@@ -182,6 +182,12 @@ three values of `target_scope` index the runtime side. For
 memory / agents / skills / commands, the canonical and runtime
 sides are coupled via `RUNTIME_FANOUT_TABLE` per ADR-0011 §1.
 
+> **2026-06 (#1247):** `mcp_servers` (shipped #1165, post-dating this ADR)
+> joins neither table: it is the one single-tier artifact — canonical exists
+> at `project_shared` only (`<proj>/.memtomem/mcp-servers/<name>.json`) and
+> fans out to the project `.mcp.json` `mcpServers` object. See the ADR-0011
+> §1 table row and the ADR-0009 §5 note.
+
 v1 defaults preserved unchanged from ADR-0010 §2 (settings:
 `target_scope=user` → runtime at `~/.claude/settings.json`) and
 ADR-0011 §2 (memory canonical: `user`; agents / skills / commands
@@ -295,6 +301,15 @@ entries remain visible by inspecting each tier (`mm context status
 --scope <tier>`, or the Web overview's per-tier views). ADR-0011 §"Open
 questions" item 2 owns the user-facing warning copy for the
 cross-tier collision case.
+
+> **2026-06 (#1247):** "Refuses to overwrite without `--force`" shipped
+> differently: ADR-0011 PR-E4 (Row 15) deliberately made `mm context migrate
+> --to <tier>` refuse destination overwrite **even with `--force`**
+> (`context/migrate.py` — "force does not overwrite scope-tier targets;
+> replace verb is a follow-up"). Within-tier name conflicts therefore always
+> refuse today; an explicit `replace`-style verb is the named follow-up
+> rather than a `--force` valve. (`--force` keeps its other migrate
+> meanings, e.g. proceeding past a dirty flat-layout source.)
 
 For settings, ADR-0010's documented Claude Code tier-merge handles
 duplicate keys additively (one hook entry per tier fires per tier);

@@ -24,6 +24,17 @@ Accepted ADR; ADR-0007 / ADR-0008 layer onto ADR-0001 the same way).
    | Codex  | `~/.codex/hooks.json` | `<proj>/.codex/hooks.json` | — (none) |
    | Gemini | `~/.gemini/settings.json` | `<proj>/.gemini/settings.json` | — (none) |
 
+   > **2026-06 (#1247):** A fourth runtime shipped after this ADR: **Kimi
+   > CLI** (`KimiSettingsGenerator`, `context/settings.py`). Targets: user →
+   > `~/.kimi/config.toml`, project_shared → `<proj>/.kimi/config.toml`,
+   > project_local → none (the same `target_file() → None` skip contract as
+   > Codex/Gemini, decision 4). Kimi's config is TOML, not JSON: instead of
+   > the additive JSON merge, sync preserves the user's file verbatim and
+   > replaces only a memtomem-managed block delimited by
+   > `# BEGIN memtomem managed hooks` / `# END memtomem managed hooks`.
+   > Ownership is block-scoped, not per-rule — see the companion note on
+   > ADR-0019.
+
 2. **Codex is near-identical.** Codex shares Claude's event names and accepts
    `Bash` / `Edit` / `Write` matchers natively, so it reuses the same
    `_merge_hooks_record` additive merge as Claude. Events Codex lacks
