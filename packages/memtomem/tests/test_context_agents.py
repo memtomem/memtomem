@@ -355,6 +355,36 @@ class TestDuplicateAgentName:
         assert rows, "expected diff rows for the colliding name"
         assert {r[2] for r in rows} == {"in sync"}
 
+    def test_parse_failure_does_not_shadow_parsed_name_in_diff(self, tmp_path, codex_home):
+        """Codex impl round (#1247 B4): a later malformed canonical whose
+        FALLBACK name (stem) collides with an earlier parsed ``name:`` must
+        not overwrite the parsed entry with a parse-error row. Sync writes
+        that name fine — the malformed file never claims a name there — so
+        the shadowed row would be permanent phantom "parse error" drift no
+        sync can clear. The malformed file stays loud via the warning log."""
+        _make_canonical_agent(tmp_path, "aaa", SAMPLE_MINIMAL_AGENT.replace("helper", "shared"))
+        _make_canonical_agent(tmp_path, "shared", "no frontmatter at all\n")
+        generate_all_agents(tmp_path)
+
+        rows = [r for r in diff_agents(tmp_path) if r[1] == "shared"]
+        assert rows, "expected diff rows for the shared name"
+        assert {r[2] for r in rows} == {"in sync"}
+
+    def test_parsed_name_recovers_parse_failure_fallback_in_diff(self, tmp_path, codex_home):
+        """Reverse order of the shadow case: the malformed file registers its
+        fallback name FIRST, then a later canonical parses to the same name.
+        The parsed entry wins (pre-existing overwrite-None behavior, now
+        load-bearing for the sync alignment): sync writes the name from the
+        parsed file, so diff must compare against it — not report a stale
+        parse-error row."""
+        _make_canonical_agent(tmp_path, "shared", "no frontmatter at all\n")
+        _make_canonical_agent(tmp_path, "zzz", SAMPLE_MINIMAL_AGENT.replace("helper", "shared"))
+        generate_all_agents(tmp_path)
+
+        rows = [r for r in diff_agents(tmp_path) if r[1] == "shared"]
+        assert rows, "expected diff rows for the shared name"
+        assert {r[2] for r in rows} == {"in sync"}
+
 
 class TestExtractAgentsToCanonical:
     def test_imports_claude_agent(self, tmp_path):

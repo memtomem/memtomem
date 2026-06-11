@@ -804,12 +804,17 @@ def diff_commands(
             text = path.read_bytes().decode("utf-8", errors="replace")
             parsed = _parse_canonical_command_text(text, source=path, layout=layout)
         except OSError as exc:
-            canonical_index[fallback_name] = None
-            parse_failures[fallback_name] = f"unreadable: {exc}"
+            # First-parsed-wins guard — see diff_agents (#1247 Codex impl
+            # round): a fallback-name entry must not shadow an earlier
+            # successfully parsed canonical claiming the same name.
+            if canonical_index.get(fallback_name) is None:
+                canonical_index[fallback_name] = None
+                parse_failures[fallback_name] = f"unreadable: {exc}"
             logger.warning("canonical command %s unreadable: %s", path, exc)
         except CommandParseError as exc:
-            canonical_index[fallback_name] = None
-            parse_failures[fallback_name] = str(exc)
+            if canonical_index.get(fallback_name) is None:
+                canonical_index[fallback_name] = None
+                parse_failures[fallback_name] = str(exc)
             logger.warning("canonical command %s failed to parse: %s", path, exc)
         else:
             # First-parsed-wins on a frontmatter-name collision, matching the

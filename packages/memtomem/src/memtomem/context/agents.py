@@ -1030,12 +1030,21 @@ def diff_agents(
             text = path.read_bytes().decode("utf-8", errors="replace")
             parsed = _parse_canonical_agent_text(text, source=path, layout=layout)
         except OSError as exc:
-            canonical_index[fallback_name] = None
-            parse_failures[fallback_name] = f"unreadable: {exc}"
+            # Same first-parsed-wins precedence as below (#1247 Codex impl
+            # round): a fallback-name entry must not SHADOW an earlier
+            # successfully parsed canonical that claimed the same effective
+            # name — sync writes that name fine (the unreadable file never
+            # claims a name there), so a None overwrite here would report
+            # permanent phantom "parse error" drift no sync can clear. The
+            # warning below still fires, so the broken file stays loud.
+            if canonical_index.get(fallback_name) is None:
+                canonical_index[fallback_name] = None
+                parse_failures[fallback_name] = f"unreadable: {exc}"
             logger.warning("canonical agent %s unreadable: %s", path, exc)
         except AgentParseError as exc:
-            canonical_index[fallback_name] = None
-            parse_failures[fallback_name] = str(exc)
+            if canonical_index.get(fallback_name) is None:
+                canonical_index[fallback_name] = None
+                parse_failures[fallback_name] = str(exc)
             logger.warning("canonical agent %s failed to parse: %s", path, exc)
         else:
             # First-parsed-wins on a frontmatter-name collision, matching the

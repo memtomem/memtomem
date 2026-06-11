@@ -279,6 +279,42 @@ class TestDuplicateCommandName:
         assert rows, "expected diff rows for the colliding name"
         assert {r[2] for r in rows} == {"in sync"}
 
+    # Command parse failures are narrower than agents': frontmatter-less
+    # files are tolerated (stem-named prompt body), so the only
+    # ``CommandParseError`` shape is an INVALID effective name. The shadow
+    # fixture is a file whose stem is the colliding name but whose
+    # frontmatter ``name: -bad`` fails validation.
+    _MALFORMED = "---\nname: -bad\ndescription: broken\n---\n\nBody.\n"
+
+    def test_parse_failure_does_not_shadow_parsed_name_in_diff(self, tmp_path):
+        """Sibling of the agents shadow pin (#1247 B4 Codex impl round): a
+        later malformed canonical whose stem collides with an earlier parsed
+        ``name:`` must not flip diff to a permanent parse-error row."""
+        _make_canonical_command(
+            tmp_path,
+            "aaa",
+            "---\nname: review\ndescription: Parsed claimant\n---\n\nBody from A.\n",
+        )
+        _make_canonical_command(tmp_path, "review", self._MALFORMED)
+        generate_all_commands(tmp_path)
+
+        rows = [r for r in diff_commands(tmp_path) if r[1] == "review"]
+        assert rows, "expected diff rows for the shared name"
+        assert {r[2] for r in rows} == {"in sync"}
+
+    def test_parsed_name_recovers_parse_failure_fallback_in_diff(self, tmp_path):
+        _make_canonical_command(tmp_path, "review", self._MALFORMED)
+        _make_canonical_command(
+            tmp_path,
+            "zzz",
+            "---\nname: review\ndescription: Parsed claimant\n---\n\nBody from Z.\n",
+        )
+        generate_all_commands(tmp_path)
+
+        rows = [r for r in diff_commands(tmp_path) if r[1] == "review"]
+        assert rows, "expected diff rows for the shared name"
+        assert {r[2] for r in rows} == {"in sync"}
+
 
 class TestExtractCommandsToCanonical:
     def test_imports_claude_command(self, tmp_path):
