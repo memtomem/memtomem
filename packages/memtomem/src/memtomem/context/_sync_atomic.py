@@ -62,7 +62,23 @@ class StrictDropError(ValueError):
     — an ``except agents.StrictDropError`` block does NOT catch a commands
     raise. The engine raises ``adapter.strict_drop_error_type`` which each
     adapter sets to its own subclass.
+
+    ``generated`` carries the ``(runtime, target_file)`` writes that landed
+    BEFORE the raise — the #908 partial-write boundary fires mid-Phase-2, so
+    surfaces (web 422, #1247 id 47) can report which runtime files already
+    changed instead of an opaque error. Keyword-optional with a ``None``
+    default: the class is public API (re-exported by both artifact modules)
+    and one-arg construction must keep working.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        generated: list[tuple[str, Path]] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.generated: list[tuple[str, Path]] = list(generated or [])
 
 
 # Valid severity levels for the ``on_drop`` parameter.
@@ -249,6 +265,21 @@ def sync_atomic_artifact(
     # disk and the scan→write TOCTOU window stays closed.
     pending: list[tuple[str, str, AtomicGenerator[T], T, Path, bytes | None]] = []
 
+    # Frontmatter-name dedupe (#1247): ``out_path`` is a pure function of
+    # (target, name), so two canonicals (different stems) declaring the same
+    # ``name:`` would both queue for the SAME runtime file — silent
+    # last-writer-wins, with both writes reported in ``generated`` and the
+    # loser invisible on every surface (diff keys canonicals by parsed name
+    # too). Track the first canonical to claim each name across the whole
+    # fan-out; later claimants from a *different* source path get a typed
+    # ``DUPLICATE_NAME`` skip per target (matching the per-(target, item)
+    # convention of the parse/privacy skips above) plus a once-per-loser
+    # warning. First-seen wins: ``list_canonical`` returns sorted order, so
+    # the winner is deterministic. Same-name flat-vs-dir pairs never reach
+    # here — ``list_canonical`` already collapses those (dir wins).
+    name_owner: dict[str, Path] = {}
+    duplicates_warned: set[Path] = set()
+
     for target in targets:
         gen = adapter.generators.get(target)
         if gen is None:
@@ -350,6 +381,34 @@ def sync_atomic_artifact(
                 )
                 skipped.append((name, reason, code))
                 continue
+            # Frontmatter-name dedupe (#1247) — deliberately AFTER the Gate A
+            # scan, so a secret-bearing duplicate loser still trips the
+            # project_shared all-or-nothing raise (the dedupe must not become
+            # a privacy bypass for canonical bytes), and AFTER the no-fanout
+            # check, so that contract's skip rows are unchanged for duplicate
+            # losers too. BEFORE override resolution — the loser never
+            # writes, and the colliding name resolves the SAME override file
+            # the winner's pass already scans, so no scan surface is lost.
+            owner = name_owner.setdefault(name, item_path)
+            if owner != item_path:
+                if item_path not in duplicates_warned:
+                    duplicates_warned.add(item_path)
+                    adapter.logger.warning(
+                        "duplicate %s name %r: %s already provides it; skipping %s",
+                        adapter.kind,
+                        name,
+                        owner,
+                        item_path,
+                    )
+                skipped.append(
+                    (
+                        name,
+                        f"duplicate name {name!r}: already provided by {owner}; "
+                        f"skipping {item_path}",
+                        skip_codes.DUPLICATE_NAME,
+                    )
+                )
+                continue
             # Resolve per-vendor override and scan its bytes — read once,
             # scan once, hand the bytes to Phase 2. Same TOCTOU close as
             # canonical above.
@@ -412,14 +471,18 @@ def sync_atomic_artifact(
     # which raises before any write; (b) user / project_local partial writes are
     # an intentional contract pinned by ``test_strict_drop_preserves_earlier_writes``
     # (#908); and (c) each ``out_path`` is written exactly once via a single
-    # atomic ``os.replace`` (below), so per-file writes are idempotent /
-    # last-writer-wins with no torn cross-file state to protect (#1123 B3-1).
+    # atomic ``os.replace`` (below), so per-file writes are idempotent with
+    # no torn cross-file state to protect (#1123 B3-1). The exactly-once
+    # part is enforced by the Phase 1 duplicate-name dedupe (#1247) — before
+    # it, two canonicals sharing a frontmatter name queued the same
+    # ``out_path`` twice.
     for target, name, gen, item, out_path, override_bytes in pending:
         content, dropped_fields = gen.render(item)
         if dropped_fields:
             if effective_drop == "error":
                 raise adapter.strict_drop_error_type(
-                    f"strict mode: {target} would drop {dropped_fields} from '{name}'"
+                    f"strict mode: {target} would drop {dropped_fields} from '{name}'",
+                    generated=generated,
                 )
             if effective_drop == "warn":
                 adapter.logger.warning("%s dropped %s from '%s'", target, dropped_fields, name)

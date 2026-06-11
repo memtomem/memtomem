@@ -486,3 +486,111 @@ def test_strict_drop_errors_are_sister_subclasses() -> None:
     assert AgentsStrictDrop is not CommandsStrictDrop
     assert not issubclass(AgentsStrictDrop, CommandsStrictDrop)
     assert not issubclass(CommandsStrictDrop, AgentsStrictDrop)
+
+
+# ── 7. Duplicate frontmatter names (#1247) ────────────────────────────
+
+
+def _parse_inline_name(text: str, *, source: Path, layout: Any = "flat") -> StubItem:
+    """Stub parse variant whose name can DIFFER from the file stem.
+
+    ``_stub_parse_text`` derives the name from ``source.stem``, which makes a
+    cross-file name collision impossible — the very case the dedupe exists
+    for. A leading ``NAME: <name>`` line plays the role of the frontmatter
+    ``name:`` key.
+    """
+    first, _, rest = text.partition("\n")
+    if first.startswith("NAME:"):
+        return StubItem(name=first.split(":", 1)[1].strip(), body=rest)
+    return _stub_parse_text(text, source=source, layout=layout)
+
+
+def _make_inline_name_adapter(
+    generators: dict[str, StubGenerator],
+) -> AtomicSyncAdapter[StubItem]:
+    return AtomicSyncAdapter(
+        kind="agent",
+        artifact_label="agents",
+        list_canonical=_stub_list_canonical,
+        parse_canonical_text=_parse_inline_name,
+        parse_error_type=StubParseError,
+        name_of=lambda item: item.name,
+        generators=generators,
+    )
+
+
+class TestDuplicateNameDedupe:
+    """Two canonicals (different stems) declaring the same name (#1247).
+
+    ``out_path`` is a pure function of (target, name), so pre-dedupe both
+    queued the SAME runtime file — silent last-writer-wins with both writes
+    reported in ``generated``.
+    """
+
+    def test_later_claimant_skipped_first_seen_wins(self, tmp_path: Path) -> None:
+        _seed_canonical(tmp_path, "aaa", "NAME: shared\nbody A")
+        _seed_canonical(tmp_path, "bbb", "NAME: shared\nbody B")
+        adapter = _make_inline_name_adapter({"t1": StubGenerator("out")})
+
+        result = sync_atomic_artifact(adapter, tmp_path)
+
+        out = tmp_path / "out" / "shared.txt"
+        # Exactly one write — pre-fix this was [("t1", out), ("t1", out)].
+        assert result.generated == [("t1", out)]
+        assert out.read_text(encoding="utf-8") == "body A"
+        assert [row[2] for row in result.skipped] == [skip_codes.DUPLICATE_NAME]
+        name, reason, _code = result.skipped[0]
+        assert name == "shared"
+        # The reason names both source paths so the user can rename one.
+        assert "aaa.txt" in reason and "bbb.txt" in reason
+
+    def test_winner_reclaims_name_on_every_target(self, tmp_path: Path) -> None:
+        """The SAME canonical claiming its name on a second target is not a
+        duplicate; the loser is skipped once per target (matching the
+        per-(target, item) convention of the parse/privacy skips)."""
+        _seed_canonical(tmp_path, "aaa", "NAME: shared\nbody A")
+        _seed_canonical(tmp_path, "bbb", "NAME: shared\nbody B")
+        adapter = _make_inline_name_adapter(
+            {"t1": StubGenerator("out1"), "t2": StubGenerator("out2")}
+        )
+
+        result = sync_atomic_artifact(adapter, tmp_path)
+
+        assert sorted(result.generated) == [
+            ("t1", tmp_path / "out1" / "shared.txt"),
+            ("t2", tmp_path / "out2" / "shared.txt"),
+        ]
+        assert [row[2] for row in result.skipped] == [
+            skip_codes.DUPLICATE_NAME,
+            skip_codes.DUPLICATE_NAME,
+        ]
+
+    def test_no_fanout_skip_precedes_duplicate(self, tmp_path: Path) -> None:
+        """Dedupe sits AFTER the no-fanout check: a duplicate loser on a
+        runtime with no fan-out keeps its pinned ``NO_PROJECT_FANOUT`` row
+        (Codex design review on #1247 B4)."""
+        _seed_canonical(tmp_path, "aaa", "NAME: shared\nbody A")
+        _seed_canonical(tmp_path, "bbb", "NAME: shared\nbody B")
+        adapter = _make_inline_name_adapter({"t1": StubGenerator("out", no_fanout=True)})
+
+        result = sync_atomic_artifact(adapter, tmp_path)
+
+        assert result.generated == []
+        assert [row[2] for row in result.skipped] == [
+            skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+            skip_codes.NO_PROJECT_FANOUT_FOR_RUNTIME,
+        ]
+
+    def test_secret_bearing_loser_still_trips_gate_a(self, tmp_path: Path) -> None:
+        """Dedupe sits AFTER Gate A: a duplicate loser carrying a secret must
+        still abort the ``project_shared`` fan-out (all-or-nothing) — the
+        duplicate skip must not become a privacy bypass for canonical bytes."""
+        _seed_canonical(tmp_path, "aaa", "NAME: shared\nclean body")
+        _seed_canonical(tmp_path, "bbb", f"NAME: shared\n{SECRET}")
+        adapter = _make_inline_name_adapter({"t1": StubGenerator("out")})
+
+        with pytest.raises(PrivacyBlockedError):
+            sync_atomic_artifact(adapter, tmp_path, scope="project_shared")
+
+        # Phase 1 raise — nothing landed on disk.
+        assert not (tmp_path / "out").exists()

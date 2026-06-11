@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from memtomem.context import versioning
+from memtomem.context._atomic import atomic_write_text
 from memtomem.context.agents import (
     AGENT_DIR_FILENAME,
     ON_DROP_LEVELS,
@@ -869,7 +870,11 @@ def init_cmd(
                         sections[key] = val
 
         ctx_path.parent.mkdir(parents=True, exist_ok=True)
-        ctx_path.write_text(sections_to_markdown(sections), encoding="utf-8")
+        # Atomic write (#1247 id 19): a crash mid-write must not truncate the
+        # canonical context.md — unlike the runtime fan-out targets it is NOT
+        # regenerable. 0o644: project file meant to be read (and committed)
+        # by other tools, not a 0o600 state file.
+        atomic_write_text(ctx_path, sections_to_markdown(sections), 0o644)
         click.secho(f"Created {CONTEXT_FILENAME}", fg="green")
         click.echo(f"  Sections: {', '.join(sections.keys())}")
         click.echo("  Edit this file, then run 'mm context generate' to sync.")
@@ -1005,7 +1010,9 @@ def generate_cmd(
                 content = gen.generate(sections)
                 out_path = root / gen.output_path
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(content, encoding="utf-8")
+                # Atomic write (#1247 id 19): crash mid-write must not
+                # truncate the user's CLAUDE.md / GEMINI.md / etc.
+                atomic_write_text(out_path, content, 0o644)
                 click.echo(f"  {name:10s}  {gen.output_path}")
     elif not inc:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
@@ -1187,7 +1194,9 @@ def sync_cmd(
 
                     content = gen.generate(sections)
                     out_path = root / gen.output_path
-                    out_path.write_text(content, encoding="utf-8")
+                    # Atomic write (#1247 id 19): crash mid-write must not
+                    # truncate the user's CLAUDE.md / GEMINI.md / etc.
+                    atomic_write_text(out_path, content, 0o644)
                     click.echo(f"  {agent_name:10s}  {gen.output_path}")
             else:
                 click.echo(

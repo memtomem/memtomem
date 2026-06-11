@@ -201,6 +201,7 @@ async def mem_context_init(
             hard-refuses unsafe imports.
     """
     from memtomem.context import _skip_reasons as skip_codes
+    from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import (
         canonical_agent_name,
         extract_agents_to_canonical,
@@ -288,10 +289,15 @@ async def mem_context_init(
                         sections[key] = val
 
         ctx_path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write (#1247 id 19): a crash mid-write must not truncate
+        # the canonical context.md — unlike the runtime fan-out targets it
+        # is NOT regenerable. 0o644: project file meant to be read (and
+        # committed) by other tools, not a 0o600 state file.
         await asyncio.to_thread(
-            ctx_path.write_text,
+            atomic_write_text,
+            ctx_path,
             sections_to_markdown(sections),
-            encoding="utf-8",
+            0o644,
         )
         results.append(f"Created {CONTEXT_FILENAME}")
         results.append(f"  Sections: {', '.join(sections.keys())}")
@@ -557,6 +563,7 @@ async def mem_context_generate(
             with ``allow_host_writes=True`` after surfacing the host
             paths to the user.
     """
+    from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
     from memtomem.context.commands import (
         StrictDropError as CommandStrictDropError,
@@ -588,7 +595,9 @@ async def mem_context_generate(
                 content = gen.generate(sections)
                 out_path = root / gen.output_path
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                await asyncio.to_thread(out_path.write_text, content, encoding="utf-8")
+                # Atomic write (#1247 id 19): crash mid-write must not
+                # truncate the user's CLAUDE.md / GEMINI.md / etc.
+                await asyncio.to_thread(atomic_write_text, out_path, content, 0o644)
                 results.append(f"{name}: {gen.output_path}")
         else:
             results.append(f"{CONTEXT_FILENAME} is empty.")
@@ -877,6 +886,7 @@ async def mem_context_sync(
     flat-layout artifact is isolated as a per-artifact ``skipped`` row, never a
     whole-run error. Mirrors the CLI ``mm context sync --label``.
     """
+    from memtomem.context._atomic import atomic_write_text
     from memtomem.context.agents import StrictDropError, generate_all_agents
     from memtomem.context.commands import (
         StrictDropError as CommandStrictDropError,
@@ -918,7 +928,9 @@ async def mem_context_sync(
                         continue
                     content = gen.generate(sections)
                     out_path = root / gen.output_path
-                    await asyncio.to_thread(out_path.write_text, content, encoding="utf-8")
+                    # Atomic write (#1247 id 19): crash mid-write must not
+                    # truncate the user's CLAUDE.md / GEMINI.md / etc.
+                    await asyncio.to_thread(atomic_write_text, out_path, content, 0o644)
                     results.append(f"{f.agent}: {gen.output_path}")
                     agents_synced.add(f.agent)
             elif not inc:

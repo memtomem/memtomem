@@ -308,6 +308,84 @@ class TestStrictMode:
         assert list(runtime_dir.glob(".beta-full.md.*.tmp")) == []
 
 
+class TestDuplicateAgentName:
+    """Two canonicals (different stems) declaring the same frontmatter
+    ``name:`` (#1247): the engine keeps the first-seen canonical (sorted
+    order) and emits a typed ``duplicate_name`` skip for the later claimant
+    instead of silently last-writer-winning the shared runtime file.
+    """
+
+    def _seed_collision(self, project_root):
+        body = SAMPLE_MINIMAL_AGENT.replace("helper", "code-reviewer")
+        winner = _make_canonical_agent(
+            project_root, "a-reviewer", body.replace("Help with things.", "Body from A.")
+        )
+        loser = _make_canonical_agent(
+            project_root, "b-reviewer", body.replace("Help with things.", "Body from B.")
+        )
+        return winner, loser
+
+    def test_first_seen_wins_single_write(self, tmp_path):
+        self._seed_collision(tmp_path)
+        result = generate_all_agents(tmp_path, runtimes=["claude_agents"])
+
+        out = tmp_path / ".claude/agents/code-reviewer.md"
+        # Exactly one generated tuple — pre-fix both canonicals queued the
+        # same out_path and both writes were reported.
+        assert result.generated == [("claude_agents", out)]
+        text = out.read_text(encoding="utf-8")
+        assert "Body from A." in text
+        assert "Body from B." not in text
+
+        dup_rows = [row for row in result.skipped if row[2] == "duplicate_name"]
+        assert len(dup_rows) == 1
+        name, reason, _code = dup_rows[0]
+        assert name == "code-reviewer"
+        assert "a-reviewer.md" in reason and "b-reviewer.md" in reason
+
+    def test_post_sync_diff_reports_in_sync(self, tmp_path, codex_home):
+        """diff keys canonicals by parsed name with the SAME first-seen
+        precedence as sync — last-wins there would diff the runtime file
+        against the canonical sync never wrote, reporting permanent
+        phantom drift the user cannot clear."""
+        self._seed_collision(tmp_path)
+        generate_all_agents(tmp_path)
+
+        rows = [r for r in diff_agents(tmp_path) if r[1] == "code-reviewer"]
+        assert rows, "expected diff rows for the colliding name"
+        assert {r[2] for r in rows} == {"in sync"}
+
+    def test_parse_failure_does_not_shadow_parsed_name_in_diff(self, tmp_path, codex_home):
+        """Codex impl round (#1247 B4): a later malformed canonical whose
+        FALLBACK name (stem) collides with an earlier parsed ``name:`` must
+        not overwrite the parsed entry with a parse-error row. Sync writes
+        that name fine — the malformed file never claims a name there — so
+        the shadowed row would be permanent phantom "parse error" drift no
+        sync can clear. The malformed file stays loud via the warning log."""
+        _make_canonical_agent(tmp_path, "aaa", SAMPLE_MINIMAL_AGENT.replace("helper", "shared"))
+        _make_canonical_agent(tmp_path, "shared", "no frontmatter at all\n")
+        generate_all_agents(tmp_path)
+
+        rows = [r for r in diff_agents(tmp_path) if r[1] == "shared"]
+        assert rows, "expected diff rows for the shared name"
+        assert {r[2] for r in rows} == {"in sync"}
+
+    def test_parsed_name_recovers_parse_failure_fallback_in_diff(self, tmp_path, codex_home):
+        """Reverse order of the shadow case: the malformed file registers its
+        fallback name FIRST, then a later canonical parses to the same name.
+        The parsed entry wins (pre-existing overwrite-None behavior, now
+        load-bearing for the sync alignment): sync writes the name from the
+        parsed file, so diff must compare against it — not report a stale
+        parse-error row."""
+        _make_canonical_agent(tmp_path, "shared", "no frontmatter at all\n")
+        _make_canonical_agent(tmp_path, "zzz", SAMPLE_MINIMAL_AGENT.replace("helper", "shared"))
+        generate_all_agents(tmp_path)
+
+        rows = [r for r in diff_agents(tmp_path) if r[1] == "shared"]
+        assert rows, "expected diff rows for the shared name"
+        assert {r[2] for r in rows} == {"in sync"}
+
+
 class TestExtractAgentsToCanonical:
     def test_imports_claude_agent(self, tmp_path):
         claude_dir = tmp_path / ".claude/agents"

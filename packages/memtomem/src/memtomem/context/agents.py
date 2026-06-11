@@ -1030,15 +1030,39 @@ def diff_agents(
             text = path.read_bytes().decode("utf-8", errors="replace")
             parsed = _parse_canonical_agent_text(text, source=path, layout=layout)
         except OSError as exc:
-            canonical_index[fallback_name] = None
-            parse_failures[fallback_name] = f"unreadable: {exc}"
+            # Same first-parsed-wins precedence as below (#1247 Codex impl
+            # round): a fallback-name entry must not SHADOW an earlier
+            # successfully parsed canonical that claimed the same effective
+            # name — sync writes that name fine (the unreadable file never
+            # claims a name there), so a None overwrite here would report
+            # permanent phantom "parse error" drift no sync can clear. The
+            # warning below still fires, so the broken file stays loud.
+            if canonical_index.get(fallback_name) is None:
+                canonical_index[fallback_name] = None
+                parse_failures[fallback_name] = f"unreadable: {exc}"
             logger.warning("canonical agent %s unreadable: %s", path, exc)
         except AgentParseError as exc:
-            canonical_index[fallback_name] = None
-            parse_failures[fallback_name] = str(exc)
+            if canonical_index.get(fallback_name) is None:
+                canonical_index[fallback_name] = None
+                parse_failures[fallback_name] = str(exc)
             logger.warning("canonical agent %s failed to parse: %s", path, exc)
         else:
-            canonical_index[parsed.name] = parsed
+            # First-parsed-wins on a frontmatter-name collision, matching the
+            # sync engine's duplicate-name dedupe (#1247) — last-wins here
+            # would diff the runtime file against the canonical sync never
+            # wrote, reporting permanent phantom drift. The loser surfaces in
+            # the sync result as a ``duplicate_name`` skip, not as a diff row
+            # (flat-vs-dir precedent: log-only in diff). A ``None`` entry
+            # (parse-failure fallback name) stays overwritable — pre-existing
+            # interplay, unchanged.
+            if canonical_index.get(parsed.name) is not None:
+                logger.warning(
+                    "duplicate agent name %r: keeping first-seen canonical, ignoring %s",
+                    parsed.name,
+                    path,
+                )
+            else:
+                canonical_index[parsed.name] = parsed
     canonical_names = set(canonical_index)
 
     for gen_name, gen in AGENT_GENERATORS.items():

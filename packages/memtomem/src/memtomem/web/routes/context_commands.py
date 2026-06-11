@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
@@ -20,7 +20,9 @@ from memtomem.context.commands import (
     CANONICAL_COMMAND_ROOT,
     COMMAND_DIR_FILENAME,
     COMMAND_GENERATORS,
+    ON_DROP_LEVELS,
     CommandParseError,
+    StrictDropError,
     canonical_command_name,
     diff_commands,
     extract_commands_to_canonical,
@@ -552,6 +554,19 @@ async def diff_command(
 class SyncRequest(BaseModel):
     on_drop: str = "warn"
 
+    # An out-of-vocabulary value used to slip through to the engine, where it
+    # silently behaved as "ignore" (#1247 id 47) — reject at the boundary
+    # instead (FastAPI renders the ValueError as a native 422). Validates
+    # against the engine's ON_DROP_LEVELS so the vocabulary has one owner
+    # (no Literal duplication; CLI click.Choice and MCP _validate_on_drop
+    # already gate the same way).
+    @field_validator("on_drop")
+    @classmethod
+    def _check_on_drop(cls, value: str) -> str:
+        if value not in ON_DROP_LEVELS:
+            raise ValueError(f"on_drop must be one of {ON_DROP_LEVELS}, got {value!r}")
+        return value
+
 
 @router.post("/context/commands/sync")
 async def sync_commands(
@@ -574,6 +589,23 @@ async def sync_commands(
         raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
     except PrivacyScanError as exc:
         raise HTTPException(422, exc.message) from exc
+    except StrictDropError as exc:
+        # on_drop="error" aborts mid-Phase-2 with earlier writes persisted
+        # (the #908 partial-write boundary). Surface the partial fan-out
+        # instead of an opaque 500 (#1247 id 47): the detail dict follows
+        # the #1210 ``{reason_code, message}`` shape the JS error path
+        # already renders, plus the writes that landed before the abort.
+        # API-only reachability — the UI never sends on_drop="error".
+        raise HTTPException(
+            422,
+            detail={
+                "reason_code": "strict_drop",
+                "message": str(exc),
+                "generated": [
+                    {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in exc.generated
+                ],
+            },
+        ) from exc
     return {
         "generated": [
             {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
