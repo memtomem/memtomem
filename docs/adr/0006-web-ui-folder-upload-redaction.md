@@ -1,13 +1,25 @@
 # ADR-0006: Web UI folder/upload privacy redaction trust-boundary
 
-**Status:** Proposed (deferred pending trigger)
-**Date:** 2026-04-30
+**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import)
+**Date:** 2026-04-30 (amended 2026-06-11)
 **Context:** Issue #585 — PR #575 follow-up review surfaced that
 `packages/memtomem/src/memtomem/privacy.py: DEFAULT_PATTERNS` is enforced
 only on the MCP `mem_add` / `mem_batch_add` paths. The Web UI's
 folder-index and upload surfaces accept content raw, bypassing the LTM
 trust boundary that CLAUDE.md asserts ("STM-bypass must not be
 safety-bypass").
+
+> **Reading note (2026-06-11 amendment).** This ADR layers a 2026-06-11
+> amendment over the original 2026-04-30 analysis. The **Background**, the
+> axis tables (**A–E**), and the **Implementation outline** describe the
+> original state and may cite line numbers or method names that have since
+> drifted (e.g. `index_directory()` was never an `IndexEngine` method — the
+> real entrypoints are `index_path()` / `index_file()` / `index_path_stream()`,
+> all routing through the private `_index_file()`; and `upload_files` has
+> since gained a route-layer guard). The
+> **Implementation status** section is the authoritative current state. The
+> amendment also adds **Axis F** (bundle import) and promotes the ADR to
+> Accepted.
 
 ## Background
 
@@ -46,7 +58,11 @@ plus the same `logger.warning(...)` line, scoped per item-index. Note
 that **`mem_edit` and `mem_delete` are unguarded today** (no
 `privacy.scan()` call, no `force_unsafe` parameter); that is a related
 but separate MCP-path gap and is out of scope for this ADR (which
-addresses only the Web UI bulk surfaces).
+addresses only the Web UI bulk surfaces). *(2026-06-11 update: this
+paragraph reflects the 2026-04-30 state — `mem_edit` has since gained a
+`force_unsafe` parameter and an `enforce_write_guard` call at
+`server/tools/memory_crud.py:496`; treat "unguarded today" as historical
+for `mem_edit`.)*
 
 Compose-mode in the Web UI is covered separately by **#580 (CLOSED)** —
 a client-side regex pre-check against `GET /api/privacy/patterns`
@@ -57,8 +73,8 @@ meaningful.
 The remaining gap is on bulk surfaces, where per-file confirm is not a
 meaningful UX:
 
-| Surface | Endpoint | Handler | Privacy gate today? |
-|---------|----------|---------|---------------------|
+| Surface | Endpoint | Handler | Privacy gate (as of 2026-04-30)? |
+|---------|----------|---------|---------------------------------|
 | Index a registered dir | `POST /api/index` | `trigger_index` (`system.py:835`) | ❌ none |
 | Index a registered dir (SSE) | `GET /api/index/stream` | `index_stream` (`system.py:795`) | ❌ none |
 | Reindex all `memory_dirs` | `POST /api/reindex` | `system.py:688` | ❌ none |
@@ -66,17 +82,19 @@ meaningful UX:
 | Upload + index | `POST /api/upload` | `upload_files` (`system.py:911`) | ❌ none |
 | Compose textarea | client-side, `POST /api/add` | `mem_add` (MCP path) | ✅ via `mem_add` + #580 client warn |
 
-All five bulk surfaces converge into `IndexEngine.index_file()` /
-`index_directory()` (`indexing/engine.py`). None of them call
-`privacy.scan()` before persisting. The unspoken assumption — "Web UI =
+All five bulk surfaces converge into `IndexEngine.index_file()`
+(`indexing/engine.py`). At the 2026-04-30 baseline none of them called
+`privacy.scan()` before persisting (upload has since gained a route-layer
+guard — see "Implementation status"). The unspoken assumption — "Web UI =
 local user, the boundary is at MCP" — breaks at the moment a user runs
 `mm web` on a non-loopback bind, runs it on a shared workstation, or
 indexes a folder that contains a `.env` they didn't realize was there.
 
-## The five decisions this ADR settles
+## The decisions this ADR settles
 
-The issue body enumerated five axes. Each is treated below with options,
-leaning, and rationale.
+The issue body enumerated five axes (A–E). Each is treated below with
+options, leaning, and rationale. The 2026-06-11 amendment adds **Axis F —
+bundle import** after the deferral trigger fired (see "Trigger record").
 
 ### Axis A — Scope
 
@@ -196,12 +214,80 @@ semantics. E.4 (no override) breaks the "intentional debug note about an
 old, rotated key" workflow that ADR-0005's force-reindex contract revealed
 is real.
 
+### Axis F — Bundle import (added 2026-06-11 amendment)
+
+> Folder-index and upload (axes A–E) were the original scope. This amendment
+> adds a sixth surface the ADR never covered: JSON **bundle import**.
+
+Two ingresses share one unguarded code path:
+
+| Surface | Handler | Privacy gate today? |
+|---------|---------|---------------------|
+| `POST /api/export/import` | `web/routes/export.py:import_memories` → `import_chunks` | ❌ none |
+| MCP `mem_import` | `server/tools/export_import.py:mem_import` (`@mcp.tool`) → `import_chunks` | ❌ none |
+
+Both call `tools/export_import.py:import_chunks`, which embeds each record and
+calls `storage.upsert_chunks(...)` with **no** `privacy.enforce_write_guard`
+call. The bypass is today an explicit but under-documented exemption — it
+lives only as a comment in `tests/test_web_invariants_registry.py`
+(`export.import_memories`: "import bypass: archived chunks already passed
+redaction at original write time and re-scanning would corrupt deterministic
+round-trip"). That rationale exists nowhere in an ADR or in production code.
+
+**The flaw in that rationale.** "Archived chunks already passed redaction at
+original write time" only holds for bundles **this instance exported**.
+`import_chunks` accepts *any* JSON bundle — including hand-crafted or
+third-party ones that never crossed our write boundary. The
+round-trip-fidelity justification does not cover foreign bundles, which are
+exactly the untrusted case the redaction invariant exists for.
+
+| Option | Behavior | Round-trip | Closes invariant gap |
+|--------|----------|------------|----------------------|
+| F.1 — ratify exemption | import stays unguarded; document the round-trip rationale here | preserved for all bundles | ❌ foreign bundles still bypass |
+| F.2 — gate all imports | scan each record's `content`; reject on hit unless `force_unsafe` (mirrors `mem_add` / upload: B.2 + E.1) | a secret-bearing self-export needs explicit `force_unsafe` | ✅ |
+| **F.3 — provenance-aware** | exempt bundles carrying a verifiable **local-provenance** marker (this install's own export produced them — see caveat); route all others (absent/invalid marker) through the F.2 gate | preserved for self-exports; foreign bundles gated | ✅ for foreign bundles |
+
+**Decision: F.3.** It keeps deterministic round-trip for the common, trusted
+case (a bundle this instance produced) while closing the only case the
+invariant actually protects (a bundle of unknown provenance). F.1 is rejected:
+it leaves the untrusted case wide open while reading as "we decided this is
+fine." Pure F.2 is the safe fallback if a provenance marker proves too heavy
+for the bundle format, at the cost of forcing `force_unsafe` on legitimate
+self-export round-trips that happen to carry a (rotated, intentional) secret.
+
+**Caveat — what the marker proves.** A bundle-level marker proves *local
+provenance* (this install exported it), **not** that every chunk passed
+redaction. Legacy pre-guard rows, prior `force_unsafe` writes, and content
+from the still-unguarded folder-index path can all sit in the DB and thus
+appear in a self-export. F.3 is therefore an explicit **local-provenance
+round-trip exemption**: we re-import our own export as-is, trusting the local
+user's earlier storage decisions, rather than re-proving redaction on data
+that already lives in this install. The stronger alternative — per-chunk
+redaction provenance before skipping a scan — is heavier and deferred; if
+same-install round-trip of `force_unsafe` / legacy content is judged
+unacceptable, fall back to F.2 (gate everything).
+
+**Provenance marker (implementation detail, deferred to the follow-up PR).**
+`export_chunks` stamps the bundle with a marker proving **local provenance**
+(this install's export produced it) — e.g. an HMAC over the chunk content
+keyed by a per-install secret, or a signed `exported_by` + `redaction_version`
+header. (Per the caveat above, this attests origin, not per-chunk redaction.) Import verifies it: valid → skip re-scan
+(round-trip preserved); absent or invalid → treat as foreign and run the F.2
+gate (`enforce_write_guard` per record, `force_unsafe` to override), across
+**both** `POST /api/export/import` and MCP `mem_import`. The exact marker
+(HMAC vs. signature vs. content-hash manifest) is a follow-up-PR decision;
+this ADR fixes the *policy* (verify-or-gate), not the mechanism.
+
 ## Decision
 
-**Defer.** Leaning toward **A.3 + B.2 + C.1 + D.2 + E.1** when implementation
-is triggered.
+**Accepted (2026-06-11).** Axes **A.3 + B.2 + C.1 + D.2 + E.1** (bulk
+index/upload) stand as the decision; implementation is **partial** — the
+upload surface is guarded, the folder-index surfaces are not yet (see
+"Implementation status"). Adds **Axis F → F.3** (provenance-aware import gate),
+also unbuilt. Originally deferred; promoted on the public `--allow-remote-ui`
+trigger (see "Trigger record").
 
-### Why hold instead of implement now
+### Why this was originally held (historical)
 
 - Single signal (PR #575 follow-up review). Below the "twice = pattern"
   bar that ADR-0004 also held to.
@@ -229,13 +315,49 @@ is triggered.
    workstation, container deploy), the "Web UI = local user" assumption
    no longer holds and the boundary must move with it.
 
+### Trigger record (2026-06-11)
+
+The public trigger #3 is met, so the ADR moves from deferred to Accepted:
+
+- **#3 — `mm web` non-loopback bind documented (public).** `mm web` now ships
+  `--allow-remote-ui` with `_validate_bind` at `cli/web.py:228-244`
+  (RFC #787). The "Web UI = local user" assumption no longer holds
+  universally — once a user opts into `--allow-remote-ui`, the boundary must
+  move with it, exactly as this criterion anticipated. This public flag is
+  sufficient on its own to promote; the amendment relies on it alone.
+
+### Implementation status (2026-06-11)
+
+Axes A–E are decided but only **partially built**:
+
+- **Upload — guarded.** `web/routes/system.py` `upload_files` calls
+  `privacy.enforce_write_guard(..., surface="web_api_upload")` (`:1411`); the
+  Compose/add route guards similarly (`surface="web_api_add"`, `:1526`). These
+  are route-layer guards, **not** the engine-layer
+  `IndexEngine._index_file(force_unsafe=…)` + `PrivacyRejection` seam the
+  "Implementation outline" describes.
+- **Folder-index — not yet guarded.** `trigger_index` (`web/routes/system.py:1282`),
+  `reindex_all` (`:885`), and `memory-dirs/add (auto_index)` (`:664`) call
+  `IndexEngine.index_path(...)`; `index_stream` (`:1252`) calls
+  `index_path_stream(...)`. None of these guard, and `IndexEngine` itself has
+  no `enforce_write_guard` call. The single-chokepoint design from A.3 / B.2 is
+  still unbuilt for these surfaces; the "Implementation outline" below
+  describes that pending work.
+- **Import (Axis F) — not yet built.**
+
+So the B.2 reject behavior is live for upload only. The decision
+(A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands; the folder-index and import gates
+remain to implement.
+
 ## Implementation outline (when triggered)
 
 In rough order, all in `packages/memtomem/src/memtomem/`:
 
 - **PR-A — Engine gate + route wiring.**
-  - Add `force_unsafe: bool = False` to `IndexEngine.index_file()` and
-    `index_directory()` in `indexing/engine.py`. On entry, read file
+  - Enforce at the private `IndexEngine._index_file()` (the per-file method
+    that `index_path()`, `index_file()`, and `index_path_stream()` all funnel
+    through), threading `force_unsafe` from those public entrypoints in
+    `indexing/engine.py`. On entry, read file
     content and call `privacy.scan(content)`; on hit without
     `force_unsafe`, raise a typed `PrivacyRejection` (carrying file path
     + matched pattern indices) and abort that file's index.
@@ -278,10 +400,14 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
   scoped, not persistent rows — promotion to a real audit table is the
   open sub-question in axis E and would carry its own storage
   implications (eviction policy etc.) only if taken.
-- **`IndexEngine` API gains a parameter.** External callers (currently
-  none outside this repo, but the engine is part of the public Python
-  API) get a new keyword. Default `False` keeps the existing behavior
-  for code that doesn't pass it.
+- **`IndexEngine` API *will* gain a parameter (folder-index work, pending).**
+  The outline's `force_unsafe` keyword belongs on the private
+  `IndexEngine._index_file()` (the per-file method that `index_path` /
+  `index_file` / `index_path_stream` all funnel through) and is **not yet
+  built** — upload guards at the route layer instead (see "Implementation
+  status"). When the folder-index gate lands,
+  external callers (the engine is part of the public Python API) get the new
+  keyword; default `False` preserves existing behavior.
 - **Cross-repo sync invariant gets a hook.** STM's secret-class pattern
   additions now have a documented reason to ramp the LTM gap-close in
   the same release window — the asymmetric-sync rule in CLAUDE.md
@@ -290,6 +416,15 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
   MCP rejects, bulk passes. After this ADR's implementation: Compose
   warns (client) + rejects (server, via `mem_add`), bulk rejects, MCP
   rejects. The boundary is uniform.
+- **Bundle import gains a trust check (Axis F → F.3).** Self-exported bundles
+  with a valid provenance marker import unchanged (round-trip preserved);
+  bundles of unknown provenance are scanned per-record and rejected on a
+  secret hit unless `force_unsafe` is passed, across both
+  `POST /api/export/import` and MCP `mem_import`. The
+  `tests/test_web_invariants_registry.py` exemption for
+  `export.import_memories` narrows to the provenance-verified path. Importing a
+  foreign bundle that contains a secret is a behavior change — telegraph it in
+  the next minor's CHANGELOG.
 
 ## Considered & rejected upstream
 
@@ -307,6 +442,10 @@ These were considered when drafting and folded into the leaning above:
 
 ## References
 
+> *Line numbers in the original entries below reflect the 2026-04-30 draft and
+> may have drifted; the "Added by the 2026-06-11 amendment" subsection uses
+> current references.*
+
 - Issue #585 — ADR placeholder, this document is the deliverable.
 - Issue #580 (CLOSED) — Compose-mode client-side warning. Sibling, not
   superseded.
@@ -319,8 +458,9 @@ These were considered when drafting and folded into the leaning above:
 - `packages/memtomem/src/memtomem/server/tools/memory_crud.py:78-104` —
   existing gate model on `mem_add`.
 - `packages/memtomem/src/memtomem/server/tools/memory_crud.py:445-465` —
-  same model on `mem_batch_add`. (`mem_edit` / `mem_delete` are
-  unguarded today — separate MCP-path gap, not addressed here.)
+  same model on `mem_batch_add`. (As of 2026-06-11, `mem_edit` is also guarded
+  — `enforce_write_guard` at `memory_crud.py:496`; `mem_delete` writes no
+  content, so it needs no redaction gate.)
 - `packages/memtomem/src/memtomem/web/routes/system.py:835` —
   `trigger_index` (POST `/api/index`).
 - `packages/memtomem/src/memtomem/web/routes/system.py:795` —
@@ -334,3 +474,21 @@ These were considered when drafting and folded into the leaning above:
 - `packages/memtomem/src/memtomem/web/routes/system.py:278` —
   `GET /api/privacy/patterns` (introduced by #580; client-side regex
   source-of-truth endpoint, may be reused for bulk-surface UI hints).
+
+### Added by the 2026-06-11 amendment (Axis F)
+
+- Axis F (bundle import) — both ingresses reach `import_chunks` with no
+  `enforce_write_guard` call; the gap is verifiable in the sources below.
+- `packages/memtomem/tests/test_web_invariants_registry.py` — the
+  `export.import_memories` exemption being narrowed by Axis F → F.3.
+- `packages/memtomem/src/memtomem/web/routes/export.py` — `import_memories`
+  (`POST /api/export/import`).
+- `packages/memtomem/src/memtomem/server/tools/export_import.py` — MCP
+  `mem_import`, the second ingress to the shared `import_chunks` path.
+- `packages/memtomem/src/memtomem/tools/export_import.py` — `import_chunks`
+  (embed + `upsert_chunks`; no redaction gate today) and `export_chunks` (the
+  marker-stamping site for F.3).
+- `packages/memtomem/src/memtomem/cli/web.py:228-244` — `_validate_bind` /
+  `--allow-remote-ui` (RFC #787), the bind flag that fired trigger #3.
+- ADR-0012 §"Closest existing prior art: bundle v2" — covers *what fields* a
+  bundle serializes; orthogonal to Axis F (redaction *on ingest*). Cross-ref.
