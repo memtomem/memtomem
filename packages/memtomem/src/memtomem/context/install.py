@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from memtomem.context._atomic import (
+    DIRTY_SKIP_SUFFIXES,
     copy_tree_atomic,
     installed_at_from_dest,
     iter_installed_files,
@@ -337,7 +338,7 @@ def _install_asset(
         )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files_written = copy_tree_atomic(src, dest)
+    files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
     installed_at = installed_at_from_dest(dest)
     lock.upsert_entry(
@@ -537,7 +538,7 @@ def _apply_update(
             bak_paths.append(bak)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files_written = copy_tree_atomic(src, dest)
+    files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
     # Mirror semantics (#1247): drop dest files the wiki no longer ships.
     # Membership uses the COPIER's effective file set (iter_installed_files

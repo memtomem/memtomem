@@ -251,7 +251,7 @@ class WikiStore:
         """
         # Deferred import: install.py imports wiki.store at module load;
         # the reverse import here would cycle. Local resolves at call time.
-        from memtomem.context._atomic import copy_tree_atomic
+        from memtomem.context._atomic import DIRTY_SKIP_SUFFIXES, copy_tree_atomic
 
         src_prefix = f"{asset_type}/{name}/"
         inner_relpaths = self.asset_files_at_commit(commit, asset_type, name)
@@ -269,7 +269,7 @@ class WikiStore:
                     capture_output=True,
                 )
                 target.write_bytes(content.stdout)
-            return copy_tree_atomic(tmpdir_path, dest)
+            return copy_tree_atomic(tmpdir_path, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
     def asset_files_at_commit(self, commit: str, asset_type: str, name: str) -> list[str]:
         """List the asset's file relpaths (relative to the asset dir) at *commit*.

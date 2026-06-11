@@ -59,11 +59,13 @@ COPY_SKIP_NAMES: frozenset[str] = frozenset({".git", ".DS_Store", "__pycache__"}
 DIRTY_SKIP_SUFFIXES: frozenset[str] = frozenset({".bak"})
 """Suffix patterns the installed-file walker excludes.
 
-Shared by :func:`copy_tree_atomic` (no-op there in practice; wikis don't
-carry ``.bak`` files under normal operation) and
-:func:`iter_installed_files` (the real filter for
+Shared by :func:`iter_installed_files` (the filter for
 :func:`memtomem.context.dirty.is_asset_dirty` and the install-time
-capture helper).
+capture helper) and, via ``skip_suffixes``, by the wiki-install
+``copy_tree_atomic`` call sites — so the installed surface equals the
+tracked surface and a wiki-shipped ``*.bak`` can neither dodge dirty
+tracking nor collide with the ``--force`` preservation namespace
+(#1247).
 
 ``.bak`` — sibling files created by ``mm context update --force`` to
 preserve user edits before overwriting with wiki bytes. They live in the
@@ -192,6 +194,7 @@ def copy_tree_atomic(
     *,
     mode: int = 0o644,
     skip_top_level: frozenset[str] | None = None,
+    skip_suffixes: frozenset[str] = frozenset(),
 ) -> int:
     """Recursively mirror *src* → *dst*, each file via :func:`atomic_write_bytes`.
 
@@ -205,7 +208,13 @@ def copy_tree_atomic(
     depth. ``skip_top_level`` names additional entries skipped ONLY at the
     root of this call (it is deliberately not propagated into the recursion),
     so e.g. a skill's top-level ``overrides/`` source can be excluded without
-    also dropping a legitimate nested ``scripts/overrides/``. Skipping during
+    also dropping a legitimate nested ``scripts/overrides/``. ``skip_suffixes``
+    excludes entries by suffix at every depth — the wiki-install copies pass
+    :data:`DIRTY_SKIP_SUFFIXES` so the installed surface equals the tracked
+    surface (a wiki-shipped ``*.bak`` would be invisible to the dirty walk,
+    the manifest, and reconcile, and would collide with the ``--force``
+    preservation namespace; #1247). The skills staging mirror deliberately
+    passes nothing — its diff parity compares full trees. Skipping during
     the copy (rather than deleting afterwards) means those bytes never touch
     *dst* — no crash window where they exist, no silent leak if a later delete
     fails. Symlinks are skipped with a warning — this helper promises a
@@ -219,6 +228,8 @@ def copy_tree_atomic(
     for entry in src.iterdir():
         if entry.name in COPY_SKIP_NAMES or entry.name in extra_skip:
             continue
+        if entry.suffix in skip_suffixes:
+            continue
         if entry.is_symlink():
             logger.warning("copy_tree_atomic: skipping symlink %s", entry)
             continue
@@ -228,7 +239,7 @@ def copy_tree_atomic(
             written += 1
         elif entry.is_dir():
             # skip_top_level intentionally not threaded into the recursion.
-            written += copy_tree_atomic(entry, target, mode=mode)
+            written += copy_tree_atomic(entry, target, mode=mode, skip_suffixes=skip_suffixes)
     return written
 
 

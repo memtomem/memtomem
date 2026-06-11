@@ -1241,3 +1241,34 @@ def test_update_removes_file_replaced_by_symlink_upstream(wiki_root: Path, tmp_p
     assert [p.name for p in result.files_removed] == ["link.md"]
     entry = _lock_entry(tmp_path, "skills", "web")
     assert entry["files"] == ["SKILL.md"]
+
+
+def test_wiki_shipped_bak_never_installed_or_stranded(wiki_root: Path, tmp_path: Path) -> None:
+    """#1247 item 10 (re-review major): the wiki-install copies share the
+    walker's suffix skip, so a wiki-shipped ``*.bak`` is never installed —
+    it can't dodge dirty tracking, collide with the ``--force`` preservation
+    namespace, or strand stale bytes when upstream later replaces it."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "leftover.md.bak": b"wiki bak\n"})
+    result = install_skill(tmp_path, "web")
+
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    assert not (dest / "leftover.md.bak").exists()
+    assert result.files_written == 1
+    assert _lock_entry(tmp_path, "skills", "web")["files"] == ["SKILL.md"]
+
+    # Upstream replaces the .bak with a symlink (the re-review repro shape):
+    # update stays clean — nothing was installed, so nothing can go stale.
+    src_bak = wiki_root / "skills" / "web" / "leftover.md.bak"
+    src_bak.unlink()
+    src_bak.symlink_to("SKILL.md")
+    subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "replace bak with symlink"],
+        check=True,
+        capture_output=True,
+    )
+
+    upd = update_skill(tmp_path, "web")
+    assert upd.files_removed == ()
+    assert not (dest / "leftover.md.bak").exists()
