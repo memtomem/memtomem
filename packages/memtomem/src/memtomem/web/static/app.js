@@ -755,11 +755,14 @@ function _tierBadgeHtml(targetScope, { isContextRow = false } = {}) {
   if (isContextRow && targetScope === 'project_local') {
     // The annotation is PROSE, so it goes through i18n (ADR-0001 §5.3 parity
     // gate, #1247 id 58) — unlike the tier token above, which is pinned
-    // verbatim. ``typeof t`` guard mirrors ``_validityBadgeHtml`` below: this
-    // helper can render before i18n.js settles on a cold boot.
-    const annotation = typeof t === 'function'
-      ? t('settings.ctx.tier_no_fanout_annotation')
-      : '(no runtime fan-out)';
+    // verbatim. Two cold-boot windows need the EN-literal fallback: ``t``
+    // not yet defined (``typeof`` guard, mirrors ``_validityBadgeHtml``
+    // below) AND ``t`` defined but the locale fetch not yet resolved — a
+    // missing key makes ``t()`` return the KEY itself, which must never
+    // reach the DOM (CI Playwright caught exactly that race).
+    const annotationKey = 'settings.ctx.tier_no_fanout_annotation';
+    const translated = typeof t === 'function' ? t(annotationKey) : annotationKey;
+    const annotation = translated === annotationKey ? '(no runtime fan-out)' : translated;
     return `${badge}<span class="tier-fanout-annotation">${annotation}</span>`;
   }
   return badge;
