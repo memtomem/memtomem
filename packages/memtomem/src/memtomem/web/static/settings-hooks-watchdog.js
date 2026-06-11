@@ -370,11 +370,62 @@ async function _handleHooksPromoteAll(btn) {
   }
 }
 
+// ADR-0010 §3/§4 read-only banner: memtomem-managed hook entries duplicated
+// across non-active tiers (#1247 id 32). Renders ONLY from GET
+// /api/settings-sync payloads — the POST response also carries
+// ``duplicate_tier_warnings`` but lacks ``target_scope`` (the ``--to=`` hint
+// source), and every POST success path already re-runs loadHooksSync(),
+// whose GET repaints this. Wording mirrors the CLI's ``format_warning``
+// (context/settings_doctor.py) per the sibling hint-parity convention.
+function _renderHooksDuplicateBanner(data) {
+  const el = qs('hooks-duplicate-banner');
+  if (!el) return;
+  const dups = Array.isArray(data && data.duplicate_tier_warnings)
+    ? data.duplicate_tier_warnings
+    : [];
+  if (!dups.length) {
+    el.innerHTML = '';
+    el.hidden = true;
+    return;
+  }
+  const active = escapeHtml(typeof data.target_scope === 'string' ? data.target_scope : '');
+  const rows = dups.map(dup => {
+    const tier = escapeHtml(dup.tier || '');
+    const path = escapeHtml(dup.path || '');
+    const count = Array.isArray(dup.entries) ? dup.entries.length : 0;
+    const cmd = `<code>mm context settings-migrate --from=${tier} --to=${active}</code>`;
+    const key = count === 1
+      ? 'settings.hooks.duplicate_banner_one'
+      : 'settings.hooks.duplicate_banner_many';
+    let text = t(key, { count: String(count), tier, path, cmd, active });
+    if (text === key) {
+      // Cold-boot fallback: the locale fetch may still be in flight, in which
+      // case t() echoes the key — render the EN literal instead (same shape
+      // as the B10 fan-out annotation fix).
+      text = count === 1
+        ? `1 memtomem-managed hook entry already exists in the ${tier} tier (${path}) — run ${cmd} to move it. Active scope: ${active}.`
+        : `${count} memtomem-managed hook entries already exist in the ${tier} tier (${path}) — run ${cmd} to move them. Active scope: ${active}.`;
+    }
+    return `<div class="hooks-duplicate-banner-row">${text}</div>`;
+  }).join('');
+  el.innerHTML = rows;
+  el.hidden = false;
+}
+
 async function loadHooksSync() {
   const seq = ++_hooksSyncSeq;
   const statusEl = qs('hooks-sync-status');
   const contentEl = qs('hooks-sync-content');
   panelLoading(contentEl);
+  // Clear the duplicate-tier banner before ANY await: a tier/project switch
+  // whose reload then fails must not leave the previous scope's banner (and
+  // its now-wrong ``--to=`` hint) on screen (Codex impl-gate catch). The
+  // success path repaints it from the fresh GET payload below. Deliberately
+  // does NOT null ``_hooksLastSyncData`` — that cache also feeds the rule
+  // actions' mtime staleness tokens (``_hooksRuleActionPayload``), and
+  // nulling it mid-reload would let a concurrent rule click bypass the
+  // stale-write gate.
+  _renderHooksDuplicateBanner(null);
   const requestedScope = _hooksCurrentTargetScope();
   let requestedProjectScope = _hooksCurrentProjectScope();
   if (typeof _ctxFetchProjectsData === 'function') {
@@ -460,6 +511,7 @@ async function loadHooksSync() {
       + (showTarget
         ? `<div class="hooks-status-target" data-target-scope="${escapeHtml(scope || '')}">${escapeHtml(targetLabel)} <code>${escapeHtml(data.target_path)}</code></div>`
         : '');
+    _renderHooksDuplicateBanner(data);
 
     // Sync Now is only meaningful when a canonical source exists and has
     // at least one hook rule. Disable the button for empty sources so a
@@ -976,3 +1028,18 @@ async function runWatchdogNow() {
 
 qs('health-watchdog-refresh-btn')?.addEventListener('click', loadWatchdogStatus);
 qs('health-watchdog-run-btn')?.addEventListener('click', runWatchdogNow);
+
+// Re-render the duplicate-tier banner in the new locale from the cached GET
+// payload (the emb-mismatch banner pattern — see
+// feedback_i18n_init_order_race). The rest of the hooks panel repaints on
+// its next load; the banner is the only piece whose copy is otherwise
+// invisible until then. Guarded on the banner being VISIBLE: after a failed
+// reload the banner is cleared while ``_hooksLastSyncData`` still holds the
+// previous scope's payload — re-rendering from that cache would resurrect
+// the stale ``--to=`` hint the reload-start clear just removed.
+window.addEventListener('langchange', () => {
+  const el = qs('hooks-duplicate-banner');
+  if (el && !el.hidden && _hooksLastSyncData) {
+    _renderHooksDuplicateBanner(_hooksLastSyncData);
+  }
+});

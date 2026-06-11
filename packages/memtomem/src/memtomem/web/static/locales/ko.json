@@ -721,6 +721,8 @@
   "settings.hooks.target_label_project_local": "프로젝트(로컬) 대상:",
   "settings.hooks.needs_confirmation_title": "호스트 쓰기 확인이 필요합니다",
   "settings.hooks.needs_confirmation_body": "서버가 다음 대상에 대해 쓰기를 거부했습니다:\n{targets}\n자세한 내용은 `mm settings sync` 로 확인하세요.",
+  "settings.hooks.duplicate_banner_one": "{tier} tier({path})에 memtomem 관리 훅 항목 1개가 이미 있습니다 — {cmd} 로 이동하세요. 활성 스코프: {active}.",
+  "settings.hooks.duplicate_banner_many": "{tier} tier({path})에 memtomem 관리 훅 항목 {count}개가 이미 있습니다 — {cmd} 로 이동하세요. 활성 스코프: {active}.",
   "settings.hooks.badge_in_sync": "동기화됨",
   "settings.hooks.badge_out_of_sync": "불일치",
   "settings.hooks.badge_error": "오류",

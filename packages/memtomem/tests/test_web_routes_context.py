@@ -118,8 +118,14 @@ class TestOverview:
 
     @pytest.mark.anyio
     async def test_overview_detected_runtimes_flags_present_surfaces(
-        self, client: AsyncClient, tmp_path: Path
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        # Isolated home: the settings-availability probe (ADR-0009 §1,
+        # #1247 id 54) reads Path.home(), so a dev machine's real ~/.codex
+        # would otherwise flip the exact-flag assertion below.
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
         # CLAUDE.md (top-level agent file) → claude detected
         (tmp_path / "CLAUDE.md").write_text("# x\n", encoding="utf-8")
         # .gemini/skills/foo/SKILL.md → gemini detected via skill dir
@@ -129,12 +135,17 @@ class TestOverview:
 
         r = await client.get("/api/context/overview")
         runtimes = {r["name"]: r["available"] for r in r.json()["detected_runtimes"]}
+        # gemini is True via BOTH the skill dir and the settings probe
+        # (project .gemini/ dir); claude via CLAUDE.md only.
         assert runtimes == {"claude": True, "gemini": True, "codex": False, "kimi": False}
 
     @pytest.mark.anyio
     async def test_overview_detects_kimi_runtime_config_without_importing_as_context(
-        self, client: AsyncClient, tmp_path: Path
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        home = tmp_path / "home"
+        home.mkdir()
+        set_home(monkeypatch, home)
         kimi_dir = tmp_path / ".kimi"
         kimi_dir.mkdir()
         (kimi_dir / "config.toml").write_text("[hooks]\n", encoding="utf-8")

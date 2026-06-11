@@ -721,6 +721,8 @@
   "settings.hooks.target_label_project_local": "Project (local) target:",
   "settings.hooks.needs_confirmation_title": "Host write requires confirmation",
   "settings.hooks.needs_confirmation_body": "Server refused the write for the following target(s):\n{targets}\nReview via `mm settings sync` for details.",
+  "settings.hooks.duplicate_banner_one": "1 memtomem-managed hook entry already exists in the {tier} tier ({path}) — run {cmd} to move it. Active scope: {active}.",
+  "settings.hooks.duplicate_banner_many": "{count} memtomem-managed hook entries already exist in the {tier} tier ({path}) — run {cmd} to move them. Active scope: {active}.",
   "settings.hooks.badge_in_sync": "in sync",
   "settings.hooks.badge_out_of_sync": "out of sync",
   "settings.hooks.badge_error": "error",
