@@ -37,6 +37,7 @@ __all__ = [
     "LOCKFILE_VERSION",
     "Lockfile",
     "LockfileVersionError",
+    "manifest_from_entry",
     "utcnow_iso8601_z",
 ]
 
@@ -62,6 +63,43 @@ def utcnow_iso8601_z() -> str:
     ``installed_at`` values for ordering.
     """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def manifest_from_entry(entry: dict[str, Any]) -> frozenset[str] | None:
+    """Return the entry's validated file manifest, or ``None``.
+
+    The manifest (``files`` + ``files_commit``, written by install/update
+    since #1247) is honored only when it provably describes the entry's
+    current pin AND is well-formed:
+
+    - ``files_commit`` is a ``str`` equal to ``entry["wiki_commit"]`` —
+      ``upsert_entry`` preserves unknown keys, so an entry rewritten by an
+      *older* tool keeps a stale ``files`` list while the pin moves; the
+      commit pairing detects that.
+    - ``files`` is a list of non-empty ``str`` POSIX relpaths — no leading
+      ``/``, no ``..`` segment, no ``\\``. ``lock.json`` can be git-tracked
+      and hand-merged, so malformed shapes are an ordinary event and must
+      degrade to "no manifest", never crash or mis-answer membership.
+    """
+    files = entry.get("files")
+    files_commit = entry.get("files_commit")
+    wiki_commit = entry.get("wiki_commit")
+    if not isinstance(files_commit, str) or not isinstance(wiki_commit, str):
+        return None
+    if files_commit != wiki_commit:
+        return None
+    if not isinstance(files, list):
+        return None
+    out: set[str] = set()
+    for item in files:
+        if not isinstance(item, str) or not item:
+            return None
+        if item.startswith("/") or "\\" in item:
+            return None
+        if ".." in item.split("/"):
+            return None
+        out.add(item)
+    return frozenset(out)
 
 
 class Lockfile:
@@ -174,14 +212,25 @@ class Lockfile:
         *,
         wiki_commit: str,
         installed_at: str,
+        files: list[str] | None = None,
+        files_commit: str | None = None,
     ) -> None:
         """Insert or replace the ``(asset_type, name)`` entry.
 
         Holds the sidecar lock for the load + mutate + write triple.
         Preserves all unknown sibling and per-entry keys verbatim — only
-        the two mandated fields are written, anything else under
+        the mandated fields are written, anything else under
         ``doc[asset_type][name]`` survives.
+
+        ``files`` / ``files_commit`` (#1247): the installed file manifest,
+        stored sorted. Both must be passed together. Omitting them leaves
+        any previously recorded manifest untouched (same unknown-key
+        preservation contract as the rest of the entry) — consumers detect
+        the resulting staleness via the ``files_commit`` pairing, see
+        :func:`manifest_from_entry`.
         """
+        if (files is None) != (files_commit is None):
+            raise ValueError("files and files_commit must be passed together")
         with _file_lock(_lock_path_for(self._path)):
             doc = self.load()
             section = doc.get(asset_type)
@@ -196,6 +245,9 @@ class Lockfile:
                 merged = {}
             merged["wiki_commit"] = wiki_commit
             merged["installed_at"] = installed_at
+            if files is not None:
+                merged["files"] = sorted(files)
+                merged["files_commit"] = files_commit
             section[name] = merged
 
             atomic_write_bytes(

@@ -431,8 +431,13 @@ def test_cli_install_already_installed_classified_message(
 # ── Lockfile assertions about the live install ──────────────────────────
 
 
-def test_lockfile_contains_only_two_keys_per_entry(wiki_root: Path, tmp_path: Path) -> None:
-    """Schema discipline: install writes exactly the two mandated keys."""
+def test_lockfile_contains_only_mandated_keys_per_entry(wiki_root: Path, tmp_path: Path) -> None:
+    """Schema discipline: install writes exactly the mandated keys.
+
+    ``files`` + ``files_commit`` joined the schema with the #1247
+    deletion-fidelity work (the installed file manifest enabling
+    deletion-dirty detection and update reconciliation).
+    """
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
     project = tmp_path
@@ -441,4 +446,6 @@ def test_lockfile_contains_only_two_keys_per_entry(wiki_root: Path, tmp_path: Pa
     lock = Lockfile.at(project)
     entry = lock.read_entry("skills", "foo")
     assert entry is not None
-    assert set(entry) == {"wiki_commit", "installed_at"}
+    assert set(entry) == {"wiki_commit", "installed_at", "files", "files_commit"}
+    assert entry["files"] == ["SKILL.md"]
+    assert entry["files_commit"] == entry["wiki_commit"]

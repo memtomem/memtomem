@@ -64,8 +64,9 @@ class StatusRow:
     callers abbreviate to 12 for display per ADR-0008 line 149.
     ``installed_at`` is the ISO-8601Z value from the lockfile (whatever
     was last written; not re-validated here). ``dirty_file_count`` is
-    populated only for ``state == "dirty"`` and reflects the count of
-    files with ``mtime > installed_at_epoch``.
+    populated only for ``state == "dirty"`` and counts local edits of
+    both classes: files with ``mtime > installed_at_epoch`` plus
+    manifest-recorded files deleted from disk (#1247).
 
     ``reason`` is a human-readable detail line that the CLI appends in
     parens after the row. Common contents: ``"N file(s) modified
@@ -160,8 +161,8 @@ def classify_status(
             reason = "dest missing"
         elif report.reason == "dirty":
             state = "dirty"
-            dirty_count = len(report.dirty_files)
-            reason = f"{dirty_count} file(s) modified locally"
+            dirty_count = len(report.dirty_files) + len(report.missing_files)
+            reason = report.summary()
         else:  # report.reason == "clean"
             if not wiki_present:
                 state = "stale-pin"

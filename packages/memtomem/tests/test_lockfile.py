@@ -258,3 +258,52 @@ def test_remove_entry_preserves_siblings_and_unknown_fields(tmp_path: Path) -> N
     assert doc["skills"]["beta"]["wiki_commit"] == "b" * 40
     assert doc["skills"]["beta"]["compat"] == "v2"  # unknown per-entry field kept
     assert doc["future_root"] == "preserved"  # unknown top-level field kept
+
+
+# ── B1: file manifest fields (#1247) ─────────────────────────────────────
+
+
+def test_upsert_records_manifest_keys(tmp_path: Path) -> None:
+    """``files`` is stored sorted (POSIX relpaths) with its pairing
+    ``files_commit`` so consumers can detect stale manifests."""
+    lock = Lockfile.at(tmp_path)
+    lock.upsert_entry(
+        "skills",
+        "web",
+        wiki_commit="a" * 40,
+        installed_at="2026-06-11T00:00:00.000000Z",
+        files=["scripts/run.py", "SKILL.md"],
+        files_commit="a" * 40,
+    )
+
+    doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text(encoding="utf-8"))
+    entry = doc["skills"]["web"]
+    assert entry["files"] == ["SKILL.md", "scripts/run.py"]
+    assert entry["files_commit"] == "a" * 40
+
+
+def test_upsert_without_manifest_preserves_existing_manifest_keys(tmp_path: Path) -> None:
+    """Omitting ``files`` on a later upsert must not strip a previously
+    recorded manifest — same unknown-key preservation contract as the rest
+    of the entry; staleness is handled by the ``files_commit`` guard."""
+    lock = Lockfile.at(tmp_path)
+    lock.upsert_entry(
+        "skills",
+        "web",
+        wiki_commit="a" * 40,
+        installed_at="2026-06-11T00:00:00.000000Z",
+        files=["SKILL.md"],
+        files_commit="a" * 40,
+    )
+    lock.upsert_entry(
+        "skills",
+        "web",
+        wiki_commit="b" * 40,
+        installed_at="2026-06-12T00:00:00.000000Z",
+    )
+
+    doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text(encoding="utf-8"))
+    entry = doc["skills"]["web"]
+    assert entry["files"] == ["SKILL.md"]
+    assert entry["files_commit"] == "a" * 40  # now stale — guard ignores it
+    assert entry["wiki_commit"] == "b" * 40

@@ -15,6 +15,7 @@ the strict ``>`` boundary on every platform.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -379,3 +380,93 @@ class TestInstalledAtFromDest:
             f"{actual_mtime} ({f.stat().st_mtime_ns}ns) — the µs ceiling "
             "regressed."
         )
+
+
+# ── B1: manifest-based deletion-dirty (#1247 item 12) ────────────────────
+
+
+def _setup_installed_with_manifest(
+    project: Path,
+    asset_type: str,
+    name: str,
+    files: dict[str, bytes],
+) -> str:
+    """Like :func:`_setup_installed` but records the B1 file manifest
+    (``files`` + ``files_commit`` matching ``wiki_commit``)."""
+    dest = project / ".memtomem" / asset_type / name
+    dest.mkdir(parents=True)
+    for relpath, data in files.items():
+        target = dest / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    installed_at = installed_at_from_dest(dest)
+    Lockfile.at(project).upsert_entry(
+        asset_type,
+        name,
+        wiki_commit="0" * 40,
+        installed_at=installed_at,
+        files=sorted(files),
+        files_commit="0" * 40,
+    )
+    return installed_at
+
+
+def test_user_deleted_file_reports_missing(tmp_path: Path) -> None:
+    """A manifest entry absent from disk classifies the asset dirty with the
+    relpath in ``missing_files`` — pre-B1 this was the guaranteed false
+    negative (clean → silent resurrection on the next update)."""
+    _setup_installed_with_manifest(
+        tmp_path, "skills", "web", {"SKILL.md": b"v1\n", "scripts/run.py": b"r\n"}
+    )
+
+    (tmp_path / ".memtomem" / "skills" / "web" / "scripts" / "run.py").unlink()
+
+    report = is_asset_dirty(tmp_path, "skills", "web")
+    assert report.reason == "dirty"
+    assert report.dirty_files == ()
+    assert [str(p) for p in report.missing_files] == [
+        str(tmp_path / ".memtomem" / "skills" / "web" / "scripts" / "run.py")
+    ]
+
+
+def test_intact_manifest_stays_clean(tmp_path: Path) -> None:
+    """Negative pin: manifest present and every file on disk → clean."""
+    _setup_installed_with_manifest(tmp_path, "skills", "web", {"SKILL.md": b"v1\n"})
+
+    report = is_asset_dirty(tmp_path, "skills", "web")
+    assert report.reason == "clean"
+    assert report.missing_files == ()
+
+
+@pytest.mark.parametrize(
+    "files_value, files_commit_value",
+    [
+        ("not-a-list", "0" * 40),  # files not a list
+        ([42], "0" * 40),  # non-str member
+        (["../escape.md"], "0" * 40),  # path traversal
+        (["/abs.md"], "0" * 40),  # absolute path
+        (["a\\b.md"], "0" * 40),  # backslash separator
+        (["SKILL.md"], "f" * 40),  # files_commit mismatch
+        (["SKILL.md"], None),  # files_commit missing
+    ],
+)
+def test_malformed_or_stale_manifest_ignored(
+    tmp_path: Path, files_value: object, files_commit_value: object
+) -> None:
+    """Codex design-gate M3: lock.json is git-tracked and hand-mergeable —
+    any malformed manifest shape degrades to pre-B1 semantics (no manifest),
+    never a crash or a wrong membership check."""
+    _setup_installed(tmp_path, "skills", "web", {"SKILL.md": b"v1\n"})
+
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    entry = doc["skills"]["web"]
+    entry["files"] = files_value
+    if files_commit_value is not None:
+        entry["files_commit"] = files_commit_value
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    report = is_asset_dirty(tmp_path, "skills", "web")
+    assert report.reason == "clean"
+    assert report.missing_files == ()

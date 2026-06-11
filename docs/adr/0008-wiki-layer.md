@@ -92,7 +92,7 @@ be reconsidered in v2 if a real workflow demands it.
          │  mm context install <type> <name>   (copytree + lockfile pin)
          ▼
 <project>/.memtomem/                 ← project canonical (Invariant 1)
-├── lock.json                        ← { skills: { foo: { wiki_commit, installed_at } } }
+├── lock.json                        ← { skills: { foo: { wiki_commit, installed_at, files, files_commit } } }
 ├── skills/<name>/SKILL.md + overrides/...
 ├── agents/<name>/...
 └── commands/<name>/...
@@ -157,11 +157,13 @@ are out of scope for the install/upgrade lifecycle.
   "skills": {
     "foo": {
       "wiki_commit": "abc123def4567890abc123def4567890abc12345",
-      "installed_at": "2026-04-30T12:34:56Z"
+      "installed_at": "2026-04-30T12:34:56Z",
+      "files": ["SKILL.md", "scripts/run.py"],
+      "files_commit": "abc123def4567890abc123def4567890abc12345"
     }
   },
-  "agents":   { "bar": { "wiki_commit": "…", "installed_at": "…" } },
-  "commands": { "baz": { "wiki_commit": "…", "installed_at": "…" } }
+  "agents":   { "bar": { "wiki_commit": "…", "installed_at": "…", "files": ["…"], "files_commit": "…" } },
+  "commands": { "baz": { "wiki_commit": "…", "installed_at": "…", "files": ["…"], "files_commit": "…" } }
 }
 ```
 
@@ -170,6 +172,20 @@ are out of scope for the install/upgrade lifecycle.
 for readability; the stored value is always full-length to avoid
 abbreviation collisions across projects that share a wiki and to keep
 `git checkout <wiki_commit>` directly usable for forensics.
+
+`files` / `files_commit` (added with the #1247 deletion-fidelity work)
+record the installed file set as sorted POSIX relpaths plus the commit
+they describe. They power deletion-aware dirty detection (a
+manifest-recorded file missing from disk is a local edit) and update
+reconciliation (files the wiki dropped are removed instead of carried
+additively). Consumers MUST honor the manifest only when
+`files_commit == wiki_commit` and the shape validates
+(`manifest_from_entry`): `upsert_entry` preserves unknown keys, so an
+entry rewritten by a pre-manifest tool keeps a stale `files` list while
+the pin moves — the commit pairing detects exactly that. Entries
+without a valid manifest degrade to the pre-manifest behavior
+(deletions invisible to the dirty walk; reconcile falls back to the
+`mtime <= installed_at` guard).
 
 Reads MUST preserve unknown top-level and per-entry fields (round-trip
 through plain `dict` is sufficient). The `version` field is reserved for

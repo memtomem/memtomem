@@ -23,17 +23,27 @@ clobbered") without depending on PR-D's mtime/dirty detection. PR-D's
 
 from __future__ import annotations
 
+import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from memtomem.context._atomic import copy_tree_atomic, installed_at_from_dest
+from memtomem.context._atomic import (
+    DIRTY_SKIP_SUFFIXES,
+    copy_tree_atomic,
+    installed_at_from_dest,
+    iter_installed_files,
+)
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
-from memtomem.context.lockfile import Lockfile, LockfileVersionError
+from memtomem.context.lockfile import Lockfile, LockfileVersionError, manifest_from_entry
 from memtomem.wiki.store import CommitNotFoundError as CommitNotFoundError
 from memtomem.wiki.store import WikiStore
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AlreadyInstalledError",
@@ -81,7 +91,12 @@ class StaleInstallError(RuntimeError):
 
 @dataclass(frozen=True)
 class InstallResult:
-    """Outcome of a successful install. Display-oriented; not persisted."""
+    """Outcome of a successful install. Display-oriented; not persisted.
+
+    ``files_removed`` is populated only by the ``install --all --force``
+    re-extraction path, which reconciles dest-only leftovers against the
+    pinned commit's file set (#1247); a fresh install never removes.
+    """
 
     asset_type: Literal["skills", "agents", "commands"]
     name: str
@@ -89,6 +104,7 @@ class InstallResult:
     installed_at: str
     dest: Path
     files_written: int
+    files_removed: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,10 +116,11 @@ class UpdateResult:
       ``installed_at`` is the value previously recorded (echoed for
       display) and ``files_written``/``bak_files_written`` are empty.
     - ``was_no_op=False`` means a real refresh happened: the dest tree
-      was overwritten with wiki bytes, ``installed_at`` was re-captured
-      after the copy, and any dirty files were preserved at the listed
-      ``.bak`` paths (only populated when ``--force`` was used against
-      a dirty asset).
+      was mirrored to the wiki bytes — files written/overwritten AND
+      dest files absent upstream reconciled away (``files_removed``,
+      #1247) — ``installed_at`` was re-captured after the copy, and any
+      dirty files were preserved at the listed ``.bak`` paths (only
+      populated when ``--force`` was used against a dirty asset).
     """
 
     asset_type: Literal["skills", "agents", "commands"]
@@ -115,6 +132,7 @@ class UpdateResult:
     bak_files_written: tuple[Path, ...]
     dest: Path
     files_written: int
+    files_removed: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -186,6 +204,89 @@ def install_command(
     return _install_asset(project_root, "commands", name, wiki=wiki)
 
 
+def _installed_at_epoch(lock_entry: dict[str, Any]) -> float | None:
+    """Parse the entry's ``installed_at`` to an epoch, or ``None``.
+
+    Tolerant on purpose: the reconcile mtime guard must degrade to "keep"
+    (never delete) when the timestamp is missing or malformed.
+    """
+    raw = lock_entry.get("installed_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
+def _manifest_relpaths(dest: Path) -> list[str]:
+    """The asset's installed file set as sorted POSIX relpaths.
+
+    Walks via :func:`iter_installed_files` — the exact set the dirty
+    checker and ``installed_at`` capture observe, so the recorded manifest
+    can never disagree with the walker about membership.
+    """
+    return sorted(p.relative_to(dest).as_posix() for p in iter_installed_files(dest))
+
+
+def _reconcile_removed_files(
+    dest: Path,
+    *,
+    src_has: Callable[[str], bool],
+    old_installed_at_epoch: float | None,
+    baked: frozenset[Path],
+    manifest: frozenset[str] | None,
+) -> tuple[Path, ...]:
+    """Delete dest files absent from the copy source (#1247).
+
+    ``copy_tree_atomic`` is an additive mirror; without this pass a file
+    removed upstream survives in dest forever while the lockfile claims
+    the new commit and status reports ``ok``. Decision rule per dest-only
+    file (walked via :func:`iter_installed_files`, so ``.bak`` siblings
+    and skip-listed names are never candidates):
+
+    1. ``manifest`` valid and relpath **not** recorded → user-added file:
+       keep (never silently delete user-authored content).
+    2. Recorded in the manifest (or no usable manifest — legacy entry):
+       delete when its mtime is ``<= old_installed_at_epoch`` (provably
+       untouched bytes from a previous wiki copy) **or** when it is in
+       ``baked`` (the ``--force`` path just preserved its ``.bak``).
+    3. Anything else (fresh mtime, no ``.bak``, provenance unknown) →
+       keep with a warning. Unreachable through the normal classify →
+       refuse/--force flow, but the ``--all`` confirm gap can race edits
+       past a stale dirty report — when in doubt, never delete.
+
+    Directories the deletions empty are pruned bottom-up (``dest`` itself
+    always survives). Returns the removed paths.
+    """
+    removed: list[Path] = []
+    for f in list(iter_installed_files(dest)):
+        rel = f.relative_to(dest).as_posix()
+        if src_has(rel):
+            continue
+        if manifest is not None and rel not in manifest:
+            logger.debug("reconcile: keeping user-added file %s", f)
+            continue
+        provably_old = (
+            old_installed_at_epoch is not None and f.stat().st_mtime <= old_installed_at_epoch
+        )
+        if not (provably_old or f in baked):
+            logger.warning("reconcile: keeping dest-only file with fresh mtime and no .bak: %s", f)
+            continue
+        f.unlink(missing_ok=True)
+        removed.append(f)
+
+    for f in removed:
+        parent = f.parent
+        while parent != dest:
+            try:
+                parent.rmdir()
+            except OSError:
+                break  # non-empty (or already gone) — stop pruning this chain
+            parent = parent.parent
+    return tuple(removed)
+
+
 def _install_asset(
     project_root: Path | str,
     asset_type: str,
@@ -237,7 +338,7 @@ def _install_asset(
         )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files_written = copy_tree_atomic(src, dest)
+    files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
     installed_at = installed_at_from_dest(dest)
     lock.upsert_entry(
@@ -245,6 +346,8 @@ def _install_asset(
         validated,
         wiki_commit=wiki_commit,
         installed_at=installed_at,
+        files=_manifest_relpaths(dest),
+        files_commit=wiki_commit,
     )
 
     return InstallResult(
@@ -408,17 +511,19 @@ def _apply_update(
     each dirty file is preserved alongside the wiki bytes as
     ``<file>.bak`` before the copy. ``shutil.copy2`` is used so the
     user's edit-mtime survives onto the ``.bak`` (atomic_write_bytes
-    would lose it). ``installed_at`` is captured *after* the copy
-    completes, mirroring the C2a (#630) install invariant so a
-    follow-up dirty check can't false-positive on this update's own
-    writes.
+    would lose it). After the copy, dest files absent from the wiki
+    source are reconciled away (:func:`_reconcile_removed_files`,
+    #1247) so the refreshed tree mirrors the wiki instead of growing
+    additively. ``installed_at`` is captured *after* copy + reconcile,
+    mirroring the C2a (#630) install invariant so a follow-up dirty
+    check can't false-positive on this update's own writes.
     """
     if dirty_report.reason == "dirty" and not force:
         raise StaleInstallError(
-            f"{asset_type}/{name}: {len(dirty_report.dirty_files)} file(s) "
-            f"modified locally since install at {dirty_report.installed_at}; "
+            f"{asset_type}/{name}: {dirty_report.summary()} "
+            f"since install at {dirty_report.installed_at}; "
             f"pass --force to overwrite "
-            f"(each dirty file gets a .bak sibling)"
+            f"(each modified file gets a .bak sibling; deleted files are restored)"
         )
 
     bak_paths: list[Path] = []
@@ -433,7 +538,28 @@ def _apply_update(
             bak_paths.append(bak)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files_written = copy_tree_atomic(src, dest)
+    files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
+
+    # Mirror semantics (#1247): drop dest files the wiki no longer ships.
+    # Membership uses the COPIER's effective file set (iter_installed_files
+    # shares copy_tree_atomic's skip rules) — a bare (src / rel).is_file()
+    # would count a symlink the copier skips as present, stranding the old
+    # regular file in dest (Codex implementation-gate M1). The guard epoch
+    # is the PRE-update install timestamp (the same basis ``dirty_report``
+    # classified against) — the freshly captured value below is >= every
+    # current mtime and would approve deleting anything.
+    src_files = {p.relative_to(src).as_posix() for p in iter_installed_files(src)}
+    files_removed = _reconcile_removed_files(
+        dest,
+        src_has=lambda rel: rel in src_files,
+        old_installed_at_epoch=_installed_at_epoch(lock_entry),
+        baked=(
+            frozenset(dirty_report.dirty_files)
+            if force and dirty_report.reason == "dirty"
+            else frozenset()
+        ),
+        manifest=manifest_from_entry(lock_entry),
+    )
 
     installed_at = installed_at_from_dest(dest)
     lock = Lockfile.at(project_root)
@@ -442,6 +568,8 @@ def _apply_update(
         name,
         wiki_commit=wiki_commit,
         installed_at=installed_at,
+        files=_manifest_relpaths(dest),
+        files_commit=wiki_commit,
     )
 
     old_wiki_commit = cast(str, lock_entry.get("wiki_commit", ""))
@@ -456,6 +584,7 @@ def _apply_update(
         bak_files_written=tuple(bak_paths),
         dest=dest,
         files_written=files_written,
+        files_removed=files_removed,
     )
 
 
@@ -565,7 +694,7 @@ def _classify_for_all_update(
         report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
         if report.reason == "dirty":
             state: Literal["update", "unchanged", "refuse", "error"] = "refuse"
-            reason: str | None = f"{len(report.dirty_files)} file(s) modified locally since install"
+            reason: str | None = f"{report.summary()} since install"
         else:
             state = "update"
             reason = None
@@ -708,7 +837,7 @@ def _classify_for_install_all(
         report = is_asset_dirty(project_root, asset_type, name, lock_entry=entry)
         if report.reason == "dirty":
             state: Literal["install", "skip", "refuse", "orphan", "error"] = "refuse"
-            reason: str | None = f"{len(report.dirty_files)} file(s) modified locally"
+            reason: str | None = report.summary()
         else:
             # clean / missing_dest / never_installed all collapse to "skip" here:
             # missing_dest is impossible (we already saw dest.exists()), and
@@ -777,9 +906,11 @@ def _apply_pinned_install(
         )
 
     if classification.state == "refuse" and not force:
+        refuse_report = classification.dirty_report
+        local_edits = refuse_report.summary() if refuse_report is not None else "local edits"
         raise StaleInstallError(
-            f"{asset_type}/{name}: local edits would be clobbered; "
-            f"pass --force to overwrite (each dirty file gets a .bak sibling)"
+            f"{asset_type}/{name}: {local_edits} would be clobbered; "
+            f"pass --force to overwrite (each modified file gets a .bak sibling)"
         )
 
     bak_paths: list[Path] = []
@@ -793,6 +924,27 @@ def _apply_pinned_install(
 
     files_written = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
 
+    # Mirror semantics (#1247): a re-extraction over an existing dest must
+    # also retire dest-only leftovers (pre-B1 additive-update residue,
+    # carried files from a different pin). Membership comes from the pin's
+    # ls-tree set — the extraction tmpdir is internal to
+    # ``copy_asset_at_commit`` (design-gate M2).
+    files_removed: tuple[Path, ...] = ()
+    if classification.state in ("skip", "refuse"):
+        expected = set(wiki.asset_files_at_commit(pin, asset_type, name))
+        entry = classification.lock_entry or {}
+        files_removed = _reconcile_removed_files(
+            dest,
+            src_has=lambda rel: rel in expected,
+            old_installed_at_epoch=_installed_at_epoch(entry),
+            baked=(
+                frozenset(classification.dirty_report.dirty_files)
+                if classification.state == "refuse" and classification.dirty_report is not None
+                else frozenset()
+            ),
+            manifest=manifest_from_entry(entry),
+        )
+
     installed_at = installed_at_from_dest(dest)
     lock = Lockfile.at(project_root)
     # CRITICAL: wiki_commit stays at the pin we just restored to —
@@ -802,6 +954,8 @@ def _apply_pinned_install(
         name,
         wiki_commit=pin,
         installed_at=installed_at,
+        files=_manifest_relpaths(dest),
+        files_commit=pin,
     )
 
     return InstallResult(
@@ -811,4 +965,5 @@ def _apply_pinned_install(
         installed_at=installed_at,
         dest=dest,
         files_written=files_written,
+        files_removed=files_removed,
     )

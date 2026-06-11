@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from memtomem.context._atomic import iter_installed_files
-from memtomem.context.lockfile import Lockfile
+from memtomem.context.lockfile import Lockfile, manifest_from_entry
 
 __all__ = [
     "DirtyReason",
@@ -50,11 +50,12 @@ DirtyReason = Literal["clean", "dirty", "never_installed", "missing_dest"]
 class DirtyReport:
     """Outcome of a dirty check on a single installed asset.
 
-    - ``reason="clean"`` — dest exists and every checked file's mtime is
-      ``<= installed_at_epoch``.
+    - ``reason="clean"`` — dest exists, every checked file's mtime is
+      ``<= installed_at_epoch``, and no manifest entry is missing.
     - ``reason="dirty"`` — at least one checked file has
-      ``mtime > installed_at_epoch``; the offending paths are in
-      ``dirty_files``.
+      ``mtime > installed_at_epoch`` (paths in ``dirty_files``) and/or at
+      least one manifest-recorded file is gone from disk (paths in
+      ``missing_files``) — a user deletion is a local edit too (#1247).
     - ``reason="never_installed"`` — no usable lockfile entry;
       ``installed_at`` is ``None`` and ``dirty_files`` / ``checked_files``
       are empty. Returned for both "no entry at all" and "entry exists
@@ -63,12 +64,31 @@ class DirtyReport:
     - ``reason="missing_dest"`` — lockfile entry exists but
       ``<project>/.memtomem/<type>/<name>/`` was deleted; ``installed_at``
       is the lockfile value, ``dirty_files`` empty.
+
+    ``missing_files`` is populated only when the entry carries a valid
+    file manifest (see
+    :func:`memtomem.context.lockfile.manifest_from_entry`); legacy entries
+    keep the pre-manifest behavior (deletions invisible).
     """
 
     reason: DirtyReason
     installed_at: str | None
     dirty_files: tuple[Path, ...]
     checked_files: int
+    missing_files: tuple[Path, ...] = ()
+
+    def summary(self) -> str:
+        """Human-readable local-edit summary for messages and status rows.
+
+        Covers both edit classes so a missing-only report can't render as
+        "0 file(s) modified locally" (#1247 design-gate M4).
+        """
+        parts: list[str] = []
+        if self.dirty_files:
+            parts.append(f"{len(self.dirty_files)} file(s) modified locally")
+        if self.missing_files:
+            parts.append(f"{len(self.missing_files)} file(s) deleted locally")
+        return " and ".join(parts) if parts else "0 file(s) changed"
 
 
 def is_asset_dirty(
@@ -123,14 +143,25 @@ def is_asset_dirty(
 
     dirty: list[Path] = []
     checked = 0
+    present_rels: set[str] = set()
     for file_path in iter_installed_files(dest):
         checked += 1
+        present_rels.add(file_path.relative_to(dest).as_posix())
         if file_path.stat().st_mtime > installed_at_epoch:
             dirty.append(file_path)
 
+    # Deletion detection (#1247): a manifest-recorded file gone from disk
+    # is a local edit. Valid-manifest entries only — legacy/stale/malformed
+    # manifests degrade to the pre-manifest behavior (deletions invisible).
+    missing: list[Path] = []
+    manifest = manifest_from_entry(lock_entry)
+    if manifest is not None:
+        missing = [dest / rel for rel in sorted(manifest - present_rels)]
+
     return DirtyReport(
-        reason="dirty" if dirty else "clean",
+        reason="dirty" if (dirty or missing) else "clean",
         installed_at=installed_at,
         dirty_files=tuple(dirty),
         checked_files=checked,
+        missing_files=tuple(missing),
     )
