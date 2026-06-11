@@ -574,7 +574,9 @@ async def sync_agents(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = generate_all_agents(project_root, on_drop=on_drop)
+                result = generate_all_agents(
+                    project_root, on_drop=on_drop, surface="web_context_agents_sync"
+                )
     except TimeoutError:
         raise HTTPException(503, "Agents sync timed out — another sync may be in progress")
     except PrivacyScanError as exc:

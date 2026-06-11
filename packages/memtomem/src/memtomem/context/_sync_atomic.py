@@ -166,6 +166,7 @@ def sync_atomic_artifact(
     on_drop: str = "ignore",
     *,
     scope: TargetScope = "project_shared",
+    surface: str = "cli_context_sync",
 ) -> AtomicSyncResult:
     """Fan out every canonical artifact to the requested runtimes (atomic-file shape).
 
@@ -183,6 +184,16 @@ def sync_atomic_artifact(
         scope: ADR-0011 PR-E3 — selects canonical root and runtime fan-out
             destination. Default ``project_shared`` preserves pre-PR-E3
             behavior.
+        surface: Audit identifier forwarded verbatim to
+            :func:`privacy.enforce_write_guard` via both
+            :func:`scan_text_content` sites (canonical bytes AND
+            per-vendor override bytes) — it dimensions the privacy
+            ``record()`` counter and tags the blocked/bypassed audit
+            log line. Callers pass their own literal: the CLI relies on
+            the default ``"cli_context_sync"``, the Web sync routes
+            pass ``"web_context_<kind>_sync"``, and the MCP tools pass
+            ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246
+            — sibling of the import-side #1242 fix).
 
     Returns:
         :class:`AtomicSyncResult` carrying ``generated``, ``dropped``, and
@@ -326,7 +337,7 @@ def sync_atomic_artifact(
             file_scan = scan_text_content(
                 item_text,
                 source_path=scan_source,
-                surface="cli_context_sync",
+                surface=surface,
                 scope=scope,
                 project_root=project_root,
             )
@@ -371,7 +382,7 @@ def sync_atomic_artifact(
                     file_scan = scan_text_content(
                         override_text,
                         source_path=override_path,
-                        surface="cli_context_sync",
+                        surface=surface,
                         scope=scope,
                         project_root=project_root,
                     )

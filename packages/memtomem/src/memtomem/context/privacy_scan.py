@@ -4,10 +4,14 @@ Sibling of :mod:`memtomem.context._gate_a` (the runtime → canonical
 import-side gate). Both share :func:`memtomem.privacy.enforce_write_guard`
 underneath, but the two surfaces differ on:
 
-* ``surface=`` string — ``"cli_context_sync"`` vs the import side's
-  caller-supplied surface (default ``"cli_context_init"``; the Web import
-  routes pass ``"web_context_<kind>_import"`` and the MCP tool passes
-  ``"mcp_context_init"`` — #1229).
+* ``surface=`` string — caller-supplied on both sides. Sync defaults to
+  ``"cli_context_sync"`` (migrate: ``"cli_context_migrate"``); the Web
+  sync routes pass ``"web_context_<kind>_sync"`` and the MCP tools pass
+  ``"mcp_context_generate"`` / ``"mcp_context_sync"`` /
+  ``"mcp_context_artifact_migrate"`` (#1246). The import side defaults
+  to ``"cli_context_init"``; the Web import routes pass
+  ``"web_context_<kind>_import"`` and the MCP tool passes
+  ``"mcp_context_init"`` (#1229).
 * ``force_unsafe`` valve — sync has none (ADR §5: canonical → runtime
   fan-out is a write-amplifying loop, so a single bypass-flagged content
   would propagate to every registered runtime; the ADR explicitly
@@ -147,7 +151,8 @@ def scan_artifact_tree(
             blocks — replacement chars (U+FFFD) cannot themselves
             match the ASCII-only regex pattern set, so this does not
             create false positives on benign binary assets.
-        surface: Audit-log surface tag — typically ``"cli_context_sync"``.
+        surface: Audit-log surface tag — e.g. ``"cli_context_sync"``,
+            ``"web_context_skills_sync"``, ``"mcp_context_artifact_migrate"``.
             Used by :func:`enforce_write_guard` to attribute the outcome
             to the calling code path.
         scope: Destination scope. Determines block-vs-skip semantics

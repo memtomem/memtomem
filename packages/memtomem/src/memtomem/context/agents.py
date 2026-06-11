@@ -733,6 +733,7 @@ def generate_all_agents(
     *,
     scope: TargetScope = "project_shared",
     label: str | None = None,
+    surface: str = "cli_context_sync",
 ) -> AgentSyncResult:
     """Fan out every canonical sub-agent to the requested runtimes.
 
@@ -755,6 +756,11 @@ def generate_all_agents(
             the working ``agent.md``. ``None`` / ``"latest"`` preserve today's
             behavior byte-for-byte (the working file). Per-artifact resolution
             failures isolate as skips; they never abort the whole fan-out.
+        surface: Gate A audit identifier, forwarded verbatim to the
+            engine's privacy scans. The CLI relies on the default
+            ``"cli_context_sync"``; the Web sync route passes
+            ``"web_context_agents_sync"`` and the MCP tools pass
+            ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246).
     """
     adapter = _AGENT_ADAPTER
     if label is not None and label != "latest":
@@ -772,6 +778,7 @@ def generate_all_agents(
             strict=strict,
             on_drop=on_drop,
             scope=scope,
+            surface=surface,
         ),
     )
 

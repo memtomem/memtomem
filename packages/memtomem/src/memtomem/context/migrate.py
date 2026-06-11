@@ -905,6 +905,7 @@ def migrate_scope(
     to_scope: TargetScope,
     project_root: Path,
     apply_: bool,
+    surface: str = "cli_context_migrate",
 ) -> MigrateScopeResult:
     """Move a canonical artifact between ADR-0011 scope tiers.
 
@@ -934,6 +935,13 @@ def migrate_scope(
     10. Best-effort cleanup of stale src runtime fan-out targets
         (``~/.claude/agents/<name>.md`` etc.) — outside the lock so a
         partial cleanup failure does not roll back the canonical move.
+
+    Args:
+        surface: Gate A audit identifier forwarded to the step-7
+            staging scan. The CLI relies on the default
+            ``"cli_context_migrate"``; the MCP tool passes
+            ``"mcp_context_artifact_migrate"`` (#1246 — previously
+            MCP-driven moves were misattributed to the CLI literal).
 
     Returns:
         :class:`MigrateScopeResult` with ``moved=True`` on apply
@@ -998,7 +1006,7 @@ def migrate_scope(
             if to_scope == "project_shared":
                 scan = scan_artifact_tree(
                     staging,
-                    surface="cli_context_migrate",
+                    surface=surface,
                     scope=to_scope,
                     project_root=project_root,
                     on_blocked="fail_fast",

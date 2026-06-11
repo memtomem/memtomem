@@ -404,3 +404,106 @@ async def test_mem_context_init_uses_mcp_surface(
     assert out.startswith("Imported") or "Imported" in out
     assert surfaces, "Gate A never ran"
     assert set(surfaces) == {"mcp_context_init"}
+
+
+# ── #1246 — Gate A sync/migrate surface attribution ──────────────────────
+
+
+def _capture_sync_surfaces(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Spy the sync-side privacy chokepoint and record every ``surface``.
+
+    ``privacy_scan`` funnels all three sync engines (the skills staging
+    walk, the atomic agents/commands engine, ``migrate_scope``'s staging
+    scan) through ``privacy.enforce_write_guard`` — one spy covers them
+    all. Sibling of the import-side ``_gate_a`` spy above (#1229).
+    """
+    from memtomem.privacy import WriteGuardResult
+
+    surfaces: list[str] = []
+
+    def spy(content_text, *, surface, **kw):
+        surfaces.append(surface)
+        return WriteGuardResult("pass", [])
+
+    monkeypatch.setattr("memtomem.context.privacy_scan.privacy.enforce_write_guard", spy)
+    return surfaces
+
+
+def _seed_shared_artifacts(project: Path) -> None:
+    skill = project / ".memtomem" / "skills" / "sk"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# sk\n", encoding="utf-8")
+    agents = project / ".memtomem" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "agt.md").write_text(_clean_agent_body("agt"), encoding="utf-8")
+    commands = project / ".memtomem" / "commands"
+    commands.mkdir(parents=True)
+    (commands / "cmd.md").write_text("---\ndescription: example\n---\nbody\n", encoding="utf-8")
+
+
+@pytest.mark.anyio
+async def test_mem_context_generate_uses_mcp_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate A audit attribution (#1246): sync-direction scans driven by the
+    MCP generate tool must reach the privacy audit log as
+    ``mcp_context_generate``, not the CLI literal ``cli_context_sync``."""
+    project = _make_project(tmp_path, monkeypatch)
+    set_home(monkeypatch, tmp_path / "home")
+    _seed_shared_artifacts(project)
+    surfaces = _capture_sync_surfaces(monkeypatch)
+
+    out = await mem_context_generate(include="skills,agents,commands")
+
+    assert surfaces, f"Gate A never ran: {out}"
+    assert set(surfaces) == {"mcp_context_generate"}
+
+
+@pytest.mark.anyio
+async def test_mem_context_sync_uses_mcp_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same as the generate pin, but through ``mem_context_sync`` — the two
+    tools call the same engines and must remain distinguishable in the
+    audit log (the surface matches the tool name, #1242 convention)."""
+    project = _make_project(tmp_path, monkeypatch)
+    set_home(monkeypatch, tmp_path / "home")
+    _seed_shared_artifacts(project)
+    surfaces = _capture_sync_surfaces(monkeypatch)
+
+    out = await mem_context_sync(include="skills,agents,commands")
+
+    assert surfaces, f"Gate A never ran: {out}"
+    assert set(surfaces) == {"mcp_context_sync"}
+
+
+@pytest.mark.anyio
+async def test_mem_context_artifact_migrate_uses_mcp_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope-tier moves driven by the MCP tool must attribute their Gate A
+    staging scan to ``mcp_context_artifact_migrate`` (the tool name), not
+    ``cli_context_migrate``."""
+    from memtomem.server.tools.context import mem_context_artifact_migrate
+
+    project = _make_project(tmp_path, monkeypatch)
+    set_home(monkeypatch, tmp_path / "home")
+    user_agents = canonical_artifact_dir("agents", "user", project)
+    user_agents.mkdir(parents=True, exist_ok=True)
+    (user_agents / "agt.md").write_text(_clean_agent_body("agt"), encoding="utf-8")
+    surfaces = _capture_sync_surfaces(monkeypatch)
+
+    out = await mem_context_artifact_migrate(
+        asset_type="agents",
+        name="agt",
+        from_scope="user",
+        to_scope="project_shared",
+        apply=True,
+        confirm_project_shared=True,
+    )
+
+    assert (project / ".memtomem" / "agents" / "agt.md").exists(), out
+    assert surfaces == ["mcp_context_artifact_migrate"]
