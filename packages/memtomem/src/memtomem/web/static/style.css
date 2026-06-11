@@ -4481,8 +4481,6 @@ button.ctx-runtime-chip--greyed:focus-visible {
 .ctx-edit-area { width: 100%; min-height: 200px; font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; padding: 12px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--bg); color: var(--text); resize: vertical; box-sizing: border-box; }
 .ctx-edit-actions { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; }
 
-.ctx-dropped-chip { display: inline-block; font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; background: rgba(224, 90, 90, 0.12); color: var(--danger); margin: 0 4px 4px 0; }
-
 .ctx-import-result { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .ctx-import-priority { font-size: 0.78rem; color: var(--muted); margin-bottom: 8px; font-style: italic; }
 .ctx-import-item { padding: 4px 0; font-size: 0.85rem; }
@@ -4577,6 +4575,14 @@ button.ctx-runtime-chip--greyed:focus-visible {
   font-size: 0.85rem;
   margin: 24px 0;
 }
+
+.path-picker-error {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 24px 0;
+}
+.path-picker-error p { margin: 0 0 8px; }
 
 /* ═══════════════════════════════════════════════════════════════
    Mobile (<=520px) Settings + Context Gateway stacking — issue #1072

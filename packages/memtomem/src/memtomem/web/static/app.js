@@ -753,7 +753,17 @@ function _tierBadgeHtml(targetScope, { isContextRow = false } = {}) {
   const cls = `badge badge-tier badge-tier--${targetScope}`;
   const badge = ` <span class="${cls}" data-tier="${targetScope}">${targetScope}</span>`;
   if (isContextRow && targetScope === 'project_local') {
-    return `${badge}<span class="tier-fanout-annotation">(no runtime fan-out)</span>`;
+    // The annotation is PROSE, so it goes through i18n (ADR-0001 §5.3 parity
+    // gate, #1247 id 58) — unlike the tier token above, which is pinned
+    // verbatim. Two cold-boot windows need the EN-literal fallback: ``t``
+    // not yet defined (``typeof`` guard, mirrors ``_validityBadgeHtml``
+    // below) AND ``t`` defined but the locale fetch not yet resolved — a
+    // missing key makes ``t()`` return the KEY itself, which must never
+    // reach the DOM (CI Playwright caught exactly that race).
+    const annotationKey = 'settings.ctx.tier_no_fanout_annotation';
+    const translated = typeof t === 'function' ? t(annotationKey) : annotationKey;
+    const annotation = translated === annotationKey ? '(no runtime fan-out)' : translated;
+    return `${badge}<span class="tier-fanout-annotation">${annotation}</span>`;
   }
   return badge;
 }

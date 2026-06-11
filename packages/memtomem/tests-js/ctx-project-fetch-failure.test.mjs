@@ -2,7 +2,9 @@
  * ``GET /api/context/projects`` instead of silently collapsing them all
  * onto the Server-CWD-only fallback.
  *
- *   - 404 / network throw     → silent fallback (legacy/older-deploy contract)
+ *   - 404                     → silent fallback (legacy/older-deploy contract)
+ *   - network throw           → silent fallback, but NOT authoritative — the
+ *                               persisted active scope survives (#1247 id 20)
  *   - 5xx / non-404 4xx       → toast + fallback (endpoint failing)
  *   - 200 + malformed JSON    → toast + fallback (response unreadable)
  *   - 200 + unexpected shape  → toast + fallback (parses but not {scopes:[…]})
@@ -263,6 +265,39 @@ describe('_ctxFetchProjects — active scope normalize gated on failure shape (#
     respond = () => jsonRes({ scopes: REAL_SCOPES });
     const recovered = await window._ctxFetchProjects();
     expect(recovered.scopes).toHaveLength(2);
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+  });
+
+  it('keeps the persisted active scope across a network throw and restores it on recovery', async () => {
+    // #1247 id 20: a fetch() REJECTION (server restart / sleep-wake / offline)
+    // was bucketed with the silent 404 — warn stays null, so normalization ran
+    // against the synthetic Server-CWD-only list and persisted '' over the
+    // user's selection, with no toast and no recovery. An absent endpoint on
+    // the same origin resolves as a 404, so a rejection is the transient
+    // class of the 503 cell above — same expectations, one layer lower.
+    const { window, toasts } = await bootWithToastSpy();
+    let respond = () => jsonRes({ scopes: REAL_SCOPES });
+    installProjectsFetch(window, () => respond());
+    window.loadCtxOverview = async () => {};
+
+    await window._ctxFetchProjects();
+    const select = mountSelect(window);
+    dispatchChange(select, 'proj-abc');
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+
+    // Outage: the responder throws like real fetch rejects. Selection must
+    // survive in localStorage; the documented contract keeps this cell
+    // toast-silent (unlike the 503 cell).
+    respond = () => { throw new TypeError('Failed to fetch'); };
+    const fallback = await window._ctxFetchProjects();
+    expect(fallback.scopes).toHaveLength(1);
+    expect(fallback.scopes[0].sources).toEqual(['server-cwd']);
+    expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
+    expect(toasts).toHaveLength(0);
+
+    // Server reachable again — the preserved selection is live immediately.
+    respond = () => jsonRes({ scopes: REAL_SCOPES });
+    await window._ctxFetchProjects();
     expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
   });
 

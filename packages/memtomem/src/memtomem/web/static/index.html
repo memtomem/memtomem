@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=103" />
+  <link rel="stylesheet" href="/style.css?v=104" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1425,6 +1425,13 @@
       <nav id="path-picker-breadcrumb" class="path-picker-breadcrumb" aria-label="breadcrumb"></nav>
       <ul id="path-picker-list" class="path-picker-list" role="listbox"></ul>
       <p id="path-picker-empty" class="path-picker-empty" hidden data-i18n="picker.empty">No subdirectories</p>
+      <!-- Load-failure state (#1247 id 28): replaces the listing so a failed
+           (re)load isn't a dead blank modal — Retry re-runs the failed
+           navigation in place. role=status announces the failure to AT. -->
+      <div id="path-picker-error" class="path-picker-error" hidden role="status">
+        <p data-i18n="picker.error">Could not list folder.</p>
+        <button type="button" id="path-picker-retry-btn" class="btn-ghost" data-i18n="picker.retry">Retry</button>
+      </div>
       <div class="confirm-actions">
         <button type="button" id="path-picker-cancel-btn" class="btn-ghost" data-i18n="picker.cancel">Cancel</button>
         <button type="button" id="path-picker-select-btn" class="btn-primary" data-i18n="picker.select" disabled>Select</button>
@@ -1459,7 +1466,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=3"></script>
-  <script src="/app.js?v=126"></script>
+  <script src="/app.js?v=127"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=10"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
@@ -1468,8 +1475,8 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=17"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=70"></script>
+  <script src="/context-gateway.js?v=71"></script>
   <script src="/context-portal.js?v=2"></script>
-  <script src="/path-picker.js?v=3"></script>
+  <script src="/path-picker.js?v=4"></script>
 </body>
 </html>

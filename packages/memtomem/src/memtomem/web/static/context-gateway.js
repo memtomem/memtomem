@@ -159,11 +159,6 @@ function _ctxDiagnosticDetail(rt, canonicalPath) {
   return html === '<div class="ctx-diagnostic-detail"></div>' ? '' : html;
 }
 
-function renderDroppedChips(fields) {
-  if (!fields || !fields.length) return '';
-  return fields.map(f => `<span class="ctx-dropped-chip">${escapeHtml(t('settings.ctx.dropped_fields'))}: ${escapeHtml(f)}</span>`).join('');
-}
-
 // ADR-0022 PR4: read-only ``production → v2`` label chips for a list card,
 // fed by the ``?include=versions`` enrichment (``item.versions.labels``). Chips
 // are informational only — freeze / promote / remove live in the detail panel
@@ -391,11 +386,20 @@ function _ctxNormalizeActiveScope(scopes) {
 }
 
 // Fetch ``/api/context/projects`` and classify the outcome, WITHOUT mutating
-// any module global. Returns ``{ data, warn }``:
+// any module global. Returns ``{ data, warn, authoritative }``:
 //   - ``data``  always a ``{scopes: [...]}`` object — the real scopes on
 //               success, or the synthetic Server-CWD fallback on any failure.
-//   - ``warn``  null on success / silent-404, else ``{kind, status?, detail}``
-//               describing a "loud" (toastable) failure shape.
+//   - ``warn``  null on success / silent-404 / network throw, else
+//               ``{kind, status?, detail}`` describing a "loud" (toastable)
+//               failure shape.
+//   - ``authoritative``  whether the outcome says something definitive about
+//               the project roster — true on success and on a same-origin 404
+//               (endpoint genuinely absent / older deploy), false when no
+//               response was received at all (``fetch`` rejected: the server
+//               became unreachable AFTER serving the page — restart, sleep-
+//               wake, offline — i.e. the transient class of #1102, NOT
+//               evidence the roster is gone). Gates normalization in
+//               ``_ctxCommitProjects`` (#1247 id 20).
 //
 // Pure by contract (#1194): a superseded, still-in-flight fetch that resolves
 // AFTER a newer one must not be able to clobber the shared ``_ctxProjectsCache``,
@@ -407,10 +411,15 @@ function _ctxNormalizeActiveScope(scopes) {
 // can't split the two requests across tiers (ADR-0021 §C).
 async function _ctxFetchProjectsData(opts = {}) {
   let data;
-  // Four failure shapes need to stay distinguishable per #1080:
-  //   - 404 / network throw   → older deployment or absent endpoint; the
+  // Five failure shapes need to stay distinguishable per #1080 / #1247 id 20:
+  //   - 404                   → older deployment or absent endpoint; the
   //     legacy single-server-CWD fallback is the documented contract here,
   //     so stay silent to avoid noise on intentional-omit deployments.
+  //   - network throw          → no response received; an absent endpoint on
+  //     the origin that served this page resolves as a 404, so a rejection
+  //     means the server became unreachable after page load — transient.
+  //     Stays toast-silent like the 404 cell but is NOT authoritative about
+  //     the roster, so it must not demote the persisted active scope.
   //   - 5xx (and non-404 4xx)  → endpoint exists but is failing; surface a
   //     non-blocking toast so a broken store doesn't masquerade as "no
   //     registered projects".
@@ -419,6 +428,9 @@ async function _ctxFetchProjectsData(opts = {}) {
   //   - 200 with unexpected shape → parses cleanly but isn't {scopes: Array};
   //     same "endpoint exists but failing" class, surface a toast (#1100).
   let warn = null;
+  // Flipped the moment ``fetch`` resolves — distinguishes "server answered
+  // (with anything)" from "no response at all" in the catch-all below.
+  let sawResponse = false;
   try {
     // ``include`` tokens are opt-in server-side (ADR-0021 PR2). ``counts`` is
     // always requested — every caller renders the scope picker's per-scope
@@ -429,6 +441,7 @@ async function _ctxFetchProjectsData(opts = {}) {
     // one-flag change. ``_ctxWithTargetScope`` appends ``&target_scope=``.
     const include = opts.includeCoverage ? 'counts,runtime_coverage' : 'counts';
     const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }));
+    sawResponse = true;
     if (!res.ok) {
       const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
@@ -475,7 +488,7 @@ async function _ctxFetchProjectsData(opts = {}) {
       }],
     };
   }
-  return { data, warn };
+  return { data, warn, authoritative: sawResponse };
 }
 
 // Commit a ``_ctxFetchProjectsData`` result into the shared module state. Split
@@ -484,12 +497,12 @@ async function _ctxFetchProjectsData(opts = {}) {
 // newer one's cache / active scope / toast memo. Carries the #1102
 // normalize-only-when-authoritative gate and the #1101 failure-toast de-dup.
 // Returns ``data`` for callers that render from it.
-function _ctxCommitProjects({ data, warn }) {
+function _ctxCommitProjects({ data, warn, authoritative }) {
   _ctxProjectsCache = data.scopes || [];
-  // Normalize only when the outcome is *authoritative* — i.e. exactly when we
-  // did NOT raise a "loud" failure toast (``warn``). Three cases:
+  // Normalize only when the outcome is *authoritative* about the roster.
+  // Four cases:
   //   - success (real scopes)          → normalize against the real list.
-  //   - 404 / network throw (silent)   → endpoint absent / older deploy; the
+  //   - silent 404                     → endpoint absent / older deploy; the
   //     project list genuinely isn't available, so clear a now-stale active id
   //     to Server-CWD (preserves the pre-#1099 behavior — other consumers like
   //     ``_ctxRestoreDraft`` key off ``_ctxActiveScopeId`` and would otherwise
@@ -503,7 +516,15 @@ function _ctxCommitProjects({ data, warn }) {
   //     would restore (#1102). ``_ctxScopeParam`` already omits ``scope_id``
   //     when the active id is absent from the cache, so requests during the
   //     degraded window safely fall back to the Server-CWD default.
-  if (!warn) _ctxNormalizeActiveScope(_ctxProjectsCache);
+  //   - network throw (no response)     → same transient class as the 5xx
+  //     cell, just one layer lower; ``authoritative === false`` skips
+  //     normalization so an outage blip can't persist a Server-CWD demotion
+  //     that recovery would otherwise have restored (#1247 id 20). Stays
+  //     toast-silent (``warn`` is null), matching the documented contract.
+  // ``authoritative !== false`` (not ``=== true``) keeps legacy/direct
+  // callers that pass only ``{data, warn}`` on the old normalize-on-silent
+  // semantics.
+  if (!warn && authoritative !== false) _ctxNormalizeActiveScope(_ctxProjectsCache);
   if (warn) {
     // De-dup so a persistent outage doesn't stack one toast per panel-load
     // path (#1101). Key on the failure shape, not just the message, so a
@@ -605,7 +626,15 @@ function _ctxProjectControls(type, scopes = _ctxProjectsCache) {
       ? ` ${t('settings.ctx.scope_missing')}`
       : '';
     const selected = _ctxScopeIsActive(scope) ? ' selected' : '';
-    return `<option value="${escapeHtml(scope.scope_id)}"${selected}>${escapeHtml(label + suffix)}</option>`;
+    // Missing scopes stay listed (the roster should show what's registered)
+    // but are not actionable: selecting one would just have
+    // ``_ctxNormalizeActiveScope`` silently snap back to Server-CWD and
+    // persist the demotion (#1247 id 25). ``disabled`` makes the
+    // non-actionability visible instead. The active scope can never be a
+    // missing one (normalize filters them), so this can't disable the
+    // current selection.
+    const disabled = scope.missing ? ' disabled' : '';
+    return `<option value="${escapeHtml(scope.scope_id)}"${selected}${disabled}>${escapeHtml(label + suffix)}</option>`;
   }).join('');
   return `<label class="ctx-project-switcher" data-type="${escapeHtml(type)}">
     <span>${escapeHtml(t('settings.ctx.active_project'))}</span>
@@ -1614,12 +1643,16 @@ async function _ctxSyncProjectScope(scopeId, btn) {
   let settingsSeverity = null;
   let settingsReason = '';
   let anyPhaseStarted = false;
+  // Same failure-class skip surfacing as the overview Sync All (#1247 id 21
+  // + B4) — an HTTP-200 phase can still have skipped the very items the card
+  // claims to have synced.
+  const attentionSkips = [];
   try {
     const csrf = await ensureCsrfToken();
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
-    
+
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
@@ -1641,6 +1674,11 @@ async function _ctxSyncProjectScope(scopeId, btn) {
         break;
       }
       succeeded.push(typ);
+      const body = await resp.json().catch(() => ({}));
+      const phaseSkips = Array.isArray(body.skipped) ? body.skipped : [];
+      attentionSkips.push(
+        ...phaseSkips.filter(_ctxIsAttentionSkip).map(_ctxAttentionSkipLabel),
+      );
     }
 
     if (!failed) {
@@ -1696,19 +1734,38 @@ async function _ctxSyncProjectScope(scopeId, btn) {
       showToast(t('toast.sync_failed', { error: settingsReason }), 'error');
     } else if (settingsSeverity === 'aborted') {
       showToast(t('settings.ctx.mtime_conflict'), 'warning');
-    } else if (settingsSeverity === 'needs_confirmation') {
-      showToast(
-        t('toast.sync_partial_settings_needs_confirmation'),
-        'info',
-        {
-          action: {
-            label: t('toast.open_settings_action'),
-            onClick: () => switchSettingsSection('hooks-sync'),
-          },
-        }
-      );
     } else {
-      showToast(t('settings.ctx.sync_success'));
+      // Artifact attention skips (#1247 id 21 + B4) and the settings
+      // needs_confirmation outcome are INDEPENDENT facts — and unlike the
+      // overview Sync All, this card path has no per-phase summary region
+      // to carry whichever one a single-toast ladder would drop. Emit both
+      // (toasts stack); only a run with neither reads as plain success
+      // (Codex review).
+      if (attentionSkips.length) {
+        const items = [...new Set(attentionSkips)];
+        showToast(
+          t('settings.ctx.sync_skipped_attention', {
+            count: items.length,
+            items: items.join(', '),
+          }),
+          'warning',
+        );
+      }
+      if (settingsSeverity === 'needs_confirmation') {
+        showToast(
+          t('toast.sync_partial_settings_needs_confirmation'),
+          'info',
+          {
+            action: {
+              label: t('toast.open_settings_action'),
+              onClick: () => switchSettingsSection('hooks-sync'),
+            },
+          }
+        );
+      }
+      if (!attentionSkips.length && settingsSeverity !== 'needs_confirmation') {
+        showToast(t('settings.ctx.sync_success'));
+      }
     }
   } catch (err) {
     showToast(err.message, 'error');
@@ -1764,8 +1821,8 @@ async function _ctxSyncProjectScope(scopeId, btn) {
 // Per-type list re-render path (Q-PR4 / #826): the same inline-``t()``
 // staleness exists in ``renderImportResult`` (post-Import receipt),
 // ``_ctxScopeBadges`` (non-cwd scope badges), ``_ctxRefreshSectionState``
-// (runtime-only banner), ``renderRuntimeBadges`` (status labels), and
-// ``renderDroppedChips`` (Diff pane). All five are rebuilt by re-issuing
+// (runtime-only banner), and ``renderRuntimeBadges`` (status labels). All
+// four are rebuilt by re-issuing
 // ``loadCtxList(type)`` for the active section. The Import status box
 // is intentionally cleared rather than cached: it's an ephemeral
 // post-Import receipt and caching it across navigation would resurrect
@@ -1838,8 +1895,9 @@ window.addEventListener('langchange', () => {
     // Capture detail state *before* ``loadCtxList`` resets it (see the
     // ``_ctxCurrentDetail`` reset near the top of ``loadCtxList``). We
     // need ``runtimeOnly`` to route to the matching loader and
-    // ``wasDiffActive`` to land back on the Diff tab so
-    // ``renderDroppedChips`` re-renders without further user clicks.
+    // ``wasDiffActive`` to land back on the Diff tab so the diff pane
+    // (field-map matrix + per-runtime diffs) re-renders in the new
+    // locale without further user clicks.
     const detailEl = qs(`ctx-${type}-detail`);
     const openName = (_ctxCurrentDetail.type === type) ? _ctxCurrentDetail.name : null;
     const openRuntimeOnly = openName ? _ctxCurrentDetail.runtimeOnly === true : false;
@@ -1987,6 +2045,34 @@ function _ctxSyncFormatCounts(counts) {
   return parts.join(' · ');
 }
 
+// Benign-by-design sync skip codes (``context/_skip_reasons.py``): nothing to
+// sync, already byte-identical, or no fan-out target for that (artifact,
+// runtime, scope) tuple. Every OTHER code means the engine skipped work the
+// user asked for — parse_error, unknown_runtime, duplicate_name (#1247 B4),
+// lock_timeout, target_conflict, privacy_blocked, … — and must not hide
+// behind the "Sync completed" success toast (#1247 id 21). Allow-listing the
+// benign codes (rather than block-listing the failures) keeps future skip
+// codes loud by default.
+const _CTX_BENIGN_SKIP_CODES = new Set([
+  'no_canonical_root',
+  'in_sync',
+  'no_project_fanout_for_runtime',
+]);
+
+function _ctxIsAttentionSkip(s) {
+  return !!s && !_CTX_BENIGN_SKIP_CODES.has(s.reason_code);
+}
+
+// Toast fragment naming one failure-class skip: "<who> (<code>)". Sync
+// responses serialize the skip tuple's first element under the ``runtime``
+// key — it carries the artifact/file name for parse_error / duplicate_name
+// rows and the runtime name for unknown_runtime rows; tolerate ``name`` for
+// shape drift.
+function _ctxAttentionSkipLabel(s) {
+  const who = (s && (s.runtime || s.name)) || '?';
+  return s && s.reason_code ? `${who} (${s.reason_code})` : String(who);
+}
+
 // Render (or clear, when ``states`` is null) the status region. Declarative —
 // rebuilds the whole list each call so repeated updates can't desync.
 function _renderCtxSyncStatus(states) {
@@ -2016,10 +2102,17 @@ function _renderCtxSyncStatus(states) {
       badge = `<span class="ctx-sync-state ctx-sync-state--failed">`
         + `${escapeHtml(t('settings.ctx.sync_state_failed'))}</span>`;
     } else if (entry.state === 'attention') {
-      // Settings landed but needs host-write confirmation — distinct from a
-      // plain ``done`` so the row matches the "complete except Settings" toast.
+      // Two attention shapes share the style: an artifact phase that finished
+      // but skipped failure-class items (counts present — render them, the
+      // skipped count + attention color carry the signal, #1247 id 21), and
+      // the settings phase needing host-write confirmation (no counts —
+      // keep the explicit copy so the row matches the "complete except
+      // Settings" toast).
+      const text = entry.counts
+        ? _ctxSyncFormatCounts(entry.counts)
+        : t('settings.ctx.sync_state_needs_confirmation');
       badge = `<span class="ctx-sync-state ctx-sync-state--attention">`
-        + `${escapeHtml(t('settings.ctx.sync_state_needs_confirmation'))}</span>`;
+        + `${escapeHtml(text)}</span>`;
     } else if (entry.state === 'not_run') {
       badge = `<span class="ctx-sync-state ctx-sync-state--muted">`
         + `${escapeHtml(t('settings.ctx.sync_state_not_run'))}</span>`;
@@ -2181,6 +2274,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
   const succeeded = [];
   let failed = null;
   let anyPhaseStarted = false;
+  // Failure-class skips collected across artifact phases (#1247 id 21): the
+  // phase itself completes (HTTP 200) but the engine skipped items it was
+  // asked to sync (parse_error / unknown_runtime / duplicate_name / …). The
+  // run must not end in the unqualified success toast, and the per-phase row
+  // shows ``attention`` instead of ``done``.
+  const attentionSkips = [];
   // No-op detection: a run that writes nothing (0 generated everywhere,
   // only ``no_canonical_root`` artifact skips, settings all-skipped) must
   // not end in the "Sync completed" success toast — on an empty project
@@ -2257,7 +2356,17 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       if (phaseSkips.some(s => s && s.reason_code !== 'no_canonical_root')) {
         artifactNonEmptySkip = true;
       }
-      setPhase(typ, 'done', phaseCounts);
+      // Failure-class skips demote the phase row from ``done`` to
+      // ``attention`` (#1247 id 21) — the counts still render, the color
+      // flags that the skipped column needs a look. Benign skips
+      // (no_canonical_root / in_sync / no-fanout-by-design) keep ``done``.
+      const phaseAttention = phaseSkips.filter(_ctxIsAttentionSkip);
+      if (phaseAttention.length) {
+        attentionSkips.push(...phaseAttention.map(_ctxAttentionSkipLabel));
+        setPhase(typ, 'attention', phaseCounts);
+      } else {
+        setPhase(typ, 'done', phaseCounts);
+      }
     }
     // Settings hooks sync (additive merge) — appends memtomem-owned hook
     // entries to ~/.claude/settings.json without clobbering user-authored
@@ -2368,6 +2477,22 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       showToast(t('toast.sync_failed', { error: settingsReason }), 'error');
     } else if (settingsSeverity === 'aborted') {
       showToast(t('settings.ctx.mtime_conflict'), 'warning');
+    } else if (attentionSkips.length) {
+      // Failure-class skips (parse_error / unknown_runtime / duplicate_name
+      // / …) used to fall through to the unqualified success toast (#1247
+      // id 21 + B4). Name the skipped items so the user can map the warning
+      // to the artifact/runtime that needs fixing. De-dup: per-(target,
+      // item) skips repeat one broken canonical once per runtime. Ordered
+      // above ``needs_confirmation`` (warning > info) — when both apply,
+      // the settings row still shows its own attention state in the summary.
+      const items = [...new Set(attentionSkips)];
+      showToast(
+        t('settings.ctx.sync_skipped_attention', {
+          count: items.length,
+          items: items.join(', '),
+        }),
+        'warning',
+      );
     } else if (settingsSeverity === 'needs_confirmation') {
       showToast(
         t('toast.sync_partial_settings_needs_confirmation'),
@@ -2859,6 +2984,11 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // ``emptyState`` over the fresh container the newer ``loadCtxList``
     // rebuilt — same false-overwrite class as the success path above.
     if (seq !== _ctxListSeq[type]) return;
+    // Re-arm the lazy-load flag (set optimistically by ``fetchOnce`` BEFORE
+    // the fetch, to de-dup rapid toggles): without this, a failed group load
+    // is permanent for the session — re-toggling the <details> routes through
+    // ``fetchOnce`` and no-ops on ``loaded === 'true'`` (#1247 id 24).
+    container.dataset.loaded = 'false';
     container.innerHTML = emptyState('', t('settings.ctx.load_failed', { type: _ctxTypeName(type) }), err.message);
   }
 }
@@ -3035,6 +3165,16 @@ async function loadCtxList(type) {
   const listEl = qs(`ctx-${type}-list`);
   const detailEl = qs(`ctx-${type}-detail`);
   const statusEl = qs(`ctx-${type}-status`);
+  // This wipe owns the detail pane, so it must also invalidate any in-flight
+  // detail mount: a tier flip / section re-entry routes through here without
+  // a project change (the project handler bumps via
+  // ``_ctxBumpActiveScopeDetailSeq``), and without the bump a stale
+  // ``loadCtxDetail`` / ``_ctxLoadRuntimeOnlyDetail`` response would pass its
+  // seq check, paint into the wiped-and-hidden pane, and fire draft-restore
+  // side effects from an invisible mount (#1247 id 26). Callers that want the
+  // detail re-mounted (save success, langchange) call ``loadCtxDetail``
+  // AFTER this, taking a fresh seq.
+  _ctxDetailSeq[type] += 1;
   if (detailEl) { detailEl.hidden = true; detailEl.innerHTML = ''; }
   if (statusEl) statusEl.innerHTML = '';
   panelLoading(listEl);
@@ -3189,6 +3329,13 @@ async function loadCtxList(type) {
             confirmText: t('settings.ctx.remove'),
           });
           if (!ok) return;
+          // In-flight disable (#1247 id 27): mirrors the detail Delete
+          // button — a slow DELETE otherwise allows a second confirm whose
+          // duplicate request error-toasts right after the success toast.
+          // The success path's ``loadCtxList`` repaints the whole list
+          // (fresh, enabled ×), so the ``finally`` restore only matters on
+          // the error paths.
+          btnLoading(removeBtn, true);
           try {
             const csrf = await ensureCsrfToken();
             const r = await fetch(`/api/context/known-projects/${encodeURIComponent(scope.scope_id)}`, {
@@ -3203,7 +3350,7 @@ async function loadCtxList(type) {
             loadCtxList(type);
           } catch (err) {
             showToast(t('toast.delete_failed', { error: err.message }), 'error');
-          }
+          } finally { btnLoading(removeBtn, false); }
         });
       }
     }
@@ -3409,6 +3556,9 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
         showToast(t('settings.ctx.conflict_force_done'), 'warning');
         detailEl.dataset.mtimeNs = result.mtime_ns || '';
         _ctxClearDraft(draftKey, type, name);
+        // List badges went stale the moment the force-PUT landed — refresh
+        // alongside the detail re-mount (#1247 id 22, same as plain Save).
+        loadCtxList(type);
         loadCtxDetail(type, name);
       }
     } catch (err) {
@@ -3465,10 +3615,13 @@ function _ctxRenderDetailMetaHeader(type, data) {
     // Convert BigInt-safe nanosecond epoch string to a millisecond Date.
     // ``Number(mtime_ns) / 1e6`` is safe — we only need timestamp precision
     // for human display, not equality.
+    // ``mtime_ns`` is the CANONICAL file's mtime — label it "Modified", not
+    // "Last synced": sync timing is a different fact this row never knew
+    // (#1247 id 37, the same overstatement #1076 renamed on the dashboard).
     const ts = Number(data.mtime_ns) / 1e6;
     if (Number.isFinite(ts)) {
       rows.push({
-        label: t('settings.ctx.detail.meta_last_synced'),
+        label: t('settings.ctx.detail.meta_modified'),
         value: new Date(ts).toLocaleString(),
       });
     }
@@ -4080,6 +4233,15 @@ async function loadCtxDetail(type, name, opts = {}) {
           detailEl.dataset.mtimeNs = result.mtime_ns || '';
           // Clear any stashed draft now that the buffer is durable on disk.
           _ctxClearDraft(detailEl.dataset.draftKey, type, name);
+          // Refresh the LIST too, not just the detail (#1247 id 22): the
+          // canonical just changed on disk, so the card's sync badges /
+          // ``data-out-of-sync`` are stale — leaving them reads as "in sync"
+          // and hides the now-required Sync step (a re-click wouldn't even
+          // auto-open the Diff). Same list+detail re-mount order as the
+          // langchange path; ``loadCtxDetail`` takes a fresh detail seq
+          // AFTER ``loadCtxList``'s wipe-side bump, so the mounts can't
+          // cancel each other.
+          loadCtxList(type);
           loadCtxDetail(type, name);
         }
       } catch (err) {
@@ -4089,6 +4251,10 @@ async function loadCtxDetail(type, name, opts = {}) {
 
     // Delete
     detailEl.querySelector('.ctx-detail-delete-btn')?.addEventListener('click', async () => {
+      // Captured synchronously at click dispatch — the bound button is
+      // guaranteed live here, whereas a post-``showConfirm`` querySelector
+      // could return null if a re-mount wiped the detail mid-dialog.
+      const delBtn = detailEl.querySelector('.ctx-detail-delete-btn');
       // Cascade is opt-in: the canonical artifact is the ``.memtomem/``
       // entry, runtime files are mirrored copies. Default-off keeps the
       // dialog conservative — a stray click only removes the canonical,
@@ -4127,6 +4293,12 @@ async function loadCtxDetail(type, name, opts = {}) {
       if (!ok) return;
       const cascade = !!(result && typeof result === 'object'
         && result.extras && result.extras.cascade);
+      // In-flight disable (#1247 id 27): a slow DELETE left the button live,
+      // so a second click could stack another confirm whose duplicate DELETE
+      // 404s — an error toast right after the success toast. Restored in
+      // ``finally``; the success path hides/replaces the detail anyway, so
+      // re-enabling a detached button is harmless.
+      btnLoading(delBtn, true);
       try {
         const csrf = await ensureCsrfToken();
         const r = await fetch(
@@ -4165,7 +4337,7 @@ async function loadCtxDetail(type, name, opts = {}) {
         }
       } catch (err) {
         showToast(t('toast.delete_failed', { error: err.message }), 'error');
-      }
+      } finally { btnLoading(delBtn, false); }
     });
 
     // Per-item Edit / Delete buttons just landed in ``detailEl``; mirror
@@ -4268,9 +4440,9 @@ async function _ctxLoadDiff(type, name, detailEl) {
         html += `<div style="margin-bottom:12px">`;
         html += `<strong>${escapeHtml(rt.runtime)}</strong> ${_ctxBadge(rt.status)}`;
         html += _ctxDiagnosticDetail(rt, data.canonical_path);
-        if (rt.dropped_fields && rt.dropped_fields.length) {
-          html += `<div style="margin-top:4px">${renderDroppedChips(rt.dropped_fields)}</div>`;
-        }
+        // Per-field kept/dropped state is NOT in the /diff payload — it
+        // surfaces via the ``field_map`` matrix rendered above from the
+        // parallel /rendered fetch (#1247 id 35).
         // ``expected_content`` (commands/agents, #1247 id 30) is what sync
         // would actually write — vendor override or rendered output — so the
         // diff shows the real pending change instead of a raw canonical-vs-
@@ -4517,6 +4689,23 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
         showToast(
           t('settings.ctx.sync_target_conflict')
             .replace('{reason}', targetConflict.reason || ''),
+          'warning',
+        );
+      } else if (skipped.some(_ctxIsAttentionSkip)) {
+        // Remaining failure-class skips — parse_error / unknown_runtime /
+        // duplicate_name (#1247 id 21 + B4) / any future non-benign code —
+        // previously fell through to ``sync_success``, reporting a sync
+        // that silently left items behind. lock_timeout / target_conflict
+        // can't reach here (dedicated branches above). Ranked above
+        // ``dropped``: a whole item skipped outranks field-level loss.
+        const items = [...new Set(
+          skipped.filter(_ctxIsAttentionSkip).map(_ctxAttentionSkipLabel),
+        )];
+        showToast(
+          t('settings.ctx.sync_skipped_attention', {
+            count: items.length,
+            items: items.join(', '),
+          }),
           'warning',
         );
       } else if (dropped.length) {
