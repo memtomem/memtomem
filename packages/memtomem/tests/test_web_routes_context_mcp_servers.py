@@ -64,7 +64,9 @@ async def test_create_list_read_sync_and_overview(client: AsyncClient, tmp_path:
     )
     sync = await client.post("/api/context/mcp-servers/sync")
     assert sync.status_code == 200
-    assert sync.json()["generated"] == [{"runtime": "project_mcp", "path": ".mcp.json"}]
+    assert sync.json()["generated"] == [
+        {"runtime": "project_mcp", "name": "demo", "path": ".mcp.json"}
+    ]
 
     written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     assert written["project"] == "keep"
@@ -73,8 +75,11 @@ async def test_create_list_read_sync_and_overview(client: AsyncClient, tmp_path:
 
     overview = await client.get("/api/context/overview")
     assert overview.status_code == 200
-    assert overview.json()["mcp_servers"]["total"] == 1
+    # ``total`` counts the runtime-only "other" entry too since #1247 id 31 —
+    # same name-union semantics as the skills/commands/agents overview tiles.
+    assert overview.json()["mcp_servers"]["total"] == 2
     assert overview.json()["mcp_servers"]["in_sync"] == 1
+    assert overview.json()["mcp_servers"]["missing_canonical"] == 1
 
 
 @pytest.mark.anyio
@@ -253,3 +258,91 @@ async def test_diff_reasons_distinguish_canonical_vs_mcp_json(
     rt = r.json()["runtimes"][0]
     assert rt["status"] == "parse error"
     assert ".mcp.json" in rt["reason"]
+
+
+# ── #1247 B8: id 40 / id 31 — invalid-name tolerance + runtime-only rows ────
+
+
+@pytest.mark.anyio
+async def test_list_tolerates_invalid_named_canonical(client: AsyncClient, tmp_path: Path) -> None:
+    """One stray 'my server.json' used to 500 the whole list route (#1247
+    id 40). The valid canonical keeps serving; the invalid name surfaces as a
+    runtime-only row whose runtime status is 'invalid name'."""
+    create = await client.post(
+        "/api/context/mcp-servers",
+        json={"name": "good", "content": _definition()},
+    )
+    assert create.status_code == 200
+    stray = tmp_path / ".memtomem" / "mcp-servers" / "my server.json"
+    stray.write_text(_definition(), encoding="utf-8")
+
+    listing = await client.get("/api/context/mcp-servers")
+    assert listing.status_code == 200
+    rows = {row["name"]: row for row in listing.json()["mcp-servers"]}
+    assert rows["good"]["canonical_path"] is not None
+    assert rows["my server"]["canonical_path"] is None
+    assert rows["my server"]["runtimes"][0]["status"] == "invalid name"
+
+
+@pytest.mark.anyio
+async def test_list_includes_runtime_only_servers(client: AsyncClient, tmp_path: Path) -> None:
+    """A server present only in .mcp.json gets a canonical_path-less row with
+    'missing canonical' status — mirror of the skills list route (#1247 id 31)."""
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"adhoc": {"command": "node"}}}),
+        encoding="utf-8",
+    )
+    listing = await client.get("/api/context/mcp-servers")
+    assert listing.status_code == 200
+    rows = listing.json()["mcp-servers"]
+    assert rows and rows[0]["name"] == "adhoc"
+    assert rows[0]["canonical_path"] is None
+    assert rows[0]["runtimes"] == [{"runtime": "project_mcp", "status": "missing canonical"}]
+
+
+@pytest.mark.anyio
+async def test_diff_route_returns_runtime_content_for_runtime_only(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    """The runtime-only detail pane fetches /diff — it must carry the actual
+    .mcp.json definition, not an empty 'missing canonical' shell (#1247 id 31)."""
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"adhoc": {"command": "node", "args": ["server.js"]}}}),
+        encoding="utf-8",
+    )
+    diff = await client.get("/api/context/mcp-servers/adhoc/diff")
+    assert diff.status_code == 200
+    body = diff.json()
+    runtime = body["runtimes"][0]
+    assert runtime["status"] == "missing canonical"
+    assert runtime["runtime_content"] is not None
+    assert "server.js" in runtime["runtime_content"]
+
+
+# ── #1247 B8: id 42 / id 43 — named generated rows + in-sync skip ────────────
+
+
+@pytest.mark.anyio
+async def test_sync_payload_carries_names_and_in_sync_rerun_skips(
+    client: AsyncClient, tmp_path: Path
+) -> None:
+    create = await client.post(
+        "/api/context/mcp-servers",
+        json={"name": "demo", "content": _definition()},
+    )
+    assert create.status_code == 200
+
+    first = await client.post("/api/context/mcp-servers/sync")
+    assert first.status_code == 200
+    assert first.json()["generated"] == [
+        {"runtime": "project_mcp", "name": "demo", "path": ".mcp.json"}
+    ]
+    mtime_before = (tmp_path / ".mcp.json").stat().st_mtime_ns
+
+    second = await client.post("/api/context/mcp-servers/sync")
+    assert second.status_code == 200
+    body = second.json()
+    assert body["generated"] == []
+    assert len(body["skipped"]) == 1
+    assert body["skipped"][0]["reason_code"] == "in_sync"
+    assert (tmp_path / ".mcp.json").stat().st_mtime_ns == mtime_before

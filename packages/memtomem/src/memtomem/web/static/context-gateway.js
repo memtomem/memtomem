@@ -2599,16 +2599,20 @@ function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
     ? 'project_shared'
     : (scope === 'project_local' ? 'project_local' : 'user');
   const title = t(`settings.ctx.missing_canonical_${scopeForKey}_title`);
-  const body = t(`settings.ctx.missing_canonical_${scopeForKey}_body`)
+  // MCP servers take a dedicated body: the generic project_shared copy says
+  // "Click Import above", and mcp-servers has no Import button or /import
+  // route (#1247 id 31 made these rows reachable — Codex impl review). MCP
+  // canonicals are project_shared-only, so one un-tiered key is enough.
+  const bodyKey = type === 'mcp-servers'
+    ? 'settings.ctx.missing_canonical_mcp_body'
+    : `settings.ctx.missing_canonical_${scopeForKey}_body`;
+  const body = t(bodyKey)
     .replace('{count}', count)
     .replace(/\{type\}/g, _ctxTypeName(type))
     .replace('{scan_dirs}', scanList);
   // The CLI bootstrap snippets cover skills/agents/commands only — there is
   // no ``--include=mcp-servers`` in ``mm context``, so rendering them for the
   // MCP section would hand the user commands that cannot touch MCP state.
-  // (Today this banner is effectively unreachable for mcp-servers — the list
-  // only shows stored definitions — but the guard keeps a future
-  // runtime-only MCP surface from inheriting wrong remediation.)
   const commands = type === 'mcp-servers'
     ? ''
     : _ctxMissingCanonicalCommands(scope)
@@ -3489,6 +3493,17 @@ function _ctxRenderDetailMetaHeader(type, data) {
       ['command_model', fields.model],
     ];
     chipsHtml = _ctxRenderDetailChipsHtml(chips);
+  } else if (type === 'mcp-servers') {
+    // #1247 id 36: read_mcp_server has always returned these — they just
+    // never rendered. Numeric 0 passes the chips filter intentionally:
+    // "Args 0" confirms the definition parsed (an unparseable canonical
+    // yields fields == {} and no chips at all).
+    const chips = [
+      ['mcp_command', fields.command],
+      ['mcp_args_count', fields.args_count],
+      ['mcp_env_count', fields.env_count],
+    ];
+    chipsHtml = _ctxRenderDetailChipsHtml(chips);
   }
 
   if (!rows.length && !chipsHtml) return '';
@@ -4312,12 +4327,18 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
     // ``type`` is always the plural section slug (skills/commands/agents);
     // the localized singular display name feeds the one-artifact CTA copy
-    // ("Import this skill" / "이 스킬 가져오기").
-    html += `<div class="ctx-edit-actions" style="margin-top:12px">
-      <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
-        ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
-      </button>
-    </div>`;
+    // ("Import this skill" / "이 스킬 가져오기"). Gated on the same capability
+    // map as the section toolbar: mcp-servers has NO /import route, and once
+    // runtime-only rows exist for it (#1247 id 31) an ungated button here
+    // would 404 — the residual dead-import leg #1223's toolbar map missed.
+    const caps = _CTX_TOOLBAR_CAPS[type] || {};
+    if (caps.import !== false) {
+      html += `<div class="ctx-edit-actions" style="margin-top:12px">
+        <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
+          ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
+        </button>
+      </div>`;
+    }
 
     html += '</div>';
     detailEl.innerHTML = html;
