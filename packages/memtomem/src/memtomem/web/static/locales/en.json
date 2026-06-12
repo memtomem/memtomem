@@ -513,7 +513,7 @@
   "settings.ctx.missing_canonical_project_shared_title": "Not yet imported into the project store (.memtomem/)",
   "settings.ctx.missing_canonical_project_shared_body": "{count} {type} exist in {scan_dirs} but are not in memtomem's store yet. Click Import above, or run:",
   "settings.ctx.missing_canonical_user_title": "Not yet imported into your user store (~/.memtomem/)",
-  "settings.ctx.missing_canonical_user_body": "{count} {type} exist in your runtimes but are not in memtomem's user store yet. The web UI is read-only for the user tier — run these commands instead:",
+  "settings.ctx.missing_canonical_user_body": "{count} {type} exist in your runtimes but are not in memtomem's user store yet. Click Import above (you'll confirm the host paths first), or run these commands:",
   "settings.ctx.missing_canonical_mcp_body": "{count} {type} exist in {scan_dirs} but are not in memtomem's store yet. There is no Import for MCP servers — open an entry to view its definition, then add it with Create.",
   "settings.ctx.missing_canonical_project_local_title": "Not yet imported into local drafts",
   "settings.ctx.missing_canonical_project_local_body": "{count} {type} exist in your runtimes but are not in your local drafts yet. Local drafts are gitignored and never pushed to runtimes — initialize them with the commands below:",
