@@ -221,21 +221,48 @@ a bookkeeping failure must never fail or roll back a committed move:
 - **move out of `project_shared`** → drop the entry from the
   **source** project's `lock.json` (best-effort, loud warning on
   failure) — the #1123 B4-1 dangling-entry rule, now root-qualified;
-- **copy** → no `lock.json` change anywhere (the source keeps its
-  provenance; the destination copy has none — yet, see §9).
+- **copy** → the source's `lock.json` is never touched; the
+  destination may gain an entry via the §9 carry-over.
 
-### 9. Provenance carry-over — deferred to A-4 (#1275)
+### 9. Provenance carry-over (A-4 #1275)
 
-A `project_shared → project_shared` transfer of a wiki-installed
-artifact could carry the source's `lock.json` entry (commit pin,
-manifest, digests) to the destination so `mm context status` /
-`update` keep working there. That is **deliberately not part of this
-engine**: the design-gate finding stands that carry-over is only
-sound when the source asset is clean per `is_asset_dirty` (carrying a
-pin over locally-edited bytes would bless the edits as installed
-state), which needs its own decision pass. Until #1275 lands, a
-transferred artifact at the destination is simply unmanaged-canonical
-(same as a hand-created one): fully functional, no update lineage.
+A `project_shared → project_shared` transfer (move AND copy) of a
+wiki-installed artifact carries the source's `lock.json` entry to the
+destination so `mm context status` / `update` keep working there.
+The design-gate finding from A-2 stands as the gating rule — carrying
+a pin over locally-edited bytes would bless the edits as installed
+state, letting a later `mm context update` clobber them without its
+`--force` gate — so the carry is double-gated:
+
+1. **Pre-stage (source still on disk):** the entry must have a full
+   40-char SHA `wiki_commit` (the ADR-0008 stored-pin contract), a
+   valid per-file digest map (`digests_from_entry`; pre-#1247 mtime
+   entries never carry — mtime cleanliness is not byte evidence), and
+   classify `clean` under `is_asset_dirty`.
+2. **Post-promote (after the pair lock releases):** the promoted
+   destination tree is rehashed and must equal the source entry's
+   digest map exactly. Sidecar locks don't bind external writers, so
+   this equality gate — not the pre-stage check — is what closes the
+   classify→stage TOCTOU: the only digests ever written at the
+   destination are byte-identical to what the wiki install recorded.
+
+A clean carry upserts the destination entry with the carried
+`wiki_commit`, `files` derived from the rehashed map, and a fresh
+`installed_at`/`digests_installed_at` pair captured from the promoted
+tree (the `lockfile.upsert_entry` paired-key contract requires
+recompute, not verbatim copy). A copy-rename (`--as`) never carries:
+entries are keyed by wiki asset name, so an entry under the new name
+would point `update` at a different wiki asset. Failed or declined
+carries land the artifact untracked, with a human reason plus a
+stable `_skip_reasons.ProvenanceSkipCode` on the result
+(`provenance` / `provenance_reason` / `provenance_reason_code`).
+
+Bookkeeping order on a move: destination upsert first, then the
+source entry drop of §8 (unconditional — even when the carry
+declined, the source canonical is gone and a dangling entry is status
+noise). All of it stays best-effort and outside the pair lock: a
+corrupt destination lockfile warns loudly but never un-commits the
+transfer.
 
 ## Backward compatibility
 
@@ -301,8 +328,13 @@ transferred artifact at the destination is simply unmanaged-canonical
 - **In-engine Gate B prompting.** Rejected: surfaces own confirmation
   UX (CLI flag, web disclose-then-confirm); the engine stays
   prompt-free and headless-safe, same as `migrate_scope`.
-- **Carrying `lock.json` provenance in this PR.** Deferred to A-4
-  #1275 with the dirty-source guard as the open design point (§9).
+- **Unconditional `lock.json` provenance carry.** Rejected when A-4
+  #1275 landed the carry-over (§9): copying the entry (or rehashing
+  whatever bytes arrived) without the dirty/digest gates would bless
+  locally-edited bytes as installed wiki state, letting a later
+  `mm context update` clobber them without its `--force` gate. Same
+  reasoning rejected carrying mtime-only (pre-#1247) entries and
+  copy-renames.
 
 ## References
 

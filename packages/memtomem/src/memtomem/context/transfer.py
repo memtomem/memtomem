@@ -31,11 +31,26 @@ bytes against the **destination** root — per-vendor overrides live
 inside the artifact dir (``<name>/overrides/<vendor>.<ext>``) and
 travel with it. ``_remove_runtime_fanout_for`` takes the two roots
 separately for exactly this reason.
+
+Install-provenance carry-over (ADR-0023 §9, A-4 #1275): a
+``project_shared → project_shared`` transfer of a clean wiki install
+carries the source's ``lock.json`` entry to the destination so ``mm
+context status`` / ``update`` keep working there. The carry is gated
+twice — source classified clean under
+:func:`memtomem.context.dirty.is_asset_dirty` pre-stage, AND the
+promoted bytes rehashing to the source entry's exact digest map
+post-promote — because blessing locally-edited bytes as pristine wiki
+state would let a later ``mm context update`` clobber them without its
+``--force`` gate (the A-2 design-gate finding that deferred this
+feature). Dirty or unprovable sources still transfer; they just land
+untracked, with the reason on the result
+(``provenance_reason`` / ``provenance_reason_code``).
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import secrets
@@ -49,10 +64,31 @@ from typing import Literal
 import click
 
 from memtomem.config import TargetScope
-from memtomem.context._atomic import atomic_write_bytes
+from memtomem.context._atomic import (
+    atomic_write_bytes,
+    installed_at_from_dest,
+    iter_installed_files,
+)
 from memtomem.context._names import validate_name
+from memtomem.context._skip_reasons import (
+    PROVENANCE_DEST_BYTES_UNVERIFIED,
+    PROVENANCE_DEST_LOCKFILE_ERROR,
+    PROVENANCE_RENAMED_COPY,
+    PROVENANCE_SOURCE_DIRTY,
+    PROVENANCE_SOURCE_INVALID_PIN,
+    PROVENANCE_SOURCE_LOCKFILE_UNREADABLE,
+    PROVENANCE_SOURCE_NO_DIGESTS,
+    PROVENANCE_SOURCE_UNPROVABLE,
+    ProvenanceSkipCode,
+)
 from memtomem.context.agents import _KEY_VALUE_RE
-from memtomem.context.lockfile import Lockfile
+from memtomem.context.dirty import is_asset_dirty
+from memtomem.context.lockfile import (
+    _HEX_DIGITS,
+    Lockfile,
+    LockfileError,
+    digests_from_entry,
+)
 from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
@@ -69,12 +105,21 @@ from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["TransferMode", "TransferResult", "transfer_artifact"]
+__all__ = ["ProvenanceCarry", "TransferMode", "TransferResult", "transfer_artifact"]
 
 
 TransferMode = Literal["move", "copy"]
 
+#: Outcome of the shared→shared install-provenance carry-over (A-4 #1275).
+#: ``not_applicable`` covers every transfer the carry-over does not target:
+#: non-(shared→shared) tier pairs, and shared→shared sources with no
+#: ``lock.json`` entry at all (not wiki-tracked — nothing to carry, quiet).
+ProvenanceCarry = Literal["carried", "not_carried", "not_applicable"]
+
 _VALID_SCOPES: tuple[TargetScope, ...] = ("user", "project_shared", "project_local")
+
+#: ADR-0008 lockfile contract: ``wiki_commit`` is the FULL 40-char SHA.
+_FULL_SHA_LEN = 40
 
 
 @dataclass(frozen=True)
@@ -94,6 +139,16 @@ class TransferResult:
     (``needs_sync`` + ``sync_command`` carry the follow-up instead).
     ``notes`` carries non-fatal caveats the surface should show (today:
     the overrides-travel-verbatim caveat on a copy-rename).
+
+    ``provenance`` / ``provenance_reason`` / ``provenance_reason_code``
+    (A-4 #1275) report the shared→shared ``lock.json`` carry-over:
+    ``carried`` means the destination entry was written (on a dry-run:
+    will be, subject to apply-time re-verification); ``not_carried``
+    pairs a human ``provenance_reason`` with a stable
+    ``provenance_reason_code`` (the ``_skip_reasons`` contract — CLI
+    prints the reason, web/MCP surfaces match on the code);
+    ``not_applicable`` is every transfer the carry-over does not target
+    and stays quiet (both companion fields ``None``).
     """
 
     kind: ArtifactKind
@@ -114,6 +169,9 @@ class TransferResult:
     needs_sync: bool = False
     sync_command: str | None = None
     notes: tuple[str, ...] = ()
+    provenance: ProvenanceCarry = "not_applicable"
+    provenance_reason: str | None = None
+    provenance_reason_code: ProvenanceSkipCode | None = None
 
 
 def _resolve_root(root: Path | str | None) -> Path | None:
@@ -137,6 +195,247 @@ def _sync_followup(to_scope: TargetScope, dst_project_root: Path | None) -> tupl
     if to_scope != "user" and dst_project_root is not None:
         cmd = f"cd {shlex.quote(str(dst_project_root))} && {cmd}"
     return True, cmd
+
+
+@dataclass(frozen=True)
+class _ProvenancePlan:
+    """Pre-stage outcome of the shared→shared provenance classification.
+
+    ``carry=True`` captures the source entry's pin and digest map for the
+    post-promote verification (:func:`_carry_provenance`); ``carry=False``
+    pairs the human reason with its stable code. The "no ``lock.json``
+    entry at all" case returns ``None`` from the classifier instead of a
+    plan — not wiki-tracked is ``not_applicable``, not a skip.
+    """
+
+    carry: bool
+    wiki_commit: str | None = None
+    digests: dict[str, str] | None = None
+    reason: str | None = None
+    reason_code: ProvenanceSkipCode | None = None
+
+
+def _provenance_skip(reason: str, code: ProvenanceSkipCode) -> _ProvenancePlan:
+    return _ProvenancePlan(carry=False, reason=reason, reason_code=code)
+
+
+def _classify_provenance_carry(
+    kind: ArtifactKind,
+    name: str,
+    src_root: Path,
+    *,
+    renamed: bool,
+) -> _ProvenancePlan | None:
+    """Classify whether a shared→shared transfer may carry install provenance.
+
+    Runs while the source tree is still on disk (pre-stage in apply mode,
+    lock-free in dry-run). Returns ``None`` when the source has no
+    ``lock.json`` entry — a non-wiki artifact has nothing to carry and the
+    result stays ``not_applicable`` / quiet.
+
+    Carry requires, in order (each failure is a typed skip):
+
+    - a readable source lockfile (corrupt → the transfer itself must not
+      fail over bookkeeping; classify and move on);
+    - no copy-rename: entries are keyed by artifact name == wiki asset
+      name, so an entry under the new name would point ``mm context
+      update`` at a DIFFERENT wiki asset — if that asset exists, the
+      carried digests would classify the renamed copy clean and let
+      update silently clobber it with foreign bytes. The digest gate
+      alone does not close this: a manifest with no ``name:`` key makes
+      the rename rewrite a no-op, leaving the staged bytes identical.
+    - a full 40-char SHA ``wiki_commit`` (the ADR-0008 stored-pin
+      contract; carrying an abbreviated or malformed pin would mint
+      destination provenance that ``git checkout <pin>`` forensics and
+      reachability checks cannot reliably use);
+    - a valid per-file digest map (:func:`digests_from_entry`) — the
+      design-gate finding behind this whole feature: without byte
+      evidence, "clean" can only be claimed from mtimes, and rehashing
+      mtime-clean bytes would MANUFACTURE digest evidence over possibly
+      backdated local edits, blessing them as wiki bytes for a later
+      ``mm context update`` to clobber without the ``--force`` gate.
+      Pre-digest (#1247) installs therefore don't carry until updated or
+      reinstalled at the source;
+    - ``is_asset_dirty`` == ``clean`` over that digest map (modified,
+      added, deleted, or unreadable files all refuse — "cannot prove
+      clean" protects).
+    """
+    try:
+        entry = Lockfile.at(src_root).read_entry(kind, name)
+    except LockfileError as exc:
+        logger.warning(
+            "transfer: source lockfile at %s unreadable while classifying "
+            "provenance carry for %s/%s: %s",
+            src_root,
+            kind,
+            name,
+            exc,
+        )
+        return _provenance_skip(
+            "source project's lock.json is unreadable; fix or remove it, then "
+            "re-install at the destination to restore update lineage",
+            PROVENANCE_SOURCE_LOCKFILE_UNREADABLE,
+        )
+    if entry is None:
+        return None
+
+    if renamed:
+        return _provenance_skip(
+            "renamed copy: lock.json entries are keyed by wiki asset name, so "
+            "provenance under the new name would target a different wiki asset",
+            PROVENANCE_RENAMED_COPY,
+        )
+
+    wiki_commit = entry.get("wiki_commit")
+    if (
+        not isinstance(wiki_commit, str)
+        or len(wiki_commit) != _FULL_SHA_LEN
+        or not set(wiki_commit) <= _HEX_DIGITS
+    ):
+        return _provenance_skip(
+            "source entry's wiki_commit is not a full 40-char SHA (ADR-0008 pin contract)",
+            PROVENANCE_SOURCE_INVALID_PIN,
+        )
+
+    digests = digests_from_entry(entry)
+    if digests is None:
+        return _provenance_skip(
+            "source entry has no valid per-file digests (pre-digest install); "
+            "run `mm context update` at the source first, then retry",
+            PROVENANCE_SOURCE_NO_DIGESTS,
+        )
+
+    try:
+        report = is_asset_dirty(src_root, kind, name, lock_entry=entry)
+    except OSError as exc:
+        logger.warning(
+            "transfer: dirty classification failed for %s/%s at %s: %s",
+            kind,
+            name,
+            src_root,
+            exc,
+        )
+        return _provenance_skip(
+            f"source tree could not be classified ({exc}); cannot prove clean",
+            PROVENANCE_SOURCE_UNPROVABLE,
+        )
+    if report.reason == "clean":
+        return _ProvenancePlan(carry=True, wiki_commit=wiki_commit, digests=digests)
+    if report.reason == "dirty":
+        return _provenance_skip(
+            f"source has local edits ({report.summary()}); update or revert "
+            f"them at the source first, or re-install at the destination",
+            PROVENANCE_SOURCE_DIRTY,
+        )
+    # missing_dest (e.g. a flat-layout source shadowing a stale dir entry)
+    # or never_installed (malformed installed_at over an existing dest):
+    # the install record cannot vouch for the bytes being transferred.
+    return _provenance_skip(
+        f"source install record cannot vouch for the transferred bytes ({report.reason})",
+        PROVENANCE_SOURCE_UNPROVABLE,
+    )
+
+
+def _carry_provenance(
+    kind: ArtifactKind,
+    dst_name: str,
+    dst_path: Path,
+    dst_root: Path,
+    plan: _ProvenancePlan,
+) -> tuple[ProvenanceCarry, str | None, ProvenanceSkipCode | None]:
+    """Verify the promoted bytes and upsert the destination ``lock.json`` entry.
+
+    Best-effort by contract (issue #1275): runs AFTER the artifact pair
+    lock releases, and no failure here may fail or un-commit the
+    transfer — every refusal degrades to ``not_carried`` with a loud log.
+
+    The promoted tree is REHASHED and required to equal the source
+    entry's digest map exactly (keys and values). This closes the
+    classify→stage TOCTOU: sidecar locks don't bind external writers, so
+    an edit landing between the clean check and the staging rename would
+    otherwise be blessed as pristine wiki bytes. With the equality gate,
+    the only digests we ever record are byte-identical to what the wiki
+    install recorded — an edit landing after the rehash leaves entry ≠
+    disk, which classifies *dirty* later and makes ``mm context update``
+    refuse without ``--force`` (the protective direction).
+
+    The paired keys are recomputed per the ``lockfile.upsert_entry``
+    contract, not copied verbatim: ``installed_at`` is captured from the
+    promoted tree (:func:`installed_at_from_dest`) and
+    ``digests_installed_at`` is stamped from it inside ``upsert_entry``;
+    ``files`` derives from the rehashed map so the new entry is
+    internally consistent by construction (exactly how install writes
+    fresh entries).
+    """
+    rehashed: dict[str, str] = {}
+    try:
+        for file_path in iter_installed_files(dst_path):
+            rel = file_path.relative_to(dst_path).as_posix()
+            rehashed[rel] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        logger.warning(
+            "transfer: cannot rehash promoted tree at %s for provenance "
+            "carry-over (%s); destination entry not written.",
+            dst_path,
+            exc,
+        )
+        return (
+            "not_carried",
+            f"promoted bytes could not be verified ({exc})",
+            PROVENANCE_DEST_BYTES_UNVERIFIED,
+        )
+    if rehashed != plan.digests:
+        logger.warning(
+            "transfer: promoted bytes at %s do not match the source install "
+            "digests (concurrent edit during transfer?); destination entry "
+            "not written.",
+            dst_path,
+        )
+        return (
+            "not_carried",
+            "promoted bytes do not match the source install digests (changed during transfer)",
+            PROVENANCE_DEST_BYTES_UNVERIFIED,
+        )
+
+    assert plan.wiki_commit is not None  # carry plans always capture the pin
+    try:
+        Lockfile.at(dst_root).upsert_entry(
+            kind,
+            dst_name,
+            wiki_commit=plan.wiki_commit,
+            installed_at=installed_at_from_dest(dst_path),
+            files=sorted(rehashed),
+            files_commit=plan.wiki_commit,
+            digests=rehashed,
+        )
+    except (LockfileError, OSError) as exc:
+        logger.warning(
+            "transfer: failed to write the destination lock.json entry for "
+            "%s/%s at %s (%s); the transfer itself is committed — the "
+            "artifact lands untracked (re-install there to restore update "
+            "lineage).",
+            kind,
+            dst_name,
+            dst_root,
+            exc,
+        )
+        return (
+            "not_carried",
+            f"destination lock.json could not be written ({exc})",
+            PROVENANCE_DEST_LOCKFILE_ERROR,
+        )
+    return "carried", None, None
+
+
+def _provenance_fields(
+    plan: _ProvenancePlan | None,
+) -> tuple[ProvenanceCarry, str | None, ProvenanceSkipCode | None]:
+    """Result-field triple for a classification outcome (dry-run / skip path)."""
+    if plan is None:
+        return "not_applicable", None, None
+    if plan.carry:
+        return "carried", None, None
+    return "not_carried", plan.reason, plan.reason_code
 
 
 def _remove_staging(staging: Path) -> None:
@@ -387,19 +686,25 @@ def transfer_artifact(
        iff ``to_scope == "project_shared"``, promote via ``os.replace``.
        Rollback preserves "staging deleted only when the bytes are
        verified safe elsewhere".
-    6. Outside the pair lock: drop the source project's ``lock.json``
-       entry when moving out of ``project_shared`` (bookkeeping must
-       never fail a committed move), then clean stale SOURCE runtime
-       fan-out under the two-root contract (discovery at the source
-       root, override/render verification against the destination
-       root). Destination fan-out is NOT generated — the result carries
+    6. Outside the pair lock (bookkeeping must never fail a committed
+       move): for a shared→shared transfer, carry the install
+       provenance to the destination ``lock.json`` when the source was
+       classified clean pre-stage AND the promoted bytes rehash to the
+       source entry's exact digest map (A-4 #1275; see
+       :func:`_classify_provenance_carry` / :func:`_carry_provenance`);
+       then drop the source project's entry when moving out of
+       ``project_shared``; then clean stale SOURCE runtime fan-out
+       under the two-root contract (discovery at the source root,
+       override/render verification against the destination root).
+       Destination fan-out is NOT generated — the result carries
        ``needs_sync`` + the exact follow-up sync command.
 
     Copy mode replaces step 5's staging with a byte copy
     (:func:`_stage_copy`, source never consumed), applies the optional
-    rename rewrite before the Gate A scan, and skips step 6 entirely
-    (no source fan-out cleanup, no lock.json change; destination
-    ``lock.json`` provenance carry-over is A-4 #1275). ``versions/`` +
+    rename rewrite before the Gate A scan, and runs only the carry-over
+    half of step 6 (no source fan-out cleanup, no source ``lock.json``
+    change — a shared→shared copy of a clean wiki install ends with the
+    entry at BOTH ends; a copy-rename never carries). ``versions/`` +
     ``versions.json`` live inside the artifact dir and travel
     implicitly in both modes.
     """
@@ -474,11 +779,25 @@ def transfer_artifact(
     # get the source-anchored offending-file hint instead.
     transfer_hint = mode == "copy" or cross_root
 
+    def _plan_provenance() -> _ProvenancePlan | None:
+        # shared→shared (A-4 #1275) — necessarily cross-project here: the
+        # same-store pairs were rejected above. Only this tier pair carries
+        # install provenance; the lockfile tracks project_shared installs
+        # only. ``None`` for every other pair == ``not_applicable``.
+        if src_scope != "project_shared" or to_scope != "project_shared" or src_root is None:
+            return None
+        return _classify_provenance_carry(kind, name, src_root, renamed=new_name is not None)
+
     if not apply_:
         # Dry-run: compute plan, no mutation. ``fanout_planned`` previews
         # the deletion half of a move — the same selection the apply-side
         # cleanup uses, so preview and apply cannot disagree about what
-        # gets removed. Copy has no deletion half by definition.
+        # gets removed. Copy has no deletion half by definition. The
+        # provenance triple previews the same classification apply runs
+        # pre-stage (apply additionally re-verifies the promoted bytes).
+        provenance, provenance_reason, provenance_reason_code = _provenance_fields(
+            _plan_provenance()
+        )
         return TransferResult(
             kind=kind,
             name=name,
@@ -504,6 +823,9 @@ def transfer_artifact(
             ),
             needs_sync=needs_sync,
             sync_command=sync_command,
+            provenance=provenance,
+            provenance_reason=provenance_reason,
+            provenance_reason_code=provenance_reason_code,
         )
 
     # ── apply path ───────────────────────────────────────────────────
@@ -515,6 +837,13 @@ def transfer_artifact(
         # had to take the same lock, but check defensively).
         if dst_path.exists():
             raise click.ClickException(f"destination appeared during lock acquire: {dst_path}.")
+
+        # Provenance classification must run while the SOURCE tree still
+        # exists (move staging consumes it). Read-only; the write half
+        # (`_carry_provenance`) runs after the lock releases and re-verifies
+        # the promoted bytes, so an edit slipping in between cannot be
+        # blessed (the equality gate there is the actual TOCTOU close).
+        provenance_plan = _plan_provenance()
 
         if mode == "copy":
             staging = _stage_copy(src_path, dst_path.parent, name_hint=dst_name)
@@ -682,10 +1011,22 @@ def transfer_artifact(
                         dst_path=dst_path,
                     ) from exc
 
-    # Lock released. Move-mode bookkeeping + source fan-out cleanup —
-    # both deliberately OUTSIDE the artifact pair lock: ``Lockfile``
-    # serializes on its own sidecar lock, and a partial fan-out cleanup
-    # failure must not roll back the committed canonical move.
+    # Lock released. Bookkeeping + source fan-out cleanup — all
+    # deliberately OUTSIDE the artifact pair lock: ``Lockfile``
+    # serializes on its own sidecar lock, and a bookkeeping or partial
+    # fan-out cleanup failure must not roll back the committed transfer.
+    #
+    # Provenance carry-over (A-4 #1275) runs FIRST, in both modes, so a
+    # shared→shared move upserts the destination entry before dropping
+    # the source one — the carried record never has a gap where neither
+    # project tracks the artifact.
+    provenance, provenance_reason, provenance_reason_code = _provenance_fields(provenance_plan)
+    if provenance_plan is not None and provenance_plan.carry:
+        assert dst_root is not None  # shared→shared implies a project root
+        provenance, provenance_reason, provenance_reason_code = _carry_provenance(
+            kind, dst_name, dst_path, dst_root, provenance_plan
+        )
+
     fanout_cleaned: list[Path] = []
     fanout_backed_up: list[Path] = []
     if mode == "move":
@@ -694,11 +1035,12 @@ def transfer_artifact(
         # leaves its entry dangling, and `mm context status` would then
         # iterate that entry, find the canonical gone, and report the
         # (now-moved) artifact as "missing" (#1123 B4-1). Drop the stale
-        # entry — at the SOURCE project's lockfile. Best-effort: the
-        # canonical move already committed inside the lock above, so a
-        # lock.json bookkeeping failure must NOT undo or fail the move —
-        # log loudly and continue. (Destination-side provenance carry-over
-        # for shared→shared transfers is A-4 #1275.)
+        # entry — at the SOURCE project's lockfile, unconditionally: even
+        # when the carry-over above declined or failed, the source
+        # canonical is gone and a dangling entry is pure status noise.
+        # Best-effort: the canonical move already committed inside the
+        # lock above, so a lock.json bookkeeping failure must NOT undo or
+        # fail the move — log loudly and continue.
         if src_scope == "project_shared" and src_root is not None:
             try:
                 Lockfile.at(src_root).remove_entry(kind, name)
@@ -745,4 +1087,7 @@ def transfer_artifact(
         needs_sync=needs_sync,
         sync_command=sync_command,
         notes=notes,
+        provenance=provenance,
+        provenance_reason=provenance_reason,
+        provenance_reason_code=provenance_reason_code,
     )

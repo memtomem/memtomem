@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import shlex
 import shutil
 from pathlib import Path
@@ -30,11 +31,17 @@ from pathlib import Path
 import click
 import pytest
 
-from memtomem.context._atomic import _file_lock, _lock_path_for
-from memtomem.context.lockfile import Lockfile, utcnow_iso8601_z
+from memtomem.context._atomic import (
+    _file_lock,
+    _lock_path_for,
+    installed_at_from_dest,
+    iter_installed_files,
+)
+from memtomem.context.dirty import is_asset_dirty
+from memtomem.context.lockfile import Lockfile, digests_from_entry, utcnow_iso8601_z
 from memtomem.context.migrate import MigratePartialError
 from memtomem.context.privacy_scan import PrivacyBlockedError
-from memtomem.context.transfer import transfer_artifact
+from memtomem.context.transfer import _carry_provenance, _ProvenancePlan, transfer_artifact
 
 _MANIFEST_NAME = {"agents": "agent.md", "commands": "command.md", "skills": "SKILL.md"}
 _AGENT_BODY_CLEAN = "---\nname: foo\ndescription: a clean test agent\n---\n\nhello world\n"
@@ -266,8 +273,12 @@ def test_copy_keeps_source_lock_entry_and_fanout(two_projects):
     assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
     assert Lockfile.at(two_projects["a"]).read_entry("agents", "foo") is not None
     assert fanout.is_file()
-    # Copy never plans/cleans fan-out; destination lock.json untouched (A-4).
+    # Copy never plans/cleans fan-out. The destination gains no lock.json
+    # entry here either: this legacy-shaped entry (abbreviated pin, no
+    # digests) fails the A-4 carry gates — see the provenance section below
+    # for the carried cases.
     assert result.fanout_cleaned == [] and result.fanout_backed_up == []
+    assert result.provenance == "not_carried"
     assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
 
 
@@ -902,3 +913,281 @@ def test_copy_into_user_tier_sync_command(two_projects):
     assert result.sync_command == "mm context sync --scope user"
     dst_manifest = _canonical_root(two_projects, "agents", "user", "a") / "foo" / "agent.md"
     assert dst_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+
+
+# ── install-provenance carry-over (A-4 #1275) ────────────────────────
+
+_FULL_PIN = "deadbeef" * 5  # 40-char lowercase hex — the ADR-0008 stored-pin shape
+_OTHER_PIN = "cafebabe" * 5
+
+
+def _wiki_install_entry(root: Path, kind: str, name: str, *, pin: str = _FULL_PIN) -> None:
+    """Write a wiki-install-shaped lock.json entry over the on-disk tree.
+
+    Mirrors what install/update write (#1247 id 15): per-file SHA-256
+    digests hashed from the canonical bytes, ``files`` == digest keys,
+    ``installed_at`` captured from the dest tree so the
+    ``digests_installed_at`` pairing validates and ``is_asset_dirty``
+    takes the digest branch.
+    """
+    dest = root / ".memtomem" / kind / name
+    digests = {
+        f.relative_to(dest).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
+        for f in iter_installed_files(dest)
+    }
+    Lockfile.at(root).upsert_entry(
+        kind,
+        name,
+        wiki_commit=pin,
+        installed_at=installed_at_from_dest(dest),
+        files=sorted(digests),
+        files_commit=pin,
+        digests=digests,
+    )
+
+
+def _shared_to_shared(mode: str, two_projects, *, apply_: bool = True, new_name: str | None = None):
+    return transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode=mode,
+        apply_=apply_,
+        new_name=new_name,
+    )
+
+
+def test_provenance_carried_on_clean_move(two_projects):
+    """Clean wiki install, shared→shared move: entry lands at B, leaves A.
+
+    The destination entry must be status-serviceable: carried pin, valid
+    digest pairing (``digests_from_entry`` non-None), and a clean
+    ``is_asset_dirty`` classification — the inputs that make ``mm context
+    status`` render ok/behind instead of untracked. ``versions/`` travels
+    inside the artifact dir and is part of the digest surface.
+    """
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    _write_versions(src_manifest.parent, _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+    src_entry = Lockfile.at(two_projects["a"]).read_entry("agents", "foo")
+    assert src_entry is not None
+
+    result = _shared_to_shared("move", two_projects)
+
+    assert result.transferred is True
+    assert result.provenance == "carried"
+    assert result.provenance_reason is None and result.provenance_reason_code is None
+    dst_entry = Lockfile.at(two_projects["b"]).read_entry("agents", "foo")
+    assert dst_entry is not None
+    assert dst_entry["wiki_commit"] == _FULL_PIN
+    assert dst_entry["files"] == src_entry["files"]
+    assert dst_entry["digests"] == src_entry["digests"]
+    # Paired keys recomputed from the promoted tree, and the pairing
+    # validates there (digest branch active at the destination).
+    assert digests_from_entry(dst_entry) is not None
+    assert is_asset_dirty(two_projects["b"], "agents", "foo").reason == "clean"
+    # Source entry removed AFTER the destination carry (move semantics).
+    assert Lockfile.at(two_projects["a"]).read_entry("agents", "foo") is None
+
+
+def test_provenance_carried_on_clean_copy_keeps_source_entry(two_projects):
+    """Clean wiki install, shared→shared copy: entries at BOTH ends, source verbatim."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+    src_entry_before = Lockfile.at(two_projects["a"]).read_entry("agents", "foo")
+
+    result = _shared_to_shared("copy", two_projects)
+
+    assert result.provenance == "carried"
+    assert Lockfile.at(two_projects["a"]).read_entry("agents", "foo") == src_entry_before
+    dst_entry = Lockfile.at(two_projects["b"]).read_entry("agents", "foo")
+    assert dst_entry is not None and dst_entry["wiki_commit"] == _FULL_PIN
+    assert is_asset_dirty(two_projects["b"], "agents", "foo").reason == "clean"
+
+
+def test_provenance_dirty_source_move_lands_untracked(two_projects):
+    """Dirty source: bytes still move, no destination entry, source entry dropped."""
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+    src_manifest.write_text(_AGENT_BODY_CLEAN + "\nlocal edit\n", encoding="utf-8")
+
+    result = _shared_to_shared("move", two_projects)
+
+    assert result.transferred is True  # dirty blocks the carry, not the move
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "source_dirty"
+    assert "local edits" in result.provenance_reason
+    dst_dir = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
+    assert (dst_dir / "agent.md").read_text(encoding="utf-8").endswith("local edit\n")
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+    # Move still drops the (now-dangling) source entry — #1123 B4-1.
+    assert Lockfile.at(two_projects["a"]).read_entry("agents", "foo") is None
+
+
+def test_provenance_dirty_source_copy_keeps_source_entry(two_projects):
+    """Dirty source on copy: no destination entry, source entry untouched."""
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+    (src_manifest.parent / "extra.md").write_text("unrecorded addition\n", encoding="utf-8")
+
+    result = _shared_to_shared("copy", two_projects)
+
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "source_dirty"
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+    assert Lockfile.at(two_projects["a"]).read_entry("agents", "foo") is not None
+
+
+def test_provenance_not_applicable_without_entry_and_other_tier_pairs(two_projects):
+    """No lock.json entry → quiet not_applicable; non-shared→shared pairs likewise."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+
+    result = _shared_to_shared("copy", two_projects)
+    assert result.provenance == "not_applicable"
+    assert result.provenance_reason is None and result.provenance_reason_code is None
+
+    # shared→project_local with a CLEAN wiki entry: the lockfile only
+    # tracks project_shared installs, so the pair stays not_applicable
+    # (and the move-out entry drop keeps today's behavior).
+    _write_canonical(two_projects, "commands", "project_shared", "a", "bar", _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "commands", "bar")
+    result = transfer_artifact(
+        "commands",
+        "bar",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_local",
+        mode="move",
+        apply_=True,
+    )
+    assert result.provenance == "not_applicable"
+    assert Lockfile.at(two_projects["a"]).read_entry("commands", "bar") is None
+
+
+def test_provenance_legacy_entry_without_digests_not_carried(two_projects):
+    """Pre-digest entry (mtime evidence only) must not carry — no minting digests."""
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    Lockfile.at(two_projects["a"]).upsert_entry(
+        "agents",
+        "foo",
+        wiki_commit=_FULL_PIN,
+        installed_at=installed_at_from_dest(src_manifest.parent),
+    )
+
+    result = _shared_to_shared("copy", two_projects)
+
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "source_no_digests"
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+
+
+def test_provenance_abbreviated_pin_not_carried(two_projects):
+    """A non-40-hex wiki_commit violates the ADR-0008 stored-pin contract."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "agents", "foo", pin="abc123")
+
+    result = _shared_to_shared("copy", two_projects)
+
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "source_invalid_pin"
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+
+
+def test_provenance_renamed_copy_not_carried(two_projects):
+    """--as rename: entries are keyed by wiki asset name; carrying would mistarget update."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+
+    result = _shared_to_shared("copy", two_projects, new_name="bar")
+
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "renamed_copy"
+    dst_lock = Lockfile.at(two_projects["b"])
+    assert dst_lock.read_entry("agents", "bar") is None
+    assert dst_lock.read_entry("agents", "foo") is None
+
+
+def test_provenance_corrupt_dest_lockfile_warns_but_move_commits(two_projects, caplog):
+    """Corrupt destination lock.json: loud warning, no un-commit, garbage preserved."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+    dst_lock_path = two_projects["b"] / ".memtomem" / "lock.json"
+    dst_lock_path.parent.mkdir(parents=True, exist_ok=True)
+    dst_lock_path.write_bytes(b"{not json")
+
+    with caplog.at_level("WARNING", logger="memtomem.context.transfer"):
+        result = _shared_to_shared("move", two_projects)
+
+    assert result.transferred is True
+    dst_manifest = (
+        _canonical_root(two_projects, "agents", "project_shared", "b") / "foo" / "agent.md"
+    )
+    assert dst_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "dest_lockfile_error"
+    assert any("destination lock.json" in r.message for r in caplog.records)
+    # The corrupt file is preserved for the user to fix — never reset
+    # (#1247 id 16: a tolerant reset would be persisted).
+    assert dst_lock_path.read_bytes() == b"{not json"
+
+
+def test_provenance_corrupt_source_lockfile_not_carried(two_projects, caplog):
+    """Corrupt SOURCE lock.json: transfer proceeds, provenance skip says why."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    src_lock_path = two_projects["a"] / ".memtomem" / "lock.json"
+    src_lock_path.parent.mkdir(parents=True, exist_ok=True)
+    src_lock_path.write_bytes(b"\x00garbage")
+
+    with caplog.at_level("WARNING", logger="memtomem.context.transfer"):
+        result = _shared_to_shared("move", two_projects)
+
+    assert result.transferred is True
+    assert result.provenance == "not_carried"
+    assert result.provenance_reason_code == "source_lockfile_unreadable"
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+
+
+def test_provenance_dry_run_previews_without_writing(two_projects):
+    """Dry-run reports the carry plan and mutates neither lockfile."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    _wiki_install_entry(two_projects["a"], "agents", "foo")
+
+    preview = _shared_to_shared("move", two_projects, apply_=False)
+
+    assert preview.transferred is False
+    assert preview.provenance == "carried"  # planned; apply re-verifies
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+    assert Lockfile.at(two_projects["a"]).read_entry("agents", "foo") is not None
+
+    applied = _shared_to_shared("move", two_projects)
+    assert applied.provenance == "carried"  # dry-run/apply parity on the clean path
+
+
+def test_carry_provenance_digest_mismatch_refuses(two_projects):
+    """The post-promote equality gate: foreign bytes at dst → no entry written.
+
+    Unit-level pin of the TOCTOU close — a plan whose digest map does not
+    match the on-disk destination tree (as if the bytes changed between
+    classification and promote) must refuse rather than bless.
+    """
+    _write_canonical(two_projects, "agents", "project_shared", "b", "foo", _AGENT_BODY_CLEAN)
+    dst_path = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
+    plan = _ProvenancePlan(carry=True, wiki_commit=_FULL_PIN, digests={"agent.md": "0" * 64})
+
+    outcome = _carry_provenance("agents", "foo", dst_path, two_projects["b"], plan)
+
+    assert outcome[0] == "not_carried"
+    assert outcome[2] == "dest_bytes_unverified"
+    assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None

@@ -438,3 +438,85 @@ def test_move_help_is_the_three_verb_comparison(cli_projects) -> None:
     assert result.exit_code == 0
     for needle in ("move ", "copy ", "migrate", "flat→dir layout adoption"):
         assert needle in result.output
+
+
+# ── install-provenance carry-over lines (A-4 #1275) ──────────────────
+
+
+def _wiki_install_entry_cli(root: Path, name: str = "foo") -> None:
+    """Wiki-install-shaped lock.json entry over the seeded agent dir."""
+    import hashlib
+
+    from memtomem.context._atomic import installed_at_from_dest, iter_installed_files
+    from memtomem.context.lockfile import Lockfile
+
+    dest = root / ".memtomem" / "agents" / name
+    digests = {
+        f.relative_to(dest).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
+        for f in iter_installed_files(dest)
+    }
+    pin = "deadbeef" * 5
+    Lockfile.at(root).upsert_entry(
+        "agents",
+        name,
+        wiki_commit=pin,
+        installed_at=installed_at_from_dest(dest),
+        files=sorted(digests),
+        files_commit=pin,
+        digests=digests,
+    )
+
+
+def test_provenance_carried_line_on_clean_move(cli_projects) -> None:
+    _seed_agent(cli_projects, "project_shared", root_key="a")
+    _wiki_install_entry_cli(cli_projects["a"])
+    result = _invoke(
+        [
+            "move",
+            "agents",
+            "foo",
+            "--to-project",
+            str(cli_projects["b"]),
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+            "-y",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert "carried the wiki install provenance" in result.output
+
+
+def test_provenance_not_carried_line_names_the_reason(cli_projects) -> None:
+    src = _seed_agent(cli_projects, "project_shared", root_key="a")
+    _wiki_install_entry_cli(cli_projects["a"])
+    (src / "agent.md").write_text("---\nname: foo\n---\n\nedited\n", encoding="utf-8")
+    result = _invoke(
+        [
+            "move",
+            "agents",
+            "foo",
+            "--to-project",
+            str(cli_projects["b"]),
+            "--to",
+            "project_shared",
+            "--apply",
+            "--confirm-project-shared",
+            "-y",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert "install provenance not carried" in result.output
+    assert "local edits" in result.output
+    # Dry-run previews the same refusal.
+    _seed_agent(cli_projects, "project_shared", name="bar", root_key="a")
+    _wiki_install_entry_cli(cli_projects["a"], name="bar")
+    (cli_projects["a"] / ".memtomem" / "agents" / "bar" / "agent.md").write_text(
+        "---\nname: bar\n---\n\nedited\n", encoding="utf-8"
+    )
+    preview = _invoke(
+        ["move", "agents", "bar", "--to-project", str(cli_projects["b"]), "--to", "project_shared"]
+    )
+    assert preview.exit_code == 0, preview.output
+    assert "install provenance will not be carried" in preview.output

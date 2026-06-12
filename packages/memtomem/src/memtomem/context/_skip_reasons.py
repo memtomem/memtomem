@@ -81,6 +81,40 @@ VERSION_NOT_FOUND: Final = "version_not_found"
 # ``latest`` / no-label sync on a flat artifact is unaffected.
 VERSIONING_REQUIRES_DIR_LAYOUT: Final = "versioning_requires_dir_layout"
 
+# Transfer install-provenance skip codes (A-4 #1275) — emitted in
+# ``TransferResult.provenance_reason_code`` when a project_shared →
+# project_shared transfer does NOT carry the source's ``lock.json`` entry
+# to the destination. Same (human reason, stable code) pairing contract as
+# the sync/import codes above: CLI prints ``provenance_reason``, the web
+# route (A-5) / MCP action (A-13) match on the code.
+#
+# Source-side classification (pre-stage, while the source tree still
+# exists):
+PROVENANCE_SOURCE_LOCKFILE_UNREADABLE: Final = "source_lockfile_unreadable"
+PROVENANCE_RENAMED_COPY: Final = "renamed_copy"
+PROVENANCE_SOURCE_INVALID_PIN: Final = "source_invalid_pin"
+PROVENANCE_SOURCE_NO_DIGESTS: Final = "source_no_digests"
+PROVENANCE_SOURCE_DIRTY: Final = "source_dirty"
+PROVENANCE_SOURCE_UNPROVABLE: Final = "source_unprovable"
+# Destination-side verification (post-promote, best-effort):
+PROVENANCE_DEST_BYTES_UNVERIFIED: Final = "dest_bytes_unverified"
+PROVENANCE_DEST_LOCKFILE_ERROR: Final = "dest_lockfile_error"
+
+# Closed set for the provenance codes — separate from `SkipCode` because the
+# consumer surface differs (transfer result field, not per-item `skipped`
+# triples), and mixing the sets would let a fan-out code typo masquerade as
+# a provenance outcome (and vice versa) at construction sites.
+ProvenanceSkipCode = Literal[
+    "source_lockfile_unreadable",
+    "renamed_copy",
+    "source_invalid_pin",
+    "source_no_digests",
+    "source_dirty",
+    "source_unprovable",
+    "dest_bytes_unverified",
+    "dest_lockfile_error",
+]
+
 # Closed set of skip codes — typing dataclass `skipped` triples and route
 # response builders against `SkipCode` catches typos at the construction site
 # instead of letting an arbitrary string slip through to the wire.

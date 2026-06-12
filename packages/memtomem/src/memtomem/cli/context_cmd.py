@@ -2936,10 +2936,13 @@ def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
     """User-facing summary for one copy/move transfer (#1274).
 
     Sibling of :func:`_print_migrate_scope_result` with the transfer
-    extras: mode verb, copy-rename name, engine ``notes``, and the
+    extras: mode verb, copy-rename name, engine ``notes``, the
     engine's exact follow-up sync command (``TransferResult.sync_command``
     — cd-prefixed for cross-project tiers until A-9 lands a ``--project``
-    selector on sync) instead of a hand-built one.
+    selector on sync) instead of a hand-built one, and the shared→shared
+    provenance carry-over outcome (A-4 #1275; quiet when
+    ``not_applicable``, yellow with the engine's human reason when the
+    artifact lands untracked).
     """
     layout_note = " (flat layout)" if result.layout == "flat" else ""
     rename_note = f" as {result.dst_name}" if result.dst_name != result.name else ""
@@ -2957,6 +2960,16 @@ def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
             )
             for path in result.fanout_planned:
                 click.echo(f"    - {path}")
+        if result.provenance == "carried":
+            click.echo(
+                "  will carry the wiki install provenance (lock.json entry) to the destination"
+            )
+        elif result.provenance == "not_carried":
+            click.secho(
+                f"  install provenance will not be carried — the artifact "
+                f"lands untracked: {result.provenance_reason}",
+                fg="yellow",
+            )
         confirm_note = " --confirm-project-shared" if result.to_scope == "project_shared" else ""
         click.echo(f"\nRun with --apply{confirm_note} to execute.")
         if result.needs_sync and result.sync_command:
@@ -2985,6 +2998,14 @@ def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
         )
         for path in result.fanout_backed_up:
             click.echo(f"    - {path}")
+    if result.provenance == "carried":
+        click.echo("  carried the wiki install provenance (lock.json entry) to the destination")
+    elif result.provenance == "not_carried":
+        click.secho(
+            f"  install provenance not carried — the artifact lands "
+            f"untracked at the destination: {result.provenance_reason}",
+            fg="yellow",
+        )
     for note in result.notes:
         click.secho(f"  note: {note}", fg="yellow")
     if result.needs_sync and result.sync_command:
