@@ -48,7 +48,7 @@ to its native error shape (the established `PrivacyScanError` pattern).
 | agents | yes (PR-E4, now via engine) | yes | yes | yes | yes |
 | commands | yes (PR-E4, now via engine) | yes | yes | yes | yes |
 | skills | yes (dir tree) | yes | yes | yes | yes |
-| settings hooks | `settings-migrate` path, NOT this engine | — | A-11 #1281 (per-hook copy, separate mechanism) | A-11 #1281 | — |
+| settings hooks | `settings-migrate` path, NOT this engine | — | no (copy-only v1, #1281 scope) | yes — `settings-copy` per-hook (A-11 #1281, separate mechanism: §11) | — |
 | mcp-servers | n/a (single-tier by design, ADR-0016 §3 note) | — | A-12 #1282 (separate mechanism) | A-12 #1282 | — |
 | memory | ADR-0012 (cross-DB migration, deferred) | — | — | — | — |
 
@@ -337,6 +337,48 @@ no-commit claim. The response serializes `TransferResult` verbatim
 (absolute paths; `src_project_scope_id` / `dst_project_scope_id`
 computed for project tiers so the UI can offer one-click follow-up
 sync; the §9 provenance triple on the wire for client matching).
+
+### 11. Settings hooks: the A-11 per-hook copy mechanism (#1281)
+
+Settings hooks are not `{kind}/{name}` artifacts, so their
+cross-project copy is a **separate engine**
+(`context/settings_copy.py`; CLI `mm context settings-copy`, web
+`POST /api/context/settings/hooks/copy` in `settings_sync.py`) that
+inherits this ADR's surface contracts (§10's error envelope,
+disclose-then-confirm, destination eligibility, engine-offload shape)
+with four mechanism-specific decisions A-12/A-13 should inherit where
+applicable:
+
+- **Dual write, canonical first (durability).** A stamped rule absent
+  from the destination's canonical `.memtomem/settings.json` is
+  garbage-collected by that project's next settings sync (ADR-0019
+  owned-rule GC), so a tier-only copy would self-destruct. The copy
+  writes the destination canonical (entry verbatim — the durable
+  definition) and then the destination-tier Claude settings file
+  (ADR-0019-stamped — live immediately); other runtimes ride the
+  printed `cd <dst> && mm context sync --include=settings --scope
+  <tier>` follow-up. Companion fix: `generate_all_settings` re-reads
+  the canonical **under** the per-target lock so an in-flight sync
+  holding a stale canonical cannot prune the freshly stamped rule;
+  every no-write early exit stays pre-lock (host sidecars are never
+  touched before consent).
+- **Gate A always, `scope="project_shared"` hardcoded.** The
+  destination canonical is git-tracked for every destination tier
+  (the `promote_target_rule` precedent), so the fragment scan runs
+  unconditionally, before the consent round-trip, with no force valve.
+- **Pending-write-keyed gates.** `confirm_project_shared` is required
+  whenever a git-tracked write is pending (the canonical leg always
+  qualifies; `project_local` tier alone therefore still gates — unlike
+  artifact transfers); `allow_host_writes` when the user-tier file
+  would be written. No-op re-runs (`already_at_target` both legs)
+  never prompt. Destination eligibility is evaluated as a project-tier
+  destination for every tier — the canonical leg is a project write,
+  so a paused destination refuses even user-tier copies.
+- **Cross-leg conflict rule.** A canonical conflict skips both legs
+  (a tier-only write would be replaced by the destination's own sync —
+  the silent-evaporation failure); a tier conflict still writes the
+  canonical leg and reports the half-apply. Conflicts never duplicate
+  a matcher and the report names the colliding entry.
 
 ## Backward compatibility
 
