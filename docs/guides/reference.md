@@ -1212,6 +1212,7 @@ mm context sync                        # sync context.md → agent files (projec
 mm context sync --scope user           # fan out from ~/.memtomem/... → ~/.{claude,gemini,codex}/...
 mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)
 mm context sync --include=agents,commands --label production # sync using the 'production' labeled version (agents/commands only)
+mm context sync --all-projects --yes   # batch over every enrolled on-disk project (project_shared only, ADR-0025)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 

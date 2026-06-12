@@ -51,6 +51,31 @@ ADR-0024 resolves that deferral and records the contracts:
   on ``project_shared`` every settings generator targets inside the
   project root, so the in-band host-write gate cannot fire here
   (ADR-0024 §Alternatives records both).
+
+Second mutator: ``POST /api/context/sync-all-projects`` (ADR-0025,
+#1279) — the cross-project batch. It loops the SAME five-phase run over
+every discovered project scope, producing a per-project × per-phase
+report. Contracts on top of the single-project route's:
+
+- **Batch reports, never refuses.** Where the single route 409s on an
+  ineligible explicit selector, the batch emits a ``skipped`` project
+  entry with a ``reason_code`` (``sync_paused`` / ``sync_not_enrolled``
+  / ``missing_root`` / ``stale_project``) and proceeds. ``stale_project``
+  (root exists, no ``.memtomem/``) is batch-only: bulk-syncing a tree the
+  user never initialized would at best no-op every phase and at worst
+  seed bookkeeping; the per-type single routes stay ungated on stale.
+- **Per-project lock window.** The ``_gateway_lock`` +
+  ``asyncio.timeout(300)`` window wraps ONE project's five phases and is
+  released between projects — project stores are independent, so
+  cross-project interleaving by other mutators is harmless, while a
+  batch-wide window would starve them for N×5 phases. A project-level
+  timeout / unexpected error converts to a ``failed`` project entry
+  (completed phases kept — their writes are real; ``summary`` present
+  iff the phase loop completed) and the batch proceeds. There is
+  deliberately NO batch-level timeout: it would discard completed
+  projects' reports mid-flight.
+- **Tier policy unchanged** — ``project_shared`` only, same two 400s.
+- Version snapshots carry ``surface="web_context_sync_all_projects"``.
 """
 
 from __future__ import annotations
@@ -60,15 +85,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from memtomem.config import TargetScope
+from memtomem.context.projects import ProjectScope, sync_skip_reason
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_agents import _sync_agents_core
 from memtomem.web.routes.context_commands import _sync_commands_core
 from memtomem.web.routes.context_gateway import _classify_exception, _redact_message
 from memtomem.web.routes.context_mcp_servers import _sync_mcp_servers_core
-from memtomem.web.routes.context_projects import resolve_writable_scope_root
+from memtomem.web.routes.context_projects import _discover_for, resolve_writable_scope_root
 from memtomem.web.routes.context_skills import _sync_skills_core
 from memtomem.web.routes.context_transfer import _error
 from memtomem.web.routes.settings_sync import _sync_settings_core
@@ -92,6 +118,10 @@ _SYNC_ALL_PHASES: tuple[str, ...] = (
 #: ``surface`` parameter — version snapshots name the actual orchestrator
 #: instead of impersonating the standalone per-type routes.
 _SYNC_ALL_SURFACE = "web_context_sync_all"
+
+#: Same role for the cross-project batch (ADR-0025): snapshots taken
+#: during a batch run name the batch, not the single-project orchestrator.
+_SYNC_ALL_PROJECTS_SURFACE = "web_context_sync_all_projects"
 
 #: One outer window = five sequential phases × the standalone routes' 60s
 #: budget. The engine-internal cross-process lock budgets
@@ -147,6 +177,8 @@ async def _run_phase(
     phase_type: str,
     project_root: Path,
     target_scope: TargetScope,
+    *,
+    surface: str = _SYNC_ALL_SURFACE,
 ) -> dict[str, Any]:
     """Run one per-type core and shape its phase entry; never raises HTTP.
 
@@ -155,17 +187,16 @@ async def _run_phase(
     error (``OSError`` mid fan-out, …) fails only ITS phase — a bare
     propagate would 500 the whole request and discard the completed
     phases' report. Classification + redaction reuse the overview error
-    taxonomy.
+    taxonomy. ``surface`` flows to the version-snapshot audit trail —
+    the cross-project batch passes its own identity.
     """
     try:
         if phase_type == "skills":
-            native = await _sync_skills_core(project_root, target_scope, surface=_SYNC_ALL_SURFACE)
+            native = await _sync_skills_core(project_root, target_scope, surface=surface)
         elif phase_type == "commands":
-            native = await _sync_commands_core(
-                project_root, target_scope, surface=_SYNC_ALL_SURFACE
-            )
+            native = await _sync_commands_core(project_root, target_scope, surface=surface)
         elif phase_type == "agents":
-            native = await _sync_agents_core(project_root, target_scope, surface=_SYNC_ALL_SURFACE)
+            native = await _sync_agents_core(project_root, target_scope, surface=surface)
         elif phase_type == "mcp-servers":
             native = await _sync_mcp_servers_core(project_root)
         else:  # settings
@@ -226,6 +257,31 @@ def _summarize(phases: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _reject_ineligible_tier(target_scope: TargetScope) -> None:
+    """Shared tier gate for both sync-all routes (ADR-0024 §4 / ADR-0025).
+
+    One source for the two 400 literals — the per-route tests pin them by
+    full equality, and the batch deliberately refuses the same tiers for
+    the same reasons (a user-tier batch would also multiply the per-type
+    host-write confirmation bypass by N projects).
+    """
+    if target_scope == "project_local":
+        raise _error(
+            400,
+            "validation",
+            "Sync all is supported on the project_shared tier; project_local "
+            "is a draft tier with no runtime fan-out (ADR-0011 §3).",
+        )
+    if target_scope == "user":
+        raise _error(
+            400,
+            "validation",
+            "Sync all is a project-tier action (#1263); sync skills, commands, "
+            "agents, and settings individually on the user tier (mcp-servers "
+            "sync is project_shared-only).",
+        )
+
+
 @router.post("/context/sync-all")
 async def sync_all_context(
     project_root: Path = Depends(resolve_writable_scope_root),
@@ -249,21 +305,7 @@ async def sync_all_context(
     all on the ADR-0023 §10 envelope except the resolver's pre-existing
     409 shape (B-1 #1284 retrofits it).
     """
-    if target_scope == "project_local":
-        raise _error(
-            400,
-            "validation",
-            "Sync all is supported on the project_shared tier; project_local "
-            "is a draft tier with no runtime fan-out (ADR-0011 §3).",
-        )
-    if target_scope == "user":
-        raise _error(
-            400,
-            "validation",
-            "Sync all is a project-tier action (#1263); sync skills, commands, "
-            "agents, and settings individually on the user tier (mcp-servers "
-            "sync is project_shared-only).",
-        )
+    _reject_ineligible_tier(target_scope)
     phases: list[dict[str, Any]] = []
     try:
         async with asyncio.timeout(_SYNC_ALL_TIMEOUT_S):
@@ -279,3 +321,179 @@ async def sync_all_context(
             "runtime files; re-run to converge.",
         )
     return {"phases": phases, "summary": _summarize(phases)}
+
+
+# ── Cross-project batch (ADR-0025, #1279) ────────────────────────────────
+
+
+#: Web remediation prose per ``sync_skip_reason`` code. The CODE derivation
+#: is shared with the CLI (``context.projects.sync_skip_reason``) so the
+#: surfaces cannot drift on which scopes execute; the messages are
+#: surface-appropriate (portal here, ``mm`` verbs on the CLI).
+_SKIP_MESSAGES: dict[str, str] = {
+    "missing_root": (
+        "project root no longer exists on disk; re-register it or remove "
+        "the entry from the Projects portal."
+    ),
+    "sync_paused": (
+        "sync enrollment is paused for this project; resume it from the "
+        "Projects portal to include it in batch sync."
+    ),
+    "sync_not_enrolled": (
+        "discovery-only project (never enrolled); register it from the "
+        "Projects portal to include it in batch sync."
+    ),
+    "stale_project": (
+        "project has no .memtomem/ store (never initialized); run "
+        "`mm context init` there before syncing."
+    ),
+}
+
+
+def _project_skip(scope: ProjectScope) -> tuple[str, str] | None:
+    """``(reason_code, message)`` when *scope* must be skipped, else None."""
+    code = sync_skip_reason(scope)
+    if code is None:
+        return None
+    return code, _SKIP_MESSAGES[code]
+
+
+def _summarize_projects(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Batch-level roll-up over the per-project entries.
+
+    ``status``: ``failed`` (every EXECUTED project failed) / ``ok`` (no
+    executed project failed or partial — an all-skipped batch is ``ok``
+    with ``executed: 0`` visible: skipping paused projects is the designed
+    outcome, and unattended callers need the no-op run to read as success)
+    / ``partial`` otherwise. Totals aggregate the embedded phase lists —
+    counts, not classifications (#1262); a failed project's completed
+    phases still count (their writes are real).
+    """
+    counts = {"ok": 0, "partial": 0, "failed": 0, "skipped": 0}
+    generated_total = 0
+    skipped_rows_total = 0
+    for entry in entries:
+        counts[entry["status"]] += 1
+        for phase in entry.get("phases", ()):
+            generated_total += len(phase.get("generated", ()))
+            skipped_rows_total += len(phase.get("skipped", ()))
+    executed = len(entries) - counts["skipped"]
+    if executed and counts["failed"] == executed:
+        status = "failed"
+    elif counts["failed"] or counts["partial"]:
+        status = "partial"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "projects_total": len(entries),
+        "executed": executed,
+        **counts,
+        "generated_total": generated_total,
+        "skipped_rows_total": skipped_rows_total,
+    }
+
+
+@router.post("/context/sync-all-projects")
+async def sync_all_projects_context(
+    request: Request,
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to fan out in every project. Only "
+            "project_shared is supported — same gates as /context/sync-all."
+        ),
+    ),
+) -> dict:
+    """Run the five-phase sync for every eligible discovered project.
+
+    Returns HTTP 200 with ``{projects: [...], summary: {...}}`` whenever
+    the loop ran; non-2xx only for the pre-run tier gate (400) and CSRF
+    (403). Per-project entries embed the single-project report verbatim
+    (``phases`` + ``summary``) under the project identity; ineligible
+    scopes become ``skipped`` entries (batch reports, never refuses —
+    the single route's eligibility 409 has no batch analogue). One
+    project's failure — engine error, lock timeout — converts to a
+    ``failed`` entry and the loop proceeds (``error`` envelope attached,
+    completed ``phases`` kept, ``summary`` present iff the phase loop
+    completed). Lock + timeout window is PER PROJECT — see the module
+    docstring.
+    """
+    _reject_ineligible_tier(target_scope)
+    entries: list[dict[str, Any]] = []
+    for scope in _discover_for(request):
+        base: dict[str, Any] = {
+            "project_scope_id": scope.scope_id,
+            "label": scope.label,
+            "root": str(scope.root) if scope.root is not None else None,
+        }
+        skip = _project_skip(scope)
+        if skip is not None:
+            reason_code, message = skip
+            entries.append(
+                {**base, "status": "skipped", "reason_code": reason_code, "message": message}
+            )
+            continue
+        assert scope.root is not None  # _project_skip returned a missing_root row otherwise
+        phases: list[dict[str, Any]] = []
+        try:
+            async with asyncio.timeout(_SYNC_ALL_TIMEOUT_S):
+                async with _gateway_lock:
+                    for phase_type in _SYNC_ALL_PHASES:
+                        phases.append(
+                            await _run_phase(
+                                phase_type,
+                                scope.root,
+                                target_scope,
+                                surface=_SYNC_ALL_PROJECTS_SURFACE,
+                            )
+                        )
+        except TimeoutError:
+            entries.append(
+                {
+                    **base,
+                    "status": "failed",
+                    "phases": phases,
+                    "error": {
+                        "error_kind": "busy",
+                        "http_status": 503,
+                        "message": (
+                            "sync timed out for this project — another sync may "
+                            "be in progress. Phases that completed before the "
+                            "timeout have already written their runtime files; "
+                            "re-run to converge."
+                        ),
+                    },
+                }
+            )
+            continue
+        except Exception as exc:  # defensive — _run_phase contains engine errors
+            logger.error(
+                "sync-all-projects %s failed outside the phase runner: %s",
+                scope.scope_id,
+                exc,
+                exc_info=True,
+            )
+            entries.append(
+                {
+                    **base,
+                    "status": "failed",
+                    "phases": phases,
+                    "error": {
+                        "error_kind": _classify_exception(exc),
+                        "message": _redact_message(str(exc)),
+                        "http_status": 500,
+                    },
+                }
+            )
+            continue
+        project_summary = _summarize(phases)
+        entries.append(
+            {
+                **base,
+                "status": project_summary["status"],
+                "phases": phases,
+                "summary": project_summary,
+            }
+        )
+    return {"projects": entries, "summary": _summarize_projects(entries)}

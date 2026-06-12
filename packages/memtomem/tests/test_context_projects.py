@@ -25,6 +25,7 @@ from memtomem.context.projects import (
     compute_scope_id,
     discover_project_scopes,
     has_runtime_marker,
+    sync_skip_reason,
 )
 
 
@@ -1361,3 +1362,57 @@ def test_selector_nonexistent_path_raises(tmp_path: Path) -> None:
     scopes = _discover(tmp_path, cwd)
     with pytest.raises(UnknownProjectSelectorError, match="existing directory"):
         resolve_project_selector(str(tmp_path / "nope"), scopes)
+
+
+# ── sync_skip_reason (ADR-0025) ──────────────────────────────────────────
+
+
+def _scope_for_skip(
+    *,
+    root: Path | None,
+    sources: tuple[str, ...] = ("known-projects",),
+    missing: bool = False,
+    stale: bool = False,
+    enabled: bool = True,
+    sync_eligible: bool = False,
+) -> ProjectScope:
+    return ProjectScope(
+        scope_id="p-000000000000",
+        label="x",
+        root=root,
+        tier="project",
+        sources=sources,
+        missing=missing,
+        stale=stale,
+        enabled=enabled,
+        sync_eligible=sync_eligible,
+    )
+
+
+def test_sync_skip_reason_eligible_is_none(tmp_path: Path) -> None:
+    scope = _scope_for_skip(root=tmp_path, sync_eligible=True)
+    assert sync_skip_reason(scope) is None
+
+
+def test_sync_skip_reason_codes(tmp_path: Path) -> None:
+    assert sync_skip_reason(_scope_for_skip(root=tmp_path, missing=True)) == "missing_root"
+    assert sync_skip_reason(_scope_for_skip(root=None)) == "missing_root"
+    assert (
+        sync_skip_reason(_scope_for_skip(root=tmp_path, sources=("known-projects",), enabled=False))
+        == "sync_paused"
+    )
+    assert (
+        sync_skip_reason(_scope_for_skip(root=tmp_path, sources=("claude-projects",)))
+        == "sync_not_enrolled"
+    )
+    assert (
+        sync_skip_reason(_scope_for_skip(root=tmp_path, stale=True, sync_eligible=True))
+        == "stale_project"
+    )
+
+
+def test_sync_skip_reason_missing_trumps_paused(tmp_path: Path) -> None:
+    """A paused project whose root is also gone reports the physical
+    problem — eligibility is moot for a tree that no longer exists."""
+    scope = _scope_for_skip(root=tmp_path, missing=True, enabled=False)
+    assert sync_skip_reason(scope) == "missing_root"
