@@ -269,8 +269,19 @@ async def test_effect_parity_with_per_type_orchestration(
     # Phase entries embed the native per-type bodies verbatim. The settings
     # rows carry the ABSOLUTE target path, which legitimately differs per
     # project — normalize both roots to a placeholder before comparing.
+    # Walk the parsed structure rather than substring-replacing a
+    # ``json.dumps`` rendering: on Windows the serialized text escapes the
+    # path's backslashes (``C:\\Users``) while ``str(root)`` keeps single
+    # ones, so a serialized-text replace silently no-ops and the targets
+    # never normalize.
     def _rootless(value, root: Path):
-        return json.loads(json.dumps(value).replace(str(root), "<root>"))
+        if isinstance(value, str):
+            return value.replace(str(root), "<root>")
+        if isinstance(value, list):
+            return [_rootless(v, root) for v in value]
+        if isinstance(value, dict):
+            return {k: _rootless(v, root) for k, v in value.items()}
+        return value
 
     for phase_type, native in per_type.items():
         phase = _phase(data, phase_type)
