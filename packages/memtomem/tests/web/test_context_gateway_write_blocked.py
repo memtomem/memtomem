@@ -161,8 +161,7 @@ def test_user_tier_keeps_open_family_buttons_live_and_gates_mcp(page, mm_web_url
 
     sync_all = page.locator("#ctx-sync-all-btn")
     assert sync_all.get_attribute("data-write-blocked") == "user", (
-        "Sync All must stay gated on user tier (multi-phase run hits "
-        "settings + mcp-servers)"
+        "Sync All must stay gated on user tier (multi-phase run hits settings + mcp-servers)"
     )
 
     banner = page.locator("#ctx-skills-list .ctx-write-blocked-banner[data-tier='user']")
