@@ -1116,8 +1116,10 @@ function _renderCtxOverview(data) {
   // users diagnosing "did this actually reach Claude/Codex?" trusted it too
   // much. The label is now data-source-accurate and the explanation is
   // attached via ``title=`` on the label span (the row-level ``title=``
-  // still carries the raw ISO so the diagnose case keeps the absolute
-  // timestamp on hover). Suppress the line when the backend returns null
+  // still carries the absolute timestamp so the diagnose case keeps it on
+  // hover — rendered in the viewer's locale/TZ, not the raw UTC ISO, which
+  // read as a "wrong" date for non-UTC users; ``data-iso`` keeps the
+  // machine-readable form). Suppress the line when the backend returns null
   // (fresh / empty project — no canonical files yet); rendering a "never"
   // sentinel or epoch-zero relative would be more confusing than silent
   // absence.
@@ -1128,8 +1130,9 @@ function _renderCtxOverview(data) {
   if (lastSyncedAt) {
     const rel = escapeHtml(relativeTime(lastSyncedAt));
     const iso = escapeHtml(lastSyncedAt);
+    const localAbs = escapeHtml(new Date(lastSyncedAt).toLocaleString());
     const labelTip = escapeHtml(t('settings.ctx.last_synced_tooltip'));
-    lastSyncHtml = `<div class="ctx-overview-last-sync" title="${iso}">
+    lastSyncHtml = `<div class="ctx-overview-last-sync" title="${localAbs}">
         <span class="ctx-overview-last-sync-label" title="${labelTip}">${escapeHtml(t('settings.ctx.last_synced_label'))}</span>
         <span class="ctx-overview-last-sync-value" data-iso="${iso}">${rel}</span>
       </div>`;

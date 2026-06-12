@@ -1135,10 +1135,11 @@ def _build_iso(seconds_ago: int) -> str:
 
 def test_overview_last_sync_renders_relative_text_and_iso_tooltip(page, mm_web_url: str) -> None:
     """ADR-0009 §1.c pin: header surfaces ``last_synced_at`` as a relative
-    string ("5m ago") with the full ISO timestamp exposed via ``title=`` on
-    the row container. The raw ISO is also reflected on the value span's
-    ``data-iso`` attribute so screen-reader / scraping consumers don't have
-    to parse the localized relative form.
+    string ("5m ago") with the absolute timestamp exposed via ``title=`` on
+    the row container — rendered in the viewer's locale/TZ (#1290), not the
+    raw UTC ISO, which read as a "wrong" date for non-UTC users. The raw ISO
+    is reflected on the value span's ``data-iso`` attribute so screen-reader
+    / scraping consumers don't have to parse either localized form.
     """
     install_default_stubs(page)
     iso = _build_iso(seconds_ago=300)  # ~5 minutes ago
@@ -1161,9 +1162,17 @@ def test_overview_last_sync_renders_relative_text_and_iso_tooltip(page, mm_web_u
     assert row.count() == 1, (
         f"freshness row must render when last_synced_at is set; got {row.count()}"
     )
-    # ``title`` carries the unredacted ISO for the diagnose case.
-    assert row.get_attribute("title") == iso, (
-        f"freshness row title= must carry the raw ISO; got {row.get_attribute('title')!r}"
+    # ``title`` keeps the absolute timestamp for the diagnose case, but in
+    # the browser's own locale/TZ (#1290). Compute the expectation inside the
+    # same page so the pin is exact yet locale/TZ-agnostic, and pair it with
+    # the negative pin that the raw UTC ISO no longer leaks.
+    expected_local = page.evaluate(f"new Date({iso!r}).toLocaleString()")
+    assert row.get_attribute("title") == expected_local, (
+        f"freshness row title= must carry the localized absolute timestamp; "
+        f"got {row.get_attribute('title')!r}, expected {expected_local!r}"
+    )
+    assert row.get_attribute("title") != iso, (
+        "freshness row title= must not expose the raw UTC ISO (#1290)"
     )
     value = row.locator(".ctx-overview-last-sync-value")
     assert value.get_attribute("data-iso") == iso, (
