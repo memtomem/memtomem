@@ -61,7 +61,15 @@ from memtomem.context.migrate import (
     migrate_one,
     migrate_scope,
 )
-from memtomem.context.projects import KnownProjectsStore
+from memtomem.context.projects import (
+    KnownProjectsCorruptError,
+    KnownProjectsStore,
+    ProjectScope,
+    UnknownProjectSelectorError,
+    annotate_project_health,
+    discover_project_scopes,
+    resolve_project_selector,
+)
 from memtomem.context.lockfile import LockfileError
 from memtomem.context.status import classify_status, load_with_recovery, scan_user_artifacts
 from memtomem.context.generator import (

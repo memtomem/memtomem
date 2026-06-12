@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
@@ -53,6 +54,14 @@ class KnownProjectsCorruptError(RuntimeError):
     default. Version mismatch is folded in (no separate version error like the
     lockfile's): ``_write`` re-renders at the current version, so mutating a
     future-version file is the same clobber hazard as mutating a corrupt one.
+    """
+
+
+class UnknownProjectSelectorError(ValueError):
+    """A project selector matched neither a discovered scope_id nor an existing path.
+
+    Raised by :func:`resolve_project_selector`. CLI surfaces translate this
+    into a usage error; the message already names both interpretations tried.
     """
 
 
@@ -872,3 +881,68 @@ def has_runtime_marker(root: Path) -> bool:
     checkout.
     """
     return any((root / m).is_dir() for m in _MARKER_DIRS)
+
+
+# ── CLI / web project selector ───────────────────────────────────────────
+
+
+_SCOPE_ID_SHAPE = re.compile(r"^p-[0-9a-f]{12}$")
+
+
+def resolve_project_selector(
+    selector: str,
+    scopes: Sequence[ProjectScope],
+) -> tuple[Path, ProjectScope | None]:
+    """Resolve a user-supplied ``scope_id | path`` selector to a project root.
+
+    Shared by the ``mm context projects`` subcommands and the cross-project
+    flags that take a destination project (``--to-project``, ``--project``,
+    ``--all-projects`` siblings) so every surface accepts the same two forms.
+
+    Resolution is deterministic, not heuristic:
+
+    1. A selector matching the ``p-<sha12>`` shape is ONLY treated as a
+       scope_id. Match against *scopes* (case-sensitive, exact) → that
+       scope's root. No match → :class:`UnknownProjectSelectorError` — it
+       does NOT fall through to the path interpretation, so a directory that
+       happens to be named like a scope_id cannot be selected ambiguously
+       (spell it ``./p-...`` to force the path reading).
+    2. Anything else is a filesystem path: ``expanduser`` + resolved, and it
+       must be an existing directory. Returns the matching discovered scope
+       when one shares the same ``compute_scope_id`` (so callers see
+       enrollment state), else ``None`` — explicitly typing a path is consent
+       to operate on an unregistered root; callers gate further (e.g. a
+       paused *registered* destination still refuses).
+
+    A scope_id match whose scope has no root (defensive — discovery always
+    sets one today) raises :class:`UnknownProjectSelectorError` rather than
+    returning a rootless scope.
+    """
+    if _SCOPE_ID_SHAPE.match(selector):
+        for scope in scopes:
+            if scope.scope_id == selector:
+                if scope.root is None:
+                    raise UnknownProjectSelectorError(
+                        f"scope {selector} has no resolvable root; re-register it by path"
+                    )
+                return scope.root, scope
+        raise UnknownProjectSelectorError(
+            f"no discovered project has scope_id {selector!r} (run `mm context projects "
+            f"list`); to select a directory literally named like a scope_id, "
+            f"prefix it with ./"
+        )
+
+    candidate = Path(selector).expanduser()
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:
+        resolved = candidate
+    if not resolved.is_dir():
+        raise UnknownProjectSelectorError(
+            f"{selector!r} is neither a discovered scope_id nor an existing directory"
+        )
+    wanted = compute_scope_id(resolved)
+    for scope in scopes:
+        if scope.scope_id == wanted:
+            return resolved, scope
+    return resolved, None
