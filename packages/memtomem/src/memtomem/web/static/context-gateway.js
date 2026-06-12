@@ -774,15 +774,17 @@ function _ctxWireShowAllScopes(type, listEl) {
 // -- Tier-aware write-block gate (issue #943) ---------------------------------
 //
 // ADR-0011 / #940 wired ``target_scope`` through every artifact route. The
-// server gate is now split (#1263): ``project_local`` writes 400 via
+// server gate is split (#1263): ``project_local`` writes 400 via
 // ``_reject_project_local_write`` (mcp-servers/versions keep the stricter
 // ``_reject_non_shared_write``), while unconfirmed ``user``-tier writes on
-// skills/commands/agents return a 200 ``needs_confirmation`` envelope this
-// UI does not yet re-send with ``allow_host_writes`` — so the client-side
-// block below still covers BOTH non-shared tiers until the confirm dialog
-// ships (#1263 follow-up). Without the affordance, users who switch the
-// tier filter would only learn the operation is blocked from a generic
-// toast. #943 closed that UX gap by tagging every web-write affordance
+// skills/commands/agents return a 200 ``needs_confirmation`` envelope that
+// ``_ctxConfirmHostWrite`` re-sends with ``allow_host_writes`` after the
+// user approves the disclosed host paths. The client-side block below
+// therefore covers project_local fully, and on the user tier only the
+// surfaces with no user-tier route (version store, portal per-project
+// sync, Sync All). Without the affordance, users who switch the tier
+// filter would only learn an operation is blocked from a generic toast.
+// #943 closed that UX gap by tagging every still-blocked write affordance
 // with ``data-write-blocked="<tier>"`` so:
 //
 //   (1) CSS dims the button (``[data-write-blocked]`` selector in style.css),
@@ -813,8 +815,8 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   // stay un-gated, as they were before).
   + '.ctx-portal-sync, '
   // The single-item runtime-only import route (#940 import_<type>)
-  // also flows through the tier gate (project_local 400, unconfirmed
-  // user-tier → needs_confirmation), so the per-detail "Import this
+  // also flows through the tier gate (project_local 400; user tier rides
+  // the #1263 confirm round-trip), so the per-detail "Import this
   // <type>" button minted by ``_ctxLoadRuntimeOnlyDetail`` belongs in
   // the same write-blocked sweep.
   + '.ctx-runtime-only-import, '
@@ -889,14 +891,45 @@ function _ctxRenderToolbars() {
 }
 _ctxRenderToolbars();
 
+// Subset of ``_CTX_WRITE_BUTTON_SELECTOR`` whose routes accept user-tier
+// writes behind the #1263 ``allow_host_writes`` confirm round-trip — these
+// stay live on the user tier FOR the artifact families whose routes are
+// open (``_CTX_USER_TIER_OPEN_TYPES``). The class match alone is not
+// enough: the MCP Servers section mints the same button classes, but its
+// routes stay project_shared-only by design (ADR-0011 §1) — unblocking
+// them would send users into avoidable 400s (Codex review). Version-store
+// writes and the portal per-project sync likewise remain
+// project_shared-only server-side (ADR-0022 / multi-phase Sync All
+// semantics) and keep the block on BOTH non-shared tiers; project_local
+// blocks everything (no fan-out, ADR-0011 §3).
+const _CTX_USER_TIER_OPEN_SELECTOR = (
+  '.ctx-create-btn, .ctx-import-btn, .ctx-sync-btn, '
+  + '.ctx-detail-edit-btn, .ctx-detail-delete-btn, .ctx-runtime-only-import'
+);
+const _CTX_USER_TIER_OPEN_TYPES = new Set(['skills', 'commands', 'agents']);
+
+// Artifact family a write button belongs to: the toolbar buttons carry
+// ``data-type``; detail-minted buttons (edit / delete / runtime-only
+// import) resolve through their enclosing ``settings-ctx-<type>`` section.
+// Portal buttons live outside any section and resolve to '' (never open).
+function _ctxBtnArtifactType(btn) {
+  if (btn.dataset.type) return btn.dataset.type;
+  const section = btn.closest('[id^="settings-ctx-"]');
+  return section ? section.id.replace('settings-ctx-', '') : '';
+}
+
 function _ctxRefreshWriteBlockedState() {
-  const blocked = _ctxTargetScope !== 'project_shared';
-  const tooltipKey = _ctxTargetScope === 'project_local'
+  const tier = _ctxTargetScope;
+  const tooltipKey = tier === 'project_local'
     ? 'settings.ctx.write_blocked_project_local_tooltip'
     : 'settings.ctx.write_blocked_user_tooltip';
   document.querySelectorAll(_CTX_WRITE_BUTTON_SELECTOR).forEach(btn => {
+    const userTierOpen = btn.matches(_CTX_USER_TIER_OPEN_SELECTOR)
+      && _CTX_USER_TIER_OPEN_TYPES.has(_ctxBtnArtifactType(btn));
+    const blocked = tier === 'project_local'
+      || (tier === 'user' && !userTierOpen);
     if (blocked) {
-      btn.dataset.writeBlocked = _ctxTargetScope;
+      btn.dataset.writeBlocked = tier;
       btn.setAttribute('aria-disabled', 'true');
       btn.title = t(tooltipKey);
     } else {
@@ -911,9 +944,10 @@ function _ctxRefreshWriteBlockedState() {
     }
   });
 
-  // Sync All: user-tier writes hit the server's 400 reject path; gate
-  // them here so the dashboard surfaces the decision pre-click instead
-  // of relying on the post-click toast. project_local already carries
+  // Sync All deliberately stays a project_shared action (#1263): its
+  // multi-phase run also hits settings + mcp-servers, which have no
+  // user-tier write surface, so gate it here pre-click rather than
+  // surfacing a mid-run mixed result. project_local already carries
   // ``data-runtime-only`` from ``_renderCtxOverview`` (no-fanout copy
   // is the more specific signal there) — leave that channel alone.
   const syncAll = document.getElementById('ctx-sync-all-btn');
@@ -956,6 +990,50 @@ document.addEventListener('click', (e) => {
     : 'settings.ctx.write_blocked_user_tooltip';
   showToast(t(key), 'info');
 }, true);
+
+// -- #1263 user-tier host-write confirm round-trip ----------------------------
+//
+// Since #1302 the skills/commands/agents write routes accept
+// ``target_scope=user``: the first unconfirmed request writes nothing and
+// answers HTTP 200 with ``{status: "needs_confirmation",
+// confirm: "allow_host_writes", reason, host_targets}`` (ADR-0015 §4c
+// rider). ``_ctxConfirmHostWrite`` owns the second leg: disclose the host
+// paths in the shared confirm modal and, on approval, invoke ``resend()``
+// — the SAME request with ``allow_host_writes=true`` (a body field on
+// POST/PUT, a query parameter on DELETE). Resolves to the re-sent
+// ``Response``, or ``null`` when the user declines (callers bail silently
+// — declining a disclosure is a choice, not an error).
+
+const _CTX_HOST_TARGET_PREVIEW_CAP = 8;
+
+function _ctxIsHostWriteEnvelope(data) {
+  return !!data && data.status === 'needs_confirmation'
+    && data.confirm === 'allow_host_writes';
+}
+
+async function _ctxConfirmHostWrite(data, resend) {
+  const targets = Array.isArray(data.host_targets) ? data.host_targets : [];
+  // ``warningText`` renders pre-line (style.css) so one path per row; cap
+  // the listing so a many-skills × 4-runtimes sync can't outgrow the modal.
+  const shown = targets.slice(0, _CTX_HOST_TARGET_PREVIEW_CAP);
+  let listing = shown.join('\n');
+  if (targets.length > shown.length) {
+    listing += '\n' + t('settings.ctx.host_write_more', {
+      count: targets.length - shown.length,
+    });
+  }
+  const ok = await showConfirm({
+    title: t('settings.ctx.host_write_confirm_title'),
+    message: t('settings.ctx.host_write_confirm_message', { count: targets.length }),
+    warningText: listing,
+    confirmText: t('settings.ctx.host_write_confirm_btn'),
+    // Host writes are consequential but not destructive-by-default; red
+    // stays reserved for deletes (the delete flow composes both dialogs).
+    danger: false,
+  });
+  if (!ok) return null;
+  return await resend();
+}
 
 // -- Deep-link carrier (ADR-0009 §3) ----------------------------------------
 //
@@ -2931,8 +3009,8 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // canonical, not a same-named project_shared one. project_local writes
     // are rejected at the server with HTTP 400 (``_reject_project_local_write``)
     // and unconfirmed user-tier writes return a needs_confirmation envelope
-    // this UI doesn't yet act on (#1263); the JS surfaces the 400s as
-    // toasts via the existing ``err.detail`` path.
+    // ``_ctxConfirmHostWrite`` resolves into a confirmed re-send (#1263);
+    // the JS surfaces the 400s as toasts via the existing ``err.detail`` path.
     const clickable = _ctxScopeIsActive(scope);
     container.innerHTML = _ctxRenderItemsHtml(
       items,
@@ -3292,12 +3370,13 @@ async function loadCtxList(type) {
     _ctxRenderControlBar();
     _ctxWireShowAllScopes(type, listEl);
 
-    // Tier-aware read-only banner (issue #943): inserted at the top of
-    // the list whenever the canonical-tier filter is set to a
-    // non-shared tier. Sits ABOVE the runtime-only banner that
-    // ``_ctxRefreshSectionState`` may insert later — the write-block
-    // state is the more important framing (it's why the user can't
-    // press the section's write buttons), so it should read first.
+    // Tier-aware banner (issue #943, reframed by #1263): inserted at the
+    // top of the list whenever the canonical-tier filter is set to a
+    // non-shared tier. project_local keeps the read-only framing; the
+    // user tier is writable since #1302 with a confirm-first contract,
+    // so its copy explains the disclosure instead of claiming read-only.
+    // Sits ABOVE the runtime-only banner that ``_ctxRefreshSectionState``
+    // may insert later.
     if (_ctxTargetScope !== 'project_shared') {
       const bannerKey = _ctxTargetScope === 'project_local'
         ? 'settings.ctx.write_blocked_project_local_banner'
@@ -3579,20 +3658,36 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
       const headers = csrf
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
-      const r2 = await fetch(
+      const forcePut = (extra) => fetch(
         _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
         {
           method: 'PUT',
           headers,
-          body: JSON.stringify({ content: userBuffer, mtime_ns: staleMtimeNs, force: true }),
+          body: JSON.stringify({
+            content: userBuffer, mtime_ns: staleMtimeNs, force: true, ...extra,
+          }),
         },
       );
+      let r2 = await forcePut({});
       if (!r2.ok) {
         const err = await r2.json().catch(() => ({}));
         showToast(err.detail || t('toast.request_failed'), 'error');
         return;
       }
-      const result = await r2.json();
+      let result = await r2.json();
+      if (_ctxIsHostWriteEnvelope(result)) {
+        // #1263: force=true skips the mtime pre-check server-side, so an
+        // unconfirmed user-tier force-save reaches the host-write gate —
+        // run the same disclose-then-re-PUT leg as the plain save.
+        r2 = await _ctxConfirmHostWrite(result, () => forcePut({ allow_host_writes: true }));
+        if (!r2) return;
+        if (!r2.ok) {
+          const err = await r2.json().catch(() => ({}));
+          showToast(err.detail || t('toast.request_failed'), 'error');
+          return;
+        }
+        result = await r2.json();
+      }
       if (result.name) {
         showToast(t('settings.ctx.conflict_force_done'), 'warning');
         detailEl.dataset.mtimeNs = result.mtime_ns || '';
@@ -4251,14 +4346,15 @@ async function loadCtxDetail(type, name, opts = {}) {
         const headers = csrf
           ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
           : { 'Content-Type': 'application/json' };
-        const r = await fetch(
+        const putOnce = (extra) => fetch(
           _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
           {
             method: 'PUT',
             headers,
-            body: JSON.stringify({ content, mtime_ns }),
+            body: JSON.stringify({ content, mtime_ns, ...extra }),
           },
         );
+        let r = await putOnce({});
         if (r.status === 409) {
           await _ctxHandleConflict(type, name, content, mtime_ns, detailEl);
           return;
@@ -4268,7 +4364,24 @@ async function loadCtxDetail(type, name, opts = {}) {
           showToast(err.detail || t('toast.request_failed'), 'error');
           return;
         }
-        const result = await r.json();
+        let result = await r.json();
+        if (_ctxIsHostWriteEnvelope(result)) {
+          // #1263 user-tier save: disclose the host path, re-PUT with the
+          // flag. The confirmed leg can still lose an mtime race — give it
+          // the same 409 → conflict-dialog path as the first attempt.
+          r = await _ctxConfirmHostWrite(result, () => putOnce({ allow_host_writes: true }));
+          if (!r) return;
+          if (r.status === 409) {
+            await _ctxHandleConflict(type, name, content, mtime_ns, detailEl);
+            return;
+          }
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            showToast(err.detail || t('toast.request_failed'), 'error');
+            return;
+          }
+          result = await r.json();
+        }
         if (result.name) {
           showToast(t('settings.ctx.save_success').replace('{name}', name));
           detailEl.dataset.mtimeNs = result.mtime_ns || '';
@@ -4342,18 +4455,34 @@ async function loadCtxDetail(type, name, opts = {}) {
       btnLoading(delBtn, true);
       try {
         const csrf = await ensureCsrfToken();
-        const r = await fetch(
+        const deleteOnce = (confirmed) => fetch(
           _ctxWithTargetScope(
-            `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`,
+            `/api/context/${type}/${encodeURIComponent(name)}?cascade=${cascade}`
+            + (confirmed ? '&allow_host_writes=true' : ''),
           ),
           { method: 'DELETE', headers: csrf ? { 'X-Memtomem-CSRF': csrf } : {} },
         );
+        let r = await deleteOnce(false);
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
-        const data = await r.json();
+        let data = await r.json();
+        if (_ctxIsHostWriteEnvelope(data)) {
+          // #1263 user-tier delete: the envelope's host_targets carry the
+          // canonical dir plus — on cascade — the user-tier runtime copies
+          // (the flag rides the query string: DELETE bodies are
+          // client-hostile, same reason the route takes it that way).
+          r = await _ctxConfirmHostWrite(data, () => deleteOnce(true));
+          if (!r) return;
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+            return;
+          }
+          data = await r.json();
+        }
         // Branch on lengths, not truthiness — ``deleted``/``skipped`` are
         // always arrays and ``[]`` is truthy, so a fully-failed delete
         // (every unlink skipped) used to show the success toast and hide
@@ -4588,20 +4717,32 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
         const headers = csrf
           ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
           : { 'Content-Type': 'application/json' };
-        const r = await fetch(
+        const importOnce = (extra) => fetch(
           _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/import`),
           {
             method: 'POST',
             headers,
-            body: JSON.stringify({}),
+            body: JSON.stringify({ ...extra }),
           },
         );
+        let r = await importOnce({});
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
-        const data = await r.json();
+        let data = await r.json();
+        if (_ctxIsHostWriteEnvelope(data)) {
+          // #1263 user-tier single import (see the section Import above).
+          r = await _ctxConfirmHostWrite(data, () => importOnce({ allow_host_writes: true }));
+          if (!r) return;
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+            return;
+          }
+          data = await r.json();
+        }
         if (data.imported && data.imported.length) {
           showToast(t('settings.ctx.import_success'));
         } else if (data.skipped && data.skipped.length) {
@@ -4691,16 +4832,35 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       const headers = csrf
         ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
         : { 'Content-Type': 'application/json' };
-      const r = await fetch(
+      const syncOnce = (extra) => fetch(
         _ctxWithTargetScope(`/api/context/${type}/sync`, pinnedScopeOpts),
-        { method: 'POST', headers },
+        {
+          method: 'POST',
+          headers,
+          // No-body POST stays the project-tier wire shape; the body only
+          // appears on the #1263 confirmed user-tier leg.
+          ...(extra ? { body: JSON.stringify(extra) } : {}),
+        },
       );
+      let r = await syncOnce(null);
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
-      const data = await r.json();
+      let data = await r.json();
+      if (_ctxIsHostWriteEnvelope(data)) {
+        // #1263 user-tier sync: host_targets list the ~/.claude-family
+        // fan-out destinations (parsed-name keyed, upper bound).
+        r = await _ctxConfirmHostWrite(data, () => syncOnce({ allow_host_writes: true }));
+        if (!r) return;
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          return;
+        }
+        data = await r.json();
+      }
       const generated = data.generated || [];
       const dropped = data.dropped || [];
       const skipped = data.skipped || [];
@@ -4809,7 +4969,9 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
     } finally {
       btnLoading(btn, false);
     }
-    const importDest = _ctxImportDestinationLabel(pinnedScopeOpts.scopeId);
+    const importDest = _ctxImportDestinationLabel(
+      pinnedScopeOpts.scopeId, pinnedScopeOpts.targetScope,
+    );
     let importMessage = t('settings.ctx.confirm_import', {
       type: _ctxTypeName(type),
       dest: importDest,
@@ -4866,17 +5028,35 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
         : { 'Content-Type': 'application/json' };
       // Same click-time (project, tier) snapshot as the preview so the write
       // can't land somewhere the preview/label didn't describe.
-      const r = await fetch(_ctxWithTargetScope(`/api/context/${type}/import`, pinnedScopeOpts), {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ overwrite }),
-      });
+      const importOnce = (extra) => fetch(
+        _ctxWithTargetScope(`/api/context/${type}/import`, pinnedScopeOpts),
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ overwrite, ...extra }),
+        },
+      );
+      let r = await importOnce({});
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
-      const data = await r.json();
+      let data = await r.json();
+      if (_ctxIsHostWriteEnvelope(data)) {
+        // #1263 user-tier import: the envelope nests the engine's dry-run
+        // under ``plan``; host_targets are the would-import canonical
+        // destinations under ~/.memtomem/. Second dialog after the impact
+        // confirm above — the first names counts, this one names paths.
+        r = await _ctxConfirmHostWrite(data, () => importOnce({ allow_host_writes: true }));
+        if (!r) return;
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          return;
+        }
+        data = await r.json();
+      }
       const statusEl = qs(`ctx-${type}-status`);
       if (statusEl) statusEl.innerHTML = renderImportResult(data);
       const importedCount = data.imported?.length || 0;
@@ -4938,9 +5118,17 @@ function _ctxCreateDestinationLabel() {
 // project_shared), so the tier is fixed — naming it answers rank-10's "Import
 // hides the destination tier" gap. Returns just "{project} · {tier}" (no
 // "Destination:" prefix) so it reads inline inside the confirm sentence.
-function _ctxImportDestinationLabel(scopeId = _ctxActiveScopeId) {
+function _ctxImportDestinationLabel(scopeId = _ctxActiveScopeId, targetScope = _ctxTargetScope) {
+  // Name the tier the pinned POST actually writes (Codex review — the
+  // hardcoded shared label lied once #1263 opened the user tier). The
+  // user tier is global (~/.memtomem), not per-project, so naming the
+  // active project there would claim a residency the import doesn't have.
+  if (targetScope === 'user') return t('settings.ctx.tier_option_user');
+  const tierKey = targetScope === 'project_local'
+    ? 'settings.ctx.tier_option_project_local'
+    : 'settings.ctx.tier_option_project_shared';
   const project = _ctxScopeDisplayLabelById(scopeId);
-  return `${project} · ${t('settings.ctx.tier_option_project_shared')}`;
+  return `${project} · ${t(tierKey)}`;
 }
 
 document.querySelectorAll('.ctx-create-btn').forEach(btn => {
@@ -4977,15 +5165,27 @@ document.querySelectorAll('.ctx-create-btn').forEach(btn => {
         const headers = csrf
           ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
           : { 'Content-Type': 'application/json' };
-        const r = await fetch(_ctxWithTargetScope(`/api/context/${type}`), {
+        const createOnce = (extra) => fetch(_ctxWithTargetScope(`/api/context/${type}`), {
           method: 'POST',
           headers,
-          body: JSON.stringify({ name: nameInput, content }),
+          body: JSON.stringify({ name: nameInput, content, ...extra }),
         });
+        let r = await createOnce({});
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
+        }
+        const created = await r.json().catch(() => ({}));
+        if (_ctxIsHostWriteEnvelope(created)) {
+          // #1263 user-tier create: canonical lands under ~/.memtomem/.
+          r = await _ctxConfirmHostWrite(created, () => createOnce({ allow_host_writes: true }));
+          if (!r) return;
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+            return;
+          }
         }
         showToast(t('settings.ctx.create_success').replace('{name}', nameInput));
         form.remove();

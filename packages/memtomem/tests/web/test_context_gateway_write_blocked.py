@@ -1,29 +1,23 @@
-"""Browser tests for ADR-0011 §5 / #943 tier-aware web write affordances.
+"""Browser tests for the tier-aware web write affordances (#943, #1263).
 
 PR #940 wired ``target_scope`` through every Context Gateway artifact
-route and added ``_reject_non_shared_write`` to 400-block create / update
-/ delete / sync / import on the ``user`` and ``project_local`` tiers.
-The route-level decision is correct but invisible to a user clicking
-the Web UI: pressing Create on a user-tier list produced a generic
-toast error rather than an explicit "this tier is read-only" cue.
+route; #943 made the SPA dim every write button on non-shared tiers.
+#1263/#1302 then opened the skills/commands/agents write routes to the
+``user`` tier behind the ``allow_host_writes`` disclose-then-confirm
+round-trip, so the gate is now selective. These specs pin the contract:
 
-#943 closes that gap by making the SPA dim every write button and
-insert a tier-aware banner when the canonical-tier filter is set to a
-non-shared tier. These specs pin the UX contract:
-
-  * Per-section Create / Import / Sync buttons carry
-    ``data-write-blocked="<tier>"`` + ``aria-disabled="true"`` + an
-    i18n-aware ``title``.
-  * A ``.ctx-write-blocked-banner[data-tier="<tier>"]`` sits at the top
-    of the list when the filter is non-shared.
-  * Clicks on the dim buttons are intercepted at the document level —
-    no fetch reaches the server; a toast surfaces the explanation
-    instead.
+  * ``user`` tier: skills/commands/agents Create / Import / Sync (and
+    per-item Edit / Delete) stay LIVE — the server's
+    ``needs_confirmation`` envelope owns the consent step. MCP Server
+    buttons stay dim (their routes remain project_shared-only by
+    design, ADR-0011 §1), and a banner explains the confirm-first
+    contract instead of the old read-only claim.
+  * ``project_local`` tier: everything stays dim
+    (``data-write-blocked="project_local"`` + ``aria-disabled`` + i18n
+    ``title``), the draft-tier banner renders, dim-button clicks are
+    intercepted at the document level (no fetch, toast instead), and
+    locale flips re-translate the tooltips.
   * Switching back to ``project_shared`` clears the gate state.
-  * Per-item Edit / Delete (and the runtime-only Import-this CTA)
-    inside the detail panel pick up the same gate when they mount.
-  * Locale toggles re-translate the dim button tooltips so the hover
-    text stays in sync with the active locale.
 """
 
 from __future__ import annotations
@@ -121,10 +115,12 @@ def _switch_tier(page, scope: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_user_tier_gates_section_write_buttons_and_inserts_banner(page, mm_web_url: str) -> None:
-    """Tier filter = user → Create / Import / Sync buttons carry the
-    full gate state, and the read-only banner appears at the top of
-    the list with the user-tier copy.
+def test_user_tier_keeps_open_family_buttons_live_and_gates_mcp(page, mm_web_url: str) -> None:
+    """Tier filter = user (#1263) → the skills section's Create / Import /
+    Sync stay LIVE (the server's needs_confirmation envelope owns consent
+    now), the MCP Servers section's buttons stay gated (their routes are
+    project_shared-only by design), Sync All stays gated, and the banner
+    explains the confirm-first contract instead of claiming read-only.
     """
     install_default_stubs(page)
     _stub_projects_and_skills(page)
@@ -132,31 +128,50 @@ def test_user_tier_gates_section_write_buttons_and_inserts_banner(page, mm_web_u
     _open_skills(page)
     _switch_tier(page, "user")
 
+    # The sweep is synchronous with the tier click; wait on the banner
+    # (inserted by the list re-render) as the settled signal.
     page.wait_for_selector(
-        "#settings-ctx-skills .ctx-create-btn[data-write-blocked='user']",
+        "#ctx-skills-list .ctx-write-blocked-banner[data-tier='user']",
         timeout=3_000,
     )
 
     for cls in ("ctx-create-btn", "ctx-import-btn", "ctx-sync-btn"):
         btn = page.locator(f"#settings-ctx-skills .{cls}")
-        assert btn.get_attribute("data-write-blocked") == "user", (
-            f"{cls!r} must be gated on user tier; got "
+        assert btn.get_attribute("data-write-blocked") is None, (
+            f"{cls!r} must stay live on user tier (#1263); got "
             f"data-write-blocked={btn.get_attribute('data-write-blocked')!r}"
         )
-        assert btn.get_attribute("aria-disabled") == "true", (
-            f"{cls!r} must announce aria-disabled on user tier"
+        assert btn.get_attribute("aria-disabled") is None, (
+            f"{cls!r} must not announce aria-disabled on user tier"
         )
-        # Tooltip carries the i18n-resolved EN copy (default locale).
+
+    # The write-block sweep is document-wide, so the (hidden) MCP Servers
+    # toolbar reflects the gate without navigating to the section. No
+    # Import button there — _CTX_TOOLBAR_CAPS['mcp-servers'].import=false.
+    for cls in ("ctx-create-btn", "ctx-sync-btn"):
+        btn = page.locator(f"#settings-ctx-mcp-servers .{cls}")
+        assert btn.get_attribute("data-write-blocked") == "user", (
+            f"mcp-servers {cls!r} must stay gated on user tier; got "
+            f"data-write-blocked={btn.get_attribute('data-write-blocked')!r}"
+        )
         title = btn.get_attribute("title") or ""
-        assert "read-only" in title.lower() or "manage these" in title.lower(), (
-            f"{cls!r} title must surface the user-tier read-only copy; got {title!r}"
+        assert "project_shared-only" in title.lower(), (
+            f"mcp-servers {cls!r} title must surface the shared-only copy; got {title!r}"
         )
+
+    sync_all = page.locator("#ctx-sync-all-btn")
+    assert sync_all.get_attribute("data-write-blocked") == "user", (
+        "Sync All must stay gated on user tier (multi-phase run hits settings + mcp-servers)"
+    )
 
     banner = page.locator("#ctx-skills-list .ctx-write-blocked-banner[data-tier='user']")
     assert banner.count() == 1, "user-tier banner must be present exactly once"
     banner_text = (banner.text_content() or "").strip()
-    assert "user-tier" in banner_text.lower() or "read-only" in banner_text.lower(), (
-        f"banner must surface the user-tier read-only copy; got {banner_text!r}"
+    assert "confirmation" in banner_text.lower(), (
+        f"banner must surface the confirm-first copy; got {banner_text!r}"
+    )
+    assert "read-only" not in banner_text.lower(), (
+        f"banner must not claim read-only on the now-writable user tier; got {banner_text!r}"
     )
     remediation = page.locator(
         "#ctx-skills-list .ctx-missing-canonical-remediation[data-tier='user']"
@@ -210,21 +225,22 @@ def test_project_local_tier_uses_project_local_specific_copy(page, mm_web_url: s
 
 
 def test_project_shared_tier_clears_write_blocked_state(page, mm_web_url: str) -> None:
-    """Symmetric guardrail: flipping from user → project_shared must
-    clear ``data-write-blocked`` + ``aria-disabled`` + tooltip override
-    and remove the read-only banner. Without this, the gate state would
-    persist across tier flips and the user would never see the write
-    buttons re-enable.
+    """Symmetric guardrail: flipping from project_local → project_shared
+    must clear ``data-write-blocked`` + ``aria-disabled`` + tooltip
+    override and remove the tier banner. Without this, the gate state
+    would persist across tier flips and the user would never see the
+    write buttons re-enable. (project_local is the fully-blocked tier
+    since #1263 opened the user tier for these sections.)
     """
     install_default_stubs(page)
     _stub_projects_and_skills(page)
     page.goto(mm_web_url)
     _open_skills(page)
-    _switch_tier(page, "user")
+    _switch_tier(page, "project_local")
 
     # Precondition: gate is on.
     page.wait_for_selector(
-        "#settings-ctx-skills .ctx-create-btn[data-write-blocked='user']",
+        "#settings-ctx-skills .ctx-create-btn[data-write-blocked='project_local']",
         timeout=3_000,
     )
 
@@ -248,15 +264,16 @@ def test_project_shared_tier_clears_write_blocked_state(page, mm_web_url: str) -
         )
 
     assert page.locator("#ctx-skills-list .ctx-write-blocked-banner").count() == 0, (
-        "read-only banner must be removed on project_shared"
+        "tier banner must be removed on project_shared"
     )
 
 
 def test_blocked_create_click_fires_toast_and_skips_post(page, mm_web_url: str) -> None:
-    """Clicking a dim Create button on a non-shared tier must NOT
-    issue ``POST /api/context/skills`` (the route would 400 with
-    ``Create skill rejected: ...``). The document-level capture-phase
-    intercept stops the event before the per-button handler runs.
+    """Clicking a dim Create button on project_local must NOT issue
+    ``POST /api/context/skills`` (the route would 400). The
+    document-level capture-phase intercept stops the event before the
+    per-button handler runs. (user-tier clicks are no longer blocked —
+    they ride the needs_confirmation round-trip instead, #1263.)
     """
     install_default_stubs(page)
     _stub_projects_and_skills(page)
@@ -269,17 +286,17 @@ def test_blocked_create_click_fires_toast_and_skips_post(page, mm_web_url: str) 
         route.fulfill(
             status=400,
             content_type="application/json",
-            body=json.dumps({"detail": "Create skill rejected: target_scope='user'"}),
+            body=json.dumps({"detail": "Create skill rejected: target_scope='project_local'"}),
         )
 
     page.route("**/api/context/skills", _on_create)
 
     page.goto(mm_web_url)
     _open_skills(page)
-    _switch_tier(page, "user")
+    _switch_tier(page, "project_local")
 
     page.wait_for_selector(
-        "#settings-ctx-skills .ctx-create-btn[data-write-blocked='user']",
+        "#settings-ctx-skills .ctx-create-btn[data-write-blocked='project_local']",
         timeout=3_000,
     )
     # ``force=True`` bypasses Playwright's actionability check, which
@@ -291,8 +308,8 @@ def test_blocked_create_click_fires_toast_and_skips_post(page, mm_web_url: str) 
     # Toast must surface, and no POST must have fired.
     toast = page.wait_for_selector("#toast-container .toast", timeout=2_000)
     text = toast.text_content() or ""
-    assert "read-only" in text.lower() or "user-tier" in text.lower(), (
-        f"toast must surface the read-only explanation; got {text!r}"
+    assert "draft tier" in text.lower(), (
+        f"toast must surface the draft-tier explanation; got {text!r}"
     )
     assert create_post_calls == [], (
         f"blocked Create click must not issue a POST; saw {create_post_calls!r}"
@@ -305,11 +322,12 @@ def test_blocked_create_click_fires_toast_and_skips_post(page, mm_web_url: str) 
     )
 
 
-def test_user_tier_gates_per_item_edit_and_delete_buttons(page, mm_web_url: str) -> None:
+def test_per_item_edit_and_delete_buttons_follow_tier_gate(page, mm_web_url: str) -> None:
     """Per-item Edit / Delete buttons are minted by ``loadCtxDetail``
     AFTER the section list lands, so the gate must re-apply on detail
-    mount. Pin: open a card on the user tier and assert the detail
-    pane's edit / delete buttons are in the blocked state.
+    mount. Pin both sides of the #1263 contract: on the user tier the
+    mounted detail buttons stay LIVE; flipping to project_local sweeps
+    the already-mounted buttons into the blocked state.
     """
     install_default_stubs(page)
     _stub_projects_and_skills(page)
@@ -342,19 +360,37 @@ def test_user_tier_gates_per_item_edit_and_delete_buttons(page, mm_web_url: str)
     )
     page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first.click()
 
-    page.wait_for_selector(
-        "#ctx-skills-detail .ctx-detail-edit-btn[data-write-blocked='user']",
-        timeout=3_000,
-    )
+    page.wait_for_selector("#ctx-skills-detail .ctx-detail-edit-btn", timeout=3_000)
 
     for cls in ("ctx-detail-edit-btn", "ctx-detail-delete-btn"):
         btn = page.locator(f"#ctx-skills-detail .{cls}")
-        assert btn.get_attribute("data-write-blocked") == "user", (
-            f"detail {cls!r} must be gated on user tier; got "
+        assert btn.get_attribute("data-write-blocked") is None, (
+            f"detail {cls!r} must stay live on user tier (#1263); got "
+            f"data-write-blocked={btn.get_attribute('data-write-blocked')!r}"
+        )
+
+    # Tier flip re-renders the list and WIPES the mounted detail
+    # (loadCtxList hides + clears it), so the blocked state is pinned on
+    # the re-mount path: open the card again on the blocked tier and the
+    # freshly-minted detail buttons must come up gated.
+    _switch_tier(page, "project_local")
+    page.wait_for_selector(
+        "#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card",
+        timeout=5_000,
+    )
+    page.locator("#ctx-skills-list details[data-scope-id='cwd-scope'] .ctx-card").first.click()
+    page.wait_for_selector(
+        "#ctx-skills-detail .ctx-detail-edit-btn[data-write-blocked='project_local']",
+        timeout=3_000,
+    )
+    for cls in ("ctx-detail-edit-btn", "ctx-detail-delete-btn"):
+        btn = page.locator(f"#ctx-skills-detail .{cls}")
+        assert btn.get_attribute("data-write-blocked") == "project_local", (
+            f"detail {cls!r} must be gated on project_local; got "
             f"data-write-blocked={btn.get_attribute('data-write-blocked')!r}"
         )
         assert btn.get_attribute("aria-disabled") == "true", (
-            f"detail {cls!r} must announce aria-disabled on user tier"
+            f"detail {cls!r} must announce aria-disabled on project_local"
         )
 
 
@@ -405,8 +441,14 @@ def test_write_blocked_banner_sits_above_runtime_only_banner(page, mm_web_url: s
         ).text_content()
         or ""
     )
-    assert "read-only" in remediation_text.lower(), (
-        f"user-tier remediation must explain web read-only canonical ops; got {remediation_text!r}"
+    # #1263: the web Import path works on the user tier now (behind the
+    # host-write confirm), so the remediation names it — and must not
+    # carry the old read-only claim.
+    assert "import" in remediation_text.lower(), (
+        f"user-tier remediation must point at the Import path; got {remediation_text!r}"
+    )
+    assert "read-only" not in remediation_text.lower(), (
+        f"user-tier remediation must not claim read-only anymore; got {remediation_text!r}"
     )
     assert "mm context init --include=agents,commands,skills --scope user" in remediation_text
     assert "mm context sync --include=agents,commands,skills --scope user" in remediation_text
@@ -484,11 +526,11 @@ def test_langchange_re_translates_write_blocked_tooltips(page, mm_web_url: str) 
     _stub_projects_and_skills(page)
     page.goto(mm_web_url)
     _open_skills(page)
-    _switch_tier(page, "user")
+    _switch_tier(page, "project_local")
 
     create_btn = page.locator("#settings-ctx-skills .ctx-create-btn")
     pre_title = create_btn.get_attribute("title") or ""
-    assert "read-only" in pre_title.lower() or "manage these" in pre_title.lower(), (
+    assert "draft tier" in pre_title.lower(), (
         f"EN precondition: title must be EN copy; got {pre_title!r}"
     )
 
@@ -496,15 +538,15 @@ def test_langchange_re_translates_write_blocked_tooltips(page, mm_web_url: str) 
     page.wait_for_function(
         "() => {"
         "  const b = document.querySelector('#settings-ctx-skills .ctx-create-btn');"
-        "  return b && (b.title || '').includes('읽기 전용');"
+        "  return b && (b.title || '').includes('초안');"
         "}",
         timeout=3_000,
     )
     post_title = create_btn.get_attribute("title") or ""
-    assert "읽기 전용" in post_title, (
+    assert "초안" in post_title, (
         f"KO title must replace EN copy after langchange; got {post_title!r}"
     )
     # Symmetric negative: the EN string must not linger.
-    assert "read-only" not in post_title.lower(), (
+    assert "draft tier" not in post_title.lower(), (
         f"EN copy must not survive langchange; got {post_title!r}"
     )
