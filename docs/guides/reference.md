@@ -1220,6 +1220,14 @@ mm context version create agents my-agent --note "stable"          # snapshot th
 mm context version promote agents my-agent --to production --version v1 # move a label pointer (e.g. production) to a specific version (e.g. v1)
 mm context version list agents my-agent                            # list all versions and label pointers for an artifact
 
+# Multi-project registry (same registry the web portal manages)
+mm context projects list               # discovered scopes: scope_id, health, enrollment
+mm context projects list --json        # same fields as GET /api/context/projects
+mm context projects add ~/work/proj --label "My Project"  # register (idempotent)
+mm context projects pause <scope_id|path>   # exclude from --all batches / web Sync
+mm context projects resume <scope_id|path>  # re-include
+mm context projects remove <scope_id|path>  # unregister (project files untouched)
+
 # Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
 # `generate` warns on stderr when both sections are populated. context.md is
 # the source of truth — edit there, not in generated files.

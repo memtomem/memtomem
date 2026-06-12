@@ -1288,3 +1288,76 @@ def test_decode_stale_colliding_anchor_does_not_drop_live_match(
     claude = [s for s in scopes if "claude-projects" in s.sources]
     assert len(claude) == 1
     assert claude[0].root == live.resolve()
+
+
+# ── resolve_project_selector (#1272) ─────────────────────────────────────
+
+
+def _discover(tmp_path: Path, cwd: Path) -> list[ProjectScope]:
+    kp = tmp_path / "kp.json"
+    return discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
+
+
+def test_selector_scope_id_resolves_to_root(tmp_path: Path) -> None:
+    from memtomem.context.projects import resolve_project_selector
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    scopes = _discover(tmp_path, cwd)
+    root, scope = resolve_project_selector(scopes[0].scope_id, scopes)
+    assert root == cwd.resolve()
+    assert scope is scopes[0]
+
+
+def test_selector_scope_id_shape_never_falls_through_to_path(tmp_path: Path) -> None:
+    """A directory literally named like a scope_id must not be selected by the
+    bare token — the scope_id interpretation is exclusive; ``./`` forces the
+    path reading."""
+    from memtomem.context.projects import (
+        UnknownProjectSelectorError,
+        resolve_project_selector,
+    )
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    trap = cwd / "p-aaaaaaaaaaaa"
+    trap.mkdir()
+    scopes = _discover(tmp_path, cwd)
+
+    with pytest.raises(UnknownProjectSelectorError, match="no discovered project"):
+        resolve_project_selector("p-aaaaaaaaaaaa", scopes)
+
+    # Forced path reading selects the trap dir and reports it unregistered.
+    root, scope = resolve_project_selector(str(trap), scopes)
+    assert root == trap.resolve()
+    assert scope is None
+
+
+def test_selector_path_matches_registered_scope(tmp_path: Path) -> None:
+    from memtomem.context.projects import resolve_project_selector
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    kp = tmp_path / "kp.json"
+    KnownProjectsStore(kp).add(other)
+    scopes = discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
+
+    root, scope = resolve_project_selector(str(other), scopes)
+    assert root == other.resolve()
+    assert scope is not None
+    assert scope.scope_id == compute_scope_id(other)
+
+
+def test_selector_nonexistent_path_raises(tmp_path: Path) -> None:
+    from memtomem.context.projects import (
+        UnknownProjectSelectorError,
+        resolve_project_selector,
+    )
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    scopes = _discover(tmp_path, cwd)
+    with pytest.raises(UnknownProjectSelectorError, match="existing directory"):
+        resolve_project_selector(str(tmp_path / "nope"), scopes)

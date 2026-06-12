@@ -36,9 +36,11 @@ __all__ = [
     "ProjectHealth",
     "KnownProjectsCorruptError",
     "KnownProjectsStore",
+    "UnknownProjectSelectorError",
     "compute_scope_id",
     "discover_project_scopes",
     "annotate_project_health",
+    "resolve_project_selector",
 ]
 
 

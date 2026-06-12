@@ -67,6 +67,7 @@ from memtomem.context.projects import (
     ProjectScope,
     UnknownProjectSelectorError,
     annotate_project_health,
+    compute_scope_id,
     discover_project_scopes,
     resolve_project_selector,
 )
@@ -3724,3 +3725,176 @@ def rescan_cmd(
 
     if violations:
         raise SystemExit(1)
+
+
+# ── mm context projects ──────────────────────────────────────────────────
+#
+# CLI face of the multi-project registry (#1272, mechanism-track campaign
+# #1270). Web has had discovery + enrollment since ADR-0021; these commands
+# expose the same KnownProjectsStore / discover_project_scopes surface so
+# cross-project flags (--to-project, --all-projects) have a CLI-native way
+# to enumerate scope_ids and manage enrollment.
+
+
+def _projects_gateway_cfg() -> ContextGatewayConfig:
+    """One construction point so every subcommand reads the same env/config."""
+    return ContextGatewayConfig()
+
+
+def _projects_store(cfg: ContextGatewayConfig) -> KnownProjectsStore:
+    return KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
+
+
+def _projects_discover(cfg: ContextGatewayConfig) -> list[ProjectScope]:
+    """Discover with the exact flags the web GET /api/context/projects uses."""
+    return discover_project_scopes(
+        Path.cwd(),
+        Path(cfg.known_projects_path).expanduser(),
+        experimental_claude_projects_scan=cfg.experimental_claude_projects_scan,
+        auto_display_configured_projects=cfg.auto_display_configured_projects,
+    )
+
+
+def _projects_resolve_or_die(selector: str, scopes: list[ProjectScope]) -> tuple[Path, str]:
+    """Resolve a ``scope_id | path`` selector → ``(root, scope_id)`` or exit."""
+    try:
+        root, scope = resolve_project_selector(selector, scopes)
+    except UnknownProjectSelectorError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return root, scope.scope_id if scope is not None else compute_scope_id(root)
+
+
+@context.group("projects")
+def projects_group() -> None:
+    """Inspect and manage the multi-project registry (known_projects.json).
+
+    Subcommands accept a project as either its ``p-<sha12>`` scope_id (from
+    ``list``) or a filesystem path. ``pause`` / ``resume`` flip the per-project
+    sync-enrollment flag that ``--all`` batch commands and the web Sync gate
+    honor.
+    """
+
+
+@projects_group.command("list")
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    help="Emit the discovery payload as JSON (same fields as GET /api/context/projects).",
+)
+def projects_list_cmd(json_out: bool) -> None:
+    """List every discovered project scope with health and enrollment."""
+    cfg = _projects_gateway_cfg()
+    scopes = _projects_discover(cfg)
+    if json_out:
+        rows = []
+        for s in scopes:
+            health = annotate_project_health(s)
+            rows.append(
+                {
+                    "scope_id": s.scope_id,
+                    "label": s.label,
+                    "root": str(s.root) if s.root is not None else None,
+                    "tier": s.tier,
+                    "sources": list(s.sources),
+                    "missing": health.missing,
+                    "stale": health.stale,
+                    "experimental": s.experimental,
+                    "enabled": s.enabled,
+                    "sync_eligible": s.sync_eligible,
+                }
+            )
+        click.echo(json.dumps({"scopes": rows}, indent=2))
+        return
+
+    click.echo(f"{len(scopes)} project scope(s):")
+    for s in scopes:
+        health = annotate_project_health(s)
+        # Pad BEFORE styling — ANSI escapes are invisible but count toward
+        # f-string width, so styling first skews the columns.
+        if health.missing:
+            health_txt = click.style(f"{'missing':<8}", fg="red")
+        elif health.stale:
+            health_txt = click.style(f"{'stale':<8}", fg="yellow")
+        else:
+            health_txt = click.style(f"{'ok':<8}", fg="green")
+        if s.enabled:
+            enrollment = f"{'enabled':<8}"
+        else:
+            enrollment = click.style(f"{'paused':<8}", fg="yellow")
+        eligible = "sync" if s.sync_eligible else "-"
+        sources = ",".join(s.sources)
+        click.echo(
+            f"  {s.scope_id}  {health_txt}  {enrollment}  {eligible:<4}  "
+            f"{s.label}  ({s.root})  [{sources}]"
+        )
+
+
+@projects_group.command("add")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--label", default=None, help="Display label for the project.")
+def projects_add_cmd(path: Path, label: str | None) -> None:
+    """Register PATH in known_projects.json (idempotent)."""
+    cfg = _projects_gateway_cfg()
+    store = _projects_store(cfg)
+    try:
+        already = any(
+            compute_scope_id(e.root) == compute_scope_id(path) for e in store.load(strict=True)
+        )
+        entry = store.add(path, label=label)
+    except KnownProjectsCorruptError as exc:
+        raise click.ClickException(str(exc)) from exc
+    scope_id = compute_scope_id(entry.root)
+    if already:
+        click.echo(f"Already registered: {scope_id} ({entry.root})")
+    else:
+        click.secho(f"Registered: {scope_id} ({entry.root})", fg="green")
+
+
+@projects_group.command("remove")
+@click.argument("selector")
+def projects_remove_cmd(selector: str) -> None:
+    """Unregister a project (scope_id or path). Does not touch the project's files."""
+    cfg = _projects_gateway_cfg()
+    scopes = _projects_discover(cfg)
+    _root, scope_id = _projects_resolve_or_die(selector, scopes)
+    try:
+        removed = _projects_store(cfg).remove_by_scope_id(scope_id)
+    except KnownProjectsCorruptError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not removed:
+        raise click.ClickException(
+            f"{selector!r} resolved to {scope_id} but it has no known_projects entry "
+            f"(server-cwd and scan-discovered scopes are not registered; nothing to remove)"
+        )
+    click.secho(f"Removed: {scope_id}", fg="green")
+
+
+def _projects_set_enabled(selector: str, *, enabled: bool, verb: str) -> None:
+    cfg = _projects_gateway_cfg()
+    scopes = _projects_discover(cfg)
+    _root, scope_id = _projects_resolve_or_die(selector, scopes)
+    try:
+        entry = _projects_store(cfg).set_enabled_by_scope_id(scope_id, enabled)
+    except KnownProjectsCorruptError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if entry is None:
+        raise click.ClickException(
+            f"{selector!r} resolved to {scope_id} but it has no known_projects entry — "
+            f"only registered projects can be {verb}d; run `mm context projects add <path>` first"
+        )
+    click.secho(f"{verb.capitalize()}d: {scope_id} ({entry.root})", fg="green")
+
+
+@projects_group.command("pause")
+@click.argument("selector")
+def projects_pause_cmd(selector: str) -> None:
+    """Pause sync enrollment for a registered project (skipped by --all batches)."""
+    _projects_set_enabled(selector, enabled=False, verb="pause")
+
+
+@projects_group.command("resume")
+@click.argument("selector")
+def projects_resume_cmd(selector: str) -> None:
+    """Resume sync enrollment for a paused project."""
+    _projects_set_enabled(selector, enabled=True, verb="resume")
