@@ -150,6 +150,8 @@ def _api_payload(url: str, mode: str) -> dict[str, object]:
         return {"sources": [source], "total": 1, "offset": 0, "limit": 10000}
     if path.startswith("/api/sources/"):
         return {"path": source["path"], "chunks": [chunk], "total": 1}
+    if path == "/api/chunks":
+        return {"chunks": [chunk], "total": 1}
     if path == "/api/search":
         return {
             "results": [
@@ -286,6 +288,28 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
                 timeout=4_000,
             )
             _assert_active_panel(page, tab)
+            page.wait_for_function(
+                """tab => {
+                    const el = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.left >= -1 && r.right <= window.innerWidth + 1;
+                }""",
+                arg=tab,
+                timeout=2_000,
+            )
+
+        assert page.locator("#stat-chunks").inner_text() == "1 chunk"
+        assert page.locator("#stat-sources").inner_text() == "1 source"
+
+        if viewport[0] <= 390:
+            page.locator('.tab-btn[data-tab="home"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('#home-activity-map .activity-map-frame')"
+            )
+            assert page.evaluate(
+                "() => document.documentElement.scrollWidth <= window.innerWidth + 1"
+            )
 
         page.locator('.tab-btn[data-tab="search"]').focus()
         before_history = page.evaluate("() => history.length")
@@ -308,9 +332,20 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             "() => document.querySelectorAll('#results-list .result-item').length > 0",
             timeout=5_000,
         )
+        assert page.locator("#results-list .result-debug-meta").first.evaluate(
+            "el => getComputedStyle(el).display === 'none'"
+        )
+        assert (
+            page.locator("#results-list .results-debug-details summary").inner_text()
+            == "Advanced details"
+        )
 
         page.locator('.tab-btn[data-tab="sources"]').click()
         assert page.locator(".sources-vendor-tab").count() >= 1
+        page.wait_for_function(
+            "() => document.querySelector('#chunks-browser .chunks-browser-header .file-path')?.textContent.includes('notes.md')",
+            timeout=5_000,
+        )
         for vendor in ("user", "claude", "openai"):
             tab = page.locator(f'.sources-vendor-tab[data-vendor="{vendor}"]')
             if tab.count():
@@ -374,6 +409,7 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             btn = page.locator(f'.index-mode-toggle [data-mode="{index_mode}"]')
             btn.click()
             assert btn.get_attribute("aria-selected") == "true"
+            assert page.locator(f'[data-mode-guide="{index_mode}"]').is_visible()
 
         page.locator('.tab-btn[data-tab="tags"]').click()
         assert page.locator("#tags-search").is_visible()
@@ -386,3 +422,29 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
 
     assert captured_errors == []
     assert page_errors == []
+
+
+@pytest.mark.parametrize("route", ["#home", "#search", "#settings"])
+def test_direct_hash_entry_populates_header_stats(page, route: str) -> None:
+    """Direct entry routes keep global header stats hydrated."""
+    page.set_viewport_size({"width": 390, "height": 844})
+    _install_error_capture(page)
+    _install_smoke_stubs(page, "prod")
+
+    with _web_server("prod") as base_url:
+        page.goto(f"{base_url}/{route}", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.querySelector('#stat-chunks')?.textContent === '1 chunk'",
+            timeout=5_000,
+        )
+        page.wait_for_function(
+            "() => document.querySelector('#stat-sources')?.textContent === '1 source'",
+            timeout=5_000,
+        )
+
+        tab = route.lstrip("#")
+        _assert_active_panel(page, tab)
+
+        captured_errors = page.evaluate("() => window.__smokeErrors || []")
+
+    assert captured_errors == []

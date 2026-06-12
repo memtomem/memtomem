@@ -142,7 +142,7 @@ describe('Search filters - add/remove UX', () => {
     });
 
     const badges = [...document.querySelectorAll('.result-item .score-badge')].map(el => el.textContent);
-    expect(badges).toEqual(['#1 · 100%', '#2 · 1%']);
+    expect(badges).toEqual(['Relevance 100%', 'Relevance 1%']);
     expect(badges.join(' ')).not.toContain('-');
     expect(document.getElementById('d-score').textContent).toBe('rank #1 · 100%');
     expect(document.getElementById('d-score-detail').dataset.tooltip).toContain('raw score -0.420000');

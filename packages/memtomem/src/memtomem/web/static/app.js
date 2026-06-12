@@ -1305,6 +1305,7 @@ function activateTab(tabName, opts = {}) {
     btn.classList.add('active');
     btn.setAttribute('aria-selected', 'true');
     btn.setAttribute('tabindex', '0');
+    _centerActiveMainTab(btn);
   }
 
   // Show panel
@@ -1341,7 +1342,7 @@ function activateTab(tabName, opts = {}) {
     // axis now, so there's no mode to restore.
     loadSources();
   }
-  if (tabName === 'index') loadStats();
+  loadStats();
   if (tabName === 'tags') { STATE.tagsTabStale = false; loadTags(); }
   if (tabName === 'timeline') loadTimeline();
   if (tabName === 'settings') {
@@ -1382,6 +1383,13 @@ function activateTab(tabName, opts = {}) {
     switchSettingsSection(start);
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();
+}
+
+function _centerActiveMainTab(btn) {
+  if (!btn || typeof btn.scrollIntoView !== 'function') return;
+  requestAnimationFrame(() => {
+    btn.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+  });
 }
 
 // Settings Hub section switching
@@ -1615,11 +1623,15 @@ window.addEventListener('popstate', (e) => {
 async function loadStats() {
   try {
     const data = await api('GET', '/api/stats');
-    qs('stat-chunks').textContent = t(
+    const chunksEl = qs('stat-chunks');
+    const sourcesEl = qs('stat-sources');
+    chunksEl.removeAttribute('data-i18n');
+    sourcesEl.removeAttribute('data-i18n');
+    chunksEl.textContent = t(
       data.total_chunks === 1 ? 'header.stat_chunks_count_one' : 'header.stat_chunks_count_other',
       { count: data.total_chunks },
     );
-    qs('stat-sources').textContent = t(
+    sourcesEl.textContent = t(
       data.total_sources === 1 ? 'header.stat_sources_count_one' : 'header.stat_sources_count_other',
       { count: data.total_sources },
     );
@@ -1886,12 +1898,15 @@ function _renderActivityMap(chunks, options) {
     countByDate[key] = (countByDate[key] || 0) + 1;
   });
 
-  // Start from Sunday before 364 days ago
+  const compactRange = !!(window.matchMedia && window.matchMedia('(max-width: 430px)').matches);
+  const rangeDays = compactRange ? 90 : 364;
+
+  // Start from Sunday before the visible range so the grid aligns by week.
   const startDate = new Date(today);
-  startDate.setDate(startDate.getDate() - 364 - startDate.getDay());
-  // Compute working range (but only show data for the last 364 days)
+  startDate.setDate(startDate.getDate() - rangeDays - startDate.getDay());
+  // Compute working range and ignore the leading week-alignment padding.
   const dataStart = new Date(today);
-  dataStart.setDate(dataStart.getDate() - 364);
+  dataStart.setDate(dataStart.getDate() - rangeDays);
 
   const totalDays = Math.round((today - startDate) / 86400000) + 1;
   const cells = [];
@@ -2641,12 +2656,12 @@ function _buildScoreViews(results) {
     if (isReranked) {
       percent = total === 1 ? 100 : Math.round((1 - idx / (total - 1)) * 100);
       percent = Math.max(1, Math.min(100, percent));
-      label = `#${rank} · ${percent}%`;
+      label = `${percent}%`;
       tooltip = `Reranker percentile ${percent}% by final rank. Raw reranker score ${raw.toFixed(6)}.`;
     } else {
       percent = positiveMax > 0 ? Math.round((raw / positiveMax) * 100) : 0;
       percent = Math.max(0, Math.min(100, percent));
-      label = raw.toFixed(3);
+      label = `${percent}%`;
       tooltip = `Raw ${r.source || 'search'} score ${raw.toFixed(6)}. Normalized ${percent}%.`;
     }
 
@@ -2715,6 +2730,11 @@ function _buildResultItem(r) {
   const scoreView = _scoreViewForResult(r);
   const scorePct = scoreView.percent;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
+  let relevanceLabel = 'Relevance';
+  if (typeof t === 'function') {
+    const translated = t('search.relevance_label');
+    relevanceLabel = translated === 'search.relevance_label' ? relevanceLabel : translated;
+  }
 
   const body = document.createElement('div');
   body.className = 'result-body';
@@ -2722,8 +2742,8 @@ function _buildResultItem(r) {
     <div class="result-item-row1">
       <span class="result-type-dot" style="background:${fileTypeColor(r.chunk.source_file || '')}"></span>
       <span class="result-filename">${escapeHtml(fname)}</span>
-      <span class="score-badge" title="${escapeAttr(scoreView.tooltip)}">${escapeHtml(scoreView.label)}</span>
-      <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)}">${escapeHtml(r.source)}</span>
+      <span class="score-badge" title="${escapeAttr(scoreView.tooltip)}" aria-label="${escapeAttr(relevanceLabel)} ${escapeAttr(scoreView.label)}">${escapeHtml(relevanceLabel)} ${escapeHtml(scoreView.label)}</span>
+      <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)} result-debug-meta">${escapeHtml(r.source)}</span>
       ${nsBadge}${tierBadge}${validityBadge}
     </div>
     <div class="result-item-meta">${escapeHtml(dir)} \u00b7 #${r.rank} \u00b7 ${escapeHtml(age)}</div>
@@ -2955,7 +2975,18 @@ function renderResults(results, retrievalStats) {
     // Cache retrieval stats for score detail computation
     STATE.lastRetrievalStats = s;
   }
-  const summaryHtml = `<div class="results-summary"><span class="results-summary-total">${total} total</span>${sourceParts.join('')}${funnelHtml}</div>`;
+  let advancedDetailsLabel = 'Advanced details';
+  if (typeof t === 'function') {
+    const translated = t('search.advanced_details');
+    advancedDetailsLabel = translated === 'search.advanced_details' ? advancedDetailsLabel : translated;
+  }
+  const debugHtml = (sourceParts.length || funnelHtml)
+    ? `<details class="results-debug-details">
+        <summary>${escapeHtml(advancedDetailsLabel)}</summary>
+        <div class="results-debug-body">${sourceParts.join('')}${funnelHtml}</div>
+      </details>`
+    : '';
+  const summaryHtml = `<div class="results-summary"><span class="results-summary-total">${total} total</span>${debugHtml}</div>`;
 
   show(qs('bulk-toolbar'));
   if (results.length >= STATE.currentTopK) show(qs('load-more-row'));
@@ -4770,6 +4801,16 @@ function _renderMemorySourceTree(sources, list) {
     }
     STATE.pendingActivatePath = '';
   }
+
+  const renderedSources = Array.from(list.querySelectorAll('.source-item'));
+  if (renderedSources.length && !list.querySelector('.source-item.active')) {
+    const currentPath = qs('chunks-browser')?.querySelector('.chunks-browser-header .file-path')?.textContent || '';
+    const target = renderedSources.find(el => el.title === currentPath) || renderedSources[0];
+    if (target) {
+      target.classList.add('active');
+      if (typeof browseSource === 'function') browseSource(target.title);
+    }
+  }
 }
 
 function _renderMemoryDirGroup(dir, items, status, maxChunks, opts) {
@@ -5390,6 +5431,8 @@ function setIndexMode(mode) {
     btn.setAttribute('aria-selected', String(active));
     btn.setAttribute('tabindex', active ? '0' : '-1');
     pnl.hidden = !active;
+    const guide = document.querySelector(`[data-mode-guide="${m}"]`);
+    if (guide) guide.hidden = !active;
   }
   if (mode === 'upload') loadUploadUsage();
 }

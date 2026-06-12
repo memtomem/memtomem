@@ -245,10 +245,25 @@ async function doMerge(rowEl, keepId, deleteIds) {
 // Decay tab
 // ---------------------------------------------------------------------------
 
+let _decayPreviewSignature = null;
+
+function _decaySignature() {
+  return JSON.stringify({
+    maxAge: parseFloat(qs('decay-max-age').value) || 90,
+    source: qs('decay-source-filter').value.trim(),
+  });
+}
+
+function _invalidateDecayPreview() {
+  _decayPreviewSignature = null;
+  qs('decay-expire-btn').disabled = true;
+  qs('decay-r-deleted').textContent = '—';
+}
+
 function resetDecayPanel() {
   hide(qs('decay-result'));
   hide(qs('decay-msg'));
-  qs('decay-expire-btn').disabled = true;
+  _invalidateDecayPreview();
 
   // Sync defaults from config
   const cfg = STATE.serverConfig?.decay;
@@ -271,6 +286,7 @@ async function runDecayScan() {
     qs('decay-r-expired').textContent = data.expired_chunks;
     qs('decay-r-deleted').textContent = '—';
     show(qs('decay-result'));
+    _decayPreviewSignature = _decaySignature();
     qs('decay-expire-btn').disabled = data.expired_chunks === 0;
     if (data.expired_chunks === 0) {
       setMsg(qs('decay-msg'), t('settings.decay.no_expire'), false);
@@ -283,6 +299,11 @@ async function runDecayScan() {
 }
 
 async function runDecayExpire() {
+  if (_decayPreviewSignature !== _decaySignature()) {
+    _invalidateDecayPreview();
+    setMsg(qs('decay-msg'), t('settings.decay.preview_required'), true);
+    return;
+  }
   // Pull the count from the most recent scan rendered in the result
   // panel — the Expire button is only enabled when scan returned > 0
   // (see ``runDecayScan``), so this is always populated when we get
@@ -329,14 +350,28 @@ async function runDecayExpire() {
 
 qs('decay-scan-btn').addEventListener('click', runDecayScan);
 qs('decay-expire-btn').addEventListener('click', runDecayExpire);
+qs('decay-max-age').addEventListener('input', _invalidateDecayPreview);
+qs('decay-source-filter').addEventListener('input', _invalidateDecayPreview);
 
 
 // ---------------------------------------------------------------------------
 // Export / Import tab
 // ---------------------------------------------------------------------------
 
-function resetExportPanel() {
+let _exportPreviewSignature = null;
+
+function _exportSignature() {
+  return _exportParams().toString();
+}
+
+function _invalidateExportPreview() {
+  _exportPreviewSignature = null;
+  qs('exp-download-btn').disabled = true;
   hide(qs('exp-preview'));
+}
+
+function resetExportPanel() {
+  _invalidateExportPreview();
   hide(qs('exp-msg'));
   hide(qs('imp-result'));
   hide(qs('imp-msg'));
@@ -361,6 +396,8 @@ async function runExportPreview() {
   try {
     const data = await api('GET', `/api/export/stats?${_exportParams()}`);
     qs('exp-count').textContent = data.total_chunks;
+    _exportPreviewSignature = _exportSignature();
+    qs('exp-download-btn').disabled = false;
     show(qs('exp-preview'));
   } catch (err) {
     setMsg(qs('exp-msg'), 'Preview failed: ' + err.message, true);
@@ -368,6 +405,11 @@ async function runExportPreview() {
 }
 
 function runExportDownload() {
+  if (_exportPreviewSignature !== _exportSignature()) {
+    _invalidateExportPreview();
+    setMsg(qs('exp-msg'), t('settings.export.preview_required'), true);
+    return;
+  }
   const url = `/api/export?${_exportParams()}`;
   const a = document.createElement('a');
   a.href = url;
@@ -376,6 +418,21 @@ function runExportDownload() {
   a.click();
   document.body.removeChild(a);
 }
+
+['exp-source', 'exp-tag', 'exp-since', 'exp-namespace'].forEach(id => {
+  qs(id).addEventListener('input', _invalidateExportPreview);
+  qs(id).addEventListener('change', _invalidateExportPreview);
+});
+
+qs('exp-preview-btn').addEventListener('click', runExportPreview);
+qs('exp-download-btn').addEventListener('click', runExportDownload);
+qs('imp-file-trigger').addEventListener('click', () => qs('imp-file').click());
+qs('imp-file').addEventListener('change', () => {
+  const file = qs('imp-file').files?.[0];
+  qs('imp-file-name').textContent = file ? file.name : t('settings.import.no_file');
+  qs('imp-btn').disabled = !file;
+});
+qs('imp-btn').addEventListener('click', runImport);
 
 async function runImport() {
   const file = qs('imp-file').files[0];
@@ -430,6 +487,7 @@ qs('reset-btn').addEventListener('click', async () => {
   const ok = await showConfirm({
     title: t('settings.reset.confirm_title'),
     message: t('settings.reset.confirm_message'),
+    warningText: t('settings.reset.backup_hint'),
     confirmText: t('settings.reset.confirm_btn'),
   });
   if (!ok) return;

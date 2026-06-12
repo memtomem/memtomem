@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=105" />
+  <link rel="stylesheet" href="/style.css?v=106" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -55,7 +55,7 @@
     <button id="tabbtn-index" class="tab-btn" role="tab" aria-controls="tab-index" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="index" data-i18n="nav.index">Index</button>
     <button id="tabbtn-tags" class="tab-btn" role="tab" aria-controls="tab-tags" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="tags" data-i18n="nav.tags">Tags</button>
     <button id="tabbtn-timeline" class="tab-btn" role="tab" aria-controls="tab-timeline" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="timeline" data-i18n="nav.timeline">Timeline</button>
-    <button id="tabbtn-settings" class="tab-btn" role="tab" aria-controls="tab-settings" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="settings" data-i18n="nav.more">More</button>
+    <button id="tabbtn-settings" class="tab-btn" role="tab" aria-controls="tab-settings" aria-selected="false" tabindex="-1" data-ui-tier="prod" data-tab="settings" data-i18n="nav.more">Settings</button>
   </nav>
 
   <main id="main" tabindex="-1">
@@ -696,6 +696,11 @@
               tabindex="-1"
               data-mode="compose" data-i18n="index.mode.compose">New memory</button>
     </div>
+    <div class="index-mode-guide" aria-live="polite">
+      <span data-mode-guide="folder" data-i18n="index.mode.folder_desc">Scan an existing directory in place.</span>
+      <span data-mode-guide="upload" data-i18n="index.mode.upload_desc" hidden>Copy files into memtomem uploads, then index them.</span>
+      <span data-mode-guide="compose" data-i18n="index.mode.compose_desc" hidden>Write a new note directly into your memtomem memories.</span>
+    </div>
     <div class="index-layout">
       <div class="card index-panels">
         <div id="index-panel-folder" class="index-panel" role="tabpanel" aria-labelledby="index-mode-folder">
@@ -917,6 +922,7 @@
         <!-- Dedup section -->
         <div class="settings-section" id="settings-dedup">
           <p class="settings-section-desc" data-i18n="settings.dedup.desc">Find near-duplicate chunks by similarity threshold and merge or skip them.</p>
+          <p class="settings-preflight-note" data-i18n="settings.dedup.preflight">Scan previews candidates only. Merge buttons appear on reviewed pairs and delete only the duplicate chunk you choose.</p>
           <div class="dedup-controls">
             <div class="dedup-params">
               <label>
@@ -947,6 +953,7 @@
         <!-- Decay section -->
         <div class="settings-section" id="settings-decay">
           <p class="settings-section-desc" data-i18n="settings.decay.desc">Expire chunks older than a cutoff date, optionally filtered by source path.</p>
+          <p class="settings-preflight-note" data-i18n="settings.decay.preflight">Run Scan first. Expire stays disabled until the current filters have a reviewed candidate count.</p>
           <div id="decay-config-status" class="config-status" hidden></div>
           <div class="decay-controls">
             <div class="decay-params">
@@ -981,6 +988,7 @@
             <div class="reset-warning">
               <strong data-i18n="settings.reset.warning_title">Danger Zone</strong>
               <p data-i18n="settings.reset.warning_text">This will permanently delete ALL data (chunks, sessions, history, relations, entities, etc.) and reinitialize the database. Embedding configuration is preserved.</p>
+              <p data-i18n="settings.reset.backup_hint">Export a JSON bundle first if you may need to restore this database later.</p>
             </div>
             <div class="reset-info" id="reset-info">
               <span data-i18n="settings.reset.chunk_count_label">Current chunks:</span>
@@ -1075,6 +1083,7 @@
           <div class="export-layout">
             <div class="export-card card">
               <h2 data-i18n="settings.export.title">Export</h2>
+              <p class="export-hint" data-i18n="settings.export.preflight">Preview the filters before downloading so the bundle size is explicit.</p>
               <div class="export-filters">
                 <label class="field-label" for="exp-source" data-i18n="settings.export.source_label">Source Filter</label>
                 <input id="exp-source" type="text" data-i18n-placeholder="settings.export.source_placeholder" placeholder="optional path substring…" />
@@ -1089,7 +1098,7 @@
               </div>
               <div class="export-btn-row">
                 <button id="exp-preview-btn" class="btn-ghost" data-i18n="settings.export.preview_btn">Preview</button>
-                <button id="exp-download-btn" class="btn-primary" data-i18n="settings.export.download_btn">Download JSON</button>
+                <button id="exp-download-btn" class="btn-primary" data-i18n="settings.export.download_btn" disabled>Download JSON</button>
               </div>
               <div id="exp-preview" class="export-preview" hidden>
                 <span id="exp-count"></span> chunks will be exported

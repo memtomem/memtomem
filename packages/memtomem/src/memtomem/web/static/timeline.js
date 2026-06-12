@@ -197,13 +197,16 @@ function renderChunkView(list, groups) {
       item.setAttribute('aria-label', `${basename(c.source_file)}, ${time}`);
       const tagsHtml = c.tags.map(t => `<span class="timeline-tag">${escapeHtml(t)}</span>`).join('');
       const dot = `<span class="tl-type-dot" style="background:${fileTypeColor(c.source_file)}"></span>`;
+      const sourcePath = c.source_file || '';
+      const sourceName = basename(sourcePath);
+      const sourceDir = sourcePath.split('/').slice(0, -1).join('/') || '/';
       const openLabel = (typeof t === 'function')
         ? t('timeline.open_in_source') : 'Open in source';
       const copyLabel = (typeof t === 'function')
         ? t('timeline.copy') : 'Copy';
       item.innerHTML = `
         <div class="timeline-item-header">
-          <span class="timeline-item-source">${dot}${escapeHtml(truncate(c.source_file, 60))}</span>
+          <span class="timeline-item-source" title="${escapeAttr(sourcePath)}">${dot}<span class="timeline-source-name">${escapeHtml(sourceName)}</span><span class="timeline-source-dir">${escapeHtml(truncate(sourceDir, 48))}</span></span>
           <span class="timeline-item-time">${time}</span>
         </div>
         <div class="timeline-item-snippet">${escapeHtml(c.content)}</div>
@@ -372,5 +375,3 @@ function showDetailFromChunk(c) {
   const result = existing || { chunk: c, score: 0, rank: 0, source: 'browse' };
   showDetail(result);
 }
-
-

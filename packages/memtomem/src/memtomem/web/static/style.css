@@ -903,6 +903,11 @@ mark {
 .index-mode-toggle .btn-ghost.btn-active {
   color: var(--accent); border-bottom-color: var(--accent);
 }
+.index-mode-guide {
+  padding: 0 20px 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
 .index-layout { display: flex; flex-direction: column; gap: 20px; padding: 20px 0 20px; overflow-y: auto; }
 /* min-height keeps the panel container stable across mode switches; floor
    chosen so the folder panel's empty-on-first-visit area stays modest while
@@ -964,13 +969,13 @@ textarea#add-content:focus { border-color: var(--accent); }
 /* ── Shared Components ── */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
 
-input[type="text"], select {
+input[type="text"], input[type="number"], input[type="date"], input[type="search"], select {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); color: var(--text);
   padding: 7px 10px; font-size: 0.875rem; outline: none;
   font-family: var(--font);
 }
-input[type="text"]:focus, select:focus { border-color: var(--accent); }
+input[type="text"]:focus, input[type="number"]:focus, input[type="date"]:focus, input[type="search"]:focus, select:focus { border-color: var(--accent); }
 
 button { border: none; cursor: pointer; border-radius: var(--radius); font-size: 0.875rem; padding: 7px 14px; transition: opacity 0.15s; }
 button:hover { opacity: 0.85; }
@@ -1068,6 +1073,12 @@ button:active { opacity: 0.7; }
 }
 .decay-result table td:first-child { color: var(--muted); font-size: 0.85rem; padding-right: 20px; }
 .decay-result table td:last-child  { font-weight: 600; font-size: 0.95rem; }
+.settings-preflight-note {
+  margin: -6px 0 12px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
 
 /* ── Tags Tab ── */
 .tags-layout { display: grid; grid-template-columns: 1fr 320px; gap: 20px; align-items: start; }
@@ -2052,7 +2063,28 @@ kbd {
 }
 .timeline-item:hover { border-color: var(--accent); background: color-mix(in srgb, var(--surface) 80%, var(--accent) 20%); }
 .timeline-item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-.timeline-item-source { font-size: 0.75rem; color: var(--muted); }
+.timeline-item-source {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.timeline-source-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: var(--mono);
+}
+.timeline-source-dir {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .timeline-item-time { font-size: 0.72rem; color: var(--muted); }
 .timeline-item-snippet { font-size: 0.83rem; color: var(--text); line-height: 1.45; }
 .timeline-item-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
@@ -2478,6 +2510,25 @@ select:focus-visible {
 .results-summary { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 5px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; position: sticky; top: 0; z-index: 10; }
 .results-summary-total { font-size: 0.72rem; color: var(--muted); margin-right: 2px; }
 .results-summary-pipeline { font-size: 0.68rem; color: var(--muted); font-family: var(--mono); margin-left: auto; opacity: 0.7; }
+.result-debug-meta { display: none !important; }
+.results-debug-details {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.results-debug-details summary {
+  cursor: pointer;
+  list-style: none;
+}
+.results-debug-details summary::-webkit-details-marker { display: none; }
+.results-debug-details summary:hover { color: var(--text); }
+.results-debug-body {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
 .bulk-toolbar {
   display: flex; align-items: center; gap: 10px;
   padding: 7px 12px; background: var(--surface);
@@ -2992,6 +3043,12 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
   body.dev-mode .home-stats-row {
     grid-template-columns: 1fr;
   }
+  .activity-map-frame {
+    min-width: 0;
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  .activity-weekdays span { min-height: 8px; }
+  .activity-grid { gap: 1px; }
 
   .home-bar-label {
     width: 84px;
@@ -4622,6 +4679,7 @@ button.ctx-runtime-chip--greyed:focus-visible {
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
+  #tab-settings .settings-nav { max-height: 28vh; }
   .settings-content {
     width: 100%;
     min-width: 0;
