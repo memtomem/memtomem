@@ -28,6 +28,7 @@ from memtomem.context.mcp_servers import (
     scan_mcp_server_text,
 )
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes._sync_phase import SyncPhaseError
 from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
@@ -431,6 +432,45 @@ async def diff_mcp_server(
     }
 
 
+async def _sync_mcp_servers_core(project_root: Path) -> dict:
+    """Lock-free MCP-server sync core — the caller MUST hold ``_gateway_lock``.
+
+    Shared by the standalone route below and ``POST /context/sync-all``
+    (#1278), which runs every per-type core under ONE outer lock
+    acquisition — the lock is a non-reentrant ``_LoopLocalLock``, so the
+    core must never acquire it itself. The engine call stays a direct
+    synchronous call (no worker thread): the ``.mcp.json`` write is one
+    full-content atomic ``os.replace`` with no cross-process file lock,
+    so there is no unbounded block to offload (the skills/settings cores
+    differ, see ``_sync_skills_core``). No ``target_scope`` parameter —
+    MCP servers are single-tier by design (ADR-0016 §3 note); the
+    standalone route rejects non-``project_shared`` tiers before calling.
+
+    Engine errors are raised as :class:`SyncPhaseError` — the standalone
+    route's historical 422 string details plus the envelope attributes
+    sync-all renders.
+    """
+    try:
+        result = generate_all_mcp_servers(project_root)
+    except McpServerParseError as exc:
+        raise SyncPhaseError(422, str(exc), error_kind="parse") from exc
+    except McpServerPrivacyError as exc:
+        raise SyncPhaseError(
+            422, str(exc), error_kind="validation", reason_code="privacy_blocked"
+        ) from exc
+    return {
+        "generated": [
+            {"runtime": runtime, "name": name, "path": _safe_rel(path, project_root)}
+            for runtime, name, path in result.generated
+        ],
+        "skipped": [
+            {"runtime": runtime, "reason": reason, "reason_code": code}
+            for runtime, reason, code in result.skipped
+        ],
+        "canonical_root": CANONICAL_MCP_SERVER_ROOT,
+    }
+
+
 @router.post("/context/mcp-servers/sync")
 async def sync_mcp_servers(
     project_root: Path = Depends(resolve_writable_scope_root),
@@ -443,21 +483,6 @@ async def sync_mcp_servers(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = generate_all_mcp_servers(project_root)
+                return await _sync_mcp_servers_core(project_root)
     except TimeoutError:
         raise HTTPException(503, "MCP server sync timed out — another sync may be in progress")
-    except McpServerParseError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except McpServerPrivacyError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    return {
-        "generated": [
-            {"runtime": runtime, "name": name, "path": _safe_rel(path, project_root)}
-            for runtime, name, path in result.generated
-        ],
-        "skipped": [
-            {"runtime": runtime, "reason": reason, "reason_code": code}
-            for runtime, reason, code in result.skipped
-        ],
-        "canonical_root": CANONICAL_MCP_SERVER_ROOT,
-    }

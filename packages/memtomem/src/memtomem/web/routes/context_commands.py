@@ -49,6 +49,7 @@ from memtomem.web.routes.context_projects import (
 from memtomem.web.routes.context_versions import include_has, version_summary
 from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes._sync_phase import SyncPhaseError
 
 # Flat list of project-relative runtime scan paths reported on list / import
 # responses so the web UI's empty-state hint can name the exact directories
@@ -711,6 +712,74 @@ class SyncRequest(BaseModel):
         return value
 
 
+async def _sync_commands_core(
+    project_root: Path,
+    target_scope: TargetScope,
+    *,
+    on_drop: str = "warn",
+    surface: str = "web_context_commands_sync",
+) -> dict:
+    """Lock-free commands sync core — the caller MUST hold ``_gateway_lock``.
+
+    Shared by the standalone route below and ``POST /context/sync-all``
+    (#1278), which runs every per-type core under ONE outer lock
+    acquisition — the lock is a non-reentrant ``_LoopLocalLock``, so the
+    core must never acquire it itself. The engine call stays a direct
+    synchronous call (no worker thread): commands take no cross-process
+    file lock — each runtime artifact is one full-content atomic
+    ``os.replace`` — so there is no unbounded block to offload (the
+    skills/settings cores differ, see ``_sync_skills_core``).
+
+    Engine errors are raised as :class:`SyncPhaseError` — the standalone
+    route's historical status/detail pair (privacy 422 keeps its STRING
+    detail, issue-pinned; strict-drop keeps its dict detail) plus the
+    envelope attributes sync-all renders.
+    """
+    try:
+        result = generate_all_commands(
+            project_root,
+            on_drop=on_drop,
+            scope=target_scope,
+            surface=surface,
+        )
+    except PrivacyScanError as exc:
+        raise SyncPhaseError(
+            422, exc.message, error_kind="validation", reason_code="privacy_blocked"
+        ) from exc
+    except StrictDropError as exc:
+        # on_drop="error" aborts mid-Phase-2 with earlier writes persisted
+        # (the #908 partial-write boundary). Surface the partial fan-out
+        # instead of an opaque 500 (#1247 id 47): the detail dict follows
+        # the #1210 ``{reason_code, message}`` shape the JS error path
+        # already renders, plus the writes that landed before the abort.
+        # API-only reachability — the UI never sends on_drop="error".
+        raise SyncPhaseError(
+            422,
+            detail={
+                "reason_code": "strict_drop",
+                "message": str(exc),
+                "generated": [
+                    {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in exc.generated
+                ],
+            },
+            error_kind="validation",
+            reason_code="strict_drop",
+        ) from exc
+    return {
+        "generated": [
+            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
+        ],
+        "dropped": [
+            {"runtime": rt, "name": name, "fields": fields} for rt, name, fields in result.dropped
+        ],
+        "skipped": [
+            {"runtime": rt, "reason": reason, "reason_code": code}
+            for rt, reason, code in result.skipped
+        ],
+        "canonical_root": CANONICAL_COMMAND_ROOT,
+    }
+
+
 @router.post("/context/commands/sync")
 async def sync_commands(
     body: SyncRequest | None = None,
@@ -738,46 +807,9 @@ async def sync_commands(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = generate_all_commands(
-                    project_root,
-                    on_drop=on_drop,
-                    scope=target_scope,
-                    surface="web_context_commands_sync",
-                )
+                return await _sync_commands_core(project_root, target_scope, on_drop=on_drop)
     except TimeoutError:
         raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
-    except PrivacyScanError as exc:
-        raise HTTPException(422, exc.message) from exc
-    except StrictDropError as exc:
-        # on_drop="error" aborts mid-Phase-2 with earlier writes persisted
-        # (the #908 partial-write boundary). Surface the partial fan-out
-        # instead of an opaque 500 (#1247 id 47): the detail dict follows
-        # the #1210 ``{reason_code, message}`` shape the JS error path
-        # already renders, plus the writes that landed before the abort.
-        # API-only reachability — the UI never sends on_drop="error".
-        raise HTTPException(
-            422,
-            detail={
-                "reason_code": "strict_drop",
-                "message": str(exc),
-                "generated": [
-                    {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in exc.generated
-                ],
-            },
-        ) from exc
-    return {
-        "generated": [
-            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
-        ],
-        "dropped": [
-            {"runtime": rt, "name": name, "fields": fields} for rt, name, fields in result.dropped
-        ],
-        "skipped": [
-            {"runtime": rt, "reason": reason, "reason_code": code}
-            for rt, reason, code in result.skipped
-        ],
-        "canonical_root": CANONICAL_COMMAND_ROOT,
-    }
 
 
 # ── Import ───────────────────────────────────────────────────────────────

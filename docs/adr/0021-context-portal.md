@@ -148,6 +148,12 @@ keys. The detection layer is therefore constrained:
 
 ### Sync orchestration — reuse, do not add a backend endpoint
 
+> **Narrowly superseded by ADR-0024** (2026-06-12): the deferred backend
+> endpoint shipped as `POST /api/context/sync-all` once the Open-question
+> §2 trigger fired — lock-free per-type cores under one outer
+> `_gateway_lock` window, with a per-phase report instead of cross-type
+> atomicity. The v1 reasoning below stands as the historical record.
+
 A combined backend `POST /api/context/sync-all` was considered and rejected
 for v1 on two grounds:
 
@@ -201,7 +207,10 @@ for triggered deferred decisions, not roadmap items.
    helpers under one outer `_gateway_lock`, native per-type results
    (incl. skills staging + settings + MCP) aggregated. *Trigger:* a need for
    cross-type all-or-nothing sync, or a user report of partial-failure pain
-   from the sequential front-end orchestration. (TRACKER row.)
+   from the sequential front-end orchestration. *Resolved by ADR-0024*
+   (#1278): the trigger fired (campaign-owner signal) and the endpoint
+   shipped with a per-phase report — cross-type all-or-nothing was
+   rejected, see ADR-0024 §1. (TRACKER row struck.)
 3. **Inline 3-button conflict editor** — Keep-User / Overwrite-Canonical /
    side-by-side Compare-and-merge on `409`/out-of-sync, replacing the v1
    "view diff" leaf pointer. *Revisit if:* repeated user friction resolving

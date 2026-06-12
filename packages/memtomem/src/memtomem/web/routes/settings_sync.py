@@ -391,6 +391,65 @@ class ApplySettingsSyncRequest(BaseModel):
     allow_host_writes: bool = False
 
 
+async def _sync_settings_core(
+    project_root: Path,
+    target_scope: TargetScope,
+    *,
+    allow_host_writes: bool = False,
+) -> dict:
+    """Lock-free settings sync core — the caller MUST hold ``_gateway_lock``.
+
+    Shared by the standalone route below and ``POST /context/sync-all``
+    (#1278), which runs every per-type core under ONE outer lock
+    acquisition — the lock is a non-reentrant ``_LoopLocalLock``, so the
+    core must never acquire it itself.
+
+    Duplicate-tier detection runs BEFORE the merge so the warning
+    reflects pre-write state (ADR-0010 §4: the warning fires in the
+    user's actual workflow, not behind a separate command).
+
+    ``generate_all_settings`` takes a per-target ``portalocker``
+    lock (#1123 B3-3). Run it in a worker thread: a cross-process
+    holder of ``.settings.json.lock`` would otherwise block this
+    synchronous call ON the event loop thread, stalling every
+    request AND preventing the caller's ``asyncio.timeout``
+    from firing (its callback is scheduled on the blocked loop).
+    The lock waits share a single whole-call budget
+    (``_SETTINGS_LOCK_BUDGET_S``, below every caller's timeout, across
+    all runtime targets, not per target), so the worker self-aborts with
+    an ``aborted`` status rather than running past the timeout —
+    ``asyncio.to_thread`` cannot cancel a thread, so without the
+    budget a timed-out request would orphan a thread that writes
+    after the 503 (#1145 review).
+
+    Refusals stay in-band by design: host-target generators report a
+    ``needs_confirmation`` *result row* instead of raising (the
+    ``_confirm.py`` hold-out), so this core raises no ``SyncPhaseError``.
+    """
+    duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
+    results = await asyncio.to_thread(
+        generate_all_settings,
+        project_root,
+        scope=target_scope,
+        allow_host_writes=allow_host_writes,
+    )
+    out: list[dict] = []
+    for name, r in results.items():
+        out.append(
+            {
+                "name": name,
+                "status": r.status,
+                "reason": r.reason,
+                "warnings": r.warnings,
+                "target": str(r.target) if r.target else None,
+            }
+        )
+    return {
+        "results": out,
+        "duplicate_tier_warnings": _serialize_duplicate_tiers(duplicates),
+    }
+
+
 @router.post("/settings-sync")
 @router.post("/context/settings/sync")
 async def apply_settings_sync(
@@ -409,49 +468,14 @@ async def apply_settings_sync(
     ``{"allow_host_writes": true}`` once the user has confirmed.
     """
     allow_host_writes = body.allow_host_writes if body else False
-    # Detect duplicate-tier hooks BEFORE the merge so the warning
-    # reflects pre-write state (ADR-0010 §4: the warning fires in the
-    # user's actual workflow, not behind a separate command).
-    duplicates = detect_duplicate_tiers(project_root, active_scope=target_scope)
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                # ``generate_all_settings`` takes a per-target ``portalocker``
-                # lock (#1123 B3-3). Run it in a worker thread: a cross-process
-                # holder of ``.settings.json.lock`` would otherwise block this
-                # synchronous call ON the event loop thread, stalling every
-                # request AND preventing the enclosing ``asyncio.timeout(60)``
-                # from firing (its callback is scheduled on the blocked loop).
-                # The lock waits share a single whole-call budget
-                # (``_SETTINGS_LOCK_BUDGET_S`` < 60s, across all runtime targets,
-                # not per target), so the worker self-aborts with an ``aborted``
-                # status rather than running past the timeout —
-                # ``asyncio.to_thread`` cannot cancel a thread, so without the
-                # budget a timed-out request would orphan a thread that writes
-                # after the 503 (#1145 review).
-                results = await asyncio.to_thread(
-                    generate_all_settings,
-                    project_root,
-                    scope=target_scope,
-                    allow_host_writes=allow_host_writes,
+                return await _sync_settings_core(
+                    project_root, target_scope, allow_host_writes=allow_host_writes
                 )
     except TimeoutError:
         raise HTTPException(503, "Settings sync timed out — another sync may be in progress")
-    out: list[dict] = []
-    for name, r in results.items():
-        out.append(
-            {
-                "name": name,
-                "status": r.status,
-                "reason": r.reason,
-                "warnings": r.warnings,
-                "target": str(r.target) if r.target else None,
-            }
-        )
-    return {
-        "results": out,
-        "duplicate_tier_warnings": _serialize_duplicate_tiers(duplicates),
-    }
 
 
 class ResolveRequest(BaseModel):
