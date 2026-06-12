@@ -478,6 +478,7 @@
   "settings.ctx.diff_tab_hint": "Click the Diff tab to load...",
   "settings.ctx.diff_failed": "Diff failed",
   "settings.ctx.diff_failed_detail": "Diff failed: {error}",
+  "settings.ctx.draft_stash_failed": "Draft could not be saved locally — keep this tab open until you save.",
   "settings.ctx.no_runtime_targets": "No runtime targets found.",
   "settings.ctx.tier_option_user": "User",
   "settings.ctx.tier_option_project_shared": "Project (shared)",
