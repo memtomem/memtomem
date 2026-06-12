@@ -18,15 +18,22 @@ first and owns the extraction). Contract:
 - Callers attach surface-specific context via ``extra`` (the transfer
   route nests its dry-run preview under ``plan``).
 
-A-6 (#1263) migrates the settings-sync host-write refusals onto this
-helper; until then ``generate_all_settings`` keeps its engine-level
-per-generator ``needs_confirmation`` results.
+The artifact write/sync routes (skills / commands / agents, #1263)
+gate their ``target_scope=user`` writes through :func:`host_write_gate`
+below. Settings sync is the one deliberate hold-out: its refusal is
+engine-level and per-generator (``generate_all_settings`` returns a
+``needs_confirmation`` *result row* per runtime target, consumed by the
+CLI prompt, the web route, and the dashboard's Sync All summary), so
+migrating it onto this envelope is a behavior-visible refactor tracked
+separately — not part of #1263.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
+
+from memtomem.config import TargetScope
 
 
 def needs_confirmation_envelope(
@@ -50,3 +57,43 @@ def needs_confirmation_envelope(
         payload["host_targets"] = list(host_targets)
     payload.update(extra)
     return payload
+
+
+def host_write_gate(
+    target_scope: TargetScope,
+    allow_host_writes: bool,
+    *,
+    action: str,
+    host_targets: Sequence[str],
+    **extra: Any,
+) -> dict[str, Any] | None:
+    """``needs_confirmation`` envelope for an unconfirmed user-tier write, else ``None``.
+
+    The #1263 contract for the artifact write/sync routes: a
+    ``target_scope=user`` request whose pending writes land on host paths
+    (the ``~/.memtomem/<kind>/`` canonicals and the ``~/.claude/...``-family
+    fan-out roots both live outside any project root) must disclose those
+    paths and complete only on a confirmed re-request. Callers compute
+    ``host_targets`` from the *pending* mutation — an empty sequence means
+    the request would not write anything, and the gate stays open
+    (``None``) so no-op requests (idempotent deletes, nothing-to-import
+    imports, empty canonical sets) never prompt; cheap conflict checks
+    (409 duplicate create, 404 missing update) likewise belong *before*
+    this gate so a request that cannot succeed is refused, not confirmed.
+
+    ``allow_host_writes`` is the request's opt-in flag: a body field on
+    POST/PUT routes, a query parameter on DELETE (bodies on DELETE are
+    client-hostile). The reason prose therefore says "re-send", not
+    "re-POST". Project tiers pass through untouched (``None``) — their
+    write policy is the caller's business.
+    """
+    if target_scope != "user" or allow_host_writes or not host_targets:
+        return None
+    return needs_confirmation_envelope(
+        f"{action} targets the user tier — host paths outside any project "
+        f"root. Re-send the request with allow_host_writes=true after "
+        f"confirming with the user.",
+        confirm="allow_host_writes",
+        host_targets=host_targets,
+        **extra,
+    )

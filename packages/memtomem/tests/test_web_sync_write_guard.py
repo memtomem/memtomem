@@ -235,7 +235,7 @@ async def test_scan_only_never_enrolled_rejected(
 # ── Both project-runtime tiers gated; user tier exempt ───────────────────
 
 # The settings-sync routes legitimately accept ``project_local`` (they have NO
-# ``_reject_non_shared_write`` tier backstop), so the guard — not the route —
+# ``_reject_project_local_write`` tier backstop), so the guard — not the route —
 # is the only thing standing between a paused project and a ``project_local``
 # runtime write.
 _SETTINGS_RUNTIME_WRITES = [e for e in GATED_ENDPOINTS if e[0].startswith("settings_")]
@@ -249,7 +249,7 @@ async def test_settings_project_local_on_paused_rejected(
 ) -> None:
     """Regression (review blocker): ``project_local`` is a project-runtime write
     (``<root>/.claude/settings.local.json``). The settings routes have no
-    ``_reject_non_shared_write`` backstop, so the guard must 409 ``project_local``
+    ``_reject_project_local_write`` backstop, so the guard must 409 ``project_local``
     on a paused project — and nothing may be written under ``proj/.claude/``.
     """
     proj = tmp_path / "proj"

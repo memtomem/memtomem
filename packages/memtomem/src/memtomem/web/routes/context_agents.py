@@ -15,12 +15,14 @@ from memtomem.config import TargetScope
 from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._runtime_targets import KNOWN_RUNTIMES, runtime_fanout_root
 from memtomem.context.agents import (
     AGENT_DIR_FILENAME,
     AGENT_GENERATORS,
     CANONICAL_AGENT_ROOT,
     ON_DROP_LEVELS,
     AgentParseError,
+    ExtractResult,
     StrictDropError,
     SubAgent,
     _parse_canonical_agent_text,
@@ -46,6 +48,7 @@ from memtomem.web.routes.context_projects import (
     resolve_writable_scope_root,
 )
 from memtomem.web.routes.context_versions import include_has, version_summary
+from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._locks import _gateway_lock
 
 # Flat list of project-relative runtime scan paths reported on list / import
@@ -77,20 +80,67 @@ def _resolve_existing_agent(
     return name, resolve_canonical_agent(project_root, name, scope=scope)
 
 
-def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
-    """Reject writes on non-``project_shared`` tiers with HTTP 400.
+def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
+    """Reject writes on the ``project_local`` tier with HTTP 400.
 
-    See context_skills.py:_reject_non_shared_write for the rationale.
-    Mirrored here so each route file stays self-contained.
+    See context_skills.py:_reject_project_local_write for the rationale
+    (user accepted behind the #1263 host-write confirm; project_local
+    deferred per ADR-0011 §3). Mirrored here so each route file stays
+    self-contained.
     """
-    if target_scope != "project_shared":
+    if target_scope == "project_local":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{action} is supported only on project_shared in this release; "
-                f"got target_scope={target_scope!r}."
+                f"{action} is supported on the project_shared and user tiers; "
+                f"project_local is a draft tier with no runtime fan-out "
+                f"(ADR-0011 §3)."
             ),
         )
+
+
+def _user_scan_dirs() -> list[str]:
+    """User-tier runtime roots the import scan reads (absolute, expanded).
+
+    Mirrors context_skills._user_scan_dirs — the project-relative
+    ``_AGENT_SCAN_DIRS`` hint would lie on ``target_scope=user``.
+    """
+    dirs: list[str] = []
+    for runtime in KNOWN_RUNTIMES:
+        root = runtime_fanout_root("agents", runtime, "user", None)
+        if root is not None:
+            dirs.append(str(root))
+    return sorted(set(dirs))
+
+
+def _scanned_dirs_for(target_scope: TargetScope) -> list[str]:
+    return _user_scan_dirs() if target_scope == "user" else _AGENT_SCAN_DIRS
+
+
+def _user_sync_host_targets(project_root: Path) -> list[str]:
+    """Pending user-tier fan-out destinations for the sync confirm gate.
+
+    Upper bound on the confirmed sync's writes, resolved from the PARSED
+    frontmatter name: ``sync_atomic_artifact`` fans out under
+    ``adapter.name_of(parse(...))``, not the canonical filename, so a
+    filename-derived disclosure could confirm one path while the engine
+    writes another (#1263 review Blocker). Canonicals the engine would
+    skip at read/parse time are excluded the same way; later preflight
+    skips (Gate A, override errors, conflicts, lock timeouts) only
+    shrink the actual write set below this disclosure.
+    """
+    targets: set[str] = set()
+    for agent_path, layout in list_canonical_agents(project_root, scope="user"):
+        try:
+            text = agent_path.read_bytes().decode("utf-8", errors="replace")
+            parsed = _parse_canonical_agent_text(text, source=agent_path, layout=layout)
+        except (OSError, AgentParseError):
+            continue  # the engine skips these too
+        for gen in AGENT_GENERATORS.values():
+            dst = gen.target_file(project_root, parsed.name, scope="user")
+            if dst is not None:
+                targets.add(str(dst))
+    return sorted(targets)
 
 
 def _agent_to_dict(agent: SubAgent) -> dict:
@@ -286,6 +336,10 @@ async def rendered_agent(
 class AgentCreateRequest(BaseModel):
     name: str
     content: str
+    # #1263 host-write opt-in: required true for target_scope=user (the
+    # canonical lands under ~/.memtomem/, outside any project root). The
+    # first POST without it returns the needs_confirmation envelope.
+    allow_host_writes: bool = False
 
 
 @router.post("/context/agents")
@@ -294,11 +348,32 @@ async def create_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to create in. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to create in. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Create agent")
+    _reject_project_local_write(target_scope, "Create agent")
     name = validate_name(body.name, kind="agent")
+
+    # Unlocked pre-checks so a duplicate is refused (409) rather than
+    # confirmed, and the gate discloses the exact artifact dir. The locked
+    # re-checks below stay authoritative for create races.
+    artifact_dir_unlocked = _agents_root(project_root, scope=target_scope) / name
+    if (
+        resolve_canonical_agent(project_root, name, scope=target_scope) is not None
+        or artifact_dir_unlocked.exists()
+    ):
+        raise HTTPException(409, detail=f"Agent '{name}' already exists")
+    gate = host_write_gate(
+        target_scope,
+        body.allow_host_writes,
+        action="Create agent",
+        host_targets=[str(artifact_dir_unlocked)],
+    )
+    if gate is not None:
+        return gate
 
     try:
         async with asyncio.timeout(60):
@@ -345,7 +420,7 @@ async def create_agent(
                     raise
     except TimeoutError:
         raise HTTPException(503, "Agent create timed out — another sync may be in progress")
-    return {"name": name, "canonical_path": str(agent_path.relative_to(project_root))}
+    return {"name": name, "canonical_path": _safe_rel(agent_path, project_root)}
 
 
 # ── Update ───────────────────────────────────────────────────────────────
@@ -360,6 +435,22 @@ class AgentUpdateRequest(BaseModel):
     # (see issue #763); every force-save emits a WARNING with both mtime
     # values for the audit trail.
     force: bool = False
+    # #1263 host-write opt-in for target_scope=user (see AgentCreateRequest).
+    allow_host_writes: bool = False
+
+
+_MTIME_CONFLICT_REASON = "File was modified by another process. Reload and retry."
+
+
+def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "aborted",
+            "reason": _MTIME_CONFLICT_REASON,
+            "mtime_ns": str(current_mtime_ns),
+        },
+    )
 
 
 @router.put("/context/agents/{name}")
@@ -369,10 +460,13 @@ async def update_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to update. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to update. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
 ) -> JSONResponse:
-    _reject_non_shared_write(target_scope, "Update agent")
+    _reject_project_local_write(target_scope, "Update agent")
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
         raise KeyError(name)
@@ -383,22 +477,27 @@ async def update_agent(
     except ValueError:
         raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
 
+    # Unlocked pre-check before the host-write gate — a stale request is
+    # refused, never confirmed (see context_skills.update_skill).
+    pre_mtime_ns = agent_path.stat().st_mtime_ns
+    if pre_mtime_ns != body_mtime_ns and not body.force:
+        return _mtime_conflict_response(pre_mtime_ns)
+    gate = host_write_gate(
+        target_scope,
+        body.allow_host_writes,
+        action="Update agent",
+        host_targets=[str(agent_path)],
+    )
+    if gate is not None:
+        return JSONResponse(content=gate)
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 current_mtime_ns = agent_path.stat().st_mtime_ns
                 if current_mtime_ns != body_mtime_ns:
                     if not body.force:
-                        return JSONResponse(
-                            status_code=409,
-                            content={
-                                "status": "aborted",
-                                "reason": (
-                                    "File was modified by another process. Reload and retry."
-                                ),
-                                "mtime_ns": str(current_mtime_ns),
-                            },
-                        )
+                        return _mtime_conflict_response(current_mtime_ns)
                     logger.warning(
                         "force-save bypassed mtime check on %s "
                         "(client_mtime_ns=%s server_mtime_ns=%s)",
@@ -430,11 +529,40 @@ async def delete_agent(
     project_root: Path = Depends(resolve_scope_root_cascade_gated),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to delete from. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
+    ),
+    allow_host_writes: bool = Query(
+        False,
+        description=(
+            "#1263 host-write opt-in for target_scope=user. Query parameter "
+            "(not a body field) because DELETE bodies are client-hostile; "
+            "the needs_confirmation envelope names the same flag."
+        ),
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Delete agent")
+    _reject_project_local_write(target_scope, "Delete agent")
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
+
+    # Pending deletions, computed unlocked (see delete_skill): cascade
+    # targets resolve AT THIS TIER — scope= is load-bearing for user-tier
+    # cascades. Idempotent no-ops skip the gate.
+    pending: list[Path] = [resolved[0]] if resolved is not None else []
+    if cascade:
+        for gen in AGENT_GENERATORS.values():
+            target = gen.target_file(project_root, name, scope=target_scope)
+            if target is not None and target.is_file():
+                pending.append(target)
+    gate = host_write_gate(
+        target_scope,
+        allow_host_writes,
+        action="Delete agent",
+        host_targets=[str(p) for p in pending],
+    )
+    if gate is not None:
+        return gate
 
     try:
         async with asyncio.timeout(60):
@@ -452,7 +580,7 @@ async def delete_agent(
 
                 if cascade:
                     for gen in AGENT_GENERATORS.values():
-                        target = gen.target_file(project_root, name)
+                        target = gen.target_file(project_root, name, scope=target_scope)
                         if target is None:
                             continue
                         if not target.is_file():
@@ -571,6 +699,8 @@ async def diff_agent(
 
 class SyncRequest(BaseModel):
     on_drop: str = "warn"
+    # #1263 host-write opt-in for target_scope=user (see AgentCreateRequest).
+    allow_host_writes: bool = False
 
     # An out-of-vocabulary value used to slip through to the engine, where it
     # silently behaved as "ignore" (#1247 id 47) — reject at the boundary
@@ -592,16 +722,32 @@ async def sync_agents(
     project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to fan out. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to fan out. user fans out to the host "
+            "~/.claude-family roots behind the allow_host_writes confirm "
+            "round-trip (#1263); project_local rejected — no runtime fan-out "
+            "per ADR-0011 §3."
+        ),
     ),
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Sync agents")
+    _reject_project_local_write(target_scope, "Sync agents")
     on_drop = body.on_drop if body else "warn"
+    gate = host_write_gate(
+        target_scope,
+        body.allow_host_writes if body else False,
+        action="Sync agents",
+        host_targets=_user_sync_host_targets(project_root),
+    )
+    if gate is not None:
+        return gate
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 result = generate_all_agents(
-                    project_root, on_drop=on_drop, surface="web_context_agents_sync"
+                    project_root,
+                    on_drop=on_drop,
+                    scope=target_scope,
+                    surface="web_context_agents_sync",
                 )
     except TimeoutError:
         raise HTTPException(503, "Agents sync timed out — another sync may be in progress")
@@ -649,43 +795,27 @@ async def sync_agents(
 
 class ImportRequest(BaseModel):
     overwrite: bool = False
+    # #1263 host-write opt-in for target_scope=user (the canonical
+    # destination is ~/.memtomem/agents/, outside any project root).
+    allow_host_writes: bool = False
 
 
-@router.post("/context/agents/import")
-async def import_agents(
-    body: ImportRequest | None = None,
-    project_root: Path = Depends(resolve_scope_root),
-    target_scope: TargetScope = Query(
-        "project_shared",
-        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
-    ),
-    dry_run: bool = Query(
-        False,
-        description=(
-            "Preview the import without writing to canonical (rank-10): runs the "
-            "full scan + privacy walk + dedup and returns the would-import / would-"
-            "skip counts, leaving disk untouched."
-        ),
-    ),
+def _import_payload(
+    result: ExtractResult,
+    project_root: Path,
+    target_scope: TargetScope,
+    dry_run: bool | None,
 ) -> dict:
-    _reject_non_shared_write(target_scope, "Import agents")
-    overwrite = body.overwrite if body else False
-    try:
-        async with asyncio.timeout(60):
-            async with _gateway_lock:
-                result = extract_agents_to_canonical(
-                    project_root,
-                    overwrite=overwrite,
-                    dry_run=dry_run,
-                    surface="web_context_agents_import",
-                )
-    except TimeoutError:
-        raise HTTPException(503, "Agents import timed out — another sync may be in progress")
-    return {
+    """Wire shape shared by both import routes (and the gate's nested plan).
+
+    Mirrors context_skills._import_payload — ``dry_run=None`` omits the
+    key, ``_safe_rel`` keeps user-tier ``~/.memtomem`` paths encodable.
+    """
+    payload: dict = {
         "imported": [
             {
                 "name": canonical_agent_name(p, layout),
-                "canonical_path": str(p.relative_to(project_root)),
+                "canonical_path": _safe_rel(p, project_root),
             }
             for p, layout in result.imported
         ],
@@ -694,9 +824,67 @@ async def import_agents(
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
-        "scanned_dirs": _AGENT_SCAN_DIRS,
-        "dry_run": dry_run,
+        "scanned_dirs": _scanned_dirs_for(target_scope),
     }
+    if dry_run is not None:
+        payload["dry_run"] = dry_run
+    return payload
+
+
+@router.post("/context/agents/import")
+async def import_agents(
+    body: ImportRequest | None = None,
+    project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to import into. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
+    ),
+    dry_run: bool = Query(
+        False,
+        description=(
+            "Preview the import without writing to canonical (rank-10): runs the "
+            "full scan + privacy walk + dedup and returns the would-import / would-"
+            "skip counts, leaving disk untouched. Returned regardless of "
+            "confirmation flags (mirrors the transfer route's dry_run)."
+        ),
+    ),
+) -> dict:
+    _reject_project_local_write(target_scope, "Import agents")
+    overwrite = body.overwrite if body else False
+    allow_host_writes = body.allow_host_writes if body else False
+
+    async def _run(dry: bool) -> ExtractResult:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                return extract_agents_to_canonical(
+                    project_root,
+                    overwrite=overwrite,
+                    dry_run=dry,
+                    scope=target_scope,
+                    surface="web_context_agents_import",
+                )
+
+    try:
+        if not dry_run and target_scope == "user" and not allow_host_writes:
+            # Gate disclosure needs the engine's scan — dry-run preview,
+            # nested as ``plan`` (see context_skills.import_skills).
+            preview = await _run(dry=True)
+            gate = host_write_gate(
+                target_scope,
+                allow_host_writes,
+                action="Import agents",
+                host_targets=[str(p) for p, _layout in preview.imported],
+                plan=_import_payload(preview, project_root, target_scope, dry_run=True),
+            )
+            if gate is not None:
+                return gate
+        result = await _run(dry=dry_run)
+    except TimeoutError:
+        raise HTTPException(503, "Agents import timed out — another sync may be in progress")
+    return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
 @router.post("/context/agents/{name}/import")
@@ -706,46 +894,57 @@ async def import_agent(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to import into. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
 ) -> dict:
-    """Import a single runtime agent into ``.memtomem/agents/``.
+    """Import a single runtime agent into the scoped canonical dir.
 
     Same response shape as the section-level import so the web UI can reuse
     its rendering. 404 when no runtime file matches the name (the section
     import would silently report 0 imported, which is the wrong shape of
-    feedback for "you clicked a specific item that doesn't exist").
+    feedback for "you clicked a specific item that doesn't exist") — pinned
+    on the gate's dry-run preview too.
     """
-    _reject_non_shared_write(target_scope, "Import agent")
+    _reject_project_local_write(target_scope, "Import agent")
     try:
         validate_name(name, kind="agent name")
     except InvalidNameError as exc:
         raise HTTPException(400, f"Invalid agent name: {exc}")
     overwrite = body.overwrite if body else False
-    try:
+    allow_host_writes = body.allow_host_writes if body else False
+
+    async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result = extract_agents_to_canonical(
+                return extract_agents_to_canonical(
                     project_root,
                     overwrite=overwrite,
                     only_name=name,
+                    dry_run=dry,
+                    scope=target_scope,
                     surface="web_context_agents_import",
                 )
+
+    try:
+        if target_scope == "user" and not allow_host_writes:
+            preview = await _run(dry=True)
+            if not preview.imported and not preview.skipped:
+                raise HTTPException(404, f"No runtime agent named {name!r} to import")
+            gate = host_write_gate(
+                target_scope,
+                allow_host_writes,
+                action="Import agent",
+                host_targets=[str(p) for p, _layout in preview.imported],
+                plan=_import_payload(preview, project_root, target_scope, dry_run=None),
+            )
+            if gate is not None:
+                return gate
+        result = await _run(dry=False)
     except TimeoutError:
         raise HTTPException(503, "Agent import timed out — another sync may be in progress")
     if not result.imported and not result.skipped:
         raise HTTPException(404, f"No runtime agent named {name!r} to import")
-    return {
-        "imported": [
-            {
-                "name": canonical_agent_name(p, layout),
-                "canonical_path": str(p.relative_to(project_root)),
-            }
-            for p, layout in result.imported
-        ],
-        "skipped": [
-            {"name": n, "reason": reason, "reason_code": code} for n, reason, code in result.skipped
-        ],
-        "project_root": str(project_root),
-        "scanned_dirs": _AGENT_SCAN_DIRS,
-    }
+    return _import_payload(result, project_root, target_scope, dry_run=None)

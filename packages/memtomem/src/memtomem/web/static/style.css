@@ -4360,7 +4360,8 @@ button.ctx-runtime-chip--greyed:focus-visible {
    reach the per-button handler. Mirrors the #ctx-sync-all-btn
    data-runtime-only pattern — clicks still fire a toast so the user
    understands why the affordance is dim, rather than getting a
-   generic 400 from the route's _reject_non_shared_write guard. */
+   generic 400 (project_local) or an unhandled needs_confirmation
+   envelope (user tier, #1263) from the route's tier gate. */
 [data-write-blocked] {
   opacity: 0.45;
   cursor: not-allowed;

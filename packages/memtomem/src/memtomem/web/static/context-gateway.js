@@ -773,14 +773,17 @@ function _ctxWireShowAllScopes(type, listEl) {
 
 // -- Tier-aware write-block gate (issue #943) ---------------------------------
 //
-// ADR-0011 / #940 wired ``target_scope`` through every artifact route, with
-// ``_reject_non_shared_write`` 400-rejecting create/update/delete/sync/import
-// on user and project_local tiers. Without a matching UI affordance, users
-// who switch the tier filter to ``user`` or ``project_local`` see the same
-// write buttons as on ``project_shared`` and only learn the operation is
-// blocked when the route surfaces a generic toast. #943 closes that UX
-// gap by tagging every web-write affordance with
-// ``data-write-blocked="<tier>"`` so:
+// ADR-0011 / #940 wired ``target_scope`` through every artifact route. The
+// server gate is now split (#1263): ``project_local`` writes 400 via
+// ``_reject_project_local_write`` (mcp-servers/versions keep the stricter
+// ``_reject_non_shared_write``), while unconfirmed ``user``-tier writes on
+// skills/commands/agents return a 200 ``needs_confirmation`` envelope this
+// UI does not yet re-send with ``allow_host_writes`` — so the client-side
+// block below still covers BOTH non-shared tiers until the confirm dialog
+// ships (#1263 follow-up). Without the affordance, users who switch the
+// tier filter would only learn the operation is blocked from a generic
+// toast. #943 closed that UX gap by tagging every web-write affordance
+// with ``data-write-blocked="<tier>"`` so:
 //
 //   (1) CSS dims the button (``[data-write-blocked]`` selector in style.css),
 //   (2) ``aria-disabled="true"`` announces the state to screen readers,
@@ -810,9 +813,10 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   // stay un-gated, as they were before).
   + '.ctx-portal-sync, '
   // The single-item runtime-only import route (#940 import_<type>)
-  // also flows through ``_reject_non_shared_write``, so the per-detail
-  // "Import this <type>" button minted by ``_ctxLoadRuntimeOnlyDetail``
-  // belongs in the same write-blocked sweep.
+  // also flows through the tier gate (project_local 400, unconfirmed
+  // user-tier → needs_confirmation), so the per-detail "Import this
+  // <type>" button minted by ``_ctxLoadRuntimeOnlyDetail`` belongs in
+  // the same write-blocked sweep.
   + '.ctx-runtime-only-import, '
   // ADR-0022 version-store writes (enable / freeze / promote / delete-label)
   // are project_shared-only canonical writes, so they ride the same tier gate.
@@ -2924,9 +2928,10 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // Cards on the active project scope are clickable across all tiers — the detail /
     // rendered / diff / edit / delete endpoints now accept ``target_scope=``
     // (#940 r3), so a click on a project_local draft opens the project_local
-    // canonical, not a same-named project_shared one. Writes on non-shared
-    // tiers are rejected at the server with HTTP 400 (the route's
-    // ``_reject_non_shared_write`` helper); the JS surfaces those as
+    // canonical, not a same-named project_shared one. project_local writes
+    // are rejected at the server with HTTP 400 (``_reject_project_local_write``)
+    // and unconfirmed user-tier writes return a needs_confirmation envelope
+    // this UI doesn't yet act on (#1263); the JS surfaces the 400s as
     // toasts via the existing ``err.detail`` path.
     const clickable = _ctxScopeIsActive(scope);
     container.innerHTML = _ctxRenderItemsHtml(

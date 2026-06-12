@@ -1962,9 +1962,11 @@ class TestImportOneAgent:
 # target_scope plumbing through item routes (#940 r3)
 #
 # Reads honor every tier; writes (create/update/delete/sync/import) accept
-# the param but reject anything other than ``project_shared`` with HTTP 400
-# via ``_reject_non_shared_write``. Pins the contract from both sides so a
-# regression on either gate shows up immediately.
+# the param, 400-reject ``project_local`` via ``_reject_project_local_write``,
+# and since #1263 accept ``user`` behind the allow_host_writes confirm
+# round-trip (pinned in test_web_routes_context_user_tier.py). Pins the
+# contract from both sides so a regression on either gate shows up
+# immediately.
 # ---------------------------------------------------------------------------
 
 
@@ -2020,9 +2022,11 @@ class TestSkillTargetScopePlumbing:
         assert "project_shared" in r.json()["detail"]
 
     @pytest.mark.anyio
-    async def test_sync_rejects_non_shared(self, client: AsyncClient):
-        r = await client.post("/api/context/skills/sync", params={"target_scope": "user"})
+    async def test_sync_rejects_project_local(self, client: AsyncClient):
+        """user-tier sync is open since #1263 — project_local stays 400."""
+        r = await client.post("/api/context/skills/sync", params={"target_scope": "project_local"})
         assert r.status_code == 400
+        assert "project_shared" in r.json()["detail"]
 
 
 class TestAgentTargetScopePlumbing:
@@ -2075,15 +2079,17 @@ class TestCommandTargetScopePlumbing:
         assert "local draft cmd" in local.json()["content"]
 
     @pytest.mark.anyio
-    async def test_update_rejects_non_shared(self, client: AsyncClient, tmp_path: Path):
+    async def test_update_rejects_project_local(self, client: AsyncClient, tmp_path: Path):
+        """user-tier update is open since #1263 — project_local stays 400."""
         _make_local_command(tmp_path, "draft")
         # Need an mtime_ns; doesn't matter — the gate fires before mtime check.
         r = await client.put(
             "/api/context/commands/draft",
-            params={"target_scope": "user"},
+            params={"target_scope": "project_local"},
             json={"content": "# x\n", "mtime_ns": "0"},
         )
         assert r.status_code == 400
+        assert "project_shared" in r.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
