@@ -2821,6 +2821,17 @@ def _transfer_dispatch(
             "--to-project cannot be combined with --to user: the user tier "
             "is global (~/.memtomem), not per-project."
         )
+    # Validate names BEFORE any path construction (Codex review fold):
+    # the --to default pre-probe below builds candidate paths from the
+    # raw name, and a traversal shape like ``../x`` must never reach a
+    # filesystem probe. Same vocabulary as the engine's own
+    # ``validate_name`` calls, translated to the CLI error shape here.
+    try:
+        validate_name(name, kind=f"{asset_type[:-1]} name")
+        if new_name is not None:
+            validate_name(new_name, kind=f"{asset_type[:-1]} name")
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     src_root = _find_project_root()
 
@@ -2902,6 +2913,12 @@ def _transfer_dispatch(
             surface=f"cli_context_{mode}",
             new_name=new_name,
         )
+    except (FileNotFoundError, ValueError, InvalidNameError) as exc:
+        # Same translation set as _migrate_scope_dispatch — the engine's
+        # validate_name raises InvalidNameError (not ClickException), and
+        # deep filesystem paths can surface OS errors; without this the
+        # CLI dies with a traceback instead of a one-line error.
+        raise click.ClickException(str(exc)) from exc
     except PrivacyScanError as exc:
         raise click.ClickException(exc.message) from exc
     except MigratePartialError as exc:

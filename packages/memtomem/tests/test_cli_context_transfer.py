@@ -406,6 +406,32 @@ def test_gate_a_block_renders_as_cli_error_with_source_hint(cli_projects) -> Non
     assert not (cli_projects["b"] / ".memtomem" / "agents" / "foo").exists()  # zero residue
 
 
+def test_invalid_source_name_is_a_clean_cli_error(cli_projects) -> None:
+    """Traversal-shaped names fail validation BEFORE any path probe.
+
+    With ``--to`` omitted the dispatch pre-probes the source tier from
+    the raw name — without the up-front ``validate_name`` a name like
+    ``../escape`` would hit the filesystem first (Codex review fold).
+    """
+    result = _invoke(["copy", "agents", "../escape", "--to-project", str(cli_projects["b"])])
+    assert result.exit_code == 1
+    assert result.output.strip(), "expected a one-line CLI error, got empty output"
+    assert "Error" in result.output
+    assert not isinstance(result.exception, Exception) or isinstance(
+        result.exception, SystemExit
+    ), f"unhandled exception leaked: {result.exception!r}"
+
+
+def test_invalid_as_name_is_a_clean_cli_error(cli_projects) -> None:
+    _seed_agent(cli_projects, "project_local", root_key="a")
+    result = _invoke(["copy", "agents", "foo", "--to", "user", "--as", "../bad", "--apply"])
+    assert result.exit_code == 1
+    assert result.output.strip(), "expected a one-line CLI error, got empty output"
+    assert "Error" in result.output
+    # Nothing escaped the canonical roots.
+    assert not (cli_projects["home"] / ".memtomem" / "agents" / "foo").exists()
+
+
 def test_move_help_is_the_three_verb_comparison(cli_projects) -> None:
     """#1274 acceptance: move vs copy vs migrate documented in one place."""
     result = _invoke(["move", "--help"])
