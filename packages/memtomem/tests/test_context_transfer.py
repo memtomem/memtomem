@@ -372,9 +372,15 @@ def test_copy_as_rename_crlf_manifest_preserves_endings(two_projects):
     from memtomem.context.agents import parse_canonical_agent
 
     crlf_body = _AGENT_BODY_CLEAN.replace("\n", "\r\n")
-    src_manifest = _write_canonical(two_projects, "agents", "project_shared", "a", "foo", crlf_body)
-    # Belt-and-suspenders: confirm the seed really is CRLF on disk.
-    assert b"\r\n" in src_manifest.read_bytes()
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    # Seed via bytes, not write_text: text-mode writing translates "\n" to
+    # os.linesep, which on Windows turns the intended "\r\n" into "\r\r\n"
+    # (caught by CI — the engine handled even that, but the assertions pin
+    # exact CRLF endings).
+    src_manifest.write_bytes(crlf_body.encode("utf-8"))
+    assert src_manifest.read_bytes().decode("utf-8") == crlf_body
 
     transfer_artifact(
         "agents",

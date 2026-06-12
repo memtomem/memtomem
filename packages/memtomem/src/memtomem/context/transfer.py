@@ -41,6 +41,7 @@ import os
 import secrets
 import shlex
 import shutil
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -48,6 +49,7 @@ from typing import Literal
 import click
 
 from memtomem.config import TargetScope
+from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import validate_name
 from memtomem.context.agents import _KEY_VALUE_RE
 from memtomem.context.lockfile import Lockfile
@@ -258,7 +260,15 @@ def _rewrite_staged_manifest_name(
     content = lines[idx].rstrip("\r\n")
     ending = lines[idx][len(content) :]
     lines[idx] = f"name: {new_name}{ending}"
-    manifest.write_bytes((bom + "".join(lines)).encode("utf-8"))
+    # Staging is private pre-promote, but the atomic-write invariant is
+    # surface-wide (test_context_atomic_write_guard): no bare writes on
+    # gateway modules. Mode is preserved from the copied manifest —
+    # copy semantics, not the helper's 0600 default.
+    atomic_write_bytes(
+        manifest,
+        (bom + "".join(lines)).encode("utf-8"),
+        mode=stat.S_IMODE(manifest.stat().st_mode),
+    )
 
 
 def _offending_file_hint(blocked_path: Path, staging: Path, src_path: Path) -> str:
