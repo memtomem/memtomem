@@ -11,7 +11,11 @@ moves an existing canonical artifact between ADR-0011 scope tiers
 (``user`` ↔ ``project_shared`` ↔ ``project_local``). The flat→dir path
 and the scope-move path share the dry-run/apply/click-exception
 discipline; they branch on whether ``--to <scope>`` is passed at the CLI
-layer.
+layer. Since ADR-0023 the scope-move orchestration lives in
+:mod:`memtomem.context.transfer` (which generalizes it to cross-project
+move|copy); ``migrate_scope`` remains here as a thin same-root wrapper
+with byte-compatible results, and the staging / pair-lock / fan-out
+primitives below are shared by both modules.
 
 Pure module: filesystem + lockfile only, no wiki dependency (ADR-0008
 Invariants 1 / 3). The CLI wrapper in
@@ -64,10 +68,6 @@ from memtomem.context.commands import (
     parse_canonical_command,
 )
 from memtomem.context.lockfile import Lockfile
-from memtomem.context.privacy_scan import (
-    raise_or_collect,
-    scan_artifact_tree,
-)
 from memtomem.context.scope_resolver import (
     ArtifactKind,
     ContextScopeError,
@@ -708,9 +708,14 @@ def _acquire_pair_lock(path_a: Path, path_b: Path) -> Iterator[None]:
 
     The pair is always two locks; if both arguments resolve to the same
     sidecar (defensive — only happens when src and dst are the same file,
-    which :func:`migrate_scope` rejects upstream) the second lock is
-    skipped to avoid re-entrancy issues with portalocker on platforms
-    where ``LOCK_EX`` does not nest.
+    which :func:`memtomem.context.transfer.transfer_artifact` rejects
+    upstream) the second lock is skipped to avoid re-entrancy issues with
+    portalocker on platforms where ``LOCK_EX`` does not nest.
+
+    Cross-project note (ADR-0023): the two paths may live under two
+    different project roots. ``sorted(key=str)`` over absolute lock
+    paths is a total order there too, so every process — whatever pair
+    of roots it works across — still acquires in one global sequence.
     """
     lock_a = _lock_path_for(path_a)
     lock_b = _lock_path_for(path_b)
@@ -912,7 +917,7 @@ def _fanout_target_matches(
     parsed_item: Any | None,
     dst_path: Path,
     to_scope: TargetScope,
-    project_root: Path,
+    dst_project_root: Path | None,
 ) -> bool:
     """True when *target* byte-matches what sync would write for this artifact.
 
@@ -920,10 +925,14 @@ def _fanout_target_matches(
     post-move location** (``dst_path``): the moved bytes are identical to
     what sync last read at the source scope, and per-vendor overrides live
     inside the artifact dir (``<name>/overrides/<vendor>.<ext>``) so they
-    moved with it. The expected-bytes rule mirrors ``_sync_atomic`` Phase 2
-    exactly — override bytes verbatim when one resolves, else the
-    generator render — the same comparison ``diff_agents`` /
-    ``diff_commands`` / ``_skill_effective_equal`` already pin.
+    moved with it. Override resolution therefore reads the DESTINATION
+    project root (ADR-0023 two-root contract — for a same-root move the
+    two roots coincide and this is the historical behavior; ``None`` is
+    valid for a user-tier destination, where the project root is unused).
+    The expected-bytes rule mirrors ``_sync_atomic`` Phase 2 exactly —
+    override bytes verbatim when one resolves, else the generator render
+    — the same comparison ``diff_agents`` / ``diff_commands`` /
+    ``_skill_effective_equal`` already pin.
 
     Any read failure returns ``False`` — the same "report drift, never
     mask it" posture as diff — so uncertainty routes to the backup path
@@ -933,7 +942,7 @@ def _fanout_target_matches(
     vendor = GENERATOR_VENDOR.get(gen.name)
     override_bytes: bytes | None = None
     if vendor is not None:
-        override_path = _override.resolve(project_root, kind, name, vendor, scope=to_scope)
+        override_path = _override.resolve(dst_project_root, kind, name, vendor, scope=to_scope)
         if override_path is not None:
             try:
                 override_bytes = override_path.read_bytes()
@@ -1013,11 +1022,12 @@ def _remove_runtime_fanout_for(
     kind: ArtifactKind,
     name: str,
     scope: TargetScope,
-    project_root: Path,
+    src_project_root: Path | None,
     *,
     dst_path: Path,
     to_scope: TargetScope,
     layout: Literal["dir", "flat"],
+    dst_project_root: Path | None,
 ) -> tuple[list[Path], list[Path]]:
     """Remove runtime fan-out targets for one artifact at one scope.
 
@@ -1027,6 +1037,16 @@ def _remove_runtime_fanout_for(
     do not linger as orphans (#895 P2). Target selection — including the
     symlink / foreign-file exclusions — lives in
     :func:`_existing_fanout_targets`, shared with the dry-run preview.
+
+    Two-root contract (ADR-0023 §4): the single ``project_root`` this
+    helper used to take drove BOTH stale fan-out discovery and the
+    expected-render/override verification, which diverge in a
+    cross-project move. ``src_project_root`` anchors discovery (where
+    the stale runtime entries live — the artifact's pre-move project);
+    ``dst_project_root`` anchors verification (where the canonical and
+    its travelling ``overrides/`` now live). A same-root move passes
+    the same path for both, which is byte-for-byte the historical
+    behavior.
 
     #1247 id 6: deletion is no longer unconditional. Each target is
     byte-compared against what sync would write
@@ -1042,7 +1062,7 @@ def _remove_runtime_fanout_for(
     """
     removed: list[Path] = []
     backed_up: list[Path] = []
-    targets = _existing_fanout_targets(kind, name, scope, project_root)
+    targets = _existing_fanout_targets(kind, name, scope, src_project_root)
     if not targets:
         return removed, backed_up
 
@@ -1065,7 +1085,7 @@ def _remove_runtime_fanout_for(
 
     for runtime, target in targets:
         matches = _fanout_target_matches(
-            kind, name, runtime, target, parsed_item, dst_path, to_scope, project_root
+            kind, name, runtime, target, parsed_item, dst_path, to_scope, dst_project_root
         )
         if not matches:
             bak = _backup_fanout_target(target)
@@ -1093,10 +1113,18 @@ def _remove_runtime_fanout_for(
 def _detect_source_scope(
     kind: ArtifactKind,
     name: str,
-    project_root: Path,
+    project_root: Path | None,
     explicit_from: TargetScope | None,
 ) -> tuple[TargetScope, Path, Literal["dir", "flat"]]:
     """Locate the unique scope where *name*'s canonical lives.
+
+    ``project_root=None`` (transfer engine, source side without a
+    project context) restricts the probe to the user tier — the
+    project-tier ``canonical_artifact_dir`` calls raise
+    :class:`ContextScopeError` and are skipped by the existing
+    ``continue``. Callers that mean a project tier must pass a root;
+    :func:`memtomem.context.transfer.transfer_artifact` pre-checks
+    that pairing before calling here.
 
     Uses :func:`canonical_artifact_dir` + on-disk probes (NOT
     ``list_canonical_*`` because PR-E4 only operates on a single name:
@@ -1167,43 +1195,32 @@ def migrate_scope(
 ) -> MigrateScopeResult:
     """Move a canonical artifact between ADR-0011 scope tiers.
 
+    Thin same-root wrapper over
+    :func:`memtomem.context.transfer.transfer_artifact` (ADR-0023): the
+    staged-move orchestration that used to live here moved to the
+    transfer engine when cross-project support landed. This wrapper pins
+    the historical surface — same signature, byte-compatible
+    :class:`MigrateScopeResult` values, and byte-identical error
+    messages for every same-root case reachable from the shipping
+    surfaces (the pre-delegation checks below own the literals the
+    transfer engine words differently for its own callers). One
+    documented exception, unreachable through the Click/MCP gates: an
+    invalid ``from_scope``/``to_scope`` literal now raises a clear
+    "unsupported source/destination scope" instead of the old
+    misleading "not found at scope='<bogus>'" / raw
+    :class:`ContextScopeError` (ADR-0023 §Backward compatibility).
+
     Pure module entry point — no Click prompts, no stdout writes; the
     CLI wrapper in :mod:`memtomem.cli.context_cmd` owns all user-facing
     output. Errors raise :class:`click.ClickException` so the wrapper
     can re-raise verbatim.
 
-    Apply sequence:
-
-    1. Auto-detect or validate ``from_scope`` via
-       :func:`_detect_source_scope`; reject same-source-as-target.
-    2. Resolve ``dst_path`` (mirrors src layout — dir or flat).
-    3. Dry-run gate — return the plan without touching disk if
-       ``apply_=False``.
-    4. Refuse on dst conflict (PR-E4 Row 15: ``--force`` does not
-       overwrite scope-tier targets; replace verb is a follow-up).
-    5. Acquire src + dst sidecar locks in sorted order
-       (:func:`_acquire_pair_lock`).
-    6. Stage src → ``<dst.parent>/.migrate-<name>-<pid>-<rand>.tmp``
-       via rename; fall back to copytree on EXDEV.
-    7. Gate A scan on staging when ``to_scope == project_shared``.
-       Block raises :class:`click.ClickException` with the standard
-       project_shared block message; rollback puts src back.
-    8. Promote staging → dst via ``os.replace``.
-    9. EXDEV cleanup (rmtree src) when the rename fell back.
-    10. Best-effort cleanup of stale src runtime fan-out targets
-        (``~/.claude/agents/<name>.md`` etc.) — outside the lock so a
-        partial cleanup failure does not roll back the canonical move.
-        Targets that diverge from the canonical render (or whose
-        provenance can't be verified) are snapshotted to a ``.bak``
-        before removal; symlinks and files sync can't have written
-        (no generator) are left in place (#1247 id 6).
-
     Args:
-        surface: Gate A audit identifier forwarded to the step-7
-            staging scan. The CLI relies on the default
-            ``"cli_context_migrate"``; the MCP tool passes
-            ``"mcp_context_artifact_migrate"`` (#1246 — previously
-            MCP-driven moves were misattributed to the CLI literal).
+        surface: Gate A audit identifier forwarded to the staging scan.
+            The CLI relies on the default ``"cli_context_migrate"``; the
+            MCP tool passes ``"mcp_context_artifact_migrate"`` (#1246 —
+            previously MCP-driven moves were misattributed to the CLI
+            literal).
 
     Returns:
         :class:`MigrateScopeResult` with ``moved=True`` on apply
@@ -1222,217 +1239,31 @@ def migrate_scope(
 
     project_root = Path(project_root).expanduser().resolve()
 
-    src_scope, src_path, layout = _detect_source_scope(kind, name, project_root, from_scope)
-    if src_scope == to_scope:
-        raise click.ClickException(f"{kind}/{name} is already at scope='{to_scope}' (no-op).")
+    # Local import: transfer.py imports this module's primitives at load
+    # time; importing it lazily here keeps the cycle one-directional.
+    from memtomem.context.transfer import transfer_artifact
 
-    dst_root = canonical_artifact_dir(kind, to_scope, project_root)
-    dst_path = dst_root / name if layout == "dir" else dst_root / f"{name}.md"
-
-    # Pre-flight conflict check (also re-checked inside the lock).
-    if dst_path.exists():
-        raise click.ClickException(
-            f"destination already exists: {dst_path}. "
-            "Resolve manually or remove the existing entry first. "
-            "--force does not overwrite scope-tier targets in PR-E4 "
-            "(replace verb is a follow-up)."
-        )
-
-    if not apply_:
-        # Dry-run: compute plan, no mutation. ``fanout_planned`` previews
-        # the deletion half of the move (#1247 id 6) — the same selection
-        # the apply-side cleanup uses, so preview and apply cannot
-        # disagree about what gets removed.
-        return MigrateScopeResult(
-            kind=kind,
-            name=name,
-            from_scope=src_scope,
-            to_scope=to_scope,
-            src_path=src_path,
-            dst_path=dst_path,
-            layout=layout,
-            moved=False,
-            fanout_planned=[
-                target
-                for _runtime, target in _existing_fanout_targets(
-                    kind, name, src_scope, project_root
-                )
-            ],
-        )
-
-    # ── apply path ───────────────────────────────────────────────────
-    with _acquire_pair_lock(src_path, dst_path):
-        # Re-check dst inside the lock window — some other process could
-        # have created it between the dry-run preview and the apply
-        # phase, even with our own lock-pair held (the writer would have
-        # had to take the same lock, but check defensively).
-        if dst_path.exists():
-            raise click.ClickException(f"destination appeared during lock acquire: {dst_path}.")
-
-        staging, src_consumed = _stage_move(src_path, dst_path.parent, name_hint=name)
-
-        try:
-            # Gate A on the staged content if landing in project_shared.
-            # The scan runs against staging (the bytes about to be
-            # promoted), not against src — so any in-flight edits caught
-            # mid-rename are still scanned.
-            if to_scope == "project_shared":
-                scan = scan_artifact_tree(
-                    staging,
-                    surface=surface,
-                    scope=to_scope,
-                    project_root=project_root,
-                    on_blocked="fail_fast",
-                )
-                if scan.blocked:
-                    # Raise — project_shared has no force valve in PR-E4
-                    # (mirrors PR-D memory-migrate and PR-E3 sync-side).
-                    raise_or_collect(
-                        scan.blocked[0],
-                        scope=to_scope,
-                        kind=kind[:-1],
-                        artifact_name=name,
-                    )
-
-            _promote_move(staging, dst_path)
-        except BaseException:
-            # Roll back: put bytes back at src so the caller can retry
-            # without manual cleanup.
-            #
-            # The cleanup rule is: staging is deleted only when we KNOW
-            # the bytes are safe elsewhere. There are exactly three safe
-            # cases; everything else preserves staging as a recovery copy
-            # and logs a loud ERROR pointing the user at it.
-            #
-            # Codex review #1 fold caught the "rename-back fails →
-            # staging gets deleted" path. Re-review then caught a
-            # subtler one: ``not src_path.exists()`` was a TOCTOU — an
-            # external writer (``mm context install``, a manual file op,
-            # any tool that does not take our sidecar lock) can recreate
-            # ``src_path`` between our ``os.rename`` and rollback. The
-            # old guard would skip rename-back (src "already there") and
-            # the cleanup branch would delete staging anyway, even
-            # though the bytes at src now belong to someone else.
-            cleanup_staging = False
-            if not src_consumed:
-                # EXDEV fallback: src was never consumed, staging is
-                # just a copy. Safe to drop.
-                cleanup_staging = True
-            elif src_path.exists():
-                # Same-FS path consumed src, but src has reappeared —
-                # not by us. Don't overwrite the new src bytes; don't
-                # delete staging either. User reconciles manually.
-                logger.error(
-                    "migrate_scope rollback: src %s reappeared during apply "
-                    "(another writer outside our lock); preserving staging "
-                    "at %s as a recovery copy — manual reconciliation "
-                    "required.",
-                    src_path,
-                    staging,
-                )
-            elif staging.exists():
-                # Same-FS path consumed src; src is gone as expected;
-                # try the rename-back. Success consumes staging (cleanup
-                # is a no-op then); failure preserves staging.
-                try:
-                    os.replace(staging, src_path)
-                    cleanup_staging = True
-                except OSError as exc:
-                    logger.error(
-                        "migrate_scope rollback: rename-back failed (%s); "
-                        "staging at %s is the ONLY surviving copy of the "
-                        "source bytes — manual recovery required (mv it "
-                        "back to %s).",
-                        exc,
-                        staging,
-                        src_path,
-                    )
-            # else: src_consumed and staging is gone too — nothing to do.
-
-            if cleanup_staging and staging.exists():
-                if staging.is_dir():
-                    shutil.rmtree(staging, ignore_errors=True)
-                else:
-                    with contextlib.suppress(OSError):
-                        staging.unlink()
-            raise
-
-        # EXDEV cleanup — promoted dst now holds the bytes; src copy is
-        # stale and must be removed for the migration to be complete.
-        if not src_consumed and src_path.exists():
-            try:
-                if src_path.is_dir():
-                    shutil.rmtree(src_path)
-                else:
-                    src_path.unlink()
-            except OSError as exc:
-                # Canonical is at dst but src cleanup failed — both
-                # canonicals are on disk. Rolling back dst would just
-                # restore the duplicate state we just resolved (and the
-                # bytes at src are presumably the same — copy succeeded).
-                # Instead, surface as a hard error so the caller does
-                # NOT report "moved" and does NOT proceed to fan-out
-                # cleanup. Without this fail-loud, the next
-                # ``mm context sync`` at src_scope would recreate runtime
-                # fan-out from the stale src (#895 P2 review #5).
-                logger.error(
-                    "EXDEV cleanup: failed to remove stale src %s: %s",
-                    src_path,
-                    exc,
-                )
-                raise MigratePartialError(
-                    f"Migrate {kind}/{name}: canonical copied to {dst_path} but "
-                    f"failed to remove stale source at {src_path} (errno={exc.errno}). "
-                    f"Both canonicals now exist on disk. Remove {src_path} manually, "
-                    f"then run `mm context sync --scope {to_scope}` to refresh "
-                    f"runtime fan-out at the new tier. Until then, do NOT run "
-                    f"`mm context sync --scope {src_scope}` — it would recreate "
-                    f"runtime fan-out from the stale source.",
-                    src_path=src_path,
-                    dst_path=dst_path,
-                ) from exc
-
-    # Lock released. The wiki-install lockfile (``lock.json``) only tracks
-    # project_shared installs; migrating an artifact OUT of project_shared
-    # leaves its entry dangling, and `mm context status` would then iterate
-    # that entry, find the canonical gone from the project_shared dest, and
-    # report the (now-moved) artifact as "missing" (#1123 B4-1). Drop the
-    # stale entry. Best-effort: the canonical move already committed inside
-    # the lock above, so a lock.json bookkeeping failure must NOT undo or
-    # fail the migration — log loudly and continue.
-    if src_scope == "project_shared":
-        try:
-            Lockfile.at(project_root).remove_entry(kind, name)
-        except Exception as exc:  # bookkeeping must never fail a committed move
-            logger.warning(
-                "migrate_scope: failed to drop stale lock.json entry for %s/%s "
-                "after moving out of project_shared (%s); `mm context status` may "
-                "report it as missing until the entry is removed.",
-                kind,
-                name,
-                exc,
-            )
-
-    # Cleanup stale src runtime fan-out (best-effort).
-    fanout_cleaned, fanout_backed_up = _remove_runtime_fanout_for(
+    result = transfer_artifact(
         kind,
         name,
-        src_scope,
-        project_root,
-        dst_path=dst_path,
+        src_project_root=project_root,
+        from_scope=from_scope,
+        dst_project_root=project_root,
         to_scope=to_scope,
-        layout=layout,
+        mode="move",
+        apply_=apply_,
+        surface=surface,
     )
-
     return MigrateScopeResult(
-        kind=kind,
-        name=name,
-        from_scope=src_scope,
-        to_scope=to_scope,
-        src_path=src_path,
-        dst_path=dst_path,
-        layout=layout,
-        moved=True,
-        fanout_cleaned=fanout_cleaned,
-        fanout_backed_up=fanout_backed_up,
+        kind=result.kind,
+        name=result.name,
+        from_scope=result.from_scope,
+        to_scope=result.to_scope,
+        src_path=result.src_path,
+        dst_path=result.dst_path,
+        layout=result.layout,
+        moved=result.transferred,
+        fanout_cleaned=result.fanout_cleaned,
+        fanout_backed_up=result.fanout_backed_up,
+        fanout_planned=result.fanout_planned,
     )
