@@ -41,6 +41,7 @@ __all__ = [
     "discover_project_scopes",
     "annotate_project_health",
     "resolve_project_selector",
+    "sync_skip_reason",
 ]
 
 
@@ -883,6 +884,40 @@ def has_runtime_marker(root: Path) -> bool:
     checkout.
     """
     return any((root / m).is_dir() for m in _MARKER_DIRS)
+
+
+# ── Batch-sync eligibility (ADR-0025) ────────────────────────────────────
+
+
+def sync_skip_reason(scope: ProjectScope) -> str | None:
+    """Why *scope* is excluded from a batch sync run, or ``None`` if eligible.
+
+    One derivation shared by ``mm context sync --all-projects`` and the web
+    ``POST /api/context/sync-all-projects`` loop so the two surfaces cannot
+    drift on WHICH scopes execute; each surface owns its remediation
+    message. The paused / not-enrolled split mirrors the web
+    ``resolve_writable_scope_root`` eligibility 409.
+
+    Codes, in evaluation order:
+
+    - ``missing_root`` — the root is gone; checked first because physical
+      absence trumps enrollment state (a paused project whose tree was
+      also deleted reports the physical problem).
+    - ``sync_paused`` / ``sync_not_enrolled`` — ``sync_eligible`` is False:
+      an enrolled known-project whose ``enabled`` flag is off, or a
+      discovery-only scope never enrolled.
+    - ``stale_project`` — root exists but has no ``.memtomem/`` store.
+      Batch-only gate: bulk-syncing a tree the user never initialized
+      would at best no-op every phase and at worst seed bookkeeping; the
+      per-type single routes stay ungated on stale.
+    """
+    if scope.root is None or scope.missing:
+        return "missing_root"
+    if not scope.sync_eligible:
+        return "sync_paused" if "known-projects" in scope.sources else "sync_not_enrolled"
+    if scope.stale:
+        return "stale_project"
+    return None
 
 
 # ── CLI / web project selector ───────────────────────────────────────────

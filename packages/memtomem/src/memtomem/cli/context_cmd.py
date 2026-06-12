@@ -72,6 +72,7 @@ from memtomem.context.projects import (
     compute_scope_id,
     discover_project_scopes,
     resolve_project_selector,
+    sync_skip_reason,
 )
 from memtomem.context.lockfile import LockfileError
 from memtomem.context.status import classify_status, load_with_recovery, scan_user_artifacts
@@ -223,9 +224,10 @@ def _print_skills_generate(
     root: Path,
     *,
     scope: TargetScope = "project_shared",
+    surface: str = "cli_context_sync",
 ) -> None:
     try:
-        result = generate_all_skills(root, scope=scope)
+        result = generate_all_skills(root, scope=scope, surface=surface)
     except PrivacyScanError as exc:
         raise click.ClickException(exc.message) from exc
     if result.generated:
@@ -319,9 +321,12 @@ def _print_agents_generate(
     *,
     scope: TargetScope = "project_shared",
     label: str | None = None,
+    surface: str = "cli_context_sync",
 ) -> None:
     try:
-        result = generate_all_agents(root, strict=strict, on_drop=on_drop, scope=scope, label=label)
+        result = generate_all_agents(
+            root, strict=strict, on_drop=on_drop, scope=scope, label=label, surface=surface
+        )
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort()
@@ -428,10 +433,11 @@ def _print_commands_generate(
     *,
     scope: TargetScope = "project_shared",
     label: str | None = None,
+    surface: str = "cli_context_sync",
 ) -> None:
     try:
         result = generate_all_commands(
-            root, strict=strict, on_drop=on_drop, scope=scope, label=label
+            root, strict=strict, on_drop=on_drop, scope=scope, label=label, surface=surface
         )
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
@@ -1198,6 +1204,16 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     is_flag=True,
     help="Skip confirmation prompts before writing settings files outside this project.",
 )
+@click.option(
+    "--all-projects",
+    "all_projects",
+    is_flag=True,
+    help=(
+        "Sync every eligible discovered project (enrolled + on disk), not just "
+        "the current one. project_shared tier only; ineligible projects are "
+        "reported and skipped. One project's failure does not abort the batch."
+    ),
+)
 @_SCOPE_OPTION
 @_LABEL_OPTION
 def sync_cmd(
@@ -1205,12 +1221,76 @@ def sync_cmd(
     strict: bool,
     on_drop: str,
     yes: bool,
+    all_projects: bool,
     scope_flag: str | None,
     label: str | None,
 ) -> None:
     """Sync context.md to all detected agent files."""
     inc = _parse_include(include)
+
+    if all_projects:
+        # ADR-0025: the batch is project_shared-only — `user` would fan the
+        # SAME host files out once per project and `project_local` has no
+        # runtime fan-out (ADR-0011 §3), mirroring the web sync-all gates.
+        if scope_flag not in (None, "project_shared"):
+            raise click.UsageError(
+                "--all-projects syncs the project_shared tier only; drop "
+                "--scope or pass --scope project_shared (sync other tiers "
+                "per project, without --all-projects)."
+            )
+        _warn_label_ineligible_kinds(label, inc)
+        _run_sync_all_projects(inc=inc, strict=strict, on_drop=on_drop, yes=yes, label=label)
+        return
+
     root = _find_project_root()
+    if _run_sync_legs(
+        root,
+        inc=inc,
+        strict=strict,
+        on_drop=on_drop,
+        yes=yes,
+        scope_flag=scope_flag,
+        label=label,
+    ):
+        click.secho("Synced.", fg="green")
+
+
+def _run_sync_legs(
+    root: Path,
+    *,
+    inc: set[str],
+    strict: bool,
+    on_drop: str,
+    yes: bool,
+    scope_flag: str | None,
+    label: str | None,
+    batch: bool = False,
+    surface: str = "cli_context_sync",
+) -> bool:
+    """Run one project's sync legs (project memory + included artifact kinds).
+
+    Returns False only on the single-project missing-``context.md`` early
+    refusal (no legs ran — the caller must not print ``Synced.``, the
+    historical behavior Codex impl review caught a regression on); True
+    on every path that ran the legs.
+
+    The extracted body of ``mm context sync`` — the single-project path
+    calls it once with ``batch=False`` and keeps its historical behavior
+    byte-identical. ``--all-projects`` (ADR-0025) calls it per project
+    with ``batch=True``, which changes exactly two things:
+
+    - a missing ``context.md`` is a yellow note (a registered project
+      without project memory is not a batch failure; the single-project
+      red "run init first" guidance stays single-only), and
+    - ``_warn_label_ineligible_kinds`` is suppressed — the batch
+      orchestrator prints it once, not once per project.
+
+    The batch caller passes ``scope_flag="project_shared"`` explicitly:
+    the settings leg resolves its scope via ``_resolve_cli_scope``, which
+    otherwise consults ``cfg.hooks.target_scope`` — a config-pinned
+    ``user`` value would fan the same host files out once per project
+    (the ADR-0025 tier pin; covered by the batch settings-scope test).
+    """
     ctx_path = _context_path(root)
 
     if ctx_path.exists():
@@ -1247,9 +1327,9 @@ def sync_cmd(
                 click.echo(
                     "No agent files detected. Use 'mm context generate --agent all' to create them."
                 )
-    elif not inc:
+    elif not inc and not batch:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
-        return
+        return False
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
@@ -1259,22 +1339,23 @@ def sync_cmd(
     # which leaks ``cfg.hooks.target_scope`` into the artifact axis —
     # ADR-0011 PR-E1 Codex review trip-wire).
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
-    _warn_label_ineligible_kinds(label, inc)
+    if not batch:
+        _warn_label_ineligible_kinds(label, inc)
 
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root, scope=artifact_scope)
+        _print_skills_generate(root, scope=artifact_scope, surface=surface)
 
     if "agents" in inc:
         click.echo("")
         _print_agents_generate(
-            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label, surface=surface
         )
 
     if "commands" in inc:
         click.echo("")
         _print_commands_generate(
-            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label, surface=surface
         )
 
     if "settings" in inc:
@@ -1289,7 +1370,102 @@ def sync_cmd(
         else:
             click.secho("  Skipped settings sync (declined).", fg="yellow")
 
-    click.secho("Synced.", fg="green")
+    return True
+
+
+#: CLI remediation per ``sync_skip_reason`` code (the code derivation is
+#: shared with the web batch route — ``context.projects.sync_skip_reason``).
+_CLI_SYNC_SKIP_REASONS: dict[str, str] = {
+    "missing_root": "missing — root no longer exists; re-register or `mm context projects remove`",
+    "sync_paused": "paused — `mm context projects resume <scope_id>` to include it",
+    "sync_not_enrolled": "not enrolled — `mm context projects add <path>` to include it",
+    "stale_project": "stale — no .memtomem/ store; run `mm context init` there first",
+}
+
+
+def _run_sync_all_projects(
+    *,
+    inc: set[str],
+    strict: bool,
+    on_drop: str,
+    yes: bool,
+    label: str | None,
+) -> None:
+    """Orchestrate ``mm context sync --all-projects`` (ADR-0025, #1279).
+
+    Cloned from the ``_run_update_all`` flow: discover → classify
+    (eligibility/health — NOT a dirty-diff preview) → preview table →
+    confirm → serial execute with per-project failure isolation →
+    summary, exit 1 if any project failed. Zero eligible projects exits
+    0 informationally (cron safety, the update-all precedent).
+
+    Discovery anchors at ``_find_project_root()`` — not raw ``Path.cwd()``
+    like ``mm context projects list`` — so running from a project
+    SUBDIRECTORY treats that project as the cwd scope, matching both
+    single-sync semantics (which walks up) and the web lifespan anchor.
+    """
+    cfg = _projects_gateway_cfg()
+    scopes = _projects_discover(cfg, cwd=_find_project_root())
+    rows: list[tuple[ProjectScope, str | None]] = [(s, sync_skip_reason(s)) for s in scopes]
+    runnable = [s for s, code in rows if code is None]
+
+    click.echo(f"{len(rows)} project scope(s) discovered:")
+    for s, code in rows:
+        if code is None:
+            click.secho(f"  sync  {s.scope_id}  {s.label}  ({s.root})", fg="green")
+        else:
+            click.secho(
+                f"  skip  {s.scope_id}  {s.label}  ({s.root})  [{_CLI_SYNC_SKIP_REASONS[code]}]",
+                fg="yellow",
+            )
+
+    if not runnable:
+        click.echo("No projects are eligible for sync; nothing to do.")
+        return
+
+    if not yes:
+        click.confirm(f"\nSync {len(runnable)} project(s)?", abort=True)
+
+    successes = 0
+    failures = 0
+    for s in runnable:
+        assert s.root is not None  # sync_skip_reason() filtered missing roots
+        click.secho(f"\n→ {s.label} ({s.root})", fg="cyan")
+        try:
+            _run_sync_legs(
+                s.root,
+                inc=inc,
+                strict=strict,
+                on_drop=on_drop,
+                yes=yes,
+                # Explicit tier pin — see _run_sync_legs docstring (ADR-0025).
+                scope_flag="project_shared",
+                label=label,
+                batch=True,
+                surface="cli_context_sync_all_projects",
+            )
+        except click.exceptions.Abort:
+            # Strict-drop legs raise Abort after printing their [strict]
+            # diagnostic; in a batch that fails the project, not the run.
+            click.secho(f"  ✗ {s.root}: aborted (strict-drop)", fg="red")
+            failures += 1
+        except click.ClickException as exc:
+            # Privacy Gate A and engine refusals — this project's row fails,
+            # the batch continues (a secret in one project must not block
+            # clean siblings; the _run_update_all precedent).
+            click.secho(f"  ✗ {s.root}: {exc.message}", fg="red")
+            failures += 1
+        except OSError as exc:
+            click.secho(f"  ✗ {s.root}: {exc}", fg="red")
+            failures += 1
+        else:
+            successes += 1
+
+    click.echo(
+        f"\nSummary: {successes} synced, {failures} failed, {len(rows) - len(runnable)} skipped."
+    )
+    if failures:
+        raise click.exceptions.Exit(1)
 
 
 # ── Version snapshots + label pointers (ADR-0022) ────────────────────
@@ -4164,10 +4340,16 @@ def _projects_store(cfg: ContextGatewayConfig) -> KnownProjectsStore:
     return KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
 
 
-def _projects_discover(cfg: ContextGatewayConfig) -> list[ProjectScope]:
-    """Discover with the exact flags the web GET /api/context/projects uses."""
+def _projects_discover(cfg: ContextGatewayConfig, cwd: Path | None = None) -> list[ProjectScope]:
+    """Discover with the exact flags the web GET /api/context/projects uses.
+
+    ``cwd`` overrides the server-cwd anchor: the ``--all-projects`` batch
+    passes ``_find_project_root()`` so a run from a project subdirectory
+    anchors at the project root (the web lifespan does the same); the
+    ``mm context projects`` subcommands keep the raw-cwd default.
+    """
     return discover_project_scopes(
-        Path.cwd(),
+        Path.cwd() if cwd is None else cwd,
         Path(cfg.known_projects_path).expanduser(),
         experimental_claude_projects_scan=cfg.experimental_claude_projects_scan,
         auto_display_configured_projects=cfg.auto_display_configured_projects,

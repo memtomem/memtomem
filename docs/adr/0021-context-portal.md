@@ -98,15 +98,19 @@ stands.
    adds listing, switching, and lifecycle management (label, unregister) across
    the registered set — resolving the read/management half of the
    `registered_roots` shape ADR-0009 deferred to #829. **Mutations remain
-   single active-project per invocation.** **Artifact** writes (Sync All)
+   single active-project per invocation.** *Narrowly superseded for SYNC
+   ORCHESTRATION by ADR-0025 (#1279): a bulk-sync invocation may sequence N
+   single-project syncs, each still targeting exactly one
+   `(project_root, target_scope)`; every other mutation class keeps this
+   clause.* **Artifact** writes (Sync All)
    target exactly one `(project_root, target_scope)` — preserving ADR-0016 §5
    ("writes land in exactly one tier per invocation") and ADR-0001's
    per-project pipeline unchanged. **Registry-lifecycle** mutations (unregister,
    label edit) mutate `known_projects.json` for a single `project_scope_id`,
    carry **no artifact-tier dimension** (ADR-0015 classifies project-discovery
    routes as project-root-only), and therefore sit **outside** ADR-0016's
-   artifact-tier write rule. Cross-project *bulk* sync is explicitly deferred
-   (Open questions).
+   artifact-tier write rule. Cross-project *bulk* sync was explicitly deferred
+   here; *deferral resolved by ADR-0025* (#1279).
 
 2. **Read-only info surface → bounded actionable surface.** The dashboard may
    now host actions that are (a) **push-only from canonical** (Sync All —
