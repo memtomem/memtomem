@@ -715,9 +715,9 @@ def test_pair_lock_held_across_both_roots_sorted(two_projects, monkeypatch):
     acquired: list[Path] = []
     real = _file_lock
 
-    def logging_lock(lock_path: Path):
+    def logging_lock(lock_path: Path, *, timeout: float | None = None):
         acquired.append(lock_path)
-        return real(lock_path)
+        return real(lock_path, timeout=timeout)
 
     # _acquire_pair_lock lives in (and reads) the migrate module namespace.
     monkeypatch.setattr("memtomem.context.migrate._file_lock", logging_lock)
@@ -749,8 +749,8 @@ def test_destination_appeared_during_lock(two_projects, monkeypatch):
     real_pair_lock = transfer_mod._acquire_pair_lock
 
     @contextlib.contextmanager
-    def racing_pair_lock(path_a: Path, path_b: Path):
-        with real_pair_lock(path_a, path_b):
+    def racing_pair_lock(path_a: Path, path_b: Path, *, timeout: float | None = None):
+        with real_pair_lock(path_a, path_b, timeout=timeout):
             dst_dir.mkdir(parents=True)
             (dst_dir / "agent.md").write_text("---\nname: foo\n---\n\nracer\n", encoding="utf-8")
             yield
@@ -1191,3 +1191,164 @@ def test_carry_provenance_digest_mismatch_refuses(two_projects):
     assert outcome[0] == "not_carried"
     assert outcome[2] == "dest_bytes_unverified"
     assert Lockfile.at(two_projects["b"]).read_entry("agents", "foo") is None
+
+
+# ── lock_timeout budget (A-5 #1276) ──────────────────────────────────
+
+
+def test_lock_timeout_self_aborts_with_nothing_committed(two_projects):
+    """A held destination sidecar lock + bounded budget → TimeoutError,
+    zero filesystem change (the web route's orphan-thread guard, #1145
+    shape). portalocker contends across separate fds in-process, so the
+    held lock below blocks the engine exactly like a foreign process."""
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    dst_dir = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
+    dst_lock = _lock_path_for(dst_dir)
+
+    with _file_lock(dst_lock):
+        with pytest.raises(TimeoutError, match="held by another process"):
+            transfer_artifact(
+                "agents",
+                "foo",
+                src_project_root=two_projects["a"],
+                from_scope="project_shared",
+                dst_project_root=two_projects["b"],
+                to_scope="project_shared",
+                mode="move",
+                apply_=True,
+                lock_timeout=0.2,
+            )
+
+    # Nothing acquired → nothing staged or committed; source untouched.
+    assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert not dst_dir.exists()
+    assert not list(dst_dir.parent.glob(".migrate-*"))
+
+
+def test_lock_timeout_budget_shared_across_pair(two_projects, monkeypatch):
+    """The budget is a whole-call deadline: the second acquisition gets the
+    remainder, not a fresh allowance (worst case N, not 2N)."""
+    import contextlib as _ctx
+    import time as _time
+
+    import memtomem.context.migrate as migrate_mod
+
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    seen: list[float | None] = []
+    real = _file_lock
+
+    @_ctx.contextmanager
+    def slow_lock(lock_path: Path, *, timeout: float | None = None):
+        seen.append(timeout)
+        _time.sleep(0.1)  # consume budget while "acquiring"
+        with real(lock_path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(migrate_mod, "_file_lock", slow_lock)
+
+    transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="copy",
+        apply_=True,
+        lock_timeout=5.0,
+    )
+
+    assert len(seen) == 2
+    assert all(t is not None for t in seen)
+    assert seen[0] <= 5.0
+    # The 0.1s spent inside the first acquisition must come off the
+    # second's allowance.
+    assert seen[1] <= seen[0] - 0.05
+
+
+def test_lock_timeout_default_none_passes_unbounded(two_projects, monkeypatch):
+    """Default ``lock_timeout=None`` keeps the historical blocking waits —
+    every CLI/MCP call site is byte-for-byte unaffected."""
+    import memtomem.context.migrate as migrate_mod
+
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    seen: list[float | None] = []
+    real = _file_lock
+
+    def logging_lock(lock_path: Path, *, timeout: float | None = None):
+        seen.append(timeout)
+        return real(lock_path, timeout=timeout)
+
+    monkeypatch.setattr(migrate_mod, "_file_lock", logging_lock)
+
+    transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="copy",
+        apply_=True,
+    )
+
+    assert seen == [None, None]
+
+
+# ── typed engine exceptions (A-5 #1276) ──────────────────────────────
+
+
+def test_source_not_found_is_typed_with_pinned_literal(two_projects):
+    """``ArtifactNotFoundError`` is a ClickException subclass with the
+    byte-identical historical message — CLI/MCP/migrate consumers see no
+    change; the web route maps the TYPE to 404. Full-equality pin, not a
+    substring search (Codex review: an unanchored match would let most of
+    the literal drift)."""
+    from memtomem.context.migrate import ArtifactNotFoundError
+
+    with pytest.raises(ArtifactNotFoundError) as excinfo:
+        transfer_artifact(
+            "agents",
+            "ghost",
+            src_project_root=two_projects["a"],
+            from_scope=None,
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=False,
+        )
+    assert isinstance(excinfo.value, click.ClickException)
+    assert excinfo.value.message == (
+        "agents/ghost not found in any scope (user / project_shared / project_local)."
+    )
+
+
+def test_collision_is_typed_with_pinned_literal(two_projects):
+    """``TransferCollisionError`` carries the historical Row-15 wording —
+    pinned by full equality including the remediation sentences."""
+    from memtomem.context.transfer import TransferCollisionError
+
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+    _write_canonical(two_projects, "agents", "project_shared", "b", "foo", _AGENT_BODY_CLEAN)
+    dst_path = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
+
+    with pytest.raises(TransferCollisionError) as excinfo:
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode="move",
+            apply_=False,
+        )
+    assert isinstance(excinfo.value, click.ClickException)
+    assert excinfo.value.message == (
+        f"destination already exists: {dst_path}. "
+        "Resolve manually or remove the existing entry first. "
+        "--force does not overwrite scope-tier targets in PR-E4 "
+        "(replace verb is a follow-up)."
+    )

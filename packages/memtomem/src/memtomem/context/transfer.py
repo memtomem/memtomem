@@ -105,7 +105,26 @@ from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ProvenanceCarry", "TransferMode", "TransferResult", "transfer_artifact"]
+__all__ = [
+    "ProvenanceCarry",
+    "TransferCollisionError",
+    "TransferMode",
+    "TransferResult",
+    "transfer_artifact",
+]
+
+
+class TransferCollisionError(click.ClickException):
+    """Destination path already holds an artifact (ADR-0023 §6).
+
+    Typed subclass so non-CLI surfaces can map the collision to their
+    native shape (the web transfer route returns 409
+    ``destination_exists``) without matching on message text. Message
+    literals are byte-identical to the plain ``ClickException`` this
+    replaces, so every existing ``except ClickException`` / ``str(exc)``
+    consumer — CLI verbs, MCP migrate action, the ``migrate_scope``
+    wrapper's pinned wording — is untouched.
+    """
 
 
 TransferMode = Literal["move", "copy"]
@@ -641,6 +660,7 @@ def transfer_artifact(
     apply_: bool,
     surface: str = "cli_context_transfer",
     new_name: str | None = None,
+    lock_timeout: float | None = None,
 ) -> TransferResult:
     """Move or copy one canonical artifact between tiers and/or projects.
 
@@ -670,6 +690,14 @@ def transfer_artifact(
             ``validate_name``, and the staged manifest's frontmatter
             ``name:`` is rewritten to match
             (:func:`_rewrite_staged_manifest_name`).
+        lock_timeout: Whole-call acquisition budget (seconds) for the
+            artifact pair lock, shared across both sidecar acquisitions
+            (``_acquire_pair_lock``). ``None`` (default) blocks
+            indefinitely — the historical CLI/MCP behavior. The web
+            route passes a bound so its un-cancellable worker thread
+            self-aborts (``TimeoutError``, nothing acquired or
+            committed) inside the route's own ``asyncio.timeout``
+            window instead of writing after a 503 (#1145 shape).
 
     Apply sequence (move):
 
@@ -765,7 +793,7 @@ def transfer_artifact(
 
     # Pre-flight conflict check (also re-checked inside the lock).
     if dst_path.exists():
-        raise click.ClickException(
+        raise TransferCollisionError(
             f"destination already exists: {dst_path}. "
             "Resolve manually or remove the existing entry first. "
             "--force does not overwrite scope-tier targets in PR-E4 "
@@ -830,13 +858,13 @@ def transfer_artifact(
 
     # ── apply path ───────────────────────────────────────────────────
     notes: tuple[str, ...] = ()
-    with _acquire_pair_lock(src_path, dst_path):
+    with _acquire_pair_lock(src_path, dst_path, timeout=lock_timeout):
         # Re-check dst inside the lock window — some other process could
         # have created it between the dry-run preview and the apply
         # phase, even with our own lock-pair held (the writer would have
         # had to take the same lock, but check defensively).
         if dst_path.exists():
-            raise click.ClickException(f"destination appeared during lock acquire: {dst_path}.")
+            raise TransferCollisionError(f"destination appeared during lock acquire: {dst_path}.")
 
         # Provenance classification must run while the SOURCE tree still
         # exists (move staging consumes it). Read-only; the write half

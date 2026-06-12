@@ -264,6 +264,80 @@ noise). All of it stays best-effort and outside the pair lock: a
 corrupt destination lockfile warns loudly but never un-commits the
 transfer.
 
+### 10. Web route surface (A-5 #1276)
+
+`POST /api/context/{kind}/{name}/transfer`
+(`web/routes/context_transfer.py`) is the web face of the engine, and
+the **narrow exception to ADR-0015 §4d** (mutators stay cwd-locked):
+it accepts a destination project selector in the request body. The
+exception is bounded the same way §3 bounds the engine — exactly one
+artifact per invocation, exactly two roots — plus web-specific rails:
+destinations are addressable **only** as discovered `project_scope_id`s
+(no typed-path consent valve; that stays CLI-only), and the two risky
+tiers require an explicit per-request opt-in flag. ADR-0015 §4d carries
+a dated rider pointing here.
+
+Request: source = path `{kind}/{name}` + the standard
+`?project_scope_id=`/`?scope_id=` query selector (server cwd default) +
+optional body `from_scope`; destination = body `to_target_scope` +
+optional body `to_project_scope_id` (source project when omitted); body
+`mode` (`move`|`copy`), `as_name` (copy-rename), and the two confirm
+flags below. `?dry_run=true` returns the engine's dry-run plan
+(`status="plan"`) without mutating and without demanding confirmation
+(import-route precedent).
+
+**Disclose-then-confirm** (the shared `_confirm.py` helper A-6 #1263
+adopts next): a `project_shared` destination requires
+`confirm_project_shared` (Gate B, §5); a `user`-tier destination
+requires `allow_host_writes` (host path outside any project root,
+disclosed via `host_targets` — the `generate_all_settings` refusal
+shape). The first POST without the required flag performs no write and
+returns HTTP 200 `{status: "needs_confirmation", confirm: <flag>,
+reason, host_targets?, plan: {…dry-run result…}}`. `project_local`
+destinations have no gate (no host write, no git-tracked write).
+
+**Destination eligibility:** a project-tier destination whose
+discovered scope is not sync-eligible is refused 409 with the existing
+`resolve_writable_scope_root` reason-code shape (`sync_paused` /
+`sync_not_enrolled`, message verbatim) — **including the implicit
+destination** when `to_project_scope_id` is omitted but the *source*
+selector names a non-cwd discovered scope, so the implicit spelling of
+a destination can never write where the explicit spelling is refused
+(Codex design-gate finding). A cross-root project-tier destination
+without a `.memtomem/` store is refused 409 `no_memtomem_store` (the
+A-3 CLI gate, web-shaped).
+
+**Error envelope (campaign contract; B-1 #1284 retrofits old routes
+onto it):** every route-raised non-2xx detail is an object
+`{error_kind, message, reason_code?, …}`. `error_kind` vocabulary =
+the overview classifier four (`parse` / `permission` / `missing` /
+`internal`) plus three HTTP-semantic kinds: `validation` (bad
+input/combination, 400), `conflict` (the 409 state-refusal family,
+which also carries `reason_code` ∈ `sync_paused` / `sync_not_enrolled`
+/ `destination_exists` / `no_memtomem_store`), and `busy` (503
+lock/timeout). The one deliberate exception: `PrivacyScanError` keeps
+the standard project_shared block envelope (422, string detail) every
+sync surface emits. Engine errors map by TYPE, not message text — two
+typed `ClickException` subclasses exist for exactly this
+(`migrate.ArtifactNotFoundError` → 404, `transfer.TransferCollisionError`
+→ 409; message literals unchanged, so CLI/MCP/`migrate_scope` consumers
+are untouched).
+
+**Concurrency:** the handler runs the engine in a worker thread under
+the in-process `_gateway_lock` + `asyncio.timeout(60)`, passing
+`lock_timeout=30.0` — a whole-call deadline shared across both
+pair-lock acquisitions (`_acquire_pair_lock(timeout=…)`), so a
+cross-process lock holder makes the worker self-abort
+(`TimeoutError`, nothing acquired or committed) inside the request
+window instead of writing after the 503 (#1145 orphan-thread shape;
+`_SETTINGS_LOCK_BUDGET_S` / `_SKILLS_LOCK_BUDGET_S` precedent). The
+outer timeout can still expire while the worker is mid-write —
+`asyncio.to_thread` is un-cancellable — so the 503 wording makes no
+no-commit claim. The response serializes `TransferResult` verbatim
+(absolute paths; `src_project_scope_id` / `dst_project_scope_id`
+computed for project tiers so the UI can offer one-click follow-up
+sync; the §9 provenance triple on the wire for client matching).
+
 ## Backward compatibility
 
 - `migrate_scope` keeps its exact signature, result dataclass
@@ -355,9 +429,14 @@ transfer.
   frozen bytes).
 - Source anchors (grep the symbol if line numbers drift):
   `packages/memtomem/src/memtomem/context/transfer.py`
-  (`transfer_artifact`, `TransferResult`, `_stage_copy`,
-  `_rewrite_staged_manifest_name`),
+  (`transfer_artifact`, `TransferResult`, `TransferCollisionError`,
+  `_stage_copy`, `_rewrite_staged_manifest_name`),
   `packages/memtomem/src/memtomem/context/migrate.py`
-  (`_acquire_pair_lock`, `_stage_move`, `_promote_move`,
-  `_existing_fanout_targets`, `_remove_runtime_fanout_for` — two-root
-  split, `migrate_scope` wrapper).
+  (`_acquire_pair_lock` — pair-shared `timeout`, `_stage_move`,
+  `_promote_move`, `_existing_fanout_targets`,
+  `_remove_runtime_fanout_for` — two-root split, `migrate_scope`
+  wrapper, `ArtifactNotFoundError`),
+  `packages/memtomem/src/memtomem/web/routes/context_transfer.py`
+  (`transfer_context_artifact`, §10) and
+  `packages/memtomem/src/memtomem/web/routes/_confirm.py`
+  (`needs_confirmation_envelope`).

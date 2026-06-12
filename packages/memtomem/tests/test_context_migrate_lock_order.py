@@ -40,9 +40,9 @@ def _acquire_log(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     log: list[Path] = []
     real = _file_lock
 
-    def wrapped(lock_path: Path):
+    def wrapped(lock_path: Path, *, timeout: float | None = None):
         log.append(lock_path)
-        return real(lock_path)
+        return real(lock_path, timeout=timeout)
 
     monkeypatch.setattr("memtomem.context.migrate._file_lock", wrapped)
     return log
