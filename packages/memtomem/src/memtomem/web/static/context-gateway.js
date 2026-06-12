@@ -3396,8 +3396,21 @@ function _ctxStashKey(type, name) {
 // mid-conflict — and recomputing at clear time would target a different
 // namespace than stash time, orphaning the draft (and resurrecting it later
 // after the user already discarded/saved). One key per editor session.
+// Once-per-page-session latch for stash-failure feedback (#1291). The stash
+// exists to survive navigation, so a silent drop means the user's conflict
+// buffer can vanish with no warning; but a busted sessionStorage (quota,
+// private mode) fails on EVERY stash, so repeat failures stay quiet after
+// the first warning.
+let _ctxStashWarnedOnce = false;
 function _ctxStashDraft(key, content) {
-  try { sessionStorage.setItem(key, content); } catch (_e) { /* quota / private mode */ }
+  try {
+    sessionStorage.setItem(key, content);
+  } catch (_e) { // quota / private mode
+    if (!_ctxStashWarnedOnce) {
+      _ctxStashWarnedOnce = true;
+      showToast(t('settings.ctx.draft_stash_failed'), 'warning');
+    }
+  }
 }
 function _ctxRestoreDraft(key, type, name) {
   try {
