@@ -324,6 +324,81 @@ def test_copy_as_rename_without_name_key_is_noop(two_projects):
     assert dst_manifest.read_text(encoding="utf-8") == body
 
 
+def test_copy_as_rename_bom_prefixed_manifest(two_projects):
+    """Codex review fold — a leading BOM must not defeat the rename rewrite.
+
+    The canonical parsers strip one UTF-8 BOM before matching frontmatter
+    (``agents._parse_canonical_agent_text``, #1229), so a BOM-prefixed
+    copy that silently skipped the rewrite would promote under ``bar/``
+    while still PARSING as ``foo`` — the exact destination collision the
+    rewrite exists to close. The BOM itself is preserved verbatim.
+    """
+    from memtomem.context.agents import parse_canonical_agent
+
+    _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", "\ufeff" + _AGENT_BODY_CLEAN
+    )
+
+    transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="copy",
+        apply_=True,
+        new_name="bar",
+    )
+
+    dst_manifest = (
+        _canonical_root(two_projects, "agents", "project_shared", "b") / "bar" / "agent.md"
+    )
+    raw = dst_manifest.read_bytes().decode("utf-8")
+    assert raw.startswith("\ufeff---")  # BOM preserved
+    assert "name: bar" in raw and "name: foo" not in raw
+    # The real parser — the collision vector — sees the new name.
+    assert parse_canonical_agent(dst_manifest, layout="dir").name == "bar"
+
+
+def test_copy_as_rename_crlf_manifest_preserves_endings(two_projects):
+    """CRLF manifests rename too, with every line ending preserved verbatim.
+
+    Same parser-tolerance family as the BOM case (#1229): the parser
+    normalizes CRLF before matching, so detection must tolerate it — but
+    the rewrite must not normalize the file as a side effect (read/write
+    go through bytes, no universal-newline translation).
+    """
+    from memtomem.context.agents import parse_canonical_agent
+
+    crlf_body = _AGENT_BODY_CLEAN.replace("\n", "\r\n")
+    src_manifest = _write_canonical(two_projects, "agents", "project_shared", "a", "foo", crlf_body)
+    # Belt-and-suspenders: confirm the seed really is CRLF on disk.
+    assert b"\r\n" in src_manifest.read_bytes()
+
+    transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="copy",
+        apply_=True,
+        new_name="bar",
+    )
+
+    dst_manifest = (
+        _canonical_root(two_projects, "agents", "project_shared", "b") / "bar" / "agent.md"
+    )
+    raw = dst_manifest.read_bytes().decode("utf-8")
+    assert "name: bar\r\n" in raw and "name: foo" not in raw
+    # Untouched lines keep their CRLF endings — no silent normalization.
+    assert "description: a clean test agent\r\n" in raw
+    assert "\n" not in raw.replace("\r\n", "")  # every newline is CRLF
+    assert parse_canonical_agent(dst_manifest, layout="dir").name == "bar"
+
+
 def test_copy_as_rename_multiple_name_keys_refuses(two_projects):
     """Degenerate frontmatter (two ``name:`` keys) refuses loudly, zero residue."""
     body = "---\nname: foo\nname: stale\ndescription: d\n---\n\nbody\n"

@@ -1201,9 +1201,14 @@ def migrate_scope(
     transfer engine when cross-project support landed. This wrapper pins
     the historical surface — same signature, byte-compatible
     :class:`MigrateScopeResult` values, and byte-identical error
-    messages for every same-root case (the pre-delegation checks below
-    own the literals the transfer engine words differently for its own
-    callers).
+    messages for every same-root case reachable from the shipping
+    surfaces (the pre-delegation checks below own the literals the
+    transfer engine words differently for its own callers). One
+    documented exception, unreachable through the Click/MCP gates: an
+    invalid ``from_scope``/``to_scope`` literal now raises a clear
+    "unsupported source/destination scope" instead of the old
+    misleading "not found at scope='<bogus>'" / raw
+    :class:`ContextScopeError` (ADR-0023 §Backward compatibility).
 
     Pure module entry point — no Click prompts, no stdout writes; the
     CLI wrapper in :mod:`memtomem.cli.context_cmd` owns all user-facing

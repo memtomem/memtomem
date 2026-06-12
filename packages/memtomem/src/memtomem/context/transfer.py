@@ -49,7 +49,7 @@ import click
 
 from memtomem.config import TargetScope
 from memtomem.context._names import validate_name
-from memtomem.context.agents import _FRONT_MATTER_RE, _KEY_VALUE_RE
+from memtomem.context.agents import _KEY_VALUE_RE
 from memtomem.context.lockfile import Lockfile
 from memtomem.context.migrate import (
     _DIR_MANIFEST,
@@ -213,21 +213,39 @@ def _rewrite_staged_manifest_name(
       the last one, so a first-line-only rewrite could silently lose
       to a stale duplicate.
 
+    Tolerance must match the parser's, byte-fidelity must not (Codex
+    review fold): ``agents._parse_canonical_agent_text`` strips one
+    leading UTF-8 BOM and normalizes CRLF before matching frontmatter
+    (#1229), so a BOM/CRLF manifest that silently skipped this rewrite
+    would promote under the new directory while still PARSING as the
+    old name — exactly the destination collision the rewrite exists to
+    close. The detection below is therefore BOM/CRLF-tolerant, but the
+    mutation stays minimal: bytes go through ``read_bytes`` /
+    ``write_bytes`` (no universal-newline translation), the BOM and
+    every line's original ending are preserved verbatim, and only the
+    ``name:`` line's content changes.
+
     ``versions/vN.md`` snapshots and ``overrides/<vendor>.*`` files are
     deliberately NOT rewritten: version snapshots are frozen history
     (ADR-0022) and override bytes are verbatim-by-contract. The caller
     surfaces a :attr:`TransferResult.notes` entry when overrides exist.
     """
     manifest = staging if layout == "flat" else staging / _DIR_MANIFEST[kind]
-    text = manifest.read_text(encoding="utf-8")
-    m = _FRONT_MATTER_RE.match(text)
-    if m is None:
+    text = manifest.read_bytes().decode("utf-8")
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    lines = text[len(bom) :].splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
         return
-    lines = m.group(1).split("\n")
+    fence = next((i for i in range(1, len(lines)) if lines[i].rstrip("\r\n") == "---"), None)
+    if fence is None:
+        # Unterminated frontmatter — the canonical parser rejects this
+        # file outright at sync time; not this function's to repair.
+        return
     name_lines = [
         i
-        for i, line in enumerate(lines)
-        if (kv := _KEY_VALUE_RE.match(line)) is not None and kv.group(1) == "name"
+        for i in range(1, fence)
+        if (kv := _KEY_VALUE_RE.match(lines[i].rstrip("\r\n"))) is not None
+        and kv.group(1) == "name"
     ]
     if not name_lines:
         return
@@ -236,8 +254,11 @@ def _rewrite_staged_manifest_name(
             f"cannot rename: {manifest.name} frontmatter has {len(name_lines)} 'name:' "
             f"lines; fix the source artifact so it has exactly one, then retry."
         )
-    lines[name_lines[0]] = f"name: {new_name}"
-    manifest.write_text(text[: m.start(1)] + "\n".join(lines) + text[m.end(1) :], encoding="utf-8")
+    idx = name_lines[0]
+    content = lines[idx].rstrip("\r\n")
+    ending = lines[idx][len(content) :]
+    lines[idx] = f"name: {new_name}{ending}"
+    manifest.write_bytes((bom + "".join(lines)).encode("utf-8"))
 
 
 def _offending_file_hint(blocked_path: Path, staging: Path, src_path: Path) -> str:

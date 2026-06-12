@@ -192,6 +192,12 @@ the class of collision §6 hard-fails on. Boundaries of the rewrite:
   new name);
 - multiple `name:` keys → refuse loudly (the flat-YAML parser keeps
   the last; a partial rewrite could silently lose);
+- detection tolerance matches the parser's, byte fidelity does not
+  (Codex review fold): the canonical parsers strip one leading BOM and
+  normalize CRLF before matching (#1229), so a BOM/CRLF manifest must
+  not silently skip the rewrite — but the rewrite itself preserves the
+  BOM and every line's original ending verbatim (bytes in, bytes out;
+  no universal-newline translation);
 - `versions/vN.md` snapshots are **not** rewritten (frozen history,
   ADR-0022) — restoring a pre-rename version resurrects the old name,
   which is versioning semantics, not a transfer bug;
@@ -244,11 +250,15 @@ transferred artifact at the destination is simply unmanaged-canonical
 - `context/override.py:resolve` widens `project_root` to
   `Path | None` (user-tier destinations without a project context);
   all existing call sites pass a `Path` and are unaffected.
-- The one user-visible wording change: a non-Click caller passing a
-  garbage `to_scope` now gets a `ClickException` ("unsupported
-  destination scope") instead of a raw `ContextScopeError`. No
-  shipping surface could reach the old path (CLI is `click.Choice`
-  gated).
+- Two deliberate wording changes on invalid-scope inputs, both
+  unreachable from every shipping surface (CLI flags are
+  `click.Choice`-gated; the MCP tool validates before calling):
+  a garbage `to_scope` now raises `ClickException` ("unsupported
+  destination scope") instead of a raw `ContextScopeError`, and a
+  garbage `from_scope` raises "unsupported source scope" instead of
+  the old — and misleading — "`<kind>/<name>` not found at
+  scope='<bogus>'." (Codex review chose documenting over replicating
+  the misleading literal.)
 
 ## Consequences
 
