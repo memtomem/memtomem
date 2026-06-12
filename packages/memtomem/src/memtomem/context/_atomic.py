@@ -20,6 +20,7 @@ module and covers ``~/.memtomem/config.json`` specifically.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import tempfile
@@ -196,14 +197,20 @@ def copy_tree_atomic(
     mode: int = 0o644,
     skip_top_level: frozenset[str] | None = None,
     skip_suffixes: frozenset[str] = frozenset(),
-) -> int:
+) -> dict[str, str]:
     """Recursively mirror *src* → *dst*, each file via :func:`atomic_write_bytes`.
 
-    Returns the number of files written. ``mode`` (default ``0o644``) is the
-    permission bits applied to copied files — ``0o644`` matches the
-    convention for content meant to be read by other tools (e.g. fan-out
-    target runtimes), unlike the ``0o600`` default of ``atomic_write_bytes``
-    which is tuned for state files.
+    Returns ``{posix_relpath: sha256_hex}`` over the files written, relpaths
+    relative to this call's *dst*. The digest is computed from the same
+    in-memory ``bytes`` object handed to ``atomic_write_bytes`` — never from
+    a re-read of *dst*, which would bless a concurrent edit landing between
+    write and hash (the #1247 id 15 TOCTOU this map exists to close). The
+    map IS the written set: ``len(map)`` == files written, skipped entries
+    never appear. ``mode`` (default ``0o644``) is the permission bits
+    applied to copied files — ``0o644`` matches the convention for content
+    meant to be read by other tools (e.g. fan-out target runtimes), unlike
+    the ``0o600`` default of ``atomic_write_bytes`` which is tuned for
+    state files.
 
     Entries named in :data:`COPY_SKIP_NAMES` are skipped silently at every
     depth. ``skip_top_level`` names additional entries skipped ONLY at the
@@ -223,9 +230,38 @@ def copy_tree_atomic(
     ``/etc/passwd`` (or any out-of-tree target) would violate that contract.
     Callers who want to mirror symlinks must do so explicitly.
     """
-    extra_skip = skip_top_level or frozenset()
+    digests: dict[str, str] = {}
+    _copy_tree_collect(
+        src,
+        dst,
+        "",
+        digests,
+        mode=mode,
+        extra_skip=skip_top_level or frozenset(),
+        skip_suffixes=skip_suffixes,
+    )
+    return digests
+
+
+def _copy_tree_collect(
+    src: Path,
+    dst: Path,
+    rel_prefix: str,
+    digests: dict[str, str],
+    *,
+    mode: int,
+    extra_skip: frozenset[str],
+    skip_suffixes: frozenset[str],
+) -> None:
+    """Recursive body of :func:`copy_tree_atomic`.
+
+    Threads the accumulating rel→digest map and the rel prefix (the old
+    self-recursion restarted relpaths at each level, which was fine for a
+    count but not for a map keyed by root-relative paths). ``extra_skip``
+    is passed empty on recursion — ``skip_top_level`` is root-only by
+    contract.
+    """
     dst.mkdir(parents=True, exist_ok=True)
-    written = 0
     for entry in src.iterdir():
         if entry.name in COPY_SKIP_NAMES or entry.name in extra_skip:
             continue
@@ -235,13 +271,21 @@ def copy_tree_atomic(
             logger.warning("copy_tree_atomic: skipping symlink %s", entry)
             continue
         target = dst / entry.name
+        rel = f"{rel_prefix}{entry.name}"
         if entry.is_file():
-            atomic_write_bytes(target, entry.read_bytes(), mode=mode)
-            written += 1
+            data = entry.read_bytes()
+            atomic_write_bytes(target, data, mode=mode)
+            digests[rel] = hashlib.sha256(data).hexdigest()
         elif entry.is_dir():
-            # skip_top_level intentionally not threaded into the recursion.
-            written += copy_tree_atomic(entry, target, mode=mode, skip_suffixes=skip_suffixes)
-    return written
+            _copy_tree_collect(
+                entry,
+                target,
+                f"{rel}/",
+                digests,
+                mode=mode,
+                extra_skip=frozenset(),
+                skip_suffixes=skip_suffixes,
+            )
 
 
 def is_copy_skipped_rel(rel: str | PurePosixPath) -> bool:

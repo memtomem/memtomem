@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -327,9 +328,11 @@ class TestCopyAssetAtCommit:
         )
 
         dest = tmp_path / "out" / "foo"
-        files_written = store.copy_asset_at_commit(old_pin, "skills", "foo", dest)
+        digest_map = store.copy_asset_at_commit(old_pin, "skills", "foo", dest)
 
-        assert files_written == 1
+        # rel→digest map over the GIT-OBJECT bytes at the pin (#1247 id 15)
+        # — exactly the bytes written to dest, not the v2 working tree/HEAD.
+        assert digest_map == {"SKILL.md": hashlib.sha256(b"v1\n").hexdigest()}
         assert (dest / "SKILL.md").read_bytes() == b"v1\n"  # NOT the v2 HEAD
 
     def test_copies_nested_subdirs(self, wiki_root: Path, tmp_path: Path) -> None:
@@ -347,9 +350,11 @@ class TestCopyAssetAtCommit:
         )
 
         dest = tmp_path / "foo"
-        files_written = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+        digest_map = store.copy_asset_at_commit(pin, "skills", "foo", dest)
 
-        assert files_written == 3
+        # Nested rels are POSIX, relative to dest (#1247 id 15).
+        assert sorted(digest_map) == ["SKILL.md", "references/a.md", "scripts/run.sh"]
+        assert digest_map["scripts/run.sh"] == hashlib.sha256(b"#!/bin/bash\necho hi\n").hexdigest()
         assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
         assert (dest / "scripts" / "run.sh").read_bytes() == b"#!/bin/bash\necho hi\n"
         assert (dest / "references" / "a.md").read_bytes() == b"a\n"
@@ -413,12 +418,12 @@ class TestCopyAssetAtCommit:
 
         recorded = _record_store_git_argv(monkeypatch)
         dest = tmp_path / "out" / "foo"
-        files_written = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+        digest_map = store.copy_asset_at_commit(pin, "skills", "foo", dest)
 
         show_args = [arg for argv in recorded if argv[:2] == ["git", "show"] for arg in argv]
         assert any(arg.endswith(":skills/foo/SKILL.md") for arg in show_args)  # spy is live
         assert not any("foo.md.bak" in arg for argv in recorded for arg in argv)
-        assert files_written == 1
+        assert sorted(digest_map) == ["SKILL.md"]  # skipped rel absent from the map too
         assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
         assert not list(dest.rglob("*.bak"))
 
@@ -448,11 +453,11 @@ class TestCopyAssetAtCommit:
 
         recorded = _record_store_git_argv(monkeypatch)
         dest = tmp_path / "out" / "foo"
-        files_written = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+        digest_map = store.copy_asset_at_commit(pin, "skills", "foo", dest)
 
         show_args = [arg for argv in recorded if argv[:2] == ["git", "show"] for arg in argv]
         assert any(arg.endswith(":skills/foo/SKILL.md") for arg in show_args)  # spy is live
         assert not any("__pycache__" in arg for argv in recorded for arg in argv)
-        assert files_written == 1
+        assert sorted(digest_map) == ["SKILL.md"]  # skipped rel absent from the map too
         assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
         assert not (dest / "__pycache__").exists()

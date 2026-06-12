@@ -235,7 +235,7 @@ class WikiStore:
         asset_type: str,
         name: str,
         dest: Path,
-    ) -> int:
+    ) -> dict[str, str]:
         """Materialize ``<wiki>/<asset_type>/<name>/`` at *commit* into *dest*.
 
         Implementation flow:
@@ -258,7 +258,10 @@ class WikiStore:
         The wiki working tree is **never touched** — every read uses the
         commit's git objects directly, so a concurrent ``git checkout``
         / edit in ``~/.memtomem-wiki/`` cannot bleed through. Returns
-        the count of files written.
+        the rel→SHA-256 map of the files written (``copy_tree_atomic``'s
+        return, #1247 id 15): the tmpdir bytes it hashes are the
+        git-object bytes just materialized, so for dest purposes each
+        digest describes exactly what was written to *dest*.
         """
         # Deferred import: install.py imports wiki.store at module load;
         # the reverse import here would cycle. Local resolves at call time.

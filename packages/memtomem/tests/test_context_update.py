@@ -1354,7 +1354,13 @@ def test_update_stale_manifest_guard_ignores_mismatched_files_commit(
 ) -> None:
     """An entry whose ``files_commit`` doesn't match ``wiki_commit`` (older
     tool rewrote the entry, or a hand-merged lock.json) must behave as if no
-    manifest exists: no missing-file dirty, legacy mtime rule applies."""
+    manifest exists: no missing-file dirty, legacy mtime rule applies.
+
+    The digest keys are stripped too — install records them since #1247
+    id 15, and a valid digest pairing would (correctly) catch the deletion
+    on the digest branch before the manifest guard is ever consulted; the
+    digest-branch deletion behavior is pinned in test_dirty_digest.py.
+    """
     from memtomem.context.dirty import is_asset_dirty
 
     _initialized_wiki(wiki_root)
@@ -1363,6 +1369,8 @@ def test_update_stale_manifest_guard_ignores_mismatched_files_commit(
 
     entry = _lock_entry(tmp_path, "skills", "web")
     entry["files_commit"] = "0" * 40
+    entry.pop("digests", None)
+    entry.pop("digests_installed_at", None)
     _rewrite_lock_entry(tmp_path, "skills", "web", entry)
 
     (tmp_path / ".memtomem" / "skills" / "web" / "a.md").unlink()

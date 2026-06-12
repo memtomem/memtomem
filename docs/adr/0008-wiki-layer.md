@@ -53,6 +53,17 @@ unchanged.
 `mm context update <type> <name>` MUST detect when project canonical was
 modified after install (mtime > `lockfile.installed_at`).
 
+> **2026-06 (#1247):** the parenthetical mtime rule is superseded when
+> the entry records per-file content digests (see "Lockfile schema"):
+> detection upgrades to byte equality against `digests` — closing the
+> during-install absorption window where an edit racing the post-copy
+> `installed_at` capture classified clean forever (id 15), reclassifying
+> touch-only edits (mtime bumped, bytes identical) as clean, and
+> reclassifying unreadable files as dirty-with-warning (cannot prove
+> clean; the read error surfaces loudly pre-mutation on the `--force`
+> path). The strict-mtime rule remains the binding contract for
+> pre-digest entries, bit-for-bit.
+
 Default behavior: refuse with a clear error. `--force` overwrites and
 leaves a `.bak` copy of each clobbered file. This mirrors ADR-0001's
 on_drop policy of never silently dropping data. The `.bak` write is
@@ -98,7 +109,7 @@ be reconsidered in v2 if a real workflow demands it.
          │  mm context install <type> <name>   (copytree + lockfile pin)
          ▼
 <project>/.memtomem/                 ← project canonical (Invariant 1)
-├── lock.json                        ← { skills: { foo: { wiki_commit, installed_at, files, files_commit } } }
+├── lock.json                        ← { skills: { foo: { wiki_commit, installed_at, files, files_commit, digests, digests_installed_at } } }
 ├── skills/<name>/SKILL.md + overrides/...
 ├── agents/<name>/...
 └── commands/<name>/...
@@ -163,13 +174,18 @@ are out of scope for the install/upgrade lifecycle.
   "skills": {
     "foo": {
       "wiki_commit": "abc123def4567890abc123def4567890abc12345",
-      "installed_at": "2026-04-30T12:34:56Z",
+      "installed_at": "2026-04-30T12:34:56.123456Z",
       "files": ["SKILL.md", "scripts/run.py"],
-      "files_commit": "abc123def4567890abc123def4567890abc12345"
+      "files_commit": "abc123def4567890abc123def4567890abc12345",
+      "digests": {
+        "SKILL.md": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "scripts/run.py": "…64 lowercase hex…"
+      },
+      "digests_installed_at": "2026-04-30T12:34:56.123456Z"
     }
   },
-  "agents":   { "bar": { "wiki_commit": "…", "installed_at": "…", "files": ["…"], "files_commit": "…" } },
-  "commands": { "baz": { "wiki_commit": "…", "installed_at": "…", "files": ["…"], "files_commit": "…" } }
+  "agents":   { "bar": { "wiki_commit": "…", "installed_at": "…", "files": ["…"], "files_commit": "…", "digests": {}, "digests_installed_at": "…" } },
+  "commands": { "baz": { "wiki_commit": "…", "installed_at": "…", "files": ["…"], "files_commit": "…", "digests": {}, "digests_installed_at": "…" } }
 }
 ```
 
@@ -192,6 +208,45 @@ the pin moves — the commit pairing detects exactly that. Entries
 without a valid manifest degrade to the pre-manifest behavior
 (deletions invisible to the dirty walk; reconcile falls back to the
 `mtime <= installed_at` guard).
+
+`digests` / `digests_installed_at` (added with the #1247 id 15
+content-digest work) record the SHA-256 of **the bytes the writing
+operation put into dest** — content identity of the install, not commit
+provenance (install/update copy from the wiki *working tree*; the digest
+map inherits exactly the pre-existing `wiki_commit` provenance
+imprecision and adds none). The algorithm is fixed at SHA-256; an
+algorithm change is a NEW key name, not a value prefix. Hashes are
+computed from the in-memory bytes the copier wrote, never from a re-read
+of dest (a re-read would bless a concurrent edit — the TOCTOU this map
+exists to close). They power byte-exact dirty detection (Invariant 2
+rider) and digest-provenance reconcile: when the old entry carries valid
+digests, they are the single provenance set for both reconcile decisions
+and the `files` manifest is not consulted.
+
+The two pairings deliberately use different tokens: the manifest is
+commit-scoped *membership* (`files_commit == wiki_commit`), digests are
+write-scoped *content* (`digests_installed_at == installed_at`, string
+equality, no ISO parsing). `installed_at` is refreshed by every
+entry-writing operation, so any rewrite by a non-digest-aware tool
+self-invalidates the pair — including a pin moved A→B→A, which the
+commit pairing cannot catch. Consumers MUST honor `digests` only when
+the pairing holds and the shape validates (`digests_from_entry`: dict of
+manifest-shaped relpaths → 64-char lowercase hex); anything else
+degrades to the pre-digest (mtime) behavior, never crashes.
+
+**Key ownership (clear-on-omit):** a digest-aware `upsert_entry` call
+that omits `digests` MUST delete both keys rather than preserve them —
+`installed_at` is mtime-derived, not a nonce, so a preserved stale pair
+could later re-match by collision. The unknown-field round-trip rule
+below binds only tools the keys are *unknown to* (pre-digest clients
+preserve them verbatim, which is exactly what the pairing degrade
+catches); for the tool that defines the keys they are schema fields, not
+unknowns. Residual limitation (documented, fail-safe): a pre-digest
+client rewrite that lands on the byte-identical microsecond ISO string
+falsely re-validates the stale map — the consequence direction is safe
+by construction: stale digests vs newer bytes → mismatch → **dirty**
+(refuse / `--force`+`.bak`); a silent **clean** additionally requires
+the current bytes to equal what was once installed.
 
 Reads MUST preserve unknown top-level and per-entry fields (round-trip
 through plain `dict` is sufficient). The `version` field is reserved for

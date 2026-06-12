@@ -23,6 +23,7 @@ clobbered") without depending on PR-D's mtime/dirty detection. PR-D's
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 from collections.abc import Callable
@@ -40,7 +41,12 @@ from memtomem.context._atomic import (
 )
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
-from memtomem.context.lockfile import Lockfile, LockfileError, manifest_from_entry
+from memtomem.context.lockfile import (
+    Lockfile,
+    LockfileError,
+    digests_from_entry,
+    manifest_from_entry,
+)
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -268,16 +274,6 @@ def _flat_layout_probe(
     return flat, flat.stat().st_mtime > epoch
 
 
-def _manifest_relpaths(dest: Path) -> list[str]:
-    """The asset's installed file set as sorted POSIX relpaths.
-
-    Walks via :func:`iter_installed_files` — the exact set the dirty
-    checker and ``installed_at`` capture observe, so the recorded manifest
-    can never disagree with the walker about membership.
-    """
-    return sorted(p.relative_to(dest).as_posix() for p in iter_installed_files(dest))
-
-
 def _reconcile_removed_files(
     dest: Path,
     *,
@@ -285,6 +281,7 @@ def _reconcile_removed_files(
     old_installed_at_epoch: float | None,
     baked: frozenset[Path],
     manifest: frozenset[str] | None,
+    old_digests: dict[str, str] | None = None,
 ) -> tuple[Path, ...]:
     """Delete dest files absent from the copy source (#1247).
 
@@ -293,6 +290,22 @@ def _reconcile_removed_files(
     the new commit and status reports ``ok``. Decision rule per dest-only
     file (walked via :func:`iter_installed_files`, so ``.bak`` siblings
     and skip-listed names are never candidates):
+
+    When ``old_digests`` is valid (the OLD entry recorded digests, #1247
+    id 15), it is the **single provenance set for both decisions** — the
+    ``files`` manifest is not consulted at all on this branch (a
+    hand-merged divergent manifest must not indefinitely protect a
+    digest-tracked, wiki-dropped file):
+
+    1. relpath **not** in ``old_digests`` → user-added file: keep.
+    2. relpath recorded → delete when the current bytes hash to the
+       recorded digest (provably untouched — this also retires the
+       legacy false-KEEP of an untouched file with fresh mtime, e.g. a
+       cross-machine checkout) **or** when it is in ``baked``. An
+       unreadable file is neither provable nor baked → rule 3.
+    3. Anything else → keep with a warning (when in doubt, never delete).
+
+    Legacy fallback (no valid old digests):
 
     1. ``manifest`` valid and relpath **not** recorded → user-added file:
        keep (never silently delete user-authored content).
@@ -313,15 +326,35 @@ def _reconcile_removed_files(
         rel = f.relative_to(dest).as_posix()
         if src_has(rel):
             continue
-        if manifest is not None and rel not in manifest:
-            logger.debug("reconcile: keeping user-added file %s", f)
-            continue
-        provably_old = (
-            old_installed_at_epoch is not None and f.stat().st_mtime <= old_installed_at_epoch
-        )
-        if not (provably_old or f in baked):
-            logger.warning("reconcile: keeping dest-only file with fresh mtime and no .bak: %s", f)
-            continue
+        if old_digests is not None:
+            if rel not in old_digests:
+                logger.debug("reconcile: keeping user-added file %s", f)
+                continue
+            provably_untouched = f in baked
+            if not provably_untouched:
+                try:
+                    provably_untouched = (
+                        hashlib.sha256(f.read_bytes()).hexdigest() == old_digests[rel]
+                    )
+                except OSError:
+                    provably_untouched = False  # unreadable: can't prove — rule 3
+            if not provably_untouched:
+                logger.warning(
+                    "reconcile: keeping dest-only file with unproven bytes and no .bak: %s", f
+                )
+                continue
+        else:
+            if manifest is not None and rel not in manifest:
+                logger.debug("reconcile: keeping user-added file %s", f)
+                continue
+            provably_old = (
+                old_installed_at_epoch is not None and f.stat().st_mtime <= old_installed_at_epoch
+            )
+            if not (provably_old or f in baked):
+                logger.warning(
+                    "reconcile: keeping dest-only file with fresh mtime and no .bak: %s", f
+                )
+                continue
         f.unlink(missing_ok=True)
         removed.append(f)
 
@@ -476,8 +509,12 @@ def _install_asset(
 
     ``installed_at`` is captured at the lockfile-upsert boundary (after the
     copytree completes) so that a subsequent ``mm context update``'s
-    ``mtime > installed_at`` dirty check cannot false-positive on the
-    install's own writes.
+    legacy ``mtime > installed_at`` dirty check cannot false-positive on
+    the install's own writes. An editor racing the install used to be
+    absorbed by that scalar capture (edit mtime folded under the post-copy
+    max → permanently clean → silent clobber, #1247 id 15); the per-file
+    ``digests`` recorded from the copier's written bytes close that
+    window — a concurrent edit at ANY point leaves bytes ≠ digest → dirty.
     """
     validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     project_root = Path(project_root).expanduser()
@@ -539,16 +576,20 @@ def _install_asset(
     )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
+    digest_map = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
+    # files= derives from the copier's WRITTEN set, not a post-copy re-walk
+    # (#1247 id 15) — a concurrent addition landing during the copy can no
+    # longer be absorbed into the manifest as if wiki-shipped.
     installed_at = installed_at_from_dest(dest)
     lock.upsert_entry(
         asset_type,
         validated,
         wiki_commit=wiki_commit,
         installed_at=installed_at,
-        files=_manifest_relpaths(dest),
+        files=sorted(digest_map),
         files_commit=wiki_commit,
+        digests=digest_map,
     )
 
     return InstallResult(
@@ -557,7 +598,7 @@ def _install_asset(
         wiki_commit=wiki_commit,
         installed_at=installed_at,
         dest=dest,
-        files_written=files_written,
+        files_written=len(digest_map),
     )
 
 
@@ -819,7 +860,7 @@ def _apply_update(
         bak_paths.append(bak)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    files_written = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
+    digest_map = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
     # Mirror semantics (#1247): drop dest files the wiki no longer ships.
     # Membership uses the COPIER's effective file set (iter_installed_files
@@ -828,7 +869,8 @@ def _apply_update(
     # regular file in dest (Codex implementation-gate M1). The guard epoch
     # is the PRE-update install timestamp (the same basis ``dirty_report``
     # classified against) — the freshly captured value below is >= every
-    # current mtime and would approve deleting anything.
+    # current mtime and would approve deleting anything. ``old_digests``
+    # likewise comes from the OLD entry (#1247 id 15).
     src_files = {p.relative_to(src).as_posix() for p in iter_installed_files(src)}
     files_removed = _reconcile_removed_files(
         dest,
@@ -836,6 +878,7 @@ def _apply_update(
         old_installed_at_epoch=_installed_at_epoch(lock_entry),
         baked=frozenset(files_to_bak),
         manifest=manifest_from_entry(lock_entry),
+        old_digests=digests_from_entry(lock_entry),
     )
 
     installed_at = installed_at_from_dest(dest)
@@ -845,8 +888,9 @@ def _apply_update(
         name,
         wiki_commit=wiki_commit,
         installed_at=installed_at,
-        files=_manifest_relpaths(dest),
+        files=sorted(digest_map),
         files_commit=wiki_commit,
+        digests=digest_map,
     )
 
     old_wiki_commit = cast(str, lock_entry.get("wiki_commit", ""))
@@ -860,7 +904,7 @@ def _apply_update(
         was_no_op=False,
         bak_files_written=tuple(bak_paths),
         dest=dest,
-        files_written=files_written,
+        files_written=len(digest_map),
         files_removed=files_removed,
     )
 
@@ -1399,7 +1443,7 @@ def _apply_pinned_install(
         shutil.copy2(f, bak)
         bak_paths.append(bak)
 
-    files_written = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
+    digest_map = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
 
     # Mirror semantics (#1247): a re-extraction over an existing dest must
     # also retire dest-only leftovers (pre-B1 additive-update residue,
@@ -1416,6 +1460,7 @@ def _apply_pinned_install(
             old_installed_at_epoch=_installed_at_epoch(entry),
             baked=frozenset(files_to_bak),
             manifest=manifest_from_entry(entry),
+            old_digests=digests_from_entry(entry),
         )
 
     installed_at = installed_at_from_dest(dest)
@@ -1427,8 +1472,9 @@ def _apply_pinned_install(
         name,
         wiki_commit=pin,
         installed_at=installed_at,
-        files=_manifest_relpaths(dest),
+        files=sorted(digest_map),
         files_commit=pin,
+        digests=digest_map,
     )
 
     return InstallResult(
@@ -1437,6 +1483,6 @@ def _apply_pinned_install(
         wiki_commit=pin,
         installed_at=installed_at,
         dest=dest,
-        files_written=files_written,
+        files_written=len(digest_map),
         files_removed=files_removed,
     )

@@ -39,6 +39,7 @@ __all__ = [
     "LockfileCorruptError",
     "LockfileError",
     "LockfileVersionError",
+    "digests_from_entry",
     "manifest_from_entry",
     "utcnow_iso8601_z",
 ]
@@ -117,14 +118,78 @@ def manifest_from_entry(entry: dict[str, Any]) -> frozenset[str] | None:
         return None
     out: set[str] = set()
     for item in files:
-        if not isinstance(item, str) or not item:
-            return None
-        if item.startswith("/") or "\\" in item:
-            return None
-        if ".." in item.split("/"):
+        if not _is_valid_relpath(item):
             return None
         out.add(item)
     return frozenset(out)
+
+
+def _is_valid_relpath(item: object) -> bool:
+    """Shared relpath shape rule for ``files`` members and ``digests`` keys.
+
+    Non-empty ``str`` POSIX relpath — no leading ``/``, no ``..`` segment,
+    no ``\\``. ``lock.json`` can be git-tracked and hand-merged, so callers
+    treat a violation as "degrade to no manifest/digests", never crash.
+    """
+    if not isinstance(item, str) or not item:
+        return False
+    if item.startswith("/") or "\\" in item:
+        return False
+    return ".." not in item.split("/")
+
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def digests_from_entry(entry: dict[str, Any]) -> dict[str, str] | None:
+    """Return the entry's validated per-file digest map, or ``None``.
+
+    ``digests`` / ``digests_installed_at`` (#1247 id 15) record the SHA-256
+    of **the bytes the writing operation put into dest** — content identity
+    of the install, not commit provenance. The map is honored only when:
+
+    - ``digests_installed_at`` is a ``str`` equal to the entry's
+      ``installed_at``. Every entry-writing operation rewrites
+      ``installed_at`` and :meth:`Lockfile.upsert_entry` stamps
+      ``digests_installed_at`` from the same value, so the pairing proves
+      "these digests were written by the same upsert that last (re)wrote
+      this entry". A pre-digest tool preserves the unknown ``digests*``
+      keys verbatim while moving ``installed_at`` → mismatch → degrade.
+      Unlike the commit pairing of ``files_commit``, this also degrades an
+      old tool moving the pin A→B→A: each old-tool write refreshes
+      ``installed_at``. Residual limitation (documented, fail-safe): a
+      pre-digest rewrite landing on the byte-identical µs ISO string would
+      falsely re-validate the stale map — stale digests vs newer bytes
+      still classify **dirty**; a silent clean additionally requires the
+      current bytes to equal what was once installed. String equality only
+      — no ISO parsing; a malformed ``installed_at`` already degrades the
+      whole entry to ``never_installed`` before any digest consumer runs.
+    - ``digests`` is a dict of relpath → digest where every key passes the
+      manifest relpath shape rules (:func:`_is_valid_relpath`) and every
+      value is a 64-char lowercase-hex string (algorithm fixed: SHA-256;
+      an algorithm change is a new key name, not a value prefix).
+
+    Any violation → ``None`` (degrade to the legacy mtime behavior), never
+    crash or mis-answer — lock.json is git-tracked and hand-merged, so
+    malformed shapes are an ordinary event.
+    """
+    digests = entry.get("digests")
+    digests_installed_at = entry.get("digests_installed_at")
+    installed_at = entry.get("installed_at")
+    if not isinstance(digests_installed_at, str) or not isinstance(installed_at, str):
+        return None
+    if digests_installed_at != installed_at:
+        return None
+    if not isinstance(digests, dict):
+        return None
+    out: dict[str, str] = {}
+    for rel, digest in digests.items():
+        if not _is_valid_relpath(rel):
+            return None
+        if not isinstance(digest, str) or len(digest) != 64 or not set(digest) <= _HEX_DIGITS:
+            return None
+        out[rel] = digest
+    return out
 
 
 class Lockfile:
@@ -261,6 +326,7 @@ class Lockfile:
         installed_at: str,
         files: list[str] | None = None,
         files_commit: str | None = None,
+        digests: dict[str, str] | None = None,
     ) -> None:
         """Insert or replace the ``(asset_type, name)`` entry.
 
@@ -275,6 +341,20 @@ class Lockfile:
         preservation contract as the rest of the entry) — consumers detect
         the resulting staleness via the ``files_commit`` pairing, see
         :func:`manifest_from_entry`.
+
+        ``digests`` (#1247 id 15): per-file SHA-256 of the bytes the
+        operation wrote into dest, stored with sorted keys. When passed,
+        ``digests_installed_at`` is stamped from the same value written to
+        ``installed_at`` — there is no second kwarg, so the freshness
+        pairing cannot be mis-assembled by a caller. When **omitted**, any
+        existing ``digests`` / ``digests_installed_at`` keys are DELETED,
+        not preserved: this method owns those keys, and a digest-less write
+        that kept them would leave a stale-but-potentially-re-matching pair
+        behind (``installed_at`` is mtime-derived, not a nonce). The
+        unknown-field round-trip contract is untouched — it binds tools the
+        keys are *unknown to*; pre-digest clients preserve them verbatim,
+        which is exactly what the :func:`digests_from_entry` pairing
+        degrade catches.
         """
         if (files is None) != (files_commit is None):
             raise ValueError("files and files_commit must be passed together")
@@ -295,6 +375,12 @@ class Lockfile:
             if files is not None:
                 merged["files"] = sorted(files)
                 merged["files_commit"] = files_commit
+            if digests is not None:
+                merged["digests"] = {rel: digests[rel] for rel in sorted(digests)}
+                merged["digests_installed_at"] = installed_at
+            else:
+                merged.pop("digests", None)
+                merged.pop("digests_installed_at", None)
             section[name] = merged
 
             atomic_write_bytes(
