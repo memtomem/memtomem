@@ -82,6 +82,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_skills.import_skills",
         "context_skills.sync_skills",
         "context_skills.update_skill",
+        "context_transfer.transfer_context_artifact",
         "context_versions.create_artifact_version",
         "context_versions.delete_artifact_label",
         "context_versions.enable_artifact_versioning",
@@ -188,6 +189,10 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_skills.import_skill": "structured artifact import",
     "context_skills.import_skills": "bulk structured artifact import",
     "context_skills.sync_skills": "filesystem-driven sync",
+    "context_transfer.transfer_context_artifact": (
+        "no content payload — moves/copies existing canonical bytes between "
+        "stores; project_shared landings run Gate A in-engine on the staged tree"
+    ),
     "context_projects.add_known_project": "path/label only, no prose",
     "context_projects.update_known_project": "label/enabled update, no prose",
     # Versioning: the snapshot bytes are the already-canonical working file,

@@ -285,6 +285,17 @@ revisit the locked routes.
 
 Affects: routes listed in §2d.
 
+> **2026-06 rider (#1276):** ADR-0023 §10 carves the one non-sync
+> mutator exception: `POST /api/context/{kind}/{name}/transfer` accepts
+> a destination project selector in the request body
+> (`to_project_scope_id`). The exception is bounded — exactly one
+> artifact per invocation, destinations addressable only as discovered
+> `project_scope_id`s, destination sync-eligibility enforced with the
+> same 409 reason-code shape as the §2d sync routes, and the two risky
+> tiers (`project_shared`, `user`) gated behind a disclose-then-confirm
+> round-trip. Create / update / delete / import routes remain cwd-locked
+> as decided above.
+
 #### 4e. Settings per-request `target_scope` override — superseded by parity change
 
 Original decision: settings routes derived `target_scope` from

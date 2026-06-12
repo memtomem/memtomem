@@ -38,6 +38,7 @@ import logging
 import os
 import secrets
 import shutil
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -84,6 +85,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ASSET_DIR_FILENAMES",
     "MIGRATABLE_ASSET_TYPES",
+    "ArtifactNotFoundError",
     "MigratePartialError",
     "SCOPE_MIGRATABLE_KINDS",
     "MigrateResult",
@@ -119,6 +121,21 @@ class MigratePartialError(Exception):
         self.message = message
         self.src_path = src_path
         self.dst_path = dst_path
+
+
+class ArtifactNotFoundError(click.ClickException):
+    """Source artifact missing from the probed scope(s) (A-5 #1276).
+
+    Typed subclass so non-CLI surfaces can map "not found" to their
+    native shape (the web transfer route returns 404) without matching
+    on message text. Message literals are byte-identical to the plain
+    ``ClickException`` this replaces — every existing
+    ``except ClickException`` / ``str(exc)`` consumer (CLI verbs, MCP
+    actions, the ``migrate_scope`` wrapper contract) is untouched.
+    Raised only by the :func:`_detect_source_scope` not-found branches;
+    the multi-scope ambiguity raise stays a plain ``ClickException``
+    (the artifact exists — the selector is what's wrong).
+    """
 
 
 MigrateState = Literal[
@@ -697,7 +714,9 @@ class MigrateScopeResult:
 
 
 @contextmanager
-def _acquire_pair_lock(path_a: Path, path_b: Path) -> Iterator[None]:
+def _acquire_pair_lock(
+    path_a: Path, path_b: Path, *, timeout: float | None = None
+) -> Iterator[None]:
     """Acquire two sidecar locks in deterministic sorted order.
 
     Inverse migrations running concurrently (A: foo user→project_shared,
@@ -716,15 +735,39 @@ def _acquire_pair_lock(path_a: Path, path_b: Path) -> Iterator[None]:
     different project roots. ``sorted(key=str)`` over absolute lock
     paths is a total order there too, so every process — whatever pair
     of roots it works across — still acquires in one global sequence.
+
+    ``timeout`` is a WHOLE-CALL acquisition budget shared across both
+    locks (a monotonic deadline; the second acquisition gets whatever
+    the first left over), not a per-lock allowance — a caller bounding
+    its worst-case wait at N seconds must not discover it can stall for
+    2N. ``None`` (default) blocks indefinitely, the historical behavior
+    every CLI/MCP surface keeps. On expiry the underlying
+    :func:`memtomem.context._atomic._file_lock` raises ``TimeoutError``
+    having acquired nothing (the first lock, if already held, is
+    released by its own context manager on unwind), so a timed-out
+    caller has committed no filesystem change. Added for the web
+    transfer route (A-5 #1276), whose un-cancellable worker thread must
+    self-abort inside the route's ``asyncio.timeout`` window — the
+    #1145 orphan-thread shape ``_SETTINGS_LOCK_BUDGET_S`` /
+    ``_SKILLS_LOCK_BUDGET_S`` close for their engines.
     """
     lock_a = _lock_path_for(path_a)
     lock_b = _lock_path_for(path_b)
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def _remaining() -> float | None:
+        # 0.0 (deadline already spent) still attempts each lock once
+        # non-blocking before raising — _file_lock's poll loop fails fast.
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
     ordered = sorted([lock_a, lock_b], key=str)
     if ordered[0] == ordered[1]:
-        with _file_lock(ordered[0]):
+        with _file_lock(ordered[0], timeout=_remaining()):
             yield
         return
-    with _file_lock(ordered[0]), _file_lock(ordered[1]):
+    # ``with A, B`` enters A before evaluating B, so the second
+    # ``_remaining()`` reads the deadline AFTER the first wait finished.
+    with _file_lock(ordered[0], timeout=_remaining()), _file_lock(ordered[1], timeout=_remaining()):
         yield
 
 
@@ -1170,8 +1213,8 @@ def _detect_source_scope(
 
     if not candidates:
         if explicit_from is not None:
-            raise click.ClickException(f"{kind}/{name} not found at scope='{explicit_from}'.")
-        raise click.ClickException(
+            raise ArtifactNotFoundError(f"{kind}/{name} not found at scope='{explicit_from}'.")
+        raise ArtifactNotFoundError(
             f"{kind}/{name} not found in any scope (user / project_shared / project_local)."
         )
     if len(candidates) > 1:
