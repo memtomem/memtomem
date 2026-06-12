@@ -57,10 +57,12 @@ from memtomem.context.migrate import (
     MigrateRow,
     MigrateScopeResult,
     SCOPE_MIGRATABLE_KINDS,
+    _detect_source_scope,
     classify_migrate,
     migrate_one,
     migrate_scope,
 )
+from memtomem.context.transfer import TransferMode, TransferResult, transfer_artifact
 from memtomem.context.projects import (
     KnownProjectsCorruptError,
     KnownProjectsStore,
@@ -99,7 +101,11 @@ from memtomem.context.settings_migrate import (
     format_plan_summary,
     plan_migration,
 )
-from memtomem.context.scope_resolver import canonical_artifact_dir, find_project_root
+from memtomem.context.scope_resolver import (
+    ArtifactKind,
+    canonical_artifact_dir,
+    find_project_root,
+)
 from memtomem.context.skills import (
     diff_skills,
     extract_skills_to_canonical,
@@ -555,6 +561,36 @@ def _append_gitignore_marker(project_root: Path) -> tuple[bool, str]:
     with gi.open("a", encoding="utf-8") as fh:
         fh.write(block)
     return True, "appended"
+
+
+def _ensure_local_tier_gitignored(project_root: Path) -> None:
+    """Append the project_local gitignore marker at *project_root* and report.
+
+    Shared by every verb that can land a canonical on the project_local
+    tier without ``mm context init`` having run there (``migrate --to``,
+    ``move`` / ``copy`` — for cross-project transfers pass the
+    DESTINATION root). ``already_present`` is deliberately silent: the
+    marker is already there, the user does not need a redundant green
+    tick on every transfer.
+    """
+    wrote, msg = _append_gitignore_marker(project_root)
+    if wrote:
+        click.secho(
+            "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
+            fg="green",
+        )
+    elif msg == "no_git_repo_pyproject_only":
+        click.secho(
+            "  warning: project root resolved via pyproject.toml but `.git` "
+            "missing — .gitignore not appended. Run `git init` first to "
+            "git-protect the local tier.",
+            fg="yellow",
+        )
+    elif msg == "no_project_signal":
+        click.secho(
+            "  warning: no .git and no pyproject.toml in project root — .gitignore append skipped.",
+            fg="yellow",
+        )
 
 
 def _print_settings_detect(root: Path, scope: str) -> None:
@@ -2262,27 +2298,7 @@ def _migrate_scope_dispatch(
     # ``git status`` and risks being committed by accident
     # (#895 P2 review #3 fold).
     if apply_ and to_scope == "project_local":
-        wrote, msg = _append_gitignore_marker(project_root)
-        if wrote:
-            click.secho(
-                "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
-                fg="green",
-            )
-        elif msg == "no_git_repo_pyproject_only":
-            click.secho(
-                "  warning: project root resolved via pyproject.toml but `.git` "
-                "missing — .gitignore not appended. Run `git init` first to "
-                "git-protect the local tier.",
-                fg="yellow",
-            )
-        elif msg == "no_project_signal":
-            click.secho(
-                "  warning: no .git and no pyproject.toml in project root — "
-                ".gitignore append skipped.",
-                fg="yellow",
-            )
-        # ``already_present`` is silent — the marker is already there,
-        # the user does not need a redundant green tick on every migrate.
+        _ensure_local_tier_gitignored(project_root)
 
 
 def _print_migrate_scope_result(result: MigrateScopeResult, *, apply_: bool) -> None:
@@ -2505,6 +2521,10 @@ def migrate_cmd(
       ``project_shared`` / ``project_local``). Supports agents,
       commands, skills, and memory (memory delegates to
       ``mm context memory-migrate``'s impl with parity behaviour).
+      This mode is the within-project alias of ``mm context move``;
+      for copy semantics, cross-project destinations (--to-project),
+      or renamed copies (--as) use the dedicated ``copy`` / ``move``
+      verbs — ``mm context move --help`` has the full comparison.
 
     Default mode is a dry-run preview; pass ``--apply`` to execute.
     """
@@ -2683,6 +2703,384 @@ def migrate_cmd(
 
     if failures:
         raise click.exceptions.Exit(1)
+
+
+# ── copy / move (campaign #1270 A-3, #1274) ─────────────────────────────
+#
+# CLI face of the ADR-0023 transfer engine. The two verbs share one option
+# surface (`_transfer_options`); copy adds --as. `migrate --to` stays as
+# the within-project alias — these verbs add copy semantics and the
+# cross-project `--to-project` destination.
+
+
+def _transfer_options(fn: Any) -> Any:
+    """Shared option surface for ``mm context copy`` / ``mm context move``.
+
+    #1274 contract: the verbs differ only in mode (and copy's ``--as``,
+    stacked separately). One decorator list keeps the surfaces from
+    drifting apart.
+    """
+    decorators = [
+        click.argument("asset_type", type=click.Choice(list(SCOPE_MIGRATABLE_KINDS))),
+        click.argument("name"),
+        click.option(
+            "--from",
+            "from_scope",
+            type=click.Choice(list(get_args(TargetScope))),
+            default=None,
+            help=(
+                "Explicit source tier (auto-detected; pass to disambiguate "
+                "when the same name lives in multiple tiers)."
+            ),
+        ),
+        click.option(
+            "--to",
+            "to_scope",
+            type=click.Choice(list(get_args(TargetScope))),
+            default=None,
+            help=(
+                "Destination tier. Omitted: keeps the source tier (the "
+                "common cross-project case). At least one of --to / "
+                "--to-project is required."
+            ),
+        ),
+        click.option(
+            "--to-project",
+            "to_project",
+            default=None,
+            metavar="SCOPE_ID|PATH",
+            help=(
+                "Destination project — a p-<sha12> scope_id from `mm context "
+                "projects list`, or a filesystem path (typing a path is "
+                "consent to target an unregistered project). Omitted: the "
+                "current project."
+            ),
+        ),
+        click.option(
+            "--apply",
+            "apply_",
+            is_flag=True,
+            default=False,
+            help="Execute the transfer (default is a dry-run preview).",
+        ),
+        click.option(
+            "--yes",
+            "-y",
+            is_flag=True,
+            default=False,
+            help="Skip the confirmation prompt. Requires --apply.",
+        ),
+        click.option(
+            "--confirm-project-shared",
+            "confirm_project_shared",
+            is_flag=True,
+            default=False,
+            help=(
+                "Required (in addition to --apply) when the destination tier "
+                "is project_shared, mirroring ``mm context migrate``. --yes "
+                "alone does not satisfy the project_shared opt-in."
+            ),
+        ),
+    ]
+    for deco in reversed(decorators):
+        fn = deco(fn)
+    return fn
+
+
+def _transfer_dispatch(
+    mode: TransferMode,
+    asset_type: str,
+    name: str,
+    *,
+    from_scope: str | None,
+    to_scope: str | None,
+    to_project: str | None,
+    new_name: str | None,
+    apply_: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+) -> None:
+    """Shared driver for ``mm context copy`` / ``mm context move`` (#1274).
+
+    Surface-layer duties only (ADR-0023): option-combination gates,
+    destination-project resolution (the A-1 ``scope_id | path`` selector),
+    the destination-store pre-check, Gate B confirmation, engine-error
+    translation, and result rendering. The transfer itself is one
+    :func:`memtomem.context.transfer.transfer_artifact` call; Gate A and
+    all filesystem invariants live there.
+    """
+    if yes and not apply_:
+        raise click.UsageError("--yes is only valid with --apply")
+    if to_scope is None and to_project is None:
+        raise click.UsageError(
+            f"nothing to do: pass --to <tier> and/or --to-project "
+            f"<scope_id|path> (a same-tier, same-project {mode} is a no-op)"
+        )
+    if to_scope == "user" and to_project is not None:
+        raise click.UsageError(
+            "--to-project cannot be combined with --to user: the user tier "
+            "is global (~/.memtomem), not per-project."
+        )
+    # Validate names BEFORE any path construction (Codex review fold):
+    # the --to default pre-probe below builds candidate paths from the
+    # raw name, and a traversal shape like ``../x`` must never reach a
+    # filesystem probe. Same vocabulary as the engine's own
+    # ``validate_name`` calls, translated to the CLI error shape here.
+    try:
+        validate_name(name, kind=f"{asset_type[:-1]} name")
+        if new_name is not None:
+            validate_name(new_name, kind=f"{asset_type[:-1]} name")
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    src_root = _find_project_root()
+
+    if to_project is not None:
+        cfg = _projects_gateway_cfg()
+        try:
+            dst_root, dst_scope_rec = resolve_project_selector(to_project, _projects_discover(cfg))
+        except UnknownProjectSelectorError as exc:
+            raise click.ClickException(str(exc)) from exc
+        # An explicitly typed path is consent for an UNREGISTERED root
+        # (dst_scope_rec is None then); a paused REGISTERED destination
+        # still refuses — pausing said "stop syncing this project", and a
+        # transferred canonical would sit there without fan-out.
+        if dst_scope_rec is not None and not dst_scope_rec.enabled:
+            raise click.ClickException(
+                f"destination project {dst_scope_rec.scope_id} ({dst_root}) is "
+                f"paused — sync enrollment is disabled, so the transferred "
+                f"artifact would not fan out there. Run `mm context projects "
+                f"resume {dst_scope_rec.scope_id}` first, or pick another "
+                f"destination."
+            )
+    else:
+        dst_root = src_root
+
+    if to_scope is None:
+        # Tier default: keep the source tier. The engine re-detects under
+        # its own lock; this pre-probe only resolves the CLI default (and
+        # shares the engine's missing/ambiguous error wording).
+        to_scope, _src_path, _layout = _detect_source_scope(
+            cast(ArtifactKind, asset_type),
+            name,
+            src_root,
+            cast("TargetScope | None", from_scope),
+        )
+        if to_scope == "user" and to_project is not None:
+            raise click.UsageError(
+                f"{asset_type}/{name} lives at the user tier, which is global "
+                f"— pass --to project_shared or --to project_local to choose "
+                f"the tier it should land in inside the destination project."
+            )
+    to_scope_t = cast(TargetScope, to_scope)
+
+    # #1274: a cross-project destination must already be a memtomem
+    # project. Within-project transfers keep migrate's behaviour (the
+    # store is implicitly created) — this gate is about not seeding a
+    # half-initialized `.memtomem/` into an arbitrary directory.
+    if to_project is not None and to_scope_t != "user" and not (dst_root / ".memtomem").is_dir():
+        raise click.ClickException(
+            f"destination project has no .memtomem/ store: {dst_root}\n"
+            f"  Initialize it first: cd {dst_root} && mm context init"
+        )
+
+    # Pre-flight Gate B (project_shared opt-in) — same contract and
+    # wording as `mm context migrate --to project_shared`. Apply only:
+    # dry-run reads the same plan without touching disk.
+    if to_scope_t == "project_shared" and apply_ and not confirm_project_shared:
+        if yes:
+            raise click.ClickException(
+                "--to project_shared requires --confirm-project-shared. "
+                "--yes alone is not sufficient: project_shared writes go "
+                "to the git-tracked tier and require explicit opt-in."
+            )
+        if not click.confirm(
+            f"\nThis will {mode} the canonical into the git-tracked project_shared tier. Continue?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    try:
+        result = transfer_artifact(
+            cast(ArtifactKind, asset_type),
+            name,
+            src_project_root=src_root,
+            from_scope=cast("TargetScope | None", from_scope),
+            dst_project_root=None if to_scope_t == "user" else dst_root,
+            to_scope=to_scope_t,
+            mode=mode,
+            apply_=apply_,
+            surface=f"cli_context_{mode}",
+            new_name=new_name,
+        )
+    except (FileNotFoundError, ValueError, InvalidNameError) as exc:
+        # Same translation set as _migrate_scope_dispatch — the engine's
+        # validate_name raises InvalidNameError (not ClickException), and
+        # deep filesystem paths can surface OS errors; without this the
+        # CLI dies with a traceback instead of a one-line error.
+        raise click.ClickException(str(exc)) from exc
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
+    except MigratePartialError as exc:
+        raise click.ClickException(exc.message) from exc
+
+    _print_transfer_result(result, apply_=apply_)
+
+    if apply_ and to_scope_t == "project_local":
+        # ADR-0011 project_local gitignore contract — at the DESTINATION
+        # project (#895 P2 review #3 lineage, cross-project aware).
+        _ensure_local_tier_gitignored(dst_root)
+
+
+def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
+    """User-facing summary for one copy/move transfer (#1274).
+
+    Sibling of :func:`_print_migrate_scope_result` with the transfer
+    extras: mode verb, copy-rename name, engine ``notes``, and the
+    engine's exact follow-up sync command (``TransferResult.sync_command``
+    — cd-prefixed for cross-project tiers until A-9 lands a ``--project``
+    selector on sync) instead of a hand-built one.
+    """
+    layout_note = " (flat layout)" if result.layout == "flat" else ""
+    rename_note = f" as {result.dst_name}" if result.dst_name != result.name else ""
+    click.echo(f"Plan: {result.mode} {result.kind}/{result.name}{rename_note}{layout_note}")
+    click.echo(f"  from {result.from_scope}: {result.src_path}")
+    click.echo(f"  to   {result.to_scope}: {result.dst_path}")
+
+    if not apply_:
+        if result.fanout_planned:
+            click.echo(
+                f"  will remove {len(result.fanout_planned)} stale runtime "
+                f"fan-out target(s) at scope='{result.from_scope}' (content "
+                f"that diverges from the canonical render is snapshotted to "
+                f"a .bak first):"
+            )
+            for path in result.fanout_planned:
+                click.echo(f"    - {path}")
+        confirm_note = " --confirm-project-shared" if result.to_scope == "project_shared" else ""
+        click.echo(f"\nRun with --apply{confirm_note} to execute.")
+        if result.needs_sync and result.sync_command:
+            click.echo(f"After apply, run `{result.sync_command}` to refresh runtime fan-out.")
+        return
+
+    verb = "moved" if result.mode == "move" else "copied"
+    click.secho(
+        f"  ✓ {verb} {result.kind}/{result.name}: "
+        f"{result.from_scope} → {result.to_scope}{rename_note}",
+        fg="green",
+    )
+    if result.fanout_cleaned:
+        click.echo(
+            f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out "
+            f"target(s) at scope='{result.from_scope}':"
+        )
+        for path in result.fanout_cleaned:
+            click.echo(f"    - {path}")
+    if result.fanout_backed_up:
+        click.secho(
+            f"  {len(result.fanout_backed_up)} target(s) diverged from the "
+            f"canonical render — snapshotted before removal (review and "
+            f"delete manually):",
+            fg="yellow",
+        )
+        for path in result.fanout_backed_up:
+            click.echo(f"    - {path}")
+    for note in result.notes:
+        click.secho(f"  note: {note}", fg="yellow")
+    if result.needs_sync and result.sync_command:
+        click.echo(
+            f"\nNext: run `{result.sync_command}` to generate runtime fan-out at the destination."
+        )
+
+
+@context.command("move")
+@_transfer_options
+def move_cmd(
+    asset_type: str,
+    name: str,
+    from_scope: str | None,
+    to_scope: str | None,
+    to_project: str | None,
+    apply_: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+) -> None:
+    """Move one canonical artifact to another tier and/or project.
+
+    move / copy / migrate in one view:
+
+    \b
+      move     consumes the source and cleans its stale runtime fan-out;
+               destination fan-out is NOT generated — run the printed
+               sync command after.
+      copy     same surface, source never touched; supports a renamed
+               copy via --as.
+      migrate  legacy verb: flat→dir layout adoption, plus `--to <tier>`
+               as the within-project alias of move (kept working, not
+               deprecated).
+
+    Destination collisions always refuse (no --force valve). A
+    project_shared landing runs the privacy scan (Gate A) and requires
+    --confirm-project-shared with --apply (Gate B). Default is a
+    dry-run preview; pass --apply to execute.
+    """
+    _transfer_dispatch(
+        "move",
+        asset_type,
+        name,
+        from_scope=from_scope,
+        to_scope=to_scope,
+        to_project=to_project,
+        new_name=None,
+        apply_=apply_,
+        yes=yes,
+        confirm_project_shared=confirm_project_shared,
+    )
+
+
+@context.command("copy")
+@_transfer_options
+@click.option(
+    "--as",
+    "new_name",
+    default=None,
+    metavar="NEW_NAME",
+    help=(
+        "Name for the copy at the destination (copy only). The staged "
+        "manifest's frontmatter name: is rewritten to match; overrides/ "
+        "and frozen versions/ snapshots travel verbatim."
+    ),
+)
+def copy_cmd(
+    asset_type: str,
+    name: str,
+    from_scope: str | None,
+    to_scope: str | None,
+    to_project: str | None,
+    apply_: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+    new_name: str | None,
+) -> None:
+    """Copy one canonical artifact to another tier and/or project.
+
+    The source is never touched. Same option surface as ``mm context
+    move`` (its --help has the move/copy/migrate comparison), plus
+    ``--as NEW_NAME`` for a renamed copy. Default is a dry-run preview;
+    pass --apply to execute.
+    """
+    _transfer_dispatch(
+        "copy",
+        asset_type,
+        name,
+        from_scope=from_scope,
+        to_scope=to_scope,
+        to_project=to_project,
+        new_name=new_name,
+        apply_=apply_,
+        yes=yes,
+        confirm_project_shared=confirm_project_shared,
+    )
 
 
 @context.command("settings-doctor")
