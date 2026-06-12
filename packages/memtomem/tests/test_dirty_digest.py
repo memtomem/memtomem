@@ -349,6 +349,43 @@ def test_reconcile_digest_provenance_beats_divergent_manifest(
     assert [p.name for p in result.files_removed] == ["r.md"]
 
 
+def test_reconcile_membership_is_written_set_not_post_copy_src_walk(
+    wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex impl-gate Major: ``_apply_update`` derived reconcile membership
+    by re-walking the wiki working tree AFTER the copy returned. A src
+    mutation landing in that window (file dropped from the worktree) made
+    reconcile erase a file this very update just wrote — its unchanged
+    bytes still matched the OLD digests ("provably untouched") — while
+    ``files``/``digests`` recorded it: a phantom lock entry that the next
+    dirty check reports as a local deletion. Membership must come from the
+    copier's returned written set."""
+    import memtomem.context.install as install_module
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "keep.md": b"same\n"})
+    install_skill(tmp_path, "web")
+    _modify_wiki_skill(wiki_root, "web", {"SKILL.md": b"v2\n"})  # keep.md unchanged
+
+    real_copy = install_module.copy_tree_atomic
+
+    def copy_then_mutate_src(src: Path, dst: Path, **kwargs: object) -> dict[str, str]:
+        result = real_copy(src, dst, **kwargs)  # type: ignore[arg-type]
+        (src / "keep.md").unlink()  # worktree mutation in the copy→reconcile window
+        return result
+
+    monkeypatch.setattr(install_module, "copy_tree_atomic", copy_then_mutate_src)
+    result = update_skill(tmp_path, "web")
+
+    kept = tmp_path / ".memtomem" / "skills" / "web" / "keep.md"
+    assert kept.read_bytes() == b"same\n"  # the file this update wrote survives
+    assert result.files_removed == ()
+    entry = _entry(tmp_path)
+    assert entry["files"] == ["SKILL.md", "keep.md"]
+    assert "keep.md" in entry["digests"]  # record and dest agree — no phantom
+    assert is_asset_dirty(tmp_path, "skills", "web").reason == "clean"
+
+
 @requires_posix_perms
 def test_unreadable_file_classifies_dirty_with_warning(
     wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture

@@ -863,18 +863,23 @@ def _apply_update(
     digest_map = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
 
     # Mirror semantics (#1247): drop dest files the wiki no longer ships.
-    # Membership uses the COPIER's effective file set (iter_installed_files
-    # shares copy_tree_atomic's skip rules) — a bare (src / rel).is_file()
-    # would count a symlink the copier skips as present, stranding the old
-    # regular file in dest (Codex implementation-gate M1). The guard epoch
-    # is the PRE-update install timestamp (the same basis ``dirty_report``
-    # classified against) — the freshly captured value below is >= every
-    # current mtime and would approve deleting anything. ``old_digests``
-    # likewise comes from the OLD entry (#1247 id 15).
-    src_files = {p.relative_to(src).as_posix() for p in iter_installed_files(src)}
+    # Membership is the copier's RETURNED written set, not a re-walk of
+    # ``src`` (#1247 id 15 impl gate): the wiki working tree is mutable,
+    # so a post-copy walk reads a DIFFERENT snapshot than the one copied —
+    # a file dropped from the worktree in that window would erase a file
+    # this update just wrote (when its bytes are unchanged between
+    # versions they still match the OLD digests → "provably untouched")
+    # while ``files=``/``digests=`` below record it — a phantom entry.
+    # The map shares the copier's skip rules by construction, covering
+    # B5's symlink concern (a wiki file replaced by a symlink is absent
+    # from the map, so the old regular file in dest reconciles away). The
+    # guard epoch is the PRE-update install timestamp (the same basis
+    # ``dirty_report`` classified against) — the freshly captured value
+    # below is >= every current mtime and would approve deleting
+    # anything. ``old_digests`` likewise comes from the OLD entry.
     files_removed = _reconcile_removed_files(
         dest,
-        src_has=lambda rel: rel in src_files,
+        src_has=lambda rel: rel in digest_map,
         old_installed_at_epoch=_installed_at_epoch(lock_entry),
         baked=frozenset(files_to_bak),
         manifest=manifest_from_entry(lock_entry),
