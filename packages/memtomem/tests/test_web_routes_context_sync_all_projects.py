@@ -21,7 +21,6 @@ cross-project batch adds:
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -376,25 +375,33 @@ async def test_project_timeout_fails_row_and_batch_proceeds(
     client, cwd_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A per-project timeout converts to a failed entry (busy envelope,
-    completed phases kept — here none, skills hangs first) and the NEXT
-    project still executes: there is no batch-level timeout."""
-    from memtomem.context import skills as skills_module
-    from memtomem.web.routes import context_skills, context_sync_all
+    completed phases kept — here none, the first phase hangs) and the NEXT
+    project still executes: there is no batch-level timeout.
+
+    Stubbed at the ``_run_phase`` seam — the loop/timeout/error-shaping
+    semantics under test live in the route, and the real-engine-under-
+    timeout combination is already pinned by the A-8 suite. The first
+    windows CI run proved the real-engine variant platform-flaky: the
+    SURVIVOR'S five real phases also blew the shrunk 0.2s budget on the
+    slower runner.
+    """
+    import asyncio
+
+    from memtomem.web.routes import context_sync_all
 
     slow = _other_project(tmp_path, "slow")
     _seed_artifacts(slow)
     await _register(client, slow)
     _seed_artifacts(cwd_root)
 
-    monkeypatch.setattr(context_sync_all, "_SYNC_ALL_TIMEOUT_S", 0.2)
-    real_generate = skills_module.generate_all_skills
+    monkeypatch.setattr(context_sync_all, "_SYNC_ALL_TIMEOUT_S", 0.15)
 
-    def conditional_slow(project_root, *args, **kwargs):
+    async def conditional_phase(phase_type, project_root, target_scope, *, surface=None):
         if project_root == cwd_root:
-            time.sleep(0.6)
-        return real_generate(project_root, *args, **kwargs)
+            await asyncio.sleep(5)  # > the shrunk per-project budget
+        return {"type": phase_type, "status": "ok", "generated": [], "skipped": []}
 
-    monkeypatch.setattr(context_skills, "generate_all_skills", conditional_slow)
+    monkeypatch.setattr(context_sync_all, "_run_phase", conditional_phase)
 
     resp = await client.post("/api/context/sync-all-projects")
     assert resp.status_code == 200, resp.text
@@ -404,12 +411,12 @@ async def test_project_timeout_fails_row_and_batch_proceeds(
     assert timed_out["status"] == "failed"
     assert timed_out["error"]["error_kind"] == "busy"
     assert timed_out["error"]["http_status"] == 503
-    assert timed_out["phases"] == []  # skills hung — nothing completed
+    assert timed_out["phases"] == []  # the first phase hung — nothing completed
     assert "summary" not in timed_out  # summary present iff the loop completed
 
     survivor = _entry(data, slow)
     assert survivor["status"] == "ok"
-    assert _runtime_tree(slow) != {}
+    assert [p["type"] for p in survivor["phases"]] == list(_SYNC_ALL_PHASES)
 
     assert data["summary"]["status"] == "partial"
     assert data["summary"]["failed"] == 1
