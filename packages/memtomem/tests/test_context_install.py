@@ -7,6 +7,7 @@ Invariant 2 (refuse-on-conflict instead of silent clobber).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing as mp
 import shutil
@@ -458,7 +459,11 @@ def test_lockfile_contains_only_mandated_keys_per_entry(wiki_root: Path, tmp_pat
 
     ``files`` + ``files_commit`` joined the schema with the #1247
     deletion-fidelity work (the installed file manifest enabling
-    deletion-dirty detection and update reconciliation).
+    deletion-dirty detection and update reconciliation); ``digests`` +
+    ``digests_installed_at`` with the #1247 id 15 content-digest work
+    (byte-exact dirty detection closing the during-install absorption
+    window). The digest is the SHA-256 of the bytes the copier wrote,
+    paired to the entry's own ``installed_at``.
     """
     _initialized_wiki(wiki_root)
     _seed_skill(wiki_root, "foo", {"SKILL.md": b"x"})
@@ -468,9 +473,19 @@ def test_lockfile_contains_only_mandated_keys_per_entry(wiki_root: Path, tmp_pat
     lock = Lockfile.at(project)
     entry = lock.read_entry("skills", "foo")
     assert entry is not None
-    assert set(entry) == {"wiki_commit", "installed_at", "files", "files_commit"}
+    assert set(entry) == {
+        "wiki_commit",
+        "installed_at",
+        "files",
+        "files_commit",
+        "digests",
+        "digests_installed_at",
+    }
     assert entry["files"] == ["SKILL.md"]
     assert entry["files_commit"] == entry["wiki_commit"]
+    assert entry["digests"] == {"SKILL.md": hashlib.sha256(b"x").hexdigest()}
+    assert entry["digests_installed_at"] == entry["installed_at"]
+    assert entry["files"] == sorted(entry["digests"])  # same written set, one source
 
 
 # ── Gate A on wiki-install ingress (ADR-0011 §5, #1247 id 3) ─────────────

@@ -4,10 +4,27 @@ Pure classifier used by ``mm context update`` to decide whether the
 on-disk tree at ``<project>/.memtomem/<type>/<name>/`` still matches the
 wiki state recorded in :class:`memtomem.context.lockfile.Lockfile`.
 
-The compare rule is **strict** ``mtime > installed_at_epoch`` — only files
-whose modification time is *strictly* later than the lockfile's
-``installed_at`` are flagged dirty. Equality is clean. ``installed_at``
-is captured from the filesystem itself by
+When the entry carries a valid per-file digest map
+(:func:`memtomem.context.lockfile.digests_from_entry`, #1247 id 15), the
+compare rule is **byte equality**: a file is dirty iff its current
+SHA-256 differs from the digest recorded for the bytes the installing
+operation wrote — mtime is not consulted at all on this branch (mixing
+it in would re-import its false positives for zero detection gain). This
+closes the during-install absorption window: a concurrent edit landing
+at any point after a file's write leaves current bytes ≠ recorded digest
+→ dirty, where the scalar ``installed_at`` capture absorbed it →
+permanently clean → silent clobber on the next update. A file that
+cannot be **read** on this branch classifies dirty with a warning —
+"cannot prove clean" must protect, never crash the whole status walk and
+never silently pass; the underlying OSError then surfaces loudly at
+mutation time, before the first dest write (Gate A scans ``--force``'s
+``.bak`` set and ``privacy_scan`` raises on unreadable files).
+
+For **legacy entries** (no/invalid/stale digests) the rule remains
+strict ``mtime > installed_at_epoch`` — only files whose modification
+time is *strictly* later than the lockfile's ``installed_at`` are
+flagged dirty. Equality is clean. ``installed_at`` is captured from the
+filesystem itself by
 :func:`memtomem.context._atomic.installed_at_from_dest` (``max
 st_mtime_ns`` ceiled to microsecond), so on every platform the install's
 own writes round-trip to a value ``<= installed_at_epoch`` and the
@@ -28,6 +45,7 @@ the dest tree separately.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,7 +53,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from memtomem.context._atomic import iter_installed_files
-from memtomem.context.lockfile import Lockfile, manifest_from_entry
+from memtomem.context.lockfile import Lockfile, digests_from_entry, manifest_from_entry
 
 logger = logging.getLogger(__name__)
 
@@ -53,27 +71,35 @@ DirtyReason = Literal["clean", "dirty", "never_installed", "missing_dest"]
 class DirtyReport:
     """Outcome of a dirty check on a single installed asset.
 
-    - ``reason="clean"`` — dest exists, every checked file's mtime is
-      ``<= installed_at_epoch``, and no manifest entry is missing.
-    - ``reason="dirty"`` — at least one checked file has
-      ``mtime > installed_at_epoch`` (paths in ``dirty_files``) and/or at
-      least one manifest-recorded file is gone from disk (paths in
-      ``missing_files``) — a user deletion is a local edit too (#1247).
+    - ``reason="clean"`` — dest exists and no checked file diverged:
+      on digest entries every file's current SHA-256 equals its recorded
+      digest, on legacy entries every file's mtime is
+      ``<= installed_at_epoch``; and no recorded file is missing.
+    - ``reason="dirty"`` — at least one checked file diverged (digest
+      mismatch / unreadable / unrecorded addition on digest entries,
+      ``mtime > installed_at_epoch`` on legacy entries; paths in
+      ``dirty_files``) and/or at least one recorded file is gone from
+      disk (paths in ``missing_files``) — a user deletion is a local
+      edit too (#1247).
     - ``reason="never_installed"`` — no usable lockfile entry;
       ``installed_at`` is ``None`` and ``dirty_files`` / ``checked_files``
       are empty. Returned for "no entry at all" and "entry exists but
       missing / non-string / unparseable ``installed_at``" — all are
-      unrecoverable states for a strict mtime compare (#1247: an
-      unparseable ISO string previously crashed with ``ValueError``
-      instead of degrading like its non-string siblings).
+      unrecoverable states (#1247: an unparseable ISO string previously
+      crashed with ``ValueError`` instead of degrading like its
+      non-string siblings). Deliberately NOT widened to "digests valid
+      but installed_at malformed" — unprovable-record semantics stay
+      uniform, and the ``digests_installed_at == installed_at`` pairing
+      makes such an entry degrade anyway.
     - ``reason="missing_dest"`` — lockfile entry exists but
       ``<project>/.memtomem/<type>/<name>/`` was deleted; ``installed_at``
       is the lockfile value, ``dirty_files`` empty.
 
-    ``missing_files`` is populated only when the entry carries a valid
-    file manifest (see
-    :func:`memtomem.context.lockfile.manifest_from_entry`); legacy entries
-    keep the pre-manifest behavior (deletions invisible).
+    ``missing_files`` derives from the digest map's keys on digest
+    entries, and from the file manifest (see
+    :func:`memtomem.context.lockfile.manifest_from_entry`) on legacy
+    entries that carry one; pre-manifest entries keep deletions
+    invisible.
     """
 
     reason: DirtyReason
@@ -162,19 +188,58 @@ def is_asset_dirty(
     dirty: list[Path] = []
     checked = 0
     present_rels: set[str] = set()
-    for file_path in iter_installed_files(dest):
-        checked += 1
-        present_rels.add(file_path.relative_to(dest).as_posix())
-        if file_path.stat().st_mtime > installed_at_epoch:
-            dirty.append(file_path)
-
-    # Deletion detection (#1247): a manifest-recorded file gone from disk
-    # is a local edit. Valid-manifest entries only — legacy/stale/malformed
-    # manifests degrade to the pre-manifest behavior (deletions invisible).
     missing: list[Path] = []
-    manifest = manifest_from_entry(lock_entry)
-    if manifest is not None:
-        missing = [dest / rel for rel in sorted(manifest - present_rels)]
+    digests = digests_from_entry(lock_entry)
+    if digests is not None:
+        # Digest branch (#1247 id 15): byte equality against the SHA-256
+        # recorded for the bytes the install wrote. mtime is deliberately
+        # not consulted — it would re-import touch-only false positives
+        # for zero detection gain. Deltas vs legacy: touch-only edit →
+        # clean, backdated edit/addition → dirty, unreadable → dirty+warn.
+        for file_path in iter_installed_files(dest):
+            checked += 1
+            rel = file_path.relative_to(dest).as_posix()
+            present_rels.add(rel)
+            recorded = digests.get(rel)
+            if recorded is None:
+                dirty.append(file_path)  # local addition — never recorded
+                continue
+            try:
+                blob = file_path.read_bytes()
+            except OSError as exc:
+                # Fail-safe: cannot prove clean. The read error itself
+                # surfaces loudly pre-mutation (Gate A / copy2), not here —
+                # `mm context status` over N projects must stay usable.
+                logger.warning(
+                    "%s/%s: cannot read %s for digest check (%s); classifying dirty",
+                    asset_type,
+                    name,
+                    file_path,
+                    exc,
+                )
+                dirty.append(file_path)
+                continue
+            if hashlib.sha256(blob).hexdigest() != recorded:
+                dirty.append(file_path)
+        # Deletion detection from the digest map's own keys — when digests
+        # validate, `files` was written by the same upsert from the same
+        # set; if a hand-edit makes them diverge, the digest map is the
+        # single record we trust (mirrored on the reconcile side).
+        missing = [dest / rel for rel in sorted(digests.keys() - present_rels)]
+    else:
+        # Legacy branch — pre-digest behavior verbatim.
+        for file_path in iter_installed_files(dest):
+            checked += 1
+            present_rels.add(file_path.relative_to(dest).as_posix())
+            if file_path.stat().st_mtime > installed_at_epoch:
+                dirty.append(file_path)
+
+        # Deletion detection (#1247): a manifest-recorded file gone from disk
+        # is a local edit. Valid-manifest entries only — legacy/stale/malformed
+        # manifests degrade to the pre-manifest behavior (deletions invisible).
+        manifest = manifest_from_entry(lock_entry)
+        if manifest is not None:
+            missing = [dest / rel for rel in sorted(manifest - present_rels)]
 
     return DirtyReport(
         reason="dirty" if (dirty or missing) else "clean",

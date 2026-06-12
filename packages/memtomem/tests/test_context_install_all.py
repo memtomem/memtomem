@@ -513,11 +513,16 @@ def test_force_reextraction_removes_stale_dest_only_file(
     # the legacy-entry deletion rule, not the user-added keep rule.
     past = datetime.now(timezone.utc).timestamp() - 3600
     os.utime(stale, (past, past))
-    # Pre-B1 entries carry no manifest — simulate one by stripping the keys.
+    # Pre-B1 entries carry no manifest and no digests — simulate one by
+    # stripping all four keys (with a valid digest pairing left in place,
+    # the unrecorded leftover would correctly classify user-added → keep;
+    # that digest-branch behavior is pinned in test_dirty_digest.py).
     lock_path = tmp_path / ".memtomem" / "lock.json"
     doc = json.loads(lock_path.read_text(encoding="utf-8"))
     doc["skills"]["foo"].pop("files", None)
     doc["skills"]["foo"].pop("files_commit", None)
+    doc["skills"]["foo"].pop("digests", None)
+    doc["skills"]["foo"].pop("digests_installed_at", None)
     lock_path.write_text(json.dumps(doc), encoding="utf-8")
 
     monkeypatch.chdir(tmp_path)
