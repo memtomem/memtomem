@@ -79,4 +79,37 @@ describe('empty scopes roster renders load error with retry (#1287)', () => {
     await until(() => listEl.querySelector('details[data-scope-id]'));
     expect(listEl.querySelector('.ctx-scopes-retry')).toBeFalsy();
   });
+
+  // Codex review of #1295: the Projects portal has the same defensive
+  // empty-roster branch and used to reference the removed
+  // ``no_project_scopes`` key — without this pin the portal would echo the
+  // raw key. The portal shares ``_ctxScopesLoadError`` with its own reload
+  // (``loadCtxProjects``) as the retry.
+  it('Projects portal renders the same load error and recovers on Retry', async () => {
+    const dom = await bootApp({
+      scripts: ['i18n.js', 'app.js', 'context-gateway.js', 'context-portal.js'],
+    });
+    const { window } = dom;
+    await window.I18N.init();
+    if (!window.CSS) {
+      window.CSS = { escape: (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`) };
+    }
+    const state = installProjects(window);
+
+    await window.loadCtxProjects();
+
+    const listEl = window.document.getElementById('ctx-projects-list');
+    const text = listEl.textContent || '';
+    expect(text).toContain("Couldn't load project scopes");
+    // Neither the legacy copy nor a raw-key echo may surface.
+    expect(text).not.toContain('No project scopes');
+    expect(text).not.toContain('settings.ctx.no_project_scopes');
+    const retry = listEl.querySelector('.ctx-scopes-retry');
+    expect(retry).toBeTruthy();
+
+    state.respond = () => jsonOk({ scopes: [CWD_SCOPE], target_scope: 'project_shared' });
+    retry.click();
+    await until(() => listEl.querySelector('.ctx-portal-row'));
+    expect(listEl.querySelector('.ctx-scopes-retry')).toBeFalsy();
+  });
 });

@@ -399,11 +399,16 @@ async function loadCtxProjects() {
     _ctxPortalEditingId = null;
     _ctxPortalScopes = scopes;
     if (!scopes.length) {
-      // Server CWD is always present, so this is defensive only. Clear the
-      // heading chip strip too, so a stale strip can't outlive an emptied list.
+      // Server CWD is always present, so an empty roster means the load
+      // failed — render the shared load-error + Retry (#1287; the helper
+      // lives in context-gateway.js, which loads before this file). Clear
+      // the heading chip strip too, so a stale strip can't outlive an
+      // emptied list.
       const headingEl = document.getElementById('ctx-portal-heading-chips');
       if (headingEl) headingEl.innerHTML = '';
-      listEl.innerHTML = emptyState('', t('settings.ctx.no_project_scopes'), '');
+      _ctxScopesLoadError(
+        listEl, t('settings.ctx.scopes_load_failed'), '', () => loadCtxProjects(),
+      );
       return;
     }
 
