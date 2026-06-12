@@ -96,6 +96,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "scratch.promote_scratch",
         "scratch.set_scratch",
         "settings_sync.apply_settings_sync",
+        "settings_sync.copy_hook_to_project",
         "settings_sync.delete_target_rule",
         "settings_sync.promote_target_rule",
         "settings_sync.resolve_conflict",
@@ -228,6 +229,11 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "scratch.set_scratch": "scratch is local-only ephemeral note storage "
     "outside the LTM trust boundary; redaction not applicable",
     "settings_sync.apply_settings_sync": "structured settings merge; no free-form prose",
+    "settings_sync.copy_hook_to_project": (
+        "no free-form content payload — copies an existing canonical hook "
+        "entry between projects; the engine's Gate A fragment scan runs for "
+        "every destination tier (the canonical leg is always git-tracked)"
+    ),
     "settings_sync.delete_target_rule": "structured settings hook rule deletion; no free-form prose",
     "settings_sync.resolve_conflict": "structured settings conflict resolution; no free-form prose",
     "system.embed_text": "ephemeral compute; no persistence",

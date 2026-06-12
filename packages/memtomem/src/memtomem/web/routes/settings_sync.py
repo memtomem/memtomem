@@ -9,12 +9,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
-from memtomem.context.privacy_scan import format_scan_block_message, scan_text_content
+from memtomem.context.privacy_scan import (
+    PrivacyBlockedError,
+    format_scan_block_message,
+    scan_text_content,
+)
+from memtomem.context.projects import compute_scope_id
 from memtomem.context.settings import (
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
@@ -25,14 +30,29 @@ from memtomem.context.settings import (
     _write_json,
     generate_all_settings,
 )
+from memtomem.context.settings_copy import (
+    AmbiguousHookSelectorError,
+    HookCopyPlan,
+    HookCopyResult,
+    HookNotFoundError,
+    apply_hook_copy,
+    gate_a_scan,
+    plan_hook_copy,
+)
 from memtomem.context.settings_doctor import (
     DuplicateTier,
     detect_duplicate_tiers,
 )
+from memtomem.web.routes._confirm import needs_confirmation_envelope
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_writable_scope_root,
+)
+from memtomem.web.routes.context_transfer import (
+    _error,
+    _reject_ineligible_destination,
+    _resolve_destination,
 )
 
 logger = logging.getLogger(__name__)
@@ -959,3 +979,197 @@ async def promote_target_rule(
                 )
     except TimeoutError:
         raise HTTPException(503, "Promote timed out — another sync may be in progress")
+
+
+# ── cross-project per-hook copy (#1281, campaign #1270 A-11) ─────────
+
+
+class HookCopyRequest(BaseModel):
+    """Body for ``POST /context/settings/hooks/copy``.
+
+    ``to_project_scope_id`` is REQUIRED — the web surface restricts
+    destinations to the registered discovery set (the A-5 contract; the
+    typed-path consent valve is CLI-only), and a same-project copy is the
+    settings-migrate/sync routes' job, refused by the engine.
+    """
+
+    event: str
+    matcher: str = ""
+    hook_command: str | None = None
+    to_project_scope_id: str
+    to_target_scope: TargetScope = "project_shared"
+    confirm_project_shared: bool = False
+    allow_host_writes: bool = False
+
+
+def _serialize_hook_copy_plan(plan: HookCopyPlan) -> dict[str, Any]:
+    """Wire shape for the plan half (nested under ``plan`` in envelopes).
+
+    ``dst_project_scope_id`` mirrors the transfer route's field the UI
+    uses for one-click follow-up sync.
+    """
+    return {
+        "event": plan.signature.event,
+        "matcher": plan.signature.matcher,
+        "command_preview": plan.signature.command_shape,
+        "src_project_root": str(plan.src_project_root),
+        "dst_project_root": str(plan.dst_project_root),
+        "dst_project_scope_id": compute_scope_id(plan.dst_project_root),
+        "dst_scope": plan.dst_scope,
+        "dst_canonical": str(plan.dst_canonical_path),
+        "dst_target": str(plan.dst_target_path),
+        "canonical": {"state": plan.canonical_state, "reason": plan.canonical_reason},
+        "target": {"state": plan.target_state, "reason": plan.target_reason},
+    }
+
+
+def _serialize_hook_copy_result(result: HookCopyResult) -> dict[str, Any]:
+    payload = _serialize_hook_copy_plan(result.plan)
+    payload["canonical"] = {
+        **payload["canonical"],
+        "written": result.canonical_written,
+        "already": result.canonical_already,
+    }
+    payload["target"] = {
+        **payload["target"],
+        "written": result.target_written,
+        "already": result.target_already,
+    }
+    payload["warnings"] = list(result.warnings)
+    payload["needs_sync"] = result.needs_sync
+    payload["sync_command"] = result.sync_command
+    return payload
+
+
+@router.post("/context/settings/hooks/copy")
+async def copy_hook_to_project(
+    body: HookCopyRequest,
+    request: Request,
+    project_root: Path = Depends(resolve_scope_root),
+    dry_run: bool = Query(
+        False,
+        description=(
+            "Preview the copy without touching disk: returns the plan "
+            "(status='plan') regardless of confirmation flags."
+        ),
+    ),
+) -> dict:
+    """Copy one canonical-matched hook entry into another project.
+
+    Web face of :func:`memtomem.context.settings_copy.apply_hook_copy`
+    (the CLI sibling is ``mm context settings-copy``). Source = the
+    ``?project_scope_id=`` project's canonical settings (server cwd when
+    omitted); destination = ``body.to_project_scope_id`` (registered
+    projects only) at ``body.to_target_scope``.
+
+    Contracts:
+
+    - **Error envelope** — object details (ADR-0023 §10 vocabulary);
+      the privacy block stays the issue-pinned 422 STRING detail.
+    - **Gate A before consent** (``promote_target_rule`` precedent): a
+      doomed copy never completes a ``needs_confirmation`` round-trip.
+      The scan always runs — the destination canonical is git-tracked
+      for every tier.
+    - **Pending-write-keyed gates** (the #1263 no-op-never-prompts
+      contract), sequential round-trips when both apply:
+      ``confirm_project_shared`` whenever a git-tracked write is pending
+      (the canonical leg always is one), then ``allow_host_writes`` with
+      ``host_targets`` when the user-tier file would be written.
+    - **Status vocabulary** matches the CLI ``--json``: ``plan`` /
+      ``needs_confirmation`` / ``noop`` / ``ok`` / ``conflicts`` (any
+      apply warning — conflict skips, drift aborts — is ``conflicts``;
+      per-leg detail rides the ``canonical`` / ``target`` objects).
+    """
+    dst_root, dst_scope_rec = _resolve_destination(
+        request, body.to_project_scope_id, project_root, None
+    )
+    # The canonical leg writes the destination PROJECT for every tier, so
+    # eligibility is evaluated as a project-tier destination — the
+    # helper's user-tier exemption covers artifact host writes, which
+    # have no project-side leg (N/A here).
+    _reject_ineligible_destination(dst_scope_rec, "project_shared")
+    if not (dst_root / ".memtomem").is_dir():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_kind": "conflict",
+                "reason_code": "no_memtomem_store",
+                "message": (
+                    f"destination project has no .memtomem/ store: {dst_root}. "
+                    f"Initialize it first: cd {dst_root} && mm context init"
+                ),
+                "project_scope_id": body.to_project_scope_id,
+            },
+        )
+
+    try:
+        plan = plan_hook_copy(
+            project_root,
+            event=body.event,
+            matcher=body.matcher,
+            hook_command=body.hook_command,
+            dst_project_root=dst_root,
+            dst_scope=body.to_target_scope,
+        )
+    except HookNotFoundError as exc:
+        raise _error(404, "missing", str(exc)) from exc
+    except (AmbiguousHookSelectorError, ValueError) as exc:
+        raise _error(400, "validation", str(exc)) from exc
+
+    if dry_run:
+        return {"status": "plan", **_serialize_hook_copy_plan(plan)}
+
+    # Gate A before the consent round-trip — and before the no-op check:
+    # an already-at-target re-POST of secret-bearing content still 422s,
+    # matching the promote route's scan-first ordering.
+    try:
+        gate_a_scan(plan, "web_context_settings_hook_copy")
+    except PrivacyBlockedError as exc:
+        raise HTTPException(422, exc.message) from exc
+
+    git_tracked_write = plan.pending_canonical_write or (
+        plan.pending_target_write and body.to_target_scope == "project_shared"
+    )
+    if git_tracked_write and not body.confirm_project_shared:
+        tier_note = (
+            " and its project_shared settings tier"
+            if body.to_target_scope == "project_shared"
+            else ""
+        )
+        return needs_confirmation_envelope(
+            f"This will copy the hook into the destination project's "
+            f"git-tracked files (the canonical .memtomem/settings.json"
+            f"{tier_note}). Re-POST with confirm_project_shared=true after "
+            f"confirming with the user.",
+            confirm="confirm_project_shared",
+            plan=_serialize_hook_copy_plan(plan),
+        )
+    if plan.pending_target_write and body.to_target_scope == "user" and not body.allow_host_writes:
+        return needs_confirmation_envelope(
+            "The destination tier is the user tier — a host path outside "
+            "any project root. Re-POST with allow_host_writes=true after "
+            "confirming with the user.",
+            confirm="allow_host_writes",
+            host_targets=[str(plan.dst_target_path)],
+            plan=_serialize_hook_copy_plan(plan),
+        )
+
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                # Worker thread: the engine takes cross-process sidecar
+                # locks (canonical + tier pair) with its own 30s budget
+                # (< 60s), so a cross-process holder cannot leave an
+                # un-cancellable worker writing after the 503.
+                result = await asyncio.to_thread(
+                    apply_hook_copy, plan, surface="web_context_settings_hook_copy"
+                )
+    except TimeoutError:
+        raise _error(
+            503, "busy", "Copy timed out — another sync or settings write may be in progress"
+        )
+    except PrivacyBlockedError as exc:
+        raise HTTPException(422, exc.message) from exc
+
+    status = "noop" if plan.is_noop else ("conflicts" if result.warnings else "ok")
+    return {"status": status, **_serialize_hook_copy_result(result)}

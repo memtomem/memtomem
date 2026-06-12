@@ -3974,14 +3974,13 @@ def settings_copy_cmd(
         raise click.ClickException(str(exc)) from exc
 
     # Pending writes drive the gates (the #1263 contract: no-op requests
-    # never prompt). A canonical conflict blocks BOTH legs in the engine,
-    # so a pending tier write requires a non-conflicted canonical.
-    will_write_canonical = plan.canonical_state == "missing"
-    will_write_target = plan.canonical_state != "conflict" and plan.target_state == "missing"
-    git_tracked_write = will_write_canonical or (
-        will_write_target and dst_scope == "project_shared"
+    # never prompt). The plan properties encode the cross-leg rule (a
+    # canonical conflict blocks both legs) so the web route's envelopes
+    # and these prompts cannot drift on what counts as pending.
+    git_tracked_write = plan.pending_canonical_write or (
+        plan.pending_target_write and dst_scope == "project_shared"
     )
-    host_write = will_write_target and dst_scope == "user"
+    host_write = plan.pending_target_write and dst_scope == "user"
 
     if json_out:
         payload = _hook_copy_payload(

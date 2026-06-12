@@ -95,6 +95,7 @@ __all__ = [
     "LegState",
     "apply_hook_copy",
     "format_copy_summary",
+    "gate_a_scan",
     "plan_hook_copy",
 ]
 
@@ -155,6 +156,24 @@ class HookCopyPlan:
     @property
     def has_conflict(self) -> bool:
         return self.canonical_state == "conflict" or self.target_state == "conflict"
+
+    @property
+    def pending_canonical_write(self) -> bool:
+        """The canonical leg would write — drives the git-tracked-write gate."""
+        return self.canonical_state == "missing"
+
+    @property
+    def pending_target_write(self) -> bool:
+        """The tier leg would write.
+
+        A canonical conflict blocks BOTH legs in :func:`apply_hook_copy`,
+        so a pending tier write requires a non-conflicted canonical.
+        Surfaces key their consent gates on these two properties (the
+        no-op-never-prompts contract): the CLI's ``--confirm-project-shared``
+        / host-write prompt and the web route's ``confirm_project_shared``
+        / ``allow_host_writes`` envelopes must agree on what is pending.
+        """
+        return self.canonical_state != "conflict" and self.target_state == "missing"
 
 
 @dataclass
@@ -335,7 +354,7 @@ def _append_rule(doc: dict, event: str, rule: dict) -> dict:
 # ── Gate A ──────────────────────────────────────────────────────────
 
 
-def _gate_a_scan(plan: HookCopyPlan, surface: str) -> None:
+def gate_a_scan(plan: HookCopyPlan, surface: str) -> None:
     """Scan the exact canonical fragment the copy would write (always).
 
     ``scope="project_shared"`` is hardcoded — the destination canonical
@@ -528,7 +547,7 @@ def apply_hook_copy(
     CANONICAL also skips the tier leg (a tier-only write is the
     self-destructing copy this module exists to prevent).
     """
-    _gate_a_scan(plan, surface)
+    gate_a_scan(plan, surface)
 
     result = HookCopyResult(
         plan=plan,
