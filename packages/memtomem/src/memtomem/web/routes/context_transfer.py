@@ -136,7 +136,7 @@ def _resolve_source(
 
 def _resolve_destination(
     request: Request,
-    body: TransferRequest,
+    to_project_scope_id: str | None,
     src_root: Path,
     src_scope: ProjectScope | None,
 ) -> tuple[Path, ProjectScope | None]:
@@ -146,21 +146,23 @@ def _resolve_destination(
     same-project transfer): the destination inherits the SOURCE's scope
     record so the eligibility gate below sees a paused source project
     even when the destination is only implicit. Message literals for
-    the 404s mirror ``_resolve_selected_scope`` verbatim.
+    the 404s mirror ``_resolve_selected_scope`` verbatim. Shared with the
+    settings hook copy route (``settings_sync.copy_hook_to_project``),
+    which passes its own body's selector.
     """
-    if body.to_project_scope_id is None:
+    if to_project_scope_id is None:
         return src_root, src_scope
     for scope in _discover_for(request):
-        if scope.scope_id != body.to_project_scope_id:
+        if scope.scope_id != to_project_scope_id:
             continue
         if scope.root is None or scope.missing:
             raise _error(
                 404,
                 "missing",
-                f"scope {body.to_project_scope_id!r} is registered but its root is missing",
+                f"scope {to_project_scope_id!r} is registered but its root is missing",
             )
         return scope.root, scope
-    raise _error(404, "missing", f"unknown project_scope_id: {body.to_project_scope_id!r}")
+    raise _error(404, "missing", f"unknown project_scope_id: {to_project_scope_id!r}")
 
 
 def _reject_ineligible_destination(scope: ProjectScope | None, to_scope: TargetScope) -> None:
@@ -316,7 +318,9 @@ async def transfer_context_artifact(
         )
 
     src_root, src_scope = _resolve_source(request, project_scope_id, scope_id)
-    dst_root, dst_scope = _resolve_destination(request, body, src_root, src_scope)
+    dst_root, dst_scope = _resolve_destination(
+        request, body.to_project_scope_id, src_root, src_scope
+    )
     _reject_ineligible_destination(dst_scope, body.to_target_scope)
 
     if (

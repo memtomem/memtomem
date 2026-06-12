@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Cross-project per-hook copy for settings hooks (ADR-0023 §11).** New
+  `mm context settings-copy --event … --matcher … --to-project <scope_id|path>`
+  and `POST /api/context/settings/hooks/copy` copy ONE canonical-matched hook
+  entry into another project. The copy is durable by construction — it writes
+  the destination's canonical `.memtomem/settings.json` (so the destination's
+  own syncs maintain the rule) and the destination-tier Claude settings file
+  (ownership-stamped, live immediately); other runtimes pick the entry up on
+  the destination's next settings sync (the exact command is printed).
+  Idempotent re-runs are no-ops, same-matcher conflicts are skipped with the
+  colliding entry named, and the privacy scan (Gate A) runs for every
+  destination tier with no force valve. Companion fix: settings sync now
+  re-reads the canonical under the per-target lock, so a concurrently
+  in-flight sync can no longer prune a rule another gateway writer just
+  landed (#1281).
+
 ## [0.2.4] — 2026-06-04
 
 Patch release on top of 0.2.3: a multi-project **Context Portal**,

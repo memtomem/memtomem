@@ -1207,7 +1207,7 @@ def generate_all_settings(
             )
             continue
 
-        # Steps 1-4 run under a per-target cross-process lock so a separate
+        # Steps 0-4 run under a per-target cross-process lock so a separate
         # process (a CLI ``mm context sync`` / the MCP server) or the Web UI
         # cannot land a write between the mtime recheck (Step 3) and the atomic
         # rename inside ``_write_json`` (Step 4) and silently drop a concurrent
@@ -1225,6 +1225,36 @@ def generate_all_settings(
             # non-blocking attempt: acquire iff instantly free, else abort.
             lock_timeout = max(0.0, lock_deadline - time.monotonic())
             with _file_lock(_lock_path_for(target_path), timeout=lock_timeout):
+                # Step 0: re-read the canonical under the target lock (#1281).
+                # The pre-lock read above only decides the no-write early
+                # exits (skipped / error / needs_confirmation) WITHOUT
+                # touching this target's sidecar lock — a no-canonical or
+                # unconfirmed-host-write invocation must never create or
+                # contend on a host lock file. The merge, however, must
+                # derive its contributions from a read that happens-after
+                # the lock acquire: ``settings-copy`` (cross-project per-hook
+                # copy) writes the canonical strictly before the tier file
+                # while holding both sidecar locks, so without this re-read
+                # a sync that captured a stale canonical and then waited on
+                # this lock would prune the freshly stamped, owned tier rule
+                # as "no longer emitted". Same-literal statuses keep every
+                # stable state's result shape unchanged.
+                if not canonical_path.exists():
+                    results[name] = SettingsSyncResult(
+                        status="skipped",
+                        reason="no canonical source (.memtomem/settings.json)",
+                    )
+                    continue
+                raw_locked = _safe_load_json(canonical_path)
+                if raw_locked is _MALFORMED:
+                    results[name] = SettingsSyncResult(
+                        status="error",
+                        reason=f"{canonical_path} is not valid JSON (or not a JSON object). "
+                        f"Fix the file manually.",
+                    )
+                    continue
+                contributions = raw_locked  # type: ignore[assignment]
+
                 # Step 1: read existing + capture mtime (ns)
                 existing_raw, existing_mtime_ns = _read_settings_target(name, target_path)
                 if existing_raw is _MALFORMED:

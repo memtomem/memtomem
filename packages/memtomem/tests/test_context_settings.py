@@ -1435,6 +1435,149 @@ class TestGenerateAllSettingsHostWriteGate:
         assert results["claude_settings"].status == "needs_confirmation"
 
 
+class TestGenerateCanonicalReadUnderLock:
+    """#1281 prerequisite — merge contributions derive from a canonical read
+    that happens-after the per-target lock acquire.
+
+    ``settings-copy`` (cross-project per-hook copy) writes the canonical
+    strictly before the tier file while holding both sidecar locks; a sync
+    that captured a stale canonical and then waited on the tier lock would
+    prune the freshly stamped owned rule as "no longer emitted". The fix
+    re-reads the canonical inside the lock — while every no-write early exit
+    (skipped / error / needs_confirmation) stays pre-lock so it never creates
+    or contends on a target sidecar lock (host paths in particular)."""
+
+    def _setup(self, tmp_path, command: str = "echo old"):
+        project = tmp_path / "proj"
+        project.mkdir()
+        _make_canonical_settings(project, {"hooks": {"PostToolUse": [_rule("Edit", command)]}})
+        return project
+
+    def test_merge_uses_canonical_state_after_lock_acquire(self, claude_home, tmp_path):
+        """A canonical write landing before the lock acquire is merged.
+
+        The lock wrapper rewrites the canonical at acquire time — the exact
+        interleaving of a settings-copy committing between this sync's
+        pre-lock read and its lock acquisition. Pre-fix, the stale pre-lock
+        contributions ("echo old") were merged and the fresh entry was lost.
+        """
+        from memtomem.context import settings as settings_mod
+        from memtomem.context._atomic import _lock_path_for
+
+        project = self._setup(tmp_path)
+        canonical = project / CANONICAL_SETTINGS_FILE
+        target = project / ".claude" / "settings.json"
+        real_lock = settings_mod._file_lock
+
+        @contextlib.contextmanager
+        def mutating_lock(lock_path, *, timeout=None):
+            if lock_path == _lock_path_for(target):
+                canonical.write_text(
+                    json.dumps({"hooks": {"PostToolUse": [_rule("Edit", "echo new")]}}) + "\n",
+                    encoding="utf-8",
+                )
+            with real_lock(lock_path, timeout=timeout):
+                yield
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings_mod, "_file_lock", mutating_lock)
+            results = generate_all_settings(project, scope="project_shared")
+
+        assert results["claude_settings"].status == "ok"
+        written = json.loads(target.read_text(encoding="utf-8"))
+        commands = [
+            inner["command"] for rule in written["hooks"]["PostToolUse"] for inner in rule["hooks"]
+        ]
+        assert "echo new" in commands
+        assert "echo old" not in commands
+
+    def test_canonical_vanishing_under_lock_reports_skipped(self, claude_home, tmp_path):
+        """In-lock re-read maps a vanished canonical to the same ``skipped``
+        literal the stable no-canonical path reports; the target is never
+        written."""
+        from memtomem.context import settings as settings_mod
+        from memtomem.context._atomic import _lock_path_for
+
+        project = self._setup(tmp_path)
+        canonical = project / CANONICAL_SETTINGS_FILE
+        target = project / ".claude" / "settings.json"
+        real_lock = settings_mod._file_lock
+
+        @contextlib.contextmanager
+        def deleting_lock(lock_path, *, timeout=None):
+            if lock_path == _lock_path_for(target):
+                canonical.unlink()
+            with real_lock(lock_path, timeout=timeout):
+                yield
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings_mod, "_file_lock", deleting_lock)
+            results = generate_all_settings(project, scope="project_shared")
+
+        assert results["claude_settings"].status == "skipped"
+        assert not target.exists()
+
+    def test_no_canonical_user_scope_touches_no_host_sidecar(self, claude_home, tmp_path):
+        """No-canonical short-circuits BEFORE any lock: nothing may appear
+        under the host ``~/.claude/`` — not even a sidecar lock file."""
+        from memtomem.context._atomic import _lock_path_for
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        results = generate_all_settings(project, scope="user")
+        assert results["claude_settings"].status == "skipped"
+        target = claude_home / ".claude" / "settings.json"
+        assert not _lock_path_for(target).exists()
+        assert list((claude_home / ".claude").iterdir()) == []
+
+    def test_unconfirmed_host_write_touches_no_host_sidecar(self, claude_home, tmp_path):
+        """The host-write gate fires BEFORE the lock — an unconfirmed
+        user-scope invocation must not create the host sidecar lock."""
+        from memtomem.context._atomic import _lock_path_for
+
+        project = self._setup(tmp_path)
+        results = generate_all_settings(project, scope="user")
+        assert results["claude_settings"].status == "needs_confirmation"
+        target = claude_home / ".claude" / "settings.json"
+        assert not _lock_path_for(target).exists()
+        assert list((claude_home / ".claude").iterdir()) == []
+
+    def test_malformed_canonical_errors_without_lock_touch(self, claude_home, tmp_path):
+        """Malformed canonical stays a pre-lock ``error`` — no sidecar."""
+        from memtomem.context._atomic import _lock_path_for
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        _make_canonical_settings(project, "{not json")
+        results = generate_all_settings(project, scope="user")
+        assert results["claude_settings"].status == "error"
+        target = claude_home / ".claude" / "settings.json"
+        assert not _lock_path_for(target).exists()
+
+    def test_contended_lock_only_aborts_write_eligible_path(self, claude_home, tmp_path):
+        """Lock contention may only surface as ``aborted`` on a path that was
+        actually going to write — a no-canonical invocation never reaches the
+        lock, so it must stay ``skipped`` even when every acquire times out."""
+        from memtomem.context import settings as settings_mod
+
+        @contextlib.contextmanager
+        def always_timeout(lock_path, *, timeout=None):
+            raise TimeoutError
+            yield  # pragma: no cover
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        eligible = self._setup(tmp_path)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(settings_mod, "_file_lock", always_timeout)
+            skipped = generate_all_settings(empty, scope="project_shared")
+            aborted = generate_all_settings(eligible, scope="project_shared")
+
+        assert skipped["claude_settings"].status == "skipped"
+        assert aborted["claude_settings"].status == "aborted"
+
+
 # ── ADR-0010 §3 hooks.target_scope plumbing (issue #870) ────────────────────
 
 

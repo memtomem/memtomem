@@ -105,6 +105,12 @@ from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
     format_warning,
 )
+from memtomem.context.settings_copy import (
+    HookCopyPlan,
+    HookCopyResult,
+    apply_hook_copy,
+    plan_hook_copy,
+)
 from memtomem.context.settings_migrate import (
     apply_migration,
     format_plan_summary,
@@ -3740,6 +3746,333 @@ def settings_migrate_cmd(
         # discovered at apply time; the user must resolve manually before
         # re-running migrate. Match `mm context migrate`'s exit-1 on any
         # partial failure.
+        raise click.exceptions.Exit(1)
+
+
+# ── settings-copy (#1281, campaign #1270 A-11) ──────────────────────
+
+
+def _leg_glyph_note(state: str, reason: str, *, already_note: str, add_note: str) -> tuple:
+    """(glyph, color, note) for one settings-copy plan leg."""
+    if state == "conflict":
+        return ("✗", "red", f"skip (conflict: {reason})")
+    if state == "exact":
+        return ("·", "cyan", already_note)
+    return ("→", "green", add_note)
+
+
+def _print_hook_copy_plan(plan: HookCopyPlan) -> None:
+    """Render the settings-copy dry-run / pre-apply preview."""
+    click.echo(f"Plan: copy hook [{plan.label}]  {plan.signature.command_shape}")
+    click.echo(f"  from {plan.src_canonical_path}")
+    click.echo(f"  to   {plan.dst_project_root} ({plan.dst_scope} tier)")
+    for leg, path, state, reason, add_note in (
+        (
+            "canonical",
+            plan.dst_canonical_path,
+            plan.canonical_state,
+            plan.canonical_reason,
+            "add entry (durable definition)",
+        ),
+        (
+            "tier     ",
+            plan.dst_target_path,
+            plan.target_state,
+            plan.target_reason,
+            "add stamped rule (live immediately)",
+        ),
+    ):
+        glyph, color, note = _leg_glyph_note(
+            state, reason, already_note="already present", add_note=add_note
+        )
+        click.secho(f"  {glyph}  {leg} {path}  ({note})", fg=color)
+
+
+def _hook_copy_payload(plan: HookCopyPlan, status: str) -> dict[str, Any]:
+    """Base ``--json`` payload for one settings-copy plan."""
+    return {
+        "status": status,
+        "applied": False,
+        "event": plan.signature.event,
+        "matcher": plan.signature.matcher,
+        "command_preview": plan.signature.command_shape,
+        "src_project": str(plan.src_project_root),
+        "dst_project": str(plan.dst_project_root),
+        "dst_scope": plan.dst_scope,
+        "src_canonical": str(plan.src_canonical_path),
+        "dst_canonical": str(plan.dst_canonical_path),
+        "dst_target": str(plan.dst_target_path),
+        "canonical": {"state": plan.canonical_state, "reason": plan.canonical_reason},
+        "target": {"state": plan.target_state, "reason": plan.target_reason},
+    }
+
+
+def _print_hook_copy_result(result: HookCopyResult) -> None:
+    """Human-readable apply outcome for one settings-copy."""
+    plan = result.plan
+    if result.canonical_written:
+        click.secho(f"  ✓ wrote canonical entry to {plan.dst_canonical_path}", fg="green")
+    elif result.canonical_already:
+        click.echo(f"  · canonical already carries [{plan.label}] — no change")
+    if result.target_written:
+        click.secho(f"  ✓ wrote stamped rule to {plan.dst_target_path}", fg="green")
+    elif result.target_already:
+        click.echo(f"  · {plan.dst_scope} tier already carries [{plan.label}] — no change")
+    for warning in result.warnings:
+        click.secho(f"  ⚠ {warning}", fg="yellow", err=True)
+    if result.canonical_written or result.target_written:
+        click.echo(
+            f"\nNext: run `{result.sync_command}` to fan the entry out to the "
+            f"destination's other runtimes (Codex/Gemini/Kimi)."
+        )
+
+
+@context.command("settings-copy")
+@click.option("--event", required=True, help="Hook event name (e.g. PostToolUse).")
+@click.option(
+    "--matcher",
+    default="",
+    help="Hook matcher under the event; omit for matcher-less events (e.g. SessionStart).",
+)
+@click.option(
+    "--hook-command",
+    "hook_command",
+    default=None,
+    metavar="SUBSTRING",
+    help=(
+        "Disambiguator when several entries share (event, matcher): "
+        "substring matched against the normalized command."
+    ),
+)
+@click.option(
+    "--to-project",
+    "to_project",
+    required=True,
+    metavar="SCOPE_ID|PATH",
+    help=(
+        "Destination project — a p-<sha12> scope_id from `mm context projects "
+        "list`, or a filesystem path (typing a path is consent to target an "
+        "unregistered project)."
+    ),
+)
+@click.option(
+    "--to",
+    "to_scope",
+    type=click.Choice(list(get_args(TargetScope))),
+    default=None,
+    help=(
+        "Destination Claude settings tier for the immediate fan-out. "
+        "Omitted: the resolved hooks.target_scope (the tier sync writes)."
+    ),
+)
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    default=False,
+    help="Execute the copy (default is a dry-run preview).",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation and host-write prompts. Requires --apply.",
+)
+@click.option(
+    "--confirm-project-shared",
+    "confirm_project_shared",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required (in addition to --apply) when the copy writes the "
+        "destination's git-tracked files — the canonical "
+        ".memtomem/settings.json always is one. --yes alone does not "
+        "satisfy this opt-in (mirrors `mm context copy`)."
+    ),
+)
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    default=False,
+    help="Emit a structured JSON result instead of human-readable output.",
+)
+def settings_copy_cmd(
+    event: str,
+    matcher: str,
+    hook_command: str | None,
+    to_project: str,
+    to_scope: str | None,
+    apply_: bool,
+    yes: bool,
+    confirm_project_shared: bool,
+    json_out: bool,
+) -> None:
+    """Copy one canonical-matched hook entry into another project.
+
+    Cross-project sibling of ``settings-migrate`` (which moves entries
+    between tiers of ONE project). The copy is durable by construction:
+    it writes the destination's canonical ``.memtomem/settings.json``
+    (so the destination's own syncs maintain the rule) AND the
+    destination-tier Claude settings file (ADR-0019-stamped, live
+    immediately). Other runtimes (Codex/Gemini/Kimi) pick the entry up
+    on the destination's next ``mm context sync --include=settings`` —
+    the exact command is printed.
+
+    Copy-only in v1; the source project is never modified. Identity is
+    the canonical hook signature; ``already at target`` re-runs are
+    no-ops and a conflicting same-matcher rule at the destination is
+    skipped with a report naming the colliding entry (never duplicated).
+    A privacy scan (Gate A) always runs — the destination canonical is
+    git-tracked for every tier; there is no force valve.
+
+    Exit codes: ``0`` clean (or dry-run), ``1`` declined confirmation,
+    conflicts, or apply-time drift.
+    """
+    if yes and not apply_:
+        raise click.UsageError("--yes is only valid with --apply")
+
+    src_root = _find_project_root()
+
+    cfg = _projects_gateway_cfg()
+    try:
+        dst_root, dst_scope_rec = resolve_project_selector(to_project, _projects_discover(cfg))
+    except UnknownProjectSelectorError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if dst_scope_rec is not None and not dst_scope_rec.enabled:
+        # Same refusal as `mm context copy` — a paused destination would
+        # hold a canonical entry that never fans out there.
+        raise click.ClickException(
+            f"destination project {dst_scope_rec.scope_id} ({dst_root}) is "
+            f"paused — sync enrollment is disabled, so the copied hook would "
+            f"not fan out there. Run `mm context projects resume "
+            f"{dst_scope_rec.scope_id}` first, or pick another destination."
+        )
+    # Unconditional (unlike artifact transfer's user-tier exemption): the
+    # canonical leg lands in the destination PROJECT for every tier.
+    if not (dst_root / ".memtomem").is_dir():
+        raise click.ClickException(
+            f"destination project has no .memtomem/ store: {dst_root}\n"
+            f"  Initialize it first: cd {dst_root} && mm context init"
+        )
+
+    dst_scope = to_scope if to_scope is not None else _resolve_cli_scope(None)
+
+    try:
+        plan = plan_hook_copy(
+            src_root,
+            event=event,
+            matcher=matcher,
+            hook_command=hook_command,
+            dst_project_root=dst_root,
+            dst_scope=dst_scope,
+        )
+    except ValueError as exc:
+        # HookNotFoundError / AmbiguousHookSelectorError / same-project /
+        # unknown tier — all ValueError subclasses with CLI-ready messages.
+        raise click.ClickException(str(exc)) from exc
+
+    # Pending writes drive the gates (the #1263 contract: no-op requests
+    # never prompt). The plan properties encode the cross-leg rule (a
+    # canonical conflict blocks both legs) so the web route's envelopes
+    # and these prompts cannot drift on what counts as pending.
+    git_tracked_write = plan.pending_canonical_write or (
+        plan.pending_target_write and dst_scope == "project_shared"
+    )
+    host_write = plan.pending_target_write and dst_scope == "user"
+
+    if json_out:
+        payload = _hook_copy_payload(
+            plan,
+            "noop" if plan.is_noop else ("conflicts" if plan.has_conflict else "ok"),
+        )
+    else:
+        _print_hook_copy_plan(plan)
+
+    if not apply_:
+        if json_out:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            confirm_note = " --confirm-project-shared" if git_tracked_write else ""
+            click.echo(f"\nRun with --apply{confirm_note} to execute.")
+        return
+
+    if plan.is_noop:
+        # Nothing to write — never prompt for a no-op (#1263 contract).
+        if json_out:
+            payload["applied"] = True
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            click.echo("  (nothing to do — the entry is already at the destination)")
+        return
+
+    # Gate B — pending write into the destination's git-tracked files
+    # (the canonical is one for EVERY tier; the project_shared tier file
+    # adds a second). Wording parity with `mm context copy`.
+    if git_tracked_write and not confirm_project_shared:
+        if yes:
+            raise click.ClickException(
+                "copying into the destination's git-tracked files (canonical "
+                ".memtomem/settings.json) requires --confirm-project-shared. "
+                "--yes alone is not sufficient: project-shared writes require "
+                "explicit opt-in."
+            )
+        if json_out:
+            payload["status"] = "needs_confirmation"
+            payload["hint"] = "Re-run with --confirm-project-shared after confirming."
+            click.echo(json.dumps(payload, indent=2))
+            raise click.exceptions.Exit(1)
+        if not click.confirm(
+            f"\nThis will copy the hook into {plan.dst_project_root}'s "
+            f"git-tracked canonical settings (.memtomem/settings.json)"
+            + (" and its project_shared tier file" if dst_scope == "project_shared" else "")
+            + ". Continue?",
+            default=False,
+        ):
+            raise click.Abort()
+
+    # Host-write prompt — the user tier file lives outside any project
+    # root (mirrors settings-migrate; satisfied by --yes).
+    if host_write and not yes:
+        if json_out:
+            payload["status"] = "needs_confirmation"
+            payload["host_writes"] = [str(plan.dst_target_path)]
+            payload["hint"] = "Re-run with --yes after confirming."
+            click.echo(json.dumps(payload, indent=2))
+            raise click.exceptions.Exit(1)
+        click.secho(
+            "settings-copy will modify the following file outside the destination project:",
+            fg="yellow",
+        )
+        click.echo(f"  {plan.dst_target_path}  (user tier)")
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted.")
+            raise click.exceptions.Exit(1)
+
+    try:
+        result = apply_hook_copy(plan, surface="cli_context_settings_copy")
+    except PrivacyScanError as exc:
+        raise click.ClickException(exc.message) from exc
+
+    if json_out:
+        payload["applied"] = True
+        payload["canonical"]["written"] = result.canonical_written
+        payload["canonical"]["already"] = result.canonical_already
+        payload["target"]["written"] = result.target_written
+        payload["target"]["already"] = result.target_already
+        payload["needs_sync"] = result.needs_sync
+        payload["sync_command"] = result.sync_command
+        if result.warnings:
+            payload["warnings"] = result.warnings
+            payload["status"] = "conflicts"
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        _print_hook_copy_result(result)
+
+    if result.warnings:
+        # Conflicts or apply-time drift left unresolved — match the
+        # settings-migrate exit-1 contract.
         raise click.exceptions.Exit(1)
 
 

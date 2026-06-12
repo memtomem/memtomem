@@ -294,6 +294,32 @@ When the source or target lives outside the project root (e.g.
 `--from=user`, which resolves to `~/.claude/settings.json`), `--apply`
 prompts for confirmation; pass `--yes` to skip the prompt in scripts.
 
+`settings-migrate` moves entries between tiers of ONE project. To propagate
+a single hook to ANOTHER project ("I want this guard hook in project B
+too"), use the cross-project sibling:
+
+```bash
+mm context settings-copy --event PostToolUse --matcher "Edit|Write" \
+    --to-project ~/work/project-b                                     # dry-run
+mm context settings-copy --event PostToolUse --matcher "Edit|Write" \
+    --to-project ~/work/project-b --apply --confirm-project-shared    # mutate
+```
+
+`--to-project` takes a `p-<sha12>` scope_id from `mm context projects list`
+or a filesystem path. The copy writes the destination's canonical
+`.memtomem/settings.json` (so the destination's own syncs keep the rule
+alive) plus the destination-tier Claude settings file (`--to <tier>`,
+defaulting to the resolved `hooks.target_scope`); Codex/Gemini/Kimi pick
+the entry up on the destination's next
+`mm context sync --include=settings` — the exact command is printed.
+Because the destination canonical is git-tracked, `--apply` requires
+`--confirm-project-shared` whenever something would actually be written,
+and the privacy scan runs for every destination tier with no force valve.
+Re-runs are idempotent no-ops; a same-matcher rule with different content
+at the destination is skipped with the colliding entry named (never
+duplicated). When several entries share `(event, matcher)`, disambiguate
+with `--hook-command <substring>`.
+
 ---
 
 ## Tool Usage Guidelines (Add to CLAUDE.md)
