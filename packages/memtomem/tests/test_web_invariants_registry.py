@@ -82,6 +82,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_skills.import_skills",
         "context_skills.sync_skills",
         "context_skills.update_skill",
+        "context_sync_all.sync_all_context",
         "context_transfer.transfer_context_artifact",
         "context_versions.create_artifact_version",
         "context_versions.delete_artifact_label",
@@ -189,6 +190,8 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_skills.import_skill": "structured artifact import",
     "context_skills.import_skills": "bulk structured artifact import",
     "context_skills.sync_skills": "filesystem-driven sync",
+    "context_sync_all.sync_all_context": "filesystem-driven sync (per-type "
+    "cores under one lock); no content payload",
     "context_transfer.transfer_context_artifact": (
         "no content payload — moves/copies existing canonical bytes between "
         "stores; project_shared landings run Gate A in-engine on the staged tree"

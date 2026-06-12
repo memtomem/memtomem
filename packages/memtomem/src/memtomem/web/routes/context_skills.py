@@ -31,6 +31,7 @@ from memtomem.context.skills import (
 from memtomem.config import TargetScope
 from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._locks import _gateway_lock
+from memtomem.web.routes._sync_phase import SyncPhaseError
 from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
@@ -605,6 +606,56 @@ class SyncRequest(BaseModel):
     allow_host_writes: bool = False
 
 
+async def _sync_skills_core(
+    project_root: Path,
+    target_scope: TargetScope,
+    *,
+    surface: str = "web_context_skills_sync",
+) -> dict:
+    """Lock-free skills sync core — the caller MUST hold ``_gateway_lock``.
+
+    Shared by the standalone route below and ``POST /context/sync-all``
+    (#1278), which runs every per-type core under ONE outer lock
+    acquisition — the lock is a non-reentrant ``_LoopLocalLock``, so the
+    core must never acquire it itself.
+
+    Offloads to a worker thread — the engine acquires cross-process
+    destination sidecar locks (skills hold them across the whole staging
+    swap, _locks.py), which would otherwise block the event loop thread,
+    stalling every request AND preventing the caller's ``asyncio.timeout``
+    from firing (its expiry callback runs on the very loop that is
+    blocked) — the exact shape #1145 fixed for settings. The engine's own
+    ``_SKILLS_LOCK_BUDGET_S`` (30s, below every caller's timeout) bounds
+    the lock waits, so a timed-out request cannot orphan a worker thread
+    that writes after the 503 already went out.
+
+    Engine errors are raised as :class:`SyncPhaseError` — the standalone
+    route's historical status/detail pair (privacy 422 keeps its STRING
+    detail, issue-pinned) plus the envelope attributes sync-all renders.
+    """
+    try:
+        result = await asyncio.to_thread(
+            generate_all_skills,
+            project_root,
+            scope=target_scope,
+            surface=surface,
+        )
+    except PrivacyScanError as exc:
+        raise SyncPhaseError(
+            422, exc.message, error_kind="validation", reason_code="privacy_blocked"
+        ) from exc
+    return {
+        "generated": [
+            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
+        ],
+        "skipped": [
+            {"runtime": rt, "reason": reason, "reason_code": code}
+            for rt, reason, code in result.skipped
+        ],
+        "canonical_root": CANONICAL_SKILL_ROOT,
+    }
+
+
 @router.post("/context/skills/sync")
 async def sync_skills(
     body: SyncRequest | None = None,
@@ -632,37 +683,9 @@ async def sync_skills(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                # Offload to a worker thread — the engine acquires
-                # cross-process destination sidecar locks (skills hold them
-                # across the whole staging swap, _locks.py), which would
-                # otherwise block this synchronous call ON the event loop
-                # thread, stalling every request AND preventing the enclosing
-                # ``asyncio.timeout(60)`` from firing (its expiry callback
-                # runs on the very loop that is blocked) — the exact shape
-                # #1145 fixed for settings. The engine's own
-                # ``_SKILLS_LOCK_BUDGET_S`` (30s < 60s) bounds the lock
-                # waits, so a timed-out request cannot orphan a worker
-                # thread that writes after the 503 already went out.
-                result = await asyncio.to_thread(
-                    generate_all_skills,
-                    project_root,
-                    scope=target_scope,
-                    surface="web_context_skills_sync",
-                )
+                return await _sync_skills_core(project_root, target_scope)
     except TimeoutError:
         raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
-    except PrivacyScanError as exc:
-        raise HTTPException(422, exc.message) from exc
-    return {
-        "generated": [
-            {"runtime": rt, "path": _safe_rel(p, project_root)} for rt, p in result.generated
-        ],
-        "skipped": [
-            {"runtime": rt, "reason": reason, "reason_code": code}
-            for rt, reason, code in result.skipped
-        ],
-        "canonical_root": CANONICAL_SKILL_ROOT,
-    }
 
 
 # ── Import (reverse sync) ───────────────────────────────────────────────
