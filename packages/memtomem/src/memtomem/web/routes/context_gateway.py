@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from memtomem.privacy import scan as _privacy_scan
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._names import GENERATOR_VENDOR
-from memtomem.web.routes.context_projects import resolve_scope_root
+from memtomem.context.projects import sync_skip_reason
+from memtomem.context.status import (
+    ProjectStatus,
+    collect_project_status,
+    summarize_diff_with_canonical,
+    summarize_settings_statuses,
+)
+from memtomem.wiki.store import WikiStore
+from memtomem.web.routes.context_projects import _discover_for, resolve_scope_root
 
 try:
     import tomllib
@@ -35,34 +45,10 @@ _ERROR_MESSAGE_LIMIT = 200
 _SECRET_REDACTED_MARKER = "<redacted: secret-shape>"
 
 
-def _count_statuses(triples: list[tuple[str, str, str]]) -> dict:
-    """Summarise ``(runtime, name, status)`` triples into per-status counts."""
-    names: set[str] = set()
-    counts: dict[str, int] = {}
-    for _runtime, name, status in triples:
-        names.add(name)
-        key = status.replace(" ", "_")
-        counts[key] = counts.get(key, 0) + 1
-    return {"total": len(names), **counts}
-
-
-def _count_context_statuses(
-    triples: list[tuple[str, str, str]],
-    canonical_names: set[str],
-) -> dict:
-    """Summarise runtime diffs plus canonical-only draft rows.
-
-    ``project_local`` agents / skills / commands have no runtime fan-out, so
-    their diff list can be empty even when canonical drafts exist. Count the
-    canonical names explicitly so overview totals match list views.
-    """
-    result = _count_statuses(triples)
-    runtime_names = {name for _runtime, name, _status in triples}
-    canonical_only = canonical_names - runtime_names
-    if canonical_only:
-        result["total"] = len(runtime_names | canonical_names)
-        result["local_draft"] = len(canonical_only)
-    return result
+# The count derivations (``summarize_diff_statuses`` /
+# ``summarize_diff_with_canonical`` / ``summarize_settings_statuses``) live
+# in ``memtomem.context.status`` since #1280 so the CLI batch verb and every
+# web aggregate share one keying rule.
 
 
 def _classify_exception(exc: BaseException) -> str:
@@ -353,7 +339,7 @@ async def context_overview(
     result: dict[str, dict[str, int | bool | str]] = {}
 
     try:
-        result["skills"] = _count_context_statuses(
+        result["skills"] = summarize_diff_with_canonical(
             diff_skills(project_root, scope=target_scope),
             {p.name for p in list_canonical_skills(project_root, scope=target_scope)},
         )
@@ -362,7 +348,7 @@ async def context_overview(
         result["skills"] = _error_payload(exc, shape="total")
 
     try:
-        result["commands"] = _count_context_statuses(
+        result["commands"] = summarize_diff_with_canonical(
             diff_commands(project_root, scope=target_scope),
             {
                 canonical_command_name(p, layout)
@@ -374,7 +360,7 @@ async def context_overview(
         result["commands"] = _error_payload(exc, shape="total")
 
     try:
-        result["agents"] = _count_context_statuses(
+        result["agents"] = summarize_diff_with_canonical(
             diff_agents(project_root, scope=target_scope),
             {
                 canonical_agent_name(p, layout)
@@ -387,7 +373,7 @@ async def context_overview(
 
     try:
         if target_scope == "project_shared":
-            result["mcp_servers"] = _count_context_statuses(
+            result["mcp_servers"] = summarize_diff_with_canonical(
                 diff_mcp_servers(project_root),
                 {p.stem for p in list_canonical_mcp_servers(project_root)},
             )
@@ -399,48 +385,15 @@ async def context_overview(
 
     try:
         settings_diff = diff_settings(project_root, scope=target_scope)
-        statuses = [r.status for r in settings_diff.values()]
-        # `total` counts only **applicable** generators (runtime installed +
-        # canonical source present). `skipped` items are N/A — including them
-        # would make the dashboard read "1/2 synced" even when the second slot
-        # is "no Codex installed", which misleads the user about actionable work.
-        total_applicable = sum(1 for s in statuses if s != "skipped")
-        # diff_settings emits 5 status values (settings.py:386-404):
-        # `in sync`, `out of sync`, `missing target`, `error`, `skipped`.
-        # All four non-skipped categories must be represented as count
-        # fields so `in_sync + out_of_sync + missing_target + error ==
-        # total_applicable` holds — that contract lets future consumers
-        # render per-status segments without the count silently dropping
-        # entries on the floor. `missing target` is the common first-use
-        # state (existing is None — settings.py:403-404), parallel to
-        # how skills/commands/agents already emit `missing_target`.
-        in_sync = sum(1 for s in statuses if s == "in sync")
-        out_of_sync = sum(1 for s in statuses if s == "out of sync")
-        missing_target = sum(1 for s in statuses if s == "missing target")
-        error_count = sum(1 for s in statuses if s == "error")
-        if all(s in ("in sync", "skipped") for s in statuses):
-            status = "in_sync"
-        elif any(s == "error" for s in statuses):
-            # In-band error: per-file failure already classified by diff_settings.
-            # No error_kind here — adding one would conflate distinct per-file causes.
-            status = "error"
-        else:
-            status = "out_of_sync"
-        # `error` is a count here (parallel to `out_of_sync` / `in_sync` /
-        # `missing_target`), NOT the bool flag `_error_payload(shape="total")`
-        # emits when the whole call raises. The two shapes are on disjoint
-        # code paths. The frontend uses truthiness on `d.error` (any
-        # positive int OR the bool `true` reaches the danger render at
+        # In-band `error` is a COUNT (per-file failures already classified by
+        # diff_settings — no error_kind, which would conflate distinct per-file
+        # causes), NOT the bool flag `_error_payload(shape="status")` emits
+        # when the whole call raises. The two shapes are on disjoint code
+        # paths. The frontend uses truthiness on `d.error` (any positive int
+        # OR the bool `true` reaches the danger render at
         # context-gateway.js:136-145), so `error: 0` correctly skips the
         # danger branch and `error: >=1` reaches it — both shapes work.
-        result["settings"] = {
-            "total": total_applicable,
-            "in_sync": in_sync,
-            "out_of_sync": out_of_sync,
-            "missing_target": missing_target,
-            "error": error_count,
-            "status": status,
-        }
+        result["settings"] = summarize_settings_statuses([r.status for r in settings_diff.values()])
     except Exception as exc:
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
@@ -487,3 +440,192 @@ async def context_runtimes(
         logger.exception("probe_all_runtimes failed")
         runtimes = []
     return {"project_root": str(project_root), "runtimes": runtimes}
+
+
+# ── GET /context/status-all — cross-project drift aggregation (#1280) ────
+
+#: Remediation prose per ``sync_skip_reason`` code. The CODE derivation is
+#: shared with the batch-sync surfaces (``context.projects.sync_skip_reason``)
+#: so batch views cannot drift on WHICH scopes are reported; the prose is
+#: surface-local (read-context wording — these rows explain why a project is
+#: absent from a status report, not why a write was withheld).
+_STATUS_ALL_SKIP_MESSAGES: dict[str, str] = {
+    "missing_root": (
+        "project root no longer exists on disk; re-register it or remove "
+        "the entry from the Projects portal."
+    ),
+    "sync_paused": (
+        "sync enrollment is paused for this project; resume it from the "
+        "Projects portal to include it in batch views."
+    ),
+    "sync_not_enrolled": (
+        "discovery-only project (never enrolled); register it from the "
+        "Projects portal to include it in batch views."
+    ),
+    "stale_project": (
+        "project has no .memtomem/ store (never initialized); run "
+        "`mm context init` there before it can be reported."
+    ),
+}
+
+
+def _status_all_entry(
+    base: dict[str, Any], status: ProjectStatus, project_root: Path
+) -> dict[str, Any]:
+    """Serialize one executed project's ``ProjectStatus`` for the wire.
+
+    Entry ``status`` vocabulary: ``error`` (corrupt / version-mismatched
+    lockfile — the aggregate is kept but cannot be trusted as complete, the
+    single-status CLI's exit-1 condition), else ``drift``/``ok`` from the
+    shared predicate. Row ``reason`` strings can embed wiki paths and raw
+    exception text (this is the first surface serializing ``StatusRow``),
+    so they pass through ``sanitize_diff_reason`` — the established
+    display-sanitize boundary; ``lockfile_error`` gets the same treatment.
+    Failed diff kinds become ``_error_payload`` envelopes under their kind
+    key, exactly like the single-project overview.
+    """
+    diff_counts: dict[str, Any] = dict(status.diff_counts)
+    for kind, exc in status.diff_errors.items():
+        diff_counts[kind] = _error_payload(exc, shape="total")
+    if status.lockfile_error:
+        entry_status = "error"
+    elif status.drift:
+        entry_status = "drift"
+    else:
+        entry_status = "ok"
+    return {
+        **base,
+        "status": entry_status,
+        "wiki_head": status.wiki_head,
+        "lockfile_error": (
+            sanitize_diff_reason(status.lockfile_error, project_root)
+            if status.lockfile_error
+            else None
+        ),
+        "state_counts": status.state_counts,
+        "diff_counts": diff_counts,
+        "rows": [
+            {
+                "asset_type": row.asset_type,
+                "name": row.name,
+                "pin_commit": row.pin_commit,
+                "installed_at": row.installed_at,
+                "state": row.state,
+                "dirty_file_count": row.dirty_file_count,
+                "reason": sanitize_diff_reason(row.reason, project_root),
+                "tier": row.tier,
+            }
+            for row in status.rows
+        ],
+    }
+
+
+@router.get("/context/status-all")
+async def context_status_all(
+    request: Request,
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Canonical-residency tier to aggregate in every project. Only "
+            "project_shared is supported: the user tier is one global store "
+            "(meaningless per project) and project_local has no fan-out to "
+            "drift — mirror of the batch-sync tier gate."
+        ),
+    ),
+) -> dict:
+    """Aggregate per-project drift status across every discovered project.
+
+    The read half of ADR-0025's batch story (#1280): one call answers
+    "which of my projects have drifted" instead of N ``/context/overview``
+    fetches. Read-only — per-root filesystem/git reads, NO gateway lock,
+    and each project's collection runs off the event loop. Returns 200
+    whenever the loop ran; non-2xx only for the tier gate (400).
+
+    Per-project entries: ``skipped`` (shared ``sync_skip_reason`` codes +
+    surface-local prose), ``error`` (corrupt lockfile, or the collector
+    raised — A-9's failed-entry envelope shape), else ``ok``/``drift`` via
+    the shared ``ProjectStatus.drift`` predicate. ``summary`` is counts
+    only — deliberately NO roll-up status string: A-9's ``ok|partial|
+    failed`` describe mutation success, while fleet health here is just
+    ``drifted + errors == 0``, derivable; a third vocabulary would invite
+    drift.
+    """
+    if target_scope != "project_shared":
+        # ADR-0023 §10 object envelope, constructed inline: importing the
+        # shared ``_error`` helper from context_transfer would be a circular
+        # import (context_transfer already imports this module's classifier);
+        # B-1 #1284 owns consolidating the envelope constructors.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_kind": "validation",
+                "message": (
+                    "status-all aggregates the project_shared tier only: the "
+                    "user tier is one global store (not per-project) and "
+                    "project_local has no runtime fan-out to drift (ADR-0011 "
+                    "§3); use the single-project routes for those views."
+                ),
+            },
+        )
+    wiki = WikiStore.at_default()
+    entries: list[dict[str, Any]] = []
+    counts = {"drifted": 0, "clean": 0, "errors": 0, "skipped": 0}
+    for scope in _discover_for(request):
+        base: dict[str, Any] = {
+            "project_scope_id": scope.scope_id,
+            "label": scope.label,
+            "root": str(scope.root) if scope.root is not None else None,
+        }
+        code = sync_skip_reason(scope)
+        if code is not None:
+            counts["skipped"] += 1
+            entries.append(
+                {
+                    **base,
+                    "status": "skipped",
+                    "reason_code": code,
+                    "message": _STATUS_ALL_SKIP_MESSAGES[code],
+                }
+            )
+            continue
+        assert scope.root is not None  # sync_skip_reason returned missing_root otherwise
+        try:
+            status = await asyncio.to_thread(
+                collect_project_status,
+                scope.root,
+                wiki=wiki,
+                target_scope=target_scope,
+            )
+        except Exception as exc:  # defensive — collect contains per-kind failures
+            logger.error(
+                "status-all %s failed outside the collector: %s",
+                scope.scope_id,
+                exc,
+                exc_info=True,
+            )
+            counts["errors"] += 1
+            entries.append(
+                {
+                    **base,
+                    "status": "error",
+                    "error": {
+                        "error_kind": _classify_exception(exc),
+                        "message": _redact_message(str(exc)),
+                        "http_status": 500,
+                    },
+                }
+            )
+            continue
+        entry = _status_all_entry(base, status, scope.root)
+        key = {"error": "errors", "drift": "drifted", "ok": "clean"}[entry["status"]]
+        counts[key] += 1
+        entries.append(entry)
+    return {
+        "target_scope": target_scope,
+        "projects": entries,
+        "summary": {
+            "projects_total": len(entries),
+            "executed": len(entries) - counts["skipped"],
+            **counts,
+        },
+    }

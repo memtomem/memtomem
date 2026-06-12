@@ -18,6 +18,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from click.testing import CliRunner
@@ -26,7 +27,17 @@ from memtomem.cli.context_cmd import context as context_group
 from memtomem.context._atomic import atomic_write_bytes, installed_at_from_dest
 from memtomem.context.lockfile import Lockfile
 from memtomem.context.migrate import migrate_scope
-from memtomem.context.status import StatusRow, classify_status, scan_user_artifacts
+from memtomem.context.status import (
+    DRIFT_STATES,
+    StatusRow,
+    StatusState,
+    classify_status,
+    collect_project_status,
+    iter_kind_drift_counts,
+    scan_user_artifacts,
+    summarize_diff_statuses,
+    summarize_settings_statuses,
+)
 from memtomem.wiki.store import WikiStore
 
 from .helpers import set_home
@@ -1030,3 +1041,256 @@ def test_cli_status_degraded_wiki_exits_zero(wiki_root: Path, tmp_path: Path, mo
     assert "present but unusable" in result.output
     assert "wiki not present" not in result.output
     assert "stale-pin" in result.output
+
+
+# ── collect_project_status — the cross-project aggregate unit (#1280) ────
+#
+# The derivation both `mm context status --all-projects` and web
+# `GET /api/context/status-all` consume. Vocabulary pins are FULL equality
+# (a substring match would have passed with parse_error/invalid_name
+# missing — the Codex design-gate catch these sections exist for).
+
+
+def test_summarize_diff_statuses_full_vocabulary() -> None:
+    """One count key per engine status, spaces snake_cased — full == pin."""
+    triples = [
+        ("claude", "a", "in sync"),
+        ("claude", "b", "out of sync"),
+        ("claude", "c", "missing target"),
+        ("claude", "d", "missing canonical"),
+        ("claude", "e", "parse error"),
+        ("claude", "f", "invalid name"),
+        ("gemini", "b", "out of sync"),
+    ]
+    assert summarize_diff_statuses(triples) == {
+        "total": 6,
+        "in_sync": 1,
+        "out_of_sync": 2,
+        "missing_target": 1,
+        "missing_canonical": 1,
+        "parse_error": 1,
+        "invalid_name": 1,
+    }
+
+
+def test_summarize_settings_statuses_full_shape() -> None:
+    """Settings roll-up: skipped excluded from total, error count + status."""
+    assert summarize_settings_statuses(["in sync", "skipped"]) == {
+        "total": 1,
+        "in_sync": 1,
+        "out_of_sync": 0,
+        "missing_target": 0,
+        "error": 0,
+        "status": "in_sync",
+    }
+    assert summarize_settings_statuses(["error", "out of sync", "missing target"]) == {
+        "total": 3,
+        "in_sync": 0,
+        "out_of_sync": 1,
+        "missing_target": 1,
+        "error": 1,
+        "status": "error",
+    }
+
+
+def test_iter_kind_drift_counts_classification() -> None:
+    """Drift enumeration: clean keys silent, EVERYTHING else loud.
+
+    ``parse_error`` / ``invalid_name`` (the Codex design-gate catch) and an
+    unknown future status key must all surface; ``total``/``in_sync``/
+    ``local_draft`` and the settings ``status`` string must not.
+    """
+    diff_counts = {
+        "skills": {"total": 3, "in_sync": 2, "local_draft": 1, "out_of_sync": 1},
+        "commands": {"total": 2, "parse_error": 1, "invalid_name": 1, "future_status": 1},
+        "agents": {"total": 1, "in_sync": 1},
+        "mcp_servers": {"total": 1, "missing_target": 1, "missing_canonical": 1},
+        "settings": {
+            "total": 2,
+            "in_sync": 1,
+            "out_of_sync": 0,
+            "missing_target": 0,
+            "error": 1,
+            "status": "error",
+        },
+    }
+    assert list(iter_kind_drift_counts(diff_counts)) == [
+        ("skills", "out_of_sync", 1),
+        ("commands", "parse_error", 1),
+        ("commands", "invalid_name", 1),
+        ("commands", "future_status", 1),
+        ("mcp_servers", "missing_target", 1),
+        ("mcp_servers", "missing_canonical", 1),
+        ("settings", "error", 1),
+    ]
+
+
+def _collect_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Sandbox HOME + wiki env so collect tests are hermetic per machine."""
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    set_home(monkeypatch, home)
+    monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
+    return home
+
+
+def test_collect_state_counts_conservation_and_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All seven StatusState keys always present; sum == len(rows); a
+    DRIFT_STATES row alone flips the shared drift flag."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    (project / ".memtomem").mkdir(parents=True)
+    Lockfile.at(project).upsert_entry(
+        "agents", "ghost", wiki_commit="0" * 40, installed_at="2026-01-01T00:00:00Z"
+    )
+
+    status = collect_project_status(project)
+
+    assert set(status.state_counts) == set(get_args(StatusState))
+    assert sum(status.state_counts.values()) == len(status.rows) == 1
+    assert status.state_counts["missing"] == 1
+    assert status.rows[0].state == "missing"  # dest gone — no wiki needed
+    assert "missing" in DRIFT_STATES and status.drift is True
+    assert status.lockfile_error is None
+
+
+def test_collect_clean_empty_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty store + no runtimes: zero rows, all-clean counts, drift False."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    (project / ".memtomem").mkdir(parents=True)
+
+    status = collect_project_status(project)
+
+    assert status.rows == []
+    assert status.drift is False
+    assert status.diff_errors == {}
+    assert set(status.diff_counts) == {"skills", "commands", "agents", "mcp_servers", "settings"}
+    assert list(iter_kind_drift_counts(status.diff_counts)) == []
+
+
+def test_collect_runtime_drift_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A never-synced canonical drifts on the runtime axis with zero wiki rows
+    (missing target — the canonical exists, the runtime file doesn't)."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)  # claude generators applicable
+    agents = project / ".memtomem" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: r\n---\nbody\n", encoding="utf-8"
+    )
+
+    status = collect_project_status(project)
+
+    assert status.state_counts["untracked"] == 1  # canonical, no lockfile entry
+    assert all(status.state_counts[s] == 0 for s in DRIFT_STATES)
+    assert status.diff_counts["agents"].get("missing_target", 0) >= 1
+    assert status.drift is True
+
+
+def test_collect_parse_error_canonical_drifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex design-gate fold: an unparseable canonical emits ``parse error``
+    rows — outside the clean key set, so the project must read as drifted."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    agents = project / ".memtomem" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "broken.md").write_text("no frontmatter at all\n", encoding="utf-8")
+
+    status = collect_project_status(project)
+
+    assert status.diff_counts["agents"].get("parse_error", 0) >= 1
+    assert status.drift is True
+
+
+def test_collect_invalid_name_runtime_drifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex design-gate fold: an invalid-name runtime file emits ``invalid
+    name`` rows — also drift."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    (project / ".memtomem").mkdir(parents=True)
+    claude_agents = project / ".claude" / "agents"
+    claude_agents.mkdir(parents=True)
+    (claude_agents / "-bad.md").write_text(
+        "---\nname: -bad\ndescription: x\n---\nbody\n", encoding="utf-8"
+    )
+
+    status = collect_project_status(project)
+
+    assert status.diff_counts["agents"].get("invalid_name", 0) >= 1
+    assert status.drift is True
+
+
+def test_collect_wiki_absent_degrades_to_stale_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1280 acceptance: wiki-unreachable degrades exactly like the single
+    verb — clean installs become stale-pin rows, wiki_head None, no crash."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    project.mkdir()
+    _setup_installed_at_pin(project, "skills", "foo", {"SKILL.md": b"x\n"}, "0" * 40)
+
+    status = collect_project_status(project)
+
+    assert status.wiki_head is None
+    assert status.state_counts["stale-pin"] == 1
+    assert status.rows[0].reason == "wiki not present"
+    assert status.drift is True
+
+
+def test_collect_lockfile_error_keeps_partial_aggregate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt lockfile is reported, NOT raised, and does not by itself
+    flip drift — surfaces classify the entry as an error separately. The
+    rest of the aggregate keeps working: an untracked canonical still
+    renders its row (its runtime fan-out gap is then genuine drift —
+    ``diff_skills`` emits ``missing target`` per runtime regardless of
+    lockfile health)."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    (project / ".memtomem").mkdir(parents=True)
+    (project / ".memtomem" / "lock.json").write_text("{not json", encoding="utf-8")
+
+    status = collect_project_status(project)
+
+    assert status.lockfile_error is not None
+    assert status.rows == []
+    assert status.drift is False  # lockfile_error alone is NOT drift
+
+    skills = project / ".memtomem" / "skills" / "draft-skill"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").write_text("# s\n", encoding="utf-8")
+
+    status = collect_project_status(project)
+
+    assert status.lockfile_error is not None
+    assert [r.state for r in status.rows] == ["untracked"]  # partial aggregate
+    assert status.diff_counts["skills"].get("missing_target", 0) >= 1
+    assert status.drift is True
+
+
+def test_collect_target_scope_filters_draft_tiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """project_shared pin: local drafts drop from rows, so the local-draft
+    state count is structurally zero under the batch tier."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    draft = project / ".memtomem" / "agents.local" / "wip"
+    draft.mkdir(parents=True)
+    (draft / "agent.md").write_text("---\nname: wip\ndescription: d\n---\nbody\n", encoding="utf-8")
+
+    status = collect_project_status(project, target_scope="project_shared")
+
+    assert status.rows == []
+    assert status.state_counts["local-draft"] == 0
+    assert status.drift is False

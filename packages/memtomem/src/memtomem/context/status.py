@@ -32,10 +32,10 @@ without a usable wiki to compare against.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from memtomem.config import TargetScope
 from memtomem.context._names import is_internal_artifact_dir
@@ -48,14 +48,27 @@ from memtomem.context.skills import SKILL_MANIFEST
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 
 __all__ = [
+    "DRIFT_STATES",
+    "ProjectStatus",
     "StatusRow",
     "StatusState",
     "classify_status",
+    "collect_project_status",
+    "iter_kind_drift_counts",
     "scan_user_artifacts",
+    "summarize_diff_statuses",
+    "summarize_diff_with_canonical",
+    "summarize_settings_statuses",
 ]
 
 
 StatusState = Literal["ok", "behind", "dirty", "missing", "stale-pin", "local-draft", "untracked"]
+
+#: States that mean "this install needs attention" for the cross-project
+#: aggregate (#1280). ``ok`` is clean; ``untracked`` and ``local-draft`` are
+#: informational tiers (served / draft inventory with no wiki pin to drift
+#: from), so a project carrying only those still reads as clean.
+DRIFT_STATES: frozenset[str] = frozenset({"behind", "dirty", "missing", "stale-pin"})
 
 _LOCAL_DRAFT_MANIFEST: dict[str, str] = {
     "agents": AGENT_DIR_FILENAME,
@@ -409,6 +422,270 @@ def load_with_recovery(project_root: Path | str) -> tuple[dict, str | None]:
         return doc, None
     except LockfileError as exc:
         return lockfile.load(strict=False), str(exc)
+
+
+# ── Cross-project aggregation (#1280) ───────────────────────────────────
+#
+# One derivation consumed by BOTH batch surfaces — ``mm context status
+# --all-projects`` and web ``GET /api/context/status-all`` — so the CLI
+# table and the web payload cannot drift on classification vocabulary
+# (the #1280 acceptance criterion). The web overview route imports the
+# ``summarize_*`` helpers too, so the per-kind count keys here are the
+# SAME keys ``GET /api/context/overview`` has always emitted.
+
+
+def summarize_diff_statuses(triples: Sequence[tuple[str, str, str]]) -> dict:
+    """Summarise ``(runtime, name, status)`` triples into per-status counts.
+
+    Key vocabulary: ``total`` (distinct names) plus one count key per engine
+    status with spaces snake_cased — ``in sync`` → ``in_sync``, ``out of
+    sync`` → ``out_of_sync``, ``missing target`` → ``missing_target``,
+    ``missing canonical`` → ``missing_canonical``, ``parse error`` →
+    ``parse_error``, ``invalid name`` → ``invalid_name``. Moved verbatim
+    from the web overview's ``_count_statuses`` (#1280) so the CLI batch
+    and every web aggregate share one keying rule.
+    """
+    names: set[str] = set()
+    counts: dict[str, int] = {}
+    for _runtime, name, status in triples:
+        names.add(name)
+        key = status.replace(" ", "_")
+        counts[key] = counts.get(key, 0) + 1
+    return {"total": len(names), **counts}
+
+
+def summarize_diff_with_canonical(
+    triples: Sequence[tuple[str, str, str]],
+    canonical_names: set[str],
+) -> dict:
+    """Summarise runtime diffs plus canonical-only draft rows.
+
+    ``project_local`` agents / skills / commands have no runtime fan-out, so
+    their diff list can be empty even when canonical drafts exist. Count the
+    canonical names explicitly so aggregate totals match list views. Moved
+    verbatim from the web overview's ``_count_context_statuses`` (#1280).
+    """
+    result = summarize_diff_statuses(triples)
+    runtime_names = {name for _runtime, name, _status in triples}
+    canonical_only = canonical_names - runtime_names
+    if canonical_only:
+        result["total"] = len(runtime_names | canonical_names)
+        result["local_draft"] = len(canonical_only)
+    return result
+
+
+def summarize_settings_statuses(statuses: Sequence[str]) -> dict[str, int | str]:
+    """Roll ``diff_settings`` per-generator statuses into the overview shape.
+
+    Extracted verbatim from the web overview's inline settings block (#1280).
+    ``total`` counts only **applicable** generators (``skipped`` items are
+    N/A — an uninstalled runtime must not read as actionable work). The four
+    non-skipped categories are all represented so ``in_sync + out_of_sync +
+    missing_target + error == total`` holds — consumers can render
+    per-status segments without entries silently dropping on the floor.
+    ``status`` is the roll-up: ``in_sync`` (everything in sync or skipped),
+    ``error`` (any per-file failure), else ``out_of_sync``. ``error`` is a
+    COUNT here, parallel to its siblings — distinct from the bool ``error``
+    flag web error envelopes carry; the two shapes live on disjoint paths.
+    """
+    total_applicable = sum(1 for s in statuses if s != "skipped")
+    in_sync = sum(1 for s in statuses if s == "in sync")
+    out_of_sync = sum(1 for s in statuses if s == "out of sync")
+    missing_target = sum(1 for s in statuses if s == "missing target")
+    error_count = sum(1 for s in statuses if s == "error")
+    if all(s in ("in sync", "skipped") for s in statuses):
+        status = "in_sync"
+    elif any(s == "error" for s in statuses):
+        status = "error"
+    else:
+        status = "out_of_sync"
+    return {
+        "total": total_applicable,
+        "in_sync": in_sync,
+        "out_of_sync": out_of_sync,
+        "missing_target": missing_target,
+        "error": error_count,
+        "status": status,
+    }
+
+
+#: Per-kind count keys that do NOT signal drift. Anything else positive —
+#: ``out_of_sync``, ``missing_target``, ``missing_canonical``,
+#: ``parse_error``, ``invalid_name``, and any FUTURE engine status — reads
+#: as drift, so a new status defaults to loud rather than silently clean
+#: (Codex design-gate fold on #1280).
+_CLEAN_DIFF_KEYS: frozenset[str] = frozenset({"total", "in_sync", "local_draft"})
+#: The settings summary's clean keys (``status`` is the roll-up string, not
+#: a count; ``skipped`` generators are excluded from ``total`` upstream).
+_CLEAN_SETTINGS_KEYS: frozenset[str] = frozenset({"total", "in_sync", "status"})
+
+
+def iter_kind_drift_counts(
+    diff_counts: dict[str, dict[str, int | str]],
+) -> Iterator[tuple[str, str, int]]:
+    """Yield ``(kind, status_key, count)`` for every drift-signaling count.
+
+    THE drift enumeration both batch surfaces derive from — the CLI renders
+    its ``runtime drift:`` line from these triples and ``ProjectStatus.drift``
+    is ``any()`` over the same stream, so what the table shows and what the
+    roll-up says cannot disagree. Iteration order follows ``diff_counts``
+    insertion order (skills → commands → agents → mcp_servers → settings as
+    built by :func:`collect_project_status`), keys within a kind in summary
+    insertion order — deterministic output for tests and humans alike.
+    """
+    for kind, counts in diff_counts.items():
+        clean = _CLEAN_SETTINGS_KEYS if kind == "settings" else _CLEAN_DIFF_KEYS
+        for key, value in counts.items():
+            if key not in clean and isinstance(value, int) and value > 0:
+                yield kind, key, value
+
+
+@dataclass(frozen=True)
+class ProjectStatus:
+    """One project's full drift aggregate (#1280).
+
+    ``rows`` / ``state_counts`` cover the wiki-install axis
+    (:func:`classify_status`, filtered to the requested tier;
+    ``state_counts`` always carries all seven :data:`StatusState` keys and
+    conserves ``sum(values) == len(rows)``). ``diff_counts`` covers the
+    canonical→runtime axis: skills / commands / agents / mcp_servers via
+    :func:`summarize_diff_with_canonical` plus settings via
+    :func:`summarize_settings_statuses`. A kind whose diff scan RAISED is
+    absent from ``diff_counts`` and present in ``diff_errors`` with the raw
+    exception — redaction/classification is a surface concern (the web
+    formats an error envelope, the CLI prints the message).
+
+    ``drift`` is the shared roll-up predicate: any row state in
+    :data:`DRIFT_STATES`, any diff error, or any per-kind count outside the
+    kind's clean key set. ``lockfile_error`` does NOT imply drift — surfaces
+    report it as an error condition instead.
+    """
+
+    wiki_head: str | None
+    lockfile_error: str | None
+    rows: list[StatusRow]
+    state_counts: dict[str, int]
+    diff_counts: dict[str, dict[str, int | str]]
+    diff_errors: dict[str, BaseException]
+    drift: bool
+
+
+def collect_project_status(
+    project_root: Path | str,
+    *,
+    wiki: WikiStore | None = None,
+    target_scope: TargetScope = "project_shared",
+) -> ProjectStatus:
+    """Aggregate one project's wiki-install states + runtime diff counts.
+
+    The per-project unit both #1280 batch surfaces call once per eligible
+    discovered scope. *wiki* should be the caller's single
+    ``WikiStore.at_default()`` instance reused across the batch (the wiki
+    is global); each call still probes ``current_commit`` itself via
+    :func:`classify_status`, so ``wiki_head`` is honest per classification.
+    Wiki-unreachable degrades exactly like single-project status — rows
+    render with ``stale-pin`` reasons and ``wiki_head`` is ``None``.
+
+    *target_scope* pins the row tier filter AND the diff/settings scope.
+    Batch surfaces pass ``project_shared`` (the only tier the batch verbs
+    accept): lockfile-tracked rows plus ``untracked`` canonicals stay,
+    ``project_local`` draft rows drop, and the settings leg cannot inherit
+    a config-pinned ``hooks.target_scope = "user"`` (the A-9 precedent —
+    a host-tier scope must not leak into a batch over N projects).
+
+    Per-kind diff failures are contained (recorded in ``diff_errors``);
+    only :func:`classify_status` / lockfile reads raising would escape,
+    and those already degrade internally — callers still isolate per
+    project defensively.
+    """
+    from memtomem.context.agents import canonical_agent_name, diff_agents, list_canonical_agents
+    from memtomem.context.commands import (
+        canonical_command_name,
+        diff_commands,
+        list_canonical_commands,
+    )
+    from memtomem.context.mcp_servers import diff_mcp_servers, list_canonical_mcp_servers
+    from memtomem.context.settings import diff_settings
+    from memtomem.context.skills import diff_skills, list_canonical_skills
+
+    root = Path(project_root).expanduser()
+    _doc, lockfile_error = load_with_recovery(root)
+    wiki_head, all_rows = classify_status(root, wiki=wiki)
+    rows = [row for row in all_rows if row.tier == target_scope]
+
+    state_counts: dict[str, int] = {state: 0 for state in get_args(StatusState)}
+    for row in rows:
+        state_counts[row.state] += 1
+
+    diff_counts: dict[str, dict[str, int | str]] = {}
+    diff_errors: dict[str, BaseException] = {}
+
+    try:
+        diff_counts["skills"] = summarize_diff_with_canonical(
+            diff_skills(root, scope=target_scope),
+            {p.name for p in list_canonical_skills(root, scope=target_scope)},
+        )
+    except Exception as exc:
+        diff_errors["skills"] = exc
+
+    try:
+        # Layout-aware name extraction — under directory layout the manifest
+        # is ``<name>/command.md``, so ``p.stem`` would collapse every draft
+        # to one phantom "command" row (the overview's #624 lesson).
+        diff_counts["commands"] = summarize_diff_with_canonical(
+            diff_commands(root, scope=target_scope),
+            {
+                canonical_command_name(p, layout)
+                for p, layout in list_canonical_commands(root, scope=target_scope)
+            },
+        )
+    except Exception as exc:
+        diff_errors["commands"] = exc
+
+    try:
+        diff_counts["agents"] = summarize_diff_with_canonical(
+            diff_agents(root, scope=target_scope),
+            {
+                canonical_agent_name(p, layout)
+                for p, layout in list_canonical_agents(root, scope=target_scope)
+            },
+        )
+    except Exception as exc:
+        diff_errors["agents"] = exc
+
+    try:
+        if target_scope == "project_shared":
+            diff_counts["mcp_servers"] = summarize_diff_with_canonical(
+                diff_mcp_servers(root),
+                {p.stem for p in list_canonical_mcp_servers(root)},
+            )
+        else:
+            # Single-tier by design — mirror the overview's placeholder.
+            diff_counts["mcp_servers"] = {"total": 0, "local_draft": 0}
+    except Exception as exc:
+        diff_errors["mcp_servers"] = exc
+
+    try:
+        diff_counts["settings"] = summarize_settings_statuses(
+            [r.status for r in diff_settings(root, scope=target_scope).values()]
+        )
+    except Exception as exc:
+        diff_errors["settings"] = exc
+
+    drift = (
+        any(row.state in DRIFT_STATES for row in rows)
+        or bool(diff_errors)
+        or any(True for _ in iter_kind_drift_counts(diff_counts))
+    )
+    return ProjectStatus(
+        wiki_head=wiki_head,
+        lockfile_error=lockfile_error,
+        rows=rows,
+        state_counts=state_counts,
+        diff_counts=diff_counts,
+        diff_errors=diff_errors,
+        drift=drift,
+    )
 
 
 def _tolerant_iter_entries(

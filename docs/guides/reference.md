@@ -1208,6 +1208,8 @@ mm context init --include=agents --scope user --force-unsafe-import   # bypass G
 mm context generate --agent all        # generate all agent files
 mm context generate --include=agents --label production # generate files using the 'production' labeled snapshot (agents/commands only)
 mm context diff                        # check sync status
+mm context status                      # installed wiki assets + their drift state (read-only)
+mm context status --all-projects       # aggregated drift across enrolled on-disk projects (read-only; same data as GET /api/context/status-all)
 mm context sync                        # sync context.md → agent files (project_shared default)
 mm context sync --scope user           # fan out from ~/.memtomem/... → ~/.{claude,gemini,codex}/...
 mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)

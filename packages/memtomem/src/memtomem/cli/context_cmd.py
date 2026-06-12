@@ -75,7 +75,15 @@ from memtomem.context.projects import (
     sync_skip_reason,
 )
 from memtomem.context.lockfile import LockfileError
-from memtomem.context.status import classify_status, load_with_recovery, scan_user_artifacts
+from memtomem.context.status import (
+    DRIFT_STATES,
+    ProjectStatus,
+    classify_status,
+    collect_project_status,
+    iter_kind_drift_counts,
+    load_with_recovery,
+    scan_user_artifacts,
+)
 from memtomem.context.generator import (
     GENERATORS,
     extract_sections_from_agent_file,
@@ -2045,7 +2053,17 @@ _PROJECT_LOCAL_ANNOTATION = "(draft, no fan-out)"
         "Canonical artifact tier to show. project_local rows are drafts with no runtime fan-out."
     ),
 )
-def status_cmd(scope_flag: TargetScope) -> None:
+@click.option(
+    "--all-projects",
+    "all_projects",
+    is_flag=True,
+    help=(
+        "Aggregate drift across every eligible discovered project (enrolled "
+        "+ on disk), not just the current one. Read-only; project_shared "
+        "tier only; ineligible projects are reported and skipped."
+    ),
+)
+def status_cmd(scope_flag: TargetScope, all_projects: bool) -> None:
     """Show installed wiki assets and their drift state.
 
     Read-only. Walks ``<project>/.memtomem/lock.json`` and classifies
@@ -2053,7 +2071,25 @@ def status_cmd(scope_flag: TargetScope) -> None:
     normal runs (cron-friendly chaining via ``mm context status && mm
     context update --all``); only a corrupt / version-mismatched
     lockfile produces a non-zero exit.
+
+    ``--all-projects`` (#1280) renders the cross-project aggregate
+    instead: per-project drift rows + runtime diff counts, grouped under
+    project headers. Same exit contract per project — drift alone still
+    exits 0; a corrupt lockfile or a failed collection exits 1.
     """
+    if all_projects:
+        # #1280: the aggregate is project_shared-only, mirroring the sync
+        # batch gate — `user` is one global store (not per-project) and
+        # `project_local` has no runtime fan-out to drift (ADR-0011 §3).
+        if scope_flag != "project_shared":
+            raise click.UsageError(
+                "--all-projects reports the project_shared tier only; drop "
+                "--scope or pass --scope project_shared (inspect other "
+                "tiers per project, without --all-projects)."
+            )
+        _run_status_all_projects()
+        return
+
     root = _find_project_root()
 
     # Diagnostic lockfile read — surfaces a version mismatch as an
@@ -2169,6 +2205,118 @@ def status_cmd(scope_flag: TargetScope) -> None:
 
     if lockfile_error is not None:
         raise click.exceptions.Exit(1)
+
+
+def _run_status_all_projects() -> None:
+    """Orchestrate ``mm context status --all-projects`` (#1280).
+
+    Read-only sibling of ``_run_sync_all_projects``: discover (anchored at
+    ``_find_project_root()`` so a subdirectory run targets its project) →
+    eligibility classify → per-project render. No preview/confirm step —
+    there is nothing to confirm on a read. Eligibility reuses the SAME
+    ``sync_skip_reason`` derivation: pause is documented as "exclude from
+    --all batches / web Sync", and the point of the aggregate is to predict
+    exactly what ``mm context sync --all-projects`` would operate on.
+
+    Per-project failure isolation: one project's crash prints a red row and
+    the batch continues. Exit mirrors the single-project contract — drift
+    alone exits 0 (the cron chain ``status && sync`` stays viable); exit 1
+    iff any project had a corrupt/version-mismatched lockfile or its
+    collection crashed. Zero-eligible exits 0 informationally (the batch
+    precedent).
+    """
+    cfg = _projects_gateway_cfg()
+    scopes = _projects_discover(cfg, cwd=_find_project_root())
+    wiki = WikiStore.at_default()
+
+    click.echo(f"{len(scopes)} project scope(s) discovered:")
+    drifted = clean = errors = skipped = 0
+    for s in scopes:
+        code = sync_skip_reason(s)
+        if code is not None:
+            skipped += 1
+            click.secho(
+                f"\nskip  {s.scope_id}  {s.label}  ({s.root})  [{_CLI_SYNC_SKIP_REASONS[code]}]",
+                fg="yellow",
+            )
+            continue
+        assert s.root is not None  # sync_skip_reason() filtered missing roots
+        click.secho(f"\n→ {s.label}  ({s.scope_id}, {s.root})", fg="cyan")
+        try:
+            status = collect_project_status(s.root, wiki=wiki, target_scope="project_shared")
+        except Exception as exc:  # defensive — read-only batch: one project's
+            # surprise (unreadable tree, a git failure shape the engine doesn't
+            # degrade internally) must not hide its siblings.
+            click.secho(f"  ✗ status collection failed: {exc}", fg="red")
+            errors += 1
+            continue
+        if _render_project_status(status):
+            errors += 1
+        elif status.drift:
+            drifted += 1
+        else:
+            clean += 1
+
+    click.echo(
+        f"\nSummary: {drifted} with drift, {clean} clean, {errors} error(s), {skipped} skipped."
+    )
+    if errors:
+        raise click.exceptions.Exit(1)
+
+
+def _render_project_status(status: ProjectStatus) -> bool:
+    """Render one project's aggregate block; True when it counts as an error.
+
+    Detail rows render ONLY for :data:`DRIFT_STATES` — the aggregate answers
+    "which projects drifted", so clean/untracked inventory stays in the
+    header counts and the full row list remains the single-project verb's
+    job. The ``runtime drift:`` line enumerates the SAME
+    ``iter_kind_drift_counts`` stream the shared ``drift`` flag is computed
+    from, so the rendered table and the summary classification cannot
+    disagree.
+    """
+    if status.lockfile_error is not None:
+        click.secho(f"  ✗ lock.json: {status.lockfile_error}", fg="red")
+
+    installed = sum(1 for r in status.rows if r.state not in ("local-draft", "untracked"))
+    untracked = status.state_counts["untracked"]
+    extra = f" (+ {untracked} untracked)" if untracked else ""
+    state_parts = [
+        f"{status.state_counts[k]} {k}"
+        for k in ("ok", "behind", "dirty", "missing", "stale-pin")
+        if status.state_counts[k]
+    ]
+    states = ": " + ", ".join(state_parts) if state_parts else ""
+    wiki_note = (
+        f"wiki HEAD {status.wiki_head[:12]}"
+        if status.wiki_head is not None
+        # classify_status already degraded per-row reasons (absent vs
+        # present-but-unusable); the header only needs the "can't check
+        # pins" caveat — single-status wording.
+        else "wiki unavailable; pin reachability not checked"
+    )
+    click.echo(f"  {installed} asset(s) installed{extra}{states} — {wiki_note}")
+
+    for row in status.rows:
+        if row.state not in DRIFT_STATES:
+            continue
+        glyph, color = _STATUS_GLYPH[row.state]
+        line = f"  {glyph}  {row.asset_type}/{row.name}"
+        if row.reason:
+            line += f"  ({row.reason})"
+        click.secho(line, fg=color)
+
+    runtime_bits = [
+        f"{kind.replace('_', '-')} {count} {key.replace('_', ' ')}"
+        for kind, key, count in iter_kind_drift_counts(status.diff_counts)
+    ]
+    for kind, exc in status.diff_errors.items():
+        runtime_bits.append(f"{kind.replace('_', '-')} diff failed ({exc})")
+    if runtime_bits:
+        click.secho("  runtime drift: " + "; ".join(runtime_bits), fg="yellow")
+    else:
+        click.echo("  runtime: in sync")
+    return status.lockfile_error is not None
 
 
 # ── install --all (PR-D C3) ─────────────────────────────────────────────
