@@ -49,16 +49,20 @@ def _safe_rel(p: Path, project_root: Path) -> str:
 def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
     """Guard a *write* (create/update/delete/sync) to project_shared only.
 
-    Writes reject non-shared tiers because an MCP server canonical can only
-    live in project_shared. Reads intentionally do NOT call this — they return
-    an empty/absent result for other tiers instead (see ``list_mcp_servers``),
-    so a tier switch never turns the panel into a load-failed state.
+    Writes reject non-shared tiers **by design** (ADR-0011 §1 table note):
+    an MCP server canonical can only live in project_shared — unlike the
+    skills/commands/agents routes, which #1263 opened to ``user`` behind
+    the host-write confirm, this is not a deferred v1 narrowing. Reads
+    intentionally do NOT call this — they return an empty/absent result
+    for other tiers instead (see ``list_mcp_servers``), so a tier switch
+    never turns the panel into a load-failed state.
     """
     if target_scope != "project_shared":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{action} is supported only on project_shared in this release; "
+                f"{action} is supported only on project_shared — MCP server "
+                f"canonicals are project_shared-only by design (ADR-0011 §1); "
                 f"got target_scope={target_scope!r}."
             ),
         )

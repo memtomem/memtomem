@@ -14,12 +14,14 @@ from pydantic import BaseModel
 
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._runtime_targets import KNOWN_RUNTIMES, runtime_fanout_root
 from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.skills import (
     CANONICAL_SKILL_ROOT,
     SKILL_GENERATORS,
     SKILL_MANIFEST,
+    ExtractResult,
     canonical_skills_root,
     diff_skills,
     extract_skills_to_canonical,
@@ -27,6 +29,7 @@ from memtomem.context.skills import (
     list_canonical_skills,
 )
 from memtomem.config import TargetScope
+from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
@@ -60,27 +63,73 @@ def _canonical_skill_dir(
     return canonical_skills_root(project_root, scope=scope) / name
 
 
-def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
-    """Reject writes on non-``project_shared`` tiers with HTTP 400.
+def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
+    """Reject writes on the ``project_local`` tier with HTTP 400.
 
-    Reads honor every tier (the canonical content differs per scope), but
-    write/sync/import endpoints stay on ``project_shared`` for v1 — the
-    multi-scope write contract is intentionally deferred to a follow-up so
-    each tier's authoring policy (draft vs runtime fan-out vs user-share)
-    can be designed deliberately. Passing the param explicitly + rejecting
-    here is preferred over silently overriding the client's selection,
-    because silent override is exactly the cross-tier crossover (ADR-0011) P1
-    flagged ("mutates a same-named project_shared artifact while the UI is
-    showing a user/local row").
+    Reads honor every tier (the canonical content differs per scope).
+    Writes accept ``project_shared`` (ungated, today's default) and —
+    since #1263 — ``user``, whose host-path writes complete only through
+    the ``allow_host_writes`` disclose-then-confirm round-trip
+    (:func:`memtomem.web.routes._confirm.host_write_gate`).
+    ``project_local`` stays rejected: it is a gitignored draft tier with
+    no runtime fan-out (ADR-0011 §3), so sync would be a no-op and its
+    authoring policy is still deliberately deferred. Rejecting the
+    explicit param is preferred over silently overriding the client's
+    selection — silent override is exactly the cross-tier crossover
+    (ADR-0011) P1 flagged ("mutates a same-named project_shared artifact
+    while the UI is showing a user/local row").
     """
-    if target_scope != "project_shared":
+    if target_scope == "project_local":
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{action} is supported only on project_shared in this release; "
-                f"got target_scope={target_scope!r}."
+                f"{action} is supported on the project_shared and user tiers; "
+                f"project_local is a draft tier with no runtime fan-out "
+                f"(ADR-0011 §3)."
             ),
         )
+
+
+def _user_scan_dirs() -> list[str]:
+    """User-tier runtime roots the import scan reads (absolute, expanded).
+
+    The project-relative ``_SKILL_SCAN_DIRS`` hint would lie on
+    ``target_scope=user`` — the engine's user-tier import reads
+    ``~/.claude/skills`` etc. via ``runtime_fanout_root``, not the
+    project's runtime dirs.
+    """
+    dirs: list[str] = []
+    for runtime in KNOWN_RUNTIMES:
+        root = runtime_fanout_root("skills", runtime, "user", None)
+        if root is not None:
+            dirs.append(str(root))
+    return sorted(set(dirs))
+
+
+def _scanned_dirs_for(target_scope: TargetScope) -> list[str]:
+    return _user_scan_dirs() if target_scope == "user" else _SKILL_SCAN_DIRS
+
+
+def _user_sync_host_targets(project_root: Path) -> list[str]:
+    """Pending user-tier fan-out destinations for the sync confirm gate.
+
+    Upper bound on the confirmed sync's writes. Skill fan-out is keyed by
+    the canonical DIRECTORY name (skills are opaque to the canonical
+    layer — no parsed-frontmatter rename axis, unlike agents/commands),
+    so the names here are exact; the engine's per-destination preflight
+    (target conflicts, unreadable canonicals/overrides, privacy blocks,
+    lock timeouts) can only shrink the actual write set below this
+    disclosure, never move it elsewhere. Empty when there are no
+    user-tier canonicals — the gate stays open and the engine returns
+    its normal ``no canonical skills`` skip.
+    """
+    targets: list[str] = []
+    for skill_dir in list_canonical_skills(project_root, scope="user"):
+        for gen in SKILL_GENERATORS.values():
+            dst = gen.target_dir(project_root, skill_dir.name, scope="user")
+            if dst is not None:
+                targets.append(str(dst))
+    return sorted(targets)
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
@@ -253,6 +302,10 @@ async def read_skill(
 class SkillCreateRequest(BaseModel):
     name: str
     content: str
+    # #1263 host-write opt-in: required true for target_scope=user (the
+    # canonical lands under ~/.memtomem/, outside any project root). The
+    # first POST without it returns the needs_confirmation envelope.
+    allow_host_writes: bool = False
 
 
 @router.post("/context/skills")
@@ -261,12 +314,29 @@ async def create_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to create in. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to create in. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
 ) -> dict:
     """Create a new canonical skill."""
-    _reject_non_shared_write(target_scope, "Create skill")
+    _reject_project_local_write(target_scope, "Create skill")
     skill_dir = _canonical_skill_dir(project_root, body.name, scope=target_scope)
+
+    # Unlocked pre-checks so a request that cannot succeed is refused
+    # (409) rather than confirmed, and a no-op never prompts. The locked
+    # re-check below stays authoritative for create races.
+    if skill_dir.exists():
+        raise HTTPException(409, detail=f"Skill '{body.name}' already exists")
+    gate = host_write_gate(
+        target_scope,
+        body.allow_host_writes,
+        action="Create skill",
+        host_targets=[str(skill_dir / SKILL_MANIFEST)],
+    )
+    if gate is not None:
+        return gate
 
     try:
         async with asyncio.timeout(60):
@@ -282,7 +352,7 @@ async def create_skill(
                 atomic_write_text(manifest, body.content)
     except TimeoutError:
         raise HTTPException(503, "Skill create timed out — another sync may be in progress")
-    return {"name": body.name, "canonical_path": str(skill_dir.relative_to(project_root))}
+    return {"name": body.name, "canonical_path": _safe_rel(skill_dir, project_root)}
 
 
 # ── Update ───────────────────────────────────────────────────────────────
@@ -297,6 +367,22 @@ class SkillUpdateRequest(BaseModel):
     # (see issue #763); every force-save emits a WARNING with both mtime
     # values for the audit trail.
     force: bool = False
+    # #1263 host-write opt-in for target_scope=user (see SkillCreateRequest).
+    allow_host_writes: bool = False
+
+
+_MTIME_CONFLICT_REASON = "File was modified by another process. Reload and retry."
+
+
+def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "aborted",
+            "reason": _MTIME_CONFLICT_REASON,
+            "mtime_ns": str(current_mtime_ns),
+        },
+    )
 
 
 @router.put("/context/skills/{name}")
@@ -306,11 +392,14 @@ async def update_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to update. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to update. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
 ) -> JSONResponse:
     """Update a canonical skill's SKILL.md (mtime-guarded, atomic, locked)."""
-    _reject_non_shared_write(target_scope, "Update skill")
+    _reject_project_local_write(target_scope, "Update skill")
     skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
@@ -321,22 +410,30 @@ async def update_skill(
     except ValueError:
         raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
 
+    # Unlocked pre-check: a stale-mtime request is refused (same 409 shape
+    # as the locked check) BEFORE the host-write gate, so the user is never
+    # asked to confirm a write that would only abort. The locked re-check
+    # below stays authoritative; force=True falls through so the locked
+    # path keeps emitting its audit WARNING exactly once.
+    pre_mtime_ns = manifest.stat().st_mtime_ns
+    if pre_mtime_ns != body_mtime_ns and not body.force:
+        return _mtime_conflict_response(pre_mtime_ns)
+    gate = host_write_gate(
+        target_scope,
+        body.allow_host_writes,
+        action="Update skill",
+        host_targets=[str(manifest)],
+    )
+    if gate is not None:
+        return JSONResponse(content=gate)
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 current_mtime_ns = manifest.stat().st_mtime_ns
                 if current_mtime_ns != body_mtime_ns:
                     if not body.force:
-                        return JSONResponse(
-                            status_code=409,
-                            content={
-                                "status": "aborted",
-                                "reason": (
-                                    "File was modified by another process. Reload and retry."
-                                ),
-                                "mtime_ns": str(current_mtime_ns),
-                            },
-                        )
+                        return _mtime_conflict_response(current_mtime_ns)
                     logger.warning(
                         "force-save bypassed mtime check on %s "
                         "(client_mtime_ns=%s server_mtime_ns=%s)",
@@ -361,15 +458,45 @@ async def delete_skill(
     project_root: Path = Depends(resolve_scope_root_cascade_gated),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to delete from. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to delete from. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
+    ),
+    allow_host_writes: bool = Query(
+        False,
+        description=(
+            "#1263 host-write opt-in for target_scope=user. Query parameter "
+            "(not a body field) because DELETE bodies are client-hostile; "
+            "the needs_confirmation envelope names the same flag."
+        ),
     ),
 ) -> dict:
     """Delete a canonical skill, optionally cascading to runtime copies.
 
     Idempotent: missing canonical directory returns ``deleted: []``.
     """
-    _reject_non_shared_write(target_scope, "Delete skill")
+    _reject_project_local_write(target_scope, "Delete skill")
     skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
+
+    # Pending deletions, computed unlocked: the canonical dir plus — on
+    # cascade — the runtime copies AT THIS TIER (scope= is load-bearing:
+    # a user-tier cascade must resolve ~/.claude/... copies, never the
+    # project's). Idempotent no-ops (nothing exists) skip the gate.
+    pending: list[Path] = [skill_dir] if skill_dir.exists() else []
+    if cascade:
+        for gen in SKILL_GENERATORS.values():
+            target = gen.target_dir(project_root, name, scope=target_scope)
+            if target is not None and target.exists():
+                pending.append(target)
+    gate = host_write_gate(
+        target_scope,
+        allow_host_writes,
+        action="Delete skill",
+        host_targets=[str(p) for p in pending],
+    )
+    if gate is not None:
+        return gate
 
     try:
         async with asyncio.timeout(60):
@@ -386,7 +513,7 @@ async def delete_skill(
 
                 if cascade:
                     for gen in SKILL_GENERATORS.values():
-                        target = gen.target_dir(project_root, name)
+                        target = gen.target_dir(project_root, name, scope=target_scope)
                         if target is None:
                             continue
                         if not target.exists():
@@ -468,20 +595,40 @@ async def diff_skill(
 # ── Sync (fan-out) ──────────────────────────────────────────────────────
 
 
+class SyncRequest(BaseModel):
+    """Optional body for the sync routes (#1263).
+
+    Absent body keeps the historical no-body POST working; the only field
+    is the user-tier host-write opt-in.
+    """
+
+    allow_host_writes: bool = False
+
+
 @router.post("/context/skills/sync")
 async def sync_skills(
+    body: SyncRequest | None = None,
     project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
-            "Canonical-residency tier to fan out. Non-shared rejected — "
-            "project_local has no runtime fan-out per ADR-0011 §3, and user-tier "
-            "sync is deferred to a follow-up (ADR-0016)."
+            "Canonical-residency tier to fan out. user fans out to the host "
+            "~/.claude-family roots behind the allow_host_writes confirm "
+            "round-trip (#1263); project_local rejected — no runtime fan-out "
+            "per ADR-0011 §3."
         ),
     ),
 ) -> dict:
     """Fan out canonical skills to all runtimes."""
-    _reject_non_shared_write(target_scope, "Sync skills")
+    _reject_project_local_write(target_scope, "Sync skills")
+    gate = host_write_gate(
+        target_scope,
+        body.allow_host_writes if body else False,
+        action="Sync skills",
+        host_targets=_user_sync_host_targets(project_root),
+    )
+    if gate is not None:
+        return gate
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
@@ -497,7 +644,10 @@ async def sync_skills(
                 # waits, so a timed-out request cannot orphan a worker
                 # thread that writes after the 503 already went out.
                 result = await asyncio.to_thread(
-                    generate_all_skills, project_root, surface="web_context_skills_sync"
+                    generate_all_skills,
+                    project_root,
+                    scope=target_scope,
+                    surface="web_context_skills_sync",
                 )
     except TimeoutError:
         raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
@@ -520,6 +670,38 @@ async def sync_skills(
 
 class ImportRequest(BaseModel):
     overwrite: bool = False
+    # #1263 host-write opt-in for target_scope=user (the canonical
+    # destination is ~/.memtomem/skills/, outside any project root).
+    allow_host_writes: bool = False
+
+
+def _import_payload(
+    result: ExtractResult,
+    project_root: Path,
+    target_scope: TargetScope,
+    dry_run: bool | None,
+) -> dict:
+    """Wire shape shared by both import routes (and the gate's nested plan).
+
+    ``dry_run=None`` omits the key — the single-import response never
+    carried one. ``_safe_rel`` (not bare ``relative_to``) because user-tier
+    canonical paths live under ``~/.memtomem/`` and would otherwise raise
+    out of the response encoder.
+    """
+    payload: dict = {
+        "imported": [
+            {"name": p.name, "canonical_path": _safe_rel(p, project_root)} for p in result.imported
+        ],
+        "skipped": [
+            {"name": name, "reason": reason, "reason_code": code}
+            for name, reason, code in result.skipped
+        ],
+        "project_root": str(project_root),
+        "scanned_dirs": _scanned_dirs_for(target_scope),
+    }
+    if dry_run is not None:
+        payload["dry_run"] = dry_run
+    return payload
 
 
 @router.post("/context/skills/import")
@@ -528,49 +710,64 @@ async def import_skills(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to import into. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
     dry_run: bool = Query(
         False,
         description=(
             "Preview the import without writing to canonical (rank-10): runs the "
             "full scan + privacy walk + dedup and returns the would-import / would-"
-            "skip counts, leaving disk untouched."
+            "skip counts, leaving disk untouched. Returned regardless of "
+            "confirmation flags (mirrors the transfer route's dry_run)."
         ),
     ),
 ) -> dict:
-    """Import runtime skills into canonical .memtomem/skills/."""
-    _reject_non_shared_write(target_scope, "Import skills")
+    """Import runtime skills into the scoped canonical directory."""
+    _reject_project_local_write(target_scope, "Import skills")
     overwrite = body.overwrite if body else False
-    try:
+    allow_host_writes = body.allow_host_writes if body else False
+
+    async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 # Thread offload (#1247 id 18): the import engine now blocks
                 # on the destination sidecar flock (budget-bounded), and
                 # ``asyncio.timeout`` cannot fire while the loop thread
                 # itself is blocked — same shape as the sync route above.
-                result = await asyncio.to_thread(
+                return await asyncio.to_thread(
                     extract_skills_to_canonical,
                     project_root,
                     overwrite=overwrite,
-                    dry_run=dry_run,
+                    dry_run=dry,
+                    scope=target_scope,
                     surface="web_context_skills_import",
                 )
+
+    try:
+        if not dry_run and target_scope == "user" and not allow_host_writes:
+            # The gate needs the pending destination paths, which only the
+            # engine's scan knows — preview via dry_run, disclose, and nest
+            # the plan (A-5 transfer-route parity). An empty would-import
+            # set keeps the gate open (the confirmed run writes nothing);
+            # the dry-run→apply gap is the same accepted TOCTOU window the
+            # transfer route documents.
+            preview = await _run(dry=True)
+            gate = host_write_gate(
+                target_scope,
+                allow_host_writes,
+                action="Import skills",
+                host_targets=[str(p) for p in preview.imported],
+                plan=_import_payload(preview, project_root, target_scope, dry_run=True),
+            )
+            if gate is not None:
+                return gate
+        result = await _run(dry=dry_run)
     except TimeoutError:
         raise HTTPException(503, "Skills import timed out — another sync may be in progress")
-    return {
-        "imported": [
-            {"name": p.name, "canonical_path": str(p.relative_to(project_root))}
-            for p in result.imported
-        ],
-        "skipped": [
-            {"name": name, "reason": reason, "reason_code": code}
-            for name, reason, code in result.skipped
-        ],
-        "project_root": str(project_root),
-        "scanned_dirs": _SKILL_SCAN_DIRS,
-        "dry_run": dry_run,
-    }
+    return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
 @router.post("/context/skills/{name}/import")
@@ -580,45 +777,60 @@ async def import_skill(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
         "project_shared",
-        description="Canonical-residency tier to import into. Non-shared tiers rejected (ADR-0011).",
+        description=(
+            "Canonical-residency tier to import into. user requires the "
+            "allow_host_writes confirm round-trip; project_local rejected (ADR-0011 §3)."
+        ),
     ),
 ) -> dict:
-    """Import a single runtime skill into ``.memtomem/skills/``.
+    """Import a single runtime skill into the scoped canonical directory.
 
     Same response shape as the section-level import so the web UI can reuse
     its rendering. 404 when no runtime directory matches the name (the
     section import would silently report 0 imported, which is the wrong
-    shape of feedback for "you clicked a specific item that doesn't exist").
+    shape of feedback for "you clicked a specific item that doesn't exist")
+    — pinned on the gate's dry-run preview too, so a misnamed user-tier
+    import 404s instead of asking for confirmation.
     """
-    _reject_non_shared_write(target_scope, "Import skill")
+    _reject_project_local_write(target_scope, "Import skill")
     try:
         validate_name(name, kind="skill name")
     except InvalidNameError as exc:
         raise HTTPException(400, f"Invalid skill name: {exc}")
     overwrite = body.overwrite if body else False
-    try:
+    allow_host_writes = body.allow_host_writes if body else False
+
+    async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 # Thread offload (#1247 id 18): see import_skills above.
-                result = await asyncio.to_thread(
+                return await asyncio.to_thread(
                     extract_skills_to_canonical,
                     project_root,
                     overwrite=overwrite,
                     only_name=name,
+                    dry_run=dry,
+                    scope=target_scope,
                     surface="web_context_skills_import",
                 )
+
+    try:
+        if target_scope == "user" and not allow_host_writes:
+            preview = await _run(dry=True)
+            if not preview.imported and not preview.skipped:
+                raise HTTPException(404, f"No runtime skill named {name!r} to import")
+            gate = host_write_gate(
+                target_scope,
+                allow_host_writes,
+                action="Import skill",
+                host_targets=[str(p) for p in preview.imported],
+                plan=_import_payload(preview, project_root, target_scope, dry_run=None),
+            )
+            if gate is not None:
+                return gate
+        result = await _run(dry=False)
     except TimeoutError:
         raise HTTPException(503, "Skill import timed out — another sync may be in progress")
     if not result.imported and not result.skipped:
         raise HTTPException(404, f"No runtime skill named {name!r} to import")
-    return {
-        "imported": [
-            {"name": p.name, "canonical_path": str(p.relative_to(project_root))}
-            for p in result.imported
-        ],
-        "skipped": [
-            {"name": n, "reason": reason, "reason_code": code} for n, reason, code in result.skipped
-        ],
-        "project_root": str(project_root),
-        "scanned_dirs": _SKILL_SCAN_DIRS,
-    }
+    return _import_payload(result, project_root, target_scope, dry_run=None)

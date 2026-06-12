@@ -270,6 +270,31 @@ batch.
 > list/read routes accept the full tier set. The engine already supports
 > user-tier sync (ADR-0011 PR-E3); exposing it through the web write
 > routes is tracked in #1263.
+>
+> **2026-06 (#1263):** Shipped — the skills / commands / agents write
+> routes (create / update / delete / import / sync) now accept
+> `target_scope=user`, completed only through a disclose-then-confirm
+> round-trip: the first unconfirmed request performs no write and
+> returns the `_confirm.py` `needs_confirmation` envelope (ADR-0023 §10
+> shape) listing the pending `host_targets` (`~/.memtomem/<kind>/`
+> canonicals, `~/.claude`-family fan-out roots). For sync, that list is
+> an upper bound resolved from the parsed frontmatter names the engine
+> fans out under: later engine preflight (Gate A, override errors,
+> target conflicts, lock timeouts) can only shrink the written set below
+> the disclosure, never relocate it. Re-sending with
+> `allow_host_writes=true` (body field on POST/PUT, query parameter on
+> DELETE) applies it. The gate fires only when the request has pending
+> host writes — no-op requests (idempotent deletes, nothing-to-import
+> imports, empty canonical sets) and requests refused by cheaper checks
+> (duplicate create, stale mtime) never prompt. Import routes disclose
+> via an engine dry-run nested under `plan` (transfer-route parity).
+> `project_local` writes stay 400 (no fan-out, ADR-0011 §3); mcp-servers
+> stay project_shared-only by design (ADR-0011 §1); version routes
+> (ADR-0022) stay project_shared-only. The sync-eligibility 409
+> (#1203 §1i) still precedes the tier gate for selected paused projects.
+> Web UI affordance (tier-aware write buttons + confirm dialog) is the
+> #1263 follow-up; until it lands the dashboard keeps its client-side
+> write block on non-shared tiers.
 
 #### 4d. Mutator routes accepting `project_scope_id` — Option C (sync only)
 
