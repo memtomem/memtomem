@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Cross-project copy for MCP server definitions (ADR-0023 §12).**
+  `mm context copy mcp-servers <name> --to-project <scope_id|path>` and the
+  existing transfer route (`POST /api/context/mcp-servers/{name}/transfer`)
+  copy one canonical `.memtomem/mcp-servers/<name>.json` into another project
+  through the transfer engine's stage → Gate A → promote path — the privacy
+  scan always runs (the destination is the git-tracked project_shared tier;
+  `env` blocks are the usual hotspot), destination collisions hard-fail, and
+  the promote refuses to clobber atomically even against writers outside the
+  sidecar locks. The copy is stricter than artifact transfers in two ways:
+  the staged bytes must parse as a valid stdio server definition (one broken
+  canonical aborts the destination's entire mcp-servers sync phase), and
+  symlinked canonicals are refused (the destination must be a regular
+  git-tracked file).
+  Results carry a `sync_hint` (and disclosure notes for a same-name
+  `.mcp.json` runtime entry the destination's next sync would overwrite) —
+  there is no `mm context sync` phase for mcp-servers; fan-out stays on the
+  destination's web panel / Sync All (#1282).
+
 - **Cross-project per-hook copy for settings hooks (ADR-0023 §11).** New
   `mm context settings-copy --event … --matcher … --to-project <scope_id|path>`
   and `POST /api/context/settings/hooks/copy` copy ONE canonical-matched hook

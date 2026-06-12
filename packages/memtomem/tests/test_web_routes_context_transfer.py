@@ -16,6 +16,7 @@ covers what the WEB surface adds (ADR-0023 §10):
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -523,14 +524,17 @@ async def test_invalid_name_400(client, cwd_root: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_unsupported_kind_400(client, cwd_root: Path) -> None:
+    # "mcp-servers" graduated to a supported kind in A-12 (#1282) — the
+    # unsupported example is now a kind no surface accepts.
     resp = await client.post(
-        "/api/context/mcp-servers/foo/transfer",
+        "/api/context/memories/foo/transfer",
         json={"mode": "move", "to_target_scope": "project_local"},
     )
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
     assert detail["error_kind"] == "validation"
     assert "unsupported kind for artifact transfer" in detail["message"]
+    assert "'mcp-servers'" in detail["message"]  # the 400 advertises the new kind
 
 
 # ── timeout envelope ─────────────────────────────────────────────────────
@@ -563,3 +567,241 @@ async def test_timeout_503_busy_with_bounded_lock_budget(
     assert detail["error_kind"] == "busy"
     assert "Transfer timed out" in detail["message"]
     assert seen_kwargs["lock_timeout"] == route_mod._TRANSFER_LOCK_BUDGET_S
+
+
+# ── mcp-servers copy (A-12 #1282) ────────────────────────────────────
+#
+# Adapter semantics are pinned by ``test_mcp_servers_copy.py``; these pin
+# the route's mcp branch: the validation 400 matrix in mcp vocabulary,
+# the shared gates (confirm round-trip, eligibility, store check)
+# applying unchanged, the issue-pinned 422s (string privacy envelope /
+# object parse envelope), and the wire shape (``sync_hint`` prose with
+# ``sync_command`` null — no CLI sync phase exists for mcp-servers).
+
+
+_MCP_CLEAN = {"command": "npx", "args": ["-y", "srv"], "env": {"PG_HOST": "localhost"}}
+_MCP_SECRET = {"command": "npx", "env": {"AWS_ACCESS_KEY": "AKIA1234567890ABCDEF"}}
+
+
+def _write_mcp_server(root: Path, name: str = "pg", definition: dict | None = None) -> Path:
+    store = root / ".memtomem" / "mcp-servers"
+    store.mkdir(parents=True, exist_ok=True)
+    path = store / f"{name}.json"
+    path.write_text(
+        json.dumps(definition if definition is not None else _MCP_CLEAN, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _mcp_copy_body(scope_b: str, **overrides) -> dict:
+    body = {
+        "mode": "copy",
+        "to_target_scope": "project_shared",
+        "to_project_scope_id": scope_b,
+        "confirm_project_shared": True,
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.asyncio
+async def test_mcp_copy_ok(client, cwd_root: Path, tmp_path: Path) -> None:
+    src = _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["transferred"] is True
+    assert data["kind"] == "mcp-servers"
+    assert data["mode"] == "copy"
+    assert data["layout"] == "flat"
+    assert (data["from_scope"], data["to_scope"]) == ("project_shared", "project_shared")
+    assert data["dst_project_scope_id"] == scope_b
+    # Follow-up contract: needs_sync with prose (no runnable CLI command).
+    assert data["needs_sync"] is True
+    assert data["sync_command"] is None
+    assert f"project_scope_id={scope_b}" in data["sync_hint"]
+    assert data["provenance"] == "not_applicable"
+
+    dst = other / ".memtomem" / "mcp-servers" / "pg.json"
+    assert dst.read_bytes() == src.read_bytes()
+    assert src.is_file()
+
+
+@pytest.mark.asyncio
+async def test_mcp_needs_confirmation_round_trip(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+    dst = other / ".memtomem" / "mcp-servers" / "pg.json"
+
+    first = await client.post(
+        "/api/context/mcp-servers/pg/transfer",
+        json=_mcp_copy_body(scope_b, confirm_project_shared=False),
+    )
+    assert first.status_code == 200, first.text
+    data = first.json()
+    assert data["status"] == "needs_confirmation"
+    assert data["confirm"] == "confirm_project_shared"
+    assert data["plan"]["transferred"] is False
+    assert data["plan"]["sync_command"] is None
+    assert data["plan"]["sync_hint"]
+    assert not dst.exists()
+
+    second = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "ok"
+    assert dst.is_file()
+
+
+@pytest.mark.asyncio
+async def test_mcp_dry_run_plan_writes_nothing(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/mcp-servers/pg/transfer?dry_run=true",
+        json=_mcp_copy_body(scope_b, confirm_project_shared=False),
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "plan"
+    assert data["transferred"] is False
+    assert not (other / ".memtomem" / "mcp-servers").exists()
+
+
+@pytest.mark.asyncio
+async def test_mcp_validation_400_matrix(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    cases = [
+        (_mcp_copy_body(scope_b, mode="move"), "mcp-servers support copy only"),
+        (_mcp_copy_body(scope_b, as_name="pg2"), "as_name is not supported for mcp-servers"),
+        (
+            _mcp_copy_body(scope_b, to_target_scope="project_local"),
+            "single-tier (project_shared) by design",
+        ),
+        (
+            _mcp_copy_body(scope_b, from_scope="user"),
+            "single-tier (project_shared) by design",
+        ),
+        (
+            _mcp_copy_body(scope_b, to_project_scope_id=None),
+            "mcp-servers copy is cross-project only",
+        ),
+    ]
+    for body, fragment in cases:
+        resp = await client.post("/api/context/mcp-servers/pg/transfer", json=body)
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error_kind"] == "validation"
+        assert fragment in detail["message"]
+    assert not (other / ".memtomem" / "mcp-servers").exists()
+
+
+@pytest.mark.asyncio
+async def test_mcp_same_project_selector_400(client, cwd_root: Path) -> None:
+    _write_mcp_server(cwd_root)
+    scope_self = await _register(client, cwd_root)
+
+    resp = await client.post(
+        "/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_self)
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "validation"
+    assert "resolves to the source project" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_collision_409(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path)
+    existing = _write_mcp_server(other, definition={"command": "theirs"})
+    before = existing.read_bytes()
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "destination_exists"
+    assert existing.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_mcp_privacy_422_string_envelope(client, cwd_root: Path, tmp_path: Path) -> None:
+    """Issue #1282 acceptance 1 on the wire: the standard project_shared
+    block envelope — a STRING 422 detail, same as every sync surface."""
+    _write_mcp_server(cwd_root, definition=_MCP_SECRET)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, str)
+    assert detail.startswith("Gate A: pg.json contains 1 privacy pattern hit(s)")
+    # Zero destination residue: no canonical, no staging leftovers (the
+    # store dir + lock sidecar are the locking machinery's own artifacts).
+    dst_store = other / ".memtomem" / "mcp-servers"
+    assert not (dst_store / "pg.json").exists()
+    assert not list(dst_store.glob(".migrate-*"))
+
+
+@pytest.mark.asyncio
+async def test_mcp_parse_422_object_envelope(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root, definition={"type": "sse", "url": "https://example.com"})
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "parse"
+    assert "Only stdio servers are supported" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_source_not_found_404(client, cwd_root: Path, tmp_path: Path) -> None:
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "missing"
+    assert "mcp-servers/pg not found at the source project" in detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_paused_destination_409(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other, enabled=False)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "sync_paused"
+    assert not (other / ".memtomem" / "mcp-servers").exists()
+
+
+@pytest.mark.asyncio
+async def test_mcp_no_store_destination_409(client, cwd_root: Path, tmp_path: Path) -> None:
+    _write_mcp_server(cwd_root)
+    other = _other_project(tmp_path, store=False)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["reason_code"] == "no_memtomem_store"

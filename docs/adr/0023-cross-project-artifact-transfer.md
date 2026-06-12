@@ -49,7 +49,7 @@ to its native error shape (the established `PrivacyScanError` pattern).
 | commands | yes (PR-E4, now via engine) | yes | yes | yes | yes |
 | skills | yes (dir tree) | yes | yes | yes | yes |
 | settings hooks | `settings-migrate` path, NOT this engine | — | no (copy-only v1, #1281 scope) | yes — `settings-copy` per-hook (A-11 #1281, separate mechanism: §11) | — |
-| mcp-servers | n/a (single-tier by design, ADR-0016 §3 note) | — | A-12 #1282 (separate mechanism) | A-12 #1282 | — |
+| mcp-servers | n/a (single-tier by design, ADR-0016 §3 note) | — | no (copy-only v1, #1282 scope) | yes — same verbs/route via the copy adapter (A-12 #1282, separate mechanism: §12) | — |
 | memory | ADR-0012 (cross-DB migration, deferred) | — | — | — | — |
 
 Rejected pairings (hard `ClickException`, both modes):
@@ -380,6 +380,66 @@ applicable:
   canonical leg and reports the half-apply. Conflicts never duplicate
   a matcher and the report names the colliding entry.
 
+### 12. mcp-servers: the A-12 cross-project copy adapter (#1282)
+
+MCP server canonicals (`.memtomem/mcp-servers/<name>.json`) are
+single-tier flat JSON files, so the only transfer they need is a
+cross-project copy. `context/mcp_servers_copy.py` is a small adapter
+**over this engine's primitives** — `_stage_copy` staging, the §8 pair
+lock with its shared whole-call deadline, the §6 collision typing
+(`TransferCollisionError`), `ArtifactNotFoundError` for a missing
+source — without widening `ArtifactKind` or touching
+`transfer_artifact`. The surfaces are the SAME verbs and route
+(`mm context copy mcp-servers <name> --to-project …`,
+`POST /api/context/mcp-servers/{name}/transfer`), so §5 Gate A/B and
+every §10 web contract (eligibility, store gate, disclose-then-confirm,
+error envelope, engine offload, lock budget) apply unchanged.
+Mechanism-specific decisions:
+
+- **Copy-only, cross-project-only, same-name-only.** `move`, `--as` /
+  `as_name`, non-`project_shared` tier values, and a missing /
+  same-project destination all refuse in mcp vocabulary at the surface
+  (the adapter re-refuses same-project). Removing the source definition
+  is the web panel's delete, not a transfer concern.
+- **Staged bytes are parse-validated — stricter than the engine.** The
+  artifact engine never validates content; this adapter refuses to
+  promote bytes that fail the stdio-only definition schema, because
+  `generate_all_mcp_servers` aborts on the FIRST bad canonical — a
+  broken copy would take down the destination's entire mcp-servers
+  sync phase, not just the copied server. The authoritative parse runs
+  inside the pair lock on the same staged bytes Gate A scanned (a
+  pre-flight source parse exists only for dry-run/early signal), so a
+  source edit racing the pre-flight cannot smuggle invalid bytes in.
+- **No-clobber promote.** The mcp web CRUD routes serialize on the
+  in-process gateway lock only — they do not take sidecar locks — so
+  the engine's `exists() → os.replace()` promote could overwrite a
+  canonical that a racing web create landed between the two calls.
+  `os.link` refuses an existing target atomically (EEXIST → the §6
+  collision error, destination bytes untouched); filesystems without
+  hard links fall back to the engine's re-check + replace semantics,
+  no worse than every artifact transfer today.
+- **Symlinked canonicals are refused** (pre-flight on the source, plus
+  an in-lock regular-file check on staging for a source that turned
+  into a link mid-copy). The engine preserves links by contract (§7);
+  here a link would break the scanned-bytes == promoted-bytes
+  invariant — reads follow the link, and the hard-link promote would
+  alias the out-of-project target inode into the destination's
+  git-tracked tree. Loud refusal over silently materializing the
+  target.
+- **`sync_hint` prose instead of a `sync_command`.** No
+  `mm context sync` phase exists for mcp-servers — `.mcp.json` fan-out
+  is web-only (panel Sync, Sync All) — so prescribing the engine's
+  cd-prefixed sync command would be a no-op instruction.
+  `TransferResult` gained a presentation-only `sync_hint: str | None`
+  (engine results leave it `None`) so one CLI renderer and one web
+  serializer cover both result types; the adapter's result implements
+  the full `TransferResult` attribute surface by pinned test.
+  Destination `.mcp.json` disclosures ride `notes`, derived from the
+  copy's own resolution path: a same-name runtime entry the
+  destination's next sync will overwrite (the additive merge is
+  canonical-wins per name), or a broken `.mcp.json` its sync will
+  refuse on.
+
 ## Backward compatibility
 
 - `migrate_scope` keeps its exact signature, result dataclass
@@ -473,6 +533,9 @@ applicable:
   `packages/memtomem/src/memtomem/context/transfer.py`
   (`transfer_artifact`, `TransferResult`, `TransferCollisionError`,
   `_stage_copy`, `_rewrite_staged_manifest_name`),
+  `packages/memtomem/src/memtomem/context/mcp_servers_copy.py`
+  (`copy_mcp_server`, `McpServerCopyResult`, `_promote_no_clobber` —
+  §12),
   `packages/memtomem/src/memtomem/context/migrate.py`
   (`_acquire_pair_lock` — pair-shared `timeout`, `_stage_move`,
   `_promote_move`, `_existing_fanout_targets`,

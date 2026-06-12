@@ -57,6 +57,8 @@ from pydantic import BaseModel
 
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context.mcp_servers import McpServerParseError
+from memtomem.context.mcp_servers_copy import McpServerCopyResult, copy_mcp_server
 from memtomem.context.migrate import (
     SCOPE_MIGRATABLE_KINDS,
     ArtifactNotFoundError,
@@ -232,7 +234,7 @@ def _scope_id_for(scope: TargetScope, root: Path | None) -> str | None:
     return compute_scope_id(root)
 
 
-def _serialize(result: TransferResult) -> dict[str, Any]:
+def _serialize(result: TransferResult | McpServerCopyResult) -> dict[str, Any]:
     """Wire shape for one plan/apply result.
 
     Paths are absolute strings — relativization is ambiguous when two
@@ -240,7 +242,10 @@ def _serialize(result: TransferResult) -> dict[str, Any]:
     is the issue-pinned field the UI uses for one-click follow-up sync.
     The provenance triple is the A-4 ``_skip_reasons`` contract: the
     human ``provenance_reason`` for tooltips, the stable
-    ``provenance_reason_code`` for client matching.
+    ``provenance_reason_code`` for client matching. The mcp-servers copy
+    result (A-12 #1282) implements the same attribute surface by pinned
+    contract; ``sync_hint`` is its prose follow-up (no CLI sync phase
+    exists for mcp-servers — engine results leave it ``null``).
     """
     return {
         "transferred": result.transferred,
@@ -260,6 +265,7 @@ def _serialize(result: TransferResult) -> dict[str, Any]:
         "fanout_backed_up": [str(p) for p in result.fanout_backed_up],
         "needs_sync": result.needs_sync,
         "sync_command": result.sync_command,
+        "sync_hint": result.sync_hint,
         "notes": list(result.notes),
         "provenance": result.provenance,
         "provenance_reason": result.provenance_reason,
@@ -293,19 +299,63 @@ async def transfer_context_artifact(
     Responses: ``status="plan"`` (dry_run), ``status="needs_confirmation"``
     (gate round-trip, plan nested under ``plan``), ``status="ok"``
     (applied). See the module docstring for the gate and error contracts.
+
+    ``kind="mcp-servers"`` (A-12 #1282) rides the same route through the
+    copy adapter: copy-only (mode="move" is 400), cross-project-only
+    (``to_project_scope_id`` required), both tiers pinned
+    ``project_shared`` (``to_target_scope`` must say so; ``from_scope``
+    may), no ``as_name``. Every shared gate — destination eligibility,
+    ``.memtomem`` store check, ``confirm_project_shared`` round-trip,
+    dry_run, engine offload — applies unchanged.
     """
-    if kind not in SCOPE_MIGRATABLE_KINDS:
+    is_mcp = kind == "mcp-servers"
+    if not is_mcp and kind not in SCOPE_MIGRATABLE_KINDS:
         raise _error(
             400,
             "validation",
             f"unsupported kind for artifact transfer: {kind!r} "
-            f"(use one of {SCOPE_MIGRATABLE_KINDS})",
+            f"(use one of {SCOPE_MIGRATABLE_KINDS} or 'mcp-servers')",
         )
-    kind_t = cast(ArtifactKind, kind)
-    try:
-        validate_name(name, kind=f"{kind[:-1]} name")
+    if is_mcp:
+        if body.mode != "copy":
+            raise _error(
+                400,
+                "validation",
+                "mcp-servers support copy only: the canonical is single-tier "
+                "(project_shared), and a cross-project move would orphan the "
+                "source project's .mcp.json fan-out.",
+            )
         if body.as_name is not None:
-            validate_name(body.as_name, kind=f"{kind[:-1]} name")
+            raise _error(
+                400,
+                "validation",
+                "as_name is not supported for mcp-servers; the copy keeps the "
+                "server name (#1282 scope).",
+            )
+        if body.to_target_scope != "project_shared" or body.from_scope not in (
+            None,
+            "project_shared",
+        ):
+            raise _error(
+                400,
+                "validation",
+                "mcp-servers are single-tier (project_shared) by design; "
+                "to_target_scope must be 'project_shared' and from_scope, "
+                "when given, the same.",
+            )
+        if body.to_project_scope_id is None:
+            raise _error(
+                400,
+                "validation",
+                "mcp-servers copy is cross-project only: pass "
+                "to_project_scope_id (within one project the canonical "
+                "already exists; there is no second tier to copy to).",
+            )
+    try:
+        name_kind = "MCP server" if is_mcp else f"{kind[:-1]} name"
+        validate_name(name, kind=name_kind)
+        if body.as_name is not None:
+            validate_name(body.as_name, kind=name_kind)
     except InvalidNameError as exc:
         raise _error(400, "validation", str(exc)) from exc
 
@@ -322,6 +372,17 @@ async def transfer_context_artifact(
         request, body.to_project_scope_id, src_root, src_scope
     )
     _reject_ineligible_destination(dst_scope, body.to_target_scope)
+
+    if is_mcp and dst_root.resolve() == src_root.resolve():
+        # to_project_scope_id resolved back to the source project — the
+        # adapter would refuse the same way; 400 here keeps the message in
+        # route vocabulary (selector, not roots).
+        raise _error(
+            400,
+            "validation",
+            "to_project_scope_id resolves to the source project; mcp-servers "
+            "copy is cross-project only.",
+        )
 
     if (
         body.to_target_scope != "user"
@@ -356,20 +417,32 @@ async def transfer_context_artifact(
                 # loop AND keep the enclosing asyncio.timeout from firing. The
                 # engine-side lock budget (30s < 60s) bounds those waits — see
                 # the module docstring for the residual mid-write window.
-                result = await asyncio.to_thread(
-                    transfer_artifact,
-                    kind_t,
-                    name,
-                    src_project_root=src_root,
-                    from_scope=body.from_scope,
-                    dst_project_root=None if body.to_target_scope == "user" else dst_root,
-                    to_scope=body.to_target_scope,
-                    mode=body.mode,
-                    apply_=apply_,
-                    surface="web_context_transfer",
-                    new_name=body.as_name,
-                    lock_timeout=_TRANSFER_LOCK_BUDGET_S,
-                )
+                result: TransferResult | McpServerCopyResult
+                if is_mcp:
+                    result = await asyncio.to_thread(
+                        copy_mcp_server,
+                        name,
+                        src_project_root=src_root,
+                        dst_project_root=dst_root,
+                        apply_=apply_,
+                        surface="web_context_transfer",
+                        lock_timeout=_TRANSFER_LOCK_BUDGET_S,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        transfer_artifact,
+                        cast(ArtifactKind, kind),
+                        name,
+                        src_project_root=src_root,
+                        from_scope=body.from_scope,
+                        dst_project_root=None if body.to_target_scope == "user" else dst_root,
+                        to_scope=body.to_target_scope,
+                        mode=body.mode,
+                        apply_=apply_,
+                        surface="web_context_transfer",
+                        new_name=body.as_name,
+                        lock_timeout=_TRANSFER_LOCK_BUDGET_S,
+                    )
     except TimeoutError:
         # Either the route's own 60s window or the engine's lock budget.
         # The lock-budget path commits nothing by construction; the outer
@@ -397,6 +470,12 @@ async def transfer_context_artifact(
         # manual-recovery steps and is deliberately NOT redacted — the paths
         # ARE the remediation, and the CLI prints the same text raw.
         raise _error(500, "internal", exc.message) from exc
+    except McpServerParseError as exc:
+        # mcp-servers copy refuses to propagate a definition the
+        # destination's sync would choke its whole mcp phase on (A-12);
+        # same 422 status the mcp CRUD routes use for this error, in this
+        # route's object envelope.
+        raise _error(422, "parse", str(exc)) from exc
     except InvalidNameError as exc:
         raise _error(400, "validation", str(exc)) from exc
     except click.ClickException as exc:

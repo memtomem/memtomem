@@ -63,6 +63,7 @@ from memtomem.context.migrate import (
     migrate_scope,
 )
 from memtomem.context.transfer import TransferMode, TransferResult, transfer_artifact
+from memtomem.context.mcp_servers_copy import McpServerCopyResult, copy_mcp_server
 from memtomem.context.projects import (
     KnownProjectsCorruptError,
     KnownProjectsStore,
@@ -3051,7 +3052,10 @@ def _transfer_options(fn: Any) -> Any:
     drifting apart.
     """
     decorators = [
-        click.argument("asset_type", type=click.Choice(list(SCOPE_MIGRATABLE_KINDS))),
+        # "mcp-servers" rides the engine kinds in the shared Choice; it is
+        # copy-only and cross-project-only — _transfer_dispatch enforces
+        # both (A-12 #1282) so `move` keeps one option surface.
+        click.argument("asset_type", type=click.Choice([*SCOPE_MIGRATABLE_KINDS, "mcp-servers"])),
         click.argument("name"),
         click.option(
             "--from",
@@ -3141,6 +3145,41 @@ def _transfer_dispatch(
     """
     if yes and not apply_:
         raise click.UsageError("--yes is only valid with --apply")
+
+    # mcp-servers branch gates (A-12 #1282) — BEFORE the generic option
+    # combinators so every refusal speaks mcp vocabulary: the canonical
+    # is single-tier (project_shared, ADR-0016 §3 note), so tier flags
+    # are redundant-correct at best, move has no meaning, and the only
+    # transfer is cross-project copy via the adapter
+    # (:func:`memtomem.context.mcp_servers_copy.copy_mcp_server`).
+    is_mcp = asset_type == "mcp-servers"
+    if is_mcp:
+        if mode != "copy":
+            raise click.ClickException(
+                "mcp-servers support copy only: the canonical is single-tier "
+                "(project_shared), and a cross-project move would orphan the "
+                "source project's .mcp.json fan-out. Copy it, then delete the "
+                "source definition from its web panel if you meant move."
+            )
+        if new_name is not None:
+            raise click.ClickException(
+                "--as is not supported for mcp-servers; the copy keeps the "
+                "server name (#1282 scope)."
+            )
+        for flag, value in (("--from", from_scope), ("--to", to_scope)):
+            if value is not None and value != "project_shared":
+                raise click.ClickException(
+                    f"{flag} {value} is not valid for mcp-servers: the "
+                    f"canonical is single-tier (project_shared) by design."
+                )
+        if to_project is None:
+            raise click.UsageError(
+                "mcp-servers copy is cross-project only: pass --to-project "
+                "<scope_id|path> (within one project the canonical already "
+                "exists; there is no second tier to copy to)."
+            )
+        to_scope = "project_shared"
+
     if to_scope is None and to_project is None:
         raise click.UsageError(
             f"nothing to do: pass --to <tier> and/or --to-project "
@@ -3157,9 +3196,10 @@ def _transfer_dispatch(
     # filesystem probe. Same vocabulary as the engine's own
     # ``validate_name`` calls, translated to the CLI error shape here.
     try:
-        validate_name(name, kind=f"{asset_type[:-1]} name")
+        name_kind = "MCP server" if is_mcp else f"{asset_type[:-1]} name"
+        validate_name(name, kind=name_kind)
         if new_name is not None:
-            validate_name(new_name, kind=f"{asset_type[:-1]} name")
+            validate_name(new_name, kind=name_kind)
     except InvalidNameError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -3230,19 +3270,32 @@ def _transfer_dispatch(
         ):
             raise click.Abort()
 
+    result: TransferResult | McpServerCopyResult
     try:
-        result = transfer_artifact(
-            cast(ArtifactKind, asset_type),
-            name,
-            src_project_root=src_root,
-            from_scope=cast("TargetScope | None", from_scope),
-            dst_project_root=None if to_scope_t == "user" else dst_root,
-            to_scope=to_scope_t,
-            mode=mode,
-            apply_=apply_,
-            surface=f"cli_context_{mode}",
-            new_name=new_name,
-        )
+        if is_mcp:
+            # Cross-project-only, copy-only; the adapter re-raises the
+            # engine's typed collision/not-found errors and the standard
+            # Gate A envelope, so the translation set below is shared.
+            result = copy_mcp_server(
+                name,
+                src_project_root=src_root,
+                dst_project_root=dst_root,
+                apply_=apply_,
+                surface=f"cli_context_{mode}",
+            )
+        else:
+            result = transfer_artifact(
+                cast(ArtifactKind, asset_type),
+                name,
+                src_project_root=src_root,
+                from_scope=cast("TargetScope | None", from_scope),
+                dst_project_root=None if to_scope_t == "user" else dst_root,
+                to_scope=to_scope_t,
+                mode=mode,
+                apply_=apply_,
+                surface=f"cli_context_{mode}",
+                new_name=new_name,
+            )
     except (FileNotFoundError, ValueError, InvalidNameError) as exc:
         # Same translation set as _migrate_scope_dispatch — the engine's
         # validate_name raises InvalidNameError (not ClickException), and
@@ -3262,7 +3315,7 @@ def _transfer_dispatch(
         _ensure_local_tier_gitignored(dst_root)
 
 
-def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
+def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, apply_: bool) -> None:
     """User-facing summary for one copy/move transfer (#1274).
 
     Sibling of :func:`_print_migrate_scope_result` with the transfer
@@ -3273,8 +3326,16 @@ def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
     provenance carry-over outcome (A-4 #1275; quiet when
     ``not_applicable``, yellow with the engine's human reason when the
     artifact lands untracked).
+
+    Also renders the mcp-servers copy result (A-12 #1282) — same field
+    surface by contract. ``sync_hint`` is the prose follow-up for
+    results with no runnable sync command (mcp fan-out is web-only);
+    ``(flat layout)`` is suppressed there because flat is the only
+    layout mcp-servers have, not a legacy variant worth flagging.
     """
-    layout_note = " (flat layout)" if result.layout == "flat" else ""
+    layout_note = (
+        " (flat layout)" if result.layout == "flat" and result.kind != "mcp-servers" else ""
+    )
     rename_note = f" as {result.dst_name}" if result.dst_name != result.name else ""
     click.echo(f"Plan: {result.mode} {result.kind}/{result.name}{rename_note}{layout_note}")
     click.echo(f"  from {result.from_scope}: {result.src_path}")
@@ -3304,6 +3365,8 @@ def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
         click.echo(f"\nRun with --apply{confirm_note} to execute.")
         if result.needs_sync and result.sync_command:
             click.echo(f"After apply, run `{result.sync_command}` to refresh runtime fan-out.")
+        elif result.needs_sync and result.sync_hint:
+            click.echo(f"After apply, {result.sync_hint}")
         return
 
     verb = "moved" if result.mode == "move" else "copied"
@@ -3342,6 +3405,8 @@ def _print_transfer_result(result: TransferResult, *, apply_: bool) -> None:
         click.echo(
             f"\nNext: run `{result.sync_command}` to generate runtime fan-out at the destination."
         )
+    elif result.needs_sync and result.sync_hint:
+        click.echo(f"\nNext: {result.sync_hint}")
 
 
 @context.command("move")
@@ -3419,6 +3484,11 @@ def copy_cmd(
     move`` (its --help has the move/copy/migrate comparison), plus
     ``--as NEW_NAME`` for a renamed copy. Default is a dry-run preview;
     pass --apply to execute.
+
+    ASSET_TYPE ``mcp-servers`` copies one MCP server definition to
+    another project (--to-project required; copy-only, no --as, tier
+    flags fixed at project_shared). The destination's .mcp.json fan-out
+    is web-only — the result prints the follow-up.
     """
     _transfer_dispatch(
         "copy",

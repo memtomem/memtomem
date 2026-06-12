@@ -30,6 +30,7 @@ monkeypatched so ``--to-project`` discovery reads a tmp
 
 from __future__ import annotations
 
+import json
 import shlex
 from pathlib import Path
 
@@ -520,3 +521,169 @@ def test_provenance_not_carried_line_names_the_reason(cli_projects) -> None:
     )
     assert preview.exit_code == 0, preview.output
     assert "install provenance will not be carried" in preview.output
+
+
+# ── mcp-servers copy (A-12 #1282) ────────────────────────────────────
+#
+# Adapter semantics (staging, no-clobber promote, Gate A envelope,
+# disclosure notes) are pinned by ``test_mcp_servers_copy.py``; these pin
+# what the CLI layer adds: the option-matrix refusals in mcp vocabulary,
+# Gate B parity with artifact copies, and the prose follow-up (no CLI
+# sync phase exists for mcp-servers, so ``sync_command`` rendering must
+# fall back to ``sync_hint`` — the Codex design-gate renderer fold).
+
+
+def _seed_mcp_server(
+    layout: dict[str, Path], root_key: str = "a", name: str = "pg", definition: dict | None = None
+) -> Path:
+    store = layout[root_key] / ".memtomem" / "mcp-servers"
+    store.mkdir(parents=True, exist_ok=True)
+    path = store / f"{name}.json"
+    body = definition if definition is not None else {"command": "npx", "args": ["-y", "srv"]}
+    path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def test_mcp_copy_round_trip(cli_projects) -> None:
+    src = _seed_mcp_server(cli_projects)
+    result = _invoke(
+        [
+            "copy",
+            "mcp-servers",
+            "pg",
+            "--to-project",
+            str(cli_projects["b"]),
+            "--apply",
+            "--confirm-project-shared",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    dst = cli_projects["b"] / ".memtomem" / "mcp-servers" / "pg.json"
+    assert dst.read_bytes() == src.read_bytes()
+    assert "✓ copied mcp-servers/pg: project_shared → project_shared" in result.output
+    # Prose follow-up, not a runnable sync command — and no layout noise.
+    assert "Next: fan out at the destination from its web panel" in result.output
+    assert "`mm context sync` has no mcp-servers phase" in result.output
+    assert "(flat layout)" not in result.output
+
+
+def test_mcp_dry_run_is_default_and_prints_hint(cli_projects) -> None:
+    _seed_mcp_server(cli_projects)
+    result = _invoke(["copy", "mcp-servers", "pg", "--to-project", str(cli_projects["b"])])
+    assert result.exit_code == 0, result.output
+    assert not (cli_projects["b"] / ".memtomem" / "mcp-servers").exists()
+    assert "Run with --apply --confirm-project-shared to execute." in result.output
+    assert "After apply, fan out at the destination from its web panel" in result.output
+
+
+def test_mcp_move_rejected(cli_projects) -> None:
+    _seed_mcp_server(cli_projects)
+    result = _invoke(["move", "mcp-servers", "pg", "--to-project", str(cli_projects["b"])])
+    assert result.exit_code != 0
+    assert "mcp-servers support copy only" in result.output
+
+
+def test_mcp_as_rename_rejected(cli_projects) -> None:
+    _seed_mcp_server(cli_projects)
+    result = _invoke(
+        ["copy", "mcp-servers", "pg", "--to-project", str(cli_projects["b"]), "--as", "pg2"]
+    )
+    assert result.exit_code != 0
+    assert "--as is not supported for mcp-servers" in result.output
+
+
+def test_mcp_tier_flags_only_accept_project_shared(cli_projects) -> None:
+    _seed_mcp_server(cli_projects)
+    for flag, value in (("--to", "project_local"), ("--from", "user")):
+        result = _invoke(
+            ["copy", "mcp-servers", "pg", "--to-project", str(cli_projects["b"]), flag, value]
+        )
+        assert result.exit_code != 0
+        assert f"{flag} {value} is not valid for mcp-servers" in result.output
+    # Redundant-correct spelling passes through.
+    ok = _invoke(
+        [
+            "copy",
+            "mcp-servers",
+            "pg",
+            "--to-project",
+            str(cli_projects["b"]),
+            "--to",
+            "project_shared",
+            "--from",
+            "project_shared",
+        ]
+    )
+    assert ok.exit_code == 0, ok.output
+
+
+def test_mcp_requires_to_project(cli_projects) -> None:
+    _seed_mcp_server(cli_projects)
+    result = _invoke(["copy", "mcp-servers", "pg"])
+    assert result.exit_code != 0
+    assert "mcp-servers copy is cross-project only: pass --to-project" in result.output
+
+
+def test_mcp_gate_b_yes_alone_refused(cli_projects) -> None:
+    """--yes does not satisfy the project_shared opt-in (artifact parity)."""
+    _seed_mcp_server(cli_projects)
+    result = _invoke(
+        ["copy", "mcp-servers", "pg", "--to-project", str(cli_projects["b"]), "--apply", "-y"]
+    )
+    assert result.exit_code != 0
+    assert "--to project_shared requires --confirm-project-shared" in result.output
+    assert not (cli_projects["b"] / ".memtomem" / "mcp-servers").exists()
+
+
+def test_mcp_paused_destination_refused(cli_projects) -> None:
+    _seed_mcp_server(cli_projects)
+    store = KnownProjectsStore(cli_projects["kp"])
+    store.add(cli_projects["b"])
+    sid = compute_scope_id(cli_projects["b"])
+    store.set_enabled_by_scope_id(sid, False)
+    result = _invoke(
+        [
+            "copy",
+            "mcp-servers",
+            "pg",
+            "--to-project",
+            sid,
+            "--apply",
+            "--confirm-project-shared",
+        ]
+    )
+    assert result.exit_code != 0
+    assert "paused" in result.output
+    assert not (cli_projects["b"] / ".memtomem" / "mcp-servers").exists()
+
+
+def test_mcp_no_store_destination_refused(cli_projects, tmp_path: Path) -> None:
+    _seed_mcp_server(cli_projects)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    result = _invoke(["copy", "mcp-servers", "pg", "--to-project", str(bare)])
+    assert result.exit_code != 0
+    assert "destination project has no .memtomem/ store" in result.output
+
+
+def test_mcp_gate_a_blocks_env_secret(cli_projects) -> None:
+    """Issue #1282 acceptance 1, CLI rendering: standard Gate A message."""
+    _seed_mcp_server(
+        cli_projects,
+        definition={"command": "npx", "env": {"AWS_ACCESS_KEY": _SECRET_LITERAL}},
+    )
+    result = _invoke(
+        [
+            "copy",
+            "mcp-servers",
+            "pg",
+            "--to-project",
+            str(cli_projects["b"]),
+            "--apply",
+            "--confirm-project-shared",
+        ]
+    )
+    assert result.exit_code != 0
+    assert "Gate A: pg.json contains 1 privacy pattern hit(s)" in result.output
+    assert "write to scope='project_shared' rejected" in result.output
+    assert not (cli_projects["b"] / ".memtomem" / "mcp-servers" / "pg.json").exists()
