@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -190,6 +191,7 @@ def test_in_sync_rerun_skips_write_and_preserves_mtime_and_mode(tmp_path: Path) 
     assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(st.st_mode)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not round-tripped on Windows")
 def test_create_writes_mcp_json_world_readable(tmp_path: Path) -> None:
     """A freshly created .mcp.json holds only Gate-A-scanned canonical
     content — 0644 like every other fan-out target, not the 0600 state-file
@@ -200,6 +202,7 @@ def test_create_writes_mcp_json_world_readable(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("mode", [0o600, 0o644])
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not round-tripped on Windows")
 def test_rewrite_preserves_existing_mcp_json_mode(tmp_path: Path, mode: int) -> None:
     """Rewrites preserve the user's existing mode in BOTH directions: a 0600
     file may hold unscanned secret env values in foreign entries we preserve
