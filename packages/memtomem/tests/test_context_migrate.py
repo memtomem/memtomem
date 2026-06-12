@@ -1593,10 +1593,11 @@ def test_e4_rollback_src_reappears_preserves_staging(scope_layout, monkeypatch, 
     the only verified copy of the original.
 
     Triggered by monkeypatching ``scan_artifact_tree`` in the
-    ``migrate`` module so that BEFORE Gate A would block, the racer
-    recreates ``src_path`` with different bytes. Then Gate A blocks,
-    rollback enters the ``src_path.exists()`` branch, logs ERROR, and
-    preserves staging.
+    ``transfer`` module (the scope-move orchestration lives there since
+    ADR-0023; ``migrate_scope`` delegates) so that BEFORE Gate A would
+    block, the racer recreates ``src_path`` with different bytes. Then
+    Gate A blocks, rollback enters the ``src_path.exists()`` branch,
+    logs ERROR, and preserves staging.
 
     Pin (Codex re-review):
       * src reappeared bytes are preserved verbatim — rollback does
@@ -1608,9 +1609,9 @@ def test_e4_rollback_src_reappears_preserves_staging(scope_layout, monkeypatch, 
 
     src = _write_canonical_dir(scope_layout, "agents", "user", "leak", _AGENT_BODY_SECRET)
 
-    from memtomem.context import migrate as migrate_mod
+    from memtomem.context import transfer as transfer_mod
 
-    real_scan = migrate_mod.scan_artifact_tree
+    real_scan = transfer_mod.scan_artifact_tree
     racer_bytes = "racer wrote different bytes\n"
 
     def fake_scan_with_racer(*args, **kwargs):
@@ -1622,8 +1623,8 @@ def test_e4_rollback_src_reappears_preserves_staging(scope_layout, monkeypatch, 
         src.write_text(racer_bytes, encoding="utf-8")
         return real_scan(*args, **kwargs)
 
-    monkeypatch.setattr(migrate_mod, "scan_artifact_tree", fake_scan_with_racer)
-    caplog.set_level(_logging.ERROR, logger="memtomem.context.migrate")
+    monkeypatch.setattr(transfer_mod, "scan_artifact_tree", fake_scan_with_racer)
+    caplog.set_level(_logging.ERROR, logger="memtomem.context.transfer")
 
     result = _invoke_migrate(
         _migrate_args(

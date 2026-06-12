@@ -22,7 +22,7 @@ _SCOPE_LOOKUP_ORDER: tuple[TargetScope, ...] = ("project_local", "project_shared
 
 
 def resolve(
-    project_root: Path,
+    project_root: Path | None,
     asset_type: str,
     name: str,
     vendor: str,
@@ -38,8 +38,12 @@ def resolve(
 
     Args:
         project_root: Project root that owns the canonical subtree. For
-            ``scope="user"`` the project_root is unused but still required
-            (passed by every existing caller).
+            ``scope="user"`` the project_root is unused; ``None`` is
+            accepted for that case (ADR-0023 transfer with a user-tier
+            destination and no project context) — the project-tier
+            lookups then raise :class:`ContextScopeError` internally and
+            are skipped, exactly like the pre-existing comment below
+            describes.
         asset_type: One of ``agents`` / ``skills`` / ``commands``.
         name: Artifact name (skill / agent / command identifier).
         vendor: Runtime vendor key (``claude`` / ``gemini`` / ``codex``)

@@ -1,0 +1,321 @@
+# ADR-0023: Cross-project artifact transfer engine (move|copy)
+
+**Status:** Accepted
+**Date:** 2026-06-12
+**Context:** Context Gateway completion campaign, mechanism track #1270
+item A-2 (#1273). ADR-0011 PR-E4 shipped a single-project scope move
+(`mm context migrate <kind> <name> --to <tier>`), and ADR-0021 shipped
+cross-project *reads* (discovery + portal). What the campaign's owner
+request identified as missing is the general write-side primitive:
+selectively moving or copying **one** canonical artifact between tiers
+**and between projects**. `context/migrate.py` hardcoded a single
+`project_root`, supported move only, and had no cross-project path.
+This ADR pins the engine that fills that gap:
+`memtomem.context.transfer.transfer_artifact`.
+
+## Decision
+
+### 1. One engine, one entry point, surfaces stay thin
+
+`context/transfer.py` exposes exactly one orchestration entry point:
+
+```
+transfer_artifact(kind, name, *, src_project_root, from_scope,
+                  dst_project_root, to_scope, mode: "move"|"copy",
+                  apply_, surface, new_name=None) -> TransferResult
+```
+
+The staged-move primitives stay in `context/migrate.py` and are reused
+verbatim — `_acquire_pair_lock`, `_stage_move`, `_promote_move`,
+`_existing_fanout_targets`, `_remove_runtime_fanout_for` — so there is
+exactly one implementation of staging, locking, and fan-out cleanup in
+the tree. `migrate_scope` remains as a thin same-root wrapper with
+byte-compatible results and error messages; every existing surface
+(CLI `mm context migrate`, MCP `mem_context_artifact_migrate`, web)
+keeps its contract without modification.
+
+Planned consumers, each its own campaign item: CLI `mm context copy` /
+`mm context move` (A-3 #1274), web `POST
+/api/context/{kind}/{name}/transfer` (A-5 #1276), MCP
+`mem_context_artifact_transfer` (A-13 #1283). The engine raises
+`click.ClickException` / `MigratePartialError`; each surface translates
+to its native error shape (the established `PrivacyScanError` pattern).
+
+### 2. Support matrix
+
+| artifact × capability | tier↔tier move (same project) | copy (same project) | move (project A → B) | copy (project A → B) | copy `--as` rename |
+|---|---|---|---|---|---|
+| agents | yes (PR-E4, now via engine) | yes | yes | yes | yes |
+| commands | yes (PR-E4, now via engine) | yes | yes | yes | yes |
+| skills | yes (dir tree) | yes | yes | yes | yes |
+| settings hooks | `settings-migrate` path, NOT this engine | — | A-11 #1281 (per-hook copy, separate mechanism) | A-11 #1281 | — |
+| mcp-servers | n/a (single-tier by design, ADR-0016 §3 note) | — | A-12 #1282 (separate mechanism) | A-12 #1282 | — |
+| memory | ADR-0012 (cross-DB migration, deferred) | — | — | — | — |
+
+Rejected pairings (hard `ClickException`, both modes):
+
+- **same `(project, tier)`** — source and destination resolve to the
+  same canonical store; a rename/duplicate verb is explicitly out of
+  scope (#1270 non-goals).
+- **cross-project `user → user`** — the user tier is global
+  (`~/.memtomem/<kind>/`), so "project A's user tier" and "project B's
+  user tier" are the same directory; there is nothing to move or copy.
+  Both rules collapse to one check: `canonical_artifact_dir(kind,
+  from_scope, src_root) == canonical_artifact_dir(kind, to_scope,
+  dst_root)`.
+- **rename outside copy mode** — `new_name` with `mode="move"` is
+  refused; move preserves identity.
+
+### 3. Bounded two-roots exception to ADR-0016 §5
+
+ADR-0016 §5 pins "writes land in **exactly one tier per invocation**"
+with a single project-root resolution per write. A cross-project move
+necessarily touches two project roots in one invocation — the source
+root (delete half) and the destination root (create half). This ADR
+grants a **bounded** exception:
+
+- exactly **one artifact** per invocation (no bulk; bulk cross-project
+  sync is ADR-0025 / A-9 #1279's question, which will also own the
+  ADR-0021 single-project-mutation supersession);
+- exactly **two** roots, each playing a fixed role (source / destination);
+  tier resolution per root stays ADR-0016 §5-conformant — `from_scope`
+  binds to the source root, `to_scope` to the destination root, and
+  neither resolution consults config defaults;
+- the destination write itself still lands in exactly one tier.
+
+Everything else in ADR-0016 §5 (no config-field default for the write
+tier, project-root resolution rules per surface) is unchanged. Web/CLI
+surfaces resolve the two roots via the shared selector from A-1
+(`resolve_project_selector`, `mm context projects`).
+
+### 4. Two-root fan-out cleanup contract (move)
+
+`_remove_runtime_fanout_for`'s single `project_root` parameter used to
+drive two different jobs that only coincide in a same-root move
+(Codex design-gate finding for this campaign):
+
+1. **stale fan-out discovery** — which runtime files
+   (`<root>/.claude/agents/foo.md`, `~/.gemini/commands/foo.toml`, …)
+   the *source* tier had materialized; anchored at the **source**
+   project root.
+2. **expected-render / override verification** (#1247 id 6) — what
+   sync *would* write for this artifact, compared byte-for-byte before
+   deleting; per-vendor overrides live inside the artifact dir
+   (`<name>/overrides/<vendor>.<ext>`) and **travel with the
+   artifact**, so post-move they resolve under the **destination**
+   project root.
+
+The signature now takes `src_project_root` (discovery) and
+`dst_project_root` (verification) separately. A same-root move passes
+the same path twice — byte-for-byte the historical behavior. The
+regression pin is a `project_shared → project_shared` move across two
+roots carrying a claude override: discovery must clean the *source*
+project's runtime file, and the override must verify (no spurious
+`.bak`) by resolving at the *destination* root.
+
+Cleanup semantics are otherwise inherited unchanged from PR-E4 +
+#1247 id 6: best-effort, **outside** the pair lock, byte-verified
+deletes, `.bak` divergence snapshots, symlinks and generator-less
+(kind, runtime) pairs left in place.
+
+Move does **not** generate destination fan-out, and copy performs no
+fan-out work at all (source is untouched; destination is new). Instead
+`TransferResult` carries `needs_sync` plus the exact follow-up command
+(`mm context sync --scope <tier>`, `cd`-prefixed for a project-tier
+destination until A-9 lands a `--project` selector). `project_local`
+destinations set `needs_sync=False` (no runtime fan-out by design,
+ADR-0011 §3). Rationale: sync is the single writer of runtime trees;
+an inline fan-out here would duplicate `_sync_atomic` Phase 2 and
+inevitably drift from it.
+
+### 5. Gate A / Gate B contract
+
+**Gate A (secret scan) runs against the staged bytes iff the
+destination tier is `project_shared` — in either project.** The scan
+(`scan_artifact_tree`) walks the entire staged artifact: manifest,
+`overrides/`, and frozen `versions/vN.md` snapshots included, so a
+secret in an old version snapshot blocks a shared landing and the
+error names the offending file (re-anchored from the transient staging
+path onto the source artifact the user can actually edit). There is no
+force valve for `project_shared` (ADR-0011 §5: git history is
+forever); `user` / `project_local` destinations are not scanned at
+transfer time, same as PR-E4. A Gate A block leaves **zero residue at
+the destination**: move rolls staging back to the source ("staging is
+deleted only when the bytes are verified safe elsewhere" — the PR-E4
+rollback ladder is reused verbatim); copy just deletes staging (the
+source was never consumed, by construction).
+
+The audit `surface=` string is caller-supplied per surface
+(`cli_context_transfer` default; A-3/A-5/A-13 pass their own), and the
+scan's audit context carries the **destination** project root — that
+is where the bytes land.
+
+**Gate B (project-shared write confirmation) stays at the surface
+layer.** The engine never prompts. CLI verbs own
+`--confirm-project-shared`; the web route inherits the
+disclose-then-confirm host-write helper shared by A-5/A-6. This is the
+same layering migrate established (`migrate_scope` is prompt-free; the
+CLI wrapper gates).
+
+### 6. Collision policy
+
+A destination collision (`dst_path` exists, checked pre-flight AND
+re-checked inside the lock window) is a **hard fail with a remediation
+hint** — `--force` does not overwrite transfer targets, in deliberate
+parity with PR-E4 Row 15 (recorded in ADR-0016 §6's 2026-06 note: a
+`replace`-style verb is the named follow-up, and #1270 lists
+`replace`/`--force` overwrite verbs as campaign non-goals). The
+engine's collision identity is the destination **path**
+(`<dst_store>/<dst_name>`); `--as <new-name>` is the supported way to
+land a copy next to an existing same-name artifact.
+
+### 7. Copy mode and `--as` rename
+
+Copy stages by **byte copy** (`_stage_copy`: `copytree(symlinks=True)`
+/ `copy2(follow_symlinks=False)` — the same no-deref contract as the
+EXDEV fallback), so the source is never consumed or mutated and
+rollback is trivially safe. `versions/` + `versions.json` live inside
+the artifact dir and travel implicitly in both modes (move and copy);
+version history is content, not provenance.
+
+`--as <new-name>` (copy only) re-validates the name and performs the
+engine's **one deliberate content mutation**: the staged manifest's
+frontmatter `name:` line is rewritten to the new name, before Gate A
+scans the staged bytes. This is load-bearing, not cosmetic — sync fans
+out under the *parsed* name (`_sync_atomic` keys on
+`adapter.name_of`; dir/stem is only the omitted-`name` fallback), so a
+renamed copy keeping `name: <old>` would fan out at the destination
+under the old name and collide with whatever owns it there — exactly
+the class of collision §6 hard-fails on. Boundaries of the rewrite:
+
+- no frontmatter / no `name:` key → no-op (fallback already yields the
+  new name);
+- multiple `name:` keys → refuse loudly (the flat-YAML parser keeps
+  the last; a partial rewrite could silently lose);
+- `versions/vN.md` snapshots are **not** rewritten (frozen history,
+  ADR-0022) — restoring a pre-rename version resurrects the old name,
+  which is versioning semantics, not a transfer bug;
+- `overrides/<vendor>.*` are **not** rewritten (verbatim-by-contract);
+  the result carries a `notes` entry telling the user to review them.
+
+### 8. Lock ordering and `lock.json` bookkeeping
+
+Both sidecar locks — source artifact and destination artifact, one
+under each project root — are held **simultaneously**, acquired in
+`sorted(key=str)` order over the absolute lock paths
+(`_acquire_pair_lock`, unchanged). String sort over absolute paths is
+a total order across any pair of roots, so every process system-wide
+acquires in one global sequence and the PR-E4 deadlock-freedom
+argument carries over to the cross-project case unchanged.
+
+`lock.json` (wiki install provenance) bookkeeping stays **outside**
+the artifact pair lock — `Lockfile` serializes on its own sidecar, and
+a bookkeeping failure must never fail or roll back a committed move:
+
+- **move out of `project_shared`** → drop the entry from the
+  **source** project's `lock.json` (best-effort, loud warning on
+  failure) — the #1123 B4-1 dangling-entry rule, now root-qualified;
+- **copy** → no `lock.json` change anywhere (the source keeps its
+  provenance; the destination copy has none — yet, see §9).
+
+### 9. Provenance carry-over — deferred to A-4 (#1275)
+
+A `project_shared → project_shared` transfer of a wiki-installed
+artifact could carry the source's `lock.json` entry (commit pin,
+manifest, digests) to the destination so `mm context status` /
+`update` keep working there. That is **deliberately not part of this
+engine**: the design-gate finding stands that carry-over is only
+sound when the source asset is clean per `is_asset_dirty` (carrying a
+pin over locally-edited bytes would bless the edits as installed
+state), which needs its own decision pass. Until #1275 lands, a
+transferred artifact at the destination is simply unmanaged-canonical
+(same as a hand-created one): fully functional, no update lineage.
+
+## Backward compatibility
+
+- `migrate_scope` keeps its exact signature, result dataclass
+  (`MigrateScopeResult`), error-message literals for every same-root
+  case, Gate A audit attribution, and `MigratePartialError` semantics.
+  Its body is now a delegation to `transfer_artifact(mode="move",
+  src_project_root == dst_project_root)`.
+- `_remove_runtime_fanout_for` / `_fanout_target_matches` /
+  `_detect_source_scope` signature changes are module-private; no
+  external callers existed.
+- `context/override.py:resolve` widens `project_root` to
+  `Path | None` (user-tier destinations without a project context);
+  all existing call sites pass a `Path` and are unaffected.
+- The one user-visible wording change: a non-Click caller passing a
+  garbage `to_scope` now gets a `ClickException` ("unsupported
+  destination scope") instead of a raw `ContextScopeError`. No
+  shipping surface could reach the old path (CLI is `click.Choice`
+  gated).
+
+## Consequences
+
+- A-3 (CLI verbs), A-5 (web route), A-13 (MCP action) become thin
+  argument-marshalling layers over one tested engine, mirroring how
+  migrate's three surfaces share `migrate_scope` today.
+- The fan-out cleanup two-root split makes the cross-project move
+  leave no stale runtime entries in the source project — the #895
+  orphan class cannot reappear at the cross-project boundary.
+- Copy mode introduces the first supported way to have the same
+  artifact bytes at two tiers/projects on purpose. Drift between the
+  copies is the user's to manage (status surfaces show each project
+  independently; cross-project drift aggregation is A-10 #1280).
+- `TransferResult.needs_sync` + `sync_command` give every surface a
+  uniform "what next" affordance instead of each one wording its own
+  sync hint.
+
+## Considered & rejected
+
+- **Generating destination fan-out inline after promote.** Rejected:
+  duplicates `_sync_atomic` Phase 2 (override resolution, skip codes,
+  per-runtime suffixes) and would drift from it; sync stays the single
+  writer of runtime trees. The result's `needs_sync` contract covers
+  the UX instead.
+- **`--force` destination overwrite.** Rejected — Row 15 parity
+  (ADR-0016 §6 note); `replace` verb remains the named follow-up and a
+  #1270 non-goal.
+- **Rename in move mode.** Rejected: move preserves identity; rename
+  semantics (fan-out cleanup under the old name, lock.json key change,
+  version-history identity) compound badly with the move rollback
+  ladder, and no campaign use case needs it.
+- **Rewriting `overrides/` and `versions/` on rename.** Rejected:
+  overrides are verbatim-by-contract (user-authored vendor bytes);
+  version snapshots are frozen history (ADR-0022). A `notes` caveat
+  plus documentation beats silent mutation of user content.
+- **A distinct `.transfer-…` staging prefix.** Rejected: reusing the
+  `.migrate-…` convention keeps every existing exclusion (internal-dir
+  predicates, discovery skips, crash-leftover handling and tests)
+  applying to both engines without a second pattern to maintain.
+- **In-engine Gate B prompting.** Rejected: surfaces own confirmation
+  UX (CLI flag, web disclose-then-confirm); the engine stays
+  prompt-free and headless-safe, same as `migrate_scope`.
+- **Carrying `lock.json` provenance in this PR.** Deferred to A-4
+  #1275 with the dirty-source guard as the open design point (§9).
+
+## References
+
+- Issues: #1270 (mechanism umbrella; non-goals list), #1273 (this
+  engine, A-2), #1274 (A-3 CLI verbs), #1275 (A-4 provenance
+  carry-over), #1276 (A-5 web route), #1279 (A-9 / ADR-0025 bulk +
+  ADR-0021 supersession), #1280 (A-10 drift aggregation), #1281 /
+  #1282 (settings hooks / mcp-servers transfer mechanisms), #1283
+  (A-13 MCP action); #895 P2 (stale fan-out orphans), #1123 B4-1
+  (dangling lock.json entry), #1247 id 6 (byte-verified fan-out
+  cleanup).
+- ADRs: ADR-0011 (§3 no project_local fan-out; §5 no force valve;
+  PR-E4 scope move + Row 15), ADR-0015 / ADR-0016 (scope vocabulary;
+  §5 write-target rule this ADR carves the bounded exception into;
+  §6 conflict note), ADR-0021 (portal; its single-project-mutation
+  clause stays in force — the planned ADR-0025 / A-9 #1279 owns that
+  supersession, not this ADR), ADR-0022 (version snapshots, Gate A on
+  frozen bytes).
+- Source anchors (grep the symbol if line numbers drift):
+  `packages/memtomem/src/memtomem/context/transfer.py`
+  (`transfer_artifact`, `TransferResult`, `_stage_copy`,
+  `_rewrite_staged_manifest_name`),
+  `packages/memtomem/src/memtomem/context/migrate.py`
+  (`_acquire_pair_lock`, `_stage_move`, `_promote_move`,
+  `_existing_fanout_targets`, `_remove_runtime_fanout_for` — two-root
+  split, `migrate_scope` wrapper).
