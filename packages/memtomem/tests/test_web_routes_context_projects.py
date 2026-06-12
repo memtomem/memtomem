@@ -473,6 +473,134 @@ async def test_skill_create_with_scope_id_writes_other_scope(client, tmp_path: P
     assert "created_remote" not in cwd_names
 
 
+# ── #1277: detail / diff / rendered / versions follow the selector ──────
+#
+# ADR-0015 §2a flagged the detail-route family as silently ignoring
+# ``?scope_id=`` (cwd-locked). The remediation routes every read through
+# ``resolve_scope_root``; these tests pin the contract per route family by
+# planting a same-named artifact with different bytes in the cwd scope and
+# a registered scope, then asserting each route serves the *selected*
+# project's bytes — the original bug returned cwd bytes with a 200, which
+# a presence-only check would miss.
+
+
+_SCOPED_CMD_TEMPLATE = """---
+description: {marker}
+---
+Body for {marker}.
+"""
+
+_SCOPED_AGENT_TEMPLATE = """---
+name: {name}
+description: {marker}
+---
+# {marker}
+"""
+
+
+def _plant_artifacts(root: Path, name: str, marker: str) -> None:
+    """Plant a same-named canonical skill / command / agent carrying *marker*."""
+    skill_dir = root / ".memtomem" / "skills" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"# {marker}\n", encoding="utf-8")
+    cmd_dir = root / ".memtomem" / "commands"
+    cmd_dir.mkdir(parents=True, exist_ok=True)
+    (cmd_dir / f"{name}.md").write_text(
+        _SCOPED_CMD_TEMPLATE.format(marker=marker), encoding="utf-8"
+    )
+    agents_dir = root / ".memtomem" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / f"{name}.md").write_text(
+        _SCOPED_AGENT_TEMPLATE.format(name=name, marker=marker), encoding="utf-8"
+    )
+
+
+_DETAIL_FAMILY_ROUTES = [
+    pytest.param("/api/context/skills/{name}", "content", id="skills-detail"),
+    pytest.param("/api/context/skills/{name}/diff", "canonical_content", id="skills-diff"),
+    pytest.param("/api/context/commands/{name}", "content", id="commands-detail"),
+    pytest.param(
+        "/api/context/commands/{name}/rendered", "canonical_content", id="commands-rendered"
+    ),
+    pytest.param("/api/context/commands/{name}/diff", "canonical_content", id="commands-diff"),
+    pytest.param("/api/context/agents/{name}", "content", id="agents-detail"),
+    pytest.param("/api/context/agents/{name}/rendered", "canonical_content", id="agents-rendered"),
+    pytest.param("/api/context/agents/{name}/diff", "canonical_content", id="agents-diff"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("template", "content_key"), _DETAIL_FAMILY_ROUTES)
+async def test_detail_family_scope_id_selects_project_bytes(
+    client, cwd_root: Path, tmp_path: Path, template: str, content_key: str
+) -> None:
+    name = "scoped_artifact"
+    _plant_artifacts(cwd_root, name, marker="from-cwd")
+    other = tmp_path / "other-1277"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    _plant_artifacts(other, name, marker="from-other")
+
+    add_resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    sid = add_resp.json()["project_scope_id"]
+
+    url = template.format(name=name)
+
+    scoped = await client.get(url, params={"project_scope_id": sid})
+    assert scoped.status_code == 200, scoped.text
+    scoped_body = scoped.json()[content_key]
+    assert "from-other" in scoped_body
+    assert "from-cwd" not in scoped_body
+
+    unscoped = await client.get(url)
+    assert unscoped.status_code == 200, unscoped.text
+    unscoped_body = unscoped.json()[content_key]
+    assert "from-cwd" in unscoped_body
+    assert "from-other" not in unscoped_body
+
+    unknown = await client.get(url, params={"project_scope_id": "p-deadbeefcafe"})
+    assert unknown.status_code == 404
+    assert "unknown project_scope_id" in unknown.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("artifact_type", ["commands", "agents"])
+async def test_versions_read_scope_id_follows_selected_project(
+    client, tmp_path: Path, artifact_type: str
+) -> None:
+    """The versions read route resolves the artifact inside the selected scope.
+
+    The artifact exists only in the registered scope, so the scoped read
+    succeeding while the bare read 404s proves resolution happened there.
+    Flat-layout canonicals answer with ``migrate_required`` rather than an
+    error, which is the expected read-only shape for a never-versioned
+    artifact.
+    """
+    name = "versioned_remote"
+    other = tmp_path / "versions-1277"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    _plant_artifacts(other, name, marker="versions-other")
+
+    add_resp = await client.post("/api/context/known-projects", json={"root": str(other)})
+    sid = add_resp.json()["project_scope_id"]
+
+    url = f"/api/context/{artifact_type}/{name}/versions"
+
+    scoped = await client.get(url, params={"project_scope_id": sid})
+    assert scoped.status_code == 200, scoped.text
+    data = scoped.json()
+    assert data["name"] == name
+    assert data["migrate_required"] is True
+
+    unscoped = await client.get(url)
+    assert unscoped.status_code == 404
+
+    unknown = await client.get(url, params={"project_scope_id": "p-deadbeefcafe"})
+    assert unknown.status_code == 404
+    assert "unknown project_scope_id" in unknown.json()["detail"]
+
+
 # ── POST /context/known-projects validation ─────────────────────────────
 
 

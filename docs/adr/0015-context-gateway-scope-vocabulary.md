@@ -128,6 +128,16 @@ vocabulary remediates the silent-ignore-`?scope_id=` bug in
 Background; the actual route changes ship as their own follow-up
 issue (see §"Open questions").
 
+> **2026-06 (#1277):** Remediated. The detail / diff / rendered routes
+> (and the versions read route, which postdates this ADR) resolve their
+> project root through the same `resolve_scope_root` dependency as the
+> list routes — `?project_scope_id=` with `?scope_id=` as the permanent
+> alias, unknown / stale selectors → 404. The route swap itself shipped
+> with the Web project switcher (#993); the "currently cwd-locked" line
+> references above describe the pre-remediation tree. Route tests
+> parametrize a non-cwd scope per route family
+> (`test_web_routes_context_projects.py`).
+
 **2b. Settings routes** — originally config-driven for `target_scope`;
 superseded by the parity change in §4e. Current Web settings routes
 accept per-request `?target_scope=` with default `project_shared`.
