@@ -1450,9 +1450,7 @@ class TestGenerateCanonicalReadUnderLock:
     def _setup(self, tmp_path, command: str = "echo old"):
         project = tmp_path / "proj"
         project.mkdir()
-        _make_canonical_settings(
-            project, {"hooks": {"PostToolUse": [_rule("Edit", command)]}}
-        )
+        _make_canonical_settings(project, {"hooks": {"PostToolUse": [_rule("Edit", command)]}})
         return project
 
     def test_merge_uses_canonical_state_after_lock_acquire(self, claude_home, tmp_path):
@@ -1488,9 +1486,7 @@ class TestGenerateCanonicalReadUnderLock:
         assert results["claude_settings"].status == "ok"
         written = json.loads(target.read_text(encoding="utf-8"))
         commands = [
-            inner["command"]
-            for rule in written["hooks"]["PostToolUse"]
-            for inner in rule["hooks"]
+            inner["command"] for rule in written["hooks"]["PostToolUse"] for inner in rule["hooks"]
         ]
         assert "echo new" in commands
         assert "echo old" not in commands
