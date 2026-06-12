@@ -291,6 +291,34 @@ async def test_collector_crash_error_entry_sibling_intact(
 
 
 @pytest.mark.asyncio
+async def test_settings_diff_error_uses_status_shape_envelope(
+    client, cwd_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex impl-review fold: a raising ``diff_settings`` must serialize
+    with the OVERVIEW's settings envelope (status-based: ``status: error``
+    + ``error_kind``/``error_message``), not the artifact kinds'
+    count-based ``{"total": 0, "error": true}`` shape — one client must
+    not meet two incompatible settings error envelopes across the two
+    routes. The contained error still reads as drift."""
+
+    def _boom(project_root, *, scope):
+        raise RuntimeError("settings diff exploded")
+
+    monkeypatch.setattr("memtomem.context.settings.diff_settings", _boom)
+
+    resp = await client.get("/api/context/status-all")
+    assert resp.status_code == 200, resp.text
+    entry = _entry(resp.json(), cwd_root)
+
+    settings_envelope = entry["diff_counts"]["settings"]
+    assert settings_envelope["status"] == "error"
+    assert settings_envelope["error_kind"] == "internal"
+    assert "settings diff exploded" in settings_envelope["error_message"]
+    assert "total" not in settings_envelope  # the count-shape marker must NOT leak in
+    assert entry["status"] == "drift"  # contained per-kind error == drift, not entry error
+
+
+@pytest.mark.asyncio
 async def test_lockfile_error_entry_keeps_partial_aggregate(
     client, cwd_root: Path, tmp_path: Path
 ) -> None:

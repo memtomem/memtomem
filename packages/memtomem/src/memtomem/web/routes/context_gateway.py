@@ -482,11 +482,15 @@ def _status_all_entry(
     so they pass through ``sanitize_diff_reason`` — the established
     display-sanitize boundary; ``lockfile_error`` gets the same treatment.
     Failed diff kinds become ``_error_payload`` envelopes under their kind
-    key, exactly like the single-project overview.
+    key, exactly like the single-project overview — INCLUDING the shape
+    split: settings uses the status-based envelope, the four artifact
+    kinds use the count-based one (Codex impl-review fold — one shape for
+    all five would hand clients two incompatible settings error
+    envelopes across the two routes).
     """
     diff_counts: dict[str, Any] = dict(status.diff_counts)
     for kind, exc in status.diff_errors.items():
-        diff_counts[kind] = _error_payload(exc, shape="total")
+        diff_counts[kind] = _error_payload(exc, shape="status" if kind == "settings" else "total")
     if status.lockfile_error:
         entry_status = "error"
     elif status.drift:
