@@ -1102,3 +1102,94 @@ def test_sync_all_noop_run_shows_nothing_synced_toast(page, mm_web_url: str) -> 
     )
     success = page.locator("#toast-container .toast.toast-success")
     assert success.count() == 0, "a no-op run must not toast 'Sync completed'"
+
+
+# B-5 (#1288): per-type × per-runtime breakdown in the Sync All confirm. EN
+# copy pinned as constants (not i18n keys) per the module convention.
+SYNC_BREAKDOWN_SKILLS_CREATE = "Skills: 1 create → claude"
+SYNC_BREAKDOWN_COMMANDS_OVERWRITE = "Custom commands: 1 overwrite → claude"
+
+
+def _ctx_list_route(page, type_key: str, items: list[dict]) -> None:
+    """Stub the per-type ``GET /api/context/<type>`` list (breakdown source).
+
+    Registered AFTER ``install_default_stubs`` so it wins over the catch-all
+    ``**/api/**`` empty-``{}`` default. The ``**`` suffix catches the pinned
+    ``?scope_id=…&target_scope=…`` query the preview appends.
+    """
+    page.route(
+        f"**/api/context/{type_key}**",
+        lambda r: r.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({type_key: items}),
+        ),
+    )
+
+
+def test_sync_all_confirm_shows_per_type_runtime_breakdown(page, mm_web_url: str) -> None:
+    """B-5 (#1288): the Sync All confirm renders per-type × per-runtime
+    breakdown lines built from the four artifact lists, beneath the uncapped
+    totals lead.
+
+    Drift lives in the per-type LIST payloads (the breakdown source); the
+    overview stays healthy so the button is enabled and settings are clean.
+    Cancel before any POST — this is a copy pin, not a sync run.
+    """
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    _ctx_list_route(
+        page,
+        "skills",
+        [
+            {
+                "name": "s1",
+                "runtimes": [
+                    {"runtime": "claude_skills", "status": "missing target"},
+                    {"runtime": "codex_skills", "status": "out of sync"},
+                ],
+            },
+        ],
+    )
+    _ctx_list_route(
+        page,
+        "commands",
+        [
+            {
+                "name": "c1",
+                "runtimes": [
+                    {"runtime": "claude_commands", "status": "out of sync"},
+                ],
+            },
+        ],
+    )
+    _ctx_list_route(page, "agents", [])
+    _ctx_list_route(page, "mcp-servers", [])
+
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function(
+        "() => !document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
+
+    message = page.locator("#confirm-message").text_content() or ""
+    assert SYNC_BREAKDOWN_SKILLS_CREATE in message, (
+        f"create segment + target runtime missing from breakdown: {message!r}"
+    )
+    assert SYNC_BREAKDOWN_COMMANDS_OVERWRITE in message, (
+        f"overwrite segment for the second type missing: {message!r}"
+    )
+    # Uncapped totals lead — create 1, overwrite 2 across the four lists.
+    assert "create 1" in message, f"totals lead missing create count: {message!r}"
+    assert "overwrite 2" in message, f"totals lead missing overwrite count: {message!r}"
+
+    # Copy pin only — cancel so not a single sync POST fires.
+    page.locator("#confirm-cancel-btn").click()
+    page.wait_for_function(
+        "() => document.getElementById('confirm-modal').hidden",
+        timeout=2_000,
+    )
