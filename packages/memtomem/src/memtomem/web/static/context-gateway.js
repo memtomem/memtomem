@@ -6015,7 +6015,16 @@ document.querySelectorAll('.ctx-add-project-btn').forEach(btn => {
         const warningKey = data.warning_code
           ? `settings.ctx.add_project_warning_${data.warning_code}`
           : null;
-        if (warningKey) {
+        if (data.created === false) {
+          // ``created === false`` means the POST was a no-op: this root was
+          // already tracked (the route is idempotent — #1292). Surface that as
+          // an info toast BEFORE the warning branches — the no_runtime_marker
+          // warning was already shown on the original add, so re-warning on a
+          // no-op re-add is noise; the signal the user needs is "nothing
+          // changed". ``=== false`` (not falsy) so an older server that omits
+          // ``created`` keeps the prior success/warning behavior.
+          showToast(t('settings.ctx.add_project_already_tracked'), 'info');
+        } else if (warningKey) {
           const localized = t(warningKey);
           // ``t()`` returns the key itself when no translation exists; in
           // that case fall back to the server prose rather than showing the

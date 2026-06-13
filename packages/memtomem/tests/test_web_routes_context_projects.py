@@ -683,6 +683,10 @@ async def test_post_idempotent(client, tmp_path: Path) -> None:
     r2 = await client.post("/api/context/known-projects", json={"root": str(proj)})
     assert r1.status_code == 200 and r2.status_code == 200
     assert r1.json()["scope_id"] == r2.json()["scope_id"]
+    # ``created`` distinguishes the fresh add from the idempotent re-add (#1292)
+    # so the Add Project UI can branch "added" vs "already tracked".
+    assert r1.json()["created"] is True
+    assert r2.json()["created"] is False
     listing = await client.get("/api/context/projects")
     # cwd + the registered one — exactly two.
     assert len(listing.json()["scopes"]) == 2

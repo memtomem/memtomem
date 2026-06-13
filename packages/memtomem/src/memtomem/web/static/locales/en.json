@@ -616,6 +616,7 @@
   "settings.ctx.add_project": "Add Project",
   "settings.ctx.add_project_prompt": "Absolute path to a project root (e.g. /Users/me/Edu/inflearn):",
   "settings.ctx.add_project_success": "Project added",
+  "settings.ctx.add_project_already_tracked": "Project already tracked",
   "settings.ctx.add_project_warning_no_runtime_marker": "No .claude/.gemini/.agents/.kimi/.memtomem directory found under this root.",
   "settings.ctx.portal_title": "Projects",
   "settings.ctx.portal_desc": "Browse, switch, rename, and unregister the projects memtomem tracks. Health shows which roots are missing or not yet initialized.",

@@ -198,4 +198,67 @@ describe('Context Gateway Add Project picker', () => {
       'settings.ctx.add_project_warning_future_unknown_code',
     );
   });
+
+  it('shows the success toast on a fresh add (created:true)', async () => {
+    const { window, toast } = await captureOnSelectToast({
+      scripts: ['i18n.js', 'app.js', 'path-picker.js', 'context-gateway.js'],
+      response: {
+        scope_id: 'scope-new',
+        root: '/tmp/project-new',
+        label: 'project-new',
+        created: true,
+      },
+    });
+    expect(toast.textContent).toBe(window.I18N.t('settings.ctx.add_project_success'));
+    // ``captureOnSelectToast`` returns the ``.toast-msg`` span; the type class
+    // lives on its parent ``.toast`` div (``toast toast-<type>``).
+    expect(toast.parentElement.classList.contains('toast-success')).toBe(true);
+  });
+
+  it('shows the "already tracked" info toast on a duplicate add (created:false)', async () => {
+    // #1292: the route is idempotent — re-adding a tracked root returns the
+    // existing entry with ``created: false``. A no-op re-add must read as info,
+    // not a fresh "added" success.
+    const { window, toast } = await captureOnSelectToast({
+      scripts: ['i18n.js', 'app.js', 'path-picker.js', 'context-gateway.js'],
+      response: {
+        scope_id: 'scope-dup',
+        root: '/tmp/project-dup',
+        label: 'project-dup',
+        created: false,
+      },
+    });
+    expect(toast.textContent).toBe(
+      window.I18N.t('settings.ctx.add_project_already_tracked'),
+    );
+    expect(toast.parentElement.classList.contains('toast-info')).toBe(true);
+    expect(toast.textContent).not.toBe(window.I18N.t('settings.ctx.add_project_success'));
+  });
+
+  it('prefers the "already tracked" info toast over the no_runtime_marker warning', async () => {
+    // #1292 precedence pin (Codex design-gate Major): a duplicate add of a
+    // marker-less root carries BOTH ``created: false`` AND ``warning_code``.
+    // The no-op signal wins — the marker warning was already surfaced on the
+    // original add, so re-warning on a no-op re-add would be noise.
+    const { window, toast } = await captureOnSelectToast({
+      scripts: ['i18n.js', 'app.js', 'path-picker.js', 'context-gateway.js'],
+      response: {
+        scope_id: 'scope-dup-nomarker',
+        root: '/tmp/project-dup-nomarker',
+        label: 'project-dup-nomarker',
+        created: false,
+        warning_code: 'no_runtime_marker',
+        warning: 'No .claude/.gemini/.agents/.kimi/.memtomem directory found under this root.',
+      },
+    });
+    expect(toast.textContent).toBe(
+      window.I18N.t('settings.ctx.add_project_already_tracked'),
+    );
+    expect(toast.parentElement.classList.contains('toast-info')).toBe(true);
+    // The warning branch must NOT win.
+    expect(toast.parentElement.classList.contains('toast-warning')).toBe(false);
+    expect(toast.textContent).not.toBe(
+      window.I18N.t('settings.ctx.add_project_warning_no_runtime_marker'),
+    );
+  });
 });

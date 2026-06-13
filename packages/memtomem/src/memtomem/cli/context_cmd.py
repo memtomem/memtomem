@@ -4990,17 +4990,17 @@ def projects_add_cmd(path: Path, label: str | None) -> None:
     cfg = _projects_gateway_cfg()
     store = _projects_store(cfg)
     try:
-        already = any(
-            compute_scope_id(e.root) == compute_scope_id(path) for e in store.load(strict=True)
-        )
-        entry = store.add(path, label=label)
+        # ``add_with_status`` decides created-vs-existing INSIDE the store's write
+        # lock, replacing a racy load-then-add check across two separate lock
+        # windows (the web route shares this same atomic path — #1292).
+        entry, created = store.add_with_status(path, label=label)
     except KnownProjectsCorruptError as exc:
         raise click.ClickException(str(exc)) from exc
     scope_id = compute_scope_id(entry.root)
-    if already:
-        click.echo(f"Already registered: {scope_id} ({entry.root})")
-    else:
+    if created:
         click.secho(f"Registered: {scope_id} ({entry.root})", fg="green")
+    else:
+        click.echo(f"Already registered: {scope_id} ({entry.root})")
 
 
 @projects_group.command("remove")

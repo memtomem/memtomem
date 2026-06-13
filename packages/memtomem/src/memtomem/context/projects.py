@@ -275,13 +275,34 @@ class KnownProjectsStore:
 
         Raises :class:`KnownProjectsCorruptError` instead of re-baselining
         the list to ``[new_entry]`` when the file exists but is corrupt.
+
+        Thin wrapper over :meth:`add_with_status` for callers that don't need to
+        know whether the entry was freshly created.
+        """
+        entry, _created = self.add_with_status(root, label=label)
+        return entry
+
+    def add_with_status(
+        self, root: Path, label: str | None = None
+    ) -> tuple[_KnownProjectEntry, bool]:
+        """Like :meth:`add`, but also report whether the entry was freshly created.
+
+        Returns ``(entry, created)``: ``created`` is ``False`` when *root* was
+        already registered (the existing entry is returned unchanged) and ``True``
+        when a new entry was appended. The flag is decided INSIDE the same
+        exclusive lock as the write, so it cannot disagree with the persisted state
+        under a concurrent add of the same root — unlike a load-then-add check
+        spread across two separate lock windows.
+
+        Raises :class:`KnownProjectsCorruptError` instead of re-baselining
+        the list to ``[new_entry]`` when the file exists but is corrupt.
         """
         normalized = Path(root).expanduser()
         with _file_lock(_lock_path_for(self._path)):
             entries = self.load(strict=True)
             for existing in entries:
                 if _normalize_for_scope_id(existing.root) == _normalize_for_scope_id(normalized):
-                    return existing
+                    return existing, False
             new_entry = _KnownProjectEntry(
                 root=normalized,
                 added_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -289,7 +310,7 @@ class KnownProjectsStore:
                 enabled=True,
             )
             self._write(entries + [new_entry])
-            return new_entry
+            return new_entry, True
 
     def remove_by_scope_id(self, scope_id: str) -> bool:
         """Drop the entry whose computed scope_id matches. Returns True if removed.

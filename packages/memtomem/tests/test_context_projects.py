@@ -101,6 +101,22 @@ def test_store_add_is_idempotent(tmp_path: Path) -> None:
     assert len(store.load()) == 1
 
 
+def test_store_add_with_status_reports_created(tmp_path: Path) -> None:
+    """``add_with_status`` returns created=True on the first add and False on an
+    idempotent re-add — the signal the Add Project UI / CLI branch their
+    "added" vs "already tracked" feedback on (#1292)."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    entry, created = store.add_with_status(project)
+    assert created is True
+    again, created_again = store.add_with_status(project)
+    assert created_again is False
+    # The no-op re-add returns the same entry and keeps the store deduped.
+    assert again.root == entry.root
+    assert len(store.load()) == 1
+
+
 def test_store_remove_by_scope_id(tmp_path: Path) -> None:
     project = tmp_path / "alpha"
     project.mkdir()

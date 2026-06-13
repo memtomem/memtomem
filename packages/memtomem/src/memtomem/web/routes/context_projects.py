@@ -455,7 +455,7 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
     # a blank project name.
     label = (body.label or "").strip() or None
     try:
-        entry = store.add(candidate, label=label)
+        entry, created = store.add_with_status(candidate, label=label)
     except KnownProjectsCorruptError as exc:
         # Server-side state file is corrupt — 500, not 4xx: the request was
         # valid, the store refused the write to avoid wiping registrations.
@@ -467,6 +467,11 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
         "scope_id": project_scope_id,
         "root": str(entry.root),
         "label": entry.label,
+        # ``created`` is False when this root was already registered — the POST is
+        # idempotent and returns the existing entry. The Add Project UI branches
+        # its toast on this so a no-op re-add reads as "already tracked" rather
+        # than a fresh "added" success (#1292).
+        "created": created,
     }
     if not has_runtime_marker(entry.root):
         # ``warning_code`` follows the PR1 (#549) machine-readable pattern so
