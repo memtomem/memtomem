@@ -440,6 +440,67 @@ Mechanism-specific decisions:
   canonical-wins per name), or a broken `.mcp.json` its sync will
   refuse on.
 
+### 13. MCP action surface (A-13 #1283)
+
+`mem_context_artifact_transfer` (`server/tools/context.py`) is the
+headless-agent face: one `@register("context")` action routed via
+`mem_do` (the core-9 default tool set stays frozen), wrapping the same
+engine call — `transfer_artifact` for `agents`/`commands`/`skills`,
+the §12 `copy_mcp_server` adapter for `asset_type="mcp-servers"`, with
+the §12 branch gates mirrored verbatim (copy-only, no rename, tiers
+pinned `project_shared`, cross-project only). Gate A audit attribution
+is `surface="mcp_context_artifact_transfer"` for both branches — one
+action, one attribution unit (`web_context_transfer` precedent).
+
+Params mirror the web body with MCP-family naming and text-message
+ergonomics: `asset_type`, `name`, `mode` (`move`|`copy`),
+`from_scope` (auto-detect default), `to_scope` (**source tier when
+omitted** — the CLI default, not the web's required field; at least
+one of `to_scope`/`to_project_scope_id` is required),
+`to_project_scope_id`, `as_name` (copy-rename), `apply` (dry-run
+default, the family convention the web spells `?dry_run=`), and the
+two §10 confirm flags. Source is always the server cwd's project —
+MCP tools are cwd-anchored like the CLI, so the §10
+implicit-destination eligibility subtlety (non-cwd *source* selector)
+cannot arise.
+
+**Trust boundary (the §10 web rails, agent-shaped):** destinations are
+addressable **only** as registered/discovered `scope_id`s — the
+typed-path consent valve stays CLI-only (a human typing a path is
+consent; an agent passing one is not) — and eligibility takes the
+web's stricter `sync_eligible` line: paused AND never-enrolled
+(discovery-only) destinations refuse, each naming its remediation
+(`mm context projects resume <id>` / `mm context projects add
+<root>`). Note the CLI is deliberately looser on the second case
+(selecting a scan-only scope_id is treated like typed-path consent).
+Both confirmation gates apply on `apply=True` only and return a
+`needs confirmation:` message naming the exact re-call flag
+(`confirm_project_shared=True` for `project_shared`,
+`allow_host_writes=True` for the `user` tier — the settings surfaces'
+flag, per the A-13 Codex design-gate fold); dry-run never gates,
+never writes, and its footer names the flag(s) the destination tier
+will require. `project_local` landings append the destination
+project's `.gitignore` marker and surface the non-write warning
+states (CLI/migrate parity; the web route's missing marker is a named
+follow-up gap, not a contract).
+
+**Result/errors are prefixed text**, not an envelope: the §10
+`error_kind` vocabulary degrades to the migrate tool's documented
+prefixes — `error:` (bad input, not-found, partial-commit recovery
+steps), `refused:` (state refusals: collision, eligibility, missing
+destination store), `needs confirmation:`, `privacy block:` (Gate A,
+string detail parity with every sync surface). Engine errors still
+map by TYPE (`ArtifactNotFoundError`, `TransferCollisionError`,
+`McpServerParseError`, `MigratePartialError`, `PrivacyScanError`).
+Success output mirrors the CLI renderer (`sync_command` else
+`sync_hint` follow-up). The engine call runs in a worker thread with
+`lock_timeout=30.0` (§10's budget): an MCP agent cannot Ctrl-C a
+stuck cross-process pair-lock wait, so the engine self-aborts
+(nothing acquired or committed) and the tool reports `error: transfer
+timed out…` instead of hanging the call. There is no outer
+`asyncio.timeout` — no HTTP request window to fit, and the MCP server
+is not the web server's event loop.
+
 ## Backward compatibility
 
 - `migrate_scope` keeps its exact signature, result dataclass
@@ -542,6 +603,9 @@ Mechanism-specific decisions:
   `_remove_runtime_fanout_for` — two-root split, `migrate_scope`
   wrapper, `ArtifactNotFoundError`),
   `packages/memtomem/src/memtomem/web/routes/context_transfer.py`
-  (`transfer_context_artifact`, §10) and
+  (`transfer_context_artifact`, §10),
   `packages/memtomem/src/memtomem/web/routes/_confirm.py`
-  (`needs_confirmation_envelope`).
+  (`needs_confirmation_envelope`), and
+  `packages/memtomem/src/memtomem/server/tools/context.py`
+  (`mem_context_artifact_transfer`, `_resolve_transfer_destination`,
+  `_format_transfer_result` — §13).

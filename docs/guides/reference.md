@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **86 MCP tools** organized into categories:
+memtomem provides **87 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -1231,6 +1231,14 @@ mm context projects pause <scope_id|path>   # exclude from --all batches / web S
 mm context projects resume <scope_id|path>  # re-include
 mm context projects remove <scope_id|path>  # unregister (project files untouched)
 
+# Cross-project / cross-tier transfer (ADR-0023; see "Moving artifacts" below)
+mm context copy agents foo --to project_local                  # tier copy inside this project (dry-run preview by default)
+mm context move agents foo --to project_shared --apply --confirm-project-shared  # tier move; git-tracked landing needs the extra flag
+mm context copy agents foo --to-project <scope_id> --apply     # copy to another registered project, keeping the source tier
+mm context copy agents foo --to-project ~/work/other --as foo2 --apply  # path destination (CLI-only consent valve) + renamed copy
+mm context copy mcp-servers pg --to-project <scope_id> --apply --confirm-project-shared  # copy one MCP server definition
+mm context move agents foo --from user --to project_local --apply       # --from disambiguates a multi-tier source
+
 # Note: cursor / codex / copilot fold ## Rules + ## Style into a single block;
 # `generate` warns on stderr when both sections are populated. context.md is
 # the source of truth — edit there, not in generated files.
@@ -1304,6 +1312,76 @@ mm web --dev                           # Web UI with opt-in maintainer pages
 
 Install the CLI: `uv tool install 'memtomem[all]'` (PyPI) or `uv run mm ...` (source).
 All commands support `-h` and `--help`.
+
+---
+
+## Moving artifacts between tiers and projects
+
+Three verbs share the transfer engine (ADR-0023). Pick by what should
+happen to the source:
+
+| | `move` | `copy` | `migrate` |
+|---|---|---|---|
+| Source afterwards | consumed; its stale runtime fan-out is cleaned (divergent files get a `.bak` snapshot first) | untouched | consumed (`--to` is the within-project move alias) |
+| Cross-project (`--to-project`) | yes | yes | no — within-project only |
+| Renamed copy (`--as`) | no | yes | no |
+| flat→dir layout adoption | no | no | yes (its original job, `--to` omitted) |
+| MCP server definitions (`mcp-servers`) | no | yes (cross-project only) | no |
+
+Shared rules, all verbs: destination collisions always refuse (no
+`--force` valve); destination runtime fan-out is **not** generated —
+the result prints the exact follow-up `mm context sync` command (or,
+for `mcp-servers`, the web-panel hint: `.mcp.json` fan-out is
+web-only); a `project_shared` landing runs the privacy scan (Gate A,
+no bypass) and requires `--confirm-project-shared` with `--apply`;
+default is always a dry-run preview.
+
+### Cross-project walkthrough
+
+```bash
+# One-time: register the destination so it has a scope_id (or pass a
+# filesystem path to --to-project — typing a path is the consent valve
+# for unregistered destinations, CLI-only).
+mm context projects add ~/work/other-proj --label "Other"
+mm context projects list                  # → p-1a2b3c4d5e6f  Other  ok
+
+# Preview, then execute. --to omitted keeps the source tier.
+mm context copy agents reviewer --to-project p-1a2b3c4d5e6f
+mm context copy agents reviewer --to-project p-1a2b3c4d5e6f --apply --confirm-project-shared
+
+# The result names the follow-up — destination fan-out is sync's job:
+cd ~/work/other-proj && mm context sync --scope project_shared
+```
+
+A paused destination refuses (`mm context projects resume <scope_id>`
+re-enables it), and a cross-project destination must already be a
+memtomem project (`mm context init` there first).
+
+### Headless agents (MCP)
+
+`mem_context_artifact_transfer` is the same engine via `mem_do` —
+core mode needs no extra tools:
+
+```python
+mem_do(action="context_artifact_transfer", params={
+    "asset_type": "agents", "name": "reviewer", "mode": "copy",
+    "to_project_scope_id": "p-1a2b3c4d5e6f",   # from `mm context projects list`
+})  # dry-run preview; the footer names the flags apply will need
+
+mem_do(action="context_artifact_transfer", params={
+    "asset_type": "agents", "name": "reviewer", "mode": "copy",
+    "to_project_scope_id": "p-1a2b3c4d5e6f",
+    "apply": True, "confirm_project_shared": True,
+})
+```
+
+The MCP surface is deliberately stricter than the CLI (ADR-0023 §13):
+destinations are registered `scope_id`s only (no path valve), paused
+**and** never-enrolled destinations refuse with the remediation
+command, and a `user`-tier landing — a host write outside any project
+root — needs `allow_host_writes=True` in addition to `apply=True`.
+Refusals come back prefixed (`error:` / `refused:` /
+`needs confirmation:` / `privacy block:`) so agents can branch.
 
 ---
 
@@ -1408,4 +1486,4 @@ See [`uninstall.md`](uninstall.md) for the five-step removal flow: detach the MC
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 86 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 87 tools with parameters
