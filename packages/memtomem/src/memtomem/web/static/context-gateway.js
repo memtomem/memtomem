@@ -3809,6 +3809,15 @@ function _ctxSchedulePreview(state) {
   _ctxMoveCopyPreviewTimer = setTimeout(() => { _ctxMoveCopyPreview(state); }, 300);
 }
 
+// Lock / unlock the destination controls for the duration of an apply, so the
+// frozen request body can't drift from the visible selection and a late
+// failure can't clobber a preview the user kicked off mid-apply.
+function _ctxSetMoveCopyControlsDisabled(modalEl, disabled) {
+  modalEl
+    .querySelectorAll('input[name="ctx-mc-mode"], input[name="ctx-mc-tier"], #ctx-mc-project, #ctx-mc-rename')
+    .forEach((el) => { el.disabled = disabled; });
+}
+
 // Classify a failed transfer response into a preview-shaped outcome so the
 // apply path and the dry-run path render identically. A ``destination_exists``
 // 409 is the collision the engine can ALSO raise at apply time (the
@@ -3835,6 +3844,13 @@ async function _ctxMoveCopyApply(state) {
   const applyBtn = qs('ctx-mc-apply-btn');
   const body = _ctxMoveCopyBody(state);
   const send = (extra) => _ctxMoveCopyPost(state, { ...body, ...extra }, false);
+  // Freeze the destination for the whole apply: drop any pending debounced
+  // preview, lock the controls (so no new dry-run can start mid-apply against a
+  // changed destination), and snapshot the preview seq. Together these stop a
+  // late apply failure from overwriting a newer preview's result.
+  if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
+  const applySeq = _ctxMoveCopySeq;
+  _ctxSetMoveCopyControlsDisabled(modalEl, true);
   btnLoading(applyBtn, true);
   let outcome = null;   // a failed-apply lastPreview shape, or null on success/decline
   try {
@@ -3870,10 +3886,13 @@ async function _ctxMoveCopyApply(state) {
     outcome = { kind: 'error', message: (e && e.message) || t('toast.request_failed') };
   } finally {
     btnLoading(applyBtn, false);
+    _ctxSetMoveCopyControlsDisabled(modalEl, false);   // unlock so the user can adjust
     // Reflect a failed apply in the preview state so Apply's enabled-ness
     // tracks it (collision/error → disabled; the user adjusts to re-dry-run).
-    // On success the modal is closed (_ctxMoveCopyState===null) so we skip.
-    if (outcome && _ctxMoveCopyState === state) {
+    // Skip when the modal closed (success: _ctxMoveCopyState===null) OR a newer
+    // preview superseded this apply (_ctxMoveCopySeq advanced) — a stale failure
+    // must never clobber the current destination's result.
+    if (outcome && _ctxMoveCopyState === state && _ctxMoveCopySeq === applySeq) {
       state.lastPreview = outcome;
       _ctxRenderMoveCopyPreview(state);
     }

@@ -277,6 +277,31 @@ describe('Move/Copy modal — apply gate round-trips (#1289)', () => {
     expect(modalOf(ctx.window).hidden).toBe(false);
   });
 
+  it('locks the destination controls while an apply is in flight', async () => {
+    // Prevents the user from changing the destination mid-apply (which would
+    // start a new dry-run a late apply failure could then clobber). The
+    // synchronous prefix of the click handler disables the controls before the
+    // first await, so they read disabled immediately after the click.
+    const ctx = await bootModal({
+      applyResponses: [{
+        ok: false, status: 409,
+        body: { detail: { error_kind: 'conflict', reason_code: 'destination_exists', message: 'race' } },
+      }],
+    });
+    await openModal(ctx);
+    const modal = modalOf(ctx.window);
+    const tier = modal.querySelector('input[name="ctx-mc-tier"][value="project_local"]');
+    const rename = ctx.window.document.getElementById('ctx-mc-rename');
+    ctx.window.document.getElementById('ctx-mc-apply-btn').click();
+    expect(tier.disabled, 'tier radio locked during apply').toBe(true);
+    expect(rename.disabled, 'rename locked during apply').toBe(true);
+    await flush(ctx.window);
+    // Unlocked again after the apply settles so the user can change the
+    // destination to clear the (terminal) collision.
+    expect(tier.disabled).toBe(false);
+    expect(rename.disabled).toBe(false);
+  });
+
   it('offers a destination-pinned "Sync now" follow-up when the apply needs sync', async () => {
     const ctx = await bootModal({
       applyResponses: [
