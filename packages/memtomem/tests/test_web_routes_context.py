@@ -1,4 +1,18 @@
-"""Tests for Context Gateway web routes (overview + skills + commands + agents)."""
+"""Tests for Context Gateway web routes (overview + skills + commands + agents).
+
+Diff-payload contract pinned by ``TestDiffCommand`` / ``TestDiffAgent`` (#1256):
+
+- **Paths** are normalized to POSIX separators on every platform. The route
+  helpers ``_safe_rel`` in ``context_commands`` / ``context_agents`` return
+  ``.as_posix()`` so the Web UI receives stable ``/``-separated paths; the diff
+  tests assert literal POSIX strings (e.g. ``.claude/commands/ghost.md``) rather
+  than ``str(Path(...))``, which would be backslash-joined on Windows.
+- **Content** is LF, not platform-native. Canonical generators and sync write
+  LF bytes, so fixtures here use ``_write_text_lf`` (raw bytes) instead of
+  ``Path.write_text`` (text mode translates ``\\n`` -> ``\\r\\n`` on Windows).
+  The original Windows CRLF breakage was that fixture artifact, not the route
+  re-normalizing newlines.
+"""
 
 from __future__ import annotations
 
