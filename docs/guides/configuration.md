@@ -781,7 +781,7 @@ When `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` is set, both public and sec
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (38 incl. `mem_do`), `full` (86) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (38 incl. `mem_do`), `full` (87) |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
 

@@ -1,4 +1,4 @@
-"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_memory_migrate, context_artifact_migrate."""
+"""Tools: context_detect, context_init, context_generate, context_sync, context_diff, context_memory_migrate, context_artifact_migrate, context_artifact_transfer."""
 
 from __future__ import annotations
 
@@ -18,8 +18,10 @@ from memtomem.server.tool_registry import register
 
 if TYPE_CHECKING:
     from memtomem.context._names import Layout
+    from memtomem.context.mcp_servers_copy import McpServerCopyResult
     from memtomem.context.migrate import MigrateRow, MigrateScopeResult
     from memtomem.context.scope_resolver import ArtifactKind
+    from memtomem.context.transfer import TransferMode, TransferResult
     from memtomem.context.versioning import VersionsManifest
 
 # Known --include values (mirrors cli.context_cmd._KNOWN_INCLUDES).
@@ -1549,6 +1551,484 @@ async def mem_context_artifact_migrate(
         return "Nothing to migrate."
 
     return await asyncio.to_thread(_run_artifact_flat_apply, project_root, rows, force=force)
+
+
+# ── Cross-project / cross-tier transfer (ADR-0023, A-13 #1283) ──────────────
+#
+# Headless-agent parity for ``mm context copy`` / ``mm context move``
+# (``cli/context_cmd.py:_transfer_dispatch``) and the web
+# ``POST /context/{kind}/{name}/transfer`` route
+# (``web/routes/context_transfer.py``). One ``@register`` action wrapping the
+# A-2 transfer engine; ``asset_type="mcp-servers"`` rides the A-12 copy
+# adapter exactly like the sibling surfaces. Destination projects are
+# restricted to the registered discovery set, matched by ``scope_id`` — the
+# typed-path consent valve is CLI-only (ADR-0023 §10: a human typing a path is
+# consent; an agent passing one is not), and eligibility takes the web's
+# stricter ``sync_eligible`` line for the same no-human-at-the-keyboard
+# reason (the CLI lets a selected scan-only scope through as consent).
+
+#: Whole-call pair-lock acquisition budget forwarded to the engine. Same
+#: budget as the web route's ``_TRANSFER_LOCK_BUDGET_S``: an MCP agent cannot
+#: Ctrl-C a stuck cross-process lock wait the way a CLI user can, so the
+#: engine self-aborts (committing nothing on the lock-wait path) instead of
+#: hanging the tool call.
+_TRANSFER_LOCK_BUDGET_S = 30.0
+
+
+def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, apply_: bool) -> str:
+    """Plain-text summary for one copy/move transfer.
+
+    Mirrors the CLI's ``_print_transfer_result`` content: mode verb,
+    copy-rename note, fan-out lists, the A-4 provenance carry outcome,
+    engine ``notes``, and the engine's exact follow-up sync command
+    (``sync_command``, else the prose ``sync_hint`` for results with no
+    runnable command — mcp-servers fan-out is web-only). The dry-run
+    footer additionally names the confirmation flag(s) the destination
+    tier will require at apply time, so an agent learns the full
+    re-call shape from the preview.
+    """
+    layout_note = (
+        " (flat layout)" if result.layout == "flat" and result.kind != "mcp-servers" else ""
+    )
+    rename_note = f" as {result.dst_name}" if result.dst_name != result.name else ""
+    lines = [
+        f"Plan: {result.mode} {result.kind}/{result.name}{rename_note}{layout_note}",
+        f"  from {result.from_scope}: {result.src_path}",
+        f"  to   {result.to_scope}: {result.dst_path}",
+    ]
+    if not apply_:
+        if result.fanout_planned:
+            lines.append(
+                f"  will remove {len(result.fanout_planned)} stale runtime "
+                f"fan-out target(s) at scope='{result.from_scope}' (content "
+                f"that diverges from the canonical render is snapshotted to "
+                f"a .bak first):"
+            )
+            lines.extend(f"    - {path}" for path in result.fanout_planned)
+        if result.provenance == "carried":
+            lines.append(
+                "  will carry the wiki install provenance (lock.json entry) to the destination"
+            )
+        elif result.provenance == "not_carried":
+            lines.append(
+                f"  install provenance will not be carried — the artifact "
+                f"lands untracked: {result.provenance_reason}"
+            )
+        confirm_note = ""
+        if result.to_scope == "project_shared":
+            confirm_note = " and confirm_project_shared=True"
+        elif result.to_scope == "user":
+            confirm_note = " and allow_host_writes=True"
+        lines.append(f"\nRe-call with apply=True{confirm_note} to execute.")
+        if result.needs_sync and result.sync_command:
+            lines.append(f"After apply, run `{result.sync_command}` to refresh runtime fan-out.")
+        elif result.needs_sync and result.sync_hint:
+            lines.append(f"After apply, {result.sync_hint}")
+        return "\n".join(lines)
+
+    verb = "moved" if result.mode == "move" else "copied"
+    lines.append(
+        f"\n✓ {verb} {result.kind}/{result.name}: "
+        f"{result.from_scope} → {result.to_scope}{rename_note}"
+    )
+    if result.fanout_cleaned:
+        lines.append(
+            f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out "
+            f"target(s) at scope='{result.from_scope}':"
+        )
+        lines.extend(f"    - {path}" for path in result.fanout_cleaned)
+    if result.fanout_backed_up:
+        lines.append(
+            f"  {len(result.fanout_backed_up)} target(s) diverged from the "
+            f"canonical render — snapshotted before removal (review and "
+            f"delete manually):"
+        )
+        lines.extend(f"    - {path}" for path in result.fanout_backed_up)
+    if result.provenance == "carried":
+        lines.append("  carried the wiki install provenance (lock.json entry) to the destination")
+    elif result.provenance == "not_carried":
+        lines.append(
+            f"  install provenance not carried — the artifact lands "
+            f"untracked at the destination: {result.provenance_reason}"
+        )
+    lines.extend(f"  note: {note}" for note in result.notes)
+    if result.needs_sync and result.sync_command:
+        lines.append(
+            f"\nNext: run `{result.sync_command}` to generate runtime fan-out at the destination."
+        )
+    elif result.needs_sync and result.sync_hint:
+        lines.append(f"\nNext: {result.sync_hint}")
+    return "\n".join(lines)
+
+
+def _resolve_transfer_destination(to_project: str, src_root: Path) -> tuple[Path | None, str]:
+    """Resolve ``to_project_scope_id`` against the registered discovery set.
+
+    Returns ``(dst_root, "")`` on success or ``(None, refusal_text)`` —
+    the caller returns the refusal verbatim. Runs in a worker thread
+    (discovery walks the filesystem). Anchors discovery at the source
+    project root, the A-9 subdir-anchor convention shared with the CLI
+    ``--all-projects`` batch and the web lifespan.
+
+    Eligibility is the web route's ``sync_eligible`` rule
+    (``_reject_ineligible_destination``): both a paused and a
+    never-enrolled (discovery-only) destination refuse, each with the
+    remediation its state actually needs. The paused prose mirrors the
+    CLI dispatch verbatim (sibling trust-UX wording).
+    """
+    from memtomem.cli.context_cmd import _projects_discover, _projects_gateway_cfg
+
+    scope = next(
+        (
+            s
+            for s in _projects_discover(_projects_gateway_cfg(), cwd=src_root)
+            if s.scope_id == to_project
+        ),
+        None,
+    )
+    if scope is None:
+        return None, (
+            f"error: unknown to_project_scope_id: '{to_project}'. Destinations "
+            f"are restricted to registered projects — list them with "
+            f"`mm context projects list`."
+        )
+    if scope.root is None or scope.missing:
+        return None, (f"error: scope '{to_project}' is registered but its root is missing.")
+    if not scope.sync_eligible:
+        if "known-projects" in scope.sources:
+            return None, (
+                f"refused: destination project {scope.scope_id} ({scope.root}) is "
+                f"paused — sync enrollment is disabled, so the transferred "
+                f"artifact would not fan out there. Run `mm context projects "
+                f"resume {scope.scope_id}` first, or pick another destination."
+            )
+        return None, (
+            f"refused: destination project {scope.scope_id} ({scope.root}) is "
+            f"discovery-only (never enrolled for sync), so the transferred "
+            f"artifact would not fan out there. Enroll it first with "
+            f"`mm context projects add {scope.root}`, or pick another destination."
+        )
+    return scope.root, ""
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_artifact_transfer(
+    asset_type: str = "",
+    name: str = "",
+    mode: str = "",
+    from_scope: str = "",
+    to_scope: str = "",
+    to_project_scope_id: str = "",
+    as_name: str = "",
+    apply: bool = False,
+    confirm_project_shared: bool = False,
+    allow_host_writes: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Move or copy one canonical artifact between tiers and/or projects.
+
+    Headless parity for ``mm context copy`` / ``mm context move`` and the
+    web transfer endpoint — the same
+    :func:`memtomem.context.transfer.transfer_artifact` engine call with
+    the same gate semantics; no logic is re-implemented. The three verbs
+    in one view: **move** consumes the source and cleans its stale
+    runtime fan-out (destination fan-out is NOT generated — run the
+    follow-up sync command the result prints); **copy** never touches
+    the source and supports a renamed copy via ``as_name``;
+    ``mem_context_artifact_migrate`` stays the within-project legacy
+    verb (flat→dir layout adoption + tier moves).
+
+    ``asset_type="mcp-servers"`` copies one MCP server definition to
+    another project (A-12 adapter): copy-only, cross-project-only
+    (``to_project_scope_id`` required), no ``as_name``, tiers pinned to
+    ``project_shared``.
+
+    Destination projects are restricted to the registered discovery set
+    and matched by ``scope_id`` (``mm context projects list``) — the
+    typed-path escape hatch is CLI-only, and paused or never-enrolled
+    destinations refuse. Destination collisions always refuse (no force
+    valve). A ``project_shared`` landing runs the privacy scan (Gate A)
+    and requires ``confirm_project_shared=True`` with ``apply=True``
+    (Gate B); a ``user``-tier landing is a host write outside any
+    project root and requires ``allow_host_writes=True`` with
+    ``apply=True``.
+
+    Args:
+        asset_type: ``agents`` | ``commands`` | ``skills`` |
+            ``mcp-servers``. Required.
+        name: Source artifact name. Required.
+        mode: ``copy`` or ``move``. Required (``mcp-servers``: copy only).
+        from_scope: Source tier (``user`` / ``project_shared`` /
+            ``project_local``); auto-detected when omitted — pass it to
+            disambiguate when the same name lives in multiple tiers.
+        to_scope: Destination tier. Omitted: keeps the source tier (the
+            common cross-project case). At least one of ``to_scope`` /
+            ``to_project_scope_id`` is required.
+        to_project_scope_id: Destination project — a ``p-<sha12>``
+            scope_id from ``mm context projects list``. Omitted: the
+            current project. Cannot be combined with ``to_scope='user'``
+            (the user tier is global, not per-project).
+        as_name: Name for the copy at the destination (copy only). The
+            staged manifest's frontmatter ``name:`` is rewritten to
+            match; overrides/ and frozen versions/ snapshots travel
+            verbatim.
+        apply: Execute the transfer. Default ``False`` returns a dry-run
+            preview, matching the context-tool family.
+        confirm_project_shared: Required when the destination tier is
+            ``project_shared`` and ``apply=True``; MCP cannot prompt, so
+            a missing confirmation returns a ``needs confirmation``
+            message instead of touching disk.
+        allow_host_writes: Required when the destination tier is
+            ``user`` and ``apply=True`` — the canonical lands at a host
+            path outside any project root (``~/.memtomem``). Re-call
+            with ``allow_host_writes=True`` after surfacing the host
+            path to the user.
+
+    Refusals are prefixed (``error:`` for bad input, ``refused:`` for a
+    legitimate state that stops the transfer — fix the state and
+    re-call, ``needs confirmation:`` for a missing opt-in flag,
+    ``privacy block:`` for Gate A hits) so callers can branch on the
+    prefix.
+    """
+    from memtomem.context._names import InvalidNameError, validate_name
+    from memtomem.context.mcp_servers import McpServerParseError
+    from memtomem.context.mcp_servers_copy import copy_mcp_server
+    from memtomem.context.migrate import (
+        SCOPE_MIGRATABLE_KINDS,
+        ArtifactNotFoundError,
+        MigratePartialError,
+        _detect_source_scope,
+    )
+    from memtomem.context.privacy_scan import PrivacyScanError
+    from memtomem.context.transfer import TransferCollisionError, transfer_artifact
+
+    asset = asset_type or None
+    nm = name or None
+    frm = from_scope or None
+    to = to_scope or None
+    to_project = to_project_scope_id or None
+    new_name = as_name or None
+
+    if mode not in ("copy", "move"):
+        return "error: mode must be 'copy' or 'move'."
+    if asset is None:
+        return "error: asset_type is required (agents | commands | skills | mcp-servers)."
+    if nm is None:
+        return "error: name is required."
+
+    # ── mcp-servers branch gates (A-12) — BEFORE the generic combinators so
+    #    every refusal speaks mcp vocabulary (mirrors the CLI dispatch). ──
+    is_mcp = asset == "mcp-servers"
+    if is_mcp:
+        if mode != "copy":
+            return (
+                "error: mcp-servers support copy only: the canonical is "
+                "single-tier (project_shared), and a cross-project move would "
+                "orphan the source project's .mcp.json fan-out. Copy it, then "
+                "delete the source definition from its web panel if you meant "
+                "move."
+            )
+        if new_name is not None:
+            return (
+                "error: as_name is not supported for mcp-servers; the copy "
+                "keeps the server name (#1282 scope)."
+            )
+        for label, value in (("from_scope", frm), ("to_scope", to)):
+            if value is not None and value != "project_shared":
+                return (
+                    f"error: {label}='{value}' is not valid for mcp-servers: "
+                    f"the canonical is single-tier (project_shared) by design."
+                )
+        if to_project is None:
+            return (
+                "error: mcp-servers copy is cross-project only: pass "
+                "to_project_scope_id (within one project the canonical "
+                "already exists; there is no second tier to copy to)."
+            )
+        to = "project_shared"
+    else:
+        if asset not in SCOPE_MIGRATABLE_KINDS:
+            return (
+                f"error: unsupported asset_type='{asset}' for transfer "
+                f"(use one of {list(SCOPE_MIGRATABLE_KINDS)} or 'mcp-servers')."
+            )
+        for label, value in (("from_scope", frm), ("to_scope", to)):
+            if value is not None and value not in _KNOWN_ARTIFACT_SCOPES:
+                return (
+                    f"error: Unknown {label}='{value}'. Supported: {sorted(_KNOWN_ARTIFACT_SCOPES)}"
+                )
+
+    # ── Shared option-combination gates (mirror the CLI dispatch). ──
+    if to is None and to_project is None:
+        return (
+            f"error: nothing to do: pass to_scope and/or to_project_scope_id "
+            f"(a same-tier, same-project {mode} is a no-op)."
+        )
+    if to == "user" and to_project is not None:
+        return (
+            "error: to_project_scope_id cannot be combined with "
+            "to_scope='user': the user tier is global (~/.memtomem), not "
+            "per-project."
+        )
+    if new_name is not None and mode == "move":
+        return "error: as_name is only valid with mode='copy' (renamed copy)."
+
+    # Validate names BEFORE any path construction (A-3 Codex fold): the
+    # to_scope-default pre-probe below builds candidate paths from the raw
+    # name, and a traversal shape like ``../x`` must never reach a
+    # filesystem probe.
+    try:
+        name_kind = "MCP server" if is_mcp else f"{asset[:-1]} name"
+        validate_name(nm, kind=name_kind)
+        if new_name is not None:
+            validate_name(new_name, kind=name_kind)
+    except InvalidNameError as exc:
+        return f"error: {exc}"
+
+    src_root = await asyncio.to_thread(_find_project_root)
+
+    if to_project is not None:
+        dst_root, refusal = await asyncio.to_thread(
+            _resolve_transfer_destination, to_project, src_root
+        )
+        if dst_root is None:
+            return refusal
+    else:
+        dst_root = src_root
+
+    if is_mcp and dst_root.resolve() == src_root.resolve():
+        return (
+            "error: to_project_scope_id resolves to the source project; "
+            "mcp-servers copy is cross-project only."
+        )
+
+    if to is None:
+        # Tier default: keep the source tier. The engine re-detects under
+        # its own lock; this pre-probe only resolves the default (and
+        # shares the engine's missing/ambiguous error wording).
+        try:
+            detected, _src_path, _layout = await asyncio.to_thread(
+                _detect_source_scope,
+                cast("ArtifactKind", asset),
+                nm,
+                src_root,
+                cast("TargetScope | None", frm),
+            )
+        except click.ClickException as exc:
+            return f"error: {exc.message}"
+        to = detected
+        if to == "user" and to_project is not None:
+            return (
+                f"error: {asset}/{nm} lives at the user tier, which is global "
+                f"— pass to_scope='project_shared' or to_scope='project_local' "
+                f"to choose the tier it should land in inside the destination "
+                f"project."
+            )
+
+    # #1274 parity: a cross-project destination must already be a memtomem
+    # project — don't seed a half-initialized store into an arbitrary
+    # registered directory. Within-project transfers keep migrate's
+    # implicit-store behavior.
+    if to_project is not None and to != "user" and not (dst_root / ".memtomem").is_dir():
+        return (
+            f"refused: destination project has no .memtomem/ store: {dst_root}. "
+            f"Initialize it first: cd {dst_root} && mm context init"
+        )
+
+    # ── Tier-keyed confirmation gates (apply only — dry-run never gates and
+    #    never writes). Gate B mirrors mem_context_artifact_migrate; the
+    #    host-write gate mirrors the settings surfaces' allow_host_writes
+    #    and the web transfer route's user-tier gate. ──
+    if to == "project_shared" and apply and not confirm_project_shared:
+        verb = "copies" if mode == "copy" else "moves"
+        return (
+            f"needs confirmation: to_scope='project_shared' {verb} the "
+            f"canonical into the git-tracked tier. Re-call with "
+            f"confirm_project_shared=True to proceed."
+        )
+    if to == "user" and apply and not allow_host_writes:
+        return (
+            "needs confirmation: to_scope='user' writes the canonical to a "
+            "host path outside any project root (~/.memtomem). Re-call with "
+            "allow_host_writes=True after surfacing the host path to the user."
+        )
+
+    try:
+        result: TransferResult | McpServerCopyResult
+        if is_mcp:
+            result = await asyncio.to_thread(
+                copy_mcp_server,
+                nm,
+                src_project_root=src_root,
+                dst_project_root=dst_root,
+                apply_=apply,
+                surface="mcp_context_artifact_transfer",
+                lock_timeout=_TRANSFER_LOCK_BUDGET_S,
+            )
+        else:
+            result = await asyncio.to_thread(
+                transfer_artifact,
+                cast("ArtifactKind", asset),
+                nm,
+                src_project_root=src_root,
+                from_scope=cast("TargetScope | None", frm),
+                dst_project_root=None if to == "user" else dst_root,
+                to_scope=cast(TargetScope, to),
+                mode=cast("TransferMode", mode),
+                apply_=apply,
+                surface="mcp_context_artifact_transfer",
+                new_name=new_name,
+                lock_timeout=_TRANSFER_LOCK_BUDGET_S,
+            )
+    except TimeoutError:
+        # Engine lock budget expired — commits nothing by construction.
+        return (
+            "error: transfer timed out waiting for the artifact lock — "
+            "another sync or transfer may be in progress; nothing was "
+            "written. Retry once it finishes."
+        )
+    except ArtifactNotFoundError as exc:
+        return f"error: {exc.message}"
+    except TransferCollisionError as exc:
+        return f"refused: {exc.message}"
+    except PrivacyScanError as exc:
+        return f"privacy block: {exc.message}"
+    except MigratePartialError as exc:
+        return f"error: {exc.message}"
+    except McpServerParseError as exc:
+        return f"error: {exc}"
+    except (FileNotFoundError, InvalidNameError, ValueError) as exc:
+        return f"error: {exc}"
+    except click.ClickException as exc:
+        return f"error: {exc.message}"
+
+    out = _format_transfer_result(result, apply_=apply)
+    # project_local first-landing needs the gitignore marker at the
+    # DESTINATION project (parity with the CLI dispatch, cross-project
+    # aware). Surface the non-write states too — a caller MUST learn when
+    # .gitignore protection was skipped.
+    if apply and to == "project_local":
+        from memtomem.cli.context_cmd import _append_gitignore_marker
+
+        wrote, msg = await asyncio.to_thread(_append_gitignore_marker, dst_root)
+        if wrote:
+            out += "\n  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)."
+        elif msg == "no_git_repo_pyproject_only":
+            out += (
+                "\n  warning: project root resolved via pyproject.toml but `.git` "
+                "missing — .gitignore not appended. Run `git init` first to "
+                "git-protect the local tier."
+            )
+        elif msg == "no_project_signal":
+            out += (
+                "\n  warning: no .git and no pyproject.toml in project root — "
+                ".gitignore append skipped; the project_local tier is not "
+                "git-protected."
+            )
+        # ``already_present`` is silent (marker already in place).
+    return out
 
 
 # ── Version snapshots + label pointers (ADR-0022) ───────────────────────────
