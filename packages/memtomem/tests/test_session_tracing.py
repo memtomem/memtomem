@@ -723,7 +723,13 @@ class TestConfigSaveValidationAndRollback:
         assert app_mock.state.config.session_trace.langfuse_enabled is False
 
     @pytest.mark.anyio
-    async def test_mcp_config_rollback(self, monkeypatch):
+    async def test_mcp_config_rollback(self, monkeypatch, tmp_path):
+        # Isolate HOME: on a persist failure the MCP rollback rebuilds a fresh
+        # config via load_config_d + load_config_overrides, both of which read
+        # ~/.memtomem (config.d/ and config.json). Without isolation a developer
+        # whose real config.json sets session_trace.langfuse_enabled=true leaks
+        # into the rollback baseline and this assertion flips to True (#1249).
+        set_home(monkeypatch, tmp_path)
         app_mock = MagicMock()
         app_mock.config = Mem2MemConfig()
         app_mock.config.session_trace.enabled = True
