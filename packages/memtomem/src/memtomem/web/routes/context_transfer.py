@@ -243,8 +243,10 @@ def _serialize(result: TransferResult | McpServerCopyResult) -> dict[str, Any]:
     human ``provenance_reason`` for tooltips, the stable
     ``provenance_reason_code`` for client matching. The mcp-servers copy
     result (A-12 #1282) implements the same attribute surface by pinned
-    contract; ``sync_hint`` is its prose follow-up (no CLI sync phase
-    exists for mcp-servers — engine results leave it ``null``).
+    contract; since #1311 it carries a runnable ``sync_command``
+    (``cd <dst> && mm context sync --include=mcp-servers``) with
+    ``sync_hint`` as its prose mirror (engine transfers leave both fields
+    for the artifact ``_sync_followup``; ``sync_hint`` stays ``null`` there).
     """
     return {
         "transferred": result.transferred,

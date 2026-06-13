@@ -175,6 +175,53 @@ def test_yes_executes_every_eligible_project(
     assert "Summary: 2 synced, 0 failed, 0 skipped." in result.output
 
 
+def _seed_mcp(root: Path) -> None:
+    store = root / ".memtomem" / "mcp-servers"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "pg.json").write_text(
+        json.dumps({"command": "npx", "args": ["-y", "server-pg"]}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_all_projects_mcp_servers_declined_skips_write(
+    tmp_path: Path, fake_home: Path, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count-only "Sync N project(s)?" gate never discloses the .mcp.json
+    rewrite, so the mcp-servers leg confirms per target in a batch; declining
+    skips just that write and the project still succeeds (#1311)."""
+    a = _project(tmp_path, "proj-a")
+    _seed_mcp(a)
+    _seed_known_projects(known_projects_path, [(a, True)])
+    monkeypatch.chdir(a)
+
+    # "y" to the batch "Sync 1 project(s)?" gate, then "n" to the per-target
+    # mcp-servers fan-out confirm.
+    result = CliRunner().invoke(
+        context_group, ["sync", "--all-projects", "--include", "mcp-servers"], input="y\nn\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "Skipped mcp-servers sync (declined)." in result.output
+    assert not (a / ".mcp.json").exists()
+
+
+def test_all_projects_mcp_servers_yes_fans_out_without_prompt(
+    tmp_path: Path, fake_home: Path, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = _project(tmp_path, "proj-a")
+    _seed_mcp(a)
+    _seed_known_projects(known_projects_path, [(a, True)])
+    monkeypatch.chdir(a)
+
+    result = CliRunner().invoke(
+        context_group, ["sync", "--all-projects", "--include", "mcp-servers", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "MCP servers fan-out: 1" in result.output
+    written = json.loads((a / ".mcp.json").read_text(encoding="utf-8"))
+    assert written["mcpServers"]["pg"]["command"] == "npx"
+
+
 def test_subdirectory_run_anchors_at_project_root(
     tmp_path: Path, fake_home: Path, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

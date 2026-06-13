@@ -39,12 +39,15 @@ Deliberate divergences from the artifact engine, each load-bearing:
   destination's git-tracked tree — Codex review blocker). Refusal is
   two-layered: a pre-flight check on the source, and an in-lock check
   on the staging entry for a source that turned into a link mid-copy.
-- **``sync_command`` is ``None``; ``sync_hint`` carries the follow-up.**
-  ``mm context sync`` has no mcp-servers phase (``--include`` accepts
-  skills/agents/commands/settings only) — fan-out into the destination's
-  ``.mcp.json`` is web-only (``POST /api/context/mcp-servers/sync``,
-  Sync All). Printing the engine's cd-prefixed sync command would
-  prescribe a no-op, so the result carries prose instead.
+- **``sync_command`` is the cd-prefixed CLI fan-out; ``sync_hint`` mirrors
+  it as prose.** Since #1311 ``mm context sync --include=mcp-servers`` fans
+  the canonical into the destination's ``.mcp.json`` (opt-in, sync-only), so
+  the result carries a runnable command (``cd <dst> && mm context sync
+  --include=mcp-servers --scope project_shared``) — cd-prefixed because the
+  destination is a different project (the cross-project ``--project`` selector
+  is A-9 #1279). ``sync_hint`` is the same instruction as prose for surfaces
+  that render the hint instead of the command, and names the web panel / API
+  (``POST /api/context/mcp-servers/sync``, Sync All) as equivalents.
 
 Gate A always runs (the destination tier IS project_shared; ``env``
 blocks are the expected hotspot) through the standard
@@ -66,6 +69,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -108,9 +112,10 @@ class McpServerCopyResult:
     rename, and ``provenance="not_applicable"`` (mcp-servers are not
     wiki-installed assets — there is no ``lock.json`` lineage to carry).
 
-    ``sync_command`` is always ``None`` (no CLI sync phase exists for
-    mcp-servers); ``sync_hint`` is the prose follow-up surfaces print
-    instead. ``notes`` carries the destination ``.mcp.json`` disclosure
+    Since #1311 ``sync_command`` is the runnable cd-prefixed CLI fan-out
+    (``cd <dst> && mm context sync --include=mcp-servers``); ``sync_hint``
+    is its prose mirror for surfaces that render the hint instead of the
+    command. ``notes`` carries the destination ``.mcp.json`` disclosure
     (same-name runtime entry that the destination's next sync will
     overwrite, or a broken ``.mcp.json`` its sync will refuse on).
     """
@@ -139,18 +144,33 @@ class McpServerCopyResult:
     provenance_reason_code: str | None = None
 
 
-def _sync_hint(dst_root: Path) -> str:
-    """Prose follow-up for the destination's ``.mcp.json`` fan-out.
+def _sync_command(dst_root: Path) -> str:
+    """Runnable follow-up: fan the copied canonical into the destination ``.mcp.json``.
 
-    Honest about the surface asymmetry: there is no ``mm context sync``
-    phase for mcp-servers, so the hint names the web affordances and the
-    exact API call (the scope_id makes it copy-pasteable).
+    cd-prefixed because the destination is a different project and sync runs
+    per-project (the cross-project ``--project`` selector is A-9 #1279, not yet
+    available); mirrors the artifact transfer's ``_sync_followup`` format.
+    Since #1311 ``mm context sync`` has an mcp-servers leg, so this is a real
+    command, not the web-only prose the result used to carry.
     """
     return (
-        f"fan out at the destination from its web panel (mm web → Context "
-        f"Gateway → MCP Servers → Sync) or `POST /api/context/mcp-servers/sync"
-        f"?project_scope_id={compute_scope_id(dst_root)}` — `mm context sync` "
-        f"has no mcp-servers phase."
+        f"cd {shlex.quote(str(dst_root))} && "
+        "mm context sync --include=mcp-servers --scope project_shared"
+    )
+
+
+def _sync_hint(dst_root: Path) -> str:
+    """Prose mirror of :func:`_sync_command` for surfaces that render the hint.
+
+    Since #1311 the runnable path is ``sync_command``; this prose carries the
+    same instruction and names the web panel / API as equivalents (the scope_id
+    keeps the API call copy-pasteable).
+    """
+    return (
+        f"run `mm context sync --include=mcp-servers --scope project_shared` in "
+        f"the destination project, or fan out from its web panel (mm web → "
+        f"Context Gateway → MCP Servers → Sync) / `POST /api/context/mcp-servers/"
+        f"sync?project_scope_id={compute_scope_id(dst_root)}`."
     )
 
 
@@ -351,6 +371,7 @@ def copy_mcp_server(
         )
 
     notes = _dst_mcp_json_notes(dst_root, name)
+    sync_command = _sync_command(dst_root)
     sync_hint = _sync_hint(dst_root)
 
     def _result(*, transferred: bool) -> McpServerCopyResult:
@@ -368,7 +389,7 @@ def copy_mcp_server(
             layout="flat",
             transferred=transferred,
             needs_sync=True,
-            sync_command=None,
+            sync_command=sync_command,
             sync_hint=sync_hint,
             notes=notes,
         )

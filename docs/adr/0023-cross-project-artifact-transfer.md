@@ -426,14 +426,17 @@ Mechanism-specific decisions:
   alias the out-of-project target inode into the destination's
   git-tracked tree. Loud refusal over silently materializing the
   target.
-- **`sync_hint` prose instead of a `sync_command`.** No
-  `mm context sync` phase exists for mcp-servers — `.mcp.json` fan-out
-  is web-only (panel Sync, Sync All) — so prescribing the engine's
-  cd-prefixed sync command would be a no-op instruction.
-  `TransferResult` gained a presentation-only `sync_hint: str | None`
-  (engine results leave it `None`) so one CLI renderer and one web
-  serializer cover both result types; the adapter's result implements
-  the full `TransferResult` attribute surface by pinned test.
+- **`sync_hint` prose alongside the `sync_command`.** At A-12 no
+  `mm context sync` phase existed for mcp-servers, so the result carried
+  web-only prose; #1311 added the CLI `--include=mcp-servers` leg, so the
+  result now carries a runnable cd-prefixed `sync_command`
+  (`cd <dst> && mm context sync --include=mcp-servers --scope
+  project_shared`) like every other transfer, with `sync_hint` as its
+  prose mirror for non-CLI surfaces. `TransferResult` still has the
+  presentation-only `sync_hint: str | None` (engine results leave it
+  `None`) so one CLI renderer and one web serializer cover both result
+  types; the adapter's result implements the full `TransferResult`
+  attribute surface by pinned test.
   Destination `.mcp.json` disclosures ride `notes`, derived from the
   copy's own resolution path: a same-name runtime entry the
   destination's next sync will overwrite (the additive merge is

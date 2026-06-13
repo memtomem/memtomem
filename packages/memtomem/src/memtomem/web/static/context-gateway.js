@@ -3078,9 +3078,12 @@ function _ctxMissingCanonicalRemediationHtml(type, count, scannedDirs) {
     .replace('{count}', count)
     .replace(/\{type\}/g, _ctxTypeName(type))
     .replace('{scan_dirs}', scanList);
-  // The CLI bootstrap snippets cover skills/agents/commands only — there is
-  // no ``--include=mcp-servers`` in ``mm context``, so rendering them for the
-  // MCP section would hand the user commands that cannot touch MCP state.
+  // This is a MISSING-canonical banner: the generic snippets bootstrap a
+  // canonical from runtime (init/generate) for skills/agents/commands. MCP
+  // canonicals are not created that way (cross-project copy or hand-authored),
+  // and `mm context sync --include=mcp-servers` only fans an EXISTING canonical
+  // into .mcp.json — useless when the canonical is the thing that's missing —
+  // so the MCP row suppresses the snippets rather than prescribing a no-op.
   const commands = type === 'mcp-servers'
     ? ''
     : _ctxMissingCanonicalCommands(scope)

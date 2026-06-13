@@ -629,9 +629,11 @@ async def test_mcp_copy_round_trip(projects) -> None:
     assert "✓ copied mcp-servers/pg: project_shared → project_shared" in out
     dst = projects["b"] / ".memtomem" / "mcp-servers" / "pg.json"
     assert dst.read_bytes() == src.read_bytes()
-    # Prose follow-up (web-only fan-out), not a runnable sync command — and
+    # Since #1311 the follow-up is a runnable cd-prefixed CLI command (the MCP
+    # sync contract itself still rejects include=mcp-servers; ADR-0021 §5) — and
     # no layout noise for the single-layout kind.
-    assert "Next: fan out at the destination from its web panel" in out
+    assert "Next: run `cd " in out
+    assert "mm context sync --include=mcp-servers --scope project_shared`" in out
     assert "(flat layout)" not in out
 
 
@@ -644,7 +646,8 @@ async def test_mcp_dry_run_names_required_flags(projects) -> None:
     )
     assert out.startswith("Plan: copy mcp-servers/pg")
     assert "Re-call with apply=True and confirm_project_shared=True to execute." in out
-    assert "After apply, fan out at the destination from its web panel" in out
+    assert "After apply, run `cd " in out
+    assert "mm context sync --include=mcp-servers --scope project_shared`" in out
     assert not (projects["b"] / ".memtomem" / "mcp-servers").exists()
 
 

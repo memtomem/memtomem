@@ -663,8 +663,9 @@ async def test_timeout_503_busy_with_bounded_lock_budget(
 # the route's mcp branch: the validation 400 matrix in mcp vocabulary,
 # the shared gates (confirm round-trip, eligibility, store check)
 # applying unchanged, the issue-pinned 422s (string privacy envelope /
-# object parse envelope), and the wire shape (``sync_hint`` prose with
-# ``sync_command`` null — no CLI sync phase exists for mcp-servers).
+# object parse envelope), and the wire shape (since #1311 a runnable
+# ``sync_command`` — ``cd <dst> && mm context sync --include=mcp-servers`` —
+# with ``sync_hint`` as its prose mirror).
 
 
 _MCP_CLEAN = {"command": "npx", "args": ["-y", "srv"], "env": {"PG_HOST": "localhost"}}
@@ -709,9 +710,11 @@ async def test_mcp_copy_ok(client, cwd_root: Path, tmp_path: Path) -> None:
     assert data["layout"] == "flat"
     assert (data["from_scope"], data["to_scope"]) == ("project_shared", "project_shared")
     assert data["dst_project_scope_id"] == scope_b
-    # Follow-up contract: needs_sync with prose (no runnable CLI command).
+    # Follow-up contract (#1311): needs_sync with a runnable cd-prefixed
+    # command; the prose sync_hint mirrors it and keeps the API call.
     assert data["needs_sync"] is True
-    assert data["sync_command"] is None
+    assert data["sync_command"].startswith("cd ")
+    assert "mm context sync --include=mcp-servers --scope project_shared" in data["sync_command"]
     assert f"project_scope_id={scope_b}" in data["sync_hint"]
     assert data["provenance"] == "not_applicable"
 
@@ -736,7 +739,11 @@ async def test_mcp_needs_confirmation_round_trip(client, cwd_root: Path, tmp_pat
     assert data["status"] == "needs_confirmation"
     assert data["confirm"] == "confirm_project_shared"
     assert data["plan"]["transferred"] is False
-    assert data["plan"]["sync_command"] is None
+    assert data["plan"]["sync_command"].startswith("cd ")
+    assert (
+        "mm context sync --include=mcp-servers --scope project_shared"
+        in data["plan"]["sync_command"]
+    )
     assert data["plan"]["sync_hint"]
     assert not dst.exists()
 

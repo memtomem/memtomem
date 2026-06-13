@@ -1330,9 +1330,10 @@ happen to the source:
 
 Shared rules, all verbs: destination collisions always refuse (no
 `--force` valve); destination runtime fan-out is **not** generated —
-the result prints the exact follow-up `mm context sync` command (or,
-for `mcp-servers`, the web-panel hint: `.mcp.json` fan-out is
-web-only); a `project_shared` landing runs the privacy scan (Gate A,
+the result prints the exact follow-up `mm context sync` command (for
+`mcp-servers`, `cd <dst> && mm context sync --include=mcp-servers
+--scope project_shared`, with web Sync as an equivalent option); a
+`project_shared` landing runs the privacy scan (Gate A,
 no bypass) and requires `--confirm-project-shared` with `--apply`;
 default is always a dry-run preview.
 

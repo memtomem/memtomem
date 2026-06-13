@@ -461,7 +461,7 @@ async def _sync_mcp_servers_core(project_root: Path) -> dict:
     sync-all renders.
     """
     try:
-        result = generate_all_mcp_servers(project_root)
+        result = generate_all_mcp_servers(project_root, surface="web_context_mcp_servers_sync")
     except McpServerParseError as exc:
         raise SyncPhaseError(422, str(exc), error_kind="parse") from exc
     except McpServerPrivacyError as exc:

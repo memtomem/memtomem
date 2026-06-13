@@ -227,7 +227,10 @@ for triggered deferred decisions, not roadmap items.
 5. **MCP Sync-All parity** — an `all` alias and `mcp-servers` support in the
    MCP `sync` contract so headless agents reach full Sync-All parity with the
    web button. *Revisit if:* an agent/headless workflow needs MCP-driven
-   mcp-server sync. (v1 scope-out — not tracked.)
+   mcp-server sync. (v1 scope-out — not tracked.) *Update (#1311):* the **CLI**
+   gained `mm context sync --include=mcp-servers` (opt-in, sync-only); this
+   scope-out now covers only the **MCP** `sync` contract (`mem_context_sync`
+   still rejects `include=mcp-servers`) and the `all` alias.
 
 ## Alternatives considered
 

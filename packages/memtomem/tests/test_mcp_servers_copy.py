@@ -118,14 +118,17 @@ def test_dry_run_plan_mutates_nothing(roots) -> None:
     assert (result.from_scope, result.to_scope) == ("project_shared", "project_shared")
     assert result.layout == "flat"
     assert result.needs_sync is True
-    # No CLI sync phase exists for mcp-servers — the follow-up is prose,
-    # with the copy-pasteable API call carrying the destination scope_id.
-    assert result.sync_command is None
+    # Since #1311 the follow-up is a runnable cd-prefixed CLI command; the prose
+    # sync_hint mirrors it and still carries the copy-pasteable API call.
+    assert result.sync_command is not None
+    assert result.sync_command.startswith("cd ")
+    assert str(roots["b"]) in result.sync_command
+    assert "mm context sync --include=mcp-servers --scope project_shared" in result.sync_command
+    assert "mm context sync --include=mcp-servers" in result.sync_hint
     assert (
         f"POST /api/context/mcp-servers/sync?project_scope_id={compute_scope_id(roots['b'])}"
         in result.sync_hint
     )
-    assert "mm context sync` has no mcp-servers phase" in result.sync_hint
     assert result.notes == ()
     assert result.provenance == "not_applicable"
 

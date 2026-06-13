@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`mm context sync --include=mcp-servers` — CLI mcp-servers fan-out (#1311).**
+  `mm context sync` (and `--all-projects`) gained an opt-in mcp-servers phase:
+  `--include=mcp-servers` fans canonical `.memtomem/mcp-servers/*.json`
+  definitions into the project's `.mcp.json` via the same canonical-wins-per-name
+  merge the web Sync runs (reusing `generate_all_mcp_servers`, so CLI and web
+  stay byte-parallel). It is **opt-in** — a bare `mm context sync` never touches
+  `.mcp.json` — and **sync-only**: `mcp-servers` is rejected by
+  detect/init/generate/diff, which have no mcp-servers engine. Because
+  `.mcp.json` holds executable MCP-server config, the `--all-projects` batch
+  confirms per target before each rewrite (the count-only "Sync N projects?"
+  gate does not disclose it); a single-project run treats the explicit
+  `--include` as consent. `--scope` is a no-op note (mcp-servers is single-tier
+  project_shared). The cross-project `mm context copy mcp-servers` follow-up now
+  prints this as a runnable `cd <dst> && mm context sync --include=mcp-servers`
+  command instead of web-only prose. The MCP `sync` contract (`mem_context_sync`)
+  still rejects `include=mcp-servers` — that parity and an `all` alias remain an
+  ADR-0021 §"Open questions" §5 scope-out.
+
 - **Cross-project copy for MCP server definitions (ADR-0023 §12).**
   `mm context copy mcp-servers <name> --to-project <scope_id|path>` and the
   existing transfer route (`POST /api/context/mcp-servers/{name}/transfer`)
@@ -18,10 +36,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   canonical aborts the destination's entire mcp-servers sync phase), and
   symlinked canonicals are refused (the destination must be a regular
   git-tracked file).
-  Results carry a `sync_hint` (and disclosure notes for a same-name
-  `.mcp.json` runtime entry the destination's next sync would overwrite) —
-  there is no `mm context sync` phase for mcp-servers; fan-out stays on the
-  destination's web panel / Sync All (#1282).
+  Results carry a runnable `sync_command` (and disclosure notes for a
+  same-name `.mcp.json` runtime entry the destination's next sync would
+  overwrite) that fans the copied canonical into the destination's
+  `.mcp.json` — `cd <dst> && mm context sync --include=mcp-servers` (the CLI
+  sync phase landed in #1311, below; #1282).
 
 - **Cross-project per-hook copy for settings hooks (ADR-0023 §11).** New
   `mm context settings-copy --event … --matcher … --to-project <scope_id|path>`

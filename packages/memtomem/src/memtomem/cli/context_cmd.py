@@ -63,6 +63,12 @@ from memtomem.context.migrate import (
     migrate_scope,
 )
 from memtomem.context.transfer import TransferMode, TransferResult, transfer_artifact
+from memtomem.context.mcp_servers import (
+    PROJECT_MCP_CONFIG,
+    McpServerParseError,
+    McpServerPrivacyError,
+    generate_all_mcp_servers,
+)
 from memtomem.context.mcp_servers_copy import McpServerCopyResult, copy_mcp_server
 from memtomem.context.projects import (
     KnownProjectsCorruptError,
@@ -139,8 +145,20 @@ from memtomem.config import (
     load_config_overrides,
 )
 
-# Phase 1-3 supports skills/agents/commands; Phase D adds settings.
+# Phase 1-3 supports skills/agents/commands; Phase D adds settings. This is
+# the SHARED include contract for detect/init/generate/diff/sync (mirrored in
+# server/tools/context.py); keep the two frozensets in lockstep.
 _KNOWN_INCLUDES: frozenset[str] = frozenset({"skills", "agents", "commands", "settings"})
+
+# ``mm context sync`` accepts one extra kind the other four commands do not:
+# ``mcp-servers`` (#1311). It is opt-in (a bare ``mm context sync`` never
+# touches ``.mcp.json``) and SYNC-ONLY — the engine has a canonical→``.mcp.json``
+# fan-out (``generate_all_mcp_servers``) but no extract/init/diff, so adding it
+# to the shared ``_KNOWN_INCLUDES`` would make detect/init/generate/diff accept
+# a token they silently no-op. It is also CLI-only: MCP ``sync``-contract
+# parity (and an ``all`` alias) is a deliberate scope-out (ADR-0021 §"Open
+# questions" §5), so ``server/tools/context.py`` is intentionally NOT widened.
+_SYNC_INCLUDES: frozenset[str] = _KNOWN_INCLUDES | {"mcp-servers"}
 
 
 def _find_project_root() -> Path:
@@ -156,17 +174,24 @@ def _context_path(root: Path) -> Path:
     return root / CONTEXT_FILENAME
 
 
-def _parse_include(include_tuple: tuple[str, ...]) -> set[str]:
-    """Normalize ``--include`` values (repeatable option + comma-split within each)."""
+def _parse_include(
+    include_tuple: tuple[str, ...], *, allowed: frozenset[str] = _KNOWN_INCLUDES
+) -> set[str]:
+    """Normalize ``--include`` values (repeatable option + comma-split within each).
+
+    ``allowed`` is the per-command accepted set: detect/init/generate/diff use
+    the default ``_KNOWN_INCLUDES``; ``sync`` passes ``_SYNC_INCLUDES`` to also
+    accept ``mcp-servers`` (#1311).
+    """
     values: set[str] = set()
     for raw in include_tuple:
         for token in raw.split(","):
             token = token.strip()
             if not token:
                 continue
-            if token not in _KNOWN_INCLUDES:
+            if token not in allowed:
                 raise click.BadParameter(
-                    f"Unknown --include value '{token}'. Supported: {sorted(_KNOWN_INCLUDES)}"
+                    f"Unknown --include value '{token}'. Supported: {sorted(allowed)}"
                 )
             values.add(token)
     return values
@@ -180,6 +205,21 @@ _INCLUDE_OPTION = click.option(
     help=(
         "Additional artifact kinds to process (repeatable or comma-separated). "
         "Supported: skills, agents, commands, settings."
+    ),
+)
+
+# ``sync`` accepts one extra kind (mcp-servers, #1311); its own option carries
+# the accurate help so the other commands' --include help is not widened.
+_SYNC_INCLUDE_OPTION = click.option(
+    "--include",
+    "include",
+    multiple=True,
+    metavar="KIND",
+    help=(
+        "Additional artifact kinds to fan out (repeatable or comma-separated). "
+        "Supported: skills, agents, commands, settings, mcp-servers. "
+        "mcp-servers (opt-in) fans canonical MCP server definitions into the "
+        "project .mcp.json; it is a sync-only kind."
     ),
 )
 
@@ -701,6 +741,56 @@ def _print_settings_diff(root: Path, *, scope: str) -> None:
             click.secho(f"  error {name}: {r.reason}", fg="red")
 
 
+def _print_mcp_servers_generate(root: Path, *, surface: str = "cli_context_sync") -> None:
+    """Fan canonical MCP server definitions into the project ``.mcp.json`` (#1311).
+
+    The CLI leg of ``mm context sync --include=mcp-servers`` reuses the SAME
+    pure ``generate_all_mcp_servers`` core the web ``/context/mcp-servers/sync``
+    route calls, so the two surfaces stay byte-parallel: canonical-wins-per-name
+    merge, ``IN_SYNC`` no-op (no mtime churn when already in sync), and the
+    foreign-entry-preserving mode policy. A Gate A privacy hit or an unparseable
+    canonical aborts the whole leg (the engine refuses to write a partial
+    ``.mcp.json``), surfaced as a red ``ClickException`` like the other legs.
+    """
+    try:
+        result = generate_all_mcp_servers(root, surface=surface)
+    except McpServerPrivacyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except McpServerParseError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if result.generated:
+        click.secho(f"  MCP servers fan-out: {len(result.generated)}", fg="green")
+        for runtime, name, path in result.generated:
+            rel = path.relative_to(root) if path.is_relative_to(root) else path
+            click.echo(f"    {runtime:15s}  {name}  {rel}")
+    for runtime, reason, _code in result.skipped:
+        # NO_CANONICAL_ROOT / IN_SYNC are informational (nothing to fan, or
+        # already in sync) — yellow, never an error.
+        click.secho(f"  skipped {runtime}: {reason}", fg="yellow")
+
+
+def _confirm_mcp_servers_fanout(root: Path, *, yes: bool) -> bool:
+    """Confirm a ``.mcp.json`` rewrite before an ``--all-projects`` mcp-servers leg.
+
+    A single-project ``mm context sync --include=mcp-servers`` treats the
+    explicit ``--include`` as consent and never prompts. ``--all-projects`` is
+    different: its only confirmation is the count-only "Sync N project(s)?"
+    gate, which does NOT disclose that EXECUTABLE MCP-server config
+    (command/args/env, foreign ``mcpServers`` entries carried verbatim) in each
+    project's ``.mcp.json`` is about to be rewritten. So in a batch we disclose
+    the per-target file and confirm before writing (#1311). ``--yes`` skips it.
+    """
+    if yes:
+        return True
+    target = root / PROJECT_MCP_CONFIG
+    verb = "rewrite" if target.exists() else "create"
+    click.secho(
+        f"  mcp-servers sync will {verb} executable MCP server config at {target}",
+        fg="yellow",
+    )
+    return click.confirm("  Continue?", default=False)
+
+
 _SCOPE_OPTION = click.option(
     "--scope",
     "scope_flag",
@@ -1199,7 +1289,7 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
 
 
 @context.command("sync")
-@_INCLUDE_OPTION
+@_SYNC_INCLUDE_OPTION
 @click.option(
     "--strict",
     is_flag=True,
@@ -1241,7 +1331,9 @@ def sync_cmd(
     label: str | None,
 ) -> None:
     """Sync context.md to all detected agent files."""
-    inc = _parse_include(include)
+    # sync accepts mcp-servers on top of the shared kinds (#1311); the other
+    # context commands keep the default _KNOWN_INCLUDES set.
+    inc = _parse_include(include, allowed=_SYNC_INCLUDES)
 
     if all_projects:
         # ADR-0025: the batch is project_shared-only — `user` would fan the
@@ -1384,6 +1476,25 @@ def _run_sync_legs(
             _print_settings_generate(root, scope=scope, allow_host_writes=True)
         else:
             click.secho("  Skipped settings sync (declined).", fg="yellow")
+
+    if "mcp-servers" in inc:
+        click.echo("")
+        if artifact_scope != "project_shared":
+            # mcp-servers canonicals are single-tier project_shared (ADR-0016
+            # §3): there is no other tier to honor, so --scope is ignored — not
+            # an error, because a mixed --include can still carry a real scope
+            # for the other kinds (mirrors _warn_label_ineligible_kinds).
+            click.secho(
+                f"  note: --scope={artifact_scope} does not apply to mcp-servers "
+                "(single-tier project_shared); fanning out project_shared.",
+                fg="yellow",
+            )
+        # Single-project runs treat the explicit --include as consent; a batch
+        # (--all-projects) confirms per target first (see the helper).
+        if not batch or _confirm_mcp_servers_fanout(root, yes=yes):
+            _print_mcp_servers_generate(root, surface=surface)
+        else:
+            click.secho("  Skipped mcp-servers sync (declined).", fg="yellow")
 
     return True
 
@@ -3328,10 +3439,12 @@ def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, appl
     artifact lands untracked).
 
     Also renders the mcp-servers copy result (A-12 #1282) — same field
-    surface by contract. ``sync_hint`` is the prose follow-up for
-    results with no runnable sync command (mcp fan-out is web-only);
-    ``(flat layout)`` is suppressed there because flat is the only
-    layout mcp-servers have, not a legacy variant worth flagging.
+    surface by contract. Since #1311 the mcp-servers result carries a
+    runnable ``sync_command`` (``cd <dst> && mm context sync
+    --include=mcp-servers``), so it takes the same command branch as the
+    artifact transfers; ``sync_hint`` is its prose mirror for non-CLI
+    surfaces. ``(flat layout)`` is suppressed for mcp-servers because flat
+    is the only layout they have, not a legacy variant worth flagging.
     """
     layout_note = (
         " (flat layout)" if result.layout == "flat" and result.kind != "mcp-servers" else ""
@@ -3487,8 +3600,9 @@ def copy_cmd(
 
     ASSET_TYPE ``mcp-servers`` copies one MCP server definition to
     another project (--to-project required; copy-only, no --as, tier
-    flags fixed at project_shared). The destination's .mcp.json fan-out
-    is web-only — the result prints the follow-up.
+    flags fixed at project_shared). The result prints the runnable
+    follow-up that fans the canonical into the destination's .mcp.json
+    (``cd <dst> && mm context sync --include=mcp-servers``; #1311).
     """
     _transfer_dispatch(
         "copy",

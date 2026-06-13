@@ -1581,11 +1581,15 @@ def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, app
     Mirrors the CLI's ``_print_transfer_result`` content: mode verb,
     copy-rename note, fan-out lists, the A-4 provenance carry outcome,
     engine ``notes``, and the engine's exact follow-up sync command
-    (``sync_command``, else the prose ``sync_hint`` for results with no
-    runnable command — mcp-servers fan-out is web-only). The dry-run
-    footer additionally names the confirmation flag(s) the destination
-    tier will require at apply time, so an agent learns the full
-    re-call shape from the preview.
+    (``sync_command``, else the prose ``sync_hint``). Since #1311 the
+    mcp-servers copy result carries a runnable ``sync_command``
+    (``cd <dst> && mm context sync --include=mcp-servers``) like every
+    other transfer; the MCP ``sync`` contract itself still rejects
+    ``include=mcp-servers`` (ADR-0021 §"Open questions" §5 scope-out), so
+    the follow-up is a shell command, not an ``mem_context_sync`` call.
+    The dry-run footer additionally names the confirmation flag(s) the
+    destination tier will require at apply time, so an agent learns the
+    full re-call shape from the preview.
     """
     layout_note = (
         " (flat layout)" if result.layout == "flat" and result.kind != "mcp-servers" else ""

@@ -561,9 +561,11 @@ def test_mcp_copy_round_trip(cli_projects) -> None:
     dst = cli_projects["b"] / ".memtomem" / "mcp-servers" / "pg.json"
     assert dst.read_bytes() == src.read_bytes()
     assert "✓ copied mcp-servers/pg: project_shared → project_shared" in result.output
-    # Prose follow-up, not a runnable sync command — and no layout noise.
-    assert "Next: fan out at the destination from its web panel" in result.output
-    assert "`mm context sync` has no mcp-servers phase" in result.output
+    # Since #1311 the follow-up is a runnable cd-prefixed CLI command — and no
+    # layout noise for the single-layout kind.
+    assert "Next: run `cd " in result.output
+    assert "mm context sync --include=mcp-servers --scope project_shared`" in result.output
+    assert "web panel" not in result.output
     assert "(flat layout)" not in result.output
 
 
@@ -573,7 +575,8 @@ def test_mcp_dry_run_is_default_and_prints_hint(cli_projects) -> None:
     assert result.exit_code == 0, result.output
     assert not (cli_projects["b"] / ".memtomem" / "mcp-servers").exists()
     assert "Run with --apply --confirm-project-shared to execute." in result.output
-    assert "After apply, fan out at the destination from its web panel" in result.output
+    assert "After apply, run `cd " in result.output
+    assert "mm context sync --include=mcp-servers --scope project_shared`" in result.output
 
 
 def test_mcp_move_rejected(cli_projects) -> None:

@@ -263,7 +263,17 @@ class McpServerSyncResult:
     skipped: list[tuple[str, str, str]]
 
 
-def generate_all_mcp_servers(project_root: Path) -> McpServerSyncResult:
+def generate_all_mcp_servers(
+    project_root: Path, *, surface: str = "context_mcp_servers_sync"
+) -> McpServerSyncResult:
+    """Fan canonical MCP server definitions out into the project ``.mcp.json``.
+
+    ``surface`` names the calling fan-out surface for Gate A audit
+    attribution only (web ``/context/mcp-servers/sync``, the CLI
+    ``mm context sync --include=mcp-servers`` leg, ...); it does not
+    change the merge or write behavior. Callers pass their own surface so
+    the privacy-scan audit trail names the real entry point.
+    """
     paths = list_canonical_mcp_servers(project_root)
     if not paths:
         return McpServerSyncResult(
@@ -284,7 +294,7 @@ def generate_all_mcp_servers(project_root: Path) -> McpServerSyncResult:
             text,
             source_path=path,
             project_root=project_root,
-            surface="web_context_mcp_servers_sync",
+            surface=surface,
         )
         parsed = parse_mcp_server_text(text, name=path.stem, source=path)
         definitions[parsed.name] = parsed.definition
