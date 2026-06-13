@@ -215,7 +215,7 @@ async function loadNamespacesTab() {
   // gated to dev mode in `_buildNsCard` because their backend routes stay
   // on admin_router until chunk-id stability lands (ADR-0005 follow-up).
   const list = qs('ns-list');
-  list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
+  panelLoading(list);
 
   try {
     const data = await api('GET', '/api/namespaces');

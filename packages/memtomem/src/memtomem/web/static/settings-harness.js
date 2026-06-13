@@ -68,7 +68,7 @@ function toggleHelp() {
 
 async function loadHarnessSessions() {
   const list = qs('sessions-list');
-  list.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  list.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
   try {
     const data = await api('GET', '/api/sessions?limit=50');
     if (!data.sessions.length) {
@@ -104,7 +104,7 @@ async function showSessionEvents(sessionId) {
   const list = qs('session-events-list');
   qs('session-events-title').textContent = `Events: ${sessionId.slice(0, 8)}...`;
   show(panel);
-  list.innerHTML = '<div class="spinner-panel"></div>';
+  list.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
   try {
     const data = await api('GET', `/api/sessions/${sessionId}/events`);
     _sessionEventsCache = data.events;
@@ -166,7 +166,7 @@ qs('sessions-refresh-btn')?.addEventListener('click', loadHarnessSessions);
 
 async function loadHarnessScratch() {
   const list = qs('scratch-list');
-  list.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  list.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
   try {
     const data = await api('GET', '/api/scratch');
     if (!data.entries.length) {
@@ -245,7 +245,7 @@ qs('scratch-refresh-btn')?.addEventListener('click', loadHarnessScratch);
 
 async function loadHarnessProcedures() {
   const list = qs('procedures-list');
-  list.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  list.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
   try {
     const data = await api('GET', '/api/procedures');
     if (!data.procedures.length) {
@@ -274,7 +274,7 @@ qs('procedures-refresh-btn')?.addEventListener('click', loadHarnessProcedures);
 
 async function loadHarnessHealth() {
   const report = qs('health-report');
-  report.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  report.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
   try {
     const d = await api('GET', '/api/eval');
     report.innerHTML = `

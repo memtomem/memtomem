@@ -88,6 +88,21 @@ describe('panelLoading — sr-only text alternative (#1285)', () => {
   });
 });
 
+describe('srLoading — sr-only text for hand-rolled spinners (#1316)', () => {
+  it('returns an sr-only span carrying common.loading, beside the bespoke spinner', async () => {
+    const { window } = await bootApp({ scripts: ['i18n.js', 'app.js'] });
+    await window.I18N.init();
+    const div = window.document.createElement('div');
+    // Mirror a bespoke .empty-state spinner render that can't use panelLoading().
+    div.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${window.srLoading()}</div>`;
+    const sr = div.querySelector('.sr-only');
+    expect(sr).toBeTruthy();
+    expect(sr.textContent).toBe(window.t('common.loading'));
+    expect(sr.hasAttribute('aria-live')).toBe(false); // parent may already be live
+    expect(div.querySelector('.spinner-panel')).toBeTruthy(); // spinner kept
+  });
+});
+
 describe('showConfirm — cancelText driven every call, no leak (#1285)', () => {
   let window;
 

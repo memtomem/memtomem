@@ -1104,6 +1104,13 @@ function panelLoading(container) {
     '<div class="loading-panel"><div class="spinner-panel"></div>'
     + `<span class="sr-only">${escapeHtml(t('common.loading'))}</span></div>`;
 }
+// sr-only "Loading…" text alternative for hand-rolled spinner markup that can't
+// route through panelLoading() — bespoke .empty-state or bare .spinner-panel
+// renders that keep their own wrapper for layout. Mirrors the span panelLoading()
+// injects so every spinner has a screen-reader voice instead of silence (#1316).
+function srLoading() {
+  return `<span class="sr-only">${escapeHtml(t('common.loading'))}</span>`;
+}
 
 // ── A5: Empty State ──
 // Owns its `.empty-state` wrapper — callers must NOT add their own.
@@ -5794,7 +5801,7 @@ async function loadUploadUsage() {
 async function loadTags() {
   const emptyEl = qs('tags-empty');
   const listEl  = qs('tags-list');
-  emptyEl.innerHTML = '<div class="spinner-panel"></div>';
+  emptyEl.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
   show(emptyEl);
   hide(listEl);
   hide(qs('tags-stats'));
@@ -7209,7 +7216,7 @@ async function openSourcePreview(sourcePath, highlightStart, highlightEnd) {
   title.textContent = basename(sourcePath);
   title.title = sourcePath;
   info.textContent = 'Loading…';
-  body.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
+  panelLoading(body);
   openSourcePreviewModal();
 
   try {
@@ -7467,7 +7474,7 @@ qs('d-source-btn').addEventListener('click', async () => {
   if (!sourceFile) return;
 
   const list = qs('source-chunks-list');
-  list.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
+  panelLoading(list);
   // Hide related panel to avoid stacking
   hide(qs('related-panel'));
   show(panel);

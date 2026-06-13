@@ -953,7 +953,7 @@ async function loadWatchdogStatus() {
   const report = qs('health-watchdog-report');
   const bar = qs('health-watchdog-status-bar');
   bar.style.display = 'none';
-  report.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  report.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
   try {
     const d = await api('GET', '/api/watchdog/status');
     if (!d.enabled) {

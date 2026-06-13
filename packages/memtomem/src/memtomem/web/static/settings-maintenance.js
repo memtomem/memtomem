@@ -50,7 +50,7 @@ async function runDedupScan() {
   hide(qs('dedup-list'));
   hide(qs('dedup-msg'));
   show(empty);
-  empty.innerHTML = '<div class="spinner-panel"></div>';
+  empty.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
 
   // Abort any previous request and set a timeout aligned with the server.
   if (STATE.dedupAbortCtrl) STATE.dedupAbortCtrl.abort();

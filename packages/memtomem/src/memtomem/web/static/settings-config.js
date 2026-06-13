@@ -352,7 +352,7 @@ function _syncConfigToUI() {
 async function loadConfig() {
   const loadingEl = qs('config-loading');
   const contentEl = qs('config-content');
-  loadingEl.innerHTML = '<div class="spinner-panel"></div>';
+  loadingEl.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
   show(loadingEl); hide(contentEl);
 
   try {

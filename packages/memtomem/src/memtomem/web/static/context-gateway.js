@@ -5352,7 +5352,7 @@ async function _ctxFetchFieldMap(type, name) {
 async function _ctxLoadDiff(type, name, detailEl) {
   const pane = detailEl.querySelector(`#ctx-pane-${type}-diff`);
   if (!pane) return;
-  pane.innerHTML = '<div class="empty-state"><div class="spinner-panel"></div></div>';
+  pane.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
   try {
     // Diff is required, field map is optional + parallel-fetched. ``Promise.all``
     // would fail the whole pane on a /rendered hiccup; the explicit
