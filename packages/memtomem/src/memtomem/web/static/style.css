@@ -2391,6 +2391,29 @@ select:focus-visible {
   margin: 0;
 }
 
+/* Context Gateway per-artifact Move/Copy destination modal (B-6 #1289). A
+   compact form (mode / tier / project / rename) with a live dry-run preview and
+   an inline warning that gates the Apply button. */
+.ctx-move-copy-dialog { max-width: 480px; width: 92vw; }
+.ctx-mc-field {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin: 0 0 12px; padding: 8px 12px 10px;
+  display: flex; flex-wrap: wrap; gap: 6px 16px;
+}
+.ctx-mc-field legend { font-size: 0.78rem; font-weight: 600; color: var(--muted); padding: 0 4px; }
+.ctx-mc-radio { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text); cursor: pointer; user-select: none; }
+.ctx-mc-radio input[type="radio"] { cursor: pointer; }
+.ctx-mc-input-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.ctx-mc-input-row span { font-size: 0.8rem; color: var(--muted); }
+.ctx-mc-input-row select,
+.ctx-mc-input-row input {
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); color: var(--text); font-size: 0.85rem;
+  width: 100%; box-sizing: border-box;
+}
+.ctx-mc-preview { color: var(--muted); font-size: 0.82rem; line-height: 1.5; margin: -4px 0 12px; overflow-wrap: anywhere; }
+.ctx-mc-warning { color: var(--warning, #b58900); font-size: 0.82rem; font-weight: 600; line-height: 1.5; margin: -4px 0 12px; overflow-wrap: anywhere; }
+
 /* ── Sprint 2: Copy / Markdown Preview / Syntax Highlight ── */
 .editor-label-row {
   display: flex; align-items: center; justify-content: space-between;

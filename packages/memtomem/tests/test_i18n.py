@@ -557,6 +557,47 @@ class TestNoHardcodedStrings:
             "Use t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) })."
         )
 
+    def test_move_copy_modal_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The B-6 #1289 per-artifact Move/Copy destination modal must source
+        every label/toast from ``settings.ctx.move_copy*`` keys in both locales,
+        with the interpolating keys keeping their placeholders. The tier radio
+        reuses the existing ``settings.ctx.tier_option_*`` keys (covered by the
+        general parity test), so they are not re-listed here."""
+        required = {
+            "settings.ctx.move_copy": set(),
+            "settings.ctx.move_copy_tooltip": set(),
+            "settings.ctx.move_copy_title": set(),
+            "settings.ctx.move_copy_subject": {"type", "name", "from"},
+            "settings.ctx.move_copy_mode_label": set(),
+            "settings.ctx.move_copy_mode_copy": set(),
+            "settings.ctx.move_copy_mode_move": set(),
+            "settings.ctx.move_copy_tier_label": set(),
+            "settings.ctx.move_copy_project_label": set(),
+            "settings.ctx.move_copy_rename_label": set(),
+            "settings.ctx.move_copy_rename_placeholder": set(),
+            "settings.ctx.move_copy_preview": {"dest", "dst"},
+            "settings.ctx.move_copy_collision": set(),
+            "settings.ctx.move_copy_apply": set(),
+            "settings.ctx.move_copy_shared_confirm_title": set(),
+            "settings.ctx.move_copy_shared_confirm_message": set(),
+            "settings.ctx.move_copy_shared_confirm_btn": set(),
+            "settings.ctx.move_copy_sync_now": set(),
+            "settings.ctx.move_copy_sync_done": set(),
+            "settings.ctx.move_success": {"type", "name", "dst"},
+            "settings.ctx.copy_success": {"type", "name", "dst"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Move/Copy keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Move/Copy keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Move/Copy placeholder drift:\n" + "\n".join(bad_ph)
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —

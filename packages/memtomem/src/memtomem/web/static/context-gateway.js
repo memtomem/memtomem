@@ -3635,6 +3635,392 @@ function _ctxResolveConflict(userBuffer, freshContent) {
 // pins drive so they don't need to set up a full edit-conflict scenario.
 window.openCtxConflictModal = () => _ctxResolveConflict('', '');
 
+// ── Move/Copy destination modal (B-6 #1289) ─────────────────────────────────
+// Per-artifact "Move/Copy to…" built on POST /api/context/{kind}/{name}/transfer
+// (the A-5 #1276 endpoint). A dry-run preview (``?dry_run=1``) runs on every
+// destination change and gates the Apply button: a collision, a same-(project,
+// tier) no-op, or a sync-ineligible destination all keep Apply disabled with an
+// inline warning; a clean plan enables it. Apply then threads the tier-keyed
+// confirm round-trip (project_shared → ``confirm_project_shared``; user →
+// ``allow_host_writes`` via the shared host-write disclosure). skills/commands/
+// agents only — mcp-servers transfer (copy-only/cross-project/no-rename) is a
+// follow-up, and its detail pane omits the button.
+const _CTX_TRANSFER_TYPES = new Set(['skills', 'commands', 'agents']);
+
+// Open-modal state, shared with the ``langchange`` re-render; ``null`` when
+// closed. ``lastPreview`` caches the latest dry-run outcome so a locale flip can
+// re-paint the JS-owned subject/preview/warning lines without re-issuing fetch.
+let _ctxMoveCopyState = null;
+// Monotonic guard: a stale dry-run response (slow request; the user changed a
+// control meanwhile) must never paint over a fresher selection — same
+// supersession discipline as ``_ctxDetailSeq``.
+let _ctxMoveCopySeq = 0;
+let _ctxMoveCopyPreviewTimer = null;
+
+// Localized tier label for a transfer ``to_target_scope`` — reuses the tier
+// radio keys so the preview/subject text never drifts from the radio options.
+function _ctxTierLabel(scope) {
+  const key = {
+    user: 'settings.ctx.tier_option_user',
+    project_shared: 'settings.ctx.tier_option_project_shared',
+    project_local: 'settings.ctx.tier_option_project_local',
+  }[scope];
+  return key ? t(key) : (scope || '');
+}
+
+// Toggle the per-mode/tier rows: the user tier is global (no per-project
+// destination), and rename is copy-only (the engine 400s ``move + as_name``).
+function _ctxSyncMoveCopyVisibility() {
+  const modalEl = qs('ctx-move-copy-modal');
+  if (!modalEl) return;
+  const mode = modalEl.querySelector('input[name="ctx-mc-mode"]:checked')?.value || 'copy';
+  const tier = modalEl.querySelector('input[name="ctx-mc-tier"]:checked')?.value || 'project_shared';
+  const projRow = qs('ctx-mc-project-row');
+  const renameRow = qs('ctx-mc-rename-row');
+  if (projRow) projRow.hidden = (tier === 'user');
+  if (renameRow) renameRow.hidden = (mode !== 'copy');
+}
+
+// Build the transfer request body from the live modal controls. Destination
+// project: ``null`` when it equals the source (the route's implicit
+// same-project destination, which also inherits the source scope record for the
+// eligibility gate); an explicit id otherwise. The raw roster scope_id is the
+// comparison key (matches ``_resolve_destination``'s discovery), independent of
+// how server-cwd is spelled in ``_ctxActiveScopeId``.
+function _ctxMoveCopyBody(state) {
+  const modalEl = qs('ctx-move-copy-modal');
+  const mode = modalEl.querySelector('input[name="ctx-mc-mode"]:checked')?.value || 'copy';
+  const toTier = modalEl.querySelector('input[name="ctx-mc-tier"]:checked')?.value || 'project_shared';
+  const projSel = qs('ctx-mc-project');
+  const rename = ((qs('ctx-mc-rename') || {}).value || '').trim();
+  let toProject = null;
+  if (toTier !== 'user') {
+    const sel = projSel ? projSel.value : '';
+    toProject = (sel === state.srcScopeIdRaw) ? null : sel;
+  }
+  const body = {
+    mode,
+    to_target_scope: toTier,
+    to_project_scope_id: toProject,
+    from_scope: state.srcTier,
+    confirm_project_shared: false,
+    allow_host_writes: false,
+  };
+  if (mode === 'copy' && rename) body.as_name = rename;
+  return body;
+}
+
+// POST the transfer. ``dryRun`` picks the preview leg; ``extra`` carries the
+// confirmed gate flag on a re-apply. CSRF rides EVERY unsafe /api/* request
+// (CSRFGuardMiddleware), so thread the header on all legs. Source project+tier
+// are pinned (``scopeResolved``) so a mid-modal scope drift can't re-target.
+async function _ctxMoveCopyPost(state, body, dryRun) {
+  const csrf = await ensureCsrfToken();
+  const headers = csrf
+    ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+    : { 'Content-Type': 'application/json' };
+  const url = _ctxWithTargetScope(
+    `/api/context/${state.srcType}/${encodeURIComponent(state.srcName)}/transfer`
+    + (dryRun ? '?dry_run=1' : ''),
+    { scopeId: state.srcScopeIdEff, scopeResolved: true, targetScope: state.srcTier },
+  );
+  return fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+}
+
+// Paint the cached dry-run outcome into the JS-owned lines + Apply state.
+// Re-runnable on ``langchange`` (reads ``state.lastPreview`` — no fetch).
+function _ctxRenderMoveCopyPreview(state) {
+  const subjectEl = qs('ctx-mc-subject');
+  const previewEl = qs('ctx-mc-preview');
+  const warnEl = qs('ctx-mc-warning');
+  const applyBtn = qs('ctx-mc-apply-btn');
+  if (!previewEl || !warnEl || !applyBtn) return;
+  if (subjectEl) {
+    subjectEl.textContent = t('settings.ctx.move_copy_subject', {
+      type: _ctxTypeNameSingular(state.srcType),
+      name: state.srcName,
+      from: _ctxTierLabel(state.srcTier),
+    });
+  }
+  const p = state.lastPreview;
+  if (!p || p.kind === 'pending') {
+    hide(previewEl); previewEl.textContent = '';
+    hide(warnEl); warnEl.textContent = '';
+    applyBtn.disabled = true;
+    return;
+  }
+  if (p.kind === 'plan') {
+    const d = p.data || {};
+    const dest = d.to_scope === 'user'
+      ? _ctxTierLabel('user')
+      : `${_ctxScopeDisplayLabelById(d.dst_project_scope_id || '')} · ${_ctxTierLabel(d.to_scope)}`;
+    previewEl.textContent = t('settings.ctx.move_copy_preview', {
+      dest,
+      dst: d.dst_name || state.srcName,
+    });
+    show(previewEl);
+    hide(warnEl); warnEl.textContent = '';
+    applyBtn.disabled = false;
+    return;
+  }
+  // collision | error → inline warning, Apply stays disabled.
+  hide(previewEl); previewEl.textContent = '';
+  warnEl.textContent = p.message || t('toast.request_failed');
+  show(warnEl);
+  applyBtn.disabled = true;
+}
+
+// Run a seq-guarded dry-run preview for the current controls. A clean plan
+// enables Apply; collision (409 destination_exists) / same-store 400 /
+// ineligible 409 / privacy 422 / any error all land as a disabled-Apply
+// inline warning.
+async function _ctxMoveCopyPreview(state) {
+  if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
+  const seq = ++_ctxMoveCopySeq;
+  state.lastPreview = { kind: 'pending' };
+  _ctxRenderMoveCopyPreview(state);
+  let outcome;
+  try {
+    const r = await _ctxMoveCopyPost(state, _ctxMoveCopyBody(state), true);
+    if (r.ok) {
+      outcome = { kind: 'plan', data: await r.json() };
+    } else {
+      const err = await r.json().catch(() => ({}));
+      const detail = err && err.detail;
+      if (detail && typeof detail === 'object' && detail.reason_code === 'destination_exists') {
+        outcome = { kind: 'collision', message: t('settings.ctx.move_copy_collision') };
+      } else {
+        outcome = { kind: 'error', message: _ctxErrDetail(detail, t('toast.request_failed')) };
+      }
+    }
+  } catch (e) {
+    outcome = { kind: 'error', message: (e && e.message) || t('toast.request_failed') };
+  }
+  // Drop a stale response: a newer preview started, or the modal closed/reopened.
+  if (seq !== _ctxMoveCopySeq || _ctxMoveCopyState !== state) return;
+  state.lastPreview = outcome;
+  _ctxRenderMoveCopyPreview(state);
+}
+
+// Debounced preview for the rename keystroke stream (immediate triggers —
+// radios/select — call _ctxMoveCopyPreview directly).
+function _ctxSchedulePreview(state) {
+  if (_ctxMoveCopyPreviewTimer) clearTimeout(_ctxMoveCopyPreviewTimer);
+  _ctxMoveCopyPreviewTimer = setTimeout(() => { _ctxMoveCopyPreview(state); }, 300);
+}
+
+// Show a transfer error inline (keeps the modal open for the user to adjust).
+async function _ctxMoveCopyShowError(r) {
+  const err = await r.json().catch(() => ({}));
+  const warnEl = qs('ctx-mc-warning');
+  const previewEl = qs('ctx-mc-preview');
+  if (previewEl) { hide(previewEl); previewEl.textContent = ''; }
+  if (warnEl) { warnEl.textContent = _ctxErrDetail(err && err.detail, t('toast.request_failed')); show(warnEl); }
+}
+
+// Apply the transfer: real POST, then the tier-keyed gate round-trip, then the
+// success refresh. Gates are mutually exclusive (the route emits at most one).
+async function _ctxMoveCopyApply(state) {
+  const modalEl = qs('ctx-move-copy-modal');
+  const applyBtn = qs('ctx-mc-apply-btn');
+  const body = _ctxMoveCopyBody(state);
+  const send = (extra) => _ctxMoveCopyPost(state, { ...body, ...extra }, false);
+  btnLoading(applyBtn, true);
+  try {
+    let r = await send({});
+    if (!r.ok) { _ctxMoveCopyShowError(r); return; }
+    let data = await r.json();
+    if (data && data.status === 'needs_confirmation') {
+      // The gate's confirm dialog (#confirm-modal) shares the .modal-overlay
+      // z-index and sits earlier in the DOM, so it would stack UNDER this
+      // modal (openModalA11y orders by DOM, not z-index). Hide this one for
+      // the disclosure — one overlay on screen — and restore it on decline.
+      hide(modalEl);
+      if (data.confirm === 'allow_host_writes') {
+        // Reuse the shared host-write disclosure (host_targets capped at 8).
+        r = await _ctxConfirmHostWrite(data, () => send({ allow_host_writes: true }));
+      } else {
+        // project_shared Gate B — disclose the git-tracked write, then re-POST.
+        const ok = await showConfirm({
+          title: t('settings.ctx.move_copy_shared_confirm_title'),
+          message: data.reason || t('settings.ctx.move_copy_shared_confirm_message'),
+          confirmText: t('settings.ctx.move_copy_shared_confirm_btn'),
+          danger: false,
+        });
+        r = ok ? await send({ confirm_project_shared: true }) : null;
+      }
+      if (!r) { show(modalEl); return; }       // declined — restore the modal
+      if (!r.ok) { show(modalEl); _ctxMoveCopyShowError(r); return; }
+      data = await r.json();
+    }
+    _ctxMoveCopyClose(state);
+    _ctxMoveCopySuccess(state, data || {});
+  } catch (e) {
+    const warnEl = qs('ctx-mc-warning');
+    if (warnEl) { warnEl.textContent = (e && e.message) || t('toast.request_failed'); show(warnEl); }
+  } finally {
+    btnLoading(applyBtn, false);
+  }
+}
+
+// Success toast (with an optional destination-pinned sync follow-up) + refresh.
+function _ctxMoveCopySuccess(state, data) {
+  const mode = data.mode || 'copy';
+  const opts = {};
+  // One-click "Sync destination now": pin BOTH project and tier to the
+  // DESTINATION (never the live UI scope — it may have drifted). Offered only
+  // when the engine flagged needs_sync with a command — project_local sets it
+  // false, and the user tier is left to a manual host-write sync.
+  if (data.needs_sync && data.sync_command && data.to_scope === 'project_shared') {
+    opts.action = {
+      label: t('settings.ctx.move_copy_sync_now'),
+      onClick: () => _ctxMoveCopyRunDestSync(state, data),
+    };
+  }
+  showToast(t(mode === 'move' ? 'settings.ctx.move_success' : 'settings.ctx.copy_success', {
+    type: _ctxTypeNameSingular(state.srcType),
+    name: state.srcName,
+    dst: data.to_scope === 'user'
+      ? _ctxTierLabel('user')
+      : _ctxScopeDisplayLabelById(data.dst_project_scope_id || ''),
+  }), 'success', opts);
+  // Refresh the source list (badges/rows); a move consumed the source artifact
+  // (wipe the detail), a copy left it in place (reload so it stays current).
+  loadCtxList(state.srcType);
+  const detailEl = qs(`ctx-${state.srcType}-detail`);
+  if (mode === 'move') {
+    if (detailEl) detailEl.hidden = true;
+  } else {
+    loadCtxDetail(state.srcType, state.srcName);
+  }
+}
+
+// Destination-pinned per-type sync (the needs_sync follow-up). Pins project +
+// tier to the transfer destination so a UI scope change between apply and click
+// can't sync the wrong scope.
+async function _ctxMoveCopyRunDestSync(state, data) {
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = csrf
+      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+      : { 'Content-Type': 'application/json' };
+    const url = _ctxWithTargetScope(`/api/context/${state.srcType}/sync`, {
+      scopeId: data.dst_project_scope_id || '', scopeResolved: true, targetScope: data.to_scope,
+    });
+    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast(_ctxErrDetail(err && err.detail, t('toast.request_failed')), 'error');
+      return;
+    }
+    showToast(t('settings.ctx.move_copy_sync_done'));
+    loadCtxList(state.srcType);
+  } catch (e) {
+    showToast((e && e.message) || t('toast.request_failed'), 'error');
+  }
+}
+
+// Tear down listeners (the modal markup is static and persists, so a reopen
+// must not stack duplicate handlers), hide the modal, clear shared state.
+function _ctxMoveCopyClose(state) {
+  if (state && state._teardown) { state._teardown(); state._teardown = null; }
+  if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
+  const modalEl = qs('ctx-move-copy-modal');
+  if (modalEl) hide(modalEl);
+  if (_ctxMoveCopyState === state) _ctxMoveCopyState = null;
+}
+
+// Open the modal for one artifact. Pins source identity + scope/tier ONCE
+// (ADR-0021 §C). skills/commands/agents only.
+function _ctxOpenMoveCopyModal(srcType, srcName) {
+  const modalEl = qs('ctx-move-copy-modal');
+  if (!modalEl || !_CTX_TRANSFER_TYPES.has(srcType)) return;
+  const srcScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
+  const state = {
+    srcType,
+    srcName,
+    srcTier: _ctxTargetScope,
+    // Query source: effective id ('' = server-cwd → route default). Same value
+    // every other gateway request sends.
+    srcScopeIdEff: _ctxEffectiveScopeId(_ctxActiveScopeId),
+    // Destination same-project comparison key: the raw roster scope_id of the
+    // active source (server-cwd's compute_scope_id, or '' when none active).
+    srcScopeIdRaw: srcScope ? srcScope.scope_id : (_ctxActiveScopeId || ''),
+    lastPreview: null,
+    _teardown: null,
+  };
+  _ctxMoveCopyState = state;
+
+  // Destination project options: sync-eligible scopes plus always the source
+  // project (same-project promote must be offered; a paused source surfaces
+  // inline at dry-run). Missing scopes excluded.
+  const projSel = qs('ctx-mc-project');
+  if (projSel) {
+    const list = (_ctxProjectsCache || []).filter(s =>
+      s && !s.missing && (_ctxScopeSyncEligible(s) || _ctxScopeIsActive(s)));
+    projSel.innerHTML = list.map(s => {
+      const sel = (s.scope_id === state.srcScopeIdRaw) ? ' selected' : '';
+      return `<option value="${escapeHtml(s.scope_id)}"${sel}>${escapeHtml(_ctxScopeDisplayLabel(s))}</option>`;
+    }).join('');
+  }
+
+  // Defaults: copy + a destination tier that differs from the source so the
+  // first preview isn't a same-store no-op in the common case.
+  const defaultTier = state.srcTier === 'project_shared' ? 'project_local' : 'project_shared';
+  modalEl.querySelectorAll('input[name="ctx-mc-mode"]').forEach(el => { el.checked = el.value === 'copy'; });
+  modalEl.querySelectorAll('input[name="ctx-mc-tier"]').forEach(el => { el.checked = el.value === defaultTier; });
+  const renameEl = qs('ctx-mc-rename');
+  if (renameEl) renameEl.value = '';
+  _ctxSyncMoveCopyVisibility();
+
+  const applyBtn = qs('ctx-mc-apply-btn');
+  const cancelBtn = qs('ctx-mc-cancel-btn');
+  const onChange = () => { _ctxSyncMoveCopyVisibility(); _ctxMoveCopyPreview(state); };
+  const onRenameInput = () => _ctxSchedulePreview(state);
+  const onApply = () => _ctxMoveCopyApply(state);
+  const onCancel = () => _ctxMoveCopyClose(state);
+  const onBackdrop = (e) => { if (e.target === modalEl) _ctxMoveCopyClose(state); };
+  // Only act on Escape while THIS modal is the visible one — during a gate
+  // round-trip it is hidden under the confirm dialog, which owns Escape then.
+  const onKey = (e) => { if (e.key === 'Escape' && !modalEl.hidden) { e.stopPropagation(); _ctxMoveCopyClose(state); } };
+  const radios = modalEl.querySelectorAll('input[name="ctx-mc-mode"], input[name="ctx-mc-tier"]');
+
+  const releaseA11y = window.openModal(modalEl, {
+    focusables: () => Array.from(modalEl.querySelectorAll('input, select, button')),
+  });
+  window.registerModalCloser(modalEl, () => _ctxMoveCopyClose(state));
+
+  state._teardown = () => {
+    releaseA11y();
+    modalEl.removeEventListener('click', onBackdrop);
+    document.removeEventListener('keydown', onKey, true);
+    if (applyBtn) applyBtn.removeEventListener('click', onApply);
+    if (cancelBtn) cancelBtn.removeEventListener('click', onCancel);
+    radios.forEach(el => el.removeEventListener('change', onChange));
+    if (projSel) projSel.removeEventListener('change', onChange);
+    if (renameEl) renameEl.removeEventListener('input', onRenameInput);
+  };
+
+  radios.forEach(el => el.addEventListener('change', onChange));
+  if (projSel) projSel.addEventListener('change', onChange);
+  if (renameEl) renameEl.addEventListener('input', onRenameInput);
+  if (applyBtn) applyBtn.addEventListener('click', onApply);
+  if (cancelBtn) cancelBtn.addEventListener('click', onCancel);
+  modalEl.addEventListener('click', onBackdrop);
+  document.addEventListener('keydown', onKey, true);
+
+  _ctxRenderMoveCopyPreview(state);   // paint subject + reset Apply
+  _ctxMoveCopyPreview(state);         // kick the first dry-run
+  if (applyBtn) applyBtn.focus();
+}
+
+// Re-paint the open Move/Copy modal's JS-owned lines on a locale flip. The
+// static labels ride ``data-i18n`` (I18N.applyDOM); the subject/preview/warning
+// are JS-set, so re-render from the cached preview (no re-fetch).
+window.addEventListener('langchange', () => {
+  if (_ctxMoveCopyState) _ctxRenderMoveCopyPreview(_ctxMoveCopyState);
+});
+
 function _ctxRenderConflictBanner(detailEl, userBuffer, freshContent) {
   // Inline diff inside the edit pane, above the textarea. Diff orientation
   // is on-disk → user-buffer so '+' lines are the user's edits and '-'
@@ -4193,10 +4579,20 @@ async function loadCtxDetail(type, name, opts = {}) {
     if (seq !== _ctxDetailSeq[type]) return;
 
     let html = `<div class="ctx-detail" role="region" aria-labelledby="ctx-detail-name-${type}">`;
+    // Move/Copy is offered for the transfer kinds only (skills/commands/agents);
+    // mcp-servers transfer is a follow-up. The button is NOT in
+    // ``_CTX_WRITE_BUTTON_SELECTOR``: transfer gates the DESTINATION tier (chosen
+    // in the modal), not the source tier the write-block sweep keys on — and
+    // Move/Copy is the escape hatch FROM project_local/user, so source-tier
+    // blocking would hide it exactly where it is most useful.
+    const _mcBtn = _CTX_TRANSFER_TYPES.has(type)
+      ? `<button class="btn-ghost ctx-detail-move-copy-btn" data-i18n="settings.ctx.move_copy" data-i18n-title="settings.ctx.move_copy_tooltip" title="${escapeHtml(t('settings.ctx.move_copy_tooltip'))}">${t('settings.ctx.move_copy')}</button>`
+      : '';
     html += `<div class="ctx-detail-header">
       <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       <div style="display:flex;gap:6px">
         <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
+        ${_mcBtn}
         <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
@@ -4534,6 +4930,14 @@ async function loadCtxDetail(type, name, opts = {}) {
       } catch (err) {
         showToast(t('toast.delete_failed', { error: err.message }), 'error');
       } finally { btnLoading(delBtn, false); }
+    });
+
+    // Move / Copy to… (B-6 #1289). The modal self-manages its dry-run preview,
+    // gate round-trips, and the success refresh, so the click just opens it
+    // (no btnLoading — the modal opens synchronously). Rendered for the
+    // transfer kinds only; ``?.`` no-ops for mcp-servers.
+    detailEl.querySelector('.ctx-detail-move-copy-btn')?.addEventListener('click', () => {
+      _ctxOpenMoveCopyModal(type, name);
     });
 
     // Per-item Edit / Delete buttons just landed in ``detailEl``; mirror

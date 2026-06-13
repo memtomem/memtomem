@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=107" />
+  <link rel="stylesheet" href="/style.css?v=108" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1429,6 +1429,54 @@
     </div>
   </div>
 
+  <!-- Context Gateway per-artifact Move/Copy destination modal (B-6 #1289).
+       Consumes POST /api/context/{kind}/{name}/transfer. A dry-run preview
+       (?dry_run=1) gates the Apply button — a destination collision, a
+       same-(project,tier) no-op, or a sync-ineligible destination keeps Apply
+       disabled and shows the inline warning; the apply leg threads the
+       project_shared confirm / user-tier host-write round-trips. Source identity
+       and scope/tier are pinned at open. skills/commands/agents only —
+       mcp-servers transfer UI is a follow-up. -->
+  <div id="ctx-move-copy-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ctx-mc-title" aria-describedby="ctx-mc-subject">
+    <div class="modal-inner confirm-dialog ctx-move-copy-dialog">
+      <div class="modal-header">
+        <span id="ctx-mc-title" class="modal-title" data-i18n="settings.ctx.move_copy_title">Move or copy</span>
+      </div>
+      <p id="ctx-mc-subject" class="confirm-message"></p>
+
+      <fieldset class="ctx-mc-field">
+        <legend data-i18n="settings.ctx.move_copy_mode_label">Action</legend>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-mode" value="copy" checked><span data-i18n="settings.ctx.move_copy_mode_copy">Copy (keep original)</span></label>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-mode" value="move"><span data-i18n="settings.ctx.move_copy_mode_move">Move (remove original)</span></label>
+      </fieldset>
+
+      <fieldset class="ctx-mc-field">
+        <legend data-i18n="settings.ctx.move_copy_tier_label">Destination tier</legend>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="project_shared"><span data-i18n="settings.ctx.tier_option_project_shared">Project (shared)</span></label>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="project_local"><span data-i18n="settings.ctx.tier_option_project_local">Project (local)</span></label>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="user"><span data-i18n="settings.ctx.tier_option_user">User</span></label>
+      </fieldset>
+
+      <label id="ctx-mc-project-row" class="ctx-mc-input-row">
+        <span data-i18n="settings.ctx.move_copy_project_label">Destination project</span>
+        <select id="ctx-mc-project"></select>
+      </label>
+
+      <label id="ctx-mc-rename-row" class="ctx-mc-input-row">
+        <span data-i18n="settings.ctx.move_copy_rename_label">New name (optional)</span>
+        <input type="text" id="ctx-mc-rename" autocomplete="off" spellcheck="false" data-i18n-placeholder="settings.ctx.move_copy_rename_placeholder" />
+      </label>
+
+      <p id="ctx-mc-preview" class="confirm-message ctx-mc-preview" hidden></p>
+      <p id="ctx-mc-warning" class="ctx-mc-warning" role="alert" hidden></p>
+
+      <div class="confirm-actions">
+        <button id="ctx-mc-cancel-btn" class="btn-ghost" data-i18n="modal.cancel_btn">Cancel</button>
+        <button id="ctx-mc-apply-btn" class="btn-primary" data-i18n="settings.ctx.move_copy_apply" disabled>Apply</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Folder picker (issue #582 4.12) -->
   <div id="path-picker-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" data-i18n-aria-label="picker.aria_label">
     <div class="modal-inner path-picker-dialog">
@@ -1488,7 +1536,7 @@
   <script src="/settings-harness.js?v=2"></script>
   <script src="/settings-hooks-watchdog.js?v=19"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=76"></script>
+  <script src="/context-gateway.js?v=77"></script>
   <script src="/context-portal.js?v=4"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>
