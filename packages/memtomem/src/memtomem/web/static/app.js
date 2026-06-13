@@ -1096,7 +1096,13 @@ function _modelReadinessPoll() {
   STATE._modelReadinessPollHandle = setTimeout(tick, _MODEL_READINESS_POLL_MS);
 }
 function panelLoading(container) {
-  container.innerHTML = '<div class="loading-panel"><div class="spinner-panel"></div></div>';
+  // The ``sr-only`` span gives the decorative spinner a text alternative so
+  // screen readers announce "Loading…" instead of silence. No ``aria-live`` on
+  // the span: several callers render into containers that are already live
+  // regions (e.g. ``#results-list``), and a nested live region double-announces.
+  container.innerHTML =
+    '<div class="loading-panel"><div class="spinner-panel"></div>'
+    + `<span class="sr-only">${escapeHtml(t('common.loading'))}</span></div>`;
 }
 
 // ── A5: Empty State ──
@@ -1121,6 +1127,11 @@ function showToast(message, type = 'success', options = {}) {
   const container = qs('toast-container');
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
+  // Per-toast live semantics: errors are assertive (interrupt), everything
+  // else is polite. ``#toast-container`` is intentionally NOT a live region —
+  // wrapping these in a polite container would nest an assertive toast inside
+  // a polite region and double-announce on insert.
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
   const msgSpan = document.createElement('span');
   msgSpan.className = 'toast-msg';
   msgSpan.textContent = message;
@@ -1177,6 +1188,10 @@ function showConfirm({
   // pass ``danger: false`` so the most frequent gateway action isn't a red
   // "danger" button — red stays reserved for genuine deletes.
   danger = true,
+  // Optional per-caller Cancel label (e.g. "Keep" on a destructive confirm).
+  // ``null`` ⇒ the default ``modal.cancel_btn`` string. Driven on EVERY call
+  // (see below) so a custom label can't leak into the next default confirm.
+  cancelText = null,
 }) {
   return new Promise(resolve => {
     const modal = qs('confirm-modal');
@@ -1193,6 +1208,14 @@ function showConfirm({
     // "Delete"/"삭제" over the caller's ``confirmText`` (e.g. "Sync"). The text
     // is always driven by ``confirmText`` here, so the attribute is dead weight.
     okBtn.removeAttribute('data-i18n');
+    // Mirror the OK pattern for Cancel: drive the label from JS on EVERY call
+    // (falling back to the default string) and drop the static ``data-i18n``.
+    // Driving it unconditionally — not only when ``cancelText`` is passed — is
+    // what stops a custom label from one confirm leaking into the next default
+    // one (the button is a single reused element).
+    const cancelBtn = qs('confirm-cancel-btn');
+    cancelBtn.textContent = cancelText || t('modal.cancel_btn');
+    cancelBtn.removeAttribute('data-i18n');
 
     const extraRow = qs('confirm-extra-row');
     const extraCheckbox = qs('confirm-extra-checkbox');

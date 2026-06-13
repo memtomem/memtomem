@@ -2310,6 +2310,18 @@ select:focus-visible {
   animation: spin 0.65s linear infinite;
 }
 
+/* Visually-hidden utility — exposes text to screen readers while keeping it
+   off-screen (used for spinner labels and other SR-only announcements). */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ── A5: Empty State ── */
 .empty-state { flex-direction: column; gap: 6px; }
 .empty-state-icon { font-size: 1.6rem; opacity: 0.5; }
