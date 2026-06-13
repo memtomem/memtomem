@@ -567,6 +567,10 @@ class TestNoHardcodedStrings:
             "settings.ctx.move_copy": set(),
             "settings.ctx.move_copy_tooltip": set(),
             "settings.ctx.move_copy_title": set(),
+            # Constrained mcp-servers variant (#1314) — no interpolation.
+            "settings.ctx.move_copy_mcp_title": set(),
+            "settings.ctx.move_copy_mcp_note": set(),
+            "settings.ctx.move_copy_mcp_no_dest": set(),
             "settings.ctx.move_copy_subject": {"type", "name", "from"},
             "settings.ctx.move_copy_mode_label": set(),
             "settings.ctx.move_copy_mode_copy": set(),

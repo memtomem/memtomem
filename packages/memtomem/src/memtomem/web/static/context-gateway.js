@@ -3898,9 +3898,22 @@ window.openCtxConflictModal = () => _ctxResolveConflict('', '');
 // inline warning; a clean plan enables it. Apply then threads the tier-keyed
 // confirm round-trip (project_shared → ``confirm_project_shared``; user →
 // ``allow_host_writes`` via the shared host-write disclosure). skills/commands/
-// agents only — mcp-servers transfer (copy-only/cross-project/no-rename) is a
-// follow-up, and its detail pane omits the button.
+// agents only — they support the full surface (both modes, all three tiers,
+// rename). mcp-servers ride the SAME modal in a constrained variant (#1314).
 const _CTX_TRANSFER_TYPES = new Set(['skills', 'commands', 'agents']);
+
+// mcp-servers (#1314 / engine A-12 #1282) are a constrained move/copy: copy
+// only (a cross-project move would orphan the source ``.mcp.json`` fan-out),
+// cross-project only (single-tier ⇒ no second tier to copy to within a
+// project), ``project_shared`` pinned, and no rename. The modal hides the
+// mode/tier/rename controls for this kind and requires a non-source
+// destination project. ``_ctxCanMoveCopy`` gates BOTH the detail-pane button
+// and ``_ctxOpenMoveCopyModal``; ``_CTX_TRANSFER_TYPES`` stays the full-surface
+// set so the body builder / visibility toggles can branch on it.
+const _CTX_MCP_COPY_TYPE = 'mcp-servers';
+function _ctxCanMoveCopy(type) {
+  return _CTX_TRANSFER_TYPES.has(type) || type === _CTX_MCP_COPY_TYPE;
+}
 
 // Open-modal state, shared with the ``langchange`` re-render; ``null`` when
 // closed. ``lastPreview`` caches the latest dry-run outcome so a locale flip can
@@ -3925,13 +3938,32 @@ function _ctxTierLabel(scope) {
 
 // Toggle the per-mode/tier rows: the user tier is global (no per-project
 // destination), and rename is copy-only (the engine 400s ``move + as_name``).
-function _ctxSyncMoveCopyVisibility() {
+// The modal markup is SHARED static DOM, so this fully sets every row's
+// visibility on each open — a prior mcp session that hid the mode/tier
+// fieldsets must not leave them hidden for the next skills session. The
+// constrained mcp variant (#1314) shows only the destination-project picker
+// plus its explanatory note.
+function _ctxSyncMoveCopyVisibility(state) {
   const modalEl = qs('ctx-move-copy-modal');
   if (!modalEl) return;
-  const mode = modalEl.querySelector('input[name="ctx-mc-mode"]:checked')?.value || 'copy';
-  const tier = modalEl.querySelector('input[name="ctx-mc-tier"]:checked')?.value || 'project_shared';
+  const modeField = qs('ctx-mc-mode-field');
+  const tierField = qs('ctx-mc-tier-field');
   const projRow = qs('ctx-mc-project-row');
   const renameRow = qs('ctx-mc-rename-row');
+  const note = qs('ctx-mc-mcp-note');
+  if (state && state.isMcp) {
+    if (modeField) modeField.hidden = true;
+    if (tierField) tierField.hidden = true;
+    if (projRow) projRow.hidden = false;   // cross-project destination required
+    if (renameRow) renameRow.hidden = true;
+    if (note) note.hidden = false;
+    return;
+  }
+  if (modeField) modeField.hidden = false;
+  if (tierField) tierField.hidden = false;
+  if (note) note.hidden = true;
+  const mode = modalEl.querySelector('input[name="ctx-mc-mode"]:checked')?.value || 'copy';
+  const tier = modalEl.querySelector('input[name="ctx-mc-tier"]:checked')?.value || 'project_shared';
   if (projRow) projRow.hidden = (tier === 'user');
   if (renameRow) renameRow.hidden = (mode !== 'copy');
 }
@@ -3944,6 +3976,25 @@ function _ctxSyncMoveCopyVisibility() {
 // how server-cwd is spelled in ``_ctxActiveScopeId``.
 function _ctxMoveCopyBody(state) {
   const modalEl = qs('ctx-move-copy-modal');
+  if (state.isMcp) {
+    // Constrained mcp-servers copy (#1314): every dimension but the
+    // destination project is pinned. ``to_project_scope_id`` is REQUIRED — the
+    // route 400s a null one ("cross-project only"); the project select excludes
+    // the source, so its value (an empty string === Server CWD is a valid
+    // cross-project destination here) goes through verbatim. ``null`` only when
+    // there is no eligible destination at all (no options) — the preview
+    // short-circuits that case before this body is ever sent.
+    const projSel = qs('ctx-mc-project');
+    const hasDest = !!(projSel && projSel.options.length);
+    return {
+      mode: 'copy',
+      to_target_scope: 'project_shared',
+      to_project_scope_id: hasDest ? projSel.value : null,
+      from_scope: 'project_shared',
+      confirm_project_shared: false,
+      allow_host_writes: false,
+    };
+  }
   const mode = modalEl.querySelector('input[name="ctx-mc-mode"]:checked')?.value || 'copy';
   const toTier = modalEl.querySelector('input[name="ctx-mc-tier"]:checked')?.value || 'project_shared';
   const projSel = qs('ctx-mc-project');
@@ -3985,11 +4036,21 @@ async function _ctxMoveCopyPost(state, body, dryRun) {
 // Paint the cached dry-run outcome into the JS-owned lines + Apply state.
 // Re-runnable on ``langchange`` (reads ``state.lastPreview`` — no fetch).
 function _ctxRenderMoveCopyPreview(state) {
+  const titleEl = qs('ctx-mc-title');
   const subjectEl = qs('ctx-mc-subject');
   const previewEl = qs('ctx-mc-preview');
   const warnEl = qs('ctx-mc-warning');
   const applyBtn = qs('ctx-mc-apply-btn');
   if (!previewEl || !warnEl || !applyBtn) return;
+  if (titleEl) {
+    // The title carries ``data-i18n=move_copy_title`` for the default kinds, so
+    // ``I18N.applyDOM`` resets it on a locale flip; this render runs AFTER
+    // applyDOM (langchange fires post-applyDOM) and overrides it for the
+    // constrained mcp variant, so the copy-only title always wins.
+    titleEl.textContent = state.isMcp
+      ? t('settings.ctx.move_copy_mcp_title')
+      : t('settings.ctx.move_copy_title');
+  }
   if (subjectEl) {
     subjectEl.textContent = t('settings.ctx.move_copy_subject', {
       type: _ctxTypeNameSingular(state.srcType),
@@ -4031,6 +4092,18 @@ function _ctxRenderMoveCopyPreview(state) {
 // inline warning.
 async function _ctxMoveCopyPreview(state) {
   if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
+  // Constrained mcp variant (#1314) with no eligible cross-project destination:
+  // a dry-run would only 400 ("cross-project only"). Surface a dedicated,
+  // actionable inline warning and leave Apply disabled instead. Synchronous, so
+  // no seq guard is needed.
+  if (state.isMcp) {
+    const projSel = qs('ctx-mc-project');
+    if (!projSel || !projSel.options.length) {
+      state.lastPreview = { kind: 'error', message: t('settings.ctx.move_copy_mcp_no_dest') };
+      _ctxRenderMoveCopyPreview(state);
+      return;
+    }
+  }
   const seq = ++_ctxMoveCopySeq;
   state.lastPreview = { kind: 'pending' };
   _ctxRenderMoveCopyPreview(state);
@@ -4256,17 +4329,25 @@ function _ctxResetMoveCopyControls(modalEl) {
 }
 
 // Open the modal for one artifact. Pins source identity + scope/tier ONCE
-// (ADR-0021 §C). skills/commands/agents only.
+// (ADR-0021 §C). skills/commands/agents (full surface) + mcp-servers
+// (constrained copy-only variant, #1314).
 function _ctxOpenMoveCopyModal(srcType, srcName) {
   const modalEl = qs('ctx-move-copy-modal');
-  if (!modalEl || !_CTX_TRANSFER_TYPES.has(srcType)) return;
+  if (!modalEl || !_ctxCanMoveCopy(srcType)) return;
+  const isMcp = srcType === _CTX_MCP_COPY_TYPE;
   // Clear any stale disabled/loading DOM left by an interrupted prior session.
   _ctxResetMoveCopyControls(modalEl);
   const srcScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
   const state = {
     srcType,
     srcName,
-    srcTier: _ctxTargetScope,
+    isMcp,
+    // mcp-servers are single-tier ⇒ the source is always the project_shared
+    // canonical, regardless of the live UI tier filter. Pinning it here keeps
+    // the subject line ("from …") and the pinned ``from_scope`` body field
+    // honest (the transfer route ignores the URL ``target_scope`` and resolves
+    // the source by ``scope_id`` alone).
+    srcTier: isMcp ? 'project_shared' : _ctxTargetScope,
     // Query source: effective id ('' = server-cwd → route default). Same value
     // every other gateway request sends.
     srcScopeIdEff: _ctxEffectiveScopeId(_ctxActiveScopeId),
@@ -4278,31 +4359,42 @@ function _ctxOpenMoveCopyModal(srcType, srcName) {
   };
   _ctxMoveCopyState = state;
 
-  // Destination project options: sync-eligible scopes plus always the source
-  // project (same-project promote must be offered; a paused source surfaces
-  // inline at dry-run). Missing scopes excluded.
+  // Destination project options. Full kinds: sync-eligible scopes plus always
+  // the source project (same-project promote must be offered; a paused source
+  // surfaces inline at dry-run). mcp-servers (#1314): cross-project ONLY, so
+  // the source project is EXCLUDED and every option must be sync-eligible (the
+  // route 409s a paused/never-enrolled destination — no point offering it).
+  // Missing scopes excluded either way.
   const projSel = qs('ctx-mc-project');
   if (projSel) {
-    const list = (_ctxProjectsCache || []).filter(s =>
-      s && !s.missing && (_ctxScopeSyncEligible(s) || _ctxScopeIsActive(s)));
+    const list = (_ctxProjectsCache || []).filter(s => {
+      if (!s || s.missing) return false;
+      if (isMcp) return s.scope_id !== state.srcScopeIdRaw && _ctxScopeSyncEligible(s);
+      return _ctxScopeSyncEligible(s) || _ctxScopeIsActive(s);
+    });
     projSel.innerHTML = list.map(s => {
-      const sel = (s.scope_id === state.srcScopeIdRaw) ? ' selected' : '';
+      // Full kinds preselect the source (same-project promote default); mcp
+      // leaves the browser's first-option default (any of them is valid).
+      const sel = (!isMcp && s.scope_id === state.srcScopeIdRaw) ? ' selected' : '';
       return `<option value="${escapeHtml(s.scope_id)}"${sel}>${escapeHtml(_ctxScopeDisplayLabel(s))}</option>`;
     }).join('');
   }
 
-  // Defaults: copy + a destination tier that differs from the source so the
-  // first preview isn't a same-store no-op in the common case.
-  const defaultTier = state.srcTier === 'project_shared' ? 'project_local' : 'project_shared';
+  // Defaults: copy, and a destination tier. Full kinds pick a tier that differs
+  // from the source so the first preview isn't a same-store no-op; mcp-servers
+  // are project_shared-pinned (the radios are hidden but kept consistent).
+  const defaultTier = isMcp
+    ? 'project_shared'
+    : (state.srcTier === 'project_shared' ? 'project_local' : 'project_shared');
   modalEl.querySelectorAll('input[name="ctx-mc-mode"]').forEach(el => { el.checked = el.value === 'copy'; });
   modalEl.querySelectorAll('input[name="ctx-mc-tier"]').forEach(el => { el.checked = el.value === defaultTier; });
   const renameEl = qs('ctx-mc-rename');
   if (renameEl) renameEl.value = '';
-  _ctxSyncMoveCopyVisibility();
+  _ctxSyncMoveCopyVisibility(state);
 
   const applyBtn = qs('ctx-mc-apply-btn');
   const cancelBtn = qs('ctx-mc-cancel-btn');
-  const onChange = () => { _ctxSyncMoveCopyVisibility(); _ctxMoveCopyPreview(state); };
+  const onChange = () => { _ctxSyncMoveCopyVisibility(state); _ctxMoveCopyPreview(state); };
   const onRenameInput = () => _ctxSchedulePreview(state);
   const onApply = () => _ctxMoveCopyApply(state);
   const onCancel = () => _ctxMoveCopyClose(state);
@@ -4336,13 +4428,18 @@ function _ctxOpenMoveCopyModal(srcType, srcName) {
   modalEl.addEventListener('click', onBackdrop);
   document.addEventListener('keydown', onKey, true);
 
-  _ctxRenderMoveCopyPreview(state);   // paint subject + reset Apply
+  _ctxRenderMoveCopyPreview(state);   // paint title/subject + reset Apply
   _ctxMoveCopyPreview(state);         // kick the first dry-run
-  // Initial focus goes to the first control, NOT Apply — Apply starts disabled
-  // (pending the first dry-run), and focusing a disabled button drops focus to
-  // the now-inert background. The Tab trap (openModalA11y) cycles from here.
-  (modalEl.querySelector('input[name="ctx-mc-mode"]:checked')
-    || modalEl.querySelector('input, select, button'))?.focus();
+  // Initial focus goes to the first VISIBLE control, NOT Apply — Apply starts
+  // disabled (pending the first dry-run), and focusing a disabled button drops
+  // focus to the now-inert background. For mcp the mode radio is hidden, so the
+  // destination-project select is the first focusable control. The Tab trap
+  // (openModalA11y) cycles from here.
+  const firstControl = isMcp
+    ? (qs('ctx-mc-project') || modalEl.querySelector('select, button'))
+    : (modalEl.querySelector('input[name="ctx-mc-mode"]:checked')
+      || modalEl.querySelector('input, select, button'));
+  firstControl?.focus();
 }
 
 // Re-paint the open Move/Copy modal's JS-owned lines on a locale flip. The
@@ -4919,13 +5016,15 @@ async function loadCtxDetail(type, name, opts = {}) {
     if (seq !== _ctxDetailSeq[type]) return;
 
     let html = `<div class="ctx-detail" role="region" aria-labelledby="ctx-detail-name-${type}">`;
-    // Move/Copy is offered for the transfer kinds only (skills/commands/agents);
-    // mcp-servers transfer is a follow-up. The button is NOT in
-    // ``_CTX_WRITE_BUTTON_SELECTOR``: transfer gates the DESTINATION tier (chosen
-    // in the modal), not the source tier the write-block sweep keys on — and
-    // Move/Copy is the escape hatch FROM project_local/user, so source-tier
-    // blocking would hide it exactly where it is most useful.
-    const _mcBtn = _CTX_TRANSFER_TYPES.has(type)
+    // Move/Copy is offered for the full transfer kinds (skills/commands/agents)
+    // and the constrained mcp-servers variant (#1314 — copy-only/cross-project).
+    // The button is NOT in ``_CTX_WRITE_BUTTON_SELECTOR``: transfer gates the
+    // DESTINATION tier (chosen in the modal), not the source tier the
+    // write-block sweep keys on — and Move/Copy is the escape hatch FROM
+    // project_local/user, so source-tier blocking would hide it exactly where it
+    // is most useful. mcp-servers reach this branch only with a canonical (the
+    // runtime-only detail path has no button — there is nothing to copy).
+    const _mcBtn = _ctxCanMoveCopy(type)
       ? `<button class="btn-ghost ctx-detail-move-copy-btn" data-i18n="settings.ctx.move_copy" data-i18n-title="settings.ctx.move_copy_tooltip" title="${escapeHtml(t('settings.ctx.move_copy_tooltip'))}">${t('settings.ctx.move_copy')}</button>`
       : '';
     html += `<div class="ctx-detail-header">

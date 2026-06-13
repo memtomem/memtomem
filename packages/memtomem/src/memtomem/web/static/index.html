@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=109" />
+  <link rel="stylesheet" href="/style.css?v=110" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1438,22 +1438,28 @@
        same-(project,tier) no-op, or a sync-ineligible destination keeps Apply
        disabled and shows the inline warning; the apply leg threads the
        project_shared confirm / user-tier host-write round-trips. Source identity
-       and scope/tier are pinned at open. skills/commands/agents only —
-       mcp-servers transfer UI is a follow-up. -->
+       and scope/tier are pinned at open. skills/commands/agents get the full
+       surface; mcp-servers (#1314) ride the same modal in a constrained
+       copy-only / cross-project / project_shared variant (mode, tier, and
+       rename controls hidden — see the note paragraph below). -->
   <div id="ctx-move-copy-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ctx-mc-title" aria-describedby="ctx-mc-subject">
     <div class="modal-inner confirm-dialog ctx-move-copy-dialog">
       <div class="modal-header">
         <span id="ctx-mc-title" class="modal-title" data-i18n="settings.ctx.move_copy_title">Move or copy</span>
       </div>
       <p id="ctx-mc-subject" class="confirm-message"></p>
+      <!-- mcp-servers (#1314) ride this modal in a constrained copy-only,
+           cross-project, project_shared variant; this note explains why the
+           mode/tier choices are absent. JS toggles ``hidden`` per kind. -->
+      <p id="ctx-mc-mcp-note" class="confirm-message ctx-mc-note" data-i18n="settings.ctx.move_copy_mcp_note" hidden>MCP servers are single-tier: a copy keeps the name and lands in the destination project's shared tier.</p>
 
-      <fieldset class="ctx-mc-field">
+      <fieldset id="ctx-mc-mode-field" class="ctx-mc-field">
         <legend data-i18n="settings.ctx.move_copy_mode_label">Action</legend>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-mode" value="copy" checked><span data-i18n="settings.ctx.move_copy_mode_copy">Copy (keep original)</span></label>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-mode" value="move"><span data-i18n="settings.ctx.move_copy_mode_move">Move (remove original)</span></label>
       </fieldset>
 
-      <fieldset class="ctx-mc-field">
+      <fieldset id="ctx-mc-tier-field" class="ctx-mc-field">
         <legend data-i18n="settings.ctx.move_copy_tier_label">Destination tier</legend>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="project_shared"><span data-i18n="settings.ctx.tier_option_project_shared">Project (shared)</span></label>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="project_local"><span data-i18n="settings.ctx.tier_option_project_local">Project (local)</span></label>
@@ -1539,7 +1545,7 @@
   <script src="/settings-harness.js?v=3"></script>
   <script src="/settings-hooks-watchdog.js?v=20"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=83"></script>
+  <script src="/context-gateway.js?v=84"></script>
   <script src="/context-portal.js?v=6"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>

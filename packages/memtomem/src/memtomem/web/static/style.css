@@ -2423,6 +2423,10 @@ select:focus-visible {
   background: var(--bg); color: var(--text); font-size: 0.85rem;
   width: 100%; box-sizing: border-box;
 }
+/* Constrained mcp-servers variant note (#1314): explains the absent
+   mode/tier choices. Tighter than the default ``.confirm-message`` margin so
+   it sits close to the subject line above it. */
+.ctx-mc-note { margin: -8px 0 14px; font-size: 0.82rem; }
 .ctx-mc-preview { color: var(--muted); font-size: 0.82rem; line-height: 1.5; margin: -4px 0 12px; overflow-wrap: anywhere; }
 .ctx-mc-warning { color: var(--warning, #b58900); font-size: 0.82rem; font-weight: 600; line-height: 1.5; margin: -4px 0 12px; overflow-wrap: anywhere; }
 
