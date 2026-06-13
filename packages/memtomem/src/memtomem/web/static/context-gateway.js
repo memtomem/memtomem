@@ -3281,6 +3281,11 @@ function _ctxRenderDeepLinkBanner(type, link, matchCount) {
 // loaded after this file) passes ``loadCtxProjects()``.
 function _ctxScopesLoadError(listEl, message, detail, retry) {
   listEl.innerHTML = emptyState('', message, detail || '');
+  // Announce the load failure: this renders in-place (no toast) and is only
+  // reached on failure, so a one-shot ``role="alert"`` on the error card is safe
+  // — it won't re-fire on routine list re-renders. We tag the rendered card
+  // rather than the shared ``emptyState`` helper so benign empty states stay silent.
+  listEl.querySelector('.empty-state')?.setAttribute('role', 'alert');
   const retryBtn = document.createElement('button');
   retryBtn.type = 'button';
   retryBtn.className = 'btn-ghost ctx-scopes-retry';
@@ -4106,7 +4111,10 @@ function _ctxRenderConflictBanner(detailEl, userBuffer, freshContent) {
   if (!banner) return;
   const heading = `${escapeHtml(t('settings.ctx.conflict_your_edits'))} ↔ ${escapeHtml(t('settings.ctx.conflict_on_disk'))}`;
   const ops = diffLines(freshContent, userBuffer);
-  banner.innerHTML = `<div class="text-muted" style="margin-bottom:6px;font-size:0.78rem">${heading}</div>`
+  // ``role="alert"`` lives on the short heading only — the assertive region must
+  // not wrap the scrolling diff body, or the screen reader would read the whole
+  // diff. The conflict is an error-class interrupt the user must act on.
+  banner.innerHTML = `<div class="text-muted" style="margin-bottom:6px;font-size:0.78rem" role="alert">${heading}</div>`
     + `<div class="diff-view" style="max-height:200px;overflow:auto;margin-bottom:8px">${renderDiff(ops)}</div>`;
   banner.hidden = false;
 }
@@ -4667,9 +4675,9 @@ async function loadCtxDetail(type, name, opts = {}) {
     html += `<div class="ctx-detail-header">
       <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       <div style="display:flex;gap:6px">
-        <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit">${t('settings.ctx.edit')}</button>
+        <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit" data-i18n-title="settings.ctx.edit_tooltip" title="${escapeHtml(t('settings.ctx.edit_tooltip'))}">${t('settings.ctx.edit')}</button>
         ${_mcBtn}
-        <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete">${t('settings.ctx.delete')}</button>
+        <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete" data-i18n-title="settings.ctx.delete_tooltip" title="${escapeHtml(t('settings.ctx.delete_tooltip'))}">${t('settings.ctx.delete')}</button>
       </div>
     </div>`;
 

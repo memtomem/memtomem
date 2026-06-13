@@ -441,7 +441,12 @@ async function loadCtxProjects() {
     _ctxPortalRenderRows();
   } catch (err) {
     if (seq !== _ctxProjectsSeq) return;
-    listEl.innerHTML = emptyState('⚠', t('settings.ctx.portal_load_failed'), err.message || '');
+    // Route through the shared load-error helper so the failure is announced
+    // (``role="alert"``) and retryable, matching the empty-roster path above.
+    _ctxScopesLoadError(
+      listEl, t('settings.ctx.portal_load_failed'), err.message || '',
+      () => loadCtxProjects(),
+    );
   }
 }
 

@@ -680,10 +680,11 @@ class TestA11yModalAriaModal:
 
 
 class TestA11yLiveRegionsPreserved:
-    """A11Y-2.6 — regression guard for the four existing live regions that
-    announce indexing / model-readiness / upload-usage / toasts. These are
-    *already correct* in main; the pin catches a future refactor that
-    drops the ``aria-live`` attribute or replaces the container."""
+    """A11Y-2.6 — regression guard for the live regions that announce
+    indexing / model-readiness / upload-usage. These are *already correct* in
+    main; the pin catches a future refactor that drops the ``aria-live``
+    attribute or replaces the container. Toasts deliberately do NOT use a live
+    container (B-2 #1285) — see ``test_toast_container_is_not_a_live_region``."""
 
     def test_indexing_indicator_live_region(self, index_html: str):
         assert 'id="indexing-indicator"' in index_html and 'aria-live="polite"' in index_html
@@ -712,12 +713,20 @@ class TestA11yLiveRegionsPreserved:
         opening_tag = index_html[opening : index_html.find(">", block_start) + 1]
         assert 'aria-live="polite"' in opening_tag, 'upload-usage lost its aria-live="polite"'
 
-    def test_toast_container_live_region(self, index_html: str):
+    def test_toast_container_is_not_a_live_region(self, index_html: str):
+        # B-2 (#1285) moved toast urgency onto each toast element: showToast
+        # sets role="alert" on errors and role="status" otherwise (app.js), so
+        # the container must NOT itself be a live region — a polite container
+        # wrapping an assertive error toast double-announces the same insert.
+        # The per-toast behavior is pinned by tests-js/ctx-a11y.test.mjs.
         block_start = index_html.find('id="toast-container"')
         assert block_start != -1, "toast-container removed"
         opening = index_html.rfind("<", 0, block_start)
         opening_tag = index_html[opening : index_html.find(">", block_start) + 1]
-        assert 'aria-live="polite"' in opening_tag, 'toast-container lost its aria-live="polite"'
+        assert "aria-live" not in opening_tag, (
+            "toast-container must not be a live region — per-toast role= owns "
+            "announcement urgency (B-2 #1285); re-adding aria-live double-announces"
+        )
 
 
 class TestA11yResultsLiveRegion:
