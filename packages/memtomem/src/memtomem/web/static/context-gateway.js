@@ -3809,26 +3809,37 @@ function _ctxSchedulePreview(state) {
   _ctxMoveCopyPreviewTimer = setTimeout(() => { _ctxMoveCopyPreview(state); }, 300);
 }
 
-// Show a transfer error inline (keeps the modal open for the user to adjust).
-async function _ctxMoveCopyShowError(r) {
+// Classify a failed transfer response into a preview-shaped outcome so the
+// apply path and the dry-run path render identically. A ``destination_exists``
+// 409 is the collision the engine can ALSO raise at apply time (the
+// re-check after the pair-lock acquire, transfer.py "destination appeared
+// during lock acquire") — even when the preview was clean — and it is
+// terminal, so it must leave Apply disabled, exactly like a preview collision.
+async function _ctxMoveCopyErrorOutcome(r) {
   const err = await r.json().catch(() => ({}));
-  const warnEl = qs('ctx-mc-warning');
-  const previewEl = qs('ctx-mc-preview');
-  if (previewEl) { hide(previewEl); previewEl.textContent = ''; }
-  if (warnEl) { warnEl.textContent = _ctxErrDetail(err && err.detail, t('toast.request_failed')); show(warnEl); }
+  const detail = err && err.detail;
+  if (detail && typeof detail === 'object' && detail.reason_code === 'destination_exists') {
+    return { kind: 'collision', message: t('settings.ctx.move_copy_collision') };
+  }
+  return { kind: 'error', message: _ctxErrDetail(detail, t('toast.request_failed')) };
 }
 
 // Apply the transfer: real POST, then the tier-keyed gate round-trip, then the
 // success refresh. Gates are mutually exclusive (the route emits at most one).
+// A failed apply is folded back into ``state.lastPreview`` so Apply's enabled
+// state tracks the last outcome — a collision stays disabled until the user
+// changes destination/name and a fresh dry-run succeeds (the finally re-derives
+// it after clearing the loading spinner; ordering-independent).
 async function _ctxMoveCopyApply(state) {
   const modalEl = qs('ctx-move-copy-modal');
   const applyBtn = qs('ctx-mc-apply-btn');
   const body = _ctxMoveCopyBody(state);
   const send = (extra) => _ctxMoveCopyPost(state, { ...body, ...extra }, false);
   btnLoading(applyBtn, true);
+  let outcome = null;   // a failed-apply lastPreview shape, or null on success/decline
   try {
     let r = await send({});
-    if (!r.ok) { _ctxMoveCopyShowError(r); return; }
+    if (!r.ok) { outcome = await _ctxMoveCopyErrorOutcome(r); return; }
     let data = await r.json();
     if (data && data.status === 'needs_confirmation') {
       // The gate's confirm dialog (#confirm-modal) shares the .modal-overlay
@@ -3850,16 +3861,22 @@ async function _ctxMoveCopyApply(state) {
         r = ok ? await send({ confirm_project_shared: true }) : null;
       }
       if (!r) { show(modalEl); return; }       // declined — restore the modal
-      if (!r.ok) { show(modalEl); _ctxMoveCopyShowError(r); return; }
+      if (!r.ok) { show(modalEl); outcome = await _ctxMoveCopyErrorOutcome(r); return; }
       data = await r.json();
     }
     _ctxMoveCopyClose(state);
     _ctxMoveCopySuccess(state, data || {});
   } catch (e) {
-    const warnEl = qs('ctx-mc-warning');
-    if (warnEl) { warnEl.textContent = (e && e.message) || t('toast.request_failed'); show(warnEl); }
+    outcome = { kind: 'error', message: (e && e.message) || t('toast.request_failed') };
   } finally {
     btnLoading(applyBtn, false);
+    // Reflect a failed apply in the preview state so Apply's enabled-ness
+    // tracks it (collision/error → disabled; the user adjusts to re-dry-run).
+    // On success the modal is closed (_ctxMoveCopyState===null) so we skip.
+    if (outcome && _ctxMoveCopyState === state) {
+      state.lastPreview = outcome;
+      _ctxRenderMoveCopyPreview(state);
+    }
   }
 }
 
@@ -4011,7 +4028,11 @@ function _ctxOpenMoveCopyModal(srcType, srcName) {
 
   _ctxRenderMoveCopyPreview(state);   // paint subject + reset Apply
   _ctxMoveCopyPreview(state);         // kick the first dry-run
-  if (applyBtn) applyBtn.focus();
+  // Initial focus goes to the first control, NOT Apply — Apply starts disabled
+  // (pending the first dry-run), and focusing a disabled button drops focus to
+  // the now-inert background. The Tab trap (openModalA11y) cycles from here.
+  (modalEl.querySelector('input[name="ctx-mc-mode"]:checked')
+    || modalEl.querySelector('input, select, button'))?.focus();
 }
 
 // Re-paint the open Move/Copy modal's JS-owned lines on a locale flip. The

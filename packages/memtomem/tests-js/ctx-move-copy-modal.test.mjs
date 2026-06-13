@@ -254,6 +254,29 @@ describe('Move/Copy modal — apply gate round-trips (#1289)', () => {
     expect(ctx.toasts.some((x) => x.sev === 'success')).toBe(false);
   });
 
+  it('re-disables Apply when the apply itself hits a collision (TOCTOU race)', async () => {
+    // The preview is clean (Apply enabled), but the engine re-checks the
+    // destination after the pair-lock acquire and can 409 destination_exists
+    // even when the dry-run did not — that collision is terminal, so Apply must
+    // go back to disabled instead of staying clickable on the same destination.
+    const ctx = await bootModal({
+      applyResponses: [{
+        ok: false, status: 409,
+        body: { detail: { error_kind: 'conflict', reason_code: 'destination_exists',
+                          message: 'destination appeared during lock acquire' } },
+      }],
+    });
+    await openModal(ctx);
+    const applyBtn = ctx.window.document.getElementById('ctx-mc-apply-btn');
+    expect(applyBtn.disabled).toBe(false);     // clean dry-run enabled it
+    applyBtn.click();
+    await flush(ctx.window);
+    const warn = ctx.window.document.getElementById('ctx-mc-warning');
+    expect(warn.hidden).toBe(false);           // collision warning surfaced
+    expect(applyBtn.disabled).toBe(true);      // terminal — back to disabled
+    expect(modalOf(ctx.window).hidden).toBe(false);
+  });
+
   it('offers a destination-pinned "Sync now" follow-up when the apply needs sync', async () => {
     const ctx = await bootModal({
       applyResponses: [
