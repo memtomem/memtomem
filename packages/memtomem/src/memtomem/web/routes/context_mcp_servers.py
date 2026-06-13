@@ -27,6 +27,7 @@ from memtomem.context.mcp_servers import (
     parse_mcp_server_text,
     scan_mcp_server_text,
 )
+from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
 from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
@@ -59,13 +60,15 @@ def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
     never turns the panel into a load-failed state.
     """
     if target_scope != "project_shared":
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise _error(
+            400,
+            "validation",
+            (
                 f"{action} is supported only on project_shared — MCP server "
                 f"canonicals are project_shared-only by design (ADR-0011 §1); "
                 f"got target_scope={target_scope!r}."
             ),
+            reason_code="non_shared_write_rejected",
         )
 
 
@@ -145,10 +148,10 @@ async def read_mcp_server(
     # plain 404 (KeyError) rather than a 400, keeping reads tier-tolerant like
     # the list route above and the skills/commands/agents read endpoints.
     if target_scope != "project_shared":
-        raise KeyError(name)
+        raise _error(404, "missing", f"MCP server {name!r} not found")
     path = canonical_mcp_server_path(project_root, name)
     if not path.is_file():
-        raise KeyError(name)
+        raise _error(404, "missing", f"MCP server {name!r} not found")
     content = path.read_text(encoding="utf-8")
     fields = {}
     try:
@@ -198,12 +201,17 @@ async def create_mcp_server(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if path.exists():
-                    raise HTTPException(409, detail=f"MCP server '{name}' already exists")
+                    raise _error(
+                        409,
+                        "conflict",
+                        f"MCP server '{name}' already exists",
+                        reason_code="already_exists",
+                    )
                 atomic_write_text(path, body.content)
     except TimeoutError:
-        raise HTTPException(503, "MCP server create timed out — another sync may be in progress")
+        raise _error(503, "busy", "MCP server create timed out — another sync may be in progress")
     except McpServerParseError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise _error(422, "parse", str(exc)) from exc
     except McpServerPrivacyError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"name": name, "canonical_path": _safe_rel(path, project_root)}
@@ -225,11 +233,11 @@ async def _update_mcp_server_impl(
     name = validate_name(name, kind="MCP server")
     path = canonical_mcp_server_path(project_root, name)
     if not path.is_file():
-        raise KeyError(name)
+        raise _error(404, "missing", f"MCP server {name!r} not found")
     try:
         body_mtime_ns = int(body.mtime_ns)
     except ValueError:
-        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}") from None
+        raise _error(422, "validation", f"Invalid mtime_ns: {body.mtime_ns!r}") from None
 
     try:
         parse_mcp_server_text(body.content, name=name, source=path)
@@ -252,6 +260,8 @@ async def _update_mcp_server_impl(
                                     "File was modified by another process. Reload and retry."
                                 ),
                                 "mtime_ns": str(current_mtime_ns),
+                                "error_kind": "conflict",
+                                "reason_code": "stale_mtime",
                             },
                         )
                     logger.warning(
@@ -264,9 +274,9 @@ async def _update_mcp_server_impl(
                 atomic_write_text(path, body.content)
                 new_mtime_ns = path.stat().st_mtime_ns
     except TimeoutError:
-        raise HTTPException(503, "MCP server update timed out — another sync may be in progress")
+        raise _error(503, "busy", "MCP server update timed out — another sync may be in progress")
     except McpServerParseError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise _error(422, "parse", str(exc)) from exc
     except McpServerPrivacyError as exc:
         raise HTTPException(422, str(exc)) from exc
     return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
@@ -334,7 +344,7 @@ async def delete_mcp_server(
                             }
                         )
     except TimeoutError:
-        raise HTTPException(503, "MCP server delete timed out — another sync may be in progress")
+        raise _error(503, "busy", "MCP server delete timed out — another sync may be in progress")
     return {"deleted": removed, "skipped": skipped}
 
 
@@ -485,4 +495,4 @@ async def sync_mcp_servers(
             async with _gateway_lock:
                 return await _sync_mcp_servers_core(project_root)
     except TimeoutError:
-        raise HTTPException(503, "MCP server sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "MCP server sync timed out — another sync may be in progress")

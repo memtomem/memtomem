@@ -2042,7 +2042,8 @@ class TestSettingsHttpLayer:
             },
         )
         assert resp.status_code == 422
-        assert "Canonical hook event is not a list" in resp.json()["detail"]
+        assert "Canonical hook event is not a list" in resp.json()["detail"]["message"]
+        assert resp.json()["detail"]["error_kind"] == "validation"
 
     async def test_delete_target_rule_uses_index_and_hash_for_duplicate_matchers(
         self, client, claude_home

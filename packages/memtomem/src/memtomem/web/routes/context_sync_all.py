@@ -89,14 +89,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from memtomem.config import TargetScope
 from memtomem.context.projects import ProjectScope, sync_skip_reason
+from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_agents import _sync_agents_core
 from memtomem.web.routes.context_commands import _sync_commands_core
-from memtomem.web.routes.context_gateway import _classify_exception, _redact_message
 from memtomem.web.routes.context_mcp_servers import _sync_mcp_servers_core
 from memtomem.web.routes.context_projects import _discover_for, resolve_writable_scope_root
 from memtomem.web.routes.context_skills import _sync_skills_core
-from memtomem.web.routes.context_transfer import _error
 from memtomem.web.routes.settings_sync import _sync_settings_core
 
 logger = logging.getLogger(__name__)

@@ -2019,14 +2019,18 @@ class TestSkillTargetScopePlumbing:
             json={"name": "draft", "content": "# x\n"},
         )
         assert r.status_code == 400
-        assert "project_shared" in r.json()["detail"]
+        assert "project_shared" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "validation"
+        assert r.json()["detail"]["reason_code"] == "project_local_unsupported"
 
     @pytest.mark.anyio
     async def test_sync_rejects_project_local(self, client: AsyncClient):
         """user-tier sync is open since #1263 — project_local stays 400."""
         r = await client.post("/api/context/skills/sync", params={"target_scope": "project_local"})
         assert r.status_code == 400
-        assert "project_shared" in r.json()["detail"]
+        assert "project_shared" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "validation"
+        assert r.json()["detail"]["reason_code"] == "project_local_unsupported"
 
 
 class TestAgentTargetScopePlumbing:
@@ -2089,7 +2093,9 @@ class TestCommandTargetScopePlumbing:
             json={"content": "# x\n", "mtime_ns": "0"},
         )
         assert r.status_code == 400
-        assert "project_shared" in r.json()["detail"]
+        assert "project_shared" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "validation"
+        assert r.json()["detail"]["reason_code"] == "project_local_unsupported"
 
 
 # ---------------------------------------------------------------------------

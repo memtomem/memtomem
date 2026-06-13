@@ -44,13 +44,13 @@ from memtomem.context.settings_doctor import (
     detect_duplicate_tiers,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
+from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_writable_scope_root,
 )
 from memtomem.web.routes.context_transfer import (
-    _error,
     _reject_ineligible_destination,
     _resolve_destination,
 )
@@ -495,7 +495,7 @@ async def apply_settings_sync(
                     project_root, target_scope, allow_host_writes=allow_host_writes
                 )
     except TimeoutError:
-        raise HTTPException(503, "Settings sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "Settings sync timed out — another sync may be in progress")
 
 
 class ResolveRequest(BaseModel):
@@ -527,7 +527,7 @@ async def resolve_conflict(
 ) -> dict:
     """Resolve a single hook conflict by replacing the target's rule."""
     if body.action != "use_proposed":
-        raise HTTPException(400, detail=f"Unknown action: {body.action}")
+        raise _error(400, "validation", f"Unknown action: {body.action}")
 
     # Rule identity (issue #1112) is all-or-nothing: ``rule_index`` +
     # ``rule_hash`` pin the exact target row and ``proposed_hash`` pins the
@@ -537,9 +537,10 @@ async def resolve_conflict(
     # set we fall back to the legacy label-only first-match for both sides.
     identity = (body.rule_index, body.rule_hash, body.proposed_hash)
     if any(v is not None for v in identity) and not all(v is not None for v in identity):
-        raise HTTPException(
+        raise _error(
             400,
-            detail=(
+            "validation",
+            (
                 "Partial rule identity: send rule_index, rule_hash, and "
                 "proposed_hash together, or none for label-only resolve."
             ),
@@ -555,10 +556,10 @@ async def resolve_conflict(
             async with _gateway_lock:
                 # Read canonical rule
                 if not canonical_path.is_file():
-                    raise HTTPException(404, detail="Canonical source does not exist")
+                    raise _error(404, "missing", "Canonical source does not exist")
                 canonical = _safe_load_json(canonical_path)
                 if not isinstance(canonical, dict):
-                    raise HTTPException(422, detail="Canonical source is not valid JSON")
+                    raise _error(422, "parse", "Canonical source is not valid JSON")
 
                 # Resolve the proposed canonical rule. Each candidate is
                 # marker-stamped (ADR-0019) so the rule we write matches what
@@ -581,7 +582,7 @@ async def resolve_conflict(
                 canonical_hooks = _hooks_record(canonical, label="Canonical", create=True)
                 canonical_event_rules = canonical_hooks.get(body.event, [])
                 if not isinstance(canonical_event_rules, list):
-                    raise HTTPException(422, detail="Canonical hook event is not a list")
+                    raise _error(422, "validation", "Canonical hook event is not a list")
                 for rule in canonical_event_rules:
                     if not (isinstance(rule, dict) and rule.get("matcher", "") == body.matcher):
                         continue
@@ -600,26 +601,26 @@ async def resolve_conflict(
                         if body.proposed_hash is not None
                         else f"Rule '{label}' not in canonical source"
                     )
-                    raise HTTPException(404, detail=detail)
+                    raise _error(404, "missing", detail)
 
                 # Read target + mtime guard. ``st_mtime_ns`` matches
                 # ``hot_reload.py`` precision and detects sub-second writes
                 # that ``st_mtime`` (float seconds) misses.
                 if not target_path.is_file():
-                    raise HTTPException(404, detail="Target settings file does not exist")
+                    raise _error(404, "missing", "Target settings file does not exist")
 
                 mtime_ns = target_path.stat().st_mtime_ns
                 target = _safe_load_json(target_path)
                 if not isinstance(target, dict):
-                    raise HTTPException(422, detail="Target settings is not valid JSON")
+                    raise _error(422, "parse", "Target settings is not valid JSON")
 
                 target_hooks: dict = target.get("hooks", {})
                 if not isinstance(target_hooks, dict):
-                    raise HTTPException(422, detail="Target hooks is not a record")
+                    raise _error(422, "validation", "Target hooks is not a record")
 
                 rules = target_hooks.get(body.event, [])
                 if not isinstance(rules, list):
-                    raise HTTPException(422, detail="Target hook event is not a list")
+                    raise _error(422, "validation", "Target hook event is not a list")
 
                 # Replace the rule in place. With identity (issue #1112) the Nth
                 # duplicate resolves deterministically: address the exact row by
@@ -642,6 +643,8 @@ async def resolve_conflict(
                                 "status": "aborted",
                                 "reason": "Target rule changed. Refresh and retry.",
                                 "mtime_ns": str(target_path.stat().st_mtime_ns),
+                                "error_kind": "conflict",
+                                "reason_code": "stale_rule",
                             },
                         )
                     rules[body.rule_index] = proposed
@@ -653,7 +656,7 @@ async def resolve_conflict(
                             replaced = True
                             break
                     if not replaced:
-                        raise HTTPException(404, detail=f"Rule '{label}' not found in target")
+                        raise _error(404, "missing", f"Rule '{label}' not found in target")
 
                 # mtime check before write — protects against cross-process
                 # writers (CLI, manual edit) that the in-process lock can't see.
@@ -670,6 +673,8 @@ async def resolve_conflict(
                             "status": "aborted",
                             "reason": "Target file was modified by another process. Retry.",
                             "mtime_ns": str(current_mtime_ns),
+                            "error_kind": "conflict",
+                            "reason_code": "stale_mtime",
                         },
                     )
 
@@ -681,7 +686,7 @@ async def resolve_conflict(
                     "reason": f"Rule '{label}' replaced with memtomem's version",
                 }
     except TimeoutError:
-        raise HTTPException(503, "Resolve timed out — another sync may be in progress")
+        raise _error(503, "busy", "Resolve timed out — another sync may be in progress")
 
 
 class RuleActionRequest(BaseModel):
@@ -705,6 +710,8 @@ def _freshness_envelope(
         "reason": reason,
         "target_mtime_ns": _mtime_ns(target_path),
         "canonical_mtime_ns": _mtime_ns(canonical_path),
+        "error_kind": "conflict",
+        "reason_code": "stale_mtime",
     }
 
 
@@ -729,7 +736,7 @@ def _ok_envelope(
 def _load_settings_record(path: Path, *, label: str) -> dict:
     data = _safe_load_json(path)
     if not isinstance(data, dict):
-        raise HTTPException(422, detail=f"{label} settings is not valid JSON")
+        raise _error(422, "parse", f"{label} settings is not valid JSON")
     return data
 
 
@@ -739,7 +746,7 @@ def _hooks_record(settings: dict, *, label: str, create: bool = False) -> dict:
         hooks = {}
         settings["hooks"] = hooks
     if not isinstance(hooks, dict):
-        raise HTTPException(422, detail=f"{label} hooks is not a record")
+        raise _error(422, "validation", f"{label} hooks is not a record")
     return hooks
 
 
@@ -753,7 +760,7 @@ def _target_rule_for_action(
     target_hooks = _hooks_record(target, label="Target")
     rules = target_hooks.get(body.event, [])
     if not isinstance(rules, list):
-        raise HTTPException(422, detail="Target hook event is not a list")
+        raise _error(422, "validation", "Target hook event is not a list")
     stale = _freshness_envelope(
         reason="Target rule changed. Refresh and retry.",
         target_path=target_path,
@@ -811,7 +818,7 @@ async def delete_target_rule(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if not target_path.is_file():
-                    raise HTTPException(404, detail="Target settings file does not exist")
+                    raise _error(404, "missing", "Target settings file does not exist")
                 stale = _check_rule_action_freshness(
                     body,
                     target_path=target_path,
@@ -844,7 +851,7 @@ async def delete_target_rule(
                     canonical_path=canonical_path,
                 )
     except TimeoutError:
-        raise HTTPException(503, "Delete timed out — another sync may be in progress")
+        raise _error(503, "busy", "Delete timed out — another sync may be in progress")
 
 
 @router.post("/settings-sync/rules/promote")
@@ -866,7 +873,7 @@ async def promote_target_rule(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if not target_path.is_file():
-                    raise HTTPException(404, detail="Target settings file does not exist")
+                    raise _error(404, "missing", "Target settings file does not exist")
                 stale = _check_rule_action_freshness(
                     body, target_path=target_path, canonical_path=canonical_path
                 )
@@ -943,7 +950,7 @@ async def promote_target_rule(
                 canonical_hooks = _hooks_record(canonical, label="Canonical", create=True)
                 event_rules = canonical_hooks.get(body.event, [])
                 if not isinstance(event_rules, list):
-                    raise HTTPException(422, detail="Canonical hook event is not a list")
+                    raise _error(422, "validation", "Canonical hook event is not a list")
 
                 same_matcher = [
                     existing
@@ -978,7 +985,7 @@ async def promote_target_rule(
                     canonical_path=canonical_path,
                 )
     except TimeoutError:
-        raise HTTPException(503, "Promote timed out — another sync may be in progress")
+        raise _error(503, "busy", "Promote timed out — another sync may be in progress")
 
 
 # ── cross-project per-hook copy (#1281, campaign #1270 A-11) ─────────

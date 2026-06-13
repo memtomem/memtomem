@@ -679,7 +679,9 @@ class TestUserTierImport:
             "/api/context/skills/import", params={"target_scope": "project_local"}
         )
         assert r.status_code == 400
-        assert "project_shared" in r.json()["detail"]
+        assert "project_shared" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "validation"
+        assert r.json()["detail"]["reason_code"] == "project_local_unsupported"
 
     @pytest.mark.anyio
     async def test_import_passes_scope_kwargs_to_engine(

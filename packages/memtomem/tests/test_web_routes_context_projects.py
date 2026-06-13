@@ -560,7 +560,8 @@ async def test_detail_family_scope_id_selects_project_bytes(
 
     unknown = await client.get(url, params={"project_scope_id": "p-deadbeefcafe"})
     assert unknown.status_code == 404
-    assert "unknown project_scope_id" in unknown.json()["detail"]
+    assert "unknown project_scope_id" in unknown.json()["detail"]["message"]
+    assert unknown.json()["detail"]["error_kind"] == "missing"
 
 
 @pytest.mark.asyncio
@@ -598,7 +599,8 @@ async def test_versions_read_scope_id_follows_selected_project(
 
     unknown = await client.get(url, params={"project_scope_id": "p-deadbeefcafe"})
     assert unknown.status_code == 404
-    assert "unknown project_scope_id" in unknown.json()["detail"]
+    assert "unknown project_scope_id" in unknown.json()["detail"]["message"]
+    assert unknown.json()["detail"]["error_kind"] == "missing"
 
 
 # ── POST /context/known-projects validation ─────────────────────────────

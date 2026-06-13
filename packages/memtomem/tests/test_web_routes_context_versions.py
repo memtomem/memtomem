@@ -127,7 +127,8 @@ class TestListVersions:
     async def test_unsupported_type_skills_404(self, client, tmp_path):
         r = await client.get("/api/context/skills/anything/versions")
         assert r.status_code == 404
-        assert "agents and commands only" in r.json()["detail"]
+        assert "agents and commands only" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "missing"
 
     @pytest.mark.anyio
     async def test_unsupported_type_mcp_servers_404(self, client, tmp_path):
@@ -321,7 +322,9 @@ class TestCreateVersion:
         _make_flat_agent(tmp_path, "legacy")
         r = await client.post("/api/context/agents/legacy/versions", json={})
         assert r.status_code == 409
-        assert "migrate" in r.json()["detail"].lower()
+        assert "migrate" in r.json()["detail"]["message"].lower()
+        assert r.json()["detail"]["error_kind"] == "conflict"
+        assert r.json()["detail"]["reason_code"] == "flat_layout_not_versionable"
 
     @pytest.mark.anyio
     async def test_create_on_skills_type_404(self, client, tmp_path):
@@ -335,7 +338,9 @@ class TestCreateVersion:
             "/api/context/agents/reviewer/versions?target_scope=project_local", json={}
         )
         assert r.status_code == 400
-        assert "project_shared" in r.json()["detail"]
+        assert "project_shared" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "validation"
+        assert r.json()["detail"]["reason_code"] == "non_shared_tier"
 
     @pytest.mark.anyio
     async def test_create_missing_artifact_404(self, client, tmp_path):
@@ -498,10 +503,11 @@ class TestPrivacyAndTimeout:
 
         r = await client.get("/api/context/agents/reviewer/versions")
         assert r.status_code == 400
-        detail = r.json()["detail"]
-        assert "<path>" in detail
-        assert str(tmp_path) not in detail
-        assert ".memtomem" not in detail
+        assert r.json()["detail"]["error_kind"] == "validation"
+        message = r.json()["detail"]["message"]
+        assert "<path>" in message
+        assert str(tmp_path) not in message
+        assert ".memtomem" not in message
 
     @pytest.mark.anyio
     async def test_timeout_during_create_returns_503(self, client, tmp_path, monkeypatch):
@@ -514,7 +520,8 @@ class TestPrivacyAndTimeout:
         monkeypatch.setattr(versioning, "create_version", _raise_timeout)
         r = await client.post("/api/context/agents/reviewer/versions", json={})
         assert r.status_code == 503
-        assert "timed out" in r.json()["detail"].lower()
+        assert "timed out" in r.json()["detail"]["message"].lower()
+        assert r.json()["detail"]["error_kind"] == "busy"
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +592,9 @@ class TestEnableVersioning:
             "/api/context/agents/legacy/versions/enable?target_scope=project_local", json={}
         )
         assert r.status_code == 400
-        assert "project_shared" in r.json()["detail"]
+        assert "project_shared" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["error_kind"] == "validation"
+        assert r.json()["detail"]["reason_code"] == "non_shared_tier"
 
     @pytest.mark.anyio
     async def test_enable_flat_dir_collision_409(self, client, tmp_path):
@@ -596,7 +605,12 @@ class TestEnableVersioning:
         _make_dir_agent(tmp_path, "dup")
         r = await client.post("/api/context/agents/dup/versions/enable", json={})
         assert r.status_code == 409
-        assert "collision" in r.json()["detail"].lower()
+        message = r.json()["detail"]["message"]
+        assert "collision" in message.lower()
+        assert "<path>" in message
+        assert str(tmp_path) not in message
+        assert r.json()["detail"]["error_kind"] == "conflict"
+        assert r.json()["detail"]["reason_code"] == "flat_dir_collision"
         # Neither side touched.
         assert (tmp_path / ".memtomem" / "agents" / "dup.md").exists()
         assert (tmp_path / ".memtomem" / "agents" / "dup" / "agent.md").exists()
@@ -615,7 +629,12 @@ class TestEnableVersioning:
         )
         r = await client.post("/api/context/agents/reborn/versions/enable", json={})
         assert r.status_code == 409
-        assert "orphan" in r.json()["detail"].lower()
+        message = r.json()["detail"]["message"]
+        assert "orphan" in message.lower()
+        assert "<path>" in message
+        assert str(tmp_path) not in message
+        assert r.json()["detail"]["error_kind"] == "conflict"
+        assert r.json()["detail"]["reason_code"] == "orphaned_version_store"
         assert flat.exists()  # flat not consumed
         assert not (orphan_dir / "agent.md").exists()  # nothing adopted in
 

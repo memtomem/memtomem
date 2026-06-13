@@ -443,7 +443,7 @@ async function _ctxFetchProjectsData(opts = {}) {
     const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }));
     sawResponse = true;
     if (!res.ok) {
-      const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
+      const detail = _ctxErrDetail((await res.json().catch(() => ({}))).detail, `HTTP ${res.status}`);
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
       throw new Error(detail);
     }
@@ -1421,12 +1421,9 @@ function _renderCtxOverview(data) {
       let errorDetailHtml = '';
       let badgeTitleAttr = '';
       if (errorKind || errorMessage) {
-        // ``t()`` returns the key itself for unknown keys (no fallback
-        // arg) — fall back to the raw kind so future kinds stay visible.
-        const kindKey = `settings.ctx.error_kind_${errorKind}`;
-        const kindTranslated = errorKind ? t(kindKey) : '';
-        const kindLabel = kindTranslated === kindKey ? errorKind : kindTranslated;
-        const detailText = [kindLabel, errorMessage].filter(Boolean).join(' — ');
+        // Shared kind→label + message composer (B-1 #1284); the helper echoes
+        // the raw kind for unknown kinds so future kinds stay visible.
+        const detailText = _ctxKindDetailText(errorKind, errorMessage);
         badgeTitleAttr = ` title="${escapeHtml(detailText)}"`;
         errorDetailHtml =
           `<div class="ctx-overview-error-detail" title="${escapeHtml(detailText)}">`
@@ -1640,7 +1637,7 @@ async function loadCtxOverview() {
       scopeId: pinnedScopeId,
       scopeResolved: true,
     }));
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || t('settings.ctx.load_overview_failed'));
+    if (!res.ok) throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, t('settings.ctx.load_overview_failed')));
     const data = await res.json();
     if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
     // Shape guard (sibling of the #1100 projects-fetch hardening): a bare-null
@@ -2729,17 +2726,46 @@ function _ctxScopeSyncEligible(scope) {
   return _ctxScopeIsEnrolled(scope) && scope.enabled !== false;
 }
 
-// Map a structured 409 write-guard ``detail`` to a readable, localized string.
-// Backend #1210 returns ``detail = {reason_code, message, project_scope_id}`` on
-// sync-ineligible writes; every other route returns a plain string ``detail``.
-// Precedence: known reason_code → i18n key; else the backend's English
-// ``message``; else a string detail as-is; else the caller's fallback.
+// Map an ``error_kind`` to its localized label, echoing the raw kind when no
+// i18n key exists (``t()`` returns the key itself for unknown keys, so future
+// kinds stay visible). Shared by ``_ctxErrDetail`` and the overview tile so the
+// kind→copy mapping lives in one place (B-1 #1284).
+function _ctxKindLabel(errorKind) {
+  if (!errorKind) return '';
+  const key = `settings.ctx.error_kind_${errorKind}`;
+  const translated = t(key);
+  return translated === key ? errorKind : translated;
+}
+
+// Compose "<kind label> — <server message>" for display; either part may be
+// empty. The server ``message`` is kept as secondary detail behind the
+// localized kind label.
+function _ctxKindDetailText(errorKind, message) {
+  return [_ctxKindLabel(errorKind), message].filter(Boolean).join(' — ');
+}
+
+// Map a structured error ``detail`` to a readable, localized string.
+// Precedence, in order:
+//   1. string detail → returned verbatim (legacy routes + the central app.py
+//      KeyError/ValueError/Exception handlers, and the issue-pinned privacy 422).
+//   2. #1210 write-guard 409 ``{reason_code: sync_paused|sync_not_enrolled}`` →
+//      the specific localized copy — checked BEFORE error_kind because those
+//      409s carry BOTH error_kind:"conflict" and the reason_code, and the
+//      reason_code copy is more precise than the generic "conflict" label.
+//   3. B-1 #1284 object envelope ``{error_kind, message, reason_code?}`` →
+//      localized kind label + the server message as secondary detail.
+//   4. bare ``{message}`` → the server prose.
+//   5. caller fallback.
 function _ctxErrDetail(detail, fallback) {
   if (typeof detail === 'string') return detail;
   if (detail && typeof detail === 'object') {
     const rc = detail.reason_code;
     if (rc === 'sync_paused') return t('settings.ctx.error_sync_paused');
     if (rc === 'sync_not_enrolled') return t('settings.ctx.error_sync_not_enrolled');
+    if (typeof detail.error_kind === 'string' && detail.error_kind) {
+      const composed = _ctxKindDetailText(detail.error_kind, detail.message);
+      if (composed) return composed;
+    }
     if (typeof detail.message === 'string') return detail.message;
   }
   return fallback;
@@ -2993,7 +3019,7 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     if (type === 'agents' || type === 'commands') params.set('include', 'versions');
     const query = params.toString();
     const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${type}`);
+    if (!res.ok) throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, `Failed to load ${type}`));
     const data = await res.json();
     // Bail if a newer ``loadCtxList`` invocation has superseded this one
     // (rapid langchange / Refresh). The list — and this very container —
@@ -3671,7 +3697,7 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
       let r2 = await forcePut({});
       if (!r2.ok) {
         const err = await r2.json().catch(() => ({}));
-        showToast(err.detail || t('toast.request_failed'), 'error');
+        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
       let result = await r2.json();
@@ -3683,7 +3709,7 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
         if (!r2) return;
         if (!r2.ok) {
           const err = await r2.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         result = await r2.json();
@@ -4156,7 +4182,7 @@ async function loadCtxDetail(type, name, opts = {}) {
       detailEl.innerHTML = emptyState('', t('settings.ctx.not_found', { name }), t('settings.ctx.no_artifacts_hint'));
       return;
     }
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
+    if (!res.ok) throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, `Failed to load ${name}`));
     const data = await res.json();
     // Bail if a newer ``loadCtxDetail`` (or ``_ctxLoadRuntimeOnlyDetail``)
     // has superseded us — both share ``_ctxDetailSeq[type]`` because
@@ -4361,7 +4387,7 @@ async function loadCtxDetail(type, name, opts = {}) {
         }
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(err.detail || t('toast.request_failed'), 'error');
+          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
         let result = await r.json();
@@ -4377,7 +4403,7 @@ async function loadCtxDetail(type, name, opts = {}) {
           }
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
-            showToast(err.detail || t('toast.request_failed'), 'error');
+            showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
             return;
           }
           result = await r.json();
@@ -4595,7 +4621,7 @@ async function _ctxLoadDiff(type, name, detailEl) {
       ? _ctxFetchFieldMap(type, name)
       : Promise.resolve(null);
     const res = await diffPromise;
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || t('settings.ctx.diff_failed'));
+    if (!res.ok) throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, t('settings.ctx.diff_failed')));
     const data = await res.json();
     const fieldMapData = await fieldMapPromise;
 
@@ -4664,7 +4690,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
       _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/diff`),
     );
     if (!res.ok) {
-      throw new Error((await res.json().catch(() => ({}))).detail || `Failed to load ${name}`);
+      throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, `Failed to load ${name}`));
     }
     const data = await res.json();
     if (seq !== _ctxDetailSeq[type]) return;

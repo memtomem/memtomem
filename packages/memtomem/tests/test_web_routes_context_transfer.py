@@ -354,6 +354,25 @@ async def test_source_not_found_404(client, cwd_root: Path) -> None:
     assert "not found in any scope" in detail["message"]
 
 
+@pytest.mark.asyncio
+async def test_unknown_source_scope_404(client, cwd_root: Path) -> None:
+    # The SOURCE selector resolves through ``_resolve_selected_scope``, which
+    # raises the B-1 #1284 object envelope; ``_resolve_source`` must re-raise it
+    # verbatim rather than stringify the dict into the message field.
+    resp = await client.post(
+        "/api/context/agents/foo/transfer?project_scope_id=p-deadbeef0000",
+        json={"mode": "move", "to_target_scope": "project_local"},
+    )
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "missing"
+    assert "unknown project_scope_id" in detail["message"]
+    # Regression guard: the message is the clean string, NOT a ``str({...})``
+    # dict repr (the pre-fix bug that the substring check above would miss).
+    assert "error_kind" not in detail["message"]
+    assert not detail["message"].startswith("{")
+
+
 # ── disclose-then-confirm round-trips ────────────────────────────────────
 
 

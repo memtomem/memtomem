@@ -870,7 +870,8 @@ class TestSettingsSync:
             json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
         )
         assert resp.status_code == 404
-        assert "Canonical source does not exist" in resp.json()["detail"]
+        assert resp.json()["detail"]["error_kind"] == "missing"
+        assert "Canonical source does not exist" in resp.json()["detail"]["message"]
 
     async def test_resolve_unknown_action_returns_400(self, app, client: AsyncClient, tmp_path):
         """POST /resolve with invalid action returns HTTP 400."""
@@ -880,7 +881,8 @@ class TestSettingsSync:
             json={"event": "PostToolUse", "matcher": "Write", "action": "bad_action"},
         )
         assert resp.status_code == 400
-        assert "Unknown action" in resp.json()["detail"]
+        assert resp.json()["detail"]["error_kind"] == "validation"
+        assert "Unknown action" in resp.json()["detail"]["message"]
 
     async def test_resolve_missing_rule_returns_404(self, app, client: AsyncClient, tmp_path):
         """POST /resolve for non-existent rule returns HTTP 404."""
@@ -900,7 +902,8 @@ class TestSettingsSync:
                 json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
             )
             assert resp.status_code == 404
-            assert "not in canonical source" in resp.json()["detail"]
+            assert resp.json()["detail"]["error_kind"] == "missing"
+            assert "not in canonical source" in resp.json()["detail"]["message"]
         finally:
             if backup is not None:
                 target.write_text(backup, encoding="utf-8")
@@ -925,7 +928,8 @@ class TestSettingsSync:
             json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
         )
         assert resp.status_code == 422
-        assert "Canonical hooks is not a record" in resp.json()["detail"]
+        assert resp.json()["detail"]["error_kind"] == "validation"
+        assert "Canonical hooks is not a record" in resp.json()["detail"]["message"]
 
     async def test_resolve_non_list_canonical_event_returns_422(
         self, app, client: AsyncClient, tmp_path
@@ -942,7 +946,8 @@ class TestSettingsSync:
             json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
         )
         assert resp.status_code == 422
-        assert "Canonical hook event is not a list" in resp.json()["detail"]
+        assert resp.json()["detail"]["error_kind"] == "validation"
+        assert "Canonical hook event is not a list" in resp.json()["detail"]["message"]
 
     async def test_resolve_missing_hooks_key_stays_404(self, app, client: AsyncClient, tmp_path):
         """Regression guard for the shape fix (#1247 id 51, Codex design
@@ -959,7 +964,8 @@ class TestSettingsSync:
             json={"event": "PostToolUse", "matcher": "Write", "action": "use_proposed"},
         )
         assert resp.status_code == 404
-        assert "not in canonical source" in resp.json()["detail"]
+        assert resp.json()["detail"]["error_kind"] == "missing"
+        assert "not in canonical source" in resp.json()["detail"]["message"]
 
     async def test_conflict_payload_carries_rule_identity(self, app, client: AsyncClient, tmp_path):
         """Issue #1112: each conflict row exposes a stable identity for both
@@ -1257,7 +1263,8 @@ class TestSettingsSync:
                 },
             )
             assert resp.status_code == 400
-            assert "Partial rule identity" in resp.json()["detail"]
+            assert resp.json()["detail"]["error_kind"] == "validation"
+            assert "Partial rule identity" in resp.json()["detail"]["message"]
             # Target untouched by the rejected request.
             rules = json.loads(target.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
             assert rules[0]["hooks"][0]["command"] == "echo old"

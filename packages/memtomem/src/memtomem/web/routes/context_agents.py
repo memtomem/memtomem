@@ -7,7 +7,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
@@ -49,6 +49,7 @@ from memtomem.web.routes.context_projects import (
 )
 from memtomem.web.routes.context_versions import include_has, version_summary
 from memtomem.web.routes._confirm import host_write_gate
+from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
 
@@ -90,13 +91,15 @@ def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
     self-contained.
     """
     if target_scope == "project_local":
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise _error(
+            400,
+            "validation",
+            (
                 f"{action} is supported on the project_shared and user tiers; "
                 f"project_local is a draft tier with no runtime fan-out "
                 f"(ADR-0011 §3)."
             ),
+            reason_code="project_local_unsupported",
         )
 
 
@@ -247,7 +250,7 @@ async def read_agent(
 ) -> dict:
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
-        raise KeyError(name)
+        raise _error(404, "missing", f"agent {name!r} not found")
     agent_path, layout = resolved
 
     content = agent_path.read_text(encoding="utf-8")
@@ -289,14 +292,17 @@ async def rendered_agent(
 ) -> JSONResponse:
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
-        raise KeyError(name)
+        raise _error(404, "missing", f"agent {name!r} not found")
     agent_path, layout = resolved
 
     content = agent_path.read_text(encoding="utf-8")
     try:
         parsed = parse_canonical_agent(agent_path, layout=layout)
     except AgentParseError as exc:
-        return JSONResponse(status_code=422, content={"detail": f"Parse error: {exc}"})
+        return JSONResponse(
+            status_code=422,
+            content={"detail": {"error_kind": "parse", "message": f"Parse error: {exc}"}},
+        )
 
     diffs = diff_agents(project_root, scope=target_scope)
     status_map: dict[tuple[str, str], str] = {(rt, n): s for rt, n, s in diffs}
@@ -366,7 +372,9 @@ async def create_agent(
         resolve_canonical_agent(project_root, name, scope=target_scope) is not None
         or artifact_dir_unlocked.exists()
     ):
-        raise HTTPException(409, detail=f"Agent '{name}' already exists")
+        raise _error(
+            409, "conflict", f"Agent '{name}' already exists", reason_code="already_exists"
+        )
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes,
@@ -380,7 +388,12 @@ async def create_agent(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if resolve_canonical_agent(project_root, name, scope=target_scope) is not None:
-                    raise HTTPException(409, detail=f"Agent '{name}' already exists")
+                    raise _error(
+                        409,
+                        "conflict",
+                        f"Agent '{name}' already exists",
+                        reason_code="already_exists",
+                    )
                 # ADR-0022: create in versioned directory layout (agent.md +
                 # versions/v1.md + manifest) from the start, so the artifact is
                 # immediately versionable in the detail panel instead of a flat
@@ -392,7 +405,12 @@ async def create_agent(
                     # resolve_canonical_agent found no working file above, but a
                     # stale/orphan directory remains — surface a clean 409 rather
                     # than a 500 from mkdir()'s FileExistsError.
-                    raise HTTPException(409, detail=f"Agent '{name}' already exists")
+                    raise _error(
+                        409,
+                        "conflict",
+                        f"Agent '{name}' already exists",
+                        reason_code="already_exists",
+                    )
                 # Encode the submitted content up front, before anything touches
                 # disk. A lone-surrogate body can't be UTF-8 encoded; failing
                 # after mkdir would leave an orphan dir that wedges retries on the
@@ -402,7 +420,7 @@ async def create_agent(
                 try:
                     content_bytes = body.content.encode("utf-8")
                 except UnicodeEncodeError as exc:
-                    raise HTTPException(400, detail="Agent content is not valid UTF-8") from exc
+                    raise _error(400, "validation", "Agent content is not valid UTF-8") from exc
                 artifact_dir.mkdir(parents=True)
                 agent_path = artifact_dir / AGENT_DIR_FILENAME
                 try:
@@ -420,7 +438,7 @@ async def create_agent(
                     shutil.rmtree(artifact_dir, ignore_errors=True)
                     raise
     except TimeoutError:
-        raise HTTPException(503, "Agent create timed out — another sync may be in progress")
+        raise _error(503, "busy", "Agent create timed out — another sync may be in progress")
     return {"name": name, "canonical_path": _safe_rel(agent_path, project_root)}
 
 
@@ -450,6 +468,8 @@ def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
             "status": "aborted",
             "reason": _MTIME_CONFLICT_REASON,
             "mtime_ns": str(current_mtime_ns),
+            "error_kind": "conflict",
+            "reason_code": "stale_mtime",
         },
     )
 
@@ -470,13 +490,13 @@ async def update_agent(
     _reject_project_local_write(target_scope, "Update agent")
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
-        raise KeyError(name)
+        raise _error(404, "missing", f"agent {name!r} not found")
     agent_path, _layout = resolved
 
     try:
         body_mtime_ns = int(body.mtime_ns)
     except ValueError:
-        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
+        raise _error(422, "validation", f"Invalid mtime_ns: {body.mtime_ns!r}")
 
     # Unlocked pre-check before the host-write gate — a stale request is
     # refused, never confirmed (see context_skills.update_skill).
@@ -509,7 +529,7 @@ async def update_agent(
                 atomic_write_text(agent_path, body.content)
                 new_mtime_ns = agent_path.stat().st_mtime_ns
     except TimeoutError:
-        raise HTTPException(503, "Agent update timed out — another sync may be in progress")
+        raise _error(503, "busy", "Agent update timed out — another sync may be in progress")
     return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 
@@ -592,7 +612,7 @@ async def delete_agent(
                         except OSError as e:
                             skipped.append(delete_skip_entry(target, e, project_root))
     except TimeoutError:
-        raise HTTPException(503, "Agent delete timed out — another sync may be in progress")
+        raise _error(503, "busy", "Agent delete timed out — another sync may be in progress")
 
     return {"deleted": removed, "skipped": skipped}
 
@@ -819,7 +839,7 @@ async def sync_agents(
             async with _gateway_lock:
                 return await _sync_agents_core(project_root, target_scope, on_drop=on_drop)
     except TimeoutError:
-        raise HTTPException(503, "Agents sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "Agents sync timed out — another sync may be in progress")
 
 
 # ── Import ───────────────────────────────────────────────────────────────
@@ -915,7 +935,7 @@ async def import_agents(
                 return gate
         result = await _run(dry=dry_run)
     except TimeoutError:
-        raise HTTPException(503, "Agents import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Agents import timed out — another sync may be in progress")
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -944,7 +964,7 @@ async def import_agent(
     try:
         validate_name(name, kind="agent name")
     except InvalidNameError as exc:
-        raise HTTPException(400, f"Invalid agent name: {exc}")
+        raise _error(400, "validation", f"Invalid agent name: {exc}")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
 
@@ -964,7 +984,7 @@ async def import_agent(
         if target_scope == "user" and not allow_host_writes:
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise HTTPException(404, f"No runtime agent named {name!r} to import")
+                raise _error(404, "missing", f"No runtime agent named {name!r} to import")
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
@@ -976,7 +996,7 @@ async def import_agent(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise HTTPException(503, "Agent import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Agent import timed out — another sync may be in progress")
     if not result.imported and not result.skipped:
-        raise HTTPException(404, f"No runtime agent named {name!r} to import")
+        raise _error(404, "missing", f"No runtime agent named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)

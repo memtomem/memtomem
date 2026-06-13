@@ -830,7 +830,7 @@ async function _ctxPortalSaveLabel(scope, rawValue) {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      showToast(err.detail || t('toast.request_failed'), 'error');
+      showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
       return;
     }
     showToast(t('settings.ctx.portal_rename_success'));
@@ -861,7 +861,7 @@ async function _ctxPortalUnregister(scope) {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      showToast(err.detail || t('toast.request_failed'), 'error');
+      showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
       return;
     }
     await loadCtxProjects();
@@ -888,7 +888,7 @@ async function _ctxPortalEnroll(scope) {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      showToast(err.detail || t('toast.request_failed'), 'error');
+      showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
       return;
     }
     showToast(t('settings.ctx.portal_enroll_success'));
@@ -915,7 +915,7 @@ async function _ctxPortalToggleEnabled(scope) {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      showToast(err.detail || t('toast.request_failed'), 'error');
+      showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
       return;
     }
     showToast(t(newEnabled ? 'settings.ctx.portal_resume_success' : 'settings.ctx.portal_pause_success'));

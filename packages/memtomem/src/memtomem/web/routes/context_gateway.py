@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
-from memtomem.privacy import scan as _privacy_scan
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._names import GENERATOR_VENDOR
@@ -24,82 +22,22 @@ from memtomem.context.status import (
     summarize_settings_statuses,
 )
 from memtomem.wiki.store import WikiStore
+from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
 from memtomem.web.routes.context_projects import _discover_for, resolve_scope_root
-
-try:
-    import tomllib
-except ImportError:  # pragma: no cover — py<3.11 fallback, repo targets py312
-    tomllib = None  # type: ignore[assignment]
-
-try:
-    import yaml  # type: ignore[import-untyped]
-except ImportError:  # pragma: no cover — PyYAML may be absent on minimal installs
-    yaml = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["context-gateway"])
 
-_HOME = str(Path.home())
-_ERROR_MESSAGE_LIMIT = 200
-_SECRET_REDACTED_MARKER = "<redacted: secret-shape>"
+# ``_classify_exception`` / ``_redact_message`` are re-exported from the
+# ``_errors`` leaf (B-1 #1284) so ``context_transfer`` / ``context_sync_all``
+# can keep importing them from this module without the old import cycle.
 
 
 # The count derivations (``summarize_diff_statuses`` /
 # ``summarize_diff_with_canonical`` / ``summarize_settings_statuses``) live
 # in ``memtomem.context.status`` since #1280 so the CLI batch verb and every
 # web aggregate share one keying rule.
-
-
-def _classify_exception(exc: BaseException) -> str:
-    """Map an exception to one of {parse, permission, missing, internal}.
-
-    Order matters: ``PermissionError`` and ``FileNotFoundError`` are both
-    ``OSError`` subclasses, so they must be checked before bare ``OSError``.
-    Generic ``OSError`` is ``internal`` rather than ``permission``/``missing``
-    because ``errno`` may be ``EIO``/``EMFILE``/``ELOOP`` etc.
-    """
-    if isinstance(exc, PermissionError):
-        return "permission"
-    if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
-        return "missing"
-    if isinstance(exc, ModuleNotFoundError):
-        return "missing"
-    if isinstance(exc, UnicodeDecodeError):
-        return "parse"
-    if isinstance(exc, json.JSONDecodeError):
-        return "parse"
-    if tomllib is not None and isinstance(exc, tomllib.TOMLDecodeError):
-        return "parse"
-    if yaml is not None and isinstance(exc, yaml.YAMLError):
-        return "parse"
-    return "internal"
-
-
-def _redact_message(message: str) -> str:
-    """Collapse ``$HOME`` → ``~``, drop secret-shape messages, then truncate.
-
-    The ``internal`` classification is a catch-all for unexpected
-    exceptions, so ``str(exc)`` may incidentally contain provider tokens,
-    PEM headers, or ``api_key=...`` fragments pulled from a config parse
-    or a third-party library's error. Truncation alone leaves the first
-    200 chars verbatim, which is not enough at this trust boundary.
-
-    We reuse the LTM secret-class scanner from ``memtomem.privacy``. If
-    *any* hit is detected, the whole message is replaced with a fixed
-    marker. Span-splicing was considered and rejected: several patterns
-    (notably ``api_key=...``) match the assignment anchor only, so the
-    secret *value* would survive a span splice. Whole-message replace
-    matches the convention already established in
-    ``privacy._sanitize_audit_value``. The ``error_kind`` field still
-    tells the operator which category the failure fell into.
-    """
-    redacted = message.replace(_HOME, "~") if _HOME else message
-    if _privacy_scan(redacted):
-        return _SECRET_REDACTED_MARKER
-    if len(redacted) > _ERROR_MESSAGE_LIMIT:
-        redacted = redacted[:_ERROR_MESSAGE_LIMIT]
-    return redacted
 
 
 def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
@@ -555,21 +493,16 @@ async def context_status_all(
     drift.
     """
     if target_scope != "project_shared":
-        # ADR-0023 §10 object envelope, constructed inline: importing the
-        # shared ``_error`` helper from context_transfer would be a circular
-        # import (context_transfer already imports this module's classifier);
-        # B-1 #1284 owns consolidating the envelope constructors.
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error_kind": "validation",
-                "message": (
-                    "status-all aggregates the project_shared tier only: the "
-                    "user tier is one global store (not per-project) and "
-                    "project_local has no runtime fan-out to drift (ADR-0011 "
-                    "§3); use the single-project routes for those views."
-                ),
-            },
+        # ADR-0023 §10 object envelope via the shared ``_errors._error``
+        # constructor (B-1 #1284 consolidated the inline tier-gate dict that
+        # used to dodge the context_transfer↔context_gateway import cycle).
+        raise _error(
+            400,
+            "validation",
+            "status-all aggregates the project_shared tier only: the user "
+            "tier is one global store (not per-project) and project_local "
+            "has no runtime fan-out to drift (ADR-0011 §3); use the "
+            "single-project routes for those views.",
         )
     wiki = WikiStore.at_default()
     entries: list[dict[str, Any]] = []

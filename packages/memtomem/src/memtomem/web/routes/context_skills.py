@@ -8,7 +8,7 @@ import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -30,6 +30,7 @@ from memtomem.context.skills import (
 )
 from memtomem.config import TargetScope
 from memtomem.web.routes._confirm import host_write_gate
+from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
 from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
@@ -81,13 +82,15 @@ def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
     while the UI is showing a user/local row").
     """
     if target_scope == "project_local":
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise _error(
+            400,
+            "validation",
+            (
                 f"{action} is supported on the project_shared and user tiers; "
                 f"project_local is a draft tier with no runtime fan-out "
                 f"(ADR-0011 §3)."
             ),
+            reason_code="project_local_unsupported",
         )
 
 
@@ -262,7 +265,7 @@ async def read_skill(
 
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
-        raise KeyError(name)
+        raise _error(404, "missing", f"skill {name!r} not found")
 
     content = manifest.read_text(encoding="utf-8")
     # mtime_ns serialized as string (JS bigint-unsafe).
@@ -329,7 +332,9 @@ async def create_skill(
     # (409) rather than confirmed, and a no-op never prompts. The locked
     # re-check below stays authoritative for create races.
     if skill_dir.exists():
-        raise HTTPException(409, detail=f"Skill '{body.name}' already exists")
+        raise _error(
+            409, "conflict", f"Skill '{body.name}' already exists", reason_code="already_exists"
+        )
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes,
@@ -347,12 +352,17 @@ async def create_skill(
                     # A bare ValueError here maps to HTTP 400 via the app's
                     # value_error_handler, diverging from the sibling routes
                     # (and from the Web UI's 409 conflict-resolution flow).
-                    raise HTTPException(409, detail=f"Skill '{body.name}' already exists")
+                    raise _error(
+                        409,
+                        "conflict",
+                        f"Skill '{body.name}' already exists",
+                        reason_code="already_exists",
+                    )
                 skill_dir.mkdir(parents=True)
                 manifest = skill_dir / SKILL_MANIFEST
                 atomic_write_text(manifest, body.content)
     except TimeoutError:
-        raise HTTPException(503, "Skill create timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": _safe_rel(skill_dir, project_root)}
 
 
@@ -382,6 +392,8 @@ def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
             "status": "aborted",
             "reason": _MTIME_CONFLICT_REASON,
             "mtime_ns": str(current_mtime_ns),
+            "error_kind": "conflict",
+            "reason_code": "stale_mtime",
         },
     )
 
@@ -404,12 +416,12 @@ async def update_skill(
     skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
     manifest = skill_dir / SKILL_MANIFEST
     if not manifest.is_file():
-        raise KeyError(name)
+        raise _error(404, "missing", f"skill {name!r} not found")
 
     try:
         body_mtime_ns = int(body.mtime_ns)
     except ValueError:
-        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
+        raise _error(422, "validation", f"Invalid mtime_ns: {body.mtime_ns!r}")
 
     # Unlocked pre-check: a stale-mtime request is refused (same 409 shape
     # as the locked check) BEFORE the host-write gate, so the user is never
@@ -445,7 +457,7 @@ async def update_skill(
                 atomic_write_text(manifest, body.content)
                 new_mtime_ns = manifest.stat().st_mtime_ns
     except TimeoutError:
-        raise HTTPException(503, "Skill update timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill update timed out — another sync may be in progress")
     return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 
@@ -525,7 +537,7 @@ async def delete_skill(
                         except OSError as e:
                             skipped.append(delete_skip_entry(target, e, project_root))
     except TimeoutError:
-        raise HTTPException(503, "Skill delete timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill delete timed out — another sync may be in progress")
 
     return {"deleted": removed, "skipped": skipped}
 
@@ -685,7 +697,7 @@ async def sync_skills(
             async with _gateway_lock:
                 return await _sync_skills_core(project_root, target_scope)
     except TimeoutError:
-        raise HTTPException(503, "Skills sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skills sync timed out — another sync may be in progress")
 
 
 # ── Import (reverse sync) ───────────────────────────────────────────────
@@ -789,7 +801,7 @@ async def import_skills(
                 return gate
         result = await _run(dry=dry_run)
     except TimeoutError:
-        raise HTTPException(503, "Skills import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skills import timed out — another sync may be in progress")
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -819,7 +831,7 @@ async def import_skill(
     try:
         validate_name(name, kind="skill name")
     except InvalidNameError as exc:
-        raise HTTPException(400, f"Invalid skill name: {exc}")
+        raise _error(400, "validation", f"Invalid skill name: {exc}")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
 
@@ -841,7 +853,7 @@ async def import_skill(
         if target_scope == "user" and not allow_host_writes:
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise HTTPException(404, f"No runtime skill named {name!r} to import")
+                raise _error(404, "missing", f"No runtime skill named {name!r} to import")
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
@@ -853,7 +865,7 @@ async def import_skill(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise HTTPException(503, "Skill import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
     if not result.imported and not result.skipped:
-        raise HTTPException(404, f"No runtime skill named {name!r} to import")
+        raise _error(404, "missing", f"No runtime skill named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)
