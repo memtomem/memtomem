@@ -1267,7 +1267,16 @@ class TestNoHardcodedStrings:
         # Threshold tracks the path count exactly (``>= 3``, not ``>= 2``): with
         # three guards a looser ``>= 2`` would let a future drop of any single
         # guard — including the #1194 commit-gating one — slip through green.
-        guards = re.findall(r"if \(seq !==\s*_ctxOverviewSeq(?:\s*\|\|[^)]*)?\)\s*return;", text)
+        # #1286 added an optional ``_ctxIsAbortError(err) || `` prefix to the
+        # catch-path guard (abort = a benign supersede) and switched the guard
+        # returns to ``return false`` (the refresh-completion signal), so the seq
+        # check is no longer the first operand nor always a bare ``return;``.
+        # Anchor on ``seq !==`` preceded by ``if (`` or ``|| `` and tolerate
+        # ``return false`` — still exactly three distinct guard sites.
+        guards = re.findall(
+            r"(?:if \(|\|\|\s*)seq !==\s*_ctxOverviewSeq(?:\s*\|\|[^)]*)?\)\s*return(?:\s+false)?;",
+            text,
+        )
         assert len(guards) >= 3, (
             f"expected sequence-guard returns in all three fetch-dependent paths "
             f"(intermediate-commit, success, catch), found {len(guards)}"
@@ -1512,7 +1521,10 @@ class TestNoHardcodedStrings:
         # The bail check appears as ``if (seq !== _ctxListSeq[type]) return;``
         # at every stale-write site. We expect ≥ 4 occurrences total
         # (loadCtxList success + catch, _loadScopeGroupItems success + catch).
-        guards = re.findall(r"if \(seq !==\s*_ctxListSeq\[type\]\)\s*return;", text)
+        # #1286 prefixed the two catch-path guards with ``_ctxIsAbortError(err) || ``
+        # (abort = a benign supersede), so the seq check is no longer always the
+        # first operand — match ``seq !==`` preceded by ``if (`` or ``|| ``.
+        guards = re.findall(r"(?:if \(|\|\|\s*)seq !==\s*_ctxListSeq\[type\]\)\s*return;", text)
         assert len(guards) >= 4, (
             f"expected ≥4 _ctxListSeq guards (loadCtxList success+catch + "
             f"_loadScopeGroupItems success+catch); found {len(guards)}"
@@ -1615,7 +1627,12 @@ class TestNoHardcodedStrings:
         # at least 3 guards in loadCtxDetail (404 fast-path + success +
         # catch) and 2 in _ctxLoadRuntimeOnlyDetail (success + catch).
         # Cumulative ≥5 guards across the file.
-        guards = re.findall(r"if \(seq !==\s*_ctxDetailSeq\[type\]\)\s*return;", text)
+        # #1286 prefixed the two catch-path guards with ``_ctxIsAbortError(err) || ``
+        # (abort = a benign supersede), so the seq check is no longer always the
+        # first operand — match ``seq !==`` preceded by ``if (`` or ``|| ``. The
+        # ``seq != null && seq !==`` guards in _ctxLoadVersions stay excluded
+        # (neither prefix matches), as before.
+        guards = re.findall(r"(?:if \(|\|\|\s*)seq !==\s*_ctxDetailSeq\[type\]\)\s*return;", text)
         assert len(guards) >= 5, (
             f"expected ≥5 _ctxDetailSeq guards across loadCtxDetail and "
             f"_ctxLoadRuntimeOnlyDetail (success + catch sites in both, "

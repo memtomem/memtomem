@@ -244,6 +244,33 @@ async function _ctxErrorMessageFromResponse(resp, fallback) {
 // ``_ctxOverviewCache`` and the ``langchange`` listener below.
 let _ctxOverviewSeq = 0;
 
+// Per-surface AbortControllers (#1286). The seq guards already stop a superseded
+// response from PAINTING; these additionally abort the wasted in-flight request
+// the moment a scope/tier/section switch supersedes it, so the winning request
+// isn't queued behind stale ones on the browser's per-origin connection pool and
+// can't keep racing the cache-commit path. Seq guards stay as defense in depth —
+// abort is best-effort (a runtime without ``AbortController`` degrades to
+// seq-only). ``loadCtxList`` / ``loadCtxDetail`` key theirs by type (declared
+// next to ``_ctxListSeq`` / ``_ctxDetailSeq``); overview is a singleton and the
+// Projects portal owns its own (``_ctxProjectsAbort`` in context-portal.js).
+let _ctxOverviewAbort = null;
+
+// Abort the superseded request held in ``prev`` (no-op if absent / already
+// settled) and mint a fresh controller for the new invocation. Returns the new
+// controller, or null where ``AbortController`` is unavailable so callers fall
+// back to seq-only guarding. Pair with the surface's ``++seq`` at loader entry.
+function _ctxSwapAbort(prev) {
+  try { prev?.abort(); } catch { /* already aborted / unsupported — seq guards */ }
+  return typeof AbortController === 'function' ? new AbortController() : null;
+}
+
+// True for a fetch rejected by an ``AbortController`` (#1286). A superseded
+// request is never a real failure, so its caller must skip the error render /
+// toast / active-scope demotion and let the winning request own the surface.
+function _ctxIsAbortError(err) {
+  return !!err && (err.name === 'AbortError' || err.code === 20);
+}
+
 // Cache the last successful ``/api/context/overview`` payload so a
 // ``langchange`` toggle can re-render the inline ``t()`` card text from
 // the existing data — no fetch, no ``panelLoading`` spinner flash. The
@@ -385,6 +412,28 @@ function _ctxNormalizeActiveScope(scopes) {
   return active;
 }
 
+// The synthetic single-project fallback returned when ``/api/context/projects``
+// is unavailable (older deploy / browser test) or the fetch was aborted (#1286).
+// A safe default that never reports ``stale`` — so a fetch outage can't desync
+// the rendered shape from a real response or fire a spurious "Initialize"
+// prompt — and matches the API scope shape (``stale`` + the full four-key counts
+// dict, ADR-0021 PR2).
+function _ctxServerCwdFallback() {
+  return {
+    scopes: [{
+      scope_id: '',
+      label: t('settings.ctx.server_cwd'),
+      root: '',
+      tier: 'project',
+      sources: ['server-cwd'],
+      missing: false,
+      stale: false,
+      experimental: false,
+      counts: { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 },
+    }],
+  };
+}
+
 // Fetch ``/api/context/projects`` and classify the outcome, WITHOUT mutating
 // any module global. Returns ``{ data, warn, authoritative }``:
 //   - ``data``  always a ``{scopes: [...]}`` object — the real scopes on
@@ -440,8 +489,16 @@ async function _ctxFetchProjectsData(opts = {}) {
     // Matrix); leaving the gate means re-adding a coverage consumer is a
     // one-flag change. ``_ctxWithTargetScope`` appends ``&target_scope=``.
     const include = opts.includeCoverage ? 'counts,runtime_coverage' : 'counts';
-    const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }));
+    const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }), { signal: opts.signal });
     sawResponse = true;
+    // Superseded after the request was issued but before its body was read
+    // (#1286): skip the parse + classification entirely and return the benign
+    // class. A real browser rejects ``fetch`` on abort (handled in the catch);
+    // this covers the narrow window where the response resolves first, keeping a
+    // superseded fetch from racing the cache-commit path.
+    if (opts.signal?.aborted) {
+      return { data: _ctxServerCwdFallback(), warn: null, authoritative: false, aborted: true };
+    }
     if (!res.ok) {
       const detail = _ctxErrDetail((await res.json().catch(() => ({}))).detail, `HTTP ${res.status}`);
       if (res.status !== 404) warn = { kind: 'http', status: res.status, detail };
@@ -466,29 +523,24 @@ async function _ctxFetchProjectsData(opts = {}) {
       throw new Error(warn.detail);
     }
   } catch (_err) {
+    // An aborted fetch (superseded scope/tier/section switch — #1286) is NOT a
+    // real failure: it says nothing about the project roster. Force it into the
+    // benign, non-authoritative class (warn cleared, authoritative=false) so a
+    // late abort during the body read can't be misclassified by the parse/shape
+    // branches above as a loud failure (toast + active-scope demotion) — the
+    // same demote-the-persisted-selection hazard #1247 id 20 closed for network
+    // throws. The caller's seq guard discards this anyway; this also protects
+    // the unguarded legacy/portal commit paths.
+    if (_ctxIsAbortError(_err) || opts.signal?.aborted) {
+      return { data: _ctxServerCwdFallback(), warn: null, authoritative: false, aborted: true };
+    }
     // Browser tests and older deployments may not provide the multi-project
     // discovery endpoint. Preserve the legacy single-project behavior by
     // falling back to an implicit server-CWD scope; downstream requests omit
     // scope_id for server-CWD because it is the route default.
-    data = {
-      scopes: [{
-        scope_id: '',
-        label: t('settings.ctx.server_cwd'),
-        root: '',
-        tier: 'project',
-        sources: ['server-cwd'],
-        missing: false,
-        // Match the API scope shape: ``stale`` (ADR-0021 PR2) and the full
-        // four-key counts dict. The synthetic fallback is a safe default
-        // (never stale → no spurious "Initialize" prompt) so a fetch outage
-        // can't desync the rendered shape from a real response.
-        stale: false,
-        experimental: false,
-        counts: { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 },
-      }],
-    };
+    data = _ctxServerCwdFallback();
   }
-  return { data, warn, authoritative: sawResponse };
+  return { data, warn, authoritative: sawResponse, aborted: false };
 }
 
 // Commit a ``_ctxFetchProjectsData`` result into the shared module state. Split
@@ -497,7 +549,12 @@ async function _ctxFetchProjectsData(opts = {}) {
 // newer one's cache / active scope / toast memo. Carries the #1102
 // normalize-only-when-authoritative gate and the #1101 failure-toast de-dup.
 // Returns ``data`` for callers that render from it.
-function _ctxCommitProjects({ data, warn, authoritative }) {
+function _ctxCommitProjects({ data, warn, authoritative, aborted }) {
+  // A superseded/aborted projects fetch (#1286) carries no roster information,
+  // so it must not touch the shared cache, the active-scope normalization, or
+  // the failure-toast memo. Guarded callers already skip commit via their seq
+  // guard; this also hardens the unguarded legacy/portal commit paths.
+  if (aborted) return data;
   _ctxProjectsCache = data.scopes || [];
   // Normalize only when the outcome is *authoritative* about the roster.
   // Four cases:
@@ -675,6 +732,11 @@ function _ctxBumpActiveScopeDetailSeq() {
   for (const scopeType of Object.keys(_ctxDetailSeq)) {
     if (typeof _ctxDetailSeq[scopeType] === 'number') {
       _ctxDetailSeq[scopeType] += 1;
+      // Abort any in-flight detail fetch for the now-stale scope (#1286): it
+      // would otherwise resolve and paint into a pane the scope switch
+      // invalidated. The next mount mints a fresh controller via
+      // ``_ctxSwapAbort``; leaving the aborted one in place is harmless.
+      try { _ctxDetailAbort[scopeType]?.abort(); } catch { /* no-op */ }
     }
   }
 }
@@ -1608,6 +1670,11 @@ function _renderCtxOverview(data) {
 
 async function loadCtxOverview() {
   const seq = ++_ctxOverviewSeq;
+  // Abort the superseded overview load's in-flight fetches (#1286); the signal
+  // threads through BOTH the projects sub-fetch and the overview fetch so a
+  // scope/tier/section switch cancels the whole load, not just its render.
+  _ctxOverviewAbort = _ctxSwapAbort(_ctxOverviewAbort);
+  const signal = _ctxOverviewAbort?.signal;
   // Pin the tier once at entry. The projects fetch and the overview fetch must
   // run under the SAME tier — otherwise a tier flip between them would commit a
   // project list computed for one tier and then render overview counts for
@@ -1625,8 +1692,9 @@ async function loadCtxOverview() {
     // aggregate dashboard, so it skips the expensive ``probe_all_runtimes`` pass.
     const projectsResult = await _ctxFetchProjectsData({
       targetScope: requestedTier,
+      signal,
     });
-    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
+    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return false;
     _ctxCommitProjects(projectsResult);
     // Pin the resolved effective scope alongside the tier so the overview
     // request can't re-resolve against a cache a later refresh might mutate
@@ -1636,20 +1704,28 @@ async function loadCtxOverview() {
       targetScope: requestedTier,
       scopeId: pinnedScopeId,
       scopeResolved: true,
-    }));
+    }), { signal });
     if (!res.ok) throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, t('settings.ctx.load_overview_failed')));
     const data = await res.json();
-    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
+    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return false;
     // Shape guard (sibling of the #1100 projects-fetch hardening): a bare-null
     // or non-object 200 would TypeError inside _renderCtxOverview; route it
     // through the failure path instead.
     if (data === null || typeof data !== 'object') throw new Error(t('settings.ctx.load_overview_failed'));
     _ctxOverviewCache = data;
     _renderCtxOverview(data);
+    return true;
   } catch (err) {
-    if (seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return;
+    // An aborted fetch means a newer load superseded this one (#1286) — its
+    // seq guard already owns the panel; never paint an error over it. Return
+    // false so a caller (the Refresh button) doesn't report a success it didn't
+    // actually complete (Codex: aborted refresh must not toast "Refresh complete").
+    if (_ctxIsAbortError(err) || seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope) return false;
     _ctxOverviewCache = null;
     el.innerHTML = emptyState('', t('settings.ctx.load_overview_failed'), err.message);
+    // This invocation owned the (error) render — it ran to completion as the
+    // latest, so it is NOT a supersede; the refresh affordance may settle.
+    return true;
   }
 }
 
@@ -2621,8 +2697,11 @@ document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () =
   const btn = document.getElementById('ctx-refresh-btn');
   btnLoading(btn, true);
   try {
-    await loadCtxOverview();
-    showToast(t('toast.refresh_complete'));
+    // Only toast on a load that actually completed: a concurrent scope/tier
+    // switch (or a second refresh) aborts this one, which now returns false
+    // (#1286) — toasting "Refresh complete" then would be a lie while the
+    // winning request is still in flight (Codex review).
+    if (await loadCtxOverview()) showToast(t('toast.refresh_complete'));
   } finally { btnLoading(btn, false); }
 });
 
@@ -2639,6 +2718,9 @@ document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () =
 // runtime-only banner) so its async writes are gated by the parent
 // ``loadCtxList`` invocation that originated them.
 let _ctxListSeq = { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 };
+// Per-type AbortControllers paired with ``_ctxListSeq`` (#1286): a re-issued
+// ``loadCtxList`` aborts the prior invocation's projects + scope-group fetches.
+let _ctxListAbort = { skills: null, commands: null, agents: null, 'mcp-servers': null };
 
 // rank 2c: artifact sections (Skills/Commands/Agents/MCP) scope to the
 // active project by default — the same ~30-project roster the Projects
@@ -2657,6 +2739,11 @@ let _ctxListShowAllScopes = false;
 // and the Edit-mode buffer-restore race (where an older fetch would
 // otherwise overwrite a textarea that the listener just rehydrated).
 let _ctxDetailSeq = { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 };
+// Per-type AbortControllers paired with ``_ctxDetailSeq`` (#1286), shared by
+// ``loadCtxDetail`` and ``_ctxLoadRuntimeOnlyDetail`` (both paint the same
+// ``detailEl``). Aborted on a superseding mount AND on a scope switch / list
+// wipe (see ``_ctxBumpActiveScopeDetailSeq`` and ``loadCtxList``).
+let _ctxDetailAbort = { skills: null, commands: null, agents: null, 'mcp-servers': null };
 
 // Module-level pending Edit-mode buffer that needs to be restored
 // after the next detail mount. Set when a langchange fires while the
@@ -3004,7 +3091,7 @@ function _ctxRenderItemsHtml(items, type, projectRoot, scannedDirs, { clickable 
   return html;
 }
 
-async function _loadScopeGroupItems(type, scope, container, seq) {
+async function _loadScopeGroupItems(type, scope, container, seq, signal) {
   panelLoading(container);
   try {
     const params = new URLSearchParams();
@@ -3018,7 +3105,7 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
     // would ignore it, but gating keeps the wire honest about what's versionable.
     if (type === 'agents' || type === 'commands') params.set('include', 'versions');
     const query = params.toString();
-    const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`);
+    const res = await fetch(`/api/context/${type}${query ? `?${query}` : ''}`, { signal });
     if (!res.ok) throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, `Failed to load ${type}`));
     const data = await res.json();
     // Bail if a newer ``loadCtxList`` invocation has superseded this one
@@ -3094,8 +3181,9 @@ async function _loadScopeGroupItems(type, scope, container, seq) {
   } catch (err) {
     // Late-failing fetch from a previous invocation must not paint
     // ``emptyState`` over the fresh container the newer ``loadCtxList``
-    // rebuilt — same false-overwrite class as the success path above.
-    if (seq !== _ctxListSeq[type]) return;
+    // rebuilt — same false-overwrite class as the success path above. An abort
+    // is that same supersede (#1286), so bail before re-arming / painting.
+    if (_ctxIsAbortError(err) || seq !== _ctxListSeq[type]) return;
     // Re-arm the lazy-load flag (set optimistically by ``fetchOnce`` BEFORE
     // the fetch, to de-dup rapid toggles): without this, a failed group load
     // is permanent for the session — re-toggling the <details> routes through
@@ -3296,6 +3384,10 @@ function _ctxScopesLoadError(listEl, message, detail, retry) {
 
 async function loadCtxList(type) {
   const seq = ++_ctxListSeq[type];
+  // Abort the superseded list load's in-flight fetches (#1286) — the signal
+  // threads through the projects sub-fetch and every scope-group fetch below.
+  _ctxListAbort[type] = _ctxSwapAbort(_ctxListAbort[type]);
+  const signal = _ctxListAbort[type]?.signal;
   const listEl = qs(`ctx-${type}-list`);
   const detailEl = qs(`ctx-${type}-detail`);
   const statusEl = qs(`ctx-${type}-status`);
@@ -3309,6 +3401,10 @@ async function loadCtxList(type) {
   // detail re-mounted (save success, langchange) call ``loadCtxDetail``
   // AFTER this, taking a fresh seq.
   _ctxDetailSeq[type] += 1;
+  // Same reasoning extends to the abort (#1286): the wipe orphans any in-flight
+  // detail fetch for this type, so cancel it rather than let it resolve into the
+  // hidden pane. The next loadCtxDetail mints a fresh controller.
+  try { _ctxDetailAbort[type]?.abort(); } catch { /* no-op */ }
   if (detailEl) { detailEl.hidden = true; detailEl.innerHTML = ''; }
   if (statusEl) statusEl.innerHTML = '';
   panelLoading(listEl);
@@ -3326,7 +3422,7 @@ async function loadCtxList(type) {
     // Fetch then commit ONLY after the sequence guard, so a superseded
     // in-flight projects fetch can't clobber the shared cache / active scope
     // (#1194). The render below already gates on this same guard.
-    const result = await _ctxFetchProjectsData();
+    const result = await _ctxFetchProjectsData({ signal });
     if (seq !== _ctxListSeq[type]) return;
     const data = _ctxCommitProjects(result);
     const scopes = data.scopes || [];
@@ -3440,7 +3536,11 @@ async function loadCtxList(type) {
       const fetchOnce = () => {
         if (itemsEl.dataset.loaded === 'true') return;
         itemsEl.dataset.loaded = 'true';
-        _loadScopeGroupItems(type, scope, itemsEl, seq);
+        // ``signal`` is this load's controller (#1286): a group expanded after a
+        // supersede fires with an already-aborted signal, so its fetch rejects
+        // immediately instead of racing the fresh list (the seq guard inside
+        // catches it either way).
+        _loadScopeGroupItems(type, scope, itemsEl, seq, signal);
       };
       if (groupEl.open) fetchOnce();
       groupEl.addEventListener('toggle', () => { if (groupEl.open) fetchOnce(); });
@@ -3490,7 +3590,9 @@ async function loadCtxList(type) {
       }
     }
   } catch (err) {
-    if (seq !== _ctxListSeq[type]) return;
+    // Aborted = superseded by a newer list load (#1286); its seq guard owns the
+    // panel, so don't paint a load-error + Retry over it.
+    if (_ctxIsAbortError(err) || seq !== _ctxListSeq[type]) return;
     _ctxScopesLoadError(
       listEl, t('settings.ctx.load_failed', { type: _ctxTypeName(type) }), err.message,
       () => loadCtxList(type),
@@ -4637,6 +4739,11 @@ async function loadCtxDetail(type, name, opts = {}) {
     _ctxPendingEdit = null;
   }
   const seq = ++_ctxDetailSeq[type];
+  // Abort a superseding detail mount's in-flight fetch (#1286) — shares the
+  // per-type controller with ``_ctxLoadRuntimeOnlyDetail`` since both paint the
+  // same ``detailEl``.
+  _ctxDetailAbort[type] = _ctxSwapAbort(_ctxDetailAbort[type]);
+  const signal = _ctxDetailAbort[type]?.signal;
   const autoOpenDiff = opts.autoOpenDiff === true;
   const detailEl = qs(`ctx-${type}-detail`);
   detailEl.hidden = false;
@@ -4646,6 +4753,7 @@ async function loadCtxDetail(type, name, opts = {}) {
   try {
     const res = await fetch(
       _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}`),
+      { signal },
     );
     if (res.status === 404) {
       if (seq !== _ctxDetailSeq[type]) return;
@@ -5038,7 +5146,9 @@ async function loadCtxDetail(type, name, opts = {}) {
     }
 
   } catch (err) {
-    if (seq !== _ctxDetailSeq[type]) return;
+    // Aborted = a newer detail mount / scope switch superseded us (#1286); its
+    // seq guard owns the pane, so don't paint a load error over it.
+    if (_ctxIsAbortError(err) || seq !== _ctxDetailSeq[type]) return;
     detailEl.innerHTML = emptyState('', t('settings.ctx.load_detail_failed'), err.message);
   }
 }
@@ -5169,6 +5279,10 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     _ctxPendingEdit = null;
   }
   const seq = ++_ctxDetailSeq[type];
+  // Shares the per-type detail controller with ``loadCtxDetail`` (#1286) — a
+  // canonical mount racing a runtime-only mount aborts the loser's fetch.
+  _ctxDetailAbort[type] = _ctxSwapAbort(_ctxDetailAbort[type]);
+  const signal = _ctxDetailAbort[type]?.signal;
   detailEl.hidden = false;
   _ctxCurrentDetail = { type, name, runtimeOnly: true };
   panelLoading(detailEl);
@@ -5176,6 +5290,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
   try {
     const res = await fetch(
       _ctxWithTargetScope(`/api/context/${type}/${encodeURIComponent(name)}/diff`),
+      { signal },
     );
     if (!res.ok) {
       throw new Error(_ctxErrDetail((await res.json().catch(() => ({}))).detail, `Failed to load ${name}`));
@@ -5278,7 +5393,9 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     // it now that it's in the DOM (#943).
     _ctxRefreshWriteBlockedState();
   } catch (err) {
-    if (seq !== _ctxDetailSeq[type]) return;
+    // Aborted = a newer mount / scope switch superseded us (#1286); leave the
+    // pane to the winning mount rather than painting an error.
+    if (_ctxIsAbortError(err) || seq !== _ctxDetailSeq[type]) return;
     detailEl.innerHTML = emptyState('', t('settings.ctx.load_detail_failed'), err.message);
   }
 }

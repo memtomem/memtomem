@@ -44,6 +44,11 @@
 // guard) — counts are tier-dependent, so a tier flip during the fetch must not
 // paint stale numbers.
 let _ctxProjectsSeq = 0;
+// AbortController paired with _ctxProjectsSeq (#1286): a re-issued loadCtxProjects
+// aborts the prior invocation's projects fetch + its fan-out of per-scope
+// /runtimes fetches. _ctxSwapAbort / _ctxIsAbortError are defined in
+// context-gateway.js (loaded first) and shared via the global script scope.
+let _ctxProjectsAbort = null;
 // Post-guard snapshot of the scopes this section renders (see header). search /
 // sort / re-render / lookups all read this, never the shared cache.
 let _ctxPortalScopes = [];
@@ -375,9 +380,16 @@ function _ctxPortalIsPaused(scope) {
 
 async function loadCtxProjects() {
   const seq = ++_ctxProjectsSeq;
+  // Abort the superseded portal load's in-flight fetches (#1286): the signal
+  // threads through the projects fetch and the per-scope /runtimes fan-out, so a
+  // rapid re-entry / tier flip cancels the whole load instead of just dropping
+  // its render. _ctxSwapAbort degrades to seq-only where AbortController is
+  // unavailable (the guards below stay as defense in depth).
+  _ctxProjectsAbort = _ctxSwapAbort(_ctxProjectsAbort);
+  const signal = _ctxProjectsAbort?.signal;
   const requestedScope = _ctxTargetScope;
   const listEl = document.getElementById('ctx-projects-list');
-  if (!listEl) return;
+  if (!listEl) return false;
   panelLoading(listEl);
   
   _ctxPortalSyncFilterFromDeepLink();
@@ -388,10 +400,10 @@ async function loadCtxProjects() {
     // ``_ctxProjectsCache`` / active scope (#1194). The board already renders
     // from its own post-guard ``_ctxPortalScopes`` snapshot; this extends the
     // same discipline to the shared cache the helper used to commit pre-guard.
-    const result = await _ctxFetchProjectsData({ targetScope: requestedScope });
+    const result = await _ctxFetchProjectsData({ targetScope: requestedScope, signal });
     // Bail if a newer load started OR the tier flipped under us mid-fetch
     // (#972): counts in this payload were computed for ``requestedScope``.
-    if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return;
+    if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return false;
     const data = _ctxCommitProjects(result);
     const scopes = data.scopes || [];
     // Reset edit state on a fresh load and commit the validated snapshot before
@@ -409,7 +421,7 @@ async function loadCtxProjects() {
       _ctxScopesLoadError(
         listEl, t('settings.ctx.scopes_load_failed'), '', () => loadCtxProjects(),
       );
-      return;
+      return true; // this invocation owned the (load-error) render — not a supersede
     }
 
     // Now fetch runtimes for each scope in parallel to build the per-CLI traffic-lights (row UI)
@@ -419,7 +431,7 @@ async function loadCtxProjects() {
       }
       try {
         const url = _ctxWithTargetScope('/api/context/runtimes', { scopeId: scope.scope_id });
-        const res = await fetch(url);
+        const res = await fetch(url, { signal });
         if (!res.ok) throw new Error();
         const rData = await res.json();
         return { scopeId: scope.scope_id, runtimes: rData.runtimes || [] };
@@ -429,7 +441,7 @@ async function loadCtxProjects() {
     });
 
     const runtimesResults = await Promise.all(runtimePromises);
-    if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return;
+    if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return false;
 
     _ctxPortalRuntimesMap = {};
     for (const result of runtimesResults) {
@@ -439,14 +451,20 @@ async function loadCtxProjects() {
     _ctxPortalRenderHeadingChips();
     _ctxPortalRenderScaffold(listEl);
     _ctxPortalRenderRows();
+    return true;
   } catch (err) {
-    if (seq !== _ctxProjectsSeq) return;
+    // Aborted = a newer portal load superseded us (#1286); its seq guard owns
+    // the list, so don't paint a load-error + Retry over it. Return false so the
+    // Refresh button doesn't toast a success this superseded load never made
+    // (Codex review).
+    if (_ctxIsAbortError(err) || seq !== _ctxProjectsSeq) return false;
     // Route through the shared load-error helper so the failure is announced
     // (``role="alert"``) and retryable, matching the empty-roster path above.
     _ctxScopesLoadError(
       listEl, t('settings.ctx.portal_load_failed'), err.message || '',
       () => loadCtxProjects(),
     );
+    return true; // owned the (error) render — ran to completion as the latest
   }
 }
 
@@ -937,8 +955,11 @@ document.getElementById('ctx-projects-refresh-btn')?.addEventListener('click', a
   const btn = document.getElementById('ctx-projects-refresh-btn');
   btnLoading(btn, true);
   try {
-    await loadCtxProjects();
-    showToast(t('toast.refresh_complete'));
+    // Toast only when the load actually completed: a concurrent tier flip / a
+    // second refresh aborts this one, which now returns false (#1286) — a
+    // "Refresh complete" toast then would be false while the winning request is
+    // still in flight (Codex review).
+    if (await loadCtxProjects()) showToast(t('toast.refresh_complete'));
   } finally {
     btnLoading(btn, false);
   }
