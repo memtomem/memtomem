@@ -137,10 +137,19 @@ def _user_sync_host_targets(project_root: Path) -> list[str]:
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
+    """Project-relative path as a POSIX string for API payloads.
+
+    ``.as_posix()`` (not ``str``) so canonical/runtime paths come back
+    ``/``-separated on every platform — the Web UI and diff payloads pin POSIX
+    separators (#1256). Falls back to the absolute POSIX path for user-tier
+    locations outside ``project_root``. Parity with ``context_agents`` /
+    ``context_commands`` (#1264); this route was just never covered by #1256's
+    diff tests, so the ``str()`` form lingered latent (#1325).
+    """
     try:
-        return str(p.relative_to(project_root))
+        return p.relative_to(project_root).as_posix()
     except ValueError:
-        return str(p)
+        return p.as_posix()
 
 
 # ── List ─────────────────────────────────────────────────────────────────
@@ -277,7 +286,10 @@ async def read_skill(
         if p.is_file() and p.name != SKILL_MANIFEST:
             files.append(
                 {
-                    "path": str(p.relative_to(skill_dir)),
+                    # ``.as_posix()`` (not ``str``) — same POSIX-separator
+                    # contract as ``_safe_rel``; ``str(PurePath)`` is
+                    # backslash-joined on Windows (#1325).
+                    "path": p.relative_to(skill_dir).as_posix(),
                     "size": p.stat().st_size,
                 }
             )

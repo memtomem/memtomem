@@ -360,7 +360,10 @@ class TestUserTierCreate:
         manifest = home / ".memtomem" / "skills" / "newskill" / SKILL_MANIFEST
         assert manifest.is_file()
         # Regression: bare relative_to(project_root) 500'd on user-tier paths.
-        assert r.json()["canonical_path"] == str(manifest.parent)
+        # The POSIX fallback (``p.as_posix()``) keeps ``canonical_path``
+        # ``/``-joined on every platform — parity with the agents user-tier
+        # assertion below and the #1325 separator contract.
+        assert r.json()["canonical_path"] == manifest.parent.as_posix()
 
     @pytest.mark.anyio
     async def test_duplicate_is_409_not_confirmation_prompt(self, client: AsyncClient, home: Path):
@@ -623,8 +626,9 @@ class TestUserTierImport:
         body = r.json()
         canonical = home / ".memtomem" / "skills" / "imp1"
         assert (canonical / SKILL_MANIFEST).is_file()
-        # Regression: bare relative_to(project_root) 500'd on user-tier paths.
-        assert body["imported"] == [{"name": "imp1", "canonical_path": str(canonical)}]
+        # Regression: bare relative_to(project_root) 500'd on user-tier paths;
+        # the POSIX fallback keeps ``canonical_path`` ``/``-joined (#1325).
+        assert body["imported"] == [{"name": "imp1", "canonical_path": canonical.as_posix()}]
         assert body["dry_run"] is False
 
     @pytest.mark.anyio

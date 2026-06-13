@@ -3,10 +3,15 @@
 Diff-payload contract pinned by ``TestDiffCommand`` / ``TestDiffAgent`` (#1256):
 
 - **Paths** are normalized to POSIX separators on every platform. The route
-  helpers ``_safe_rel`` in ``context_commands`` / ``context_agents`` return
-  ``.as_posix()`` so the Web UI receives stable ``/``-separated paths; the diff
-  tests assert literal POSIX strings (e.g. ``.claude/commands/ghost.md``) rather
-  than ``str(Path(...))``, which would be backslash-joined on Windows.
+  helpers ``_safe_rel`` in ``context_commands`` / ``context_agents`` /
+  ``context_skills`` return ``.as_posix()`` so the Web UI receives stable
+  ``/``-separated paths; the diff tests assert literal POSIX strings (e.g.
+  ``.claude/commands/ghost.md``) rather than ``str(Path(...))``, which would be
+  backslash-joined on Windows. The literal-POSIX route assertions only fail on
+  ``windows-latest`` (``str(PosixPath)`` already ``/``-joins on macOS/Linux);
+  ``test_safe_rel_joins_with_posix_separators`` is the cross-platform guard —
+  it drives ``_safe_rel`` with a ``PureWindowsPath`` so a regression to
+  ``str()`` fails on any host (#1325, same shape as #1256).
 - **Content** is LF, not platform-native. Canonical generators and sync write
   LF bytes, so fixtures here use ``_write_text_lf`` (raw bytes) instead of
   ``Path.write_text`` (text mode translates ``\\n`` -> ``\\r\\n`` on Windows).
@@ -17,7 +22,7 @@ Diff-payload contract pinned by ``TestDiffCommand`` / ``TestDiffAgent`` (#1256):
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import AsyncMock
 
 import pytest
@@ -90,6 +95,26 @@ def _make_runtime_skill(
 def _write_text_lf(path: Path, content: str) -> None:
     """Write fixtures with sync-style LF bytes on every platform."""
     path.write_bytes(content.encode("utf-8"))
+
+
+def test_safe_rel_joins_with_posix_separators() -> None:
+    """Cross-platform guard for the skills ``_safe_rel`` POSIX contract (#1325).
+
+    The route-level literal-POSIX assertions in this file only fail on
+    ``windows-latest`` — ``str(PosixPath("a/b"))`` already yields ``"a/b"`` on
+    macOS/Linux, so a regression to ``str()`` is invisible there. Driving the
+    helper with a ``PureWindowsPath`` (whose ``str()`` is backslash-joined on
+    every host) makes the assertion fail on any platform if ``.as_posix()``
+    reverts to ``str()`` — the exact gap that let this bug slip past #1256.
+    """
+    from memtomem.web.routes.context_skills import _safe_rel
+
+    root = PureWindowsPath(r"C:\proj")
+    nested = PureWindowsPath(r"C:\proj\.memtomem\skills\demo\SKILL.md")
+    assert _safe_rel(nested, root) == ".memtomem/skills/demo/SKILL.md"
+    # Outside project_root → absolute POSIX fallback, still backslash-free.
+    outside = PureWindowsPath(r"C:\other\skills\x")
+    assert "\\" not in _safe_rel(outside, root)
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +790,10 @@ class TestReadSkill:
         r = await client.get("/api/context/skills/rich")
         data = r.json()
         paths = [f["path"] for f in data["files"]]
-        assert any("run.sh" in p for p in paths)
+        # Multi-segment intra-skill path pins POSIX separators — the inline
+        # ``relative_to(skill_dir).as_posix()`` (not ``str``) at
+        # context_skills.py would emit ``scripts\\run.sh`` on Windows (#1325).
+        assert "scripts/run.sh" in paths
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +811,9 @@ class TestCreateSkill:
         assert r.status_code == 200
         data = r.json()
         assert data["name"] == "new-skill"
+        # Multi-segment ``canonical_path`` pins POSIX separators — ``_safe_rel``
+        # would emit ``.memtomem\\skills\\new-skill`` on Windows pre-fix (#1325).
+        assert data["canonical_path"] == ".memtomem/skills/new-skill"
         # Verify file exists on disk
         assert (tmp_path / ".memtomem" / "skills" / "new-skill" / SKILL_MANIFEST).is_file()
 
@@ -870,6 +901,11 @@ class TestDeleteSkill:
         assert r.status_code == 200
         assert not (tmp_path / ".memtomem" / "skills" / "cascade").exists()
         assert not (tmp_path / ".claude" / "skills" / "cascade").exists()
+        # ``deleted`` entries are ``_safe_rel`` results — literal POSIX, not
+        # ``.memtomem\\skills\\cascade`` (#1325; mirrors the commands route pin).
+        data = r.json()
+        assert ".memtomem/skills/cascade" in data["deleted"]
+        assert ".claude/skills/cascade" in data["deleted"]
 
     @pytest.mark.anyio
     async def test_delete_missing_is_idempotent(self, client: AsyncClient):
