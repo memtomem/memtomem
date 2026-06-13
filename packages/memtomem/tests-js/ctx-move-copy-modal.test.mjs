@@ -306,24 +306,29 @@ describe('Move/Copy modal — apply gate round-trips (#1289)', () => {
     expect(rename.disabled).toBe(false);
   });
 
-  it('a close mid-apply unlocks the shared controls; a stale settle is ignored', async () => {
-    // The modal/controls are shared static DOM. Closing while an apply is in
-    // flight must reset the controls (so a reopen is not frozen), and the held
-    // apply settling later must not touch the superseded modal.
+  it('a stale apply settling after close+reopen leaves the reopened modal intact', async () => {
+    // The modal/controls are shared static DOM. Close mid-apply, reopen a new
+    // session, then let the OLD apply settle successfully: it owns a superseded
+    // state and must not hide the reopened modal, re-lock its controls, or toast.
     const ctx = await bootModal({ holdApply: true });
-    await openModal(ctx);
+    await openModal(ctx);                       // session A
     const modal = modalOf(ctx.window);
     const tier = modal.querySelector('input[name="ctx-mc-tier"][value="project_local"]');
     ctx.window.document.getElementById('ctx-mc-apply-btn').click();
     await flush(ctx.window);
-    expect(tier.disabled).toBe(true);          // locked while the apply is held
-    ctx.window.document.getElementById('ctx-mc-cancel-btn').click();   // close mid-apply
+    expect(tier.disabled).toBe(true);           // A's apply locks the shared controls
+    ctx.window.document.getElementById('ctx-mc-cancel-btn').click();   // close A mid-apply
     await flush(ctx.window);
     expect(modal.hidden).toBe(true);
-    expect(tier.disabled).toBe(false);         // close reset the shared control
-    ctx.releaseApply();                        // the stale apply settles after close
+    expect(tier.disabled).toBe(false);          // close reset the shared controls
+    await openModal(ctx);                        // reopen — session B
+    expect(modal.hidden).toBe(false);
+    const toastsBefore = ctx.toasts.length;
+    ctx.releaseApply();                          // A's held apply now settles (success)
     await flush(ctx.window);
-    expect(tier.disabled).toBe(false);         // it owns a superseded state — no re-lock
+    expect(modal.hidden).toBe(false);            // B's modal untouched by the stale apply
+    expect(tier.disabled).toBe(false);           // B's controls not re-locked
+    expect(ctx.toasts.length).toBe(toastsBefore);// no stale success toast
   });
 
   it('offers a destination-pinned "Sync now" follow-up when the apply needs sync', async () => {

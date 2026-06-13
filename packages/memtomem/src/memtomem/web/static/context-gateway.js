@@ -3853,10 +3853,17 @@ async function _ctxMoveCopyApply(state) {
   _ctxSetMoveCopyControlsDisabled(modalEl, true);
   btnLoading(applyBtn, true);
   let outcome = null;   // a failed-apply lastPreview shape, or null on success/decline
+  // The modal is shared static DOM. If the user closes mid-apply and reopens a
+  // new session, ownership moves on; this stale apply must then touch NOTHING
+  // shared — not the gate dialog, not close, not the success toast/refresh. It
+  // bails at every resumption point (and the finally is likewise state-guarded).
+  const owns = () => _ctxMoveCopyState === state;
   try {
     let r = await send({});
+    if (!owns()) return;
     if (!r.ok) { outcome = await _ctxMoveCopyErrorOutcome(r); return; }
     let data = await r.json();
+    if (!owns()) return;
     if (data && data.status === 'needs_confirmation') {
       // The gate's confirm dialog (#confirm-modal) shares the .modal-overlay
       // z-index and sits earlier in the DOM, so it would stack UNDER this
@@ -3876,9 +3883,11 @@ async function _ctxMoveCopyApply(state) {
         });
         r = ok ? await send({ confirm_project_shared: true }) : null;
       }
+      if (!owns()) return;                     // superseded during the disclosure
       if (!r) { show(modalEl); return; }       // declined — restore the modal
       if (!r.ok) { show(modalEl); outcome = await _ctxMoveCopyErrorOutcome(r); return; }
       data = await r.json();
+      if (!owns()) return;
     }
     _ctxMoveCopyClose(state);
     _ctxMoveCopySuccess(state, data || {});
@@ -3968,13 +3977,18 @@ async function _ctxMoveCopyRunDestSync(state, data) {
 // (the in-flight apply's finally is state-guarded and won't touch them).
 function _ctxMoveCopyClose(state) {
   if (state && state._teardown) { state._teardown(); state._teardown = null; }
-  if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
-  const modalEl = qs('ctx-move-copy-modal');
-  if (modalEl) {
-    hide(modalEl);
-    _ctxResetMoveCopyControls(modalEl);
+  // Only the owning session touches the shared modal DOM / global timer — a
+  // stale settled apply must never hide a newly reopened session (defense; the
+  // apply path also bails on lost ownership before it can reach here).
+  if (_ctxMoveCopyState === state) {
+    if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
+    const modalEl = qs('ctx-move-copy-modal');
+    if (modalEl) {
+      hide(modalEl);
+      _ctxResetMoveCopyControls(modalEl);
+    }
+    _ctxMoveCopyState = null;
   }
-  if (_ctxMoveCopyState === state) _ctxMoveCopyState = null;
 }
 
 // Reset the shared static modal's controls to a clean, enabled, not-loading
