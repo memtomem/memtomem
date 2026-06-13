@@ -66,7 +66,7 @@ const COLLISION_409 = {
   body: { detail: { error_kind: 'conflict', reason_code: 'destination_exists', message: 'destination already exists: /srv/x' } },
 };
 
-async function bootModal({ dryRun = PLAN, applyResponses = [OK_APPLIED], confirmAnswers = [] } = {}) {
+async function bootModal({ dryRun = PLAN, applyResponses = [OK_APPLIED], confirmAnswers = [], holdApply = false } = {}) {
   const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway.js'] });
   const { window } = dom;
 
@@ -80,6 +80,9 @@ async function bootModal({ dryRun = PLAN, applyResponses = [OK_APPLIED], confirm
   const transferCalls = [];
   const syncCalls = [];
   const applyQueue = [...applyResponses];
+  // Optional gate to hold an apply in flight (test mid-apply close/reopen).
+  let releaseApply = () => {};
+  const applyGate = holdApply ? new Promise((res) => { releaseApply = res; }) : null;
   const upstream = window.fetch;
   window.fetch = async (input, opts) => {
     const url = typeof input === 'string' ? input : input?.url || '';
@@ -89,6 +92,7 @@ async function bootModal({ dryRun = PLAN, applyResponses = [OK_APPLIED], confirm
       const body = opts && opts.body ? JSON.parse(opts.body) : null;
       const csrf = opts && opts.headers ? opts.headers['X-Memtomem-CSRF'] : undefined;
       transferCalls.push({ url, isDry, body, csrf });
+      if (!isDry && applyGate) await applyGate;
       const resp = isDry ? dryRun : (applyQueue.length ? applyQueue.shift() : OK_APPLIED);
       return { ok: resp.ok !== false, status: resp.status || 200, json: async () => resp.body };
     }
@@ -116,7 +120,7 @@ async function bootModal({ dryRun = PLAN, applyResponses = [OK_APPLIED], confirm
   await flush(window);
   await window.loadCtxDetail('skills', NAME);
   await flush(window);
-  return { window, confirms, toasts, transferCalls, syncCalls };
+  return { window, confirms, toasts, transferCalls, syncCalls, releaseApply };
 }
 
 function modalOf(window) { return window.document.getElementById('ctx-move-copy-modal'); }
@@ -300,6 +304,26 @@ describe('Move/Copy modal — apply gate round-trips (#1289)', () => {
     // destination to clear the (terminal) collision.
     expect(tier.disabled).toBe(false);
     expect(rename.disabled).toBe(false);
+  });
+
+  it('a close mid-apply unlocks the shared controls; a stale settle is ignored', async () => {
+    // The modal/controls are shared static DOM. Closing while an apply is in
+    // flight must reset the controls (so a reopen is not frozen), and the held
+    // apply settling later must not touch the superseded modal.
+    const ctx = await bootModal({ holdApply: true });
+    await openModal(ctx);
+    const modal = modalOf(ctx.window);
+    const tier = modal.querySelector('input[name="ctx-mc-tier"][value="project_local"]');
+    ctx.window.document.getElementById('ctx-mc-apply-btn').click();
+    await flush(ctx.window);
+    expect(tier.disabled).toBe(true);          // locked while the apply is held
+    ctx.window.document.getElementById('ctx-mc-cancel-btn').click();   // close mid-apply
+    await flush(ctx.window);
+    expect(modal.hidden).toBe(true);
+    expect(tier.disabled).toBe(false);         // close reset the shared control
+    ctx.releaseApply();                        // the stale apply settles after close
+    await flush(ctx.window);
+    expect(tier.disabled).toBe(false);         // it owns a superseded state — no re-lock
   });
 
   it('offers a destination-pinned "Sync now" follow-up when the apply needs sync', async () => {

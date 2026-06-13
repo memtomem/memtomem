@@ -3885,16 +3885,22 @@ async function _ctxMoveCopyApply(state) {
   } catch (e) {
     outcome = { kind: 'error', message: (e && e.message) || t('toast.request_failed') };
   } finally {
-    btnLoading(applyBtn, false);
-    _ctxSetMoveCopyControlsDisabled(modalEl, false);   // unlock so the user can adjust
-    // Reflect a failed apply in the preview state so Apply's enabled-ness
-    // tracks it (collision/error → disabled; the user adjusts to re-dry-run).
-    // Skip when the modal closed (success: _ctxMoveCopyState===null) OR a newer
-    // preview superseded this apply (_ctxMoveCopySeq advanced) — a stale failure
-    // must never clobber the current destination's result.
-    if (outcome && _ctxMoveCopyState === state && _ctxMoveCopySeq === applySeq) {
-      state.lastPreview = outcome;
-      _ctxRenderMoveCopyPreview(state);
+    // The modal + its controls are SHARED static DOM. Only touch them if THIS
+    // apply still owns the modal — a close (success/Cancel/Escape) followed by a
+    // reopen hands ownership to a newer state, and a stale apply settling later
+    // must not unlock that session's locked controls or clear its spinner.
+    // (close/open own the reset of stale DOM for the superseded case.)
+    if (_ctxMoveCopyState === state) {
+      btnLoading(applyBtn, false);
+      _ctxSetMoveCopyControlsDisabled(modalEl, false);   // unlock so the user can adjust
+      // Reflect a failed apply in the preview state so Apply's enabled-ness
+      // tracks it (collision/error → disabled; the user adjusts to re-dry-run).
+      // Skip if a newer preview superseded this apply (seq advanced) — a stale
+      // failure must never clobber the current destination's result.
+      if (outcome && _ctxMoveCopySeq === applySeq) {
+        state.lastPreview = outcome;
+        _ctxRenderMoveCopyPreview(state);
+      }
     }
   }
 }
@@ -3957,13 +3963,27 @@ async function _ctxMoveCopyRunDestSync(state, data) {
 }
 
 // Tear down listeners (the modal markup is static and persists, so a reopen
-// must not stack duplicate handlers), hide the modal, clear shared state.
+// must not stack duplicate handlers), hide the modal, clear shared state, and
+// reset the SHARED controls/Apply so a close mid-apply can't reopen frozen
+// (the in-flight apply's finally is state-guarded and won't touch them).
 function _ctxMoveCopyClose(state) {
   if (state && state._teardown) { state._teardown(); state._teardown = null; }
   if (_ctxMoveCopyPreviewTimer) { clearTimeout(_ctxMoveCopyPreviewTimer); _ctxMoveCopyPreviewTimer = null; }
   const modalEl = qs('ctx-move-copy-modal');
-  if (modalEl) hide(modalEl);
+  if (modalEl) {
+    hide(modalEl);
+    _ctxResetMoveCopyControls(modalEl);
+  }
   if (_ctxMoveCopyState === state) _ctxMoveCopyState = null;
+}
+
+// Reset the shared static modal's controls to a clean, enabled, not-loading
+// state. Run on both close and open so neither a close mid-apply nor a stale
+// settled apply can leave the next session's destination fields disabled.
+function _ctxResetMoveCopyControls(modalEl) {
+  _ctxSetMoveCopyControlsDisabled(modalEl, false);
+  const applyBtn = modalEl.querySelector('#ctx-mc-apply-btn');
+  if (applyBtn) btnLoading(applyBtn, false);
 }
 
 // Open the modal for one artifact. Pins source identity + scope/tier ONCE
@@ -3971,6 +3991,8 @@ function _ctxMoveCopyClose(state) {
 function _ctxOpenMoveCopyModal(srcType, srcName) {
   const modalEl = qs('ctx-move-copy-modal');
   if (!modalEl || !_CTX_TRANSFER_TYPES.has(srcType)) return;
+  // Clear any stale disabled/loading DOM left by an interrupted prior session.
+  _ctxResetMoveCopyControls(modalEl);
   const srcScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
   const state = {
     srcType,
