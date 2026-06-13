@@ -139,6 +139,210 @@ function _ctxSyncOverwriteWarning(impact) {
     : '';
 }
 
+// B-5 (#1288): per-type × per-runtime breakdown for the Sync All confirms.
+// Same (runtime, name) FILE-copy semantics as ``_ctxSyncImpact`` above —
+// 'missing target' → create, 'out of sync' → overwrite; every other status is
+// not a sync write and never contributes. The breakdown is ADDITIVE:
+// ``_ctxSyncImpact`` / ``_ctxSyncImpactMessage`` stay the per-type Sync button's
+// copy AND the Sync All degraded fallback, so this never changes their output.
+const _CTX_SYNC_BREAKDOWN_CAP = 4;
+const _CTX_SYNC_BREAKDOWN_SEP = ' · ';
+// Artifact render order — the ``_CTX_SYNC_PHASES`` order minus settings, which
+// has no per-runtime list payload and rides the separate counts-only
+// ``confirm_sync_settings_impact`` segment.
+const _CTX_SYNC_BREAKDOWN_TYPES = ['skills', 'commands', 'agents', 'mcp-servers'];
+
+// Title-case the first character of a type label for a segment head. No-op for
+// non-Latin scripts (Korean labels pass through unchanged).
+function _ctxCapitalize(s) {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+// Per (type, action) segments: [{type, action:'create'|'overwrite', count,
+// runtimes:[sorted display labels]}] in a deterministic type×action order.
+// ``listsByType`` maps each artifact type to its /api/context/<type> list body.
+function _ctxSyncBreakdownSegments(listsByType) {
+  const segments = [];
+  for (const type of _CTX_SYNC_BREAKDOWN_TYPES) {
+    const create = { count: 0, runtimes: new Set() };
+    const overwrite = { count: 0, runtimes: new Set() };
+    for (const item of listsByType[type] || []) {
+      for (const rt of item.runtimes || []) {
+        if (rt.status === 'missing target') {
+          create.count += 1;
+          create.runtimes.add(_ctxImpactRuntimeLabel(rt.runtime));
+        } else if (rt.status === 'out of sync') {
+          overwrite.count += 1;
+          overwrite.runtimes.add(_ctxImpactRuntimeLabel(rt.runtime));
+        }
+      }
+    }
+    if (create.count > 0) {
+      segments.push({
+        type, action: 'create', count: create.count, runtimes: [...create.runtimes].sort(),
+      });
+    }
+    if (overwrite.count > 0) {
+      segments.push({
+        type, action: 'overwrite', count: overwrite.count, runtimes: [...overwrite.runtimes].sort(),
+      });
+    }
+  }
+  return segments;
+}
+
+// Render the capped breakdown line: up to ``_CTX_SYNC_BREAKDOWN_CAP`` segments
+// plus a localized "…and N more" when truncated. Returns '' for an empty
+// breakdown so callers can omit the line entirely. Plural/count variants derive
+// live from the ``{count}`` param (i18n checklist) — the modal is rebuilt per
+// click, so no langchange re-render is needed.
+function _ctxSyncBreakdownMessage(segments, cap = _CTX_SYNC_BREAKDOWN_CAP) {
+  if (!segments || !segments.length) return '';
+  const shown = segments.slice(0, cap);
+  const parts = shown.map((s) =>
+    t(`settings.ctx.confirm_sync_breakdown_${s.action}`, {
+      type: _ctxCapitalize(_ctxTypeName(s.type)),
+      count: s.count,
+      runtimes: s.runtimes.join(', '),
+    }),
+  );
+  const omitted = segments.length - shown.length;
+  if (omitted > 0) {
+    parts.push(t('settings.ctx.confirm_sync_breakdown_more', { count: omitted }));
+  }
+  return parts.join(_CTX_SYNC_BREAKDOWN_SEP);
+}
+
+// Best-effort Sync All preview under a pinned (project, tier). Never throws —
+// returns the richest tier the network allowed:
+//   haveBreakdown : all four artifact lists loaded → per-type×per-runtime
+//                   segments + aggregate totals from those lists.
+//   haveCounts    : at least the overview loaded → aggregate artifact + settings
+//                   counts (no per-runtime split — the degraded copy).
+//   neither       : caller keeps the base confirm.
+// (#1288 / Codex B: the portal card may target a NON-active scope, so this is a
+// pure enhancement — any list 404/abort/parse failure drops to the overview
+// counts the portal already rendered; an overview failure drops to the base
+// copy. ``Promise.allSettled`` keeps one failed list from erasing all counts.)
+async function _ctxSyncAllPreview(pinnedScopeOpts) {
+  const urls = [
+    ..._CTX_SYNC_BREAKDOWN_TYPES.map((typ) =>
+      _ctxWithTargetScope(`/api/context/${typ}`, pinnedScopeOpts)),
+    _ctxWithTargetScope('/api/context/overview', pinnedScopeOpts),
+  ];
+  const settled = await Promise.allSettled(urls.map((u) => fetch(u)));
+  const bodyOf = async (i) => {
+    const r = settled[i];
+    if (r.status !== 'fulfilled' || !r.value || !r.value.ok) return null;
+    try {
+      return await r.value.json();
+    } catch {
+      return null;
+    }
+  };
+  const listBodies = await Promise.all(_CTX_SYNC_BREAKDOWN_TYPES.map((_, i) => bodyOf(i)));
+  const overview = await bodyOf(_CTX_SYNC_BREAKDOWN_TYPES.length);
+
+  const preview = {
+    segments: [],
+    totals: { create: 0, overwrite: 0 },
+    settings: { create: 0, overwrite: 0 },
+    haveBreakdown: false,
+    haveCounts: false,
+  };
+
+  // The overview is the floor: it is the ONLY source of settings counts
+  // (settings have no per-runtime list payload). Without it, an artifact-only
+  // breakdown would silently omit settings writes and under-count the overwrite
+  // warning, so a missing overview drops to the base copy — matching the
+  // pre-#1288 all-or-nothing behavior (Codex impl-review Major). The four lists
+  // then add the per-type breakdown on top of that floor.
+  if (!overview) return preview;
+  preview.haveCounts = true;
+  if (overview.settings) {
+    preview.settings = {
+      create: overview.settings.missing_target || 0,
+      overwrite: overview.settings.out_of_sync || 0,
+    };
+  }
+
+  const listsAllOk = listBodies.every(
+    (b, i) => b && Array.isArray(b[_CTX_SYNC_BREAKDOWN_TYPES[i]]),
+  );
+  if (listsAllOk) {
+    const listsByType = {};
+    const allItems = [];
+    _CTX_SYNC_BREAKDOWN_TYPES.forEach((typ, i) => {
+      const items = listBodies[i][typ] || [];
+      listsByType[typ] = items;
+      allItems.push(...items);
+    });
+    preview.segments = _ctxSyncBreakdownSegments(listsByType);
+    const agg = _ctxSyncImpact(allItems);
+    preview.totals = { create: agg.create, overwrite: agg.overwrite };
+    preview.haveBreakdown = true;
+  } else {
+    // Degraded: a list 404/abort/parse failure → aggregate per-type artifact
+    // counts from the overview (no per-runtime split). Overview keys are
+    // underscore-cased (``mcp_servers``) where the list routes are hyphenated.
+    for (const key of ['skills', 'commands', 'agents', 'mcp_servers']) {
+      const d = overview[key];
+      if (!d) continue;
+      preview.totals.create += d.missing_target || 0;
+      preview.totals.overwrite += d.out_of_sync || 0;
+    }
+  }
+  return preview;
+}
+
+// Compose the Sync All confirm copy + overwrite warning from a preview. Shared
+// by the dashboard Sync All and the portal per-project card so the two dialogs
+// stay byte-identical (#1288). ``baseMessage`` is the pre-built
+// ``confirm_sync_all`` lead naming the destination.
+function _ctxSyncAllConfirmCopy(baseMessage, preview) {
+  let message = baseMessage;
+  let warningText = '';
+  if (!preview || !preview.haveCounts) {
+    return { message, warningText };
+  }
+  const aCreate = preview.totals.create || 0;
+  const aOverwrite = preview.totals.overwrite || 0;
+  const sCreate = preview.settings.create || 0;
+  const sOverwrite = preview.settings.overwrite || 0;
+  if (aCreate + aOverwrite + sCreate + sOverwrite === 0) {
+    // Combined artifact + settings no-op — a bare "already in sync" (an
+    // artifact-only no-change line followed by a settings segment would
+    // contradict itself).
+    message += ' ' + t('settings.ctx.confirm_sync_no_changes');
+  } else {
+    if (aCreate + aOverwrite > 0) {
+      // Uncapped totals lead, then the capped per-type×per-runtime breakdown
+      // (only when all four lists loaded). Degraded previews keep totals only.
+      message += ' ' + t('settings.ctx.confirm_sync_counts', {
+        create: aCreate,
+        overwrite: aOverwrite,
+      });
+      if (preview.haveBreakdown) {
+        const breakdown = _ctxSyncBreakdownMessage(preview.segments);
+        if (breakdown) message += ' ' + breakdown;
+      }
+    }
+    if (sCreate + sOverwrite > 0) {
+      message += ' ' + t('settings.ctx.confirm_sync_settings_impact', {
+        create: sCreate,
+        overwrite: sOverwrite,
+      });
+    }
+  }
+  const totalOverwrite = aOverwrite + sOverwrite;
+  if (totalOverwrite > 0) {
+    warningText = t('settings.ctx.confirm_sync_overwrite_warning', {
+      overwrite: totalOverwrite,
+    });
+  }
+  return { message, warningText };
+}
+
 // U7 (#1229): per-runtime diagnostic block under a parse-error /
 // invalid-name badge — server-sanitized reason text plus a fix-it hint
 // naming the canonical file. Empty for healthy rows and for rows whose
@@ -1733,8 +1937,11 @@ async function _ctxSyncProjectScope(scopeId, btn) {
   // Pin BOTH scope and tier once, BEFORE the confirm (U4 #1229 moved this
   // above the dialog so the impact preview shares the pin). The card's scope
   // is usually NOT the active scope, so ``_ctxOverviewCache`` does not
-  // apply — fetch the overview for the pinned (project, tier) best-effort;
-  // overview has no per-runtime split, so the portal confirm is counts-only.
+  // apply — fetch the four artifact lists + overview for the pinned (project,
+  // tier) best-effort: the lists drive the per-type×per-runtime breakdown, the
+  // overview the settings counts (#1288). A failed list degrades to the overview
+  // counts; a failed overview to the base copy (Codex B — pure enhancement, the
+  // lists are read-only + scope-aware so targeting a non-active scope is safe).
   // ``_ctxWithTargetScope`` otherwise re-reads the mutable
   // ``_ctxTargetScope`` global and re-resolves the id against the live
   // ``_ctxProjectsCache`` on every call, so a mid-run tier-filter flip OR a
@@ -1752,42 +1959,22 @@ async function _ctxSyncProjectScope(scopeId, btn) {
   };
 
   btnLoading(btn, true);
-  let create = 0;
-  let overwrite = 0;
-  let haveImpact = false;
+  let preview;
   try {
-    const pr = await fetch(_ctxWithTargetScope('/api/context/overview', pinnedScopeOpts));
-    if (pr.ok) {
-      const data = await pr.json();
-      for (const key of ['skills', 'commands', 'agents', 'mcp_servers', 'settings']) {
-        const d = data?.[key];
-        if (!d) continue;
-        create += d.missing_target || 0;
-        overwrite += d.out_of_sync || 0;
-      }
-      haveImpact = true;
-    }
-  } catch {
-    /* best-effort impact preview */
+    preview = await _ctxSyncAllPreview(pinnedScopeOpts);
   } finally {
     btnLoading(btn, false);
   }
-  let message = t('settings.ctx.confirm_sync_all', {
-    dest: _ctxScopeDisplayLabelById(scopeId),
-  });
-  if (haveImpact) {
-    message += ' ' + (create === 0 && overwrite === 0
-      ? t('settings.ctx.confirm_sync_no_changes')
-      : t('settings.ctx.confirm_sync_counts', { create, overwrite }));
-  }
+  // rank-10: name the specific project this portal card syncs (the raw
+  // ``scopeId`` resolves to its label; '' === Server CWD).
+  const { message, warningText } = _ctxSyncAllConfirmCopy(
+    t('settings.ctx.confirm_sync_all', { dest: _ctxScopeDisplayLabelById(scopeId) }),
+    preview,
+  );
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
-    // rank-10: name the specific project this portal card syncs (the raw
-    // ``scopeId`` resolves to its label; '' === Server CWD).
     message,
-    warningText: overwrite > 0
-      ? t('settings.ctx.confirm_sync_overwrite_warning', { overwrite })
-      : '',
+    warningText,
     confirmText: t('settings.ctx.sync'),
     danger: false,
   });
@@ -2350,64 +2537,22 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     scopeResolved: true,
     targetScope: syncAllTier,
   };
-  // Best-effort impact preview: refetch the four artifact lists AND the
-  // overview (for the settings tile counts — settings are multi-runtime
-  // targets with no per-runtime list payload, so they get their own
-  // segment) under the pinned scope. Any failure → count-free fallback copy.
+  // Best-effort Sync All preview under the pinned (project, tier): the four
+  // artifact lists (per-type×per-runtime breakdown) + the overview (settings
+  // counts — settings have no per-runtime list payload, so they ride a separate
+  // counts-only segment). A failed list degrades to the aggregate counts; a
+  // failed overview degrades to the base copy. Never blocks the dialog (#1288).
   btnLoading(btn, true);
-  let impact = null;
-  let settingsImpact = null;
+  let preview;
   try {
-    const types = ['skills', 'commands', 'agents', 'mcp-servers'];
-    const responses = await Promise.all([
-      ...types.map((typ) => fetch(_ctxWithTargetScope(`/api/context/${typ}`, pinnedScopeOpts))),
-      fetch(_ctxWithTargetScope('/api/context/overview', pinnedScopeOpts)),
-    ]);
-    if (responses.every((r) => r.ok)) {
-      const bodies = await Promise.all(responses.map((r) => r.json()));
-      const allItems = types.flatMap((typ, i) => bodies[i]?.[typ] || []);
-      impact = _ctxSyncImpact(allItems);
-      const settings = bodies[types.length]?.settings;
-      if (settings) {
-        settingsImpact = {
-          create: settings.missing_target || 0,
-          overwrite: settings.out_of_sync || 0,
-        };
-      }
-    }
-  } catch {
-    /* best-effort impact preview */
+    preview = await _ctxSyncAllPreview(pinnedScopeOpts);
   } finally {
     btnLoading(btn, false);
   }
-  let message = t('settings.ctx.confirm_sync_all', { dest: syncAllDestLabel });
-  let warningText = '';
-  if (impact) {
-    const sCreate = settingsImpact?.create || 0;
-    const sOverwrite = settingsImpact?.overwrite || 0;
-    // "Already in sync" must reflect the COMBINED artifact + settings totals
-    // — an artifact-only no-change sentence followed by a settings impact
-    // segment reads as a contradiction (Codex review).
-    if (impact.create + impact.overwrite + sCreate + sOverwrite === 0) {
-      message += ' ' + t('settings.ctx.confirm_sync_no_changes');
-    } else {
-      if (impact.create + impact.overwrite > 0) {
-        message += ' ' + _ctxSyncImpactMessage(impact);
-      }
-      if (sCreate + sOverwrite > 0) {
-        message += ' ' + t('settings.ctx.confirm_sync_settings_impact', {
-          create: sCreate,
-          overwrite: sOverwrite,
-        });
-      }
-    }
-    const totalOverwrite = impact.overwrite + sOverwrite;
-    if (totalOverwrite > 0) {
-      warningText = t('settings.ctx.confirm_sync_overwrite_warning', {
-        overwrite: totalOverwrite,
-      });
-    }
-  }
+  const { message, warningText } = _ctxSyncAllConfirmCopy(
+    t('settings.ctx.confirm_sync_all', { dest: syncAllDestLabel }),
+    preview,
+  );
   const ok = await showConfirm({
     title: t('settings.ctx.sync_all'),
     // rank-10: name the active project being fanned out so the user sees
