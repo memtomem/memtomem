@@ -100,6 +100,13 @@ def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
+    """Project-relative path as a POSIX string for API payloads.
+
+    ``.as_posix()`` (not ``str``) so canonical/runtime paths come back
+    ``/``-separated on every platform — the Web UI and diff payloads pin POSIX
+    separators (#1256). Falls back to the absolute POSIX path for user-tier
+    locations outside ``project_root``.
+    """
     try:
         return p.relative_to(project_root).as_posix()
     except ValueError:
