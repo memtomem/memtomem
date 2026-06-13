@@ -1,8 +1,21 @@
+"""Tests for the Context Gateway MCP-servers web route.
+
+Path-payload contract (#1325, same shape as #1256): ``canonical_path`` /
+``path`` / delete-``removed`` fields are normalized to POSIX separators on
+every platform. The route helper ``_safe_rel`` returns ``.as_posix()`` (parity
+with ``context_agents`` / ``context_commands`` / ``context_skills``), so the
+assertions below pin literal ``/``-joined strings rather than
+``Path(...) == Path(...)``, which would have masked the backslash-joined
+Windows form. The literal-string route assertions only fail on
+``windows-latest`` (``str(PosixPath)`` already ``/``-joins on macOS/Linux);
+``test_safe_rel_joins_with_posix_separators`` is the cross-platform guard.
+"""
+
 from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,6 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.config import Mem2MemConfig
 from memtomem.web.app import create_app
+from memtomem.web.routes.context_mcp_servers import _safe_rel
 
 
 @pytest.fixture
@@ -43,10 +57,10 @@ async def test_create_list_read_sync_and_overview(client: AsyncClient, tmp_path:
         json={"name": "demo", "content": _definition()},
     )
     assert create.status_code == 200
-    # ``_safe_rel`` returns OS-native separators (matching the skills/commands/
-    # agents routes), so compare component-wise rather than against a literal
-    # forward-slash string — ``.memtomem\\mcp-servers\\demo.json`` on Windows.
-    assert Path(create.json()["canonical_path"]) == Path(".memtomem/mcp-servers/demo.json")
+    # ``_safe_rel`` returns POSIX separators on every platform (#1325) — pin the
+    # literal ``/``-joined string, not ``Path(...) == Path(...)``, which would
+    # mask the ``.memtomem\\mcp-servers\\demo.json`` Windows form.
+    assert create.json()["canonical_path"] == ".memtomem/mcp-servers/demo.json"
 
     listing = await client.get("/api/context/mcp-servers")
     assert listing.status_code == 200
@@ -251,7 +265,8 @@ async def test_diff_reasons_distinguish_canonical_vs_mcp_json(
     r = await client.get("/api/context/mcp-servers/bad/diff")
     assert r.status_code == 200
     data = r.json()
-    assert Path(data["canonical_path"]) == Path(".memtomem/mcp-servers/bad.json")
+    # Literal POSIX pin (#1325) — see ``test_create_list_read_sync_and_overview``.
+    assert data["canonical_path"] == ".memtomem/mcp-servers/bad.json"
     rt = data["runtimes"][0]
     assert rt["status"] == "parse error"
     assert "bad.json" in rt["reason"]
@@ -284,7 +299,8 @@ async def test_list_tolerates_invalid_named_canonical(client: AsyncClient, tmp_p
     listing = await client.get("/api/context/mcp-servers")
     assert listing.status_code == 200
     rows = {row["name"]: row for row in listing.json()["mcp-servers"]}
-    assert rows["good"]["canonical_path"] is not None
+    # POSIX-pinned (#1325) — the valid canonical's list-row path stays ``/``-joined.
+    assert rows["good"]["canonical_path"] == ".memtomem/mcp-servers/good.json"
     assert rows["my server"]["canonical_path"] is None
     assert rows["my server"]["runtimes"][0]["status"] == "invalid name"
 
@@ -351,3 +367,36 @@ async def test_sync_payload_carries_names_and_in_sync_rerun_skips(
     assert len(body["skipped"]) == 1
     assert body["skipped"][0]["reason_code"] == "in_sync"
     assert (tmp_path / ".mcp.json").stat().st_mtime_ns == mtime_before
+
+
+# ── #1325: POSIX-separator path payloads (same shape as #1256) ───────────────
+
+
+@pytest.mark.anyio
+async def test_delete_removed_entry_is_posix(client: AsyncClient, tmp_path: Path) -> None:
+    """The delete ``removed`` entry is a ``_safe_rel`` result — multi-segment
+    and literal POSIX, not the backslash-joined ``.memtomem\\mcp-servers\\
+    gone.json`` Windows form (#1325; mirrors the skills/commands cascade pins)."""
+    _seed_canonical(tmp_path, "gone")
+    r = await client.delete("/api/context/mcp-servers/gone")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["deleted"] == [".memtomem/mcp-servers/gone.json"]
+    assert data["skipped"] == []
+
+
+def test_safe_rel_joins_with_posix_separators() -> None:
+    """Cross-platform guard for the MCP-servers ``_safe_rel`` POSIX contract.
+
+    The literal-string route assertions only fail on ``windows-latest``
+    (``str(PosixPath("a/b"))`` already yields ``"a/b"`` on macOS/Linux). Driving
+    the helper with a ``PureWindowsPath`` — whose ``str()`` is backslash-joined
+    on every host — makes a regression to ``str()`` fail on any platform, the
+    exact gap that let this slip past #1256 (#1325).
+    """
+    root = PureWindowsPath(r"C:\proj")
+    nested = PureWindowsPath(r"C:\proj\.memtomem\mcp-servers\demo.json")
+    assert _safe_rel(nested, root) == ".memtomem/mcp-servers/demo.json"
+    # Outside project_root → absolute POSIX fallback, still backslash-free.
+    outside = PureWindowsPath(r"C:\other\mcp-servers\x.json")
+    assert "\\" not in _safe_rel(outside, root)

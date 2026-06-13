@@ -42,10 +42,19 @@ router = APIRouter(tags=["context-mcp-servers"])
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
+    """Project-relative path as a POSIX string for API payloads.
+
+    ``.as_posix()`` (not ``str``) so ``canonical_path`` / ``path`` fields come
+    back ``/``-separated on every platform — the Web UI and diff payloads pin
+    POSIX separators (#1256). Falls back to the absolute POSIX path outside
+    ``project_root``. Parity with ``context_agents`` / ``context_commands``
+    (#1264); this route was never covered by #1256's diff tests, so the
+    ``str()`` form lingered latent (#1325).
+    """
     try:
-        return str(p.relative_to(project_root))
+        return p.relative_to(project_root).as_posix()
     except ValueError:
-        return str(p)
+        return p.as_posix()
 
 
 def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
