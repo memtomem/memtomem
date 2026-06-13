@@ -180,6 +180,75 @@ async def test_cross_project_copy_keeps_source(client, cwd_root: Path, tmp_path:
     assert (_shared_agents(other) / "foo" / "agent.md").is_file()
 
 
+# ── #1310: project_local landing git-protects the DESTINATION ────────────
+
+
+@pytest.mark.asyncio
+async def test_cross_project_local_transfer_appends_dest_gitignore(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """A web transfer landing on project_local git-protects the DESTINATION
+    (CLI/MCP parity, #1310): the dest .gitignore gets the marker, the SOURCE
+    project is never git-touched, and the response reports ``appended``."""
+    from memtomem.cli.context_cmd import _GITIGNORE_MARKER
+
+    src_manifest = _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)
+    (other / ".git").mkdir()  # marker is only meaningful in a git working tree
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_local",
+            "to_project_scope_id": scope_b,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["to_scope"] == "project_local"
+    assert data["gitignore_marker"] == "appended"
+
+    # Canonical landed on the destination's local tier.
+    assert (_local_agents(other) / "foo" / "agent.md").is_file()
+    # Destination .gitignore now carries the marker block.
+    dst_gi = (other / ".gitignore").read_text(encoding="utf-8")
+    assert _GITIGNORE_MARKER in dst_gi
+    assert ".memtomem/*.local/" in dst_gi
+    # The SOURCE project is never git-touched by a destination landing.
+    assert not (cwd_root / ".gitignore").exists()
+    assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY  # copy kept source
+
+
+@pytest.mark.asyncio
+async def test_project_local_transfer_without_git_surfaces_skip(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    """When the project_local destination has a store but no git signal, the
+    marker write is skipped (meaningful only in a git tree) and the skip is
+    SURFACED in the response instead of silently dropped (#1310)."""
+    _write_agent(_shared_agents(cwd_root), "foo")
+    other = _other_project(tmp_path)  # .memtomem + .claude, no .git / pyproject
+    scope_b = await _register(client, other)
+
+    resp = await client.post(
+        "/api/context/agents/foo/transfer",
+        json={
+            "mode": "copy",
+            "to_target_scope": "project_local",
+            "to_project_scope_id": scope_b,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["gitignore_marker"] == "no_project_signal"
+    # No .gitignore conjured in a non-git directory.
+    assert not (other / ".gitignore").exists()
+
+
 @pytest.mark.asyncio
 async def test_copy_rename_surfaces_provenance_reason_code(
     client, cwd_root: Path, tmp_path: Path

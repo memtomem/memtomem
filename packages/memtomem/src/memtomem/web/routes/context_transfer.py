@@ -272,6 +272,44 @@ def _serialize(result: TransferResult | McpServerCopyResult) -> dict[str, Any]:
     }
 
 
+async def _ensure_dest_local_gitignored(dst_root: Path) -> str:
+    """Append the ``project_local`` ``.gitignore`` marker at the transfer
+    DESTINATION after a successful ``project_local`` apply.
+
+    Web parity for the CLI dispatch (``_ensure_local_tier_gitignored``,
+    cross-project aware since #1274) and the MCP action (#1283): without
+    this the web transfer route was the one surface that could leave a
+    ``project_local`` canonical un-git-protected at the destination
+    (#1310). Reuses the same idempotent helper, so the marker block and
+    the ``.git``-required precondition stay byte-identical across surfaces.
+
+    Returns the helper's status code (``appended`` / ``already_present`` /
+    ``no_git_repo_pyproject_only`` / ``no_project_signal``) for the
+    response, and logs the non-write skips at WARNING so a dropped marker
+    is never silent (mirrors the warnings the CLI/MCP surfaces emit).
+    """
+    from memtomem.cli.context_cmd import _append_gitignore_marker
+
+    wrote, msg = await asyncio.to_thread(_append_gitignore_marker, dst_root)
+    if wrote:
+        logger.info("transfer: appended project_local .gitignore marker at %s", dst_root)
+    elif msg == "no_git_repo_pyproject_only":
+        logger.warning(
+            "transfer: project_local landing at %s resolved via pyproject.toml but "
+            ".git is missing — .gitignore marker not written; the local tier is not "
+            "git-protected (run `git init` at the destination first).",
+            dst_root,
+        )
+    elif msg == "no_project_signal":
+        logger.warning(
+            "transfer: project_local landing at %s has neither .git nor pyproject.toml "
+            "— .gitignore marker not written; the local tier is not git-protected.",
+            dst_root,
+        )
+    # ``already_present`` is the quiet, idempotent case (marker already on disk).
+    return msg
+
+
 @router.post("/context/{kind}/{name}/transfer")
 async def transfer_context_artifact(
     kind: str,
@@ -494,4 +532,10 @@ async def transfer_context_artifact(
             host_targets=host_targets,
             plan=_serialize(result),
         )
-    return {"status": "plan" if dry_run else "ok", **_serialize(result)}
+    payload: dict[str, Any] = {"status": "plan" if dry_run else "ok", **_serialize(result)}
+    if apply_ and body.to_target_scope == "project_local":
+        # ADR-0011 project_local gitignore contract at the DESTINATION —
+        # parity with the CLI dispatch (#1274) and the MCP action (#1283);
+        # the web route was the one transfer surface that skipped it (#1310).
+        payload["gitignore_marker"] = await _ensure_dest_local_gitignored(dst_root)
+    return payload
