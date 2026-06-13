@@ -158,7 +158,7 @@ async function _hooksFetchSyncData() {
   const res = await fetch(_hooksScopedUrl('/api/settings-sync'), { method: 'GET', headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || `Request failed: ${res.status}`);
+    throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
   }
   return res.json();
 }
@@ -465,7 +465,7 @@ async function loadHooksSync() {
       || requestedProjectScope !== _hooksCurrentProjectScope()) return;
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Request failed: ${res.status}`);
+      throw new Error(_hooksErrDetail(err.detail, `Request failed: ${res.status}`));
     }
     const data = await res.json();
     if (

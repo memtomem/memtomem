@@ -45,6 +45,7 @@ from memtomem.context.mcp_servers import diff_mcp_servers, list_canonical_mcp_se
 from memtomem.context.skills import diff_skills, list_canonical_skills
 from memtomem.config import TargetScope
 from memtomem.web.deps import get_project_root
+from memtomem.web.routes._errors import _error, _redact_message
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +110,10 @@ def _resolve_selected_scope(
     selector contract has exactly one implementation.
     """
     if project_scope_id is not None and scope_id is not None and project_scope_id != scope_id:
-        raise HTTPException(
-            status_code=400,
-            detail="project_scope_id and scope_id must match when both are provided",
+        raise _error(
+            400,
+            "validation",
+            "project_scope_id and scope_id must match when both are provided",
         )
     selected_scope_id = project_scope_id or scope_id
     if selected_scope_id is None:
@@ -121,12 +123,13 @@ def _resolve_selected_scope(
         if scope.scope_id != selected_scope_id:
             continue
         if scope.root is None or scope.missing:
-            raise HTTPException(
-                status_code=404,
-                detail=f"scope {selected_scope_id!r} is registered but its root is missing",
+            raise _error(
+                404,
+                "missing",
+                f"scope {selected_scope_id!r} is registered but its root is missing",
             )
         return scope
-    raise HTTPException(status_code=404, detail=f"unknown project_scope_id: {selected_scope_id!r}")
+    raise _error(404, "missing", f"unknown project_scope_id: {selected_scope_id!r}")
 
 
 def resolve_scope_root(
@@ -197,6 +200,7 @@ def resolve_writable_scope_root(
         raise HTTPException(
             status_code=409,
             detail={
+                "error_kind": "conflict",
                 "reason_code": "sync_paused" if paused else "sync_not_enrolled",
                 "message": (
                     f"Project {scope.scope_id!r} is not enrolled for sync "
@@ -433,15 +437,15 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
     """
     raw = body.root.strip()
     if not raw:
-        raise HTTPException(status_code=400, detail="root must not be empty")
+        raise _error(400, "validation", "root must not be empty")
 
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
-        raise HTTPException(status_code=400, detail=f"root must be absolute: {raw!r}")
+        raise _error(400, "validation", f"root must be absolute: {raw!r}")
     if not candidate.exists():
-        raise HTTPException(status_code=400, detail=f"root does not exist: {raw!r}")
+        raise _error(400, "validation", f"root does not exist: {raw!r}")
     if not candidate.is_dir():
-        raise HTTPException(status_code=400, detail=f"root is not a directory: {raw!r}")
+        raise _error(400, "validation", f"root is not a directory: {raw!r}")
 
     cfg = _gateway_config(request)
     store = KnownProjectsStore(Path(cfg.known_projects_path).expanduser())
@@ -455,7 +459,7 @@ async def add_known_project(body: AddProjectRequest, request: Request) -> dict:
     except KnownProjectsCorruptError as exc:
         # Server-side state file is corrupt — 500, not 4xx: the request was
         # valid, the store refused the write to avoid wiping registrations.
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _error(500, "internal", _redact_message(str(exc))) from exc
     project_scope_id = compute_scope_id(entry.root)
 
     response: dict = {
@@ -515,7 +519,7 @@ async def update_known_project(
     label_present = "label" in body.model_fields_set
     set_enabled = body.enabled is not None  # null / omitted both mean "unchanged"
     if not set_enabled and not label_present:
-        raise HTTPException(status_code=400, detail="no fields to update (label and/or enabled)")
+        raise _error(400, "validation", "no fields to update (label and/or enabled)")
 
     # Single atomic store write — applying label + enabled in one lock window so a
     # concurrent DELETE / PATCH can't interleave and partially apply the combined
@@ -530,9 +534,9 @@ async def update_known_project(
         )
     except KnownProjectsCorruptError as exc:
         # Corrupt store must surface as a server error, not a misleading 404.
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _error(500, "internal", _redact_message(str(exc))) from exc
     if updated is None:
-        raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
+        raise _error(404, "missing", f"unknown scope_id: {scope_id!r}")
     return {
         "project_scope_id": scope_id,
         "scope_id": scope_id,
@@ -559,9 +563,9 @@ async def delete_known_project(scope_id: str, request: Request) -> dict:
         removed = store.remove_by_scope_id(scope_id)
     except KnownProjectsCorruptError as exc:
         # Corrupt store must surface as a server error, not a misleading 404.
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _error(500, "internal", _redact_message(str(exc))) from exc
     if not removed:
-        raise HTTPException(status_code=404, detail=f"unknown scope_id: {scope_id!r}")
+        raise _error(404, "missing", f"unknown scope_id: {scope_id!r}")
     return {"deleted": scope_id}
 
 

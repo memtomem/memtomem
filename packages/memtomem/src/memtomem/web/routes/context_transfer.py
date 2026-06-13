@@ -73,8 +73,8 @@ from memtomem.context.transfer import (
     transfer_artifact,
 )
 from memtomem.web.routes._confirm import needs_confirmation_envelope
+from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
 from memtomem.web.routes._locks import _gateway_lock
-from memtomem.web.routes.context_gateway import _classify_exception, _redact_message
 from memtomem.web.routes.context_projects import (
     _default_project_root,
     _discover_for,
@@ -91,14 +91,6 @@ router = APIRouter(tags=["context-transfer"])
 #: window — the ``_SETTINGS_LOCK_BUDGET_S`` / ``_SKILLS_LOCK_BUDGET_S``
 #: precedent.
 _TRANSFER_LOCK_BUDGET_S = 30.0
-
-
-def _error(status_code: int, error_kind: str, message: str, **extra: Any) -> HTTPException:
-    """Object-envelope ``HTTPException`` (ADR-0023 §10 / B-1 #1284 shape)."""
-    return HTTPException(
-        status_code=status_code,
-        detail={"error_kind": error_kind, "message": message, **extra},
-    )
 
 
 class TransferRequest(BaseModel):
@@ -121,13 +113,20 @@ def _resolve_source(
     Same resolution as the shared ``resolve_scope_root`` dependency
     (``_resolve_selected_scope`` is the single implementation), but this
     route needs the scope RECORD too — the implicit-destination
-    eligibility gate reads ``sync_eligible`` off it. The helper's plain
-    string 400/404 details are re-shaped into this route's object
-    envelope; status codes and message text are preserved exactly.
+    eligibility gate reads ``sync_eligible`` off it. ``_resolve_selected_scope``
+    raises the B-1 #1284 object envelope, so its detail is re-raised as-is;
+    status codes and message text are preserved exactly.
     """
     try:
         scope = _resolve_selected_scope(request, project_scope_id, scope_id)
     except HTTPException as exc:
+        # ``_resolve_selected_scope`` raises the object envelope
+        # (``{error_kind, message, …}``) since #1284 — re-raise it unchanged so
+        # the classified kind and the EXACT message survive. ``str(exc.detail)``
+        # would stringify the dict into the message field. A legacy string
+        # detail (defensive) is re-shaped onto this route's envelope instead.
+        if isinstance(exc.detail, dict):
+            raise
         kind = "missing" if exc.status_code == 404 else "validation"
         raise _error(exc.status_code, kind, str(exc.detail)) from exc
     if scope is None:

@@ -164,6 +164,51 @@ describe('_ctxErrDetail — structured 409 (#1210) → localized string', () => 
   });
 });
 
+describe('_ctxErrDetail — B-1 #1284 error_kind envelope → localized kind label', () => {
+  it('composes the localized kind label with the server message for every kind', async () => {
+    const { window } = await boot();
+    await window.I18N.setLang('en');
+    for (const kind of ['parse', 'permission', 'missing', 'internal', 'validation', 'conflict', 'busy']) {
+      const label = window.t(`settings.ctx.error_kind_${kind}`);
+      // every kind has an en+ko key, so t() resolves (does not echo the key)
+      expect(label).not.toBe(`settings.ctx.error_kind_${kind}`);
+      const out = window._ctxErrDetail({ error_kind: kind, message: 'detail text' }, 'fb');
+      expect(out).toBe(`${label} — detail text`);
+      expect(out).not.toContain('[object Object]');
+    }
+  });
+
+  it('shows only the localized kind label when the envelope has no message', async () => {
+    const { window } = await boot();
+    await window.I18N.setLang('en');
+    expect(window._ctxErrDetail({ error_kind: 'conflict' }, 'fb')).toBe(
+      window.t('settings.ctx.error_kind_conflict'),
+    );
+  });
+
+  it('lets a specific reason_code win over the generic error_kind (sync_paused on a conflict 409)', async () => {
+    const { window } = await boot();
+    await window.I18N.setLang('en');
+    // The sync-ineligible 409s carry BOTH error_kind:"conflict" AND a reason_code;
+    // the reason_code copy is more specific and must take precedence.
+    const out = window._ctxErrDetail(
+      { error_kind: 'conflict', reason_code: 'sync_paused', message: 'Project p-x is not enrolled for sync' },
+      'fb',
+    );
+    expect(out).toBe(window.t('settings.ctx.error_sync_paused'));
+    expect(out).not.toBe(window.t('settings.ctx.error_kind_conflict'));
+  });
+
+  it('echoes an unknown error_kind verbatim (forward-compat) and never leaks the i18n key or [object Object]', async () => {
+    const { window } = await boot();
+    await window.I18N.setLang('en');
+    const out = window._ctxErrDetail({ error_kind: 'future_kind', message: 'msg' }, 'fb');
+    expect(out).toBe('future_kind — msg');
+    expect(out).not.toContain('[object Object]');
+    expect(out).not.toContain('settings.ctx.error_kind_');
+  });
+});
+
 describe('portal enrollment UI', () => {
   it('scan-only row offers Enroll and hides rename/remove/toggle', async () => {
     const { window } = await boot();

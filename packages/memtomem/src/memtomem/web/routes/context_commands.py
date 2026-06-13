@@ -7,7 +7,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
@@ -48,6 +48,7 @@ from memtomem.web.routes.context_projects import (
 )
 from memtomem.web.routes.context_versions import include_has, version_summary
 from memtomem.web.routes._confirm import host_write_gate
+from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
 
@@ -86,13 +87,15 @@ def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
     self-contained.
     """
     if target_scope == "project_local":
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise _error(
+            400,
+            "validation",
+            (
                 f"{action} is supported on the project_shared and user tiers; "
                 f"project_local is a draft tier with no runtime fan-out "
                 f"(ADR-0011 §3)."
             ),
+            reason_code="project_local_unsupported",
         )
 
 
@@ -237,7 +240,7 @@ async def read_command(
 ) -> dict:
     name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
     if resolved is None:
-        raise KeyError(name)
+        raise _error(404, "missing", f"command {name!r} not found")
     cmd_path, layout = resolved
 
     content = cmd_path.read_text(encoding="utf-8")
@@ -289,14 +292,17 @@ async def rendered_command(
 ) -> JSONResponse:
     name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
     if resolved is None:
-        raise KeyError(name)
+        raise _error(404, "missing", f"command {name!r} not found")
     cmd_path, layout = resolved
 
     content = cmd_path.read_text(encoding="utf-8")
     try:
         parsed = parse_canonical_command(cmd_path, layout=layout)
     except CommandParseError as exc:
-        return JSONResponse(status_code=422, content={"detail": f"Parse error: {exc}"})
+        return JSONResponse(
+            status_code=422,
+            content={"detail": {"error_kind": "parse", "message": f"Parse error: {exc}"}},
+        )
 
     runtimes = []
     diffs = diff_commands(project_root, scope=target_scope)
@@ -366,7 +372,9 @@ async def create_command(
         resolve_canonical_command(project_root, name, scope=target_scope) is not None
         or artifact_dir_unlocked.exists()
     ):
-        raise HTTPException(409, detail=f"Command '{name}' already exists")
+        raise _error(
+            409, "conflict", f"Command '{name}' already exists", reason_code="already_exists"
+        )
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes,
@@ -380,7 +388,12 @@ async def create_command(
         async with asyncio.timeout(60):
             async with _gateway_lock:
                 if resolve_canonical_command(project_root, name, scope=target_scope) is not None:
-                    raise HTTPException(409, detail=f"Command '{name}' already exists")
+                    raise _error(
+                        409,
+                        "conflict",
+                        f"Command '{name}' already exists",
+                        reason_code="already_exists",
+                    )
                 # ADR-0022: create in versioned directory layout (command.md +
                 # versions/v1.md + manifest) from the start, so the artifact is
                 # immediately versionable in the detail panel instead of a flat
@@ -392,7 +405,12 @@ async def create_command(
                     # resolve_canonical_command found no working file above, but a
                     # stale/orphan directory remains — surface a clean 409 rather
                     # than a 500 from mkdir()'s FileExistsError.
-                    raise HTTPException(409, detail=f"Command '{name}' already exists")
+                    raise _error(
+                        409,
+                        "conflict",
+                        f"Command '{name}' already exists",
+                        reason_code="already_exists",
+                    )
                 # Encode the submitted content up front, before anything touches
                 # disk. A lone-surrogate body can't be UTF-8 encoded; failing
                 # after mkdir would leave an orphan dir that wedges retries on the
@@ -402,7 +420,7 @@ async def create_command(
                 try:
                     content_bytes = body.content.encode("utf-8")
                 except UnicodeEncodeError as exc:
-                    raise HTTPException(400, detail="Command content is not valid UTF-8") from exc
+                    raise _error(400, "validation", "Command content is not valid UTF-8") from exc
                 artifact_dir.mkdir(parents=True)
                 cmd_path = artifact_dir / COMMAND_DIR_FILENAME
                 try:
@@ -420,7 +438,7 @@ async def create_command(
                     shutil.rmtree(artifact_dir, ignore_errors=True)
                     raise
     except TimeoutError:
-        raise HTTPException(503, "Command create timed out — another sync may be in progress")
+        raise _error(503, "busy", "Command create timed out — another sync may be in progress")
     return {"name": name, "canonical_path": _safe_rel(cmd_path, project_root)}
 
 
@@ -450,6 +468,8 @@ def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
             "status": "aborted",
             "reason": _MTIME_CONFLICT_REASON,
             "mtime_ns": str(current_mtime_ns),
+            "error_kind": "conflict",
+            "reason_code": "stale_mtime",
         },
     )
 
@@ -470,13 +490,13 @@ async def update_command(
     _reject_project_local_write(target_scope, "Update command")
     name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
     if resolved is None:
-        raise KeyError(name)
+        raise _error(404, "missing", f"command {name!r} not found")
     cmd_path, _layout = resolved
 
     try:
         body_mtime_ns = int(body.mtime_ns)
     except ValueError:
-        raise HTTPException(422, f"Invalid mtime_ns: {body.mtime_ns!r}")
+        raise _error(422, "validation", f"Invalid mtime_ns: {body.mtime_ns!r}")
 
     # Unlocked pre-check before the host-write gate — a stale request is
     # refused, never confirmed (see context_skills.update_skill).
@@ -509,7 +529,7 @@ async def update_command(
                 atomic_write_text(cmd_path, body.content)
                 new_mtime_ns = cmd_path.stat().st_mtime_ns
     except TimeoutError:
-        raise HTTPException(503, "Command update timed out — another sync may be in progress")
+        raise _error(503, "busy", "Command update timed out — another sync may be in progress")
     return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 
@@ -589,7 +609,7 @@ async def delete_command(
                         except OSError as e:
                             skipped.append(delete_skip_entry(target, e, project_root))
     except TimeoutError:
-        raise HTTPException(503, "Command delete timed out — another sync may be in progress")
+        raise _error(503, "busy", "Command delete timed out — another sync may be in progress")
 
     return {"deleted": removed, "skipped": skipped}
 
@@ -809,7 +829,7 @@ async def sync_commands(
             async with _gateway_lock:
                 return await _sync_commands_core(project_root, target_scope, on_drop=on_drop)
     except TimeoutError:
-        raise HTTPException(503, "Commands sync timed out — another sync may be in progress")
+        raise _error(503, "busy", "Commands sync timed out — another sync may be in progress")
 
 
 # ── Import ───────────────────────────────────────────────────────────────
@@ -905,7 +925,7 @@ async def import_commands(
                 return gate
         result = await _run(dry=dry_run)
     except TimeoutError:
-        raise HTTPException(503, "Commands import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Commands import timed out — another sync may be in progress")
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -934,7 +954,7 @@ async def import_command(
     try:
         validate_name(name, kind="command name")
     except InvalidNameError as exc:
-        raise HTTPException(400, f"Invalid command name: {exc}")
+        raise _error(400, "validation", f"Invalid command name: {exc}")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
 
@@ -954,7 +974,7 @@ async def import_command(
         if target_scope == "user" and not allow_host_writes:
             preview = await _run(dry=True)
             if not preview.imported and not preview.skipped:
-                raise HTTPException(404, f"No runtime command named {name!r} to import")
+                raise _error(404, "missing", f"No runtime command named {name!r} to import")
             gate = host_write_gate(
                 target_scope,
                 allow_host_writes,
@@ -966,7 +986,7 @@ async def import_command(
                 return gate
         result = await _run(dry=False)
     except TimeoutError:
-        raise HTTPException(503, "Command import timed out — another sync may be in progress")
+        raise _error(503, "busy", "Command import timed out — another sync may be in progress")
     if not result.imported and not result.skipped:
-        raise HTTPException(404, f"No runtime command named {name!r} to import")
+        raise _error(404, "missing", f"No runtime command named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)

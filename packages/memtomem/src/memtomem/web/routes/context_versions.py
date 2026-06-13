@@ -51,6 +51,7 @@ from memtomem.context.versioning import (
     VersionNotFoundError,
     VersionsDirMissingError,
 )
+from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes.context_projects import resolve_scope_root
 
@@ -88,12 +89,14 @@ def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
     the same tier policy as create/update in this release.
     """
     if target_scope != "project_shared":
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise _error(
+            400,
+            "validation",
+            (
                 f"{action} is supported only on project_shared in this release; "
                 f"got target_scope={target_scope!r}."
             ),
+            reason_code="non_shared_tier",
         )
 
 
@@ -107,11 +110,11 @@ def _version_http(exc: VersionError) -> HTTPException:
     """
     msg = _PATH_RE.sub("<path>", str(exc))
     if isinstance(exc, (VersionNotFoundError, LabelNotFoundError)):
-        return HTTPException(status_code=404, detail=msg)
+        return _error(404, "missing", msg)
     if isinstance(exc, VersionsDirMissingError):
-        return HTTPException(status_code=409, detail=msg)
+        return _error(409, "conflict", msg, reason_code="versions_dir_missing")
     # ReservedLabelError / InvalidLabelError / InvalidTagError / base VersionError
-    return HTTPException(status_code=400, detail=msg)
+    return _error(400, "validation", msg)
 
 
 def _resolve_versionable(
@@ -128,17 +131,16 @@ def _resolve_versionable(
     """
     entry = _ELIGIBLE.get(artifact_type)
     if entry is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Versioning is not supported for {artifact_type!r} (agents and commands only)."
-            ),
+        raise _error(
+            404,
+            "missing",
+            (f"Versioning is not supported for {artifact_type!r} (agents and commands only)."),
         )
     resolver, kind = entry
     name = validate_name(raw_name, kind=kind)
     resolved = resolver(project_root, name, scope)
     if resolved is None:
-        raise HTTPException(status_code=404, detail=f"{kind} {name!r} not found")
+        raise _error(404, "missing", f"{kind} {name!r} not found")
     working_file, layout = resolved
     return name, working_file, layout
 
@@ -146,13 +148,15 @@ def _resolve_versionable(
 def _require_dir_layout(name: str, layout: Layout) -> None:
     """409 when *layout* is flat — versioning needs the per-artifact directory."""
     if layout != "dir":
-        raise HTTPException(
-            status_code=409,
-            detail=(
+        raise _error(
+            409,
+            "conflict",
+            (
                 f"{name!r} uses flat layout, which has no per-artifact version store. "
                 f"Enable versioning (POST /context/<type>/<name>/versions/enable) to convert it "
                 f"to directory layout; for a CLI-installed artifact, `mm context migrate` also works."
             ),
+            reason_code="flat_layout_not_versionable",
         )
 
 
@@ -318,7 +322,7 @@ async def create_artifact_version(
             async with _gateway_lock:
                 record = versioning.create_version(artifact_dir, working_file, note=note)
     except TimeoutError:
-        raise HTTPException(503, "Version create timed out — another sync may be in progress")
+        raise _error(503, "busy", "Version create timed out — another sync may be in progress")
     except VersionError as exc:
         raise _version_http(exc) from exc
 
@@ -399,13 +403,15 @@ async def enable_artifact_versioning(
                     if flat_path.exists():
                         # flat+dir collision — refuse rather than report a
                         # misleading idempotent success while a stray flat lingers.
-                        raise HTTPException(
-                            status_code=409,
-                            detail=_PATH_RE.sub(
+                        raise _error(
+                            409,
+                            "conflict",
+                            _PATH_RE.sub(
                                 "<path>",
                                 f"{name!r} has both flat ({flat_path}) and directory layouts; "
                                 "remove the redundant flat file to resolve the collision.",
                             ),
+                            reason_code="flat_dir_collision",
                         )
                     return {
                         "name": name,
@@ -422,13 +428,15 @@ async def enable_artifact_versioning(
                     versioning.versions_json_path(dir_path).exists()
                     or versioning.versions_dir(dir_path).is_dir()
                 ):
-                    raise HTTPException(
-                        status_code=409,
-                        detail=_PATH_RE.sub(
+                    raise _error(
+                        409,
+                        "conflict",
+                        _PATH_RE.sub(
                             "<path>",
                             f"{name!r} cannot be adopted: an orphaned version store already "
                             f"exists at {dir_path}. Resolve it manually first.",
                         ),
+                        reason_code="orphaned_version_store",
                     )
                 adopt_flat_to_dir(artifact_type, flat_path, dir_path)
                 return {
@@ -439,15 +447,17 @@ async def enable_artifact_versioning(
                     "migrated": True,
                 }
     except TimeoutError:
-        raise HTTPException(503, "Enable versioning timed out — another sync may be in progress")
+        raise _error(503, "busy", "Enable versioning timed out — another sync may be in progress")
     except FileNotFoundError as exc:
         # The flat file vanished mid-rename (external deletion under the lock).
-        raise HTTPException(status_code=404, detail=_PATH_RE.sub("<path>", str(exc)))
+        raise _error(404, "missing", _PATH_RE.sub("<path>", str(exc)))
     except FileExistsError as exc:
         # flat+dir collision surfaced by the adopt guard (defense in depth).
-        raise HTTPException(status_code=409, detail=_PATH_RE.sub("<path>", str(exc)))
+        raise _error(
+            409, "conflict", _PATH_RE.sub("<path>", str(exc)), reason_code="destination_exists"
+        )
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=_PATH_RE.sub("<path>", str(exc)))
+        raise _error(400, "validation", _PATH_RE.sub("<path>", str(exc)))
 
 
 # ── Promote / rollback a label ───────────────────────────────────────────
@@ -484,7 +494,7 @@ async def promote_artifact_label(
                 versioning.promote_label(artifact_dir, label, body.version)
                 manifest = versioning.load_manifest(artifact_dir)
     except TimeoutError:
-        raise HTTPException(503, "Label promote timed out — another sync may be in progress")
+        raise _error(503, "busy", "Label promote timed out — another sync may be in progress")
     except VersionError as exc:
         raise _version_http(exc) from exc
 
@@ -524,7 +534,7 @@ async def delete_artifact_label(
                 versioning.delete_label(artifact_dir, label)
                 manifest = versioning.load_manifest(artifact_dir)
     except TimeoutError:
-        raise HTTPException(503, "Label delete timed out — another sync may be in progress")
+        raise _error(503, "busy", "Label delete timed out — another sync may be in progress")
     except VersionError as exc:
         raise _version_http(exc) from exc
 

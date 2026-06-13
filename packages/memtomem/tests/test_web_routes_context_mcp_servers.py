@@ -120,11 +120,15 @@ async def test_non_shared_tier_reads_empty_but_blocks_writes(
         json={"name": "demo2", "content": _definition()},
     )
     assert create.status_code == 400
-    assert "project_shared" in create.json()["detail"]
+    assert "project_shared" in create.json()["detail"]["message"]
+    assert create.json()["detail"]["error_kind"] == "validation"
+    assert create.json()["detail"]["reason_code"] == "non_shared_write_rejected"
 
     sync = await client.post("/api/context/mcp-servers/sync", params={"target_scope": "user"})
     assert sync.status_code == 400
-    assert "project_shared" in sync.json()["detail"]
+    assert "project_shared" in sync.json()["detail"]["message"]
+    assert sync.json()["detail"]["error_kind"] == "validation"
+    assert sync.json()["detail"]["reason_code"] == "non_shared_write_rejected"
 
 
 @pytest.mark.anyio
@@ -134,7 +138,8 @@ async def test_create_rejects_invalid_json(client: AsyncClient) -> None:
         json={"name": "demo", "content": "{not json"},
     )
     assert r.status_code == 422
-    assert "invalid JSON" in r.json()["detail"]
+    assert "invalid JSON" in r.json()["detail"]["message"]
+    assert r.json()["detail"]["error_kind"] == "parse"
 
 
 @pytest.mark.anyio
