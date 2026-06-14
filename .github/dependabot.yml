@@ -18,14 +18,30 @@ updates:
       github-actions:
         patterns: ["*"]
 
-  # uv workspace: the single lockfile is the root uv.lock (member deps are
-  # declared in packages/memtomem/pyproject.toml but locked here), so the
-  # updater points at "/". NB: Dependabot doesn't yet document uv-workspace
-  # traversal — confirm the first weekly uv run actually proposes member-dep
-  # bumps (the security fixes tracked in #1331) and move the directory to
-  # "/packages/memtomem" if it comes up empty.
+  # uv workspace: the single root uv.lock holds everything (member runtime deps
+  # are declared in packages/memtomem/pyproject.toml but resolved/locked here;
+  # dev deps live in the root [dependency-groups]). directory:"/" is where
+  # [tool.uv.workspace] and uv.lock live — member-dep bumps do surface from here,
+  # so do NOT split to "/packages/memtomem" (no colocated lockfile there).
+  #
+  # versioning-strategy: lockfile-only — Dependabot updates only the resolved
+  # versions in uv.lock and "ignores any new versions that would require package
+  # manifest changes" (uv is in this option's supported list). It removes the
+  # manifest-edit step entirely, so pyproject<->uv.lock drift is impossible by
+  # construction. Without it, member-package requirement updates edited uv.lock's
+  # requires-dist but not the member pyproject (dependabot-core#12788), so
+  # `uv lock --check` failed — see #1337/#1338, corrected by #1343. Nothing is
+  # lost: `>=` floors are minimums (a satisfied floor is never rewritten anyway),
+  # and security floors are owned by root [tool.uv] constraint-dependencies (#1331).
+  #
+  # Caveat: lockfile-only never RAISES an authored floor, so an advisory needing
+  # a floor above the member manifest must be done by hand / via the root
+  # constraint list. CI also still resolves with `uv sync --frozen` (not
+  # `uv lock --check`), so this fixes the drift source but isn't a fail-closed
+  # gate — adding `uv lock --check` to CI is a tracked follow-up.
   - package-ecosystem: "uv"
     directory: "/"
+    versioning-strategy: "lockfile-only"
     schedule:
       interval: "weekly"
     # Group routine minor/patch bumps into one PR; majors still arrive
