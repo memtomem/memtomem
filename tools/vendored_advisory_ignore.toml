@@ -1,0 +1,22 @@
+# Reviewed, time-boxed suppressions for the vendored-asset OSV advisory gate
+# (tools/check_vendored_advisories.py — issue #1252).
+#
+# EMPTY BY DEFAULT. Add an entry ONLY for an advisory that cannot be remediated
+# by bumping the pinned version right now: no fixed release exists, the advisory
+# is disputed, or it is proven unreachable in `mm web`'s usage. Prefer bumping
+# the vendored asset (web/static/vendor/README.md) over suppressing.
+#
+# Every entry is reviewed and expires. The gate FAILS when:
+#   * an entry's `expires` date has passed (forces re-review), or
+#   * an entry matches no current advisory (stale — remove it).
+# Do NOT disable the job; add a justified, expiring entry here instead.
+#
+# Schema (all keys required):
+#
+#   [[ignore]]
+#   id = "GHSA-xxxx-xxxx-xxxx"   # OSV / GHSA advisory id
+#   package = "marked"           # npm package name (the `npm package` column)
+#   version = "18.0.3"           # the pinned version it applies to
+#   reason = "no fixed release yet; not reachable — we never call <api>"
+#   owner = "your-github-handle"
+#   expires = 2026-09-01         # YYYY-MM-DD; gate fails once this date passes

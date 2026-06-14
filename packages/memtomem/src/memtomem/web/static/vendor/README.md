@@ -33,19 +33,28 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    path is dynamically Terser'd at request time and the SHA is not stable
    across cache misses (their banner says "Do NOT use SRI").
 
+   `purify.min.js` (DOMPurify) is likewise fetched from jsdelivr's npm
+   proxy (`/npm/dompurify@<v>/dist/purify.min.js`) because cdnjs stopped
+   mirroring DOMPurify after the 3.1.x line — there is no 3.4.x build on
+   cdnjs. The jsdelivr `/dist/` path is the pre-minified file shipped in
+   the immutable npm tarball, so the SHA is reproducible. DOMPurify stays
+   dual-licensed `(MPL-2.0 OR Apache-2.0)`; keep the full dual-text
+   `dompurify-LICENSE.txt` even though upstream's `LICENSE` file slimmed to
+   Apache-only at recent tags.
+
    ```bash
    cd packages/memtomem/src/memtomem/web/static/vendor
 
    # SPA assets — bump versions here, then run:
-   curl -sSfL -o prism-tomorrow.min.css   https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css
-   curl -sSfL -o purify.min.js            https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js
+   curl -sSfL -o prism-tomorrow.min.css   https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/themes/prism-tomorrow.min.css
+   curl -sSfL -o purify.min.js            https://cdn.jsdelivr.net/npm/dompurify@3.4.10/dist/purify.min.js
    curl -sSfL -o marked.umd.js            https://cdn.jsdelivr.net/npm/marked@18.0.3/lib/marked.umd.js
-   curl -sSfL -o prism.min.js             https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js
-   curl -sSfL -o prism-python.min.js      https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js
-   curl -sSfL -o prism-typescript.min.js  https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js
-   curl -sSfL -o prism-json.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js
-   curl -sSfL -o prism-bash.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js
-   curl -sSfL -o prism-yaml.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js
+   curl -sSfL -o prism.min.js             https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/prism.min.js
+   curl -sSfL -o prism-python.min.js      https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-python.min.js
+   curl -sSfL -o prism-typescript.min.js  https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-typescript.min.js
+   curl -sSfL -o prism-json.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-json.min.js
+   curl -sSfL -o prism-bash.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-bash.min.js
+   curl -sSfL -o prism-yaml.min.js        https://cdnjs.cloudflare.com/ajax/libs/prism/1.30.0/components/prism-yaml.min.js
 
    # Swagger UI — pin the same version across all three files:
    curl -sSfL -o swagger/swagger-ui-bundle.js                  https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.5/swagger-ui-bundle.js
@@ -63,6 +72,14 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    under the same version path) — do not commit. Investigate upstream
    first, then file an issue before any update.
 
+   This check is no longer manual-only: `tests/web/test_vendor_asset_pins.py`
+   re-hashes every file against the SHA-256 column on each test run (offline,
+   cross-platform), and the `vendored-assets` CI job runs
+   `tools/check_vendored_advisories.py`, which queries OSV for every `npm
+   package`/`Version` pair in the table and fails on any known advisory. A
+   version bump therefore has to update BOTH the SHA column (or the asset
+   test fails) and land a non-vulnerable version (or the advisory job fails).
+
 2. Replace the upstream LICENSE files in this directory if the new
    version's LICENSE has changed:
 
@@ -74,7 +91,10 @@ table, source URLs, SHA-256 hashes, and full upstream license texts.
    ```
 
 3. Update `THIRD_PARTY_LICENSES.md` — bump the version column, replace
-   the SHA-256, and update the `Source` link's tag.
+   the SHA-256, update the `Source` link's tag, and (for a brand-new asset)
+   set the `npm package` column to the canonical npm name. The advisory
+   check keys off that column, so a wrong/blank name fails the
+   `vendored-assets` job loudly rather than scanning the wrong package.
 
 4. Bump `?v=N` on the matching `<script>` / `<link>` references so users
    get the new bytes past their disk cache. The references live in:
