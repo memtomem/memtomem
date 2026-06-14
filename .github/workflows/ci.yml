@@ -24,6 +24,12 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
+      # Fail closed on pyproject <-> uv.lock drift (e.g. a Dependabot member-dep
+      # update that edits the lock's requires-dist but not the member manifest).
+      # dependabot.yml uses versioning-strategy: lockfile-only to prevent that at
+      # the source; this is the CI backstop, since every other job resolves with
+      # `uv sync --frozen` (which neither checks nor regenerates the lock).
+      - run: uv lock --check
       - run: uv sync --frozen
       - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools
       - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools
