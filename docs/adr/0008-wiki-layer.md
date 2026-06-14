@@ -116,7 +116,7 @@ be reconsidered in v2 if a real workflow demands it.
 
          │  existing fan-out + override resolution (Invariant 4)
          ▼
-.claude/, .gemini/, .agents/, .codex/    ← runtime dirs (unchanged from ADR-0001)
+.claude/, .gemini/, .agents/, .codex/, .kimi/  ← runtime dirs (fan-out mechanism unchanged from ADR-0001)
 ```
 
 ## Subcommands
@@ -268,8 +268,11 @@ applies to `known_projects.json` mutations (`KnownProjectsCorruptError`).
 
 `OVERRIDE_FORMATS = { (asset_type, vendor): (alias, extension) }` lives
 in `packages/memtomem/src/memtomem/context/_names.py`. v1 covers Claude,
-Gemini, Codex across skills, agents, commands. Cursor and Copilot are
-excluded — their skill/agent/command surfaces are too thin to justify
+Gemini, Codex across skills, agents, and commands, plus Kimi for skills
+and agents (Kimi has no commands surface). The `mm wiki` `--vendor` choices
+derive from this matrix per asset type (`override_vendors`), so the CLI
+offers exactly the registered vendors and never drifts. Cursor and Copilot
+are excluded — their skill/agent/command surfaces are too thin to justify
 override slots. They can be added in v2 if their runtime surface grows.
 
 ## PR Breakdown

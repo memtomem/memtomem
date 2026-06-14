@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`mm wiki` exposes the Kimi vendor; `--vendor` Choices derive from the
+  matrix (ADR-0008).** `mm wiki skill|agent {override,diff,lint} --vendor kimi`
+  now works. Kimi skills/agents have had `OVERRIDE_FORMATS` rows and renderers
+  (`kimi_skills` / `kimi_agents`) since PR-D, but the `mm wiki` CLI hard-coded
+  every `--vendor` Choice to `claude|gemini|codex` and silently dropped kimi.
+  Each verb's Choice is now derived per asset type from `OVERRIDE_FORMATS`
+  (`override_vendors`), so it can never drift from the matrix again: kimi is
+  offered for skills and agents but not commands (Kimi has no commands surface),
+  and codex stays the documented placeholder for commands.
+
 - **`mm wiki <type> {diff, lint}` — inspect wiki overrides (ADR-0008 PR-D; #1332).**
   Two read-only verbs round out the per-asset `mm wiki skill|agent|command`
   group. `diff <name> --vendor <vendor>` renders the canonical the way

@@ -15,10 +15,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from memtomem.cli.wiki_cmd import wiki as wiki_group
+from memtomem.context._names import override_vendors
 from memtomem.wiki.store import WikiStore
 
 
@@ -671,3 +673,80 @@ def test_wiki_command_override_stdout_contract(wiki_root: Path) -> None:
     assert target_path.as_posix() in out
     assert "git commit" in out
     assert "git add commands/demo/overrides/gemini.toml" in out
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ── kimi vendor — derived Choice (ADR-0008 vendor matrix) ────────────────
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_wiki_skill_override_kimi_accepted(wiki_root: Path) -> None:
+    """kimi is a registered skills vendor; the CLI accepts ``--vendor kimi``
+    and seeds ``overrides/kimi.md`` (skills byte-copy the canonical)."""
+    _initialized_wiki()
+    canonical_bytes = b"# hello kimi\nbody\n"
+    _seed_skill(wiki_root, "hello", canonical_bytes)
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "override", "hello", "--vendor", "kimi"])
+
+    assert result.exit_code == 0, result.output
+    target = wiki_root / "skills" / "hello" / "overrides" / "kimi.md"
+    assert target.is_file()
+    assert target.read_bytes() == canonical_bytes
+
+
+def test_wiki_agent_override_kimi_accepted(wiki_root: Path) -> None:
+    """kimi agents render to ``overrides/kimi.yaml`` via the ``kimi_agents``
+    generator — the CLI accepts ``--vendor kimi`` for agents."""
+    _initialized_wiki()
+    _seed_agent(wiki_root, "demo")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["agent", "override", "demo", "--vendor", "kimi"])
+
+    assert result.exit_code == 0, result.output
+    target = wiki_root / "agents" / "demo" / "overrides" / "kimi.yaml"
+    assert target.is_file()
+
+
+def test_wiki_command_override_kimi_rejected(wiki_root: Path) -> None:
+    """commands have no kimi row in OVERRIDE_FORMATS, so the derived Choice
+    rejects ``--vendor kimi`` as a click usage error — kimi never reaches the
+    renderer for commands."""
+    _initialized_wiki()
+    _seed_command(wiki_root, "demo")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["command", "override", "demo", "--vendor", "kimi"])
+
+    assert result.exit_code != 0
+    assert "kimi" in result.output  # click.Choice error references the rejected value
+
+
+# ── vendor Choice derives from the matrix (anti-re-hardcode guard) ───────
+
+
+def _vendor_choices(cmd: click.Command) -> tuple[str, ...]:
+    for param in cmd.params:
+        if param.name == "vendor":
+            assert isinstance(param.type, click.Choice)
+            return tuple(param.type.choices)
+    raise AssertionError(f"{cmd.name!r} has no --vendor option")
+
+
+@pytest.mark.parametrize("verb", ["override", "diff", "lint"])
+@pytest.mark.parametrize(
+    "group_name, asset_type",
+    [("skill", "skills"), ("agent", "agents"), ("command", "commands")],
+)
+def test_wiki_vendor_choices_derive_from_matrix(
+    group_name: str, asset_type: str, verb: str
+) -> None:
+    """Every ``mm wiki <type> {override,diff,lint}`` ``--vendor`` Choice must
+    equal ``override_vendors(asset_type)`` — a guard against re-hardcoding the
+    list (the regression that originally dropped kimi for skills/agents)."""
+    group = wiki_group.commands[group_name]
+    assert isinstance(group, click.Group)
+    cmd = group.commands[verb]
+    assert _vendor_choices(cmd) == tuple(override_vendors(asset_type))
