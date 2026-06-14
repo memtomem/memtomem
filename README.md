@@ -63,6 +63,8 @@ mm init                               # preset picker, then memory_dir + MCP
 
 The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `bge-small-en-v1.5` + English reranker + auto-discover providers), **Korean-optimized** (ONNX `bge-m3` + `kiwipiepy` tokenizer + multilingual reranker) — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
 
+> **Indexing vs. discovery (Claude Code):** provider memory folders that setup auto-discovers (e.g. `~/.claude/projects/*/memory/`) are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Custom Commands, and Subagents — see [Configuration → Context Gateway](docs/guides/configuration.md#context-gateway) for the distinction and the lossy-slug caveats.
+
 For automation / CI:
 
 ```bash
