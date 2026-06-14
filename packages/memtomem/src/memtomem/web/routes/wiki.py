@@ -5,8 +5,9 @@ per-project ``context_*`` surfaces. These routes therefore use none of the
 project-scope machinery (``resolve_scope_root`` / ``target_scope`` / the
 host-write gate) — they read the wiki working tree directly via
 :class:`WikiStore`. All three endpoints are GET / read-only and mount in the
-prod tier; the mutating override-seed verb stays CLI-only until a dev-tier
-follow-up (ADR-0008 PR-E E-2).
+prod tier; the mutating override-seed verb lives in the dev-tier sibling
+``wiki_mutations.py`` (ADR-0008 PR-E E-2), sharing this module's validators
+via the ``_wiki_common`` leaf.
 
 Mirrors the read-only template of ``namespaces_read.py``: each handler wraps
 the blocking git subprocess in :func:`asyncio.to_thread` and maps the model
@@ -18,47 +19,21 @@ malformed wiki is a precise status the UI can render — never a traceback
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
 
 from fastapi import APIRouter, Query
 
-from memtomem.context._names import (
-    InvalidNameError,
-    override_vendors,
-    renderable_vendors,
-    validate_name,
-)
+from memtomem.context._names import override_vendors, renderable_vendors
 from memtomem.wiki import inspect as wiki_inspect
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 from memtomem.web.routes._errors import _error
+from memtomem.web.routes._wiki_common import (
+    AssetType,
+    _require_vendor,
+    _validate_name_or_error,
+    _wiki_absent,
+)
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
-
-# Literal path param → FastAPI returns 422 for any other value, so a hostile
-# ``asset_type`` can never reach ``lint_asset``'s ``store.root / asset_type``
-# path join (the model layer validates ``name`` but not ``asset_type``).
-AssetType = Literal["skills", "agents", "commands"]
-
-
-def _validate_name_or_error(asset_type: str, name: str) -> None:
-    try:
-        validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
-    except InvalidNameError as exc:
-        raise _error(400, "validation", str(exc), reason_code="invalid_name") from exc
-
-
-def _require_vendor(asset_type: str, vendor: str) -> None:
-    if vendor not in override_vendors(asset_type):
-        raise _error(
-            400,
-            "validation",
-            f"unknown vendor {vendor!r} for {asset_type}",
-            reason_code="unknown_vendor",
-        )
-
-
-def _wiki_absent(exc: WikiNotFoundError) -> Exception:
-    return _error(404, "missing", str(exc), reason_code="wiki_absent")
 
 
 @router.get("")

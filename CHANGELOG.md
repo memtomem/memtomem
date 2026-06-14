@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Web UI: dev-tier override-seed in the wiki browser (ADR-0008 PR-E E-2).**
+  The Context Gateway **Wiki** section gains a per-vendor **Seed override** action
+  (dev mode only) — the web parity of `mm wiki <type> override`. It renders the
+  canonical baseline into `~/.memtomem-wiki/<type>/<name>/overrides/<vendor>.<ext>`
+  for you to edit and commit; it never auto-commits, so the new file is left in
+  the working tree (the HEAD badge flips to "uncommitted changes"). Re-seeding an
+  existing override is gated behind a confirm and keeps the previous content as a
+  `.bak` sibling. The new `POST /api/wiki/{type}/{name}/override` mounts only in
+  `mode=dev` (`web/routes/wiki_mutations.py`); a non-renderable vendor (the
+  `commands`/`codex` placeholder) → 400, a missing canonical → 404, and an
+  existing override without `force` → 409 — never a traceback. The read-only
+  browser stays prod-tier and unchanged.
+
 - **Web UI: read-only wiki browser (ADR-0008 PR-E).** The Context Gateway gains
   a **Wiki** section that browses the global `~/.memtomem-wiki` repo — the
   canonical skills, agents, and commands shared across projects. Pick an asset

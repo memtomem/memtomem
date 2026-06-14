@@ -65,6 +65,14 @@ _DIFF = {
     "dropped": [],
 }
 
+_DIFF_NONE = {
+    "override_path": "/w/skills/alpha/overrides/claude.md",
+    "exists": False,
+    "in_sync": False,
+    "diff_lines": [],
+    "dropped": [],
+}
+
 _LINT = {"asset_type": "skills", "name": "alpha", "ok": True, "findings": []}
 
 
@@ -123,3 +131,55 @@ def test_wiki_detail_loads_diff_and_lint_on_click(page, mm_web_url: str) -> None
     )
     # Lint section renders its 'well-formed' badge for an ok report.
     assert page.locator("#wiki-vendor-view .wiki-section").count() >= 2
+
+
+def test_wiki_override_seed_in_dev_mode(page, mm_web_url: str) -> None:
+    """Dev tier (E-2): the seed button appears and POSTs ``force=false`` for a
+    fresh override, and the HEAD badge repaints from the response's ``wiki_dirty``.
+    Gated on ``body.dev-mode`` → stub ``/api/system/ui-mode`` to ``dev``."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF_NONE))  # no override yet
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    posted: list[dict] = []
+
+    def _seed(route):
+        req = route.request
+        if req.method == "POST":
+            posted.append(json.loads(req.post_data or "{}"))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "seeded": True,
+                        "vendor": "claude",
+                        "forced": False,
+                        "dropped": [],
+                        "wiki_dirty": True,
+                    }
+                ),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/wiki/**/override", _seed)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+
+    # Detail loads; the seed button renders for the default (claude) vendor and,
+    # with no override on disk, is the fresh-seed variant (data-exists="0").
+    page.wait_for_selector("#wiki-seed-btn", timeout=5_000)
+    assert page.locator("#wiki-seed-btn").get_attribute("data-exists") == "0"
+
+    page.locator("#wiki-seed-btn").click()
+    # Success repaints the HEAD dirty badge (wiki_dirty=True from the response).
+    page.wait_for_function(
+        "() => document.querySelector('#wiki-head .badge-warning') !== null",
+        timeout=5_000,
+    )
+    assert posted == [{"vendor": "claude", "force": False}]

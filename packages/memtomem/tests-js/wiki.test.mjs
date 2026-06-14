@@ -46,6 +46,18 @@ const GAMMA_DIFF = {
 };
 const GAMMA_LINT = { asset_type: 'commands', name: 'gamma', ok: true, findings: [] };
 
+// skills/alpha override-seed fixtures (E-2). claude is the first renderable
+// vendor, so loadWikiDetail('skills','alpha') auto-selects it and fetches these.
+const ALPHA_DIFF_NONE = {
+  override_path: '/w/skills/alpha/overrides/claude.md',
+  exists: false,
+  in_sync: false,
+  diff_lines: [],
+  dropped: [],
+};
+const ALPHA_DIFF_EXISTS = { ...ALPHA_DIFF_NONE, exists: true, in_sync: true };
+const ALPHA_LINT_OK = { asset_type: 'skills', name: 'alpha', ok: true, findings: [] };
+
 const API = {
   '/api/wiki': WIKI_LIST,
   '/api/wiki/commands/gamma/diff': GAMMA_DIFF,
@@ -118,5 +130,108 @@ describe('wiki.js read-only browser', () => {
     expect(list.textContent).not.toContain('Skills');
 
     await window.I18N.setLang('en');
+  });
+});
+
+describe('wiki.js override-seed (E-2, dev tier)', () => {
+  // A fetch stub that records POSTs and serves the skills/alpha diff/lint +
+  // a seed response, falling back to the boot stub for /api/wiki, /api/session,
+  // and /locales.
+  function recordingFetch(window, { exists, seedResponse }) {
+    const posts = [];
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (method === 'POST' && p === '/api/wiki/skills/alpha/override') {
+        posts.push(JSON.parse(init.body));
+        return { ok: true, status: 200, json: async () => seedResponse, text: async () => '' };
+      }
+      if (p === '/api/wiki/skills/alpha/diff') {
+        const diff = exists ? ALPHA_DIFF_EXISTS : ALPHA_DIFF_NONE;
+        return { ok: true, status: 200, json: async () => diff, text: async () => '' };
+      }
+      if (p === '/api/wiki/skills/alpha/lint') {
+        return { ok: true, status: 200, json: async () => ALPHA_LINT_OK, text: async () => '' };
+      }
+      return base(input, init);
+    };
+    return posts;
+  }
+
+  it('shows the seed button in dev mode and hides it in prod', async () => {
+    const apis = {
+      '/api/wiki': WIKI_LIST,
+      '/api/wiki/skills/alpha/diff': ALPHA_DIFF_NONE,
+      '/api/wiki/skills/alpha/lint': ALPHA_LINT_OK,
+    };
+
+    const dev = await boot(apis);
+    dev.window.document.body.classList.add('dev-mode');
+    await dev.window.loadWiki();
+    await dev.window.loadWikiDetail('skills', 'alpha');
+    const devBtn = dev.window.document.getElementById('wiki-seed-btn');
+    expect(devBtn).not.toBeNull();
+    expect(devBtn.dataset.exists).toBe('0');
+    expect(devBtn.textContent).toContain(dev.window.t('settings.ctx.wiki_seed'));
+
+    const prod = await boot(apis); // no dev-mode class
+    await prod.window.loadWiki();
+    await prod.window.loadWikiDetail('skills', 'alpha');
+    expect(prod.window.document.getElementById('wiki-seed-btn')).toBeNull();
+  });
+
+  it('labels the button "Re-seed" when an override already exists', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    recordingFetch(window, { exists: true, seedResponse: {} });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    const btn = window.document.getElementById('wiki-seed-btn');
+    expect(btn.dataset.exists).toBe('1');
+    expect(btn.textContent).toContain(window.t('settings.ctx.wiki_reseed'));
+  });
+
+  it('a fresh seed POSTs force=false and repaints the dirty badge', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    const posts = recordingFetch(window, {
+      exists: false,
+      seedResponse: { seeded: true, vendor: 'claude', forced: false, dropped: [], wiki_dirty: true },
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    // _onWikiSeedClick is a top-level fn → awaitable directly (no flush races).
+    await window._onWikiSeedClick(false);
+    expect(posts).toEqual([{ vendor: 'claude', force: false }]);
+    // wiki_dirty:true → HEAD badge repainted without re-listing.
+    const head = window.document.getElementById('wiki-head');
+    expect(head.textContent).toContain(window.t('settings.ctx.wiki_dirty'));
+  });
+
+  it('a re-seed confirms first, then POSTs force=true', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    window.showConfirm = async () => true; // accept the overwrite
+    const posts = recordingFetch(window, {
+      exists: true,
+      seedResponse: { seeded: true, vendor: 'claude', forced: true, dropped: [], wiki_dirty: true },
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    await window._onWikiSeedClick(true);
+    expect(posts).toEqual([{ vendor: 'claude', force: true }]);
+  });
+
+  it('a declined re-seed confirm POSTs nothing', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    window.showConfirm = async () => false; // cancel the overwrite
+    const posts = recordingFetch(window, { exists: true, seedResponse: {} });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    await window._onWikiSeedClick(true);
+    expect(posts).toEqual([]);
   });
 });

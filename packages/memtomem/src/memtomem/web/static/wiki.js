@@ -7,7 +7,7 @@
  * dispatches from switchSettingsSection via loadWiki() rather than loadCtxList.
  *
  * Depends on globals from app.js: qs, show, hide, escapeHtml, t, showToast,
- * emptyState, panelLoading.
+ * showConfirm, ensureCsrfToken, emptyState, panelLoading.
  *
  * i18n: all dynamic text goes through inline t() (never data-i18n on injected
  * nodes — applyDOM would clobber re-rendered content), and a `langchange`
@@ -193,11 +193,116 @@ function _renderLintSection(lint) {
   return html;
 }
 
+// --- Override seeding (E-2, dev tier only) ----------------------------------
+// Mirrors `mm wiki <type> override`: renders the canonical baseline into
+// overrides/<vendor>.<ext> for the user to edit and commit. Gated to dev mode
+// (the POST route only mounts there) and, for a re-seed that would clobber an
+// existing override, behind a confirm (the writer keeps a .bak sibling).
+
+function _wikiDevMode() {
+  return typeof document !== 'undefined'
+    && !!document.body
+    && document.body.classList.contains('dev-mode');
+}
+
+function _wikiVendorRenderable(vendor) {
+  if (!_wikiActive) return false;
+  const item = ((_wikiData && _wikiData.items) || []).find(
+    (i) => i.type === _wikiActive.type && i.name === _wikiActive.name,
+  );
+  const v = ((item && item.vendors) || []).find((x) => x.vendor === vendor);
+  return !!(v && v.renderable);
+}
+
+function _renderWikiSeedAction() {
+  // Dev-tier only: seeding writes to the host-global wiki working tree.
+  if (!_wikiDevMode() || !_wikiActive || !_wikiVendor) return '';
+  // A diff error means we can't tell whether an override exists — don't offer a
+  // mutation we'd mislabel (Seed vs Re-seed). Non-renderable vendors (the
+  // ("commands","codex") placeholder) have no generator and would 400, so
+  // mirror the disabled <option> in the picker and omit the button.
+  const diff = _wikiView && _wikiView.diff;
+  if (!diff || diff._error || !_wikiVendorRenderable(_wikiVendor)) return '';
+  const exists = !!diff.exists;
+  const label = exists ? t('settings.ctx.wiki_reseed') : t('settings.ctx.wiki_seed');
+  return '<div class="wiki-section wiki-seed-action">'
+    + '<button type="button" class="btn-ghost wiki-seed-btn" id="wiki-seed-btn"'
+    + ` data-exists="${exists ? '1' : '0'}">${escapeHtml(label)}</button>`
+    + `<span class="wiki-seed-hint">${escapeHtml(t('settings.ctx.wiki_seed_hint'))}</span>`
+    + '</div>';
+}
+
+function _bindWikiSeedAction() {
+  const btn = qs('wiki-seed-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => { _onWikiSeedClick(btn.dataset.exists === '1'); });
+}
+
+async function _onWikiSeedClick(exists) {
+  if (!_wikiActive || !_wikiVendor) return;
+  const { type, name } = _wikiActive;
+  const vendor = _wikiVendor;
+  if (exists) {
+    // Re-seed overwrites the user's (possibly edited) override — a .bak keeps
+    // the previous content, but gate the clobber behind a confirm. A first-time
+    // seed (no existing file) stays one click.
+    const ok = await showConfirm({
+      title: t('settings.ctx.wiki_reseed_confirm_title'),
+      message: t('settings.ctx.wiki_reseed_confirm_msg', {
+        vendor, type: _wikiTypeLabel(type), name,
+      }),
+      confirmText: t('settings.ctx.wiki_reseed_confirm_ok'),
+      cancelText: t('modal.cancel_btn'),
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  await _seedWikiOverride(type, name, vendor, exists);
+}
+
+async function _seedWikiOverride(type, name, vendor, force) {
+  const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/override`;
+  let res;
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ vendor, force }) });
+  } catch (err) {
+    showToast(t('settings.ctx.wiki_seed_failed', { error: String((err && err.message) || err) }), 'error');
+    return;
+  }
+  if (!res.ok) {
+    showToast(t('settings.ctx.wiki_seed_failed', { error: await _wikiErrDetail(res) }), 'error');
+    return;
+  }
+  const data = await res.json();
+  // Repaint the HEAD dirty badge from the response without re-listing (a11y: no
+  // list re-render / focus loss — see feedback_ctx_a11y_conventions).
+  if (_wikiData) { _wikiData.is_dirty = !!data.wiki_dirty; _renderWikiHead(); }
+  const dropped = (data && data.dropped) || [];
+  showToast(
+    dropped.length
+      ? t('settings.ctx.wiki_seed_ok_dropped', { vendor, fields: dropped.join(', ') })
+      : t('settings.ctx.wiki_seed_ok', { vendor }),
+    'success',
+  );
+  // Refresh diff/lint: the override now exists (diff → in-sync) and the button
+  // flips to "Re-seed". Guard against a vendor/asset switch mid-request.
+  if (_wikiActive && _wikiActive.type === type && _wikiActive.name === name
+      && _wikiVendor === vendor) {
+    await _loadWikiVendorView(type, name, vendor);
+  }
+}
+
 function _renderWikiVendorView() {
   const view = qs('wiki-vendor-view');
   if (!view) return;
   if (!_wikiView) { view.innerHTML = ''; return; }
-  view.innerHTML = _renderDiffSection(_wikiView.diff) + _renderLintSection(_wikiView.lint);
+  view.innerHTML = _renderDiffSection(_wikiView.diff)
+    + _renderLintSection(_wikiView.lint)
+    + _renderWikiSeedAction();
+  _bindWikiSeedAction();
 }
 
 function _renderWikiDetail() {

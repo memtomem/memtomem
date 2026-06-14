@@ -109,6 +109,8 @@ async def test_list_wiki_absent_is_404_not_500(client, wiki_root: Path) -> None:
     resp = await client.get("/api/wiki")
     assert resp.status_code == 404
     assert resp.json()["detail"]["reason_code"] == "wiki_absent"
+    # The absolute wiki path must not leak into the message (Codex review on E-2).
+    assert str(wiki_root) not in resp.text
 
 
 # ── GET /api/wiki/{type}/{name}/diff ──────────────────────────────────────

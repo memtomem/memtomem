@@ -4764,6 +4764,10 @@ button.ctx-runtime-chip--greyed:focus-visible {
 .wiki-diff { margin: 0; max-height: 360px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 0; font-family: var(--mono); font-size: 0.78rem; }
 .wiki-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .wiki-finding { font-size: 0.82rem; display: flex; align-items: baseline; gap: 6px; }
+/* Dev-tier override-seed action (E-2). */
+.wiki-seed-action { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; border-top: 1px dashed var(--border); padding-top: 12px; }
+.wiki-seed-btn { padding: 5px 12px; font-size: 0.82rem; }
+.wiki-seed-hint { font-size: 0.76rem; color: var(--muted); }
 /* Unified-diff line kinds the shared .diff-* set doesn't cover. */
 .diff-file { color: var(--muted); font-weight: 600; }
 .diff-hunk { color: var(--accent); }

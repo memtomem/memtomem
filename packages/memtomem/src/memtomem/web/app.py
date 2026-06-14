@@ -48,6 +48,7 @@ from memtomem.web.routes import (
     timeline,
     watchdog,
     wiki,
+    wiki_mutations,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ _DEV_ONLY_ROUTERS: list[ModuleType] = [
     procedures,
     evaluation,
     watchdog,
+    wiki_mutations,
 ]
 
 

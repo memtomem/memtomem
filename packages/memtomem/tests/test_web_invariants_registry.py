@@ -120,6 +120,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "tags.rename_tag",
         "tags.run_auto_tag",
         "watchdog.watchdog_run_now",
+        "wiki_mutations.seed_wiki_override",
     }
 )
 
@@ -214,6 +215,13 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_versions.enable_artifact_versioning": (
         "byte-identical flat→dir rename of an already-canonical file; no new "
         "content ingress (Gate A still applies at sync-time on frozen versions)"
+    ),
+    # Wiki override-seed renders the existing wiki canonical into
+    # overrides/<vendor>.<ext>; no user payload. Gate A guards the wiki→project
+    # install direction (ADR-0008 Inv 1), not wiki→wiki seeding.
+    "wiki_mutations.seed_wiki_override": (
+        "no content payload — renders existing wiki canonical into overrides/; "
+        "Gate A guards wiki→project install, not wiki→wiki seeding"
     ),
     # Tag mutations: short labels, separate validation at ingest.
     "chunks.update_chunk_tags": "tags are short labels; redaction not applicable to tag strings",
