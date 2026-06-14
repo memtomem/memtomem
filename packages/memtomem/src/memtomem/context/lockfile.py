@@ -327,10 +327,18 @@ class Lockfile:
         files: list[str] | None = None,
         files_commit: str | None = None,
         digests: dict[str, str] | None = None,
+        lock_timeout: float | None = None,
     ) -> None:
         """Insert or replace the ``(asset_type, name)`` entry.
 
         Holds the sidecar lock for the load + mutate + write triple.
+        ``lock_timeout`` (seconds) bounds the sidecar-lock acquisition: ``None``
+        (default) blocks indefinitely, matching the narrow CLI write window;
+        an async web handler offloading this to a worker thread MUST pass a
+        bound below its own request timeout so the thread self-aborts in-window
+        rather than orphaning a late write after the handler returned (#1145,
+        the ``_file_lock`` docstring). On expiry ``_file_lock`` raises
+        ``TimeoutError`` having written nothing.
         Preserves all unknown sibling and per-entry keys verbatim — only
         the mandated fields are written, anything else under
         ``doc[asset_type][name]`` survives.
@@ -358,7 +366,7 @@ class Lockfile:
         """
         if (files is None) != (files_commit is None):
             raise ValueError("files and files_commit must be passed together")
-        with _file_lock(_lock_path_for(self._path)):
+        with _file_lock(_lock_path_for(self._path), timeout=lock_timeout):
             doc = self.load()
             section = doc.get(asset_type)
             if not isinstance(section, dict):

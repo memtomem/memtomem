@@ -235,3 +235,133 @@ describe('wiki.js override-seed (E-2, dev tier)', () => {
     expect(posts).toEqual([]);
   });
 });
+
+describe('wiki.js install/update (E-3, dev tier)', () => {
+  // Boot in dev mode with a stubbed projects roster + active scope. The picker
+  // reads context-gateway.js globals via typeof-guards, so setting them on the
+  // window (rather than loading that script) is enough to drive the action.
+  async function bootDev(active = '', cache = [{ scope_id: '', label: 'Server CWD' }]) {
+    const dom = await boot({
+      '/api/wiki': WIKI_LIST,
+      '/api/wiki/skills/alpha/diff': ALPHA_DIFF_NONE,
+      '/api/wiki/skills/alpha/lint': ALPHA_LINT_OK,
+    });
+    dom.window.document.body.classList.add('dev-mode');
+    dom.window._ctxActiveScopeId = active;
+    dom.window._ctxProjectsCache = cache;
+    return dom;
+  }
+
+  // Records POSTs to the install/update routes; the 409 mode refuses a non-force
+  // update with stale_install (the dirty path) and accepts the force retry.
+  function recordingCtxFetch(window, { updateStatus = 200 } = {}) {
+    const posts = [];
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (method === 'POST' && p === '/api/context/skills/alpha/install') {
+        posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
+        return { ok: true, status: 200, json: async () => ({ installed: true }), text: async () => '' };
+      }
+      if (method === 'POST' && p === '/api/context/skills/alpha/update') {
+        const body = init.body ? JSON.parse(init.body) : {};
+        posts.push({ url, body });
+        if (updateStatus === 409 && !body.force) {
+          return {
+            ok: false, status: 409,
+            json: async () => ({ detail: { reason_code: 'stale_install' } }), text: async () => '',
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({ updated: true, was_no_op: false }), text: async () => '' };
+      }
+      return base(input, init);
+    };
+    return posts;
+  }
+
+  it('shows install/update buttons in dev and hides them in prod', async () => {
+    const dev = await bootDev();
+    await dev.window.loadWiki();
+    await dev.window.loadWikiDetail('skills', 'alpha');
+    expect(dev.window.document.getElementById('wiki-install-btn')).not.toBeNull();
+    expect(dev.window.document.getElementById('wiki-update-btn')).not.toBeNull();
+
+    const prod = await boot({
+      '/api/wiki': WIKI_LIST,
+      '/api/wiki/skills/alpha/diff': ALPHA_DIFF_NONE,
+      '/api/wiki/skills/alpha/lint': ALPHA_LINT_OK,
+    });
+    await prod.window.loadWiki();
+    await prod.window.loadWikiDetail('skills', 'alpha');
+    expect(prod.window.document.getElementById('wiki-install-btn')).toBeNull();
+  });
+
+  it('project <select> lists the roster and defaults to the active scope', async () => {
+    const dom = await bootDev('p-1', [
+      { scope_id: '', label: 'Server CWD' },
+      { scope_id: 'p-1', label: 'Proj One' },
+    ]);
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    const sel = dom.window.document.getElementById('wiki-install-project');
+    expect(sel).not.toBeNull();
+    expect(Array.from(sel.options).map((o) => o.value)).toEqual(['', 'p-1']);
+    expect(sel.value).toBe('p-1');
+  });
+
+  it('install POSTs to the install route with the selected scope_id', async () => {
+    const dom = await bootDev('p-1', [
+      { scope_id: '', label: 'Server CWD' },
+      { scope_id: 'p-1', label: 'Proj One' },
+    ]);
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('install');
+    expect(posts.length).toBe(1);
+    expect(posts[0].url).toBe('/api/context/skills/alpha/install?scope_id=p-1');
+    expect(posts[0].body).toBeNull(); // install carries no body
+  });
+
+  it('update POSTs force:false to the update route', async () => {
+    const dom = await bootDev();
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('update');
+    expect(posts.length).toBe(1);
+    expect(posts[0].url.split('?')[0]).toBe('/api/context/skills/alpha/update');
+    expect(posts[0].body).toEqual({ force: false });
+  });
+
+  it('Server-CWD selection omits scope_id from the URL', async () => {
+    const dom = await bootDev('', [{ scope_id: '', label: 'Server CWD' }]);
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('install');
+    expect(posts[0].url).toBe('/api/context/skills/alpha/install');
+  });
+
+  it('a dirty update confirms then re-POSTs with force:true', async () => {
+    const dom = await bootDev();
+    dom.window.showConfirm = async () => true; // accept the overwrite
+    const posts = recordingCtxFetch(dom.window, { updateStatus: 409 });
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('update');
+    expect(posts.map((p) => p.body.force)).toEqual([false, true]);
+  });
+
+  it('a declined dirty-update confirm sends no force POST', async () => {
+    const dom = await bootDev();
+    dom.window.showConfirm = async () => false; // cancel the overwrite
+    const posts = recordingCtxFetch(dom.window, { updateStatus: 409 });
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('update');
+    expect(posts.map((p) => p.body.force)).toEqual([false]); // initial only, no retry
+  });
+});

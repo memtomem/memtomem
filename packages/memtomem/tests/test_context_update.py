@@ -408,11 +408,19 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     with the right ``asset_type`` literal. Direct call sites (not via CLI)
     must keep the 3-wrapper API stable for downstream Python callers."""
     seen: list[str] = []
+    timeouts: list[float | None] = []
 
     def _fake_update_asset(
-        project_root: object, asset_type: str, name: str, *, wiki: object, force: bool
+        project_root: object,
+        asset_type: str,
+        name: str,
+        *,
+        wiki: object,
+        force: bool,
+        lock_timeout: float | None = None,
     ) -> object:
         seen.append(asset_type)
+        timeouts.append(lock_timeout)
         from memtomem.context.install import UpdateResult
 
         return UpdateResult(
@@ -434,6 +442,9 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     update_skill(Path("/tmp/p"), "s")
 
     assert seen == ["agents", "commands", "skills"]
+    # The wrappers forward lock_timeout verbatim; callers that omit it (the
+    # CLI / direct Python use) get the unbounded default (None).
+    assert timeouts == [None, None, None]
 
 
 # ════════════════════════════════════════════════════════════════════════

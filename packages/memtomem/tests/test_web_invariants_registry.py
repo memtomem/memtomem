@@ -69,6 +69,8 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_commands.sync_commands",
         "context_commands.update_command",
         "context_mcp_servers.create_mcp_server",
+        "context_mutations.install_asset",
+        "context_mutations.update_asset",
         "context_mcp_servers.delete_mcp_server",
         "context_mcp_servers.patch_mcp_server",
         "context_mcp_servers.sync_mcp_servers",
@@ -188,6 +190,17 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_mcp_servers.patch_mcp_server": "structured artifact; see above",
     "context_mcp_servers.delete_mcp_server": "delete-only, no payload",
     "context_mcp_servers.sync_mcp_servers": "filesystem-driven sync; see above",
+    # Wiki install/update (ADR-0008 PR-E E-3): snapshots existing wiki canonical
+    # bytes into <project>/.memtomem/; no user payload (update body is just
+    # ``force``). Gate A runs in-engine on the wiki source tree before the copy.
+    "context_mutations.install_asset": (
+        "no content payload — snapshots existing wiki canonical into the project; "
+        "Gate A runs in-engine on the wiki source tree before copy"
+    ),
+    "context_mutations.update_asset": (
+        "no free-form content payload (body is just ``force``) — refreshes the "
+        "project snapshot from wiki canonical; Gate A runs in-engine pre-copy"
+    ),
     "context_skills.create_skill": "structured artifact; see above",
     "context_skills.update_skill": "structured artifact; see above",
     "context_skills.import_skill": "structured artifact import",

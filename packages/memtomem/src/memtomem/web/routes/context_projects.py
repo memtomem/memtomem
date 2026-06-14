@@ -218,6 +218,35 @@ def resolve_writable_scope_root(
     return scope.root
 
 
+def resolve_project_shared_writable_scope_root(
+    request: Request,
+    project_scope_id: str | None = Query(default=None),
+    scope_id: str | None = Query(default=None),
+) -> Path:
+    """Writable project-scope resolver pinned to the ``project_shared`` tier.
+
+    Used by the ADR-0008 PR-E E-3 wiki install/update routes
+    (``context_mutations``). ``mm context install`` / ``update`` have no tier
+    axis — they only ever write the project's ``project_shared`` canonical
+    tree — so, unlike :func:`resolve_writable_scope_root`, this dependency
+    deliberately does NOT expose a ``target_scope`` query param.
+
+    Exposing it would be a real bypass: the sync-eligibility gate above exempts
+    the ``user`` tier, so a request ``?scope_id=<paused>&target_scope=user``
+    would skip the paused-project 409 while the engine still writes
+    project_shared bytes into that very project's tree. Omitting the param from
+    *this* signature means FastAPI never binds it from the wire, so the gate
+    always runs at ``project_shared`` and a paused / never-enrolled project is
+    refused regardless of any query the client appends.
+    """
+    return resolve_writable_scope_root(
+        request,
+        project_scope_id=project_scope_id,
+        scope_id=scope_id,
+        target_scope="project_shared",
+    )
+
+
 def resolve_scope_root_cascade_gated(
     request: Request,
     project_scope_id: str | None = Query(default=None),

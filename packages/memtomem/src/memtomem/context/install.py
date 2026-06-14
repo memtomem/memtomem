@@ -190,6 +190,7 @@ def install_skill(
     name: str,
     *,
     wiki: WikiStore | None = None,
+    lock_timeout: float | None = None,
 ) -> InstallResult:
     """Snapshot ``<wiki>/skills/<name>/`` into ``<project>/.memtomem/skills/<name>/``.
 
@@ -198,7 +199,7 @@ def install_skill(
     from the bytes that were copied. Refuses if either the lockfile entry
     or the destination directory already exists — see module docstring.
     """
-    return _install_asset(project_root, "skills", name, wiki=wiki)
+    return _install_asset(project_root, "skills", name, wiki=wiki, lock_timeout=lock_timeout)
 
 
 def install_agent(
@@ -206,9 +207,10 @@ def install_agent(
     name: str,
     *,
     wiki: WikiStore | None = None,
+    lock_timeout: float | None = None,
 ) -> InstallResult:
     """Snapshot ``<wiki>/agents/<name>/`` into ``<project>/.memtomem/agents/<name>/``."""
-    return _install_asset(project_root, "agents", name, wiki=wiki)
+    return _install_asset(project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout)
 
 
 def install_command(
@@ -216,9 +218,10 @@ def install_command(
     name: str,
     *,
     wiki: WikiStore | None = None,
+    lock_timeout: float | None = None,
 ) -> InstallResult:
     """Snapshot ``<wiki>/commands/<name>/`` into ``<project>/.memtomem/commands/<name>/``."""
-    return _install_asset(project_root, "commands", name, wiki=wiki)
+    return _install_asset(project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout)
 
 
 def _installed_at_epoch(lock_entry: dict[str, Any]) -> float | None:
@@ -497,6 +500,7 @@ def _install_asset(
     name: str,
     *,
     wiki: WikiStore | None,
+    lock_timeout: float | None = None,
 ) -> InstallResult:
     """Internal: install a single asset of any type.
 
@@ -590,6 +594,7 @@ def _install_asset(
         files=sorted(digest_map),
         files_commit=wiki_commit,
         digests=digest_map,
+        lock_timeout=lock_timeout,
     )
 
     return InstallResult(
@@ -608,6 +613,7 @@ def update_skill(
     *,
     wiki: WikiStore | None = None,
     force: bool = False,
+    lock_timeout: float | None = None,
 ) -> UpdateResult:
     """Refresh ``<wiki>/skills/<name>/`` snapshot at ``<project>/.memtomem/skills/<name>/``.
 
@@ -615,7 +621,9 @@ def update_skill(
     local edits would be clobbered, unless ``force=True`` (which preserves
     each dirty file as ``<file>.bak`` before overwriting).
     """
-    return _update_asset(project_root, "skills", name, wiki=wiki, force=force)
+    return _update_asset(
+        project_root, "skills", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+    )
 
 
 def update_agent(
@@ -624,9 +632,12 @@ def update_agent(
     *,
     wiki: WikiStore | None = None,
     force: bool = False,
+    lock_timeout: float | None = None,
 ) -> UpdateResult:
     """Refresh ``<wiki>/agents/<name>/`` snapshot at ``<project>/.memtomem/agents/<name>/``."""
-    return _update_asset(project_root, "agents", name, wiki=wiki, force=force)
+    return _update_asset(
+        project_root, "agents", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+    )
 
 
 def update_command(
@@ -635,9 +646,12 @@ def update_command(
     *,
     wiki: WikiStore | None = None,
     force: bool = False,
+    lock_timeout: float | None = None,
 ) -> UpdateResult:
     """Refresh ``<wiki>/commands/<name>/`` snapshot at ``<project>/.memtomem/commands/<name>/``."""
-    return _update_asset(project_root, "commands", name, wiki=wiki, force=force)
+    return _update_asset(
+        project_root, "commands", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+    )
 
 
 def _update_asset(
@@ -647,6 +661,7 @@ def _update_asset(
     *,
     wiki: WikiStore | None,
     force: bool = False,
+    lock_timeout: float | None = None,
 ) -> UpdateResult:
     """Internal: refresh a single installed asset of any type.
 
@@ -719,6 +734,7 @@ def _update_asset(
         wiki_commit=new_commit,
         lock_entry=lock_entry,
         force=force,
+        lock_timeout=lock_timeout,
     )
 
 
@@ -733,6 +749,7 @@ def _apply_update(
     lock_entry: dict[str, Any],
     force: bool,
     surface: str = "cli_context_update",
+    lock_timeout: float | None = None,
 ) -> UpdateResult:
     """Execute an update against apply-time dirty evidence.
 
@@ -896,6 +913,7 @@ def _apply_update(
         files=sorted(digest_map),
         files_commit=wiki_commit,
         digests=digest_map,
+        lock_timeout=lock_timeout,
     )
 
     old_wiki_commit = cast(str, lock_entry.get("wiki_commit", ""))
