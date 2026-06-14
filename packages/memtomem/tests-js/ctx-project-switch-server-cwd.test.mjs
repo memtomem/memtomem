@@ -128,3 +128,21 @@ describe('_ctxWireProjectControls — Server CWD round-trip (#1071)', () => {
     expect(window.localStorage.getItem('memtomem_ctx_active_scope_id')).toBe('proj-abc');
   });
 });
+
+describe('_ctxScopeDisplayLabel — server-cwd basename + "(current folder)" marker (#1356)', () => {
+  it('derives the basename from POSIX and Windows roots before appending the marker', async () => {
+    const { window } = await bootWithCache();
+    const cwd = (root, label = 'Server CWD') =>
+      window._ctxScopeDisplayLabel({ sources: ['server-cwd'], label, root });
+    // POSIX root → basename + marker.
+    expect(cwd('/srv/cwd')).toBe('cwd (current folder)');
+    // Windows backslash root must yield the basename, not the whole path
+    // (Codex review: _ctxBasename previously split only on '/').
+    expect(cwd('C:\\work\\proj')).toBe('proj (current folder)');
+    expect(cwd('C:\\work\\proj\\')).toBe('proj (current folder)');
+    // A real/stored label wins over the basename.
+    expect(cwd('C:\\work\\proj', 'Alpha')).toBe('Alpha (current folder)');
+    // Rootless offline fallback keeps the localized "Server CWD".
+    expect(cwd('')).toBe('Server CWD');
+  });
+});

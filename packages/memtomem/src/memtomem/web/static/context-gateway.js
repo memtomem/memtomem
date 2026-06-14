@@ -2952,7 +2952,11 @@ let _ctxCurrentDetail = { type: null, name: null, runtimeOnly: false };
 // reverse-proxy / debug case stays self-describing.
 function _ctxBasename(p) {
   if (!p) return '';
-  return String(p).replace(/\/$/, '').split('/').pop() || String(p);
+  // Split on BOTH separators so a Windows server-cwd root (``C:\work\proj``)
+  // yields ``proj``, not the whole path — P0-5 (#1353/#1356) now routes the
+  // visible "(current folder)" label through this, so the basename must be
+  // OS-agnostic. Trailing separators of either kind are trimmed first.
+  return String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p);
 }
 
 function _ctxScopeIsServerCwd(scope) {
