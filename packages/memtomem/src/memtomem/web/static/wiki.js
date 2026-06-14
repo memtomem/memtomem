@@ -23,6 +23,7 @@ let _wikiAbsent = false;
 let _wikiActive = null; // { type, name } currently open in the detail pane
 let _wikiVendor = null; // selected vendor in the detail pane
 let _wikiView = null; // { diff, lint } last fetched for the open vendor
+let _wikiInstallScopeId = ''; // E-3: project picked for install/update ('' = Server CWD)
 
 // Seq guards for overlapping fetches (the innerHTML race rule): a newer load
 // bumps the seq so a slower in-flight response can't paint over it.
@@ -295,6 +296,151 @@ async function _seedWikiOverride(type, name, vendor, force) {
   }
 }
 
+// --- Install / update into a project (E-3, dev tier only) -------------------
+// Web parity of `mm context install` / `mm context update`: these READ the
+// host-global wiki but WRITE into a project's .memtomem/, so — unlike the wiki
+// browser, which has NO project bar — the action carries its own lightweight
+// project <select> local to the detail pane. The roster + scope helpers live in
+// context-gateway.js; every reference is typeof-guarded so wiki.js never hard-
+// depends on that script's load order (and the vitest harness can stub them).
+
+function _wikiScopeList() {
+  if (typeof _ctxProjectsCache !== 'undefined' && Array.isArray(_ctxProjectsCache)) {
+    return _ctxProjectsCache;
+  }
+  return [];
+}
+
+function _wikiActiveScopeId() {
+  return (typeof _ctxActiveScopeId === 'string') ? _ctxActiveScopeId : '';
+}
+
+function _wikiScopeParam(id) {
+  if (typeof _ctxScopeParam === 'function') return _ctxScopeParam(id);
+  return id ? `scope_id=${encodeURIComponent(id)}` : '';
+}
+
+function _wikiScopeOptionLabel(scope) {
+  if (typeof _ctxScopeDisplayLabel === 'function') return _ctxScopeDisplayLabel(scope);
+  return scope.label || scope.scope_id || '';
+}
+
+function _wikiScopeLabelById(id) {
+  if (typeof _ctxScopeDisplayLabelById === 'function') return _ctxScopeDisplayLabelById(id);
+  return id || t('settings.ctx.server_cwd');
+}
+
+async function _wikiEnsureProjects() {
+  // Lazily populate the roster cache so the project <select> has options. The
+  // cache already carries a Server-CWD entry; an empty cache means it was never
+  // fetched (or context-gateway.js isn't loaded — tests pre-seed it instead).
+  if (_wikiScopeList().length) return;
+  if (typeof _ctxFetchProjects === 'function') {
+    try { await _ctxFetchProjects(); } catch { /* roster fetch is best-effort */ }
+  }
+}
+
+function _renderWikiInstallAction() {
+  // Dev-tier only: install/update writes into a project's git-tracked tree (the
+  // POST routes only mount in dev). Asset-level (vendor-independent), so this
+  // renders in the detail head, NOT the per-vendor view.
+  if (!_wikiDevMode() || !_wikiActive) return '';
+  let scopes = _wikiScopeList().filter((s) => !s.missing);
+  if (!scopes.some((s) => (s.scope_id || '') === '')) {
+    // Always offer Server-CWD (the CLI default target) even with an empty roster.
+    scopes = [{ scope_id: '', label: t('settings.ctx.server_cwd'), root: '' }, ...scopes];
+  }
+  const options = scopes.map((s) => {
+    const id = s.scope_id || '';
+    const sel = id === (_wikiInstallScopeId || '') ? ' selected' : '';
+    return `<option value="${escapeHtml(id)}"${sel}>${escapeHtml(_wikiScopeOptionLabel(s))}</option>`;
+  }).join('');
+  return '<div class="wiki-section wiki-install-action">'
+    + '<label class="wiki-install-project-row">'
+    + `<span>${escapeHtml(t('settings.ctx.wiki_install_project'))}</span>`
+    + `<select class="wiki-vendor-select" id="wiki-install-project">${options}</select></label>`
+    + '<div class="wiki-install-buttons">'
+    + `<button type="button" class="btn-ghost" id="wiki-install-btn">`
+    + `${escapeHtml(t('settings.ctx.wiki_install'))}</button>`
+    + `<button type="button" class="btn-ghost" id="wiki-update-btn">`
+    + `${escapeHtml(t('settings.ctx.wiki_update'))}</button>`
+    + '</div>'
+    + `<span class="wiki-seed-hint">${escapeHtml(t('settings.ctx.wiki_install_hint'))}</span>`
+    + '</div>';
+}
+
+function _bindWikiInstallAction() {
+  const sel = qs('wiki-install-project');
+  if (sel) sel.addEventListener('change', () => { _wikiInstallScopeId = sel.value || ''; });
+  const installBtn = qs('wiki-install-btn');
+  if (installBtn) installBtn.addEventListener('click', () => { _onWikiInstallOrUpdate('install'); });
+  const updateBtn = qs('wiki-update-btn');
+  if (updateBtn) updateBtn.addEventListener('click', () => { _onWikiInstallOrUpdate('update'); });
+}
+
+async function _onWikiInstallOrUpdate(verb) {
+  if (!_wikiActive) return;
+  const { type, name } = _wikiActive;
+  await _installWikiAsset(type, name, _wikiInstallScopeId || '', false, verb);
+}
+
+async function _installWikiAsset(type, name, scopeId, force, verb) {
+  const base = `/api/context/${encodeURIComponent(type)}/${encodeURIComponent(name)}/${verb}`;
+  const scopeParam = _wikiScopeParam(scopeId);
+  const url = scopeParam ? `${base}?${scopeParam}` : base;
+  let res;
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
+    const init = { method: 'POST', headers };
+    if (verb === 'update') init.body = JSON.stringify({ force });
+    res = await fetch(url, init);
+  } catch (err) {
+    showToast(t('settings.ctx.wiki_install_failed', { error: String((err && err.message) || err) }), 'error');
+    return;
+  }
+  const project = _wikiScopeLabelById(scopeId);
+  if (!res.ok) {
+    let body = null;
+    try { body = await res.json(); } catch { /* non-JSON body */ }
+    const reason = (body && body.detail && body.detail.reason_code) || '';
+    if (verb === 'update' && reason === 'stale_install' && !force) {
+      // Dirty dest: offer a force overwrite (each edited file is kept as a .bak).
+      const ok = await showConfirm({
+        title: t('settings.ctx.wiki_force_confirm_title'),
+        message: t('settings.ctx.wiki_force_confirm_msg', {
+          type: _wikiTypeLabel(type), name, project,
+        }),
+        confirmText: t('settings.ctx.wiki_force_confirm_ok'),
+        cancelText: t('modal.cancel_btn'),
+        danger: true,
+      });
+      if (ok) await _installWikiAsset(type, name, scopeId, true, 'update');
+      return;
+    }
+    if (reason === 'already_installed') {
+      showToast(t('settings.ctx.wiki_already_installed', { type: _wikiTypeLabel(type), name }), 'error');
+      return;
+    }
+    if (reason === 'not_installed') {
+      showToast(t('settings.ctx.wiki_not_installed', { type: _wikiTypeLabel(type), name }), 'error');
+      return;
+    }
+    const detail = (body && body.detail && body.detail.message) || `HTTP ${res.status}`;
+    showToast(t('settings.ctx.wiki_install_failed', { error: detail }), 'error');
+    return;
+  }
+  const data = await res.json();
+  if (verb === 'install') {
+    showToast(t('settings.ctx.wiki_install_ok', { type: _wikiTypeLabel(type), name, project }), 'success');
+  } else if (data && data.was_no_op) {
+    showToast(t('settings.ctx.wiki_update_unchanged', { type: _wikiTypeLabel(type), name, project }), 'success');
+  } else {
+    showToast(t('settings.ctx.wiki_update_ok', { type: _wikiTypeLabel(type), name, project }), 'success');
+  }
+}
+
 function _renderWikiVendorView() {
   const view = qs('wiki-vendor-view');
   if (!view) return;
@@ -329,10 +475,12 @@ function _renderWikiDetail() {
     });
     html += '</select></label>';
   }
+  html += _renderWikiInstallAction();
   html += '</div><div id="wiki-vendor-view"></div>';
   el.innerHTML = html;
   show(el);
   _renderWikiVendorView();
+  _bindWikiInstallAction();
   const select = qs('wiki-vendor-select');
   if (select) {
     select.addEventListener('change', () => {
@@ -389,6 +537,9 @@ async function loadWikiDetail(type, name) {
   const vendors = (item && item.vendors) || [];
   const firstRenderable = vendors.find((v) => v.renderable) || vendors[0];
   _wikiVendor = firstRenderable ? firstRenderable.vendor : null;
+  // Populate the project roster so the dev-tier install/update picker has
+  // options (no-op when already cached or not in dev mode).
+  if (_wikiDevMode()) await _wikiEnsureProjects();
   _renderWikiDetail();
   if (_wikiVendor) await _loadWikiVendorView(type, name, _wikiVendor);
 }
@@ -401,6 +552,7 @@ async function loadWiki() {
   _wikiListAbort = (typeof AbortController === 'function') ? new AbortController() : null;
   _wikiActive = null;
   _wikiView = null;
+  _wikiInstallScopeId = _wikiActiveScopeId();
   const detailEl = qs('wiki-detail');
   if (detailEl) { hide(detailEl); detailEl.innerHTML = ''; }
   panelLoading(listEl);

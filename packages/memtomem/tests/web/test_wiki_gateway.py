@@ -183,3 +183,91 @@ def test_wiki_override_seed_in_dev_mode(page, mm_web_url: str) -> None:
         timeout=5_000,
     )
     assert posted == [{"vendor": "claude", "force": False}]
+
+
+def test_wiki_install_action_in_dev_mode(page, mm_web_url: str) -> None:
+    """Dev tier (E-3): the install/update action renders with a project picker,
+    Install POSTs to the project-scoped route, and — the wiki being host-global —
+    the shared project/tier control bar STAYS hidden even with the picker present."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    posted: list[str] = []
+
+    def _install(route):
+        req = route.request
+        if req.method == "POST":
+            posted.append(req.url)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"installed": True, "asset_type": "skills", "name": "alpha"}),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/context/skills/alpha/install**", _install)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+    page.wait_for_selector("#wiki-install-btn", timeout=5_000)
+
+    # Host-global invariant: the shared per-project/tier control bar stays hidden
+    # even though the detail pane now carries its OWN local project <select>.
+    assert page.locator("#ctx-control-bar").is_hidden()
+    assert page.locator("#wiki-install-project").count() == 1
+
+    page.locator("#wiki-install-btn").click()
+    page.wait_for_selector("#toast-container .toast-success", timeout=5_000)
+    assert len(posted) == 1
+    assert "/api/context/skills/alpha/install" in posted[0]
+
+
+def test_wiki_force_update_confirms(page, mm_web_url: str) -> None:
+    """Dev tier (E-3): updating a dirty install is refused (409 ``stale_install``),
+    the UI confirms the overwrite, and the confirmed retry POSTs ``force=true``."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    calls: list[dict] = []
+
+    def _update(route):
+        req = route.request
+        if req.method != "POST":
+            route.fallback()
+            return
+        body = json.loads(req.post_data or "{}")
+        calls.append(body)
+        if not body.get("force"):
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                body=json.dumps({"detail": {"reason_code": "stale_install"}}),
+            )
+        else:
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"updated": True, "was_no_op": False}),
+            )
+
+    page.route("**/api/context/skills/alpha/update**", _update)
+
+    page.goto(mm_web_url)
+    page.evaluate("() => { window.showConfirm = async () => true; }")  # accept overwrite
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+    page.wait_for_selector("#wiki-update-btn", timeout=5_000)
+
+    page.locator("#wiki-update-btn").click()
+    # The confirmed force retry succeeds → success toast; two POSTs recorded:
+    # the refused force=false, then the confirmed force=true.
+    page.wait_for_selector("#toast-container .toast-success", timeout=5_000)
+    assert [c.get("force") for c in calls] == [False, True]

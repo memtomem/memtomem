@@ -25,6 +25,7 @@ from memtomem.web.routes import (
     context_commands,
     context_gateway,
     context_mcp_servers,
+    context_mutations,
     context_projects,
     context_skills,
     context_sync_all,
@@ -118,6 +119,7 @@ _DEV_ONLY_ROUTERS: list[ModuleType] = [
     procedures,
     evaluation,
     watchdog,
+    context_mutations,
     wiki_mutations,
 ]
 
