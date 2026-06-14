@@ -58,6 +58,6 @@ dev = [
     "pytest-cov>=6.0",
     "pytest-playwright>=0.8.0",
     "ruff>=0.15.17",
-    "mypy>=1.14",
+    "mypy>=2.1.0",
     "types-PyYAML>=6.0",
 ]
