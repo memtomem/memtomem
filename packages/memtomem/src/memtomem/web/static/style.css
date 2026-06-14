@@ -4739,3 +4739,31 @@ button.ctx-runtime-chip--greyed:focus-visible {
      Reload-vs-Force choice (was two ~225px columns side by side). */
   #ctx-conflict-preview-row { flex-direction: column; }
 }
+
+/* ── Wiki browser (ADR-0008 PR-E, ctx-wiki) ─────────────────────────────── */
+.wiki-head { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
+.wiki-head-sha code { font-family: var(--mono); color: var(--text); }
+.wiki-group { margin-bottom: 16px; }
+.wiki-group-title { font-size: 0.9rem; margin: 0 0 6px; display: flex; align-items: center; gap: 6px; }
+.wiki-group-count { font-size: 0.72rem; color: var(--muted); background: rgba(123, 127, 150, 0.15); border-radius: 10px; padding: 1px 7px; }
+.wiki-list-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.wiki-item { width: 100%; text-align: left; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 10px; color: var(--text); cursor: pointer; font-size: 0.85rem; }
+.wiki-item:hover { background: rgba(var(--accent-rgb), 0.08); }
+.wiki-item.active { background: rgba(var(--accent-rgb), 0.14); border-color: var(--accent); }
+.wiki-detail { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.wiki-detail-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.wiki-detail-name { margin: 0; font-size: 1rem; }
+.wiki-detail-type { font-size: 0.72rem; color: var(--muted); font-weight: 400; }
+.wiki-vendor-row { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); }
+.wiki-vendor-select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; font-size: 0.82rem; }
+.wiki-section { margin-top: 14px; }
+.wiki-section h4 { margin: 0 0 6px; font-size: 0.85rem; }
+.wiki-note, .wiki-dropped, .wiki-error { font-size: 0.82rem; }
+.wiki-dropped { color: var(--yellow); margin-bottom: 6px; }
+.wiki-error { color: var(--danger); }
+.wiki-diff { margin: 0; max-height: 360px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 0; font-family: var(--mono); font-size: 0.78rem; }
+.wiki-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.wiki-finding { font-size: 0.82rem; display: flex; align-items: baseline; gap: 6px; }
+/* Unified-diff line kinds the shared .diff-* set doesn't cover. */
+.diff-file { color: var(--muted); font-weight: 600; }
+.diff-hunk { color: var(--accent); }

@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from memtomem.context._names import (
+    GENERATOR_VENDOR,
     OVERRIDE_FORMATS,
     InvalidNameError,
     override_vendors,
+    renderable_vendors,
     validate_name,
 )
 
@@ -97,3 +99,58 @@ def test_override_vendors_matches_matrix() -> None:
 
 def test_override_vendors_unknown_asset_type_is_empty() -> None:
     assert override_vendors("widgets") == []
+
+
+# ── renderable_vendors ────────────────────────────────────────────────────
+
+
+def test_renderable_vendors_drops_codex_commands() -> None:
+    """commands/codex is an OVERRIDE_FORMATS placeholder with no generator, so
+    it is offered by ``override_vendors`` but excluded from ``renderable_vendors``
+    (the web wiki browser disables it instead of offering a control that 500s)."""
+    assert override_vendors("commands") == ["claude", "gemini", "codex"]
+    assert renderable_vendors("commands") == ["claude", "gemini"]
+
+
+def test_renderable_vendors_full_for_skills_and_agents() -> None:
+    assert renderable_vendors("skills") == ["claude", "gemini", "codex", "kimi"]
+    assert renderable_vendors("agents") == ["claude", "gemini", "codex", "kimi"]
+
+
+def test_renderable_vendors_matches_generator_registry() -> None:
+    """A vendor is renderable iff ``<vendor>_<asset_type>`` has a generator —
+    the same membership ``render_seed_bytes`` checks before NotImplementedError.
+    Pinning to GENERATOR_VENDOR keeps the helper and the renderers in lockstep."""
+    for asset_type in ("skills", "agents", "commands"):
+        expected = [
+            v for v in override_vendors(asset_type) if f"{v}_{asset_type}" in GENERATOR_VENDOR
+        ]
+        assert renderable_vendors(asset_type) == expected
+
+
+def test_renderable_vendors_subset_of_override_vendors() -> None:
+    for asset_type in ("skills", "agents", "commands"):
+        rendered = renderable_vendors(asset_type)
+        offered = override_vendors(asset_type)
+        assert set(rendered).issubset(offered)
+
+
+def test_renderable_vendors_unknown_asset_type_is_empty() -> None:
+    assert renderable_vendors("widgets") == []
+
+
+def test_generator_vendor_matches_real_registries() -> None:
+    """``GENERATOR_VENDOR`` is the cycle-free mirror ``renderable_vendors`` reads
+    instead of importing the real ``*_GENERATORS`` dicts (which would close a
+    wiki ↔ context import cycle). Pin that mirror to the actual registries so a
+    newly-registered generator can't leave the web UI disabling a vendor that
+    can in fact render (Codex review on PR-E)."""
+    from memtomem.context.agents import AGENT_GENERATORS
+    from memtomem.context.commands import COMMAND_GENERATORS
+    from memtomem.context.skills import SKILL_GENERATORS
+
+    real_keys = set(SKILL_GENERATORS) | set(AGENT_GENERATORS) | set(COMMAND_GENERATORS)
+    assert real_keys == set(GENERATOR_VENDOR), (
+        "GENERATOR_VENDOR drifted from the real *_GENERATORS registries — "
+        "renderable_vendors would mis-report which vendors can render."
+    )

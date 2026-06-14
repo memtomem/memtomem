@@ -130,6 +130,7 @@ class TestNoHardcodedStrings:
         "settings-hooks-watchdog.js",
         "context-gateway.js",
         "context-portal.js",
+        "wiki.js",
     )
 
     def test_no_template_literal_toasts(self) -> None:

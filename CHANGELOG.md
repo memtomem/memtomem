@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Web UI: read-only wiki browser (ADR-0008 PR-E).** The Context Gateway gains
+  a **Wiki** section that browses the global `~/.memtomem-wiki` repo — the
+  canonical skills, agents, and commands shared across projects. Pick an asset
+  to see, per vendor, its override **diff** against the freshly rendered
+  canonical and a **lint** report (canonical parse, stray override files,
+  per-vendor representability). It is read-only: seeding overrides and editing
+  stay on the `mm wiki` CLI. Because the wiki is host-global (not per-project),
+  the section carries no project/tier control bar, and a vendor with no
+  generator (the `commands`/`codex` placeholder) is shown disabled rather than
+  offered as a control that would fail at render time. New routes `GET
+  /api/wiki`, `.../{type}/{name}/diff`, `.../{type}/{name}/lint` are prod-tier;
+  an absent wiki returns a structured onboarding state, never a traceback.
+
 - **`mm wiki` exposes the Kimi vendor; `--vendor` Choices derive from the
   matrix (ADR-0008).** `mm wiki skill|agent {override,diff,lint} --vendor kimi`
   now works. Kimi skills/agents have had `OVERRIDE_FORMATS` rows and renderers

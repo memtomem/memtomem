@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=110" />
+  <link rel="stylesheet" href="/style.css?v=111" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -537,6 +537,13 @@
             <span class="nav-sub" data-i18n="settings.nav.ctx_mcp_servers_sub">Project tool servers</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-wiki" data-group="integrations">
+          <span class="nav-icon" aria-hidden="true">📚</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_wiki">Wiki</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_wiki_sub">Shared canonical library</span>
+          </span>
+        </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="hooks-sync" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">📎</span>
           <span class="nav-labels">
@@ -652,6 +659,20 @@
           <div id="ctx-mcp-servers-status"></div>
           <div id="ctx-mcp-servers-list"></div>
           <div id="ctx-mcp-servers-detail" hidden></div>
+        </div>
+
+        <!-- Context Gateway: Wiki (ADR-0008 PR-E — read-only browser for the
+             GLOBAL ~/.memtomem-wiki repo. No ctx-toolbar / project-tier bar:
+             this surface is host-global, not project-scoped. -->
+        <div class="settings-section" id="settings-ctx-wiki">
+          <p class="settings-section-desc" data-i18n="settings.ctx.wiki_desc">Browse the global wiki (~/.memtomem-wiki) of canonical skills, agents, and commands. Read-only here — seed overrides and edit with the mm wiki CLI.</p>
+          <div class="ctx-header">
+            <h2 data-i18n="settings.ctx.wiki_title">Wiki</h2>
+            <div id="wiki-head" class="wiki-head"></div>
+          </div>
+          <div id="wiki-status"></div>
+          <div id="wiki-list"></div>
+          <div id="wiki-detail" hidden></div>
         </div>
 
         <!-- Hooks Sync section -->
@@ -1547,6 +1568,7 @@
   <script src="/timeline.js?v=3"></script>
   <script src="/context-gateway.js?v=84"></script>
   <script src="/context-portal.js?v=6"></script>
+  <script src="/wiki.js?v=1"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>
 </html>
