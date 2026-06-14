@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=112" />
+  <link rel="stylesheet" href="/style.css?v=113" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -565,8 +565,15 @@
         <!-- Context Gateway: Overview -->
         <div class="settings-section active" id="settings-ctx-overview">
           <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Sync memtomem agent runtime artifacts to Claude Code, Codex, and other detected runtimes.</p>
+          <div class="tab-help-bar" id="help-ctx-overview" role="status" hidden>
+            <span class="tab-help-bar-text" data-i18n="settings.ctx.primer">memtomem keeps your master copies in one Store (.memtomem/) and Syncs them out to your Runtimes — Claude Code, Codex, Kimi, and other detected tools. Import pulls a runtime's copy back in. It's one-way: edit in the Store, then Sync.</span>
+            <button class="tab-help-bar-dismiss" data-help-tab="ctx-overview" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
+          </div>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
+            <div class="ctx-header-title">
+              <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
+              <span class="help-tip" data-help-i18n="settings.ctx.status_legend" tabindex="0" role="img">i</span>
+            </div>
             <div>
               <button id="ctx-refresh-btn" class="btn-ghost"
                       data-i18n="settings.ctx.refresh"
@@ -1556,17 +1563,17 @@
   <script src="/vendor/prism-json.min.js?v=1"></script>
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
-  <script src="/i18n.js?v=3"></script>
+  <script src="/i18n.js?v=4"></script>
   <script src="/app.js?v=129"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=11"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=10"></script>
-  <script src="/settings-harness.js?v=3"></script>
+  <script src="/settings-harness.js?v=4"></script>
   <script src="/settings-hooks-watchdog.js?v=20"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=84"></script>
+  <script src="/context-gateway.js?v=85"></script>
   <script src="/context-portal.js?v=6"></script>
   <script src="/wiki.js?v=2"></script>
   <script src="/path-picker.js?v=4"></script>

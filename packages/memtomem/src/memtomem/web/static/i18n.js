@@ -47,6 +47,15 @@ const I18N = (() => {
     document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
       el.setAttribute('aria-label', t(el.dataset.i18nAriaLabel));
     });
+    // ``.help-tip`` popovers read their text from a ``data-help`` attribute
+    // (CSS ``::after content: attr(data-help)``). ``data-help-i18n`` carries
+    // an i18n key for static help-tips so the popover text + its a11y
+    // ``aria-label`` re-translate in place on every ``langchange`` applyDOM.
+    document.querySelectorAll('[data-help-i18n]').forEach(el => {
+      const txt = t(el.dataset.helpI18n);
+      el.setAttribute('data-help', txt);
+      el.setAttribute('aria-label', txt);
+    });
     document.querySelectorAll('[data-i18n-html]').forEach(el => {
       console.warn('[i18n] data-i18n-html is deprecated, use data-i18n instead:', el);
       el.textContent = t(el.dataset.i18nHtml);

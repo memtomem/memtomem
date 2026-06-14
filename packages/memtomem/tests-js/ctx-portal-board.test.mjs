@@ -104,7 +104,9 @@ describe('Context Portal board (PR4)', () => {
   it('Server CWD is pinned first and cannot be renamed/removed', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();
-    expect(rowsText(window)[0]).toBe('Server CWD');
+    // P0-5 (ADR-0026 #1353): the cwd row shows its real folder basename + a
+    // "(current folder)" marker instead of the synthetic "Server CWD" label.
+    expect(rowsText(window)[0]).toBe('srv (current folder)');
     const cwd = window.document.querySelector('.ctx-portal-row[data-scope-id=""]');
     expect(cwd.querySelector('.ctx-portal-rename')).toBeNull();
     expect(cwd.querySelector('.ctx-portal-remove')).toBeNull();
@@ -132,7 +134,7 @@ describe('Context Portal board (PR4)', () => {
     sort.dispatchEvent(new window.Event('change', { bubbles: true }));
     // CWD pinned first; then Alpha(5) > Beta(0) = Ghost(0).
     const labels = rowsText(window);
-    expect(labels[0]).toBe('Server CWD');
+    expect(labels[0]).toBe('srv (current folder)');  // P0-5: basename + marker
     expect(labels[1]).toBe('Alpha');
   });
 

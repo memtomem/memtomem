@@ -578,7 +578,23 @@ function _ctxScopeIsActive(scope) {
 
 function _ctxScopeDisplayLabel(scope) {
   if (!scope) return '';
-  if (_ctxScopeIsServerCwd(scope)) return t('settings.ctx.server_cwd');
+  if (_ctxScopeIsServerCwd(scope)) {
+    // Show the cwd folder's real identity + a "(current folder)" marker
+    // rather than masking every server-cwd scope as a flat "Server CWD"
+    // (which gave the same directory two names — one here, one under its
+    // basename as a known project, #1353). A user/stored label wins;
+    // otherwise the cwd basename. The backend auto-labels an unnamed cwd
+    // with the literal "Server CWD" (projects.py) and the offline fallback
+    // (``_ctxServerCwdFallback``, root='') uses the localized server_cwd
+    // string — treat both as "no real name" and only then fall back to the
+    // localized "Server CWD".
+    const generic = !scope.label
+      || scope.label === 'Server CWD'
+      || scope.label === t('settings.ctx.server_cwd');
+    const name = generic ? _ctxBasename(scope.root) : scope.label;
+    if (!name) return t('settings.ctx.server_cwd');
+    return `${name} ${t('settings.ctx.cwd_marker')}`;
+  }
   return scope.label || _ctxBasename(scope.root) || scope.scope_id;
 }
 
@@ -968,7 +984,7 @@ function _ctxTierControls(type) {
     + ` class="${_ctxTargetScope === scope ? 'active' : ''}">`
     + `${escapeHtml(t(optionKey))}</button>`;
   return `<div class="ctx-tier-switcher">
-    <span>${escapeHtml(t('settings.ctx.tier_filter'))}</span>
+    <span>${escapeHtml(t('settings.ctx.tier_filter'))}</span><span class="help-tip" data-help="${escapeHtml(t('settings.ctx.tier_glossary'))}" tabindex="0" role="img" aria-label="${escapeHtml(t('settings.ctx.tier_glossary'))}">i</span>
     <div class="ctx-tier-filter" data-type="${escapeHtml(type)}" role="group" aria-label="${escapeHtml(t('settings.ctx.tier_filter'))}">
     ${btn('user', 'settings.ctx.tier_option_user', 'settings.ctx.tier_tooltip_user')}
     ${btn('project_shared', 'settings.ctx.tier_option_project_shared', 'settings.ctx.tier_tooltip_project_shared')}
@@ -1497,8 +1513,13 @@ function _renderCtxOverview(data) {
         <span class="ctx-overview-root-label">${escapeHtml(rootLabel)}</span>
         <code class="ctx-overview-root-path">${escapeHtml(rootPath)}</code>
       </div>
+      <div class="ctx-flow-diagram" role="img" aria-label="${escapeHtml(t('settings.ctx.flow_aria'))}">
+        <span class="ctx-flow-node">${escapeHtml(t('settings.ctx.store_label'))}</span>
+        <span class="ctx-flow-arrow" aria-hidden="true">── ${escapeHtml(t('settings.ctx.sync'))} →</span>
+        <span class="ctx-flow-node">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
+      </div>
       <div class="ctx-overview-runtimes">
-        <span class="ctx-overview-runtimes-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
+        <span class="ctx-overview-runtimes-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span><span class="help-tip" data-help="${escapeHtml(t('settings.ctx.runtimes_glossary'))}" tabindex="0" role="img" aria-label="${escapeHtml(t('settings.ctx.runtimes_glossary'))}">i</span>
         ${chips}
       </div>
       ${lastSyncHtml}

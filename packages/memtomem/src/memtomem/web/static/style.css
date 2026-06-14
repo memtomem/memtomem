@@ -3830,6 +3830,7 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 
 .ctx-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; gap: 8px; }
 .ctx-header div { display: flex; gap: 6px; }
+.ctx-header-title { display: flex; align-items: center; gap: 6px; }
 /* ``.ctx-tier-switcher`` (the labeled storage-tier group) shares the
    project-switcher's layout so the two bar controls read as one family.
    It is a distinct class on purpose — the rank-11 hoist guard pins
@@ -3963,6 +3964,9 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-root-label, .ctx-overview-runtimes-label, .ctx-overview-last-sync-label { font-weight: 600; color: var(--text); }
 .ctx-overview-root-path { font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 0.78rem; background: var(--surface); padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); word-break: break-all; }
 .ctx-overview-last-sync-value { font-variant-numeric: tabular-nums; }
+.ctx-flow-diagram { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ctx-flow-node { font-weight: 600; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; white-space: nowrap; }
+.ctx-flow-arrow { color: var(--accent); font-weight: 600; font-size: 0.8rem; white-space: nowrap; }
 
 .ctx-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 /* PR #1088 review: tile is now a layout container holding a separate

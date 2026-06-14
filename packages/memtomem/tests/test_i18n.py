@@ -603,6 +603,42 @@ class TestNoHardcodedStrings:
                     bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
         assert not bad_ph, "Move/Copy placeholder drift:\n" + "\n".join(bad_ph)
 
+    def test_ctx_p0_onboarding_keys_jargon_free(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """ADR-0026 P0 onboarding copy (#1353): the primer / flow-diagram /
+        glossary / status-legend keys and the rewritten Move/Copy shared-confirm
+        message must exist in both locales AND must not leak the raw
+        ``canonical`` / ``project_shared`` jargon they were added to replace.
+
+        Scoped to these user-facing onboarding strings on purpose — other keys
+        still use those tokens deliberately (wiki / empty-hint / write-blocked
+        copy), so this is a targeted regression pin, not a blanket denylist."""
+        new_keys = [
+            "settings.ctx.primer",
+            "settings.ctx.store_label",
+            "settings.ctx.flow_aria",
+            "settings.ctx.runtimes_glossary",
+            "settings.ctx.tier_glossary",
+            "settings.ctx.status_legend",
+            "settings.ctx.cwd_marker",
+        ]
+        for key in new_keys:
+            assert key in en, f"P0 onboarding key missing from en.json: {key}"
+            assert key in ko, f"P0 onboarding key missing from ko.json: {key}"
+        jargon_free = [*new_keys, "settings.ctx.move_copy_shared_confirm_message"]
+        leaks: list[str] = []
+        for key in jargon_free:
+            for name, locale in [("en", en), ("ko", ko)]:
+                value = locale[key]
+                for token in ("canonical", "project_shared"):
+                    if token in value:
+                        leaks.append(f"  {name} {key}: contains raw '{token}'")
+        assert not leaks, (
+            "ADR-0026 P0 onboarding copy must not expose raw canonical/"
+            "project_shared jargon:\n" + "\n".join(leaks)
+        )
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —
