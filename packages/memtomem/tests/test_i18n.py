@@ -606,10 +606,11 @@ class TestNoHardcodedStrings:
     def test_ctx_p0_onboarding_keys_jargon_free(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:
-        """ADR-0026 P0 onboarding copy (#1353): the primer / flow-diagram /
-        glossary / status-legend keys and the rewritten Move/Copy shared-confirm
-        message must exist in both locales AND must not leak the raw
-        ``canonical`` / ``project_shared`` jargon they were added to replace.
+        """ADR-0026 P0/P1a onboarding copy (#1353): the primer / flow-diagram /
+        glossary / status-legend keys, the P1a Simple-mode verdict / 3-state /
+        toggle copy, and the rewritten Move/Copy shared-confirm message must
+        exist in both locales AND must not leak the raw ``canonical`` /
+        ``project_shared`` jargon they were added to replace.
 
         Scoped to these user-facing onboarding strings on purpose — other keys
         still use those tokens deliberately (wiki / empty-hint / write-blocked
@@ -622,6 +623,20 @@ class TestNoHardcodedStrings:
             "settings.ctx.tier_glossary",
             "settings.ctx.status_legend",
             "settings.ctx.cwd_marker",
+            # ADR-0026 P1a Simple mode — comprehension copy that must stay
+            # jargon-free for first-time users (the whole point of Simple mode).
+            "settings.ctx.simple_toggle",
+            "settings.ctx.simple_verdict_action",
+            "settings.ctx.simple_verdict_attention",
+            "settings.ctx.simple_verdict_empty",
+            "settings.ctx.simple_verdict_clear",
+            "settings.ctx.status_simple_in_tools",
+            "settings.ctx.status_simple_needs_sync",
+            "settings.ctx.status_simple_not_saved",
+            "settings.ctx.status_simple_attention",
+            "settings.ctx.status_simple_empty",
+            "settings.ctx.simple_manage",
+            "settings.ctx.simple_empty_hint",
         ]
         for key in new_keys:
             assert key in en, f"P0 onboarding key missing from en.json: {key}"

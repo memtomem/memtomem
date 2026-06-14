@@ -3998,6 +3998,40 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-pointer:hover { background: rgba(108, 143, 255, 0.08); color: var(--text); border-color: var(--border); }
 .ctx-overview-pointer:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* ADR-0026 P1a (#1353): Context Gateway Simple mode. The ``.ctx-simple`` class
+   on ``#tab-context-gateway`` swaps the four-axis tile grid for a one-line
+   verdict + a read-only per-type row list on the Overview. Advanced (the
+   default) is unchanged.
+   The section nav + hoisted control bar are hidden ONLY while the Overview is
+   the active section (``:has``) — otherwise a persisted Simple flag plus a deep
+   link to a non-Overview leaf (e.g. ``?section=ctx-skills``) would strip the
+   navigation off an Advanced page and strand the user (Codex review). The grid
+   lives inside the Overview section, so it needs no ``:has`` guard. */
+.ctx-simple:has(#settings-ctx-overview.active) .settings-nav,
+.ctx-simple:has(#settings-ctx-overview.active) #ctx-control-bar { display: none; }
+.ctx-simple .ctx-overview-grid { display: none; }
+/* Show the toggle as engaged while Simple is active (state also carried by
+   aria-pressed for assistive tech — never color-only). */
+.ctx-mode-toggle[aria-pressed="true"] { background: rgba(var(--accent-rgb), 0.12); border-color: var(--accent); color: var(--text); }
+.ctx-overview-simple { margin-top: 4px; }
+.ctx-simple-verdict { margin: 0 0 14px; font-size: 0.95rem; color: var(--text); }
+.ctx-simple-verdict--warn { color: var(--yellow); }
+.ctx-simple-verdict--muted { color: var(--muted); }
+.ctx-simple-verdict--ok { color: var(--green); }
+.ctx-simple-rows { display: flex; flex-direction: column; gap: 8px; }
+.ctx-simple-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.ctx-simple-row-type { flex: 0 0 auto; min-width: 9rem; font-weight: 600; color: var(--text); font-size: 0.9rem; }
+.ctx-simple-row-status { flex: 1 1 auto; display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 0.82rem; }
+.ctx-simple-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.ctx-simple-row--warn .ctx-simple-dot { background: var(--yellow); }
+.ctx-simple-row--info .ctx-simple-dot { background: var(--accent); }
+.ctx-simple-row--ok .ctx-simple-dot { background: var(--green); }
+.ctx-simple-manage { flex: 0 0 auto; }
+.ctx-simple-empty-hint { margin-top: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 0.82rem; }
+.ctx-mode-toggle:focus-visible,
+.ctx-simple-manage:focus-visible,
+.ctx-simple-advanced-cta:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .ctx-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; background: var(--surface); cursor: pointer; transition: border-color 0.15s; }
 .ctx-card:hover { border-color: var(--accent); }
 .ctx-card.active { border-color: var(--accent); background: rgba(108, 143, 255, 0.06); }

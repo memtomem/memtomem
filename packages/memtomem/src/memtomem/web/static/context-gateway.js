@@ -512,6 +512,61 @@ try {
   _ctxActiveScopeId = '';
 }
 
+// -- Simple mode (ADR-0026 P1a, #1353) ----------------------------------------
+// Progressive-disclosure flag. Simple hides the four-axis control bar + the
+// section nav and renders the Overview as a one-line verdict + per-type rows
+// (read-only — rows route into Advanced to act; the inline Sync/Import buttons
+// land in P1b). Advanced — the default per ADR-0026 D-F's staged rollout —
+// restores today's UI verbatim. Persisted like the active-scope flag above;
+// default off so power users are unaffected until the post-validation
+// default-flip lands.
+const _CTX_SIMPLE_MODE_KEY = 'memtomem_ctx_simple_mode';
+let _ctxSimpleMode = false;
+try {
+  _ctxSimpleMode = localStorage.getItem(_CTX_SIMPLE_MODE_KEY) === '1';
+} catch {
+  _ctxSimpleMode = false;
+}
+
+// Toggle the ``.ctx-simple`` class on the gateway tab (CSS hides the nav +
+// control bar + tile grid) and keep the toggle button's ``aria-pressed`` in
+// sync. Idempotent — safe to call on load and on every flip.
+function _ctxApplySimpleMode() {
+  const tab = document.getElementById('tab-context-gateway');
+  if (tab) tab.classList.toggle('ctx-simple', _ctxSimpleMode);
+  const toggle = document.getElementById('ctx-mode-toggle');
+  if (toggle) toggle.setAttribute('aria-pressed', _ctxSimpleMode ? 'true' : 'false');
+}
+
+// Flip Simple mode, persist, and re-apply the class. Callers staying on the
+// Overview re-render the body (loadCtxOverview) so the grid / simple-rows swap;
+// ``_ctxOpenInAdvanced`` skips that since ``switchSettingsSection`` repaints
+// the section it navigates to.
+function _ctxSetSimpleMode(on) {
+  _ctxSimpleMode = !!on;
+  try {
+    localStorage.setItem(_CTX_SIMPLE_MODE_KEY, _ctxSimpleMode ? '1' : '0');
+  } catch { /* private-mode / disabled storage — in-memory flag still applies */ }
+  _ctxApplySimpleMode();
+}
+
+// Leave Simple mode and (optionally) deep-link into the Advanced section that
+// owns an artifact type, where the real Sync/Import/edit controls live. P1a
+// rows are read-only; the mutation buttons land in P1b.
+function _ctxOpenInAdvanced(section) {
+  _ctxSetSimpleMode(false);
+  if (section) {
+    switchSettingsSection(section);
+  } else {
+    loadCtxOverview();
+  }
+}
+
+// Apply the persisted flag once at load. The script tag sits at the end of
+// ``index.html`` so the gateway tab markup already exists; the tab itself is
+// ``hidden`` until activated, so toggling the class now causes no flash.
+_ctxApplySimpleMode();
+
 function _ctxTargetScopeParam(targetScope = _ctxTargetScope) {
   // ``targetScope`` defaults to the live global so existing single-shot
   // callers are unchanged. A multi-phase flow (Sync All) snapshots the tier
@@ -1432,6 +1487,99 @@ function _ctxTileDominantFilter(d) {
   return null;
 }
 
+// -- Simple-mode Overview body (ADR-0026 P1a, #1353) --------------------------
+
+// Map a type's raw overview counts to one of three Simple display states plus
+// the direction that resolves it. Display-only: no wire status string is
+// mutated (Advanced still renders the full four-status ladder). The precedence
+// MUST match the Advanced badge ladder (the ``badgeText`` cascade in
+// ``_renderCtxOverview``): missing_target → missing_canonical → out_of_sync, so
+// a mixed multi-runtime item shows the SAME dominant state in both modes
+// (ADR-0026 D-C, worst-status-wins). missing_target and out_of_sync both
+// resolve by Sync (push); missing_canonical resolves by Import (pull) and
+// outranks out_of_sync, exactly as Advanced does.
+function _ctxSimpleVerdict(d) {
+  d = d || {};
+  const total = d.total || 0;
+  if (d.error || d.status === 'error' || (d.parse_error || 0) > 0 || (d.invalid_name || 0) > 0) {
+    return { state: 'attention', labelKey: 'settings.ctx.status_simple_attention', tone: 'warn' };
+  }
+  if (total === 0) {
+    return { state: 'empty', labelKey: 'settings.ctx.status_simple_empty', tone: 'muted' };
+  }
+  const needsSync = { state: 'needs_sync', labelKey: 'settings.ctx.status_simple_needs_sync', tone: 'warn' };
+  if ((d.missing_target || 0) > 0) {
+    return needsSync;
+  }
+  if ((d.missing_canonical || 0) > 0) {
+    return { state: 'not_saved', labelKey: 'settings.ctx.status_simple_not_saved', tone: 'info' };
+  }
+  if ((d.out_of_sync || 0) > 0) {
+    return needsSync;
+  }
+  return { state: 'in_tools', labelKey: 'settings.ctx.status_simple_in_tools', tone: 'ok' };
+}
+
+// Build the Simple Overview body: a one-line aggregate verdict + a read-only
+// row per artifact type (skills/commands/agents/mcp — hooks stays Advanced-only
+// in P1a, matching the ADR mockup). Each row shows the 3-state status (text is
+// always present — never color-only, ADR-0026 D-G) and a Manage button that
+// opens Advanced at that section. Inline ``t()`` matches the langchange
+// re-render ordering used by the rest of this render path.
+function _ctxSimpleOverviewBody(data, types) {
+  const artifactTypes = types.filter(typ => typ.key !== 'settings');
+  let anyAttention = false, anyAction = false, anyItems = false;
+  const rowsHtml = artifactTypes.map(typ => {
+    const d = data[typ.key] || {};
+    const v = _ctxSimpleVerdict(d);
+    if ((d.total || 0) > 0) anyItems = true;
+    if (v.state === 'attention') anyAttention = true;
+    if (v.state === 'needs_sync' || v.state === 'not_saved') anyAction = true;
+    const statusText = t(v.labelKey);
+    const manageAria = t('settings.ctx.simple_manage_aria', { type: typ.label });
+    return `<div class="ctx-simple-row ctx-simple-row--${v.tone}" data-section="${typ.section}" data-state="${v.state}">
+        <span class="ctx-simple-row-type">${escapeHtml(typ.label)}</span>
+        <span class="ctx-simple-row-status">
+          <span class="ctx-simple-dot" aria-hidden="true"></span>
+          <span class="ctx-simple-status-text">${escapeHtml(statusText)}</span>
+        </span>
+        <button type="button" class="btn-ghost ctx-simple-manage"
+                data-ctx-advance data-section="${typ.section}"
+                aria-label="${escapeHtml(manageAria)}">${escapeHtml(t('settings.ctx.simple_manage'))}</button>
+      </div>`;
+  }).join('');
+
+  let verdictKey, verdictTone;
+  if (anyAttention) { verdictKey = 'settings.ctx.simple_verdict_attention'; verdictTone = 'warn'; }
+  else if (anyAction) { verdictKey = 'settings.ctx.simple_verdict_action'; verdictTone = 'warn'; }
+  else if (!anyItems) { verdictKey = 'settings.ctx.simple_verdict_empty'; verdictTone = 'muted'; }
+  else { verdictKey = 'settings.ctx.simple_verdict_clear'; verdictTone = 'ok'; }
+
+  // Plain ``<p>`` (no ``role=status``): the verdict is static render output,
+  // not a live announcement — a second live region would compete with
+  // ``#ctx-sync-status`` (ADR-0026 D-G).
+  let html = `<div class="ctx-overview-simple">
+      <p class="ctx-simple-verdict ctx-simple-verdict--${verdictTone}">${escapeHtml(t(verdictKey))}</p>
+      <div class="ctx-simple-rows">${rowsHtml}</div>`;
+  if (!anyItems) {
+    html += `<div class="ctx-simple-empty-hint">
+        <span>${escapeHtml(t('settings.ctx.simple_empty_hint'))}</span>
+        <button type="button" class="btn-ghost ctx-simple-advanced-cta" data-ctx-advance>${escapeHtml(t('settings.ctx.simple_empty_cta'))}</button>
+      </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+// Wire the Simple rows' Manage buttons + the empty-state CTA: each leaves
+// Simple mode and (when a section is named) deep-links into Advanced. No-op in
+// Advanced — the ``[data-ctx-advance]`` selector matches nothing there.
+function _ctxWireSimpleRows(el) {
+  el.querySelectorAll('[data-ctx-advance]').forEach(btn => {
+    btn.addEventListener('click', () => _ctxOpenInAdvanced(btn.dataset.section || ''));
+  });
+}
+
 function _renderCtxOverview(data) {
   const el = qs('ctx-overview-content');
   if (!el) return;
@@ -1524,6 +1672,11 @@ function _renderCtxOverview(data) {
       </div>
       ${lastSyncHtml}
     </div>`;
+  // ADR-0026 P1a (#1353): in Simple mode, render a one-line verdict + per-type
+  // rows ABOVE the grid; ``.ctx-simple`` CSS hides the grid so the Advanced
+  // path below stays byte-identical (D-F: Advanced == today's UI verbatim).
+  // Present-but-hidden mirrors the existing ``#ctx-control-bar`` hoist idiom.
+  if (_ctxSimpleMode) html += _ctxSimpleOverviewBody(data, types);
   html += '<div class="ctx-overview-grid">';
   for (const typ of types) {
       const d = data[typ.key] || {};
@@ -1881,6 +2034,10 @@ function _renderCtxOverview(data) {
       }
     });
   });
+
+  // ADR-0026 P1a: wire the Simple-mode rows (no-op in Advanced — the selector
+  // matches nothing). Read-only: each routes into Advanced to act.
+  _ctxWireSimpleRows(el);
 
   // Tier-aware write-block sweep (#945) — folds in the user-tier Sync All
   // gate alongside the existing data-runtime-only paths above. Idempotent
@@ -2859,6 +3016,16 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
 // generated runtime artifacts. The label/handler/toast were previously
 // named "detect" but the action has always been a refresh; the rename
 // aligns the button id, i18n keys, and toast copy.
+// ADR-0026 P1a (#1353): Simple/Advanced toggle. Flips the persisted flag,
+// re-applies the ``.ctx-simple`` class, and re-renders the Overview body so the
+// tile grid and the Simple verdict+rows swap in place. The toggle lives in the
+// Overview header (always visible while the Overview is shown), so it is
+// reachable in both modes.
+document.getElementById('ctx-mode-toggle')?.addEventListener('click', () => {
+  _ctxSetSimpleMode(!_ctxSimpleMode);
+  loadCtxOverview();
+});
+
 document.getElementById('ctx-refresh-btn')?.addEventListener('click', async () => {
   const btn = document.getElementById('ctx-refresh-btn');
   btnLoading(btn, true);
