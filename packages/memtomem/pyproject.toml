@@ -21,7 +21,7 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp[cli]>=1.26.0",
+    "mcp[cli]>=1.27.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "sqlite-vec>=0.1.6",
@@ -46,7 +46,7 @@ code = [
 ]
 web = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.34",
+    "uvicorn[standard]>=0.49.0",
 ]
 langfuse = ["langfuse>=4.0"]
 all = ["memtomem[onnx,ollama,openai,korean,code,web,langfuse]"]
