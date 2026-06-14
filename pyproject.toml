@@ -53,11 +53,11 @@ disable_error_code = ["has-type", "attr-defined"]
 [dependency-groups]
 dev = [
     "memtomem[all]",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.25",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=6.0",
-    "pytest-playwright>=0.5",
-    "ruff>=0.9",
+    "pytest-playwright>=0.8.0",
+    "ruff>=0.15.17",
     "mypy>=1.14",
     "types-PyYAML>=6.0",
 ]
