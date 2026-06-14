@@ -39,6 +39,8 @@ The picker offers three presets and an Advanced fallback:
 
 Pick a preset interactively, or use `mm init -y` (minimal), `mm init --preset korean -y`, or `mm init --advanced` for scripted runs. See [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) for the full model matrix.
 
+> **Claude Code — indexing vs. discovery:** the memory folders `mm init` indexes are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Custom Commands, and Subagents — see [Configuration → Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#context-gateway) for the opt-in behavior and lossy-slug caveats.
+
 Then in your AI editor, ask:
 
 ```
