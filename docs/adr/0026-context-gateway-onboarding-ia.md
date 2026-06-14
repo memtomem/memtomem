@@ -1,6 +1,8 @@
 # ADR-0026: Context Gateway first-time-user onboarding & comprehension layer
 
-**Status:** Proposed
+**Status:** Proposed (recommended leans filled in §"Provisional
+decisions"; each keeps its alternatives and is reversible — maintainer to
+confirm or re-open)
 **Date:** 2026-06-14
 **Context:** A first-time-user end-to-end smoke test of the Context Gateway
 web UI (driven through Playwright against an isolated, seeded HOME) found
@@ -45,8 +47,8 @@ is deliberately **non-normative** on the request / identifier vocabulary:
   glossary below therefore keeps the literal tokens by default and only
   *defines* them. Friendlier tier-value labels would be a **narrow
   supersession of ADR-0016 §7 for Web display copy only** — that is a
-  maintainer decision (Q-A), not something this ADR assumes. So this ADR
-  is non-normative on prior decisions **except** that Q-A explicitly puts
+  maintainer decision (D-A), not something this ADR assumes. So this ADR
+  is non-normative on prior decisions **except** that D-A explicitly puts
   ADR-0016 §7 on the table.
 
 The string-level localization/copy *defects* found by the same smoke test
@@ -106,15 +108,15 @@ only in code, request params, and ADRs).
 | fan-out | **Sync** / "pushes" (verb) | Copying the Store's items out to every detected runtime — one-way. |
 | Sync / Sync All | **Sync** (kept) | Push the Store's items out to your runtimes. |
 | Import | **Import** (kept) | Pull an existing item from a runtime back into the Store. |
-| tier (the `target_scope` axis) | **OPEN QUESTION — do _not_ reuse "Scope"** (see §"Open questions" Q-A) | Where in the Store a copy lives and how widely it applies. |
-| user / project_shared / project_local (values) | **Keep the literal tokens** + a one-line tooltip — see Q-A. ADR-0016 §7 pins these tokens and rejects display aliases; friendlier labels ("Personal"/"Team"/"Draft") would need to supersede ADR-0016 §7 (Web display only). | All your projects / committed to git, your team gets it / gitignored draft, never pushed. |
+| tier (the `target_scope` axis) | **"Tier"** (kept + defined) — _provisional_, see Decision D-A; "Scope" is rejected (collides with ADR-0015) | Where in the Store a copy lives and how widely it applies. |
+| user / project_shared / project_local (values) | **Keep the literal tokens** + a one-line tooltip — see D-A. ADR-0016 §7 pins these tokens and rejects display aliases; friendlier labels ("Personal"/"Team"/"Draft") would need to supersede ADR-0016 §7 (Web display only). | All your projects / committed to git, your team gets it / gitignored draft, never pushed. |
 | enroll | **Track** ("Enable sync") | Opt a project in to receiving pushes — like adding a git remote. |
 | Server CWD | the project's real label + a **`(current folder)`** marker | The folder the server launched in; show the real label, not a synthetic second identity. |
 | status: out of sync / not in runtime | **Out of sync → Sync** / **Not in runtimes → Sync** | Store has changes/items the runtime lacks; Sync to push. |
 | status: not yet imported | **In runtime only → Import** | A runtime has an item the Store doesn't; Import to bring it in. |
 
 `project_shared` means "git-tracked", **not** "shared between agents"
-(inherited verbatim from ADR-0011 / ADR-0015 Terminology). Whatever Q-A
+(inherited verbatim from ADR-0011 / ADR-0015 Terminology). Whatever D-A
 decides for the rendered tier values, the `project_shared` tooltip must
 carry that meaning ("committed to git — your team will see it"); the
 `project_local` tooltip must carry "gitignored draft — never pushed"
@@ -128,7 +130,7 @@ here as written, because **ADR-0015 explicitly retired unqualified
 the *display* word for the tier axis would re-create exactly the ambiguity
 ADR-0015 fought, and would collide with the project axis users already
 read as "Project". The tier-axis display term is therefore left as an
-explicit open question (Q-A), with non-colliding candidates: keep "Tier"
+explicit open question (D-A), with non-colliding candidates: keep "Tier"
 (and define it), "Storage location", or "Visibility". The current UI label
 "저장 위치" / "Stored in" is already a non-colliding choice and may simply
 need a definition rather than a rename.
@@ -218,9 +220,11 @@ Each item: **what** · **where** · **acceptance criterion**.
 #### P1 — Moderate (proposed for the next iteration)
 
 1. **Simple/Advanced toggle** (`localStorage` flag) shows/hides
-   `#ctx-control-bar` and the Projects/Wiki/Hooks nav. Default Simple;
-   Advanced restores today's UI verbatim; `#ctx-control-bar` stays in the
-   DOM (hidden) so the existing hoist guard stays green.
+   `#ctx-control-bar` and the Projects/Wiki/Hooks nav. Simple is the
+   *target* default — but per D-F the rollout is staged (ship with
+   **Advanced default first**, flip to Simple after the §Validation user
+   test). Advanced restores today's UI verbatim; `#ctx-control-bar` stays
+   in the DOM (hidden) so the existing hoist guard stays green.
 2. **One-line verdict + per-type inline actions** — each surfaced problem
    carries its resolving verb button on its own row; Sync vs Import is
    never ambiguous.
@@ -230,7 +234,7 @@ Each item: **what** · **where** · **acceptance criterion**.
 4. **Default-flip fan-out** — Simple-as-default ships with its
    onboarding-docs fan-out in the same change (per the repo's
    default-change discipline); consider a staged opt-in (Advanced default,
-   flip after the user test) — see Q-F.
+   flip after the user test) — see D-F.
 
 **Simple default mode (P1) — low-fi mockup:**
 
@@ -257,7 +261,7 @@ Each item: **what** · **where** · **acceptance criterion**.
 Re-frame as a "git push console": rename Sync→Push↑ / Import→Pull↓,
 collapse the statuses to ahead/behind/in-sync (+ two error states), add a
 `git status`-style headline verdict, and resolve the tier display-term
-(Q-A) under the same metaphor (e.g. Global/Shared/Draft). This relabels
+(D-A) under the same metaphor (e.g. Global/Shared/Draft). This relabels
 ~40 `settings.ctx.*` keys in both locales and breaks external
 docs/screenshots, so it is **deferred pending** the §Validation user test.
 Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
@@ -273,8 +277,8 @@ Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
   display copy + status presentation, never `reason_code`s or request
   params (ADR-0015 preserved).
 - P0 item 4 overlaps #1348's confirm-copy edit at `en.json:415`;
-  sequencing must be coordinated (Q-E) so the two do not collide.
-- The tier display-term decision (Q-A) is intentionally *not* taken here,
+  sequencing must be coordinated (D-E) so the two do not collide.
+- The tier display-term decision (D-A) is intentionally *not* taken here,
   to avoid colliding with ADR-0015 / pre-empting #922.
 
 ## Validation
@@ -305,65 +309,89 @@ probes 1–3 succeed for ≥4/6 without docs; P2 is gated on probe 5
 succeeding for ≥5/6 and the status-merge not costing power users the
 create-vs-overwrite distinction.
 
-## Open questions
+## Provisional decisions
 
-- **Q-A. Tier vocabulary — axis term AND value display.** Two coupled
-  sub-decisions: (i) the tier-**axis** display term — reject "Scope" (it
-  collides with ADR-0015's retired unqualified "scope" and the project
-  axis); pick a non-colliding term (keep/define "Tier", or "Storage
-  location" / "Visibility" / the existing "Stored in"). (ii) the tier-
-  **values** — ADR-0016 §7 currently pins the literal tokens
-  `user`/`project_shared`/`project_local` for user-facing surfaces and
-  **rejects** display aliases. The glossary keeps the literals by default;
-  adopting friendlier labels (e.g. "Personal"/"Team"/"Draft") requires a
-  **narrow supersession of ADR-0016 §7 for Web display copy only**. Decide
-  literals-plus-tooltip vs. supersede-0016-§7. Neither (i) nor (ii) may
-  pre-empt the #922 `target_scope`→`target_tier` *identifier* rename.
-- **Q-B. P2 directional verbs — full rename vs. softer label.** Three
-  options, not two: (a) keep Sync/Import and carry direction only via the
-  diagram + legend (P0/P1); (b) **soft** — keep the action names
-  Sync/Import but add secondary labels/icons ("push to runtimes" ↑ /
-  "pull into Store" ↓) for the directional cue without git semantics;
-  (c) **full** rename Sync→Push↑ / Import→Pull↓ (highest comprehension,
-  one-way, breaks external docs/screenshots). Which?
-- **Q-C. Status-merge — mixed multi-runtime states.** The overview
-  aggregates `(runtime, name, status)` triples, so one artifact can be
-  in-sync for one runtime and missing/out-of-sync for another
-  (`context-gateway.js:1511`). P2's ahead/behind/in-sync collapse must
-  define how a **mixed** item renders (worst-status wins? per-runtime
-  chips?) and whether list/Sync-All rows still expose overwrite risk
-  *before* the confirm modal — not just "create-vs-overwrite moves to the
-  modal". Is the collapse acceptable given mixed states?
-- **Q-D. Simple-mode empty-tier handling.** P1 Simple pins to
-  `project_shared`; a user whose items live only in the User tier sees an
-  empty Overview until they find Advanced. Split into two: (i) the hint —
-  "turn on Advanced"; (ii) **auto-switching the active tier is risky** (it
-  conflicts with the stable `project_shared` default per ADR-0015/0016).
-  Safer option: a **read-only empty-state summary** that names which other
-  tier holds items ("3 items in your User tier — open Advanced to manage")
-  *without* changing the active tier. Hint, auto-switch, or read-only
-  summary?
-- **Q-E. Sequencing + a single glossary owner.** P0 rewrites `en.json:415`
-  (overlaps #1348) and defines terms #1351 must translate. Beyond issue
-  order: name **one glossary owner / source-of-truth** that #1348–#1352
-  and this ADR all localize against, so the same EN/KO keys are not
-  re-churned by parallel changes. Land P0 before/after/interleaved?
-- **Q-F. Default-flip blast radius.** P1's Simple-as-default is a default
-  change requiring same-change docs fan-out **and** it hides
-  navigation/control surfaces. The decision should weigh discoverability
-  (will power users find Advanced?) and a rollback signal (telemetry or a
-  visible toggle), not only docs. Staged opt-in first (Advanced default,
-  flip after the user test), per the repo's default-change discipline?
-- **Q-G. Accessibility & localization of the new visual onboarding.** P0/P1
-  add a primer banner, a Store→Runtimes diagram, and a hover/focus legend.
-  Define acceptance criteria before scheduling: screen-reader text for the
-  diagram (it must not be the only carrier of the model), keyboard access
-  to the legend/tooltips, no color-only status encoding, dark-mode
-  rendering, and RTL/localized-width layout for the ASCII-style diagram.
-  What is the a11y/localization bar P0 must clear?
+These are the author's **recommended leans**, filled in so the ADR reads
+as a concrete draft. Each is **provisional** — it records the chosen
+option *and keeps its alternatives* so the maintainer can re-open any one
+without re-deriving the analysis. Until the maintainer confirms, treat
+every D-x as a recommendation, not a settled decision. (Each D-x maps 1:1
+to the prior open question Q-x.)
+
+- **D-A. Tier vocabulary — axis term AND value display.**
+  - **Lean:** (i) keep **"Tier"** as the axis display term and *define* it
+    (reject "Scope" — collides with ADR-0015's retired unqualified
+    "scope"); (ii) keep the **literal tier-value tokens**
+    `user`/`project_shared`/`project_local` + a one-line tooltip each — so
+    nothing supersedes ADR-0016 §7. Lowest-risk, zero ADR conflict.
+  - **Alternatives (kept):** axis term "Storage location" / "Visibility" /
+    "Stored in"; OR adopt friendlier value labels ("Personal"/"Team"/
+    "Draft") via a **narrow supersession of ADR-0016 §7 for Web display
+    only** (would need its own §7-supersession note).
+  - **Constraint:** neither sub-decision may pre-empt the #922
+    `target_scope`→`target_tier` *identifier* rename.
+- **D-B. P2 directional verbs.**
+  - **Lean:** option (b) **soft** — keep the action names Sync/Import but
+    add a secondary directional cue ("push to runtimes" ↑ / "pull into
+    Store" ↓). Captures most of the comprehension gain without git-semantic
+    over-promise or external-doc churn.
+  - **Alternatives (kept):** (a) no verb change — direction carried only by
+    the diagram + legend (P0/P1); (c) **full** rename Sync→Push↑ /
+    Import→Pull↓ (highest comprehension, one-way, breaks external
+    docs/screenshots) — still gated on the §Validation user test if chosen.
+- **D-C. Status-merge — mixed multi-runtime states.**
+  - **Lean:** defer any status collapse to **P2 only** (post-validation);
+    when rendering a **mixed** item (in-sync for one runtime, out-of-sync
+    for another — `context-gateway.js:1511`) use **worst-status-wins for
+    the row badge + per-runtime chips** for detail, and keep the
+    create-vs-overwrite cue on list/Sync-All rows *before* the confirm
+    modal (do not hide it in the modal).
+  - **Alternatives (kept):** collapse to a single ahead/behind/in-sync
+    badge with no per-runtime chips (simpler, but loses the mixed-state and
+    overwrite-risk signal at a glance); keep today's four-status model
+    unchanged (no collapse at all).
+- **D-D. Simple-mode empty-tier handling.**
+  - **Lean:** option (iii) a **read-only empty-state summary** that names
+    which other tier holds items ("3 items in your User tier — open
+    Advanced to manage") *without* changing the active tier — preserves the
+    stable `project_shared` default (ADR-0015/0016) while staying
+    discoverable.
+  - **Alternatives (kept):** (i) a plain "turn on Advanced" hint only;
+    (ii) **auto-switch** the active tier to the populated one (rejected in
+    the lean — conflicts with the stable default, but recorded for
+    re-evaluation).
+- **D-E. Sequencing + a single glossary owner.**
+  - **Lean:** designate **this ADR's §"A single user-facing display
+    glossary" as the source-of-truth**; land **P0 before** #1351's bulk
+    ko.json pass so translation localizes against settled terms; coordinate
+    P0-4's `en.json:415` rewrite with #1348 (same string) so they don't
+    double-churn.
+  - **Alternatives (kept):** let #1351 land first and have this ADR conform
+    to whatever terms emerge; or run them fully in parallel with a
+    post-hoc reconciliation pass (higher churn risk).
+- **D-F. Default-flip blast radius.**
+  - **Lean:** **staged opt-in first** — ship Simple mode with **Advanced as
+    the default**, gather the §Validation user-test signal, then flip the
+    default in a follow-up (with the onboarding-docs fan-out in the same
+    change), per the repo's default-change discipline. Keep the toggle
+    visible (not buried) as the rollback signal.
+  - **Alternatives (kept):** flip Simple-as-default immediately (with
+    same-change docs fan-out) — faster comprehension win, larger blast
+    radius and weaker rollback signal.
+- **D-G. Accessibility & localization of the new visual onboarding.**
+  - **Lean:** make a11y a **P0 gate** (not deferred): the Store→Runtimes
+    diagram must carry an equivalent text alternative (it is never the only
+    carrier of the model — the primer prose is), the legend/tooltips must be
+    keyboard-reachable and focus-visible, status must not be color-only,
+    and the layout must render in dark mode and survive RTL/localized
+    widths. Add these as acceptance criteria to P0 item 6 (i18n/gate
+    hygiene).
+  - **Alternatives (kept):** treat a11y polish as a fast-follow after P0
+    ships (rejected in the lean — the diagram/legend are comprehension-
+    critical, so their a11y is load-bearing, not polish).
 
 If this ADR is accepted with P2 left deferred, add a TRACKER.md row for
-Q-B (trigger: the §Validation first-run user test) pointing at #1353.
+D-B/D-C (trigger: the §Validation first-run user test) pointing at #1353.
 
 ## References
 
@@ -374,7 +402,7 @@ Q-B (trigger: the §Validation first-run user test) pointing at #1353.
   move/copy verbs; portal empty-state; `reason_code`→i18n leaks; ko.json
   gap + install-guide literals; wording polish).
 - #922 — deferred `target_scope`→`target_tier` identifier rename
-  (ADR-0016); Q-A must not pre-empt it.
+  (ADR-0016); D-A must not pre-empt it.
 
 **ADRs**
 
@@ -383,13 +411,13 @@ Q-B (trigger: the §Validation first-run user test) pointing at #1353.
 - ADR-0011 §3 — `project_local` has no runtime fan-out (load-bearing for
   the diagram + the "Draft, never pushed" definition).
 - ADR-0015 — request vocabulary `project_scope_id` / `target_scope` and
-  the retirement of unqualified "scope" (load-bearing for §2 / Q-A);
+  the retirement of unqualified "scope" (load-bearing for §2 / D-A);
   this ADR is the display-layer counterpart and does not change it.
 - ADR-0016 §7 ("CLI / Web UI user-facing names") — **pins** the literal
   tier tokens for user-facing surfaces and rejects display aliases
-  (load-bearing for Q-A(ii); the glossary keeps literals unless Q-A elects
+  (load-bearing for D-A(ii); the glossary keeps literals unless D-A elects
   to supersede it for Web display copy). §"Open questions" §2 — deferred
-  `target_scope`→`target_tier` *identifier* rename (#922); Q-A must not
+  `target_scope`→`target_tier` *identifier* rename (#922); D-A must not
   pre-empt it.
 - ADR-0021 — Context portal (the Projects portal whose dual project
   identity P0-5 fixes).
@@ -405,7 +433,7 @@ symbol if they drift.
 - `packages/memtomem/src/memtomem/web/static/context-gateway.js:1495-1500`
   — `.ctx-overview-header` / `.ctx-overview-root` / `.ctx-overview-runtimes`
   (P0-2 insertion point); `:579` `_ctxScopeDisplayLabel` (P0-5); `:1511`
-  the `(runtime, name, status)` aggregation comment (load-bearing for Q-C
+  the `(runtime, name, status)` aggregation comment (load-bearing for D-C
   mixed multi-runtime states).
 - `packages/memtomem/src/memtomem/web/static/locales/en.json:415`
   `move_copy_shared_confirm_message` (P0-4); `:497-500` status keys
