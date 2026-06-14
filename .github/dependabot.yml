@@ -1,0 +1,36 @@
+# Dependabot keeps the two dependency surfaces this repo actually ships from
+# up to date: the GitHub Actions used by CI/release, and the Python packages
+# locked in uv.lock (Dependabot has native `uv` lockfile support, GA 2024-10).
+#
+# Heads-up for maintainers: the `github-actions` updater bumps an action's
+# *ref* (e.g. astral-sh/setup-uv@v7), NOT a `with:` input. The pinned uv
+# version (`UV_VERSION` in the workflows) and the osv-scanner binary pin in
+# the `python-deps` job are therefore bumped by hand, not by Dependabot.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One grouped PR per week instead of one per action — action bumps are
+    # low-risk and high-volume, so grouping keeps the noise down.
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # uv workspace: the single lockfile is the root uv.lock (member deps are
+  # declared in packages/memtomem/pyproject.toml but locked here), so the
+  # updater points at "/". NB: Dependabot doesn't yet document uv-workspace
+  # traversal — confirm the first weekly uv run actually proposes member-dep
+  # bumps (the security fixes tracked in #1331) and move the directory to
+  # "/packages/memtomem" if it comes up empty.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Group routine minor/patch bumps into one PR; majors still arrive
+    # individually so they get their own review.
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
