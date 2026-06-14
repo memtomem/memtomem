@@ -5,6 +5,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **`mm wiki <type> {diff, lint}` — inspect wiki overrides (ADR-0008 PR-D; #1332).**
+  Two read-only verbs round out the per-asset `mm wiki skill|agent|command`
+  group. `diff <name> --vendor <vendor>` renders the canonical the way
+  `override` would seed it and prints a unified diff against the committed
+  `overrides/<vendor>.<ext>`, surfacing both your hand-edits and any canonical
+  drift since seeding (always exits 0; canonical fields the vendor format cannot
+  carry are noted on stderr). `lint <name> [--vendor <vendor>]` validates the
+  asset is well-formed and installable — name, canonical presence + parse, and
+  per-vendor representability + override UTF-8 — exiting non-zero on any error so
+  it is usable as a CI gate while dropped-field warnings stay exit 0. Both reuse
+  the PR-C `render_seed_bytes` / `OVERRIDE_FORMATS` machinery, so
+  `diff` / `lint` / `override` never disagree about what the runtime sees.
+
 - **`mm context sync --include=mcp-servers` — CLI mcp-servers fan-out (#1311).**
   `mm context sync` (and `--all-projects`) gained an opt-in mcp-servers phase:
   `--include=mcp-servers` fans canonical `.memtomem/mcp-servers/*.json`
