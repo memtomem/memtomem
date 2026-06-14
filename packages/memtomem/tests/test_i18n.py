@@ -637,6 +637,12 @@ class TestNoHardcodedStrings:
             "settings.ctx.status_simple_empty",
             "settings.ctx.simple_manage",
             "settings.ctx.simple_empty_hint",
+            # ADR-0026 P1b inline actions + D-D cross-tier empty summary —
+            # screen-reader / comprehension copy that must also stay jargon-free.
+            "settings.ctx.simple_sync_aria",
+            "settings.ctx.simple_import_aria",
+            "settings.ctx.simple_cross_tier_label",
+            "settings.ctx.simple_cross_tier_entry",
         ]
         for key in new_keys:
             assert key in en, f"P0 onboarding key missing from en.json: {key}"

@@ -4026,10 +4026,14 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-simple-row--warn .ctx-simple-dot { background: var(--yellow); }
 .ctx-simple-row--info .ctx-simple-dot { background: var(--accent); }
 .ctx-simple-row--ok .ctx-simple-dot { background: var(--green); }
-.ctx-simple-manage { flex: 0 0 auto; }
+.ctx-simple-manage, .ctx-simple-action { flex: 0 0 auto; }
+/* ADR-0026 P1b: clean rows show a check (decorative — the status text carries
+   the meaning, never glyph-only, D-G). */
+.ctx-simple-check { flex: 0 0 auto; color: var(--green); font-weight: 600; }
 .ctx-simple-empty-hint { margin-top: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 0.82rem; }
 .ctx-mode-toggle:focus-visible,
 .ctx-simple-manage:focus-visible,
+.ctx-simple-action:focus-visible,
 .ctx-simple-advanced-cta:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .ctx-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; background: var(--surface); cursor: pointer; transition: border-color 0.15s; }

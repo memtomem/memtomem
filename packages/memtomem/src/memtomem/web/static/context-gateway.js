@@ -514,10 +514,11 @@ try {
 
 // -- Simple mode (ADR-0026 P1a, #1353) ----------------------------------------
 // Progressive-disclosure flag. Simple hides the four-axis control bar + the
-// section nav and renders the Overview as a one-line verdict + per-type rows
-// (read-only — rows route into Advanced to act; the inline Sync/Import buttons
-// land in P1b). Advanced — the default per ADR-0026 D-F's staged rollout —
-// restores today's UI verbatim. Persisted like the active-scope flag above;
+// section nav and renders the Overview as a one-line verdict + per-type rows.
+// P1b: each fixable row runs Sync/Import inline (same confirm flow as Advanced);
+// clean rows show a check, and rows with no safe one-click fix keep the Manage
+// deep-link into Advanced. Advanced — the default per ADR-0026 D-F's staged
+// rollout — restores today's UI verbatim. Persisted like the active-scope flag;
 // default off so power users are unaffected until the post-validation
 // default-flip lands.
 const _CTX_SIMPLE_MODE_KEY = 'memtomem_ctx_simple_mode';
@@ -551,8 +552,9 @@ function _ctxSetSimpleMode(on) {
 }
 
 // Leave Simple mode and (optionally) deep-link into the Advanced section that
-// owns an artifact type, where the real Sync/Import/edit controls live. P1a
-// rows are read-only; the mutation buttons land in P1b.
+// owns an artifact type, where the full Sync/Import/create/edit/delete controls
+// live. Used by the Manage buttons (rows with no safe one-click fix) and the
+// empty-state CTA; P1b's inline Sync/Import act in place without leaving Simple.
 function _ctxOpenInAdvanced(section) {
   _ctxSetSimpleMode(false);
   if (section) {
@@ -1162,7 +1164,14 @@ const _CTX_WRITE_BUTTON_SELECTOR = (
   // ``.ctx-version-enable-btn`` (rank 6) adopts a flat artifact into dir layout
   // — also a project_shared-only canonical write.
   + '.ctx-version-enable-btn, '
-  + '.ctx-version-freeze-btn, .ctx-version-promote-btn, .ctx-version-label-remove'
+  + '.ctx-version-freeze-btn, .ctx-version-promote-btn, .ctx-version-label-remove, '
+  // ADR-0026 P1b: the Simple-mode inline Sync/Import buttons hit the SAME
+  // tier-gated routes as the Advanced toolbar, so they ride the same write-block
+  // sweep (project_local blocks both; user tier opens skills/commands/agents via
+  // _CTX_USER_TIER_OPEN_SELECTOR below). Without this, a persisted
+  // project_local + Simple session would open a confirm and POST a blocked write
+  // instead of surfacing the no-write tier explanation up front (Codex review).
+  + '.ctx-simple-action'
 );
 
 // rank 21: artifact-section toolbars (Skills / Commands / Agents / MCP Servers)
@@ -1241,7 +1250,12 @@ _ctxRenderToolbars();
 // blocks everything (no fan-out, ADR-0011 §3).
 const _CTX_USER_TIER_OPEN_SELECTOR = (
   '.ctx-create-btn, .ctx-import-btn, .ctx-sync-btn, '
-  + '.ctx-detail-edit-btn, .ctx-detail-delete-btn, .ctx-runtime-only-import'
+  + '.ctx-detail-edit-btn, .ctx-detail-delete-btn, .ctx-runtime-only-import, '
+  // ADR-0026 P1b: Simple-mode inline Sync/Import for skills/commands/agents is
+  // user-tier-open too (it rides the #1263 host-write confirm), exactly like the
+  // Advanced toolbar buttons above. The _CTX_USER_TIER_OPEN_TYPES gate keeps the
+  // open set to those three; mcp-servers never mints an inline action (no /import).
+  + '.ctx-simple-action'
 );
 const _CTX_USER_TIER_OPEN_TYPES = new Set(['skills', 'commands', 'agents']);
 
@@ -1520,12 +1534,14 @@ function _ctxSimpleVerdict(d) {
   return { state: 'in_tools', labelKey: 'settings.ctx.status_simple_in_tools', tone: 'ok' };
 }
 
-// Build the Simple Overview body: a one-line aggregate verdict + a read-only
-// row per artifact type (skills/commands/agents/mcp — hooks stays Advanced-only
-// in P1a, matching the ADR mockup). Each row shows the 3-state status (text is
-// always present — never color-only, ADR-0026 D-G) and a Manage button that
-// opens Advanced at that section. Inline ``t()`` matches the langchange
-// re-render ordering used by the rest of this render path.
+// Build the Simple Overview body: a one-line aggregate verdict + a row per
+// artifact type (skills/commands/agents/mcp — hooks stays Advanced-only,
+// matching the ADR mockup). Each row shows the 3-state status (text is always
+// present — never color-only, ADR-0026 D-G) plus one P1b control: an inline
+// Sync (needs_sync) / Import (not_saved, importable) button running the SAME
+// flow as Advanced, a decorative check (in_tools), or a read-only Manage
+// deep-link (attention, empty, and mcp-servers not_saved — no /import route).
+// Inline ``t()`` matches the langchange re-render ordering of this render path.
 function _ctxSimpleOverviewBody(data, types) {
   const artifactTypes = types.filter(typ => typ.key !== 'settings');
   let anyAttention = false, anyAction = false, anyItems = false;
@@ -1536,16 +1552,52 @@ function _ctxSimpleOverviewBody(data, types) {
     if (v.state === 'attention') anyAttention = true;
     if (v.state === 'needs_sync' || v.state === 'not_saved') anyAction = true;
     const statusText = t(v.labelKey);
-    const manageAria = t('settings.ctx.simple_manage_aria', { type: typ.label });
+    // P1b (#1353): one control per row (minimal layout). A fixable row carries
+    // the resolving verb inline and runs the SAME confirm + impact-preview +
+    // host-write flow as Advanced (``_ctxRunSync`` / ``_ctxRunImport``); a clean
+    // row shows a decorative check (the status text already names the state —
+    // never glyph-only, D-G); everything else (empty, attention, and the
+    // not_saved case for mcp-servers, which has no ``/import`` route) keeps the
+    // read-only Manage deep-link into Advanced.
+    const apiType = _ctxSectionToType(typ.section);   // 'skills', 'mcp-servers', …
+    const canImport = apiType !== 'mcp-servers';
+    let control;
+    if (v.state === 'needs_sync') {
+      const syncAria = t('settings.ctx.simple_sync_aria', { type: typ.label });
+      // Best-effort canonical count for the confirm headline; ``_ctxRunSync``
+      // re-fetches the real impact before committing. needs_sync ⟹ canonical
+      // items exist (missing_target / out_of_sync > 0), so the empty-guard never
+      // misfires here. project_local forces 0 — mirroring the Advanced section
+      // dataset (``_ctxTargetScope === 'project_local' ? 0 : …``) so the
+      // in-function no-write guard stays a backstop to the write-block sweep.
+      const canonicalCount = _ctxTargetScope === 'project_local'
+        ? '0'
+        : String(Math.max((d.total || 0) - (d.missing_canonical || 0), 0) || (d.total || 0));
+      control = `<button type="button" class="btn-primary ctx-simple-action"
+                data-ctx-action="sync" data-type="${escapeHtml(apiType)}"
+                data-canonical-count="${escapeHtml(canonicalCount)}"
+                data-no-fanout="${_ctxTargetScope === 'project_local' ? 'true' : 'false'}"
+                aria-label="${escapeHtml(syncAria)}">${escapeHtml(t('settings.ctx.sync'))}</button>`;
+    } else if (v.state === 'not_saved' && canImport) {
+      const importAria = t('settings.ctx.simple_import_aria', { type: typ.label });
+      control = `<button type="button" class="btn-ghost ctx-simple-action"
+                data-ctx-action="import" data-type="${escapeHtml(apiType)}"
+                aria-label="${escapeHtml(importAria)}">${escapeHtml(t('settings.ctx.import'))}</button>`;
+    } else if (v.state === 'in_tools') {
+      control = `<span class="ctx-simple-check" aria-hidden="true">✓</span>`;
+    } else {
+      const manageAria = t('settings.ctx.simple_manage_aria', { type: typ.label });
+      control = `<button type="button" class="btn-ghost ctx-simple-manage"
+                data-ctx-advance data-section="${typ.section}"
+                aria-label="${escapeHtml(manageAria)}">${escapeHtml(t('settings.ctx.simple_manage'))}</button>`;
+    }
     return `<div class="ctx-simple-row ctx-simple-row--${v.tone}" data-section="${typ.section}" data-state="${v.state}">
         <span class="ctx-simple-row-type">${escapeHtml(typ.label)}</span>
         <span class="ctx-simple-row-status">
           <span class="ctx-simple-dot" aria-hidden="true"></span>
           <span class="ctx-simple-status-text">${escapeHtml(statusText)}</span>
         </span>
-        <button type="button" class="btn-ghost ctx-simple-manage"
-                data-ctx-advance data-section="${typ.section}"
-                aria-label="${escapeHtml(manageAria)}">${escapeHtml(t('settings.ctx.simple_manage'))}</button>
+        ${control}
       </div>`;
   }).join('');
 
@@ -1571,13 +1623,83 @@ function _ctxSimpleOverviewBody(data, types) {
   return html;
 }
 
-// Wire the Simple rows' Manage buttons + the empty-state CTA: each leaves
-// Simple mode and (when a section is named) deep-links into Advanced. No-op in
-// Advanced — the ``[data-ctx-advance]`` selector matches nothing there.
+// Wire the Simple rows: ``[data-ctx-advance]`` (Manage buttons + the empty-state
+// CTA) leaves Simple mode and, when a section is named, deep-links into Advanced;
+// ``[data-ctx-action]`` (P1b inline Sync/Import) runs the SAME flow as the
+// Advanced toolbar buttons — full confirm + impact preview + host-write
+// disclosure via ``_ctxRunSync`` / ``_ctxRunImport`` — then refreshes the Simple
+// Overview in place on success. No-op in Advanced (neither selector matches).
 function _ctxWireSimpleRows(el) {
   el.querySelectorAll('[data-ctx-advance]').forEach(btn => {
     btn.addEventListener('click', () => _ctxOpenInAdvanced(btn.dataset.section || ''));
   });
+  el.querySelectorAll('[data-ctx-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const type = btn.dataset.type;
+      if (btn.dataset.ctxAction === 'sync') {
+        _ctxRunSync(type, {
+          btn,
+          canonicalCount: btn.dataset.canonicalCount || '0',
+          noFanout: btn.dataset.noFanout === 'true',
+          onComplete: () => loadCtxOverview(),
+        });
+      } else if (btn.dataset.ctxAction === 'import') {
+        _ctxRunImport(type, { btn, onComplete: () => loadCtxOverview() });
+      }
+    });
+  });
+}
+
+// ADR-0026 P1b D-D (#1353): count items in the tiers OTHER than the active one
+// and, when any hold artifacts, replace the generic empty hint with a summary
+// that names them ("Stored in another tier: 3 in User"). The Overview route
+// summarizes a single tier per call (this layer adds NO backend route — ADR
+// non-goal), so this fans out one best-effort read per other tier. Seq-guarded
+// so a tier/mode switch (or a second empty render) can't patch stale counts in;
+// any fetch failure or all-empty result silently leaves the generic hint.
+let _ctxCrossTierSeq = 0;
+const _CTX_CROSS_TIER_TYPES = ['skills', 'commands', 'agents', 'mcp_servers'];
+const _CTX_TIER_LABEL_KEY = {
+  user: 'settings.ctx.tier_option_user',
+  project_shared: 'settings.ctx.tier_option_project_shared',
+  project_local: 'settings.ctx.tier_option_project_local',
+};
+
+async function _ctxRenderCrossTierSummary(activeTier, scopeId) {
+  const seq = ++_ctxCrossTierSeq;
+  const others = ['user', 'project_shared', 'project_local'].filter(tier => tier !== activeTier);
+  const counts = await Promise.all(others.map(async tier => {
+    try {
+      const res = await fetch(_ctxWithTargetScope('/api/context/overview', {
+        targetScope: tier,
+        scopeId,
+        scopeResolved: true,
+      }));
+      if (!res.ok) return { tier, total: 0 };
+      const data = await res.json();
+      if (data === null || typeof data !== 'object') return { tier, total: 0 };
+      const total = _CTX_CROSS_TIER_TYPES.reduce(
+        (sum, key) => sum + ((data[key] && data[key].total) || 0), 0,
+      );
+      return { tier, total };
+    } catch {
+      return { tier, total: 0 };
+    }
+  }));
+  // A newer render (tier flip, mode toggle, refresh) superseded this fan-out —
+  // its own summary owns the hint now; never patch over it.
+  if (seq !== _ctxCrossTierSeq || !_ctxSimpleMode) return;
+  const container = qs('ctx-overview-content');
+  const span = container?.querySelector('.ctx-simple-empty-hint > span');
+  if (!span) return;
+  const entries = counts
+    .filter(c => c.total > 0)
+    .map(c => t('settings.ctx.simple_cross_tier_entry', {
+      count: c.total,
+      tier: t(_CTX_TIER_LABEL_KEY[c.tier] || c.tier),
+    }));
+  if (!entries.length) return;   // truly empty everywhere — keep the generic hint
+  span.textContent = `${t('settings.ctx.simple_cross_tier_label')} ${entries.join(' · ')}`;
 }
 
 function _renderCtxOverview(data) {
@@ -2035,9 +2157,17 @@ function _renderCtxOverview(data) {
     });
   });
 
-  // ADR-0026 P1a: wire the Simple-mode rows (no-op in Advanced — the selector
-  // matches nothing). Read-only: each routes into Advanced to act.
+  // ADR-0026 P1a/P1b: wire the Simple-mode rows (no-op in Advanced — neither
+  // selector matches anything). Manage rows route into Advanced; fixable rows
+  // run Sync/Import inline.
   _ctxWireSimpleRows(el);
+
+  // ADR-0026 P1b D-D (#1353): when the active tier is all-empty in Simple mode,
+  // name which OTHER tier(s) hold items instead of only the generic empty hint.
+  // Keyed off the empty-hint marker the Simple body renders only when !anyItems.
+  if (_ctxSimpleMode && el.querySelector('.ctx-simple-empty-hint')) {
+    _ctxRenderCrossTierSummary(targetScope, _ctxEffectiveScopeId());
+  }
 
   // Tier-aware write-block sweep (#945) — folds in the user-tier Sync All
   // gate alongside the existing data-runtime-only paths above. Idempotent
@@ -5841,16 +5971,22 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
 
 // -- Sync / Import buttons (delegated) ----------------------------------------
 
-document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const type = btn.dataset.type;
+// ADR-0026 P1b (#1353): the per-type Sync flow, lifted VERBATIM out of the
+// delegated ``.ctx-sync-btn`` binding (the lifted body keeps its original
+// indentation so the diff reads as a pure extract — no logic changed) so the
+// Simple-mode rows can run it inline with the SAME confirm + impact preview +
+// host-write disclosure that the read-only P1a rows only reached by routing
+// into Advanced. ``btn`` is the element to spin; ``canonicalCount`` / ``noFanout``
+// are the click-time snapshot the confirm describes (Advanced: section dataset;
+// Simple: the row's overview counts); ``onComplete(type)`` is the post-sync
+// refresh (Advanced → loadCtxList, Simple → loadCtxOverview).
+async function _ctxRunSync(type, { btn, canonicalCount, noFanout, onComplete }) {
     // Guard against pressing Sync when the cwd has no canonical artifacts —
     // the request would resolve to a `no_canonical_root` skip with an info
     // toast, but that arrives after a confirm dialog, which is the wrong
     // shape of feedback for "this button does nothing right now."
-    const section = btn.closest('.settings-section');
-    if (section?.dataset.canonicalCount === '0') {
-      const message = section?.dataset.noFanout === 'true'
+    if (canonicalCount === '0') {
+      const message = noFanout
         ? t('settings.ctx.project_local_no_fanout_tooltip')
         : t('settings.ctx.sync_disabled_tooltip').replace('{type}', _ctxTypeName(type));
       showToast(message, 'info');
@@ -5866,10 +6002,9 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       scopeResolved: true,
       targetScope: _ctxTargetScope,
     };
-    // Snapshot the count WITH the pin — a project/tier switch during the
-    // preview fetch re-renders the section dataset, and the confirm must
-    // describe the same (project, tier) the POST writes to (Codex review).
-    const canonicalCount = section?.dataset.canonicalCount || '0';
+    // ``canonicalCount`` is the caller's click-time snapshot, pinned alongside
+    // the scope/tier above so the confirm describes the same (project, tier) the
+    // POST writes to (Codex review).
     btnLoading(btn, true);
     let impact = null;
     try {
@@ -5987,16 +6122,35 @@ document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
       } else {
         showToast(t('settings.ctx.sync_success'));
       }
-      loadCtxList(type);
+      if (onComplete) onComplete(type);
     } catch (err) {
       showToast(t('toast.sync_failed', { error: err.message }), 'error');
     } finally { btnLoading(btn, false); }
+}
+
+// Advanced (delegated): each per-section ``.ctx-sync-btn`` reads its click-time
+// section snapshot and refreshes that section's list on success. The Simple-mode
+// rows call ``_ctxRunSync`` directly with the overview counts + an Overview
+// refresh (see ``_ctxWireSimpleRows``).
+document.querySelectorAll('.ctx-sync-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const section = btn.closest('.settings-section');
+    _ctxRunSync(btn.dataset.type, {
+      btn,
+      canonicalCount: section?.dataset.canonicalCount || '0',
+      noFanout: section?.dataset.noFanout === 'true',
+      onComplete: loadCtxList,
+    });
   });
 });
 
-document.querySelectorAll('.ctx-import-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const type = btn.dataset.type;
+// ADR-0026 P1b (#1353): the per-type Import flow, lifted VERBATIM out of the
+// delegated ``.ctx-import-btn`` binding (the lifted body keeps its original
+// indentation so the diff reads as a pure extract) so the Simple-mode rows can
+// run it inline with the SAME dry-run preview + overwrite opt-in + host-write
+// disclosure. ``onComplete(type)`` is the post-import refresh (Advanced →
+// loadCtxList, Simple → loadCtxOverview).
+async function _ctxRunImport(type, { btn, onComplete }) {
     // rank-10: run a dry-run preview first so the confirm names the
     // destination (active project · project_shared) and how many artifacts
     // would import vs already exist. The preview is best-effort — any failure
@@ -6150,10 +6304,17 @@ document.querySelectorAll('.ctx-import-btn').forEach(btn => {
       } else {
         showToast(t('settings.ctx.import_success'));
       }
-      loadCtxList(type);
+      if (onComplete) onComplete(type);
     } catch (err) {
       showToast(t('toast.import_failed', { error: err.message }), 'error');
     } finally { btnLoading(btn, false); }
+}
+
+// Advanced (delegated): each per-section ``.ctx-import-btn`` refreshes that
+// section's list on success. Simple-mode rows call ``_ctxRunImport`` directly.
+document.querySelectorAll('.ctx-import-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _ctxRunImport(btn.dataset.type, { btn, onComplete: loadCtxList });
   });
 });
 

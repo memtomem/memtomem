@@ -1,19 +1,27 @@
-/* ADR-0026 P1a (#1353) — Context Gateway Simple mode.
+/* ADR-0026 P1a/P1b (#1353) — Context Gateway Simple mode.
  *
  * Simple mode is a progressive-disclosure layer over the Overview: a
  * localStorage flag (default OFF = Advanced, per ADR-0026 D-F's staged rollout)
  * that toggles a ``.ctx-simple`` class on the gateway tab and swaps the
- * four-axis tile grid for a one-line verdict + a read-only per-type row list
- * (3-state display remap). These guards pin:
+ * four-axis tile grid for a one-line verdict + a per-type row list (3-state
+ * display remap). P1a guards:
  *   (1) default is Advanced — the grid renders, no ``.ctx-simple`` class, no
  *       Simple body (today's UI verbatim);
  *   (2) the toggle flips the class + aria-pressed + persists the flag, and the
  *       Overview re-renders into the verdict + per-type rows (hooks excluded);
  *   (3) the 3-state remap maps each type's raw counts to the right Simple state
  *       (display-only — no wire status string mutated);
- *   (4) a row's Manage button leaves Simple mode and deep-links into Advanced;
+ *   (4) an attention row's Manage button leaves Simple mode and deep-links into
+ *       Advanced;
  *   (5) the empty state surfaces the read-only hint + Open-Advanced CTA;
  *   (6) Simple re-renders in place on a langchange (locale flip).
+ * P1b guards:
+ *   (7) one control per row — Sync (needs_sync) / Import (not_saved) / a check
+ *       (in_tools) / Manage (attention, empty, and not_saved for mcp-servers,
+ *       which has no /import route);
+ *   (8) the inline buttons run the SAME _ctxRunSync / _ctxRunImport flow as the
+ *       Advanced toolbar, with an Overview refresh on success;
+ *   (9) an all-empty active tier names items held in another tier (D-D).
  *
  * jsdom does not apply external CSS, so visibility (the grid being display:none
  * under .ctx-simple) is covered by the Playwright spec
@@ -71,6 +79,25 @@ const MIXED_OVERVIEW = {
   detected_runtimes: [],
   project_root: '/srv',
   target_scope: 'project_shared',
+};
+
+// P1b: mcp-servers runtime-only (not_saved) — but mcp-servers has no /import
+// route, so its row must fall back to Manage, not an inline Import.
+const MCP_RUNTIME_ONLY = {
+  ...OVERVIEW,
+  mcp_servers: { total: 1, in_sync: 0, missing_canonical: 1 },
+};
+
+// P1b D-D: the active tier (project_shared) is empty; the User tier holds 3.
+const USER_TIER_OVERVIEW = {
+  skills: { total: 3, in_sync: 3 },
+  commands: { total: 0 },
+  agents: { total: 0 },
+  mcp_servers: { total: 0 },
+  settings: { total: 0, in_sync: 0, status: 'in_sync' },
+  detected_runtimes: [],
+  project_root: '/srv',
+  target_scope: 'user',
 };
 
 function jsonOk(body) {
@@ -196,7 +223,10 @@ describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
     expect(stateOf('ctx-commands')).toBe('needs_sync');
   });
 
-  it('a row Manage button leaves Simple mode and deep-links into Advanced', async () => {
+  it('an attention row Manage button leaves Simple mode and deep-links into Advanced', async () => {
+    // P1b: skills (needs_sync) now carries an inline Sync button, so the Manage
+    // deep-link is asserted on the attention row (mcp parse_error in OVERVIEW),
+    // which has no safe one-click fix and keeps Manage.
     const window = await boot();
     window._ctxSetSimpleMode(true);
     await window.loadCtxOverview();
@@ -207,14 +237,125 @@ describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
 
     const tab = window.document.getElementById('tab-context-gateway');
     const manage = window.document.querySelector(
-      '.ctx-simple-row[data-section="ctx-skills"] .ctx-simple-manage',
+      '.ctx-simple-row[data-section="ctx-mcp-servers"] .ctx-simple-manage',
     );
     expect(manage).not.toBeNull();
     manage.click();
 
-    expect(calls).toEqual(['ctx-skills']);
+    expect(calls).toEqual(['ctx-mcp-servers']);
     expect(tab.classList.contains('ctx-simple')).toBe(false);
     expect(window.localStorage.getItem('memtomem_ctx_simple_mode')).toBe('0');
+  });
+
+  it('P1b: one control per row — Sync (needs_sync) / Import (not_saved) / check (in_tools) / Manage (attention)', async () => {
+    const window = await boot();
+    window._ctxSetSimpleMode(true);
+    await window.loadCtxOverview();
+    await flush(window);
+
+    const rowCtl = (section, sel) =>
+      window.document.querySelector(`.ctx-simple-row[data-section="${section}"] ${sel}`);
+
+    // needs_sync → inline Sync (primary), carrying the type + click-time snapshot.
+    const sync = rowCtl('ctx-skills', '[data-ctx-action="sync"]');
+    expect(sync).not.toBeNull();
+    expect(sync.dataset.type).toBe('skills');
+    expect(sync.dataset.canonicalCount).toBeDefined();
+    expect(sync.dataset.noFanout).toBe('false');
+    expect(sync.classList.contains('btn-primary')).toBe(true);
+    expect((sync.getAttribute('aria-label') || '').length).toBeGreaterThan(0);
+
+    // not_saved (importable) → inline Import (ghost).
+    const imp = rowCtl('ctx-agents', '[data-ctx-action="import"]');
+    expect(imp).not.toBeNull();
+    expect(imp.dataset.type).toBe('agents');
+    expect(imp.classList.contains('btn-ghost')).toBe(true);
+
+    // in_tools → decorative check, no action button.
+    expect(rowCtl('ctx-commands', '.ctx-simple-check')).not.toBeNull();
+    expect(rowCtl('ctx-commands', '[data-ctx-action]')).toBeNull();
+
+    // attention → no safe one-click fix, keeps the read-only Manage deep-link.
+    expect(rowCtl('ctx-mcp-servers', '.ctx-simple-manage')).not.toBeNull();
+    expect(rowCtl('ctx-mcp-servers', '[data-ctx-action]')).toBeNull();
+  });
+
+  it('P1b: inline buttons run the shared _ctxRunSync/_ctxRunImport flow with an Overview refresh', async () => {
+    const window = await boot();
+    window._ctxSetSimpleMode(true);
+    await window.loadCtxOverview();
+    await flush(window);
+
+    const syncCalls = [];
+    const importCalls = [];
+    // Global function bindings, so reassigning the window property swaps what the
+    // delegated click handler resolves at call time (same idiom as the
+    // switchSettingsSection override above) — isolates the wiring from the full
+    // confirm flow.
+    window._ctxRunSync = (type, opts) => { syncCalls.push({ type, opts }); };
+    window._ctxRunImport = (type, opts) => { importCalls.push({ type, opts }); };
+
+    window.document
+      .querySelector('.ctx-simple-row[data-section="ctx-skills"] [data-ctx-action="sync"]')
+      .click();
+    window.document
+      .querySelector('.ctx-simple-row[data-section="ctx-agents"] [data-ctx-action="import"]')
+      .click();
+
+    expect(syncCalls).toHaveLength(1);
+    expect(syncCalls[0].type).toBe('skills');
+    expect(syncCalls[0].opts.btn).not.toBeUndefined();
+    expect(typeof syncCalls[0].opts.onComplete).toBe('function');
+    expect(importCalls).toHaveLength(1);
+    expect(importCalls[0].type).toBe('agents');
+    expect(typeof importCalls[0].opts.onComplete).toBe('function');
+  });
+
+  it('P1b: mcp-servers not_saved falls back to Manage (no inline Import — no /import route)', async () => {
+    const window = await boot(MCP_RUNTIME_ONLY);
+    window._ctxSetSimpleMode(true);
+    await window.loadCtxOverview();
+    await flush(window);
+
+    const row = window.document.querySelector('.ctx-simple-row[data-section="ctx-mcp-servers"]');
+    expect(row.dataset.state).toBe('not_saved');
+    expect(row.querySelector('[data-ctx-action]')).toBeNull();
+    expect(row.querySelector('.ctx-simple-manage')).not.toBeNull();
+  });
+
+  it('P1b D-D: an empty active tier names items found in another tier', async () => {
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway.js'] });
+    const { window } = dom;
+    // Active tier (project_shared, no target_scope param) + project_local are
+    // empty; the User tier holds items — so the cross-tier read names it.
+    const upstream = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      const [path, query] = url.split('?');
+      const params = new URLSearchParams(query || '');
+      if (path.includes('/api/context/projects')) return jsonOk({ scopes: SCOPES, target_scope: 'project_shared' });
+      if (path.endsWith('/api/context/overview')) {
+        return jsonOk(params.get('target_scope') === 'user' ? USER_TIER_OVERVIEW : EMPTY_OVERVIEW);
+      }
+      if (path.endsWith('/api/context/runtimes')) return jsonOk({ runtimes: [] });
+      if (path.match(/\/api\/context\/(skills|commands|agents|mcp-servers)$/)) return jsonOk({ items: [] });
+      return upstream(input, init);
+    };
+    await window.I18N.init();
+    window.document.getElementById('tab-context-gateway').classList.add('active');
+    setActiveSection(window, 'ctx-overview');
+    window._ctxSetSimpleMode(true);
+    await window.loadCtxOverview();
+    await flush(window);
+
+    const span = window.document.querySelector('.ctx-simple-empty-hint > span');
+    expect(span).not.toBeNull();
+    const expected = `${window.t('settings.ctx.simple_cross_tier_label')} `
+      + window.t('settings.ctx.simple_cross_tier_entry', {
+        count: 3,
+        tier: window.t('settings.ctx.tier_option_user'),
+      });
+    expect(span.textContent).toBe(expected);
   });
 
   it('empty state surfaces the read-only hint + Open-Advanced CTA', async () => {
