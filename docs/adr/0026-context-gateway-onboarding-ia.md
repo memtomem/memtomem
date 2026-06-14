@@ -33,9 +33,10 @@ is deliberately **non-normative** on the request / identifier vocabulary:
   the request-vocabulary terms fixed by **ADR-0015**, kept verbatim for
   backward compatibility.
 - It does **not** preempt the deferred `target_scope` → `target_tier`
-  *identifier* rename (ADR-0016 §"Open questions" §2, tracked by #922,
-  review window 2026-08-11). Any display-term change proposed here is a
-  separate, display-only concern and must not be read as resolving #922.
+  *identifier* rename — ADR-0016 §"Open questions" raises it; TRACKER.md
+  (row "0016 §2") binds it to #922 with a 2026-08-11 review window. Any
+  display-term change proposed here is a separate, display-only concern and
+  must not be read as resolving #922.
 - It does **not** change any route, schema, gate, or sync behaviour
   (ADR-0011 §3 `project_local` no-fan-out, ADR-0015 §4 product semantics,
   ADR-0023 transfer gates all stand). It changes copy, one display-label
@@ -416,9 +417,10 @@ D-B/D-C (trigger: the §Validation first-run user test) pointing at #1353.
 - ADR-0016 §7 ("CLI / Web UI user-facing names") — **pins** the literal
   tier tokens for user-facing surfaces and rejects display aliases
   (load-bearing for D-A(ii); the glossary keeps literals unless D-A elects
-  to supersede it for Web display copy). §"Open questions" §2 — deferred
-  `target_scope`→`target_tier` *identifier* rename (#922); D-A must not
-  pre-empt it.
+  to supersede it for Web display copy). §"Open questions" raises the
+  deferred `target_scope`→`target_tier` *identifier* rename (bound to #922
+  with a 2026-08-11 review window in TRACKER.md, row "0016 §2"); D-A must
+  not pre-empt it.
 - ADR-0021 — Context portal (the Projects portal whose dual project
   identity P0-5 fixes).
 - ADR-0023 — cross-project artifact transfer (the move/copy flow whose
