@@ -9,7 +9,7 @@ from typing import Literal
 
 import click
 
-from memtomem.context._names import InvalidNameError
+from memtomem.context._names import InvalidNameError, override_vendors
 from memtomem.wiki import (
     WIKI_ASSET_TYPES,
     WikiAlreadyExistsError,
@@ -24,6 +24,14 @@ from memtomem.wiki.override import (
     OverrideExistsError,
     seed_override,
 )
+
+# ``--vendor`` Choices derive from OVERRIDE_FORMATS (the single source of
+# truth) so they never drift from the matrix: kimi is valid for skills/agents
+# but not commands. See ADR-0008 "Vendor format matrix". Computed once at
+# import — the matrix is a module-level constant.
+_SKILL_VENDORS = override_vendors("skills")
+_AGENT_VENDORS = override_vendors("agents")
+_COMMAND_VENDORS = override_vendors("commands")
 
 
 @click.group("wiki")
@@ -270,7 +278,7 @@ def skill_group() -> None:
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_SKILL_VENDORS),
     required=True,
     help="Which runtime this override targets.",
 )
@@ -289,7 +297,7 @@ def skill_group() -> None:
 def skill_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> None:
     """Seed a wiki override file from the canonical skill content.
 
-    ``mm wiki skill override <name> --vendor <claude|gemini|codex>`` writes
+    ``mm wiki skill override <name> --vendor <claude|gemini|codex|kimi>`` writes
     ``<wiki>/skills/<name>/overrides/<vendor>.md`` using the canonical
     ``SKILL.md`` as the working baseline. Edit the file (``--editor`` opens
     ``$EDITOR``) and commit it inside the wiki repo so that future
@@ -303,7 +311,7 @@ def skill_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> Non
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_SKILL_VENDORS),
     required=True,
     help="Which runtime override to diff against the canonical render.",
 )
@@ -323,7 +331,7 @@ def skill_diff_cmd(name: str, vendor: str) -> None:
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_SKILL_VENDORS),
     default=None,
     help="Restrict representability checks to one runtime (default: every override on disk).",
 )
@@ -350,7 +358,7 @@ def agent_group() -> None:
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_AGENT_VENDORS),
     required=True,
     help="Which runtime this override targets.",
 )
@@ -369,7 +377,7 @@ def agent_group() -> None:
 def agent_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> None:
     """Seed a wiki override file from the canonical agent content.
 
-    ``mm wiki agent override <name> --vendor <claude|gemini|codex>`` writes
+    ``mm wiki agent override <name> --vendor <claude|gemini|codex|kimi>`` writes
     ``<wiki>/agents/<name>/overrides/<vendor>.<ext>``. Bytes come from the
     vendor renderer applied to the canonical ``agent.md`` so the seed
     matches what the runtime would produce. Fields the vendor format
@@ -385,7 +393,7 @@ def agent_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> Non
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_AGENT_VENDORS),
     required=True,
     help="Which runtime override to diff against the canonical render.",
 )
@@ -405,7 +413,7 @@ def agent_diff_cmd(name: str, vendor: str) -> None:
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_AGENT_VENDORS),
     default=None,
     help="Restrict representability checks to one runtime (default: every override on disk).",
 )
@@ -432,7 +440,7 @@ def command_group() -> None:
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_COMMAND_VENDORS),
     required=True,
     help="Which runtime this override targets.",
 )
@@ -467,7 +475,7 @@ def command_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> N
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_COMMAND_VENDORS),
     required=True,
     help="Which runtime override to diff against the canonical render.",
 )
@@ -488,7 +496,7 @@ def command_diff_cmd(name: str, vendor: str) -> None:
 @click.option(
     "--vendor",
     "-v",
-    type=click.Choice(["claude", "gemini", "codex"]),
+    type=click.Choice(_COMMAND_VENDORS),
     default=None,
     help="Restrict representability checks to one runtime (default: every override on disk).",
 )

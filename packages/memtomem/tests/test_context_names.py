@@ -1,10 +1,15 @@
-"""Tests for memtomem.context._names.validate_name."""
+"""Tests for memtomem.context._names — ``validate_name`` and ``override_vendors``."""
 
 from __future__ import annotations
 
 import pytest
 
-from memtomem.context._names import InvalidNameError, validate_name
+from memtomem.context._names import (
+    OVERRIDE_FORMATS,
+    InvalidNameError,
+    override_vendors,
+    validate_name,
+)
 
 
 @pytest.mark.parametrize(
@@ -69,3 +74,26 @@ def test_dot_and_dotdot_rejected_explicitly() -> None:
         validate_name(".")
     with pytest.raises(InvalidNameError, match="reserved path token"):
         validate_name("..")
+
+
+# ── override_vendors ─────────────────────────────────────────────────────
+
+
+def test_override_vendors_per_asset_type() -> None:
+    # Insertion order preserved: claude → gemini → codex → kimi.
+    assert override_vendors("skills") == ["claude", "gemini", "codex", "kimi"]
+    assert override_vendors("agents") == ["claude", "gemini", "codex", "kimi"]
+    # commands has no kimi row — Kimi exposes no commands surface.
+    assert override_vendors("commands") == ["claude", "gemini", "codex"]
+
+
+def test_override_vendors_matches_matrix() -> None:
+    """The derived list must equal exactly the OVERRIDE_FORMATS rows for the
+    asset type, so the helper and the matrix can never drift apart."""
+    for asset_type in ("skills", "agents", "commands"):
+        expected = [vendor for (at, vendor) in OVERRIDE_FORMATS if at == asset_type]
+        assert override_vendors(asset_type) == expected
+
+
+def test_override_vendors_unknown_asset_type_is_empty() -> None:
+    assert override_vendors("widgets") == []

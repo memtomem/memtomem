@@ -29,6 +29,7 @@ __all__ = [
     "Layout",
     "OVERRIDE_FORMATS",
     "is_internal_artifact_dir",
+    "override_vendors",
     "validate_name",
 ]
 
@@ -47,7 +48,8 @@ _MAX_LEN = 64
 # (e.g. cursor sharing claude's surface) and ``extension`` is what
 # ``override.resolve`` joins to ``<vendor>.<ext>``.
 #
-# v1 covers Claude / Gemini / Codex across skills, agents, commands. The
+# v1 covers Claude / Gemini / Codex across skills, agents, commands, plus
+# Kimi for skills and agents (Kimi has no commands surface). The
 # ``("commands", "codex")`` row is a placeholder — there is no
 # ``codex_commands`` generator yet (Codex slash prompts are user-scope and
 # upstream-deprecated). The matrix entry stays for the day Codex commands
@@ -66,6 +68,24 @@ OVERRIDE_FORMATS: dict[tuple[str, str], tuple[str, str]] = {
     ("commands", "gemini"): ("gemini", "toml"),
     ("commands", "codex"): ("codex", "md"),
 }
+
+
+def override_vendors(asset_type: str) -> list[str]:
+    """Vendors with a registered override format for ``asset_type``.
+
+    Returned in :data:`OVERRIDE_FORMATS` insertion order
+    (``claude → gemini → codex → kimi``), the deterministic vendor order used
+    across fan-out. This is the single source of truth for the ``mm wiki``
+    ``--vendor`` Choice, so the CLI can never drift from the matrix — e.g.
+    kimi is offered for skills/agents but not commands, which have no kimi row.
+
+    Placeholder rows (``("commands", "codex")``, whose ``render_seed_bytes``
+    raises :class:`NotImplementedError`) are still returned: they are valid
+    *selections* that fail loudly at render time, matching the behavior from
+    when these Choices were hardcoded to ``["claude", "gemini", "codex"]``.
+    """
+    return [vendor for (at, vendor) in OVERRIDE_FORMATS if at == asset_type]
+
 
 # Maps generator name (`gen.name` — e.g. ``"claude_skills"``) to the
 # vendor key shared with :data:`OVERRIDE_FORMATS`. Centralizing here so
