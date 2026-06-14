@@ -209,6 +209,10 @@ def test_prod_keeps_polished_routes_mounted() -> None:
         "/api/context/agents",
         "/api/context/mcp-servers",
         "/api/context/settings",
+        # ADR-0008 PR-E: the read-only wiki browser is prod-tier (no dev gate).
+        "/api/wiki",
+        "/api/wiki/{asset_type}/{name}/diff",
+        "/api/wiki/{asset_type}/{name}/lint",
     ):
         assert expected in prod_paths, (
             f"{expected} is missing from prod — reclassify or the router list"
@@ -381,6 +385,7 @@ def test_other_integration_leaves_lack_landing_modifier() -> None:
         "ctx-commands",
         "ctx-agents",
         "ctx-mcp-servers",
+        "ctx-wiki",
         "hooks-sync",
     ):
         tag = re.search(rf'<button[^>]*data-section="{section}"[^>]*>', html)

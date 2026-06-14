@@ -1436,6 +1436,7 @@ const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
 // per-call-site updates.
 const GATEWAY_SECTIONS = new Set([
   'ctx-overview', 'ctx-projects', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers',
+  'ctx-wiki',
   'hooks-sync',
 ]);
 
@@ -1562,6 +1563,11 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'ctx-commands') loadCtxList('commands');
   if (sectionName === 'ctx-agents') loadCtxList('agents');
   if (sectionName === 'ctx-mcp-servers') loadCtxList('mcp-servers');
+  // ctx-wiki is a GLOBAL surface (the ~/.memtomem-wiki repo), not project-scoped:
+  // it is deliberately absent from _CTX_SECTION_BAR_TYPE so the project/tier
+  // control bar hides (like ctx-projects), and dispatches to its own loader
+  // rather than loadCtxList. See wiki.js (ADR-0008 PR-E).
+  if (sectionName === 'ctx-wiki' && typeof loadWiki === 'function') loadWiki();
 }
 
 // Settings nav buttons

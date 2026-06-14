@@ -30,6 +30,7 @@ __all__ = [
     "OVERRIDE_FORMATS",
     "is_internal_artifact_dir",
     "override_vendors",
+    "renderable_vendors",
     "validate_name",
 ]
 
@@ -104,6 +105,23 @@ GENERATOR_VENDOR: dict[str, str] = {
     "claude_commands": "claude",
     "gemini_commands": "gemini",
 }
+
+
+def renderable_vendors(asset_type: str) -> list[str]:
+    """Subset of :func:`override_vendors` whose override can actually render.
+
+    A vendor is renderable iff a ``<vendor>_<asset_type>`` generator exists in
+    :data:`GENERATOR_VENDOR` — the same membership ``render_seed_bytes`` checks
+    before raising :class:`NotImplementedError`. So this drops exactly the
+    placeholder rows (today only ``("commands", "codex")``) that
+    ``override_vendors`` still returns.
+
+    The web wiki browser uses it to disable diff/lint controls for a vendor
+    that would only ever fail at render time; the CLI deliberately keeps
+    offering the full ``override_vendors`` set (the placeholder fails loudly,
+    matching the historical hardcoded ``--vendor`` choices).
+    """
+    return [v for v in override_vendors(asset_type) if f"{v}_{asset_type}" in GENERATOR_VENDOR]
 
 
 class InvalidNameError(ValueError):
