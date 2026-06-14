@@ -1,6 +1,6 @@
 # ADR-0008: Wiki layer for shared canonical artifacts
 
-**Status:** Accepted (PR-A merged, PR-B merged, PR-C in flight; PR-D/E sequenced — see PR Breakdown)
+**Status:** Accepted (PR-A/B/C/D merged; PR-E Web UI not started — see PR Breakdown)
 **Date:** 2026-04-30
 **Context:** Context gateway today is a per-project canonical → multi-runtime
 fan-out router (ADR-0001). Users with several projects must re-author the
@@ -279,7 +279,7 @@ override slots. They can be added in v2 if their runtime surface grows.
 | **A** | Wiki scaffold: `wiki/store.py`, `mm wiki init [--from]`, `mm wiki list`, this ADR | scaffolding only |
 | **B** | `mm context install`, lockfile schema, `shutil.copytree`, lockfile concurrency | Inv 1 (copytree), Inv 3 (graceful absence) |
 | **C** | Install widening to agents/commands + dir-layout fan-out BC read; `OVERRIDE_FORMATS`, `context/override.py` resolver, skills override hook; `mm wiki skill override` seed CLI. Override resolution active for skills only — agents/commands gated by `_PR_C_ACTIVE_TYPES` until a follow-up PR opens them. | Inv 4 (skills) |
-| **D** | `mm context {update, install --all, status, migrate}`, `mm wiki <type> {diff, lint}`, dirty detection, flip the `_PR_C_ACTIVE_TYPES` gate to activate agents/commands override | Inv 2 (refuse-if-dirty + `--force` + `.bak`) |
+| **D** | `mm context {update, install --all, status, migrate}`, `mm wiki <type> {diff, lint}`, dirty detection, remove the `_PR_C_ACTIVE_TYPES` gate to activate agents/commands override | Inv 2 (refuse-if-dirty + `--force` + `.bak`) |
 | **E** | Web UI (mirrors `web/routes/context_*` patterns post-#488) | — |
 
 ## Consequences
