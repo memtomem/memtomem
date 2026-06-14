@@ -126,3 +126,19 @@ jobs:
           cache-dependency-path: packages/memtomem/tests-js/package-lock.json
       - run: npm ci
       - run: npm test
+
+  vendored-assets:
+    name: vendored-assets (OSV advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - run: uv sync --frozen
+      # The Web UI ships SHA-pinned browser libs (DOMPurify, marked, Prism,
+      # Swagger UI) that live in no package.json, so `npm audit` never sees
+      # them. This queries OSV for every npm package/version in
+      # web/static/vendor/THIRD_PARTY_LICENSES.md and fails on any advisory.
+      # (The SHA<->disk pin check runs offline in the `test` job.)
+      - run: uv run python tools/check_vendored_advisories.py
