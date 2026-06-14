@@ -27,6 +27,11 @@ on:
       - "v[0-9]*"        # production
       - "test-v[0-9]*"   # TestPyPI dry-run
 
+# Pin the uv toolchain for reproducible release builds. Keep in lockstep with
+# the same pin in ci.yml (Dependabot can't bump a `with:` input).
+env:
+  UV_VERSION: "0.11.16"
+
 jobs:
   publish:
     name: Build and publish to ${{ startsWith(github.ref_name, 'test-') && 'TestPyPI' || 'PyPI' }}
@@ -40,7 +45,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - name: Build distribution
         run: uv build packages/memtomem --out-dir dist
       - name: Publish to PyPI

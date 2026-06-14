@@ -9,6 +9,13 @@ on:
   # schedule:
   #   - cron: "17 5 * * *"   # nightly — enable once LLM secrets are provisioned
 
+# Single source of truth for the uv toolchain setup-uv installs. Pinning (vs
+# "latest") keeps CI reproducible; Dependabot's github-actions updater can't
+# touch a `with:` input, so bump this by hand — in lockstep with the same pin
+# in release.yml.
+env:
+  UV_VERSION: "0.11.16"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -16,7 +23,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: uv run ruff check packages/memtomem/src packages/memtomem/tests tools
       - run: uv run ruff format --check packages/memtomem/src packages/memtomem/tests tools
@@ -27,7 +34,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - name: mypy (gradual)
         run: uv run mypy packages/memtomem/src
@@ -47,7 +54,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: >-
           uv run pytest
@@ -62,7 +69,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       # ``--with-deps`` pulls the headless-shell apt packages on Ubuntu so
       # chromium can launch from a clean runner; the install also seeds the
@@ -79,7 +86,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - name: Cache fastembed model (paraphrase-multilingual-MiniLM-L12-v2, ~220 MB)
         uses: actions/cache@v5
         with:
@@ -97,7 +104,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: uv run pytest -m "llm" --tb=short -q
 
@@ -107,7 +114,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_notebooks.py --tb=short -q
 
@@ -134,7 +141,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --frozen
       # The Web UI ships SHA-pinned browser libs (DOMPurify, marked, Prism,
       # Swagger UI) that live in no package.json, so `npm audit` never sees
@@ -142,3 +149,72 @@ jobs:
       # web/static/vendor/THIRD_PARTY_LICENSES.md and fails on any advisory.
       # (The SHA<->disk pin check runs offline in the `test` job.)
       - run: uv run python tools/check_vendored_advisories.py
+
+  python-deps:
+    name: python-deps (OSV advisory)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Advisory-tier: the deps locked in uv.lock currently carry known OSV
+    # advisories (triaged/bumped in #1331), so a *blocking* gate here would
+    # wedge every PR until the backlog clears. The scan step is
+    # `continue-on-error` — it reports findings, never blocks. The install step
+    # is NOT continue-on-error, so the job goes red if the pinned binary fails
+    # to download (a transient releases outage, after retries) or fails its
+    # checksum (a tampered asset — fail closed). This job is not a required
+    # check, so even that red does not block merges.
+    steps:
+      - uses: actions/checkout@v6
+      # Hand-maintained pin: Dependabot sees no release-asset URL, so on a bump
+      # update OSV_VERSION and the matching osv-scanner_linux_amd64 SHA-256 from
+      # the release's osv-scanner_SHA256SUMS together.
+      - name: Install osv-scanner (pinned + SHA-256 verified)
+        env:
+          OSV_VERSION: v2.3.8
+          OSV_SHA256: bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 2 -o osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+      # osv-scanner queries OSV.dev live, so the pinned binary never goes stale
+      # on advisory data. `--lockfile` targets uv.lock only (the npm lockfile
+      # under tests-js is out of scope here). The markdown output surfaces
+      # findings in the run's job summary / Checks tab.
+      - name: OSV advisory scan (uv.lock — non-blocking)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          rc=0
+          ./osv-scanner scan source --lockfile=uv.lock \
+            --format markdown --verbosity error | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
+          # rc 0 = clean, 1 = advisories found (expected — listed above). Higher
+          # means the scan itself errored (e.g. OSV.dev unreachable), so the
+          # short/empty summary must NOT be read as "clean".
+          if [ "$rc" -gt 1 ]; then
+            echo "> :warning: osv-scanner exited ${rc} — the advisory scan may not have completed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
+
+  bandit:
+    name: bandit (security lint — advisory)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+      # Advisory-tier: bandit compares against a committed baseline and reports
+      # only *new* findings, so routine runs stay quiet and a freshly-introduced
+      # smell stands out. Scoped to shipped source (src/). Regenerate the
+      # baseline after an intentional change with:
+      #   uvx bandit@1.9.4 -r packages/memtomem/src -f json -o tools/bandit-baseline.json
+      # (A no-op regen only rewrites the generated_at timestamp — that diff is benign.)
+      - name: bandit (new findings vs baseline)
+        continue-on-error: true
+        run: >-
+          uvx bandit@1.9.4 -r packages/memtomem/src
+          -b tools/bandit-baseline.json -q
