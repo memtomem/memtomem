@@ -166,6 +166,31 @@ describe('Move/Copy modal — open + dry-run preview (#1289)', () => {
     expect(ctx.transferCalls.every((c) => c.isDry)).toBe(true);
   });
 
+  it('localizes the no_memtomem_store transfer conflict (#1350)', async () => {
+    // A cross-project destination without a ``.memtomem/`` store 409s with the
+    // ``no_memtomem_store`` reason_code, whose backend ``message`` is raw English
+    // prose carrying an absolute path and a CLI command. The inline warning must
+    // render the localized copy, not that prose.
+    const NO_STORE_409 = {
+      ok: false, status: 409,
+      body: { detail: {
+        error_kind: 'conflict', reason_code: 'no_memtomem_store',
+        message: 'destination project has no .memtomem/ store: /srv/bare. '
+          + 'Initialize it first: cd /srv/bare && mm context init',
+      } },
+    };
+    const ctx = await bootModal({ dryRun: NO_STORE_409 });
+    await openModal(ctx);
+    const warn = ctx.window.document.getElementById('ctx-mc-warning');
+    expect(warn.hidden).toBe(false);
+    expect(warn.textContent).toBe(ctx.window.I18N.t('settings.ctx.error_no_memtomem_store'));
+    // The raw backend prose — the absolute path and ``cd …`` shell fragment — must
+    // not leak through (the localized copy keeps only the ``mm context init`` hint).
+    expect(warn.textContent).not.toContain('/srv/bare');
+    expect(warn.textContent).not.toContain('cd ');
+    expect(ctx.window.document.getElementById('ctx-mc-apply-btn').disabled).toBe(true);
+  });
+
   it('hides the rename row in Move mode and sends no as_name', async () => {
     const ctx = await bootModal();
     await openModal(ctx);
@@ -211,6 +236,11 @@ describe('Move/Copy modal — apply gate round-trips (#1289)', () => {
     expect(applies[1].body.confirm_project_shared).toBe(true);
     // The gate uses the shared confirm dialog (not the host-write disclosure).
     expect(ctx.confirms.length).toBe(1);
+    // #1348: the disclosure shows the localized copy, NOT the backend ``reason``
+    // prose ('shared write'). Before the fix ``data.reason ||`` shadowed the i18n
+    // key in every locale, so the dialog leaked developer-facing English.
+    expect(ctx.confirms[0].message).toBe(ctx.window.I18N.t('settings.ctx.move_copy_shared_confirm_message'));
+    expect(ctx.confirms[0].message).not.toBe('shared write');
     expect(modalOf(ctx.window).hidden).toBe(true);
     expect(ctx.toasts.some((x) => x.sev === 'success')).toBe(true);
   });
