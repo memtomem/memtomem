@@ -1042,6 +1042,43 @@ class TestNoHardcodedStrings:
             "add a sidebar CTA (staying tile-agnostic):\n" + "\n".join(leaks)
         )
 
+    def test_ctx_static_helptip_icons_have_accessible_name(self, en: dict[str, str]) -> None:
+        """#1352 a11y (item 13): the Context Gateway help-tip "i" icons carry
+        ``role="img"`` + ``tabindex="0"``, so each needs an accessible name. The
+        status-legend tip in the overview header used ``data-help-i18n`` alone —
+        i18n.js does set its ``aria-label`` at runtime from the key, but until the
+        locale JSON loads the icon is a nameless focusable ``role="img"``. Every
+        other static help-tip already ships a static ``aria-label`` fallback; this
+        pins that none ship nameless, and that the status-legend tip's fallback
+        matches its en value (the i18n 3-fallback-layer lesson).
+
+        The broader item-13 surface — tier controls, status badges, dialogs, and
+        toasts (per-element role, banner-heading-only alert) — was already
+        satisfied by #1315 and the ctx a11y conventions; this closes the one
+        residual pre-hydration gap rather than re-doing covered ground."""
+        index_html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        leaks: list[str] = []
+
+        # Every static help-tip rendered as role="img" must carry an accessible
+        # name in the markup (not only via runtime JS).
+        for match in re.finditer(r'<span\b[^>]*class="help-tip"[^>]*>', index_html):
+            tag = match.group(0)
+            if 'role="img"' in tag and 'aria-label="' not in tag:
+                leaks.append(f"  help-tip role=img with no static aria-label: {tag}")
+
+        # The status-legend tip's static fallback must match its en value.
+        legend = en["settings.ctx.status_legend"]
+        if f'aria-label="{legend}"' not in index_html:
+            leaks.append(
+                "  index.html: status-legend help-tip aria-label fallback is stale — "
+                "must match en['settings.ctx.status_legend']"
+            )
+
+        assert not leaks, (
+            "#1352 a11y: every static role=img help-tip needs an aria-label, and "
+            "the status-legend fallback must match en:\n" + "\n".join(leaks)
+        )
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —
