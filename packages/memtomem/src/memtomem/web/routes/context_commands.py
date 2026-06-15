@@ -7,7 +7,8 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+import click
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
@@ -933,6 +934,9 @@ async def import_commands(
         result = await _run(dry=dry_run)
     except TimeoutError:
         raise _error(503, "busy", "Commands import timed out — another sync may be in progress")
+    except click.ClickException as exc:
+        # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
+        raise HTTPException(422, exc.message) from exc
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -994,6 +998,9 @@ async def import_command(
         result = await _run(dry=False)
     except TimeoutError:
         raise _error(503, "busy", "Command import timed out — another sync may be in progress")
+    except click.ClickException as exc:
+        # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
+        raise HTTPException(422, exc.message) from exc
     if not result.imported and not result.skipped:
         raise _error(404, "missing", f"No runtime command named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)
