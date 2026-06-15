@@ -1221,6 +1221,52 @@ class TestNoHardcodedStrings:
         assert not missing_en, f"PR5 keys missing from en.json: {sorted(missing_en)}"
         assert not missing_ko, f"PR5 keys missing from ko.json: {sorted(missing_ko)}"
 
+    def test_issue_1349_portal_empty_state_keys(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The Projects portal empty state names its real cause (#1349). The
+        board can empty via the search box OR the runtime-filter chip, so the
+        render path needs a key per cause with placeholders intact — and a
+        no-filter fallback that carries no ``{query}`` so a blank query can
+        never render the pre-#1349 literal empty quotes."""
+        required = {
+            "settings.ctx.portal_no_match": {"query"},
+            "settings.ctx.portal_no_runtime_match": {"runtime"},
+            "settings.ctx.portal_no_match_filtered": {"query", "runtime"},
+            "settings.ctx.portal_no_projects": set(),
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, (
+            f"#1349 portal empty-state keys missing from en.json: {sorted(missing_en)}"
+        )
+        assert not missing_ko, (
+            f"#1349 portal empty-state keys missing from ko.json: {sorted(missing_ko)}"
+        )
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "#1349 portal empty-state placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_issue_1349_portal_empty_state_branches_on_filter(self) -> None:
+        """``context-portal.js`` ``_ctxPortalRenderRows`` must branch the empty
+        state on the runtime filter, not interpolate the (possibly blank) search
+        query unconditionally (#1349). Pin the runtime-cause keys at the call
+        site so a regression back to the single ``portal_no_match`` shape fails."""
+        text = (_STATIC_JS_DIR / "context-portal.js").read_text(encoding="utf-8")
+        for key in (
+            "settings.ctx.portal_no_runtime_match",
+            "settings.ctx.portal_no_match_filtered",
+            "settings.ctx.portal_no_projects",
+        ):
+            assert key in text, (
+                f"context-portal.js empty state must route through '{key}' so a "
+                "filter-only empty board names the filter instead of blank quotes (#1349)"
+            )
+
     def test_q_pr1_no_legacy_detect_keys(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The ``detect`` naming was an alias for what the handler always
         did — refresh the overview. Rename was a verbatim move (values

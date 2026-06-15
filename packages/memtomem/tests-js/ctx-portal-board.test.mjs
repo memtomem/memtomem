@@ -126,6 +126,25 @@ describe('Context Portal board (PR4)', () => {
     expect(window.document.querySelectorAll('.ctx-portal-row').length).toBe(0);
   });
 
+  it('runtime-filter empty state names the filter, not blank quotes (#1349)', async () => {
+    const { window } = await boot();
+    await window.loadCtxProjects();
+    // The stubbed runtimes fetch falls through to a rejecting upstream, so no
+    // scope is registered for any runtime. With the search box empty, filtering
+    // to Kimi empties the board purely via the filter chip predicate.
+    const kimiBtn = window.document.querySelector('.ctx-portal-filter-group button[data-filter="kimi"]');
+    expect(kimiBtn).not.toBeNull();
+    kimiBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
+
+    expect(window.document.querySelectorAll('.ctx-portal-row').length).toBe(0);
+    const empty = window.document.querySelector('#ctx-projects-rows .empty-state');
+    expect(empty).not.toBeNull();
+    // Names the real cause (the filter), and never the pre-#1349 literal empty
+    // quotes from interpolating a blank search query into portal_no_match.
+    expect(empty.textContent).toContain('Kimi');
+    expect(empty.textContent).not.toContain('""');
+  });
+
   it('sort by Most items orders the non-cwd rows by total count desc', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();
