@@ -155,7 +155,7 @@ def test_user_tier_keeps_open_family_buttons_live_and_gates_mcp(page, mm_web_url
             f"data-write-blocked={btn.get_attribute('data-write-blocked')!r}"
         )
         title = btn.get_attribute("title") or ""
-        assert "project_shared-only" in title.lower(), (
+        assert "project (shared)-only" in title.lower(), (
             f"mcp-servers {cls!r} title must surface the shared-only copy; got {title!r}"
         )
 
@@ -201,8 +201,8 @@ def test_project_local_tier_uses_project_local_specific_copy(page, mm_web_url: s
 
     create_btn = page.locator("#settings-ctx-skills .ctx-create-btn")
     title = create_btn.get_attribute("title") or ""
-    assert "project_local" in title or "fan-out" in title.lower(), (
-        f"project_local-tier title must surface the no-fan-out copy; got {title!r}"
+    assert "project (local)" in title.lower(), (
+        f"project_local-tier title must surface the project_local draft-tier copy; got {title!r}"
     )
 
     banner = page.locator("#ctx-skills-list .ctx-write-blocked-banner[data-tier='project_local']")
@@ -507,8 +507,8 @@ def test_project_local_missing_canonical_remediation_shows_draft_cli_flow(
     )
     remediation.wait_for(timeout=5_000)
     text = remediation.text_content() or ""
-    assert "draft" in text.lower() or "fan-out" in text.lower(), (
-        f"project_local remediation must explain draft/no-fan-out semantics; got {text!r}"
+    assert "draft" in text.lower() or "never pushed" in text.lower(), (
+        f"project_local remediation must explain draft-tier semantics; got {text!r}"
     )
     assert "mm context init --include=agents,commands,skills --scope project_local" in text
     assert "mm context sync --include=agents,commands,skills --scope project_local" in text

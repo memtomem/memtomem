@@ -412,7 +412,7 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     card_name = page.locator("#ctx-skills-list .ctx-card-name").first
     text = card_name.text_content() or ""
     assert "project_local" in text
-    assert "no runtime fan-out" in text
+    assert "(not synced to runtimes)" in text
     assert card_name.locator(".badge-tier--project_local").count() == 1
 
 
