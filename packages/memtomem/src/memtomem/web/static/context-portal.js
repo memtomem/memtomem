@@ -74,8 +74,9 @@ let _ctxPortalRuntimeFilter = null;
 // gemini-family client and keeps its own label (RUNTIME_TO_CLIENT: gemini→antigravity).
 const _CTX_PORTAL_RUNTIME_CLIENTS = ['claude', 'antigravity', 'codex', 'kimi'];
 
-// Display label for a provider client. Proper-noun product names are identical
-// across locales (matches scope_experimental), so this is intentionally not i18n.
+// Display label for a provider client. Proper-noun product names (Claude,
+// Antigravity, Codex, Kimi) are identical across locales, so this is
+// intentionally not i18n.
 function _ctxPortalRuntimeLabel(name) {
   if (name === 'antigravity') return 'Antigravity';
   return name.charAt(0).toUpperCase() + name.slice(1);
@@ -104,16 +105,17 @@ if (_ctxPortalInstallGuideModal) {
     const displayName = _ctxPortalRuntimeLabel(runtimeName);
     titleEl.textContent = t('settings.ctx.install_guide_title').replace('{runtime}', displayName);
 
-    // Code-fence header labels are format/context names kept literal (JSON / TOML
-    // are proper nouns; "Terminal" is a deferred i18n nit). The commands inside
-    // are copied verbatim from docs/guides/mcp-clients.md (the registration SoT).
+    // Code-fence header labels: "Terminal" flows through i18n
+    // (guide_code_header_terminal). JSON / TOML stay literal as format names /
+    // proper nouns — an explicit decision, not an oversight (#1351). The commands
+    // inside are copied verbatim from docs/guides/mcp-clients.md (the SoT).
     let guideHtml = '';
     if (runtimeName === 'claude') {
       guideHtml = `
         <p class="guide-text">${escapeHtml(t('settings.ctx.guide_claude_desc'))}</p>
         <div class="guide-code-block">
           <div class="guide-code-header">
-            <span>Terminal</span>
+            <span>${escapeHtml(t('settings.ctx.guide_code_header_terminal'))}</span>
             <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
           </div>
           <pre class="guide-code"><code>claude mcp add memtomem -- uvx --from memtomem memtomem-server</code></pre>
@@ -159,7 +161,7 @@ args = ["--from", "memtomem", "memtomem-server"]</code></pre>
         <p class="guide-text">${escapeHtml(t('settings.ctx.guide_kimi_desc'))}</p>
         <div class="guide-code-block">
           <div class="guide-code-header">
-            <span>Terminal</span>
+            <span>${escapeHtml(t('settings.ctx.guide_code_header_terminal'))}</span>
             <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
           </div>
           <pre class="guide-code"><code>mm init --mcp kimi</code></pre>

@@ -18,6 +18,21 @@ _LOCALES_DIR = (
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
+# Locale keys #1351 explicitly decided to keep identical in en and ko: proper
+# nouns, format names, identifiers, and Git terms that should NOT be translated.
+# Recorded so an i18n-completeness sweep does not re-flag them as a missing
+# translation. Translating one of these is a deliberate act — drop it from this set
+# in the same change. This is NOT an exhaustive list of every en==ko-identical
+# value: filesystem paths (e.g. ``settings.ctx.user_canonical_path`` = ``~/.memtomem/``),
+# brand names, and format tokens are identical by nature and intentionally not
+# enumerated. (JSON / TOML code-fence headers are hard-coded JS literals, not locale
+# keys, so they live in context-portal.js, not here.)
+_INTENTIONALLY_UNTRANSLATED = {
+    "settings.ctx.wiki_head",  # Git symbolic ref; renders as "HEAD: <sha>".
+    "settings.ctx.create_name_placeholder",  # identifier example "my-{type}" (names are ASCII).
+    "settings.ctx.guide_antigravity_cli",  # product name + CLI alias "Antigravity CLI (agy)".
+}
+
 
 def _load_locale(name: str) -> dict[str, str]:
     path = _LOCALES_DIR / f"{name}.json"
@@ -71,6 +86,21 @@ class TestLocaleFiles:
         for name, data in [("en", en), ("ko", ko)]:
             bad = [k for k, v in data.items() if not isinstance(v, str)]
             assert not bad, f"Non-string values in {name}.json: {bad}"
+
+    def test_intentionally_untranslated_keys_stay_identical(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Allowlisted proper-noun / identifier / Git-term keys are intentionally
+        the same string in both locales (#1351). If this fails because a value was
+        translated, drop the key from ``_INTENTIONALLY_UNTRANSLATED``."""
+        for key in sorted(_INTENTIONALLY_UNTRANSLATED):
+            assert key in en, f"{key} missing from en.json"
+            assert key in ko, f"{key} missing from ko.json"
+            assert en[key] == ko[key], (
+                f"{key} is allowlisted as intentionally untranslated but en/ko differ: "
+                f"en={en[key]!r} ko={ko[key]!r} — if the translation is deliberate, "
+                "remove it from _INTENTIONALLY_UNTRANSLATED"
+            )
 
     def test_no_empty_values(self, en: dict[str, str], ko: dict[str, str]) -> None:
         for name, data in [("en", en), ("ko", ko)]:
@@ -132,6 +162,21 @@ class TestNoHardcodedStrings:
         "context-portal.js",
         "wiki.js",
     )
+
+    def test_install_guide_terminal_label_uses_i18n(self) -> None:
+        """The install-guide code-fence "Terminal" header must render through
+        ``t('settings.ctx.guide_code_header_terminal')``, not a bare literal
+        (#1351). JSON / TOML headers are intentionally kept literal as format
+        names, so they are not asserted here."""
+        text = (_STATIC_JS_DIR / "context-portal.js").read_text(encoding="utf-8")
+        assert "<span>Terminal</span>" not in text, (
+            "context-portal.js still renders a bare <span>Terminal</span> — route the "
+            "install-guide code-fence header through "
+            "t('settings.ctx.guide_code_header_terminal') so it localizes."
+        )
+        assert "guide_code_header_terminal" in text, (
+            "install guide should reference settings.ctx.guide_code_header_terminal"
+        )
 
     def test_no_template_literal_toasts(self) -> None:
         r"""``showToast(\`...\`)`` with a backtick template literal means the
