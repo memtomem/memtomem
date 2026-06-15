@@ -658,8 +658,10 @@ class TestNoHardcodedStrings:
         ``project_shared`` jargon they were added to replace.
 
         Scoped to these user-facing onboarding strings on purpose — other keys
-        still use those tokens deliberately (wiki / empty-hint / write-blocked
-        copy), so this is a targeted regression pin, not a blanket denylist."""
+        still use those tokens deliberately (wiki / empty-hint copy), so this is
+        a targeted regression pin, not a blanket denylist. The write-blocked /
+        no-fanout tooltips are pinned separately by
+        ``test_ctx_scope_id_tooltips_jargon_free`` (#1352)."""
         new_keys = [
             "settings.ctx.primer",
             "settings.ctx.store_label",
@@ -703,6 +705,39 @@ class TestNoHardcodedStrings:
         assert not leaks, (
             "ADR-0026 P0 onboarding copy must not expose raw canonical/"
             "project_shared jargon:\n" + "\n".join(leaks)
+        )
+
+    def test_ctx_scope_id_tooltips_jargon_free(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """#1352: the sync-disabled / write-blocked / no-fanout tooltips used to
+        leak raw scope IDs (``project_local`` / ``project_shared``) and the
+        undefined ``fan-out`` term straight into user-facing prose. They now
+        resolve to the localized tier labels (Project (local) / Project (shared)
+        / 프로젝트(로컬) / 프로젝트(공유)) and plain "synced to runtimes" wording.
+
+        Pin both that the keys exist in both locales and that their values stay
+        free of the raw identifiers, so a future edit can't silently reintroduce
+        the jargon these strings were rewritten to remove."""
+        keys = [
+            "settings.ctx.matrix_sync_disabled_title",
+            "settings.ctx.project_local_no_fanout_tooltip",
+            "settings.ctx.tier_no_fanout_annotation",
+            "settings.ctx.write_blocked_user_tooltip",
+            "settings.ctx.write_blocked_project_local_tooltip",
+        ]
+        forbidden = ("project_local", "project_shared", "fan-out", "fanout")
+        leaks: list[str] = []
+        for key in keys:
+            for name, locale in [("en", en), ("ko", ko)]:
+                assert key in locale, f"{name}.json missing scope-ID tooltip key: {key}"
+                value = locale[key]
+                for token in forbidden:
+                    if token in value:
+                        leaks.append(f"  {name} {key}: contains raw '{token}'")
+        assert not leaks, (
+            "#1352 scope-ID tooltips must not expose raw project_local/"
+            "project_shared/fan-out jargon:\n" + "\n".join(leaks)
         )
 
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
