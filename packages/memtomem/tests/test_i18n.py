@@ -740,6 +740,43 @@ class TestNoHardcodedStrings:
             "project_shared/fan-out jargon:\n" + "\n".join(leaks)
         )
 
+    def test_ctx_enroll_term_renamed_to_activate(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """#1352: the Projects-board "enroll" copy (the first-run jargon flagged
+        in the smoke test) was renamed to "Activate" / "활성화" across the
+        per-project sync action, its states, and the related sync/move-copy
+        errors. The i18n KEYS keep the internal ``enroll`` concept name (it
+        mirrors the #1203 known-projects backend contract and the
+        ``_ctxPortalEnroll`` / ``.ctx-portal-enroll`` SPA code), but the user-
+        facing VALUES must no longer say "enroll" (en) or "등록" (ko).
+
+        Korean ``등록`` is overloaded (Add Project / register-as-source / runtime
+        registration all use it legitimately), so this is scoped to these nine
+        enrollment keys, not a blanket denylist."""
+        keys = [
+            "settings.ctx.matrix_sync_not_enrolled_title",
+            "settings.ctx.error_sync_not_enrolled",
+            "settings.ctx.cascade_unavailable_hint",
+            "settings.ctx.move_copy_mcp_no_dest",
+            "settings.ctx.sync_all_not_enrolled_tooltip",
+            "settings.ctx.portal_enroll",
+            "settings.ctx.portal_enroll_aria",
+            "settings.ctx.portal_enroll_tip",
+            "settings.ctx.portal_enroll_success",
+        ]
+        leaks: list[str] = []
+        for key in keys:
+            assert key in en, f"en.json missing enrollment key: {key}"
+            assert key in ko, f"ko.json missing enrollment key: {key}"
+            if "enroll" in en[key].lower():
+                leaks.append(f"  en {key}: still says 'enroll' — {en[key]!r}")
+            if "등록" in ko[key]:
+                leaks.append(f"  ko {key}: still says '등록' — {ko[key]!r}")
+        assert not leaks, (
+            "#1352 enrollment copy must use Activate/활성화, not enroll/등록:\n" + "\n".join(leaks)
+        )
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —

@@ -28,7 +28,7 @@ pytestmark = pytest.mark.browser
 
 # Locale-pinned copy (en.json is the source of truth).
 EN_PAUSED = "Project sync is paused — resume it on the Projects board."
-EN_NOT_ENROLLED = "Project is not enrolled for sync — enroll it on the Projects board."
+EN_NOT_ENROLLED = "Project is not active for sync — activate it on the Projects board."
 MATRIX_PAUSED_TITLE = "Sync paused — resume it on the Projects board"
 
 
