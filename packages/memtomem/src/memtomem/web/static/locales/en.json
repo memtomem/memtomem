@@ -390,6 +390,7 @@
   "settings.ctx.matrix_sync_paused_title": "Sync paused — resume it on the Projects board",
   "settings.ctx.error_sync_paused": "Project sync is paused — resume it on the Projects board.",
   "settings.ctx.error_sync_not_enrolled": "Project is not enrolled for sync — enroll it on the Projects board.",
+  "settings.ctx.error_no_memtomem_store": "The destination project isn't a memtomem store yet — run \"mm context init\" in it first.",
   "settings.ctx.cascade_unavailable_hint": "Sync is paused or not enrolled for this project, so only the stored copy is deleted — runtime files are left in place.",
   "settings.ctx.import": "Import",
   "settings.ctx.create": "Create",

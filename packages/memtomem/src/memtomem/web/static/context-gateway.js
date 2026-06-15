@@ -3302,10 +3302,11 @@ function _ctxKindDetailText(errorKind, message) {
 // Precedence, in order:
 //   1. string detail → returned verbatim (legacy routes + the central app.py
 //      KeyError/ValueError/Exception handlers, and the issue-pinned privacy 422).
-//   2. #1210 write-guard 409 ``{reason_code: sync_paused|sync_not_enrolled}`` →
-//      the specific localized copy — checked BEFORE error_kind because those
-//      409s carry BOTH error_kind:"conflict" and the reason_code, and the
-//      reason_code copy is more precise than the generic "conflict" label.
+//   2. localized reason_code 409s ``{reason_code: sync_paused|sync_not_enrolled
+//      |no_memtomem_store}`` → the specific localized copy — checked BEFORE
+//      error_kind because those 409s carry BOTH error_kind:"conflict" and the
+//      reason_code, and the reason_code copy is more precise than the generic
+//      "conflict" label (#1210 paused/not-enrolled; #1350 no-store).
 //   3. B-1 #1284 object envelope ``{error_kind, message, reason_code?}`` →
 //      localized kind label + the server message as secondary detail.
 //   4. bare ``{message}`` → the server prose.
@@ -3316,6 +3317,7 @@ function _ctxErrDetail(detail, fallback) {
     const rc = detail.reason_code;
     if (rc === 'sync_paused') return t('settings.ctx.error_sync_paused');
     if (rc === 'sync_not_enrolled') return t('settings.ctx.error_sync_not_enrolled');
+    if (rc === 'no_memtomem_store') return t('settings.ctx.error_no_memtomem_store');
     if (typeof detail.error_kind === 'string' && detail.error_kind) {
       const composed = _ctxKindDetailText(detail.error_kind, detail.message);
       if (composed) return composed;
@@ -4525,9 +4527,15 @@ async function _ctxMoveCopyApply(state) {
         r = await _ctxConfirmHostWrite(data, () => send({ allow_host_writes: true }));
       } else {
         // project_shared Gate B — disclose the git-tracked write, then re-POST.
+        // Render the localized key, NOT ``data.reason``: the backend reason is
+        // raw developer prose ("Re-POST with confirm_project_shared=true …") and,
+        // being always non-empty, shadowed the i18n fallback in every locale so
+        // non-English users never saw their translation (#1348). The envelope's
+        // ``confirm`` flag already told us this is the project_shared gate, so we
+        // don't need the prose to pick the right copy.
         const ok = await showConfirm({
           title: t('settings.ctx.move_copy_shared_confirm_title'),
-          message: data.reason || t('settings.ctx.move_copy_shared_confirm_message'),
+          message: t('settings.ctx.move_copy_shared_confirm_message'),
           confirmText: t('settings.ctx.move_copy_shared_confirm_btn'),
           danger: false,
         });
