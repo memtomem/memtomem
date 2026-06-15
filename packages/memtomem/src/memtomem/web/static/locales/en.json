@@ -742,6 +742,7 @@
   "settings.ctx.runtime_registered_tooltip": "Registered (Config: {path})",
   "settings.ctx.install_guide_title": "Install Guide: {runtime}",
   "settings.ctx.copied": "Copied!",
+  "settings.ctx.guide_code_header_terminal": "Terminal",
   "settings.ctx.guide_claude_desc": "Claude Code supports user, local, or project-local configuration scopes.",
   "settings.ctx.guide_claude_note": "Or run with \"-s user\" to register globally for all projects.",
   "settings.ctx.guide_antigravity_desc": "Register memtomem in Antigravity CLI (agy) or Antigravity IDE (VS Code).",
