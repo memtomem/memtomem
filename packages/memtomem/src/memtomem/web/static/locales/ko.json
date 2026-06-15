@@ -719,7 +719,7 @@
   "settings.hooks.detail.timeout": "타임아웃",
   "settings.hooks.detail.rule_json": "Rule JSON",
   "settings.hooks.detail.click_hint": "규칙을 클릭하면 상세 내용이 표시됩니다.",
-  "settings.ctx.overview_desc": "memtomem 의 에이전트 런타임 아티팩트를 Claude Code, Codex 등 감지된 런타임으로 동기화합니다.",
+  "settings.ctx.overview_desc": "memtomem 은 관리하는 모든 항목의 마스터 사본을 하나로 보관하고, 이를 Claude Code · Codex 등 감지된 런타임으로 동기화합니다. 사이드바에서 섹션을 선택해 기존 항목을 가져오거나 새로 만들어 시작하세요.",
   "settings.ctx.refresh_tooltip": "감지된 Claude Code · Codex 런타임 상태를 새로고침합니다",
   "settings.ctx.refresh_aria": "감지된 런타임 상태 새로고침",
   "settings.ctx.sync_all_tooltip": "memtomem 저장소의 아티팩트를 이 저장소에 구성된 런타임으로 내보냅니다",
