@@ -463,7 +463,7 @@ def test_hooks_sync_scope_drift_aborts_before_host_write(page, mm_web_url: str) 
     page.locator("#confirm-ok-btn").click()
 
     msg_el = page.wait_for_selector("#toast-container .toast.toast-error .toast-msg", timeout=3_000)
-    assert "Target scope changed" in (msg_el.text_content() or ""), (
+    assert "Sync target changed" in (msg_el.text_content() or ""), (
         "scope drift must surface the sync_scope_changed toast"
     )
     assert post_bodies == [{"allow_host_writes": False}], (
@@ -475,7 +475,7 @@ def test_hooks_sync_target_label_reflects_project_shared_scope(page, mm_web_url:
     """Issue #962: when ``target_scope: 'project_shared'`` is in the GET
     payload, the target label must use the project-shared variant
     (``Project (shared) target:``) — not the hardcoded
-    ``User-scope target:`` that the pre-fix code rendered for every
+    ``User target:`` that the pre-fix code rendered for every
     scope.
     """
     install_default_stubs(page)
@@ -497,8 +497,8 @@ def test_hooks_sync_target_label_reflects_project_shared_scope(page, mm_web_url:
     assert "Project (shared) target:" in label_text, (
         f"project_shared scope must render its scope-specific label, got {label_text!r}"
     )
-    assert "User-scope target:" not in label_text, (
-        f"project_shared scope must NOT render the User-scope label, got {label_text!r}"
+    assert "User target:" not in label_text, (
+        f"project_shared scope must NOT render the User label, got {label_text!r}"
     )
     scope_attr = label_el.get_attribute("data-target-scope")
     assert scope_attr == "project_shared", (

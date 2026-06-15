@@ -1484,7 +1484,7 @@
       <!-- mcp-servers (#1314) ride this modal in a constrained copy-only,
            cross-project, project_shared variant; this note explains why the
            mode/tier choices are absent. JS toggles ``hidden`` per kind. -->
-      <p id="ctx-mc-mcp-note" class="confirm-message ctx-mc-note" data-i18n="settings.ctx.move_copy_mcp_note" hidden>MCP servers are single-tier: a copy keeps the name and lands in the destination project's shared tier.</p>
+      <p id="ctx-mc-mcp-note" class="confirm-message ctx-mc-note" data-i18n="settings.ctx.move_copy_mcp_note" hidden>MCP servers have a single store: the copy keeps the name and lands in the destination project's shared store.</p>
 
       <fieldset id="ctx-mc-mode-field" class="ctx-mc-field">
         <legend data-i18n="settings.ctx.move_copy_mode_label">Action</legend>
@@ -1493,7 +1493,7 @@
       </fieldset>
 
       <fieldset id="ctx-mc-tier-field" class="ctx-mc-field">
-        <legend data-i18n="settings.ctx.move_copy_tier_label">Destination tier</legend>
+        <legend data-i18n="settings.ctx.move_copy_tier_label">Store in</legend>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="project_shared"><span data-i18n="settings.ctx.tier_option_project_shared">Project (shared)</span></label>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="project_local"><span data-i18n="settings.ctx.tier_option_project_local">Project (local)</span></label>
         <label class="ctx-mc-radio"><input type="radio" name="ctx-mc-tier" value="user"><span data-i18n="settings.ctx.tier_option_user">User</span></label>
@@ -1576,9 +1576,9 @@
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=10"></script>
   <script src="/settings-harness.js?v=4"></script>
-  <script src="/settings-hooks-watchdog.js?v=20"></script>
+  <script src="/settings-hooks-watchdog.js?v=21"></script>
   <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway.js?v=89"></script>
+  <script src="/context-gateway.js?v=90"></script>
   <script src="/context-portal.js?v=7"></script>
   <script src="/wiki.js?v=5"></script>
   <script src="/path-picker.js?v=4"></script>

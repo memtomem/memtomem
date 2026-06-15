@@ -681,7 +681,7 @@ class TestSettingsSync:
     async def test_target_scope_surfaces_project_shared(self, app, client: AsyncClient, tmp_path):
         """Issue #962: when the active scope is ``project_shared``, the
         GET response surfaces that value so the Web UI does not lie
-        with a hardcoded ``User-scope target:`` label.
+        with a hardcoded ``User target:`` label.
         """
         app.state.project_root = tmp_path
         resp = await client.get("/api/settings-sync?target_scope=project_shared")

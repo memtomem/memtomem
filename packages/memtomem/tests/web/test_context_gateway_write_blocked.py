@@ -308,8 +308,8 @@ def test_blocked_create_click_fires_toast_and_skips_post(page, mm_web_url: str) 
     # Toast must surface, and no POST must have fired.
     toast = page.wait_for_selector("#toast-container .toast", timeout=2_000)
     text = toast.text_content() or ""
-    assert "draft tier" in text.lower(), (
-        f"toast must surface the draft-tier explanation; got {text!r}"
+    assert "draft store" in text.lower(), (
+        f"toast must surface the draft-store explanation; got {text!r}"
     )
     assert create_post_calls == [], (
         f"blocked Create click must not issue a POST; saw {create_post_calls!r}"
@@ -530,7 +530,7 @@ def test_langchange_re_translates_write_blocked_tooltips(page, mm_web_url: str) 
 
     create_btn = page.locator("#settings-ctx-skills .ctx-create-btn")
     pre_title = create_btn.get_attribute("title") or ""
-    assert "draft tier" in pre_title.lower(), (
+    assert "draft store" in pre_title.lower(), (
         f"EN precondition: title must be EN copy; got {pre_title!r}"
     )
 
@@ -547,6 +547,6 @@ def test_langchange_re_translates_write_blocked_tooltips(page, mm_web_url: str) 
         f"KO title must replace EN copy after langchange; got {post_title!r}"
     )
     # Symmetric negative: the EN string must not linger.
-    assert "draft tier" not in post_title.lower(), (
+    assert "draft store" not in post_title.lower(), (
         f"EN copy must not survive langchange; got {post_title!r}"
     )

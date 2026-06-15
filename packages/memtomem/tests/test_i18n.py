@@ -777,6 +777,92 @@ class TestNoHardcodedStrings:
             "#1352 enrollment copy must use Activate/활성화, not enroll/등록:\n" + "\n".join(leaks)
         )
 
+    def test_ctx_storage_vocab_surface_split(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """#1352: the user/project_shared/project_local axis used to surface as
+        the undefined-jargon word ``tier`` (the first-time-user complaint) while
+        the hooks fan-out target leaked the overloaded ``scope`` word. The fix
+        splits by surface (ADR-0016 §2, §"Conceptual split"): artifact-residency
+        copy now says ``store`` / "Stored in" (KO ``저장소`` / "저장 위치"); the
+        hooks fan-out target says ``target`` (KO ``대상``), since ADR-0015
+        reserves "scope" for the per-request project-root selector.
+
+        The i18n KEY names keep the internal ``tier_*`` concept and the
+        ``{tier}`` placeholder (ADR-0016 §2 keeps "tier" as the code/concept
+        word; only the code identifier ``target_scope`` and CLI ``--scope`` are
+        likewise frozen). This pins the user-facing VALUES so a future edit can't
+        silently reintroduce "tier"/"scope" on these surfaces. Scoped to the
+        rewritten keys — "tier" stays legitimate in glossary/concept copy and key
+        names, so this is a targeted regression pin, not a blanket denylist."""
+        # Artifact-residency surfaces — values must not say "tier" (EN) or
+        # "계층" / "티어" (KO). These keys carry no ``{tier}`` placeholder.
+        artifact_keys = [
+            "settings.ctx.move_copy_tooltip",
+            "settings.ctx.move_copy_mcp_note",
+            "settings.ctx.move_copy_tier_label",
+            "settings.ctx.move_copy_shared_confirm_title",
+            "settings.ctx.confirm_sync",
+            "settings.ctx.confirm_sync_all",
+            "settings.ctx.simple_empty_hint",
+            "settings.ctx.simple_cross_tier_label",
+            "settings.ctx.empty_hint_mcp_project_only",
+            "settings.ctx.empty_hint_user",
+            "settings.ctx.project_local_no_fanout_tooltip",
+            "settings.ctx.write_blocked_user_tooltip",
+            "settings.ctx.write_blocked_project_local_tooltip",
+            "settings.ctx.write_blocked_user_banner",
+            "settings.ctx.write_blocked_project_local_banner",
+            "settings.ctx.host_write_confirm_message",
+            "settings.ctx.host_write_confirm_btn",
+            "settings.ctx.detail.meta_scope",
+            "settings.ctx.sync_all_tooltip",
+            "settings.ctx.skills_sync_tooltip",
+            "settings.ctx.commands_sync_tooltip",
+            "settings.ctx.agents_sync_tooltip",
+        ]
+        # Hooks fan-out target surfaces — values must say "target", not the
+        # overloaded "scope" (EN) / "스코프" / "범위" (KO).
+        hooks_keys = [
+            "settings.hooks.target_label_user",
+            "settings.hooks.duplicate_banner_one",
+            "settings.hooks.duplicate_banner_many",
+            "toast.sync_scope_changed",
+        ]
+        leaks: list[str] = []
+        for key in artifact_keys:
+            assert key in en, f"en.json missing storage-vocab key: {key}"
+            assert key in ko, f"ko.json missing storage-vocab key: {key}"
+            if "tier" in en[key].lower():
+                leaks.append(f"  en {key}: still says 'tier' — {en[key]!r}")
+            for token in ("계층", "티어"):
+                if token in ko[key]:
+                    leaks.append(f"  ko {key}: still says '{token}' — {ko[key]!r}")
+        for key in hooks_keys:
+            assert key in en, f"en.json missing hooks-target key: {key}"
+            assert key in ko, f"ko.json missing hooks-target key: {key}"
+            if "scope" in en[key].lower():
+                leaks.append(f"  en {key}: still says 'scope' — {en[key]!r}")
+            for token in ("스코프", "범위"):
+                if token in ko[key]:
+                    leaks.append(f"  ko {key}: still says '{token}' — {ko[key]!r}")
+        # JS cold-boot fallbacks (rendered when the locale fetch is still in
+        # flight and t() echoes the key) bypass the JSON above — pin the hooks
+        # duplicate-banner fallback literals to the new "target" wording too.
+        watchdog_js = (_STATIC_JS_DIR / "settings-hooks-watchdog.js").read_text(encoding="utf-8")
+        for stale in ("Active scope:", "tier (${path})"):
+            if stale in watchdog_js:
+                leaks.append(f"  settings-hooks-watchdog.js: stale fallback literal {stale!r}")
+        # index.html carries the same class of pre-hydration fallback: the
+        # static inline default text inside the Move/Copy modal's data-i18n
+        # elements is what the user sees before the locale JSON loads.
+        index_html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        for stale in ("Destination tier", "shared tier"):
+            if stale in index_html:
+                leaks.append(f"  index.html: stale inline-default literal {stale!r}")
+        assert not leaks, (
+            "#1352 storage vocab: artifact surfaces must say store/Stored in "
+            "(저장소/저장 위치) and hooks must say target (대상):\n" + "\n".join(leaks)
+        )
+
     def test_ctx_command_artifact_label_has_no_custom_prefix(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:

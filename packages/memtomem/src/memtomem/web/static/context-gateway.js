@@ -1652,7 +1652,7 @@ function _ctxWireSimpleRows(el) {
 
 // ADR-0026 P1b D-D (#1353): count items in the tiers OTHER than the active one
 // and, when any hold artifacts, replace the generic empty hint with a summary
-// that names them ("Stored in another tier: 3 in User"). The Overview route
+// that names them ("Stored elsewhere: 3 in User"). The Overview route
 // summarizes a single tier per call (this layer adds NO backend route — ADR
 // non-goal), so this fans out one best-effort read per other tier. Seq-guarded
 // so a tier/mode switch (or a second empty render) can't patch stale counts in;
@@ -4900,10 +4900,14 @@ function _ctxRenderDetailMetaHeader(type, data) {
     });
   }
   if (scope) {
+    // Artifact detail shows canonical residency (tier), not the hooks fan-out
+    // target — so source the value from the residency labels (settings.ctx.
+    // tier_option_*), NOT settings.hooks.target_label_* (which is fan-out
+    // wording: "User target:"). See ADR-0016 §2 (tier vs runtime scope).
     rows.push({
       label: t('settings.ctx.detail.meta_scope'),
-      value: t(`settings.hooks.target_label_${scope}`) !== `settings.hooks.target_label_${scope}`
-        ? t(`settings.hooks.target_label_${scope}`).replace(/:\s*$/, '')
+      value: t(`settings.ctx.tier_option_${scope}`) !== `settings.ctx.tier_option_${scope}`
+        ? t(`settings.ctx.tier_option_${scope}`)
         : scope,
     });
   }

@@ -1,6 +1,6 @@
 """Browser tests for the Hooks panel ``no_source`` state polish (PR D).
 
-Pre-fix the panel rendered (1) the ``User-scope target:`` line — even
+Pre-fix the panel rendered (1) the ``User target:`` line — even
 though the canonical file does not exist — and (2) left Sync Now
 enabled, inviting a click that the server would reject. The badge
 already names the condition ("No .memtomem/settings.json found"), so
@@ -494,8 +494,8 @@ def test_in_sync_state_restores_target_line_and_enabled_button(page, mm_web_url:
 
     target = page.locator("#hooks-sync-status .hooks-status-target")
     target.wait_for(state="attached", timeout=4_000)
-    assert "User-scope target:" in (target.text_content() or ""), (
-        "in_sync state must render the User-scope target line"
+    assert "User target:" in (target.text_content() or ""), (
+        "in_sync state must render the User target line"
     )
 
     btn = page.locator("#hooks-sync-btn")

@@ -77,7 +77,7 @@ def test_section_sync_confirm_names_artifact_count(page, mm_web_url: str) -> Non
     page.locator("#settings-ctx-skills .ctx-sync-btn[data-type='skills']").click()
     page.wait_for_selector("#confirm-modal:not([hidden])", timeout=2_000)
     message = page.locator("#confirm-message").text_content() or ""
-    # EN: "Push 2 skills to the runtimes configured for this tier?" — the
+    # EN: "Push 2 skills to the runtimes configured for this store?" — the
     # count is the rank-10 win.
     assert "2 skills" in message, f"sync confirm should name the count, got {message!r}"
     page.locator("#confirm-cancel-btn").click()

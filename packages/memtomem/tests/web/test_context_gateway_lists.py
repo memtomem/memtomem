@@ -1608,10 +1608,10 @@ def test_q956_empty_hint_project_tier_preserves_existing_copy(page, mm_web_url: 
 
 
 def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
-    """Korean copy for the user-tier empty hint (#956): contains the
-    ``사용자 티어`` phrase (the copy-polish pass dropped the mixed-script
-    ``사용자 canonical`` jargon in favor of plain Korean) and drops the
-    ``이 프로젝트의`` project framing.
+    """Korean copy for the user-store empty hint (#956): contains the
+    ``사용자 저장소`` phrase (#1352 retired the ``사용자 티어`` wording for the
+    plain storage vocabulary; an earlier pass had dropped the mixed-script
+    ``사용자 canonical`` jargon) and drops the ``이 프로젝트의`` project framing.
     """
     install_default_stubs(page)
     _stub_projects_wide(page, _CWD_PROJECTS_WITH_NON_CWD_MISSING)
@@ -1633,12 +1633,14 @@ def test_q956_empty_hint_user_tier_ko_locale(page, mm_web_url: str) -> None:
         "() => {"
         "  const el = document.querySelector("
         "    '#ctx-skills-list .empty-state .empty-state-hint');"
-        "  return el && el.textContent.includes('사용자 티어');"
+        "  return el && el.textContent.includes('사용자 저장소');"
         "}",
         timeout=3_000,
     )
     hint = page.locator("#ctx-skills-list .empty-state .empty-state-hint").text_content() or ""
-    assert "사용자 티어" in hint, f"KO user-tier empty hint should contain '사용자 티어': {hint!r}"
+    assert "사용자 저장소" in hint, (
+        f"KO user-store empty hint should contain '사용자 저장소': {hint!r}"
+    )
     assert "이 프로젝트의" not in hint, (
         f"KO user-tier empty hint must not say '이 프로젝트의': {hint!r}"
     )
@@ -1682,7 +1684,7 @@ def test_mcp_user_tier_empty_hint_says_project_only(page, mm_web_url: str) -> No
         timeout=3_000,
     )
     hint = page.locator("#ctx-mcp-servers-list .empty-state .empty-state-hint").text_content() or ""
-    assert "exist only at the Project (shared) tier" in hint, (
+    assert "exist only in the Project (shared) store" in hint, (
         f"user-tier MCP hint must say the artifact is project-only, got {hint!r}"
     )
     assert "~/.memtomem/mcp-servers" not in hint, (

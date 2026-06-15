@@ -403,8 +403,8 @@ function _renderHooksDuplicateBanner(data) {
       // case t() echoes the key — render the EN literal instead (same shape
       // as the B10 fan-out annotation fix).
       text = count === 1
-        ? `1 memtomem-managed hook entry already exists in the ${tier} tier (${path}) — run ${cmd} to move it. Active scope: ${active}.`
-        : `${count} memtomem-managed hook entries already exist in the ${tier} tier (${path}) — run ${cmd} to move them. Active scope: ${active}.`;
+        ? `1 memtomem-managed hook entry already exists in the ${tier} target (${path}) — run ${cmd} to move it. Active target: ${active}.`
+        : `${count} memtomem-managed hook entries already exist in the ${tier} target (${path}) — run ${cmd} to move them. Active target: ${active}.`;
     }
     return `<div class="hooks-duplicate-banner-row">${text}</div>`;
   }).join('');

@@ -244,7 +244,7 @@ def test_inline_sync_button_focusable_and_opens_confirm(page, mm_web_url: str) -
 def test_empty_tier_names_items_in_another_tier(page, mm_web_url: str) -> None:
     """P1b D-D: an all-empty active tier fans out a read to the other tiers and,
     when one holds items, replaces the generic empty hint with a counted summary
-    that names it ("Stored in another tier: 3 in User"). The Overview route
+    that names it ("Stored elsewhere: 3 in User"). The Overview route
     summarizes one tier per call, so the summary is keyed off the ``target_scope``
     query param — User holds 3, the active + local tiers are empty."""
     install_default_stubs(page)
