@@ -719,7 +719,7 @@
   "settings.hooks.detail.timeout": "Timeout",
   "settings.hooks.detail.rule_json": "Rule JSON",
   "settings.hooks.detail.click_hint": "Click a rule to view details.",
-  "settings.ctx.overview_desc": "Sync memtomem agent runtime artifacts to Claude Code, Codex, and other detected runtimes.",
+  "settings.ctx.overview_desc": "memtomem keeps one master copy of everything it manages and syncs it out to Claude Code, Codex, and other detected runtimes. Pick a section in the sidebar to import what you already have or create something new.",
   "settings.ctx.refresh_tooltip": "Refresh detected Claude Code / Codex / Kimi runtime status",
   "settings.ctx.refresh_aria": "Refresh detected runtime status",
   "settings.ctx.sync_all_tooltip": "Push memtomem's stored artifacts to the runtimes configured for this store",

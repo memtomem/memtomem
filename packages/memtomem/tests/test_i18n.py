@@ -995,6 +995,53 @@ class TestNoHardcodedStrings:
             "and the wiki nav must define 'canonical':\n" + "\n".join(leaks)
         )
 
+    def test_ctx_overview_desc_dejargoned_with_cta(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """#1352 overview/empty-state copy: the always-visible Context Gateway
+        blurb greeted a first-time user with the jargon "agent runtime artifacts"
+        / "에이전트 런타임 아티팩트" and offered no next step. Replace the jargon with
+        plain "everything it manages" wording and add a "pick a section in the
+        sidebar" first action, so it does the why/next job before the
+        (dismissible) ``primer`` help-bar.
+
+        This complements — and must not collide with — the deliberate
+        ``test_q_pr2_overview_desc_is_tier_agnostic`` contract (Q-PR2 Drift-3):
+        the desc renders unconditionally as the tile set evolves, so it must NOT
+        enumerate tile names. So this guard pins the de-jargon + CTA only, and
+        leaves tile-agnosticism to that test — do not assert any tile name here.
+
+        Pins the index.html inline default too (the i18n 3-fallback-layer lesson:
+        the inline text is what renders before the locale JSON loads)."""
+        key = "settings.ctx.overview_desc"
+        assert key in en and key in ko, f"missing {key}"
+        en_val, ko_val = en[key], ko[key]
+        index_html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        leaks: list[str] = []
+
+        # No "agent runtime artifacts" jargon (the first-run complaint).
+        if "agent runtime artifact" in en_val.lower():
+            leaks.append(f"  en {key}: still says 'agent runtime artifacts' — {en_val!r}")
+        if "에이전트 런타임 아티팩트" in ko_val:
+            leaks.append(f"  ko {key}: still says '에이전트 런타임 아티팩트' — {ko_val!r}")
+
+        # Offers a concrete next action (orient to the sidebar).
+        if "sidebar" not in en_val.lower():
+            leaks.append(f"  en {key}: must point at a first action (sidebar) — {en_val!r}")
+        if "사이드바" not in ko_val:
+            leaks.append(f"  ko {key}: must point at a first action (사이드바) — {ko_val!r}")
+
+        # Inline default must match en (pre-hydration fallback).
+        if f">{en_val}</p>" not in index_html:
+            leaks.append(
+                "  index.html: overview_desc inline default is stale — must match en value"
+            )
+
+        assert not leaks, (
+            "#1352 overview_desc must drop 'agent runtime artifacts' jargon and "
+            "add a sidebar CTA (staying tile-agnostic):\n" + "\n".join(leaks)
+        )
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —
