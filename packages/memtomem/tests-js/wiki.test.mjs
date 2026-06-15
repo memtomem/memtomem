@@ -687,3 +687,113 @@ describe('wiki.js canonical editor (ADR-0027 Editor-B, dev tier)', () => {
     await window.I18N.setLang('en');
   });
 });
+
+describe('wiki.js commit affordance (ADR-0027 §3, dev tier)', () => {
+  const CANON = { content: '# canon\n', mtime_ns: '111' };
+  const OVERRIDE_NONE = { vendor: 'claude', content: '', mtime_ns: '0', exists: false };
+
+  // Serves diff/lint + the canonical GET/PUT (Save) and records the commit POST.
+  function recordingCommitFetch(window, { commitResponse } = {}) {
+    const posts = [];
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (p === '/api/wiki/skills/alpha/diff') return { ok: true, status: 200, json: async () => ALPHA_DIFF_EXISTS, text: async () => '' };
+      if (p === '/api/wiki/skills/alpha/lint') return { ok: true, status: 200, json: async () => ALPHA_LINT_OK, text: async () => '' };
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/override') return { ok: true, status: 200, json: async () => OVERRIDE_NONE, text: async () => '' };
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/canonical') return { ok: true, status: 200, json: async () => CANON, text: async () => '' };
+      if (method === 'PUT' && p === '/api/wiki/skills/alpha/canonical') {
+        return { ok: true, status: 200, json: async () => ({ mtime_ns: '222', wiki_dirty: true, privacy_warning: 0 }), text: async () => '' };
+      }
+      if (method === 'POST' && p === '/api/wiki/skills/alpha/commit') {
+        posts.push({ headers: init.headers || {}, body: JSON.parse(init.body) });
+        if (commitResponse) return commitResponse;
+        return { ok: true, status: 200, json: async () => ({ committed: true, wiki_head: 'b'.repeat(40), wiki_dirty: false, privacy_warning: 0 }), text: async () => '' };
+      }
+      return base(input, init);
+    };
+    return posts;
+  }
+
+  // Open skills/alpha in dev, edit + Save the canonical so a pending commit
+  // target (and the HEAD-row Commit button) appear.
+  async function bootSavedCanonical(window, opts) {
+    window.document.body.classList.add('dev-mode');
+    window.ensureCsrfToken = async () => 'tok-xyz';
+    const posts = recordingCommitFetch(window, opts);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-canonical-edit-btn').dispatchEvent(new window.Event('click'));
+    window.document.getElementById('wiki-canonical-content').value = '# edited canon\n';
+    await window._onWikiCanonicalSave();
+    return posts;
+  }
+
+  it('Commit button appears after Save, POSTs the resolved target + CSRF, then clears', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    const posts = await bootSavedCanonical(window);
+    const btn = window.document.getElementById('wiki-commit-btn');
+    expect(btn).not.toBeNull(); // a pending target → Commit affordance shows
+    btn.dispatchEvent(new window.Event('click'));
+    expect(window.document.getElementById('wiki-commit-modal').hidden).toBe(false);
+    await window._doWikiCommit(false);
+    expect(posts.length).toBe(1);
+    expect(posts[0].headers['X-Memtomem-CSRF']).toBe('tok-xyz');
+    expect(posts[0].body.expected_head).toBe('a'.repeat(40));
+    expect(posts[0].body.force).toBe(false);
+    expect(posts[0].body.targets).toEqual([{ kind: 'canonical', mtime_ns: '222' }]);
+    const head = window.document.getElementById('wiki-head');
+    expect(head.textContent).toContain('bbbbbbbbbbbb'); // HEAD advanced
+    expect(head.textContent).not.toContain(window.t('settings.ctx.wiki_dirty')); // badge cleared
+    expect(window.document.getElementById('wiki-commit-btn')).toBeNull(); // pending cleared
+    expect(window.document.getElementById('wiki-commit-modal').hidden).toBe(true); // modal closed
+  });
+
+  it('a no-op commit (committed:false) clears pending without erroring', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    const posts = await bootSavedCanonical(window, {
+      commitResponse: {
+        ok: true, status: 200,
+        json: async () => ({ committed: false, reason_code: 'nothing_to_commit', wiki_head: 'a'.repeat(40), wiki_dirty: false }),
+        text: async () => '',
+      },
+    });
+    await window._openWikiCommitModal();
+    await window._doWikiCommit(false);
+    expect(posts.length).toBe(1);
+    expect(window.document.getElementById('wiki-commit-btn')).toBeNull(); // pending cleared
+  });
+
+  it('a 409 stale_head refreshes HEAD, closes the modal, and CLEARS pending', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    const posts = await bootSavedCanonical(window, {
+      commitResponse: {
+        ok: false, status: 409,
+        json: async () => ({ reason_code: 'stale_head', wiki_head: 'c'.repeat(40), error_kind: 'conflict' }),
+        text: async () => '',
+      },
+    });
+    await window._openWikiCommitModal();
+    await window._doWikiCommit(false);
+    expect(posts.length).toBe(1);
+    expect(window.document.getElementById('wiki-head').textContent).toContain('cccccccccccc');
+    // Pending is cleared so the tokens (captured against the OLD head) can't be
+    // one-click re-committed against the NEW head — a fresh Save is required
+    // (Codex M1). The Commit button disappears.
+    expect(window.document.getElementById('wiki-commit-btn')).toBeNull();
+    expect(window.document.getElementById('wiki-commit-modal').hidden).toBe(true);
+  });
+
+  it('never shows the Commit button in prod (no dev-mode class)', async () => {
+    const { window } = await boot({
+      '/api/wiki': WIKI_LIST,
+      '/api/wiki/skills/alpha/diff': ALPHA_DIFF_EXISTS,
+      '/api/wiki/skills/alpha/lint': ALPHA_LINT_OK,
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    expect(window.document.getElementById('wiki-commit-btn')).toBeNull();
+  });
+});

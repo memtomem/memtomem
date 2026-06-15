@@ -17,6 +17,7 @@ observe-only and a plain POST reaches the handler (matching
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -780,3 +781,274 @@ async def test_edit_canonical_write_vanished_is_404_no_leak(
     assert resp.status_code == 404
     assert resp.json()["detail"]["reason_code"] == "canonical_absent"
     assert str(seeded_wiki) not in resp.text  # the absolute path must not leak
+
+
+# ── commit affordance (ADR-0027 §3) ─────────────────────────────────────────
+
+
+async def _wiki_head(client: AsyncClient) -> str:
+    resp = await client.get("/api/wiki")
+    assert resp.status_code == 200
+    return resp.json()["wiki_head"]
+
+
+async def _save_canonical(client: AsyncClient, content: str) -> str:
+    """Save (PUT, force) the agents/beta canonical; return the fresh mtime_ns."""
+    cur = (await client.get("/api/wiki/agents/beta/canonical")).json()["mtime_ns"]
+    resp = await client.put(
+        "/api/wiki/agents/beta/canonical",
+        json={"content": content, "mtime_ns": cur, "force": True},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["mtime_ns"]
+
+
+def _commit_files(root: Path, commit: str) -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(root), "show", "--name-only", "--format=", commit],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return out.split()
+
+
+_EDITED = "---\nname: beta\ndescription: edited\n---\n\nEdited body.\n"
+
+
+@pytest.mark.asyncio
+async def test_commit_canonical_happy_path(dev_client, seeded_wiki: Path) -> None:
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["committed"] is True
+    assert body["wiki_head"] != head  # the branch advanced
+    assert body["wiki_dirty"] is False  # committed + .bak cleaned → clean tree
+    # the committed blob is byte-exact (override Inv 4 / canonical fidelity)
+    got = subprocess.run(
+        ["git", "-C", str(seeded_wiki), "show", f"{body['wiki_head']}:agents/beta/agent.md"],
+        check=True,
+        capture_output=True,
+    ).stdout.decode("utf-8")
+    assert got == _EDITED
+    # the commit is ISOLATED to the one target
+    assert _commit_files(seeded_wiki, body["wiki_head"]) == ["agents/beta/agent.md"]
+    # the .bak sibling the Save wrote is gone
+    assert not (seeded_wiki / "agents" / "beta" / "agent.md.bak").exists()
+
+
+@pytest.mark.asyncio
+async def test_commit_isolates_unrelated_staged_index(dev_client, seeded_wiki: Path) -> None:
+    # An unrelated file staged in the real index must NOT be swept into the
+    # isolated commit, and must remain staged afterward.
+    (seeded_wiki / "unrelated.txt").write_text("u\n", encoding="utf-8", newline="\n")
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "add", "unrelated.txt"], check=True, capture_output=True
+    )
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert _commit_files(seeded_wiki, resp.json()["wiki_head"]) == ["agents/beta/agent.md"]
+    staged = subprocess.run(
+        ["git", "-C", str(seeded_wiki), "diff", "--cached", "--name-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "unrelated.txt" in staged  # still staged, untouched
+
+
+@pytest.mark.asyncio
+async def test_commit_stale_expected_head_is_409(dev_client, seeded_wiki: Path) -> None:
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    # an external commit advances HEAD underneath the client's expected_head
+    (seeded_wiki / "README.md").write_text("changed\n", encoding="utf-8", newline="\n")
+    _git_commit(seeded_wiki, "external advance")
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "stale_head"
+
+
+@pytest.mark.asyncio
+async def test_commit_stale_target_is_409_and_force_succeeds(dev_client, seeded_wiki: Path) -> None:
+    await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    # an external editor rewrites the same file after Save → stale per-target token
+    target = seeded_wiki / "agents" / "beta" / "agent.md"
+    target.write_text(
+        "---\nname: beta\ndescription: external\n---\n\nExternal.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    stale = "1"  # an mtime the editor never saw
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": stale}]},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "stale_target"
+    # force commits the current on-disk bytes (WARNING-audited)
+    forced = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={
+            "expected_head": head,
+            "force": True,
+            "targets": [{"kind": "canonical", "mtime_ns": stale}],
+        },
+    )
+    assert forced.status_code == 200, forced.text
+    assert forced.json()["committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_commit_noop_when_bytes_match_head(dev_client, seeded_wiki: Path) -> None:
+    # Save bytes byte-identical to HEAD, then commit: no new history, but the
+    # .bak is still cleaned and wiki_dirty is reported honestly (Codex M5).
+    same = (await dev_client.get("/api/wiki/agents/beta/canonical")).json()["content"]
+    mtime = await _save_canonical(dev_client, same)
+    head = await _wiki_head(dev_client)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["committed"] is False
+    assert body["wiki_head"] == head  # no new commit
+    assert body["wiki_dirty"] is False  # .bak cleaned even on the no-op path
+    assert not (seeded_wiki / "agents" / "beta" / "agent.md.bak").exists()
+
+
+@pytest.mark.asyncio
+async def test_commit_override_target(dev_client, seeded_wiki: Path) -> None:
+    # Seed + edit a vendor override, then commit it (a NEW file untracked at HEAD).
+    await dev_client.post("/api/wiki/agents/beta/override", json={"vendor": "gemini"})
+    cur = (await dev_client.get("/api/wiki/agents/beta/override?vendor=gemini")).json()["mtime_ns"]
+    saved = await dev_client.put(
+        "/api/wiki/agents/beta/override",
+        json={"vendor": "gemini", "content": "custom override\n", "mtime_ns": cur, "force": True},
+    )
+    assert saved.status_code == 200, saved.text
+    mtime = saved.json()["mtime_ns"]
+    head = await _wiki_head(dev_client)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={
+            "expected_head": head,
+            "targets": [{"kind": "override", "vendor": "gemini", "mtime_ns": mtime}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert _commit_files(seeded_wiki, resp.json()["wiki_head"]) == [
+        "agents/beta/overrides/gemini.md"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_commit_preserves_concurrent_fresh_bak(
+    dev_client, seeded_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex M2: the .bak cleanup must not delete a *fresh* backup a concurrent
+    # cross-process Save dropped during the commit window. Simulate it by rewriting
+    # the .bak from inside commit_paths (after cleanup's snapshot, before cleanup):
+    # the snapshot won't match, so cleanup must skip — the fresh backup survives.
+    from memtomem.wiki.store import WikiStore as _WS
+
+    mtime = await _save_canonical(dev_client, _EDITED)  # Save writes agent.md.bak
+    head = await _wiki_head(dev_client)
+    bak = seeded_wiki / "agents" / "beta" / "agent.md.bak"
+    assert bak.exists()  # the editor's own backup, snapshotted at commit time
+    orig = _WS.commit_paths
+
+    def _commit_then_drop_fresh_bak(self, files, *, message, expected_head):  # noqa: ANN001
+        sha = orig(self, files, message=message, expected_head=expected_head)
+        # A concurrent Save lands a NEW backup (distinct bytes + mtime).
+        bak.write_text("concurrent fresh backup\n", encoding="utf-8", newline="\n")
+        os.utime(bak, ns=(0, 0))
+        return sha
+
+    monkeypatch.setattr(_WS, "commit_paths", _commit_then_drop_fresh_bak)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["committed"] is True
+    assert bak.exists()  # the fresh backup was NOT deleted
+    assert bak.read_text(encoding="utf-8") == "concurrent fresh backup\n"
+
+
+@pytest.mark.asyncio
+async def test_commit_message_privacy_warning_is_soft(dev_client, seeded_wiki: Path) -> None:
+    # A secret-shaped commit message is warned about but the commit still lands
+    # (valve, not gate — Codex M3 / ADR D-E).
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={
+            "expected_head": head,
+            "message": "leak AKIAIOSFODNN7EXAMPLE oops",
+            "targets": [{"kind": "canonical", "mtime_ns": mtime}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["committed"] is True
+    assert body["privacy_warning"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_commit_git_failure_is_fixed_message_no_path_leak(
+    dev_client, seeded_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A git failure inside commit_paths raises RuntimeError whose stderr embeds the
+    # absolute wiki path. The handler must return a FIXED 500 message with no leak.
+    from memtomem.wiki.store import WikiStore as _WS
+
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+
+    def _boom(self, files, *, message, expected_head):  # noqa: ANN001
+        raise RuntimeError(f"git commit-tree failed: fatal: could not open {seeded_wiki}/.git/x")
+
+    monkeypatch.setattr(_WS, "commit_paths", _boom)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["reason_code"] == "commit_failed"
+    assert str(seeded_wiki) not in resp.text  # no absolute-path / $HOME leak
+
+
+@pytest.mark.asyncio
+async def test_commit_is_dev_tier_only(prod_client, seeded_wiki: Path) -> None:
+    resp = await prod_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": "0" * 40, "targets": [{"kind": "canonical", "mtime_ns": "1"}]},
+    )
+    assert resp.status_code == 404  # the mutation router is absent in prod
+
+
+@pytest.mark.asyncio
+async def test_commit_no_targets_is_422(dev_client, seeded_wiki: Path) -> None:
+    head = await _wiki_head(dev_client)
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit", json={"expected_head": head, "targets": []}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason_code"] == "no_targets"

@@ -1465,6 +1465,28 @@
     </div>
   </div>
 
+  <!-- Wiki commit (ADR-0027 §3, dev tier): commit the editor's Saved-but-
+       uncommitted changes to an asset as an ISOLATED git commit. Message is
+       user-supplied with a generated default; Commit posts to
+       POST /api/wiki/{type}/{name}/commit (server-resolved targets only). -->
+  <div id="wiki-commit-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="wiki-commit-title">
+    <div class="modal-inner confirm-dialog wiki-commit-dialog">
+      <div class="modal-header">
+        <span id="wiki-commit-title" class="modal-title" data-i18n="settings.ctx.wiki_commit_title">Commit wiki changes</span>
+      </div>
+      <p id="wiki-commit-targets" class="confirm-message"></p>
+      <label class="wiki-commit-msg-row">
+        <span id="wiki-commit-msg-label" data-i18n="settings.ctx.wiki_commit_msg_label">Commit message</span>
+        <textarea id="wiki-commit-msg" class="wiki-commit-msg" rows="2" autocomplete="off" spellcheck="false"></textarea>
+      </label>
+      <p id="wiki-commit-error" class="tag-manage-error" hidden></p>
+      <div class="confirm-actions">
+        <button id="wiki-commit-cancel-btn" class="btn-ghost" data-i18n="modal.cancel_btn">Cancel</button>
+        <button id="wiki-commit-ok-btn" class="btn-primary" data-i18n="settings.ctx.wiki_commit_submit">Commit</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Context Gateway per-artifact Move/Copy destination modal (B-6 #1289).
        Consumes POST /api/context/{kind}/{name}/transfer. A dry-run preview
        (?dry_run=1) gates the Apply button — a destination collision, a
@@ -1580,7 +1602,7 @@
   <script src="/timeline.js?v=3"></script>
   <script src="/context-gateway.js?v=89"></script>
   <script src="/context-portal.js?v=7"></script>
-  <script src="/wiki.js?v=5"></script>
+  <script src="/wiki.js?v=6"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>
 </html>

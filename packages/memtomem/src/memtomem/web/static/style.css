@@ -4816,6 +4816,11 @@ button.ctx-runtime-chip--greyed:focus-visible {
 .wiki-override-actions { display: flex; gap: 8px; margin-top: 8px; }
 .wiki-conflict-banner { border: 1px solid var(--warning, #d4a72c); border-radius: 6px; padding: 10px; margin-bottom: 10px; background: var(--warning-bg, rgba(212, 167, 44, 0.08)); }
 .wiki-conflict-msg { margin: 0 0 8px; font-size: 0.82rem; font-weight: 600; }
+/* Commit affordance (ADR-0027 §3): the HEAD-row Commit button + the message modal. */
+.wiki-commit-btn { margin-left: 6px; }
+.wiki-commit-msg-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.wiki-commit-msg-row span { font-size: 0.8rem; color: var(--muted); }
+.wiki-commit-msg { width: 100%; font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; padding: 8px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--bg); color: var(--text); resize: vertical; box-sizing: border-box; }
 .wiki-conflict-fresh { max-height: 200px; }
 /* Unified-diff line kinds the shared .diff-* set doesn't cover. */
 .diff-file { color: var(--muted); font-weight: 600; }

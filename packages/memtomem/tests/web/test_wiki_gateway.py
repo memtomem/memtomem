@@ -476,3 +476,127 @@ def test_wiki_canonical_edit_conflict_banner(page, mm_web_url: str) -> None:
     page.wait_for_selector("#wiki-canonical-conflict-force-btn", timeout=5_000)
     assert page.locator("#wiki-canonical-conflict-banner").is_visible()
     assert page.locator("#wiki-canonical-conflict-reload-btn").count() == 1
+
+
+def _stub_canonical_save(page) -> None:
+    """List/diff/lint/override + a canonical GET/PUT (Save) so a pending commit
+    target and the HEAD-row Commit button appear."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/wiki/**/override**", _json(_OVERRIDE_NONE))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    def _canonical(route):
+        req = route.request
+        if req.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(_CANONICAL))
+        elif req.method == "PUT":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"mtime_ns": "222", "wiki_dirty": True, "privacy_warning": 0}),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/wiki/**/canonical**", _canonical)
+
+
+def test_wiki_commit_happy_path(page, mm_web_url: str) -> None:
+    """Dev tier (ADR-0027 §3): after a Save, the Commit button opens a message
+    modal; committing POSTs the server-resolved target + expected_head, and on
+    success the HEAD advances, the dirty badge clears, and the button disappears."""
+    _stub_canonical_save(page)
+
+    posted: list[dict] = []
+
+    def _commit(route):
+        req = route.request
+        if req.method != "POST":
+            route.fallback()
+            return
+        posted.append(json.loads(req.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "committed": True,
+                    "wiki_head": "b" * 40,
+                    "wiki_dirty": False,
+                    "privacy_warning": 0,
+                }
+            ),
+        )
+
+    page.route("**/api/wiki/**/commit**", _commit)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+    page.wait_for_selector("#wiki-canonical-edit-btn", timeout=5_000)
+    page.locator("#wiki-canonical-edit-btn").click()
+    page.locator("#wiki-canonical-content").fill("# edited canon\n")
+    page.locator("#wiki-canonical-save-btn").click()
+    page.wait_for_selector("#wiki-commit-btn", timeout=5_000)
+
+    page.locator("#wiki-commit-btn").click()
+    page.wait_for_selector("#wiki-commit-modal:not([hidden])", timeout=5_000)
+    page.locator("#wiki-commit-ok-btn").click()
+
+    # Success → HEAD advances to the new SHA, dirty badge clears, button gone.
+    page.wait_for_function(
+        "() => document.querySelector('#wiki-head').textContent.includes('bbbbbbbbbbbb')",
+        timeout=5_000,
+    )
+    assert page.locator("#wiki-head .badge-warning").count() == 0
+    assert page.locator("#wiki-commit-btn").count() == 0
+    assert len(posted) == 1
+    assert posted[0]["expected_head"] == "a" * 40
+    assert posted[0]["force"] is False
+    assert posted[0]["targets"] == [{"kind": "canonical", "mtime_ns": "222"}]
+
+
+def test_wiki_commit_stale_head_refreshes(page, mm_web_url: str) -> None:
+    """A 409 ``stale_head`` (HEAD moved underneath) refreshes the displayed HEAD
+    and CLEARS the pending target — the captured tokens predate the new HEAD, so a
+    fresh Save is required before another commit (Codex M1: no stale-token retry)."""
+    _stub_canonical_save(page)
+
+    def _commit(route):
+        req = route.request
+        if req.method != "POST":
+            route.fallback()
+            return
+        route.fulfill(
+            status=409,
+            content_type="application/json",
+            body=json.dumps(
+                {"reason_code": "stale_head", "wiki_head": "c" * 40, "error_kind": "conflict"}
+            ),
+        )
+
+    page.route("**/api/wiki/**/commit**", _commit)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+    page.wait_for_selector("#wiki-canonical-edit-btn", timeout=5_000)
+    page.locator("#wiki-canonical-edit-btn").click()
+    page.locator("#wiki-canonical-content").fill("# edited canon\n")
+    page.locator("#wiki-canonical-save-btn").click()
+    page.wait_for_selector("#wiki-commit-btn", timeout=5_000)
+
+    page.locator("#wiki-commit-btn").click()
+    page.wait_for_selector("#wiki-commit-modal:not([hidden])", timeout=5_000)
+    page.locator("#wiki-commit-ok-btn").click()
+
+    # HEAD repaints to the moved SHA; the Commit button disappears (pending
+    # cleared — a fresh Save is required before committing against the new HEAD).
+    page.wait_for_function(
+        "() => document.querySelector('#wiki-head').textContent.includes('cccccccccccc')",
+        timeout=5_000,
+    )
+    assert page.locator("#wiki-commit-btn").count() == 0

@@ -13,7 +13,9 @@ from memtomem.wiki.store import (
     WIKI_ASSET_TYPES,
     CommitNotFoundError,
     WikiAlreadyExistsError,
+    WikiHeadMovedError,
     WikiNotFoundError,
+    WikiNothingToCommitError,
     WikiStore,
 )
 
@@ -461,3 +463,98 @@ class TestCopyAssetAtCommit:
         assert sorted(digest_map) == ["SKILL.md"]  # skipped rel absent from the map too
         assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
         assert not (dest / "__pycache__").exists()
+
+
+class TestCommitPaths:
+    """``WikiStore.commit_paths`` — the isolated commit primitive (ADR-0027 §3)."""
+
+    def _seed(self, wiki_root: Path) -> WikiStore:
+        store = WikiStore.at_default()
+        store.init()
+        (wiki_root / "agents" / "beta").mkdir(parents=True)
+        (wiki_root / "agents" / "beta" / "agent.md").write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "seed"], check=True, capture_output=True
+        )
+        return store
+
+    def _committed_files(self, wiki_root: Path, commit: str) -> list[str]:
+        out = subprocess.run(
+            ["git", "-C", str(wiki_root), "show", "--name-only", "--format=", commit],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        return out.split()
+
+    def test_isolated_commit_excludes_unrelated_staged(self, wiki_root: Path) -> None:
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        # an unrelated file staged in the real index must not be swept in
+        (wiki_root / "unrelated.txt").write_text("u\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "add", "unrelated.txt"],
+            check=True,
+            capture_output=True,
+        )
+        new = store.commit_paths(
+            {"agents/beta/agent.md": b"v2\n"}, message="edit", expected_head=head
+        )
+        assert new != head
+        assert self._committed_files(wiki_root, new) == ["agents/beta/agent.md"]
+        # byte-exact + unrelated.txt still staged
+        got = subprocess.run(
+            ["git", "-C", str(wiki_root), "show", f"{new}:agents/beta/agent.md"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert got == b"v2\n"
+        staged = subprocess.run(
+            ["git", "-C", str(wiki_root), "diff", "--cached", "--name-only"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert "unrelated.txt" in staged
+
+    def test_new_untracked_path_becomes_clean(self, wiki_root: Path) -> None:
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        rel = "agents/beta/overrides/gemini.md"
+        (wiki_root / "agents" / "beta" / "overrides").mkdir()
+        (wiki_root / rel).write_text("ov\n", encoding="utf-8")
+        new = store.commit_paths({rel: b"ov\n"}, message="add override", expected_head=head)
+        assert self._committed_files(wiki_root, new) == [rel]
+        # after the reconcile the path is clean (not staged-reverted, not untracked)
+        status = subprocess.run(
+            ["git", "-C", str(wiki_root), "status", "--porcelain", rel],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert status.strip() == ""
+
+    def test_stale_expected_head_raises(self, wiki_root: Path) -> None:
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        # advance HEAD so the passed expected_head is stale
+        (wiki_root / "README.md").write_text("x\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-am", "adv"], check=True, capture_output=True
+        )
+        with pytest.raises(WikiHeadMovedError):
+            store.commit_paths({"agents/beta/agent.md": b"v2\n"}, message="e", expected_head=head)
+
+    def test_noop_when_bytes_match_head(self, wiki_root: Path) -> None:
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        with pytest.raises(WikiNothingToCommitError):
+            store.commit_paths({"agents/beta/agent.md": b"v1\n"}, message="e", expected_head=head)
+        assert store.current_commit() == head  # no new commit
+
+    def test_rejects_traversal_path(self, wiki_root: Path) -> None:
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        with pytest.raises(ValueError):
+            store.commit_paths({"../evil": b"x\n"}, message="e", expected_head=head)

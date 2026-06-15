@@ -22,20 +22,33 @@ verb: ``GET …/override`` reads a vendor override's working-tree bytes for the
 read pane, and ``PUT …/override`` replaces them with user content under an
 optimistic ``mtime_ns`` guard (the ctx skill-editor pattern). Both are dev-tier
 (the editor read pane is part of the editor, §D-F); Save writes + leaves the
-tree dirty but **never commits** (the commit affordance is the deferred §3 PR).
+tree dirty but **never commits**.
+
+ADR-0027 §3 adds the explicit, opt-in **commit** affordance: ``POST …/commit``
+builds an *isolated* commit of only the server-resolved target paths
+(:meth:`memtomem.wiki.store.WikiStore.commit_paths` — out-of-worktree temp index
+→ ``commit-tree`` → ref compare-and-swap), guarded by the in-process
+``_gateway_lock``, a wiki-root cross-process file lock, a per-target ``mtime_ns``
+token, and the ref CAS against the client's ``expected_head``. Save and commit
+stay two acts — auto-commit-on-save is never introduced.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import tempfile
+from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem import privacy
-from memtomem.context._names import renderable_vendors
+from memtomem.context._atomic import _file_lock
+from memtomem.context._names import OVERRIDE_FORMATS, renderable_vendors
 from memtomem.wiki.inspect import (
     CanonicalParseError,
     read_canonical,
@@ -45,11 +58,17 @@ from memtomem.wiki.inspect import (
 from memtomem.wiki.override import (
     OverrideExistsError,
     SeedResult,
+    canonical_asset_file,
     seed_override,
     write_canonical,
     write_override,
 )
-from memtomem.wiki.store import WikiNotFoundError, WikiStore
+from memtomem.wiki.store import (
+    WikiHeadMovedError,
+    WikiNothingToCommitError,
+    WikiNotFoundError,
+    WikiStore,
+)
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._wiki_common import (
@@ -483,3 +502,300 @@ async def edit_wiki_canonical(
             "privacy_warning": privacy_warning,
         }
     )
+
+
+# ── Commit affordance (ADR-0027 §3 / D-G) ───────────────────────────────────
+
+
+class CommitTarget(BaseModel):
+    """One typed, server-resolved target in a commit request.
+
+    ``kind`` selects the artifact; ``vendor`` is required for ``override`` and
+    ignored for ``canonical``. ``mtime_ns`` is the token the editor last saw for
+    that file (from the Save response) — re-``stat``ed under the lock so an
+    external same-path edit between Save and Commit is caught (→409). A **raw
+    client path is never accepted** — the server resolves the path from the typed
+    fields, so the commit can never name anything outside the validated targets.
+    """
+
+    kind: Literal["canonical", "override"]
+    vendor: str | None = None
+    mtime_ns: str
+
+
+class WikiCommitRequest(BaseModel):
+    """Body for ``POST /api/wiki/{asset_type}/{name}/commit``.
+
+    ``expected_head`` is the ``wiki_head`` the client last saw — enforced as the
+    atomic compare-and-swap on the ref update (a commit that landed underneath →
+    409, never a clobber). ``message`` is user-supplied with a generated default.
+    ``force`` bypasses a stale per-target ``mtime_ns`` (a WARNING-audited
+    conflict re-commit) — it does **not** bypass the ``expected_head`` CAS.
+    """
+
+    expected_head: str
+    targets: list[CommitTarget]
+    message: str | None = None
+    force: bool = False
+
+
+class _StaleTarget(Exception):
+    """Internal signal: a target's working-tree bytes changed since Save.
+
+    Carries the current ``mtime_ns`` so the handler can echo it in the 409
+    (mirrors the editor's ``stale_mtime`` conflict shape).
+    """
+
+    def __init__(self, rel: str, current_mtime_ns: int) -> None:
+        super().__init__(rel)
+        self.current_mtime_ns = current_mtime_ns
+
+
+def _commit_target_conflict(current_mtime_ns: int) -> JSONResponse:
+    # Same conflict envelope as the editor (stale_mtime), with a commit-specific
+    # reason_code so the SPA can tell a per-file race from a HEAD race.
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "aborted",
+            "reason": "a target file changed on disk since you saved; reload and retry",
+            "mtime_ns": str(current_mtime_ns),
+            "error_kind": "conflict",
+            "reason_code": "stale_target",
+        },
+    )
+
+
+def _commit_head_conflict(fresh_head: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "aborted",
+            "reason": "the wiki moved on disk since you loaded it; refresh and retry",
+            "wiki_head": fresh_head,
+            "error_kind": "conflict",
+            "reason_code": "stale_head",
+        },
+    )
+
+
+def _wiki_commit_lock_path(root: Path) -> Path:
+    """Cross-process commit lock path, in system-temp keyed by the wiki root.
+
+    Kept **outside** the wiki tree on purpose: ``_file_lock`` ``mkdir``s the lock
+    file's parent, so a lock under ``<wiki>/.git/`` could forge a bogus ``.git/``
+    if the wiki were removed (``WikiStore.exists()`` only checks ``.git`` is a
+    dir). A system-temp path also can never show up in ``git status``. Two
+    processes derive the same path from the same resolved root, so the lock is
+    genuinely cross-process.
+    """
+    digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / "memtomem" / f"wiki-commit-{digest}.lock"
+
+
+def _resolve_commit_target(
+    store: WikiStore, asset_type: str, name: str, target: CommitTarget
+) -> tuple[str, Path]:
+    """Resolve a typed target to ``(wiki_relative_posix, absolute_path)``.
+
+    Reuses :func:`canonical_asset_file` / :data:`OVERRIDE_FORMATS` so the path
+    matches exactly what the writers produce. Raises an HTTP error envelope for
+    a bad vendor / unknown override format (never leaks an absolute path).
+    """
+    if target.kind == "canonical":
+        path = canonical_asset_file(store, asset_type, name)
+    else:
+        if not target.vendor:
+            raise _error(
+                422, "validation", "override target requires a vendor", reason_code="invalid_target"
+            )
+        _require_vendor(asset_type, target.vendor)
+        fmt = OVERRIDE_FORMATS.get((asset_type, target.vendor))
+        if fmt is None:
+            raise _error(
+                400,
+                "validation",
+                f"no override format registered for {target.vendor!r}",
+                reason_code="vendor_unsupported",
+            )
+        _, ext = fmt
+        path = store.root / asset_type / name / "overrides" / f"{target.vendor}.{ext}"
+    return path.relative_to(store.root).as_posix(), path
+
+
+def _do_commit_blocking(
+    store: WikiStore,
+    resolved: list[tuple[str, Path, int]],
+    *,
+    message: str,
+    expected_head: str,
+    force: bool,
+) -> dict:
+    """Synchronous commit body — runs in a worker thread under the cross-process lock.
+
+    Holds the wiki-root file lock for the whole read→commit→reconcile→cleanup
+    window, so a concurrent CLI ``mm wiki`` / second ``mm web`` commit cannot
+    interleave. Per-target the bytes are read under a ``stat → read → stat``
+    verify so the committed blob is exactly the bytes whose ``mtime_ns`` matched
+    (a concurrent same-path Save → :class:`_StaleTarget` → 409, never a
+    stale-bytes commit). ``.bak`` cleanup is race-guarded and also runs on the
+    no-op path so a save-identical-bytes-then-commit never leaves the wiki dirty.
+    """
+    lock_path = _wiki_commit_lock_path(store.root)
+    # Bounded well below the handler's asyncio.timeout(60) so the thread returns
+    # a clean TimeoutError instead of being orphaned past the handler deadline.
+    with _file_lock(lock_path, timeout=30):
+        files: dict[str, bytes] = {}
+        cleanup: list[tuple[Path, int]] = []  # (path, committed_mtime_ns)
+        for rel, path, token in resolved:
+            if not path.is_file():
+                # A target the editor saved is gone — unrecoverable, even with force.
+                raise _StaleTarget(rel, 0)
+            before = path.stat().st_mtime_ns
+            if before != token:
+                if not force:
+                    raise _StaleTarget(rel, before)
+                logger.warning(
+                    "force-commit bypassed stale mtime on %s (client=%s server=%s)",
+                    rel,
+                    token,
+                    before,
+                )
+            data = path.read_bytes()
+            after = path.stat().st_mtime_ns
+            if after != before:
+                # The file changed during the read (concurrent writer).
+                if not force:
+                    raise _StaleTarget(rel, after)
+                data = path.read_bytes()
+                after = path.stat().st_mtime_ns
+            files[rel] = data
+            # Snapshot the target's own .bak (the one this asset's last Save left)
+            # so cleanup can unlink ONLY that exact backup. Save writes the .bak
+            # *before* replacing the target and does NOT take this commit lock, so a
+            # concurrent cross-process Save can drop a *fresh* .bak while the target
+            # mtime still matches; matching the snapshot avoids deleting it.
+            bak = path.with_suffix(path.suffix + ".bak")
+            bak_mtime = bak.stat().st_mtime_ns if bak.is_file() else None
+            cleanup.append((path, after, bak, bak_mtime))
+
+        try:
+            store.commit_paths(files, message=message, expected_head=expected_head)
+            committed = True
+        except WikiNothingToCommitError:
+            committed = False
+
+        # Race-guarded .bak cleanup: remove a committed target's own backup only
+        # when (a) one existed at commit time, (b) the target is still the bytes we
+        # committed, and (c) the .bak is byte-for-byte the same file (mtime
+        # unchanged) — never a fresh backup a concurrent Save just wrote.
+        for path, expect_mtime, bak, bak_snapshot in cleanup:
+            if bak_snapshot is None:
+                continue  # no editor backup at commit time → never delete one now
+            try:
+                target_unchanged = path.is_file() and path.stat().st_mtime_ns == expect_mtime
+                bak_unchanged = bak.is_file() and bak.stat().st_mtime_ns == bak_snapshot
+                if target_unchanged and bak_unchanged:
+                    bak.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("wiki commit: .bak cleanup failed for %s", path.name)
+
+        return {
+            "committed": committed,
+            "wiki_head": store.current_commit(),
+            "wiki_dirty": store.is_dirty(),
+        }
+
+
+@router.post("/{asset_type}/{name}/commit")
+async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest) -> JSONResponse:
+    """Commit the editor's saved changes to an asset as an isolated git commit.
+
+    Server-resolves the typed ``targets`` to validated wiki-relative paths
+    (canonical / vendor overrides for this asset), then under the in-process
+    ``_gateway_lock`` runs the blocking commit in a worker thread (so the event
+    loop is never blocked by the cross-process lock poll or the git subprocesses).
+    The commit is isolated to those paths and CAS-guarded on ``expected_head``.
+
+    Responses: ``{committed: true, wiki_head, wiki_dirty, privacy_warning}`` on
+    success; ``committed: false`` (200) when the saved bytes already match HEAD
+    (no new history, ``.bak`` still cleaned); 409 ``stale_head`` (HEAD moved) /
+    ``stale_target`` (a file changed since Save); 503 ``busy`` on lock timeout;
+    500 ``commit_failed`` with a **fixed** message (raw git stderr — which embeds
+    ``$HOME`` — is logged server-side only, never returned).
+
+    Privacy (§D-E): the commit *message* is new persisted user text, so it is
+    scanned with the soft, scope-less ``privacy.scan`` and a non-blocking
+    ``privacy_warning`` count is returned — the commit is never refused (the
+    handler is ``_REDACTION_EXEMPT``, a valve not a gate).
+    """
+    _validate_name_or_error(asset_type, name)
+    if not body.targets:
+        raise _error(422, "validation", "no commit targets supplied", reason_code="no_targets")
+
+    store = WikiStore.at_default()
+    message = (body.message or "").strip() or f"wiki: update {asset_type}/{name}"
+    privacy_warning = len(privacy.scan(message))
+
+    # Pure resolution + 404 gates before the lock (mirrors the editors). The
+    # canonical must exist for the asset (an override needs its canonical too).
+    try:
+        store.require_exists()
+    except WikiNotFoundError as exc:
+        raise _wiki_absent(exc) from exc
+    if not canonical_asset_file(store, asset_type, name).is_file():
+        raise _error(
+            404, "missing", f"{asset_type}/{name} has no canonical", reason_code="canonical_absent"
+        )
+
+    resolved: list[tuple[str, Path, int]] = []
+    for target in body.targets:
+        rel, path = _resolve_commit_target(store, asset_type, name, target)
+        try:
+            token = int(target.mtime_ns)
+        except ValueError as exc:
+            raise _error(
+                422,
+                "validation",
+                f"invalid mtime_ns: {target.mtime_ns!r}",
+                reason_code="invalid_mtime",
+            ) from exc
+        resolved.append((rel, path, token))
+
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result = await asyncio.to_thread(
+                    _do_commit_blocking,
+                    store,
+                    resolved,
+                    message=message,
+                    expected_head=body.expected_head,
+                    force=body.force,
+                )
+    except _StaleTarget as exc:
+        return _commit_target_conflict(exc.current_mtime_ns)
+    except WikiHeadMovedError:
+        try:
+            fresh = store.current_commit()
+        except WikiNotFoundError:
+            fresh = ""
+        return _commit_head_conflict(fresh)
+    except WikiNotFoundError as exc:
+        raise _wiki_absent(exc) from exc
+    except TimeoutError as exc:
+        raise _error(
+            503, "busy", "wiki commit timed out — another wiki operation may be in progress"
+        ) from exc
+    except RuntimeError as exc:
+        # git failure: the raw stderr (store.py:_git) embeds the absolute wiki
+        # path ($HOME/.memtomem-wiki) — log it server-side, return a fixed message.
+        logger.warning("wiki commit failed for %s/%s: %s", asset_type, name, exc)
+        raise _error(
+            500,
+            "internal",
+            "git commit failed; check the wiki repo git config and state",
+            reason_code="commit_failed",
+        ) from exc
+
+    return JSONResponse(content={**result, "privacy_warning": privacy_warning})

@@ -8,12 +8,17 @@ ADR-0008's roadmap.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WIKI_PATH: Path = Path.home() / ".memtomem-wiki"
 """Default wiki location — overridable via ``MEMTOMEM_WIKI_PATH`` env."""
@@ -69,6 +74,25 @@ class CommitNotFoundError(RuntimeError):
     """
 
 
+class WikiHeadMovedError(RuntimeError):
+    """Raised when the wiki HEAD advanced under an in-flight commit.
+
+    The web Commit affordance (ADR-0027 §3) passes the ``expected_head``
+    the client last saw. If HEAD no longer matches — caught either by the
+    upfront check or by the atomic compare-and-swap on the ref update — this
+    is raised so the route returns 409 instead of clobbering the moved HEAD.
+    """
+
+
+class WikiNothingToCommitError(RuntimeError):
+    """Raised when an isolated commit would reproduce HEAD's existing tree.
+
+    The saved bytes are byte-identical to what is already committed, so
+    :meth:`WikiStore.commit_paths` makes no commit. The route maps this to a
+    benign "nothing to commit" response (no new history is written).
+    """
+
+
 @dataclass(frozen=True)
 class WikiAsset:
     """An entry in the wiki — a skill, agent, or command directory."""
@@ -85,8 +109,20 @@ def _wiki_path_from_env() -> Path:
     return DEFAULT_WIKI_PATH
 
 
-def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    """Run ``git <args>`` in ``cwd``; raise with stderr on failure."""
+def _git(
+    args: list[str],
+    cwd: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``git <args>`` in ``cwd``; raise with stderr on failure.
+
+    ``env`` keys are *merged into* the parent environment (not replacing it)
+    — used only to thread ``GIT_INDEX_FILE`` for the out-of-worktree
+    temp-index commit (:meth:`WikiStore.commit_paths`) without disturbing
+    git's config discovery, identity, or other inherited environment.
+    """
+    run_env = {**os.environ, **env} if env else None
     try:
         return subprocess.run(
             ["git", *args],
@@ -94,10 +130,24 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
             check=True,
             capture_output=True,
             text=True,
+            env=run_env,
         )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}") from exc
+
+
+def _require_clean_rel(rel: str) -> None:
+    """Reject anything that isn't a clean wiki-relative POSIX path.
+
+    Defense-in-depth for :meth:`WikiStore.commit_paths`: the route already
+    server-resolves targets, but a path with ``..``, a leading ``/``, or
+    redundant components must never reach ``update-index --cacheinfo`` (it
+    would name an arbitrary entry in the committed tree).
+    """
+    p = PurePosixPath(rel)
+    if not rel or rel != str(p) or p.is_absolute() or ".." in p.parts:
+        raise ValueError(f"unsafe wiki-relative path: {rel!r}")
 
 
 @dataclass(frozen=True)
@@ -228,6 +278,110 @@ class WikiStore:
         self.require_exists()
         result = _git(["status", "--porcelain"], cwd=self.root)
         return bool(result.stdout.strip())
+
+    def commit_paths(
+        self,
+        files: dict[str, bytes],
+        *,
+        message: str,
+        expected_head: str,
+    ) -> str:
+        """Commit *files* in isolation onto HEAD; return the new commit SHA.
+
+        ``files`` maps wiki-**relative** POSIX paths to the exact bytes to
+        commit. The caller has already read+verified them under a lock — the
+        "saved blob", not a fresh working-tree ``add`` — so an external
+        same-path edit that slipped in cannot be swept in. The commit
+        contains **only** these paths layered onto HEAD's tree, independent
+        of whatever else is staged in the real index, and the branch ref is
+        advanced by an atomic compare-and-swap against *expected_head*
+        (ADR-0027 §3 / D-G).
+
+        Mechanics — out-of-worktree temp index → ``commit-tree`` → ref CAS:
+
+        1. The temp index is seeded from HEAD's tree (``read-tree``), so the
+           real index — including any unrelated staged changes — is never
+           consulted and never swept into the commit.
+        2. Each target's bytes are stored byte-exact (``hash-object -w
+           --no-filters``, so override Invariant 4 holds despite any repo
+           ``.gitattributes`` eol/clean filters) and staged via
+           ``update-index --add --cacheinfo``.
+        3. ``write-tree`` + ``commit-tree`` build the commit using the wiki
+           repo's own git identity (memtomem injects none).
+        4. ``update-ref <branch> <new> <expected_head>`` is a compare-and-swap:
+           if HEAD moved underneath us — an external ``$EDITOR``+git that
+           neither the in-process nor the cross-process lock can bind — it
+           fails and we raise :class:`WikiHeadMovedError` rather than
+           clobber. This is the binding cross-process guard.
+        5. The real index is reconciled for **only** the committed paths from
+           the new HEAD — best-effort, since the commit has already landed.
+
+        Raises :class:`WikiHeadMovedError` (HEAD advanced — caller → 409),
+        :class:`WikiNothingToCommitError` (bytes identical to HEAD), or
+        :class:`RuntimeError` (git failure — the caller MUST surface a fixed
+        message; the raw stderr embeds the absolute repo path).
+        """
+        self.require_exists()
+        head = self.current_commit()
+        expected = expected_head.strip().lower()
+        if _FULL_SHA_RE.fullmatch(expected) is None or head != expected:
+            raise WikiHeadMovedError(
+                f"wiki HEAD {head[:12]} does not match expected {expected_head[:12]}"
+            )
+
+        # Resolve the actual branch ref dynamically — never hardcode
+        # ``refs/heads/main`` (a clone may be on another branch); a detached
+        # HEAD has no symbolic ref and cannot be safely CAS-advanced.
+        branch_ref = _git(["symbolic-ref", "HEAD"], cwd=self.root).stdout.strip()
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="mm-wiki-commit-"))
+        try:
+            index_file = tmpdir / "index"
+            env = {"GIT_INDEX_FILE": str(index_file)}
+            _git(["read-tree", head], cwd=self.root, env=env)
+
+            blob_file = tmpdir / "blob"
+            for rel, data in files.items():
+                _require_clean_rel(rel)
+                blob_file.write_bytes(data)
+                blob = _git(
+                    ["hash-object", "-w", "--no-filters", str(blob_file)],
+                    cwd=self.root,
+                ).stdout.strip()
+                _git(
+                    ["update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}"],
+                    cwd=self.root,
+                    env=env,
+                )
+
+            tree = _git(["write-tree"], cwd=self.root, env=env).stdout.strip()
+            head_tree = _git(["rev-parse", f"{head}^{{tree}}"], cwd=self.root).stdout.strip()
+            if tree == head_tree:
+                raise WikiNothingToCommitError("saved bytes match HEAD; nothing to commit")
+
+            new = _git(
+                ["commit-tree", tree, "-p", head, "-m", message],
+                cwd=self.root,
+            ).stdout.strip()
+
+            try:
+                _git(["update-ref", branch_ref, new, expected], cwd=self.root)
+            except RuntimeError as exc:
+                raise WikiHeadMovedError(f"wiki {branch_ref} advanced during commit") from exc
+
+            # Reconcile the REAL index for only the committed paths from the
+            # new HEAD. Best-effort: the commit has already landed at the ref,
+            # so a failure here (e.g. an external ``index.lock``) must never be
+            # raised — that would tell the caller the commit failed when it
+            # succeeded. A stale real index is cosmetic and self-heals on the
+            # next commit (step 1 reads from HEAD, not the real index).
+            try:
+                _git(["reset", "-q", new, "--", *files.keys()], cwd=self.root)
+            except RuntimeError:
+                logger.warning("wiki commit %s landed but real-index reconcile failed", new[:12])
+            return new
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def copy_asset_at_commit(
         self,

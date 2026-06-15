@@ -122,6 +122,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "tags.rename_tag",
         "tags.run_auto_tag",
         "watchdog.watchdog_run_now",
+        "wiki_mutations.commit_wiki",
         "wiki_mutations.edit_wiki_canonical",
         "wiki_mutations.edit_wiki_override",
         "wiki_mutations.seed_wiki_override",
@@ -259,6 +260,16 @@ _REDACTION_EXEMPT: dict[str, str] = {
         "user payload, but privacy is a soft non-blocking warning (ADR-0027 §D-E) — "
         "the write is never refused, so it is not _REDACTION_PROTECTED (which means "
         "refuse-on-hit); single-curator host-global store, no push remote"
+    ),
+    # Wiki commit affordance (ADR-0027 §3): commits already-saved+scanned artifact
+    # bytes; the only new user text is the commit *message*, which gets the same
+    # soft, non-blocking privacy.scan (a returned count, never a refusal). A
+    # non-refusing handler in _REDACTION_PROTECTED would be a coverage false-pass
+    # (that set means refuse-on-hit). Valve, not gate — ADR-0027 §8 / §D-E.
+    "wiki_mutations.commit_wiki": (
+        "control-plane git commit of already-saved+scanned bytes; the commit "
+        "message gets a soft non-blocking privacy.scan (ADR-0027 §D-E) but the "
+        "commit is never refused, so it is not _REDACTION_PROTECTED (refuse-on-hit)"
     ),
     # Tag mutations: short labels, separate validation at ingest.
     "chunks.update_chunk_tags": "tags are short labels; redaction not applicable to tag strings",

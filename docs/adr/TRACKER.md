@@ -30,6 +30,8 @@ pointer so a maintainer can scan due dates without opening each ADR.
 | 0020 §"Open questions" | Tier 3 index-file curation (`budget` trim / `index_orphan` add / `outside_root`) beyond the subtractive `missing_target`-only `--fix` | A user report (or repeated doctor findings) that the `missing_target`-only fix demonstrably cannot resolve (criteria in ADR §"Open questions") | (none — tracked in ADR) | (event-driven) |
 | 0021 §"Open questions" §1 | Docs Drift Doctor — impl-path vs upstream-doc-path divergence surface | Upstream path drift causes a support issue OR a runtime-detection false-negative the mcp-clients.md-SoT conformance test does not catch (criteria in ADR §"Open questions") | (none — tracked in ADR) | (event-driven) |
 | 0022 §"Open questions" §1 | Skills versioning — directory-tree snapshot model (`versions/v1/<SKILL.md + assets>`) with the same label layer (v1 covers agents + commands only) | A concrete need to freeze/rollback a skill OR user-reported parity-gap pain vs agents/commands versioning (criteria in ADR §"Open questions") | (none — tracked in ADR) | (event-driven) |
+| 0027 §"Provisional decisions" D-A | in-browser wiki editor save→commit model | first dev-tier dogfooding of the now-shipped commit affordance; criteria in ADR-0027 §"Provisional decisions" | (none — tracked in ADR) | (event-driven) |
+| 0027 §"Provisional decisions" D-E | wiki editor privacy posture (soft-warn vs hard-gate) | wiki gains a configured push remote; criteria in ADR-0027 §D-E | (none — tracked in ADR) | (event-driven) |
 
 ## Adding a row
 

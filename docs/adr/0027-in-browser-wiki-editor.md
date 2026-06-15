@@ -1,9 +1,11 @@
 # ADR-0027: In-browser wiki canonical/override editor
 
-**Status:** Proposed (recommended leans filled in §"Provisional
-decisions"; each keeps its alternatives and is reversible — maintainer to
-confirm or re-open)
-**Date:** 2026-06-14
+**Status:** Accepted (Editor-A #1367, Editor-B #1371, and the §3 commit
+affordance are shipped per the recommended leans D-A/D-B/D-C/D-G; two
+event-driven questions remain — D-A save→commit dogfooding and D-E privacy
+posture — tracked in `docs/adr/TRACKER.md`. Each lean keeps its alternatives
+and is reversible)
+**Date:** 2026-06-14 (Accepted 2026-06-15)
 **Context:** ADR-0008 (wiki layer) shipped its Web UI "read-only-first":
 **E-1** a read-only wiki browser (`GET /api/wiki` + per-vendor
 `diff`/`lint`, prod tier) and **E-2** a dev-tier override *seed*
@@ -608,8 +610,15 @@ question, since their triggers differ):
 | 0027 §"Provisional decisions" D-E | wiki editor privacy posture (soft-warn vs hard-gate) | wiki gains a configured push remote; criteria in ADR-0027 D-E | (none — tracked in ADR) | (event-driven) |
 ```
 
-If instead the maintainer accepts the leans as settled (Status →
-*Accepted*), no TRACKER rows are added.
+**Resolution (2026-06-15):** the maintainer accepted the leans and the §3
+commit affordance shipped, so the *build* is settled (Status → *Accepted*).
+The two rows above were **still added** to `docs/adr/TRACKER.md` because both
+questions carry genuine post-acceptance, event-driven re-evaluation triggers
+that outlive the build: D-A re-checks the two-act save→commit UX after the
+first dev-tier dogfooding, and D-E flips the privacy posture to a hard gate
+**if/when the wiki gains a configured push remote**. They track *when to
+revisit a shipped decision*, not an unbuilt one — so the "no rows if settled"
+note above is superseded for this ADR.
 
 ## References
 

@@ -37,6 +37,13 @@ let _wikiCanonical = null;
 let _wikiCanonEditing = false;
 let _wikiCanonDraft = null;
 
+// Commit affordance (ADR-0027 §3): per-asset map of the targets the user has
+// Saved this session, keyed `${type}/${name}` → { canonical|override:<vendor>:
+// mtime_ns }. The mtime_ns is the token the editor last saw (from the Save
+// response), so the commit can detect an external same-file edit between Save and
+// Commit (→409). The wiki is host-global, so no project component in the key.
+const _wikiPending = {};
+
 // Seq guards for overlapping fetches (the innerHTML race rule): a newer load
 // bumps the seq so a slower in-flight response can't paint over it.
 let _wikiListSeq = 0;
@@ -98,7 +105,164 @@ function _renderWikiHead() {
   if (_wikiData.is_dirty) {
     html += ` <span class="badge badge-warning">${escapeHtml(t('settings.ctx.wiki_dirty'))}</span>`;
   }
+  // Commit affordance (ADR-0027 §3): when the active asset has Saved-but-
+  // uncommitted edits this session (dev tier), offer an explicit Commit. Save and
+  // commit are two acts — this is never auto-fired on Save.
+  if (_wikiDevMode() && _wikiActivePendingCount() > 0) {
+    html += ' <button type="button" class="btn-ghost wiki-commit-btn" id="wiki-commit-btn">'
+      + `${escapeHtml(t('settings.ctx.wiki_commit'))}</button>`;
+  }
   headEl.innerHTML = html;
+  const commitBtn = qs('wiki-commit-btn');
+  if (commitBtn) commitBtn.addEventListener('click', () => { _openWikiCommitModal(); });
+}
+
+// --- Commit affordance (ADR-0027 §3, dev tier only) -------------------------
+// An explicit, opt-in Commit of the asset's Saved-but-uncommitted edits as an
+// ISOLATED git commit (the server stages only the resolved target paths via an
+// out-of-worktree temp index + ref CAS). Mounts in the HEAD row beside the dirty
+// badge; the targets are whatever the user Saved this session for the open asset.
+
+let _wikiCommitRelease = null;
+
+function _wikiAssetKey(type, name) { return `${type}/${name}`; }
+
+function _wikiPendingAdd(type, name, targetKey, mtimeNs) {
+  const key = _wikiAssetKey(type, name);
+  (_wikiPending[key] = _wikiPending[key] || {})[targetKey] = String(mtimeNs);
+}
+
+function _wikiPendingClear(type, name) { delete _wikiPending[_wikiAssetKey(type, name)]; }
+
+function _wikiActivePendingCount() {
+  if (!_wikiActive) return 0;
+  const map = _wikiPending[_wikiAssetKey(_wikiActive.type, _wikiActive.name)];
+  return map ? Object.keys(map).length : 0;
+}
+
+function _wikiPendingTargetsList(type, name) {
+  const map = _wikiPending[_wikiAssetKey(type, name)] || {};
+  return Object.keys(map).map((key) => {
+    if (key === 'canonical') return { kind: 'canonical', mtime_ns: map[key] };
+    return { kind: 'override', vendor: key.slice('override:'.length), mtime_ns: map[key] };
+  });
+}
+
+function _closeWikiCommitModal() {
+  const modal = qs('wiki-commit-modal');
+  if (modal) hide(modal);
+  if (_wikiCommitRelease) {
+    try { _wikiCommitRelease(); } catch { /* release is idempotent */ }
+    _wikiCommitRelease = null;
+  }
+}
+
+function _openWikiCommitModal() {
+  if (!_wikiActive) return;
+  const { type, name } = _wikiActive;
+  const targets = _wikiPendingTargetsList(type, name);
+  if (!targets.length) return;
+  const modal = qs('wiki-commit-modal');
+  if (!modal) return;
+  const summaryEl = qs('wiki-commit-targets');
+  const msgEl = qs('wiki-commit-msg');
+  const errEl = qs('wiki-commit-error');
+  const okBtn = qs('wiki-commit-ok-btn');
+  const cancelBtn = qs('wiki-commit-cancel-btn');
+  if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
+  if (summaryEl) {
+    summaryEl.textContent = t('settings.ctx.wiki_commit_summary', {
+      count: targets.length, asset: `${type}/${name}`,
+    });
+  }
+  if (msgEl) msgEl.value = t('settings.ctx.wiki_commit_msg_default', { asset: `${type}/${name}` });
+  // Assign via .onclick (not addEventListener) so re-opening never stacks handlers.
+  if (cancelBtn) cancelBtn.onclick = () => { _closeWikiCommitModal(); };
+  if (okBtn) { okBtn.disabled = false; okBtn.onclick = () => { _doWikiCommit(false); }; }
+  show(modal);
+  _wikiCommitRelease = openModalA11y(modal);
+  registerModalCloser(modal, () => { _closeWikiCommitModal(); });
+  if (msgEl) { msgEl.focus(); msgEl.select(); }
+}
+
+async function _doWikiCommit(force) {
+  if (!_wikiActive) { _closeWikiCommitModal(); return; }
+  const { type, name } = _wikiActive;
+  const targets = _wikiPendingTargetsList(type, name);
+  if (!targets.length) { _closeWikiCommitModal(); return; }
+  const msgEl = qs('wiki-commit-msg');
+  const errEl = qs('wiki-commit-error');
+  const okBtn = qs('wiki-commit-ok-btn');
+  const message = (msgEl && msgEl.value) || '';
+  const expectedHead = (_wikiData && _wikiData.wiki_head) || '';
+  const showErr = (text) => { if (errEl) { errEl.hidden = false; errEl.textContent = text; } };
+  if (okBtn) okBtn.disabled = true;
+  const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/commit`;
+  let res;
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ expected_head: expectedHead, message, targets, force }),
+    });
+  } catch (err) {
+    if (okBtn) okBtn.disabled = false;
+    showErr(t('settings.ctx.wiki_commit_failed', { error: String((err && err.message) || err) }));
+    return;
+  }
+  if (okBtn) okBtn.disabled = false;
+  if (res.status === 503) { showErr(t('settings.ctx.wiki_commit_busy')); return; }
+  if (res.status === 409) {
+    let body = {};
+    try { body = await res.json(); } catch { /* non-JSON */ }
+    if (body.reason_code === 'stale_target') {
+      // An external editor changed a target since Save. Offer to commit the
+      // current on-disk bytes anyway (force, WARNING-audited server-side).
+      const ok = await showConfirm({
+        title: t('settings.ctx.wiki_commit_target_changed_title'),
+        message: t('settings.ctx.wiki_commit_target_changed_msg'),
+        confirmText: t('settings.ctx.wiki_commit_force_ok'),
+        cancelText: t('modal.cancel_btn'),
+        danger: true,
+      });
+      if (ok) { await _doWikiCommit(true); } else { showErr(t('settings.ctx.wiki_commit_target_changed_msg')); }
+      return;
+    }
+    // stale_head: HEAD moved under us. CLEAR the pending targets — their tokens
+    // were captured against the OLD head, so a one-click retry against the NEW
+    // head would let the CAS pass for bytes that were never reconciled with the
+    // intervening change. Forcing a fresh Save (which re-derives the token against
+    // the current state) before another commit is the safe resolution. The
+    // working-tree edits are untouched on disk.
+    _wikiPendingClear(type, name);
+    if (_wikiData && body.wiki_head) _wikiData.wiki_head = body.wiki_head;
+    _renderWikiHead();
+    _closeWikiCommitModal();
+    showToast(t('settings.ctx.wiki_commit_head_moved'), 'error');
+    return;
+  }
+  if (!res.ok) { showErr(t('settings.ctx.wiki_commit_failed', { error: await _wikiErrDetail(res) })); return; }
+  const data = await res.json();
+  // Update HEAD + dirty from the server's read-back (no list re-render → no focus
+  // loss), clear the asset's pending targets, repaint the head, close the modal.
+  if (_wikiData) {
+    if (data.wiki_head) _wikiData.wiki_head = data.wiki_head;
+    _wikiData.is_dirty = !!data.wiki_dirty;
+  }
+  _wikiPendingClear(type, name);
+  _renderWikiHead();
+  _closeWikiCommitModal();
+  if (data.committed === false) {
+    showToast(t('settings.ctx.wiki_commit_nothing'), 'info');
+    return;
+  }
+  showToast(t('settings.ctx.wiki_commit_ok', { sha: (data.wiki_head || '').slice(0, 12) }), 'success');
+  if (data.privacy_warning) {
+    showToast(t('settings.ctx.wiki_commit_privacy_warn', { count: data.privacy_warning }), 'error');
+  }
 }
 
 function _renderWikiList() {
@@ -403,8 +567,11 @@ async function _saveWikiOverride(type, name, vendor, content, mtimeNs, force) {
     return;
   }
   const data = await res.json();
-  // Repaint the HEAD dirty badge from the response without re-listing (a11y: no
-  // list re-render / focus loss — feedback_ctx_a11y_conventions).
+  // Record the saved override as a pending commit target (its fresh mtime_ns is
+  // the per-target token the commit re-checks). Then repaint the HEAD dirty badge
+  // + Commit button from the response without re-listing (a11y: no list
+  // re-render / focus loss — feedback_ctx_a11y_conventions).
+  _wikiPendingAdd(type, name, `override:${vendor}`, data.mtime_ns);
   if (_wikiData) { _wikiData.is_dirty = !!data.wiki_dirty; _renderWikiHead(); }
   _wikiEditing = false;
   _wikiEditDraft = null;
@@ -587,8 +754,9 @@ async function _saveWikiCanonical(type, name, content, mtimeNs, force) {
     return;
   }
   const data = await res.json();
-  // Repaint the HEAD dirty badge from the response without re-listing (a11y: no
-  // list re-render / focus loss — feedback_ctx_a11y_conventions).
+  // Record the saved canonical as a pending commit target, then repaint the HEAD
+  // dirty badge + Commit button without re-listing (a11y: no focus loss).
+  _wikiPendingAdd(type, name, 'canonical', data.mtime_ns);
   if (_wikiData) { _wikiData.is_dirty = !!data.wiki_dirty; _renderWikiHead(); }
   _wikiCanonEditing = false;
   _wikiCanonDraft = null;
