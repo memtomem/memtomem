@@ -9,12 +9,23 @@ from typing import Literal
 
 import click
 
-from memtomem.context._names import InvalidNameError, override_vendors
+from memtomem import privacy
+from memtomem.context._names import (
+    OVERRIDE_FORMATS,
+    InvalidNameError,
+    override_vendors,
+    validate_name,
+)
 from memtomem.wiki import (
     WIKI_ASSET_TYPES,
     WikiAlreadyExistsError,
     WikiNotFoundError,
     WikiStore,
+)
+from memtomem.wiki.commit import (
+    ResolvedTarget,
+    WikiTargetChangedError,
+    commit_targets,
 )
 from memtomem.wiki.inspect import (
     diff_override,
@@ -22,8 +33,10 @@ from memtomem.wiki.inspect import (
 )
 from memtomem.wiki.override import (
     OverrideExistsError,
+    canonical_asset_file,
     seed_override,
 )
+from memtomem.wiki.store import WikiHeadMovedError
 
 # ``--vendor`` Choices derive from OVERRIDE_FORMATS (the single source of
 # truth) so they never drift from the matrix: kimi is valid for skills/agents
@@ -207,6 +220,114 @@ def _run_lint(
     click.get_current_context().exit(1)
 
 
+def _run_commit(
+    asset_type: Literal["skills", "agents", "commands"],
+    name: str,
+    vendors: tuple[str, ...],
+    *,
+    canonical: bool,
+    message: str | None,
+) -> None:
+    """Shared body for ``mm wiki {skill,agent,command} commit``.
+
+    Parity with the web Commit affordance (ADR-0027 §3): commits ONLY the
+    selected canonical / override paths layered onto HEAD via the shared
+    :func:`memtomem.wiki.commit.commit_targets` engine — never a bare
+    ``git add . && git commit`` that would sweep unrelated staged changes. The
+    paths are server-resolved from the typed ``--canonical`` / ``--vendor`` flags
+    (a raw path is never accepted), and every engine error maps to a classified
+    :class:`click.ClickException` so no traceback — and no absolute wiki path —
+    leaks. Unlike the web route there is no client Save token, so the commit
+    takes the bytes currently on disk and lands on the freshest HEAD (the
+    cross-process lock + ref CAS still guard a concurrent ``mm web`` / second
+    ``mm wiki`` commit).
+    """
+    store = WikiStore.at_default()
+    try:
+        store.require_exists()
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not canonical and not vendors:
+        raise click.ClickException(
+            "nothing to commit: pass --canonical and/or --vendor <vendor> to select targets"
+        )
+
+    targets: list[ResolvedTarget] = []
+    if canonical:
+        path = canonical_asset_file(store, asset_type, name)
+        targets.append(ResolvedTarget(rel=path.relative_to(store.root).as_posix(), path=path))
+    for vendor in vendors:
+        fmt = OVERRIDE_FORMATS.get((asset_type, vendor))
+        if fmt is None:
+            # Unreachable via the Click Choices (derived from OVERRIDE_FORMATS),
+            # but stay classified rather than KeyError if called directly.
+            raise click.ClickException(f"no override format registered for vendor {vendor!r}")
+        _, ext = fmt
+        path = store.root / asset_type / name / "overrides" / f"{vendor}.{ext}"
+        targets.append(ResolvedTarget(rel=path.relative_to(store.root).as_posix(), path=path))
+
+    # Friendly pre-check: a selected file that never existed on disk gets a clear
+    # "create it first" message instead of the engine's generic
+    # WikiTargetChangedError(rel, 0). Re-checked authoritatively under the lock.
+    missing = [t.rel for t in targets if not t.path.is_file()]
+    if missing:
+        raise click.ClickException(
+            "no such file in the wiki: "
+            + ", ".join(missing)
+            + " — create the canonical or seed an override before committing"
+        )
+
+    msg = (message or "").strip() or f"wiki: update {asset_type}/{name}"
+    privacy_warning = len(privacy.scan(msg))
+
+    try:
+        outcome = commit_targets(store, targets, message=msg, expected_head=None)
+    except WikiTargetChangedError as exc:
+        raise click.ClickException(
+            f"{exc.rel} changed on disk during the commit; re-run to pick up the new bytes"
+        ) from exc
+    except WikiHeadMovedError as exc:
+        raise click.ClickException(
+            f"the wiki HEAD moved during the commit ({exc}); re-run to commit onto the new HEAD"
+        ) from exc
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except TimeoutError as exc:
+        # The shared cross-process wiki lock is held past ``_COMMIT_LOCK_TIMEOUT``
+        # by a concurrent committer (another ``mm wiki`` / an ``mm web`` commit).
+        # ``TimeoutError`` is an ``OSError``, not a ``RuntimeError``, so it needs
+        # its own clause; the web route maps the same path to a 503.
+        raise click.ClickException(
+            "wiki commit timed out — another wiki operation may be in progress; retry shortly"
+        ) from exc
+    except RuntimeError as exc:
+        # git failure (e.g. missing git identity) — surface the git error the way
+        # the sibling ``mm wiki init`` does. The embedded wiki path is the user's
+        # own local path, not a secret as it would be in the web route's HTTP
+        # response (which uses a fixed, path-free message instead).
+        raise click.ClickException(str(exc)) from exc
+
+    rels = ", ".join(t.rel for t in targets)
+    if outcome.committed:
+        click.secho(f"Committed {outcome.wiki_head[:12]} ({rels})", fg="green")
+    else:
+        click.secho(f"Nothing to commit — {rels} already match HEAD.", fg="yellow")
+
+    if privacy_warning:
+        click.secho(
+            f"warning: commit message has {privacy_warning} possible "
+            f"secret/PII match{'es' if privacy_warning != 1 else ''} (committed anyway)",
+            fg="yellow",
+            err=True,
+        )
+
+
 @wiki.command("init")
 @click.option(
     "--from",
@@ -345,6 +466,42 @@ def skill_lint_cmd(name: str, vendor: str | None) -> None:
     _run_lint("skills", name, vendor)
 
 
+@skill_group.command("commit")
+@click.argument("name")
+@click.option(
+    "--vendor",
+    "-v",
+    "vendors",
+    type=click.Choice(_SKILL_VENDORS),
+    multiple=True,
+    help="Commit this vendor's override file (repeatable).",
+)
+@click.option(
+    "--canonical",
+    "-c",
+    is_flag=True,
+    help="Also commit the canonical SKILL.md.",
+)
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Commit message (default: 'wiki: update skills/<name>').",
+)
+def skill_commit_cmd(
+    name: str, vendors: tuple[str, ...], canonical: bool, message: str | None
+) -> None:
+    """Commit a skill's canonical and/or override files as one isolated wiki commit.
+
+    Parity with the web Commit affordance (ADR-0027 §3): commits ONLY the
+    selected paths layered onto HEAD — never a bare ``git add . && git commit``
+    that would sweep unrelated staged changes. Edit the files first (e.g.
+    ``mm wiki skill override <name> --vendor <v> --editor``), then select targets
+    with ``--canonical`` and/or one or more ``--vendor`` flags.
+    """
+    _run_commit("skills", name, vendors, canonical=canonical, message=message)
+
+
 # ── Agent subgroup ──────────────────────────────────────────────────────
 
 
@@ -425,6 +582,42 @@ def agent_lint_cmd(name: str, vendor: str | None) -> None:
     non-zero on any error; dropped-field warnings leave the exit 0.
     """
     _run_lint("agents", name, vendor)
+
+
+@agent_group.command("commit")
+@click.argument("name")
+@click.option(
+    "--vendor",
+    "-v",
+    "vendors",
+    type=click.Choice(_AGENT_VENDORS),
+    multiple=True,
+    help="Commit this vendor's override file (repeatable).",
+)
+@click.option(
+    "--canonical",
+    "-c",
+    is_flag=True,
+    help="Also commit the canonical agent.md.",
+)
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Commit message (default: 'wiki: update agents/<name>').",
+)
+def agent_commit_cmd(
+    name: str, vendors: tuple[str, ...], canonical: bool, message: str | None
+) -> None:
+    """Commit an agent's canonical and/or override files as one isolated wiki commit.
+
+    Parity with the web Commit affordance (ADR-0027 §3): commits ONLY the
+    selected paths layered onto HEAD — never a bare ``git add . && git commit``
+    that would sweep unrelated staged changes. Edit the files first (e.g.
+    ``mm wiki agent override <name> --vendor <v> --editor``), then select targets
+    with ``--canonical`` and/or one or more ``--vendor`` flags.
+    """
+    _run_commit("agents", name, vendors, canonical=canonical, message=message)
 
 
 # ── Command subgroup ────────────────────────────────────────────────────
@@ -509,3 +702,39 @@ def command_lint_cmd(name: str, vendor: str | None) -> None:
     Exits non-zero on any error; dropped-field warnings leave the exit 0.
     """
     _run_lint("commands", name, vendor)
+
+
+@command_group.command("commit")
+@click.argument("name")
+@click.option(
+    "--vendor",
+    "-v",
+    "vendors",
+    type=click.Choice(_COMMAND_VENDORS),
+    multiple=True,
+    help="Commit this vendor's override file (repeatable).",
+)
+@click.option(
+    "--canonical",
+    "-c",
+    is_flag=True,
+    help="Also commit the canonical command.md.",
+)
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Commit message (default: 'wiki: update commands/<name>').",
+)
+def command_commit_cmd(
+    name: str, vendors: tuple[str, ...], canonical: bool, message: str | None
+) -> None:
+    """Commit a command's canonical and/or override files as one isolated wiki commit.
+
+    Parity with the web Commit affordance (ADR-0027 §3): commits ONLY the
+    selected paths layered onto HEAD — never a bare ``git add . && git commit``
+    that would sweep unrelated staged changes. Edit the files first (e.g.
+    ``mm wiki command override <name> --vendor <v> --editor``), then select
+    targets with ``--canonical`` and/or one or more ``--vendor`` flags.
+    """
+    _run_commit("commands", name, vendors, canonical=canonical, message=message)

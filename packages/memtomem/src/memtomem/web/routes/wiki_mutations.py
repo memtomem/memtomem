@@ -36,9 +36,7 @@ stay two acts — auto-commit-on-save is never introduced.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import tempfile
 from pathlib import Path
 from typing import Literal
 
@@ -47,8 +45,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem import privacy
-from memtomem.context._atomic import _file_lock
 from memtomem.context._names import OVERRIDE_FORMATS, renderable_vendors
+from memtomem.wiki.commit import (
+    ResolvedTarget,
+    WikiTargetChangedError,
+    commit_targets,
+)
 from memtomem.wiki.inspect import (
     CanonicalParseError,
     read_canonical,
@@ -65,7 +67,6 @@ from memtomem.wiki.override import (
 )
 from memtomem.wiki.store import (
     WikiHeadMovedError,
-    WikiNothingToCommitError,
     WikiNotFoundError,
     WikiStore,
 )
@@ -539,18 +540,6 @@ class WikiCommitRequest(BaseModel):
     force: bool = False
 
 
-class _StaleTarget(Exception):
-    """Internal signal: a target's working-tree bytes changed since Save.
-
-    Carries the current ``mtime_ns`` so the handler can echo it in the 409
-    (mirrors the editor's ``stale_mtime`` conflict shape).
-    """
-
-    def __init__(self, rel: str, current_mtime_ns: int) -> None:
-        super().__init__(rel)
-        self.current_mtime_ns = current_mtime_ns
-
-
 def _commit_target_conflict(current_mtime_ns: int) -> JSONResponse:
     # Same conflict envelope as the editor (stale_mtime), with a commit-specific
     # reason_code so the SPA can tell a per-file race from a HEAD race.
@@ -577,20 +566,6 @@ def _commit_head_conflict(fresh_head: str) -> JSONResponse:
             "reason_code": "stale_head",
         },
     )
-
-
-def _wiki_commit_lock_path(root: Path) -> Path:
-    """Cross-process commit lock path, in system-temp keyed by the wiki root.
-
-    Kept **outside** the wiki tree on purpose: ``_file_lock`` ``mkdir``s the lock
-    file's parent, so a lock under ``<wiki>/.git/`` could forge a bogus ``.git/``
-    if the wiki were removed (``WikiStore.exists()`` only checks ``.git`` is a
-    dir). A system-temp path also can never show up in ``git status``. Two
-    processes derive the same path from the same resolved root, so the lock is
-    genuinely cross-process.
-    """
-    digest = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / "memtomem" / f"wiki-commit-{digest}.lock"
 
 
 def _resolve_commit_target(
@@ -631,80 +606,32 @@ def _do_commit_blocking(
     expected_head: str,
     force: bool,
 ) -> dict:
-    """Synchronous commit body — runs in a worker thread under the cross-process lock.
+    """Synchronous commit body — runs in a worker thread so the event loop is
+    never blocked by the cross-process lock poll or the git subprocesses.
 
-    Holds the wiki-root file lock for the whole read→commit→reconcile→cleanup
-    window, so a concurrent CLI ``mm wiki`` / second ``mm web`` commit cannot
-    interleave. Per-target the bytes are read under a ``stat → read → stat``
-    verify so the committed blob is exactly the bytes whose ``mtime_ns`` matched
-    (a concurrent same-path Save → :class:`_StaleTarget` → 409, never a
-    stale-bytes commit). ``.bak`` cleanup is race-guarded and also runs on the
-    no-op path so a save-identical-bytes-then-commit never leaves the wiki dirty.
+    A thin adapter over :func:`memtomem.wiki.commit.commit_targets`, the shared
+    engine the ``mm wiki {skill,agent,command} commit`` CLI also calls. The web
+    supplies the client's per-target ``mtime_ns`` token (``expected_mtime_ns``)
+    and its ``expected_head`` CAS value; the engine holds the wiki-root file lock
+    for the whole read → commit → ``.bak``-cleanup window and may raise
+    :class:`~memtomem.wiki.commit.WikiTargetChangedError` (→ 409 ``stale_target``)
+    or :class:`~memtomem.wiki.store.WikiHeadMovedError` (→ 409 ``stale_head``).
     """
-    lock_path = _wiki_commit_lock_path(store.root)
-    # Bounded well below the handler's asyncio.timeout(60) so the thread returns
-    # a clean TimeoutError instead of being orphaned past the handler deadline.
-    with _file_lock(lock_path, timeout=30):
-        files: dict[str, bytes] = {}
-        cleanup: list[tuple[Path, int]] = []  # (path, committed_mtime_ns)
-        for rel, path, token in resolved:
-            if not path.is_file():
-                # A target the editor saved is gone — unrecoverable, even with force.
-                raise _StaleTarget(rel, 0)
-            before = path.stat().st_mtime_ns
-            if before != token:
-                if not force:
-                    raise _StaleTarget(rel, before)
-                logger.warning(
-                    "force-commit bypassed stale mtime on %s (client=%s server=%s)",
-                    rel,
-                    token,
-                    before,
-                )
-            data = path.read_bytes()
-            after = path.stat().st_mtime_ns
-            if after != before:
-                # The file changed during the read (concurrent writer).
-                if not force:
-                    raise _StaleTarget(rel, after)
-                data = path.read_bytes()
-                after = path.stat().st_mtime_ns
-            files[rel] = data
-            # Snapshot the target's own .bak (the one this asset's last Save left)
-            # so cleanup can unlink ONLY that exact backup. Save writes the .bak
-            # *before* replacing the target and does NOT take this commit lock, so a
-            # concurrent cross-process Save can drop a *fresh* .bak while the target
-            # mtime still matches; matching the snapshot avoids deleting it.
-            bak = path.with_suffix(path.suffix + ".bak")
-            bak_mtime = bak.stat().st_mtime_ns if bak.is_file() else None
-            cleanup.append((path, after, bak, bak_mtime))
-
-        try:
-            store.commit_paths(files, message=message, expected_head=expected_head)
-            committed = True
-        except WikiNothingToCommitError:
-            committed = False
-
-        # Race-guarded .bak cleanup: remove a committed target's own backup only
-        # when (a) one existed at commit time, (b) the target is still the bytes we
-        # committed, and (c) the .bak is byte-for-byte the same file (mtime
-        # unchanged) — never a fresh backup a concurrent Save just wrote.
-        for path, expect_mtime, bak, bak_snapshot in cleanup:
-            if bak_snapshot is None:
-                continue  # no editor backup at commit time → never delete one now
-            try:
-                target_unchanged = path.is_file() and path.stat().st_mtime_ns == expect_mtime
-                bak_unchanged = bak.is_file() and bak.stat().st_mtime_ns == bak_snapshot
-                if target_unchanged and bak_unchanged:
-                    bak.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("wiki commit: .bak cleanup failed for %s", path.name)
-
-        return {
-            "committed": committed,
-            "wiki_head": store.current_commit(),
-            "wiki_dirty": store.is_dirty(),
-        }
+    targets = [
+        ResolvedTarget(rel=rel, path=path, expected_mtime_ns=token) for rel, path, token in resolved
+    ]
+    outcome = commit_targets(
+        store,
+        targets,
+        message=message,
+        expected_head=expected_head,
+        force=force,
+    )
+    return {
+        "committed": outcome.committed,
+        "wiki_head": outcome.wiki_head,
+        "wiki_dirty": outcome.wiki_dirty,
+    }
 
 
 @router.post("/{asset_type}/{name}/commit")
@@ -773,7 +700,7 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
                     expected_head=body.expected_head,
                     force=body.force,
                 )
-    except _StaleTarget as exc:
+    except WikiTargetChangedError as exc:
         return _commit_target_conflict(exc.current_mtime_ns)
     except WikiHeadMovedError:
         try:

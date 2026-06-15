@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **CLI: `mm wiki {skill,agent,command} commit` (ADR-0027 §3).** The terminal
+  parity of the in-browser wiki **Commit** affordance. After editing a canonical
+  asset or a vendor override (e.g. with `mm wiki skill override <name> --vendor
+  <v> --editor`), `mm wiki skill commit <name> --canonical --vendor claude` writes
+  **one isolated git commit** of only the selected paths layered onto HEAD — never
+  a bare `git add . && git commit`, so unrelated staged changes in the wiki are
+  left untouched. Select targets with `--canonical`/`-c` and repeatable
+  `--vendor`/`-v`; `--message`/`-m` overrides the generated default. Bytes already
+  matching HEAD are a no-op (nothing committed); a concurrent `mm web` commit, a
+  moved HEAD, or a file that changed mid-commit aborts cleanly so you can re-run.
+  The commit message is privacy-scanned (a soft, non-blocking warning). The web
+  route and CLI now share one commit engine (`memtomem.wiki.commit.commit_targets`,
+  including the cross-process wiki lock) so the two surfaces cannot drift.
+
 - **Web UI: dev-tier override-seed in the wiki browser (ADR-0008 PR-E E-2).**
   The Context Gateway **Wiki** section gains a per-vendor **Seed override** action
   (dev mode only) — the web parity of `mm wiki <type> override`. It renders the
