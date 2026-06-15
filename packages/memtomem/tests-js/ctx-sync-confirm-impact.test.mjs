@@ -176,7 +176,7 @@ describe('Sync All confirm per-type × per-runtime breakdown (B-5 #1288)', () =>
     // Per-type × per-runtime segments, capitalized type heads + mapped runtimes.
     expect(opts.message).toContain('Skills: 1 create → claude');
     expect(opts.message).toContain('Skills: 1 overwrite → codex');
-    expect(opts.message).toContain('Custom commands: 1 overwrite → claude');
+    expect(opts.message).toContain('Commands: 1 overwrite → claude');
     // Overwrite total (artifact 2 + settings 0) drives the warning.
     expect(opts.warningText).toContain('2');
   });
@@ -250,7 +250,7 @@ describe('Sync All confirm per-type × per-runtime breakdown (B-5 #1288)', () =>
     const opts = captured();
     expect(opts).toBeTruthy();
     expect(opts.message).toContain('Skills: 1 create → claude');
-    expect(opts.message).toContain('Custom commands: 1 overwrite → claude');
+    expect(opts.message).toContain('Commands: 1 overwrite → claude');
     expect(opts.warningText).toContain('2');
   });
 });
