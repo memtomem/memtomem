@@ -589,11 +589,26 @@ function _ctxPortalRenderRows() {
     ? `<div class="ctx-portal-hidden-hint text-muted">${escapeHtml(t('settings.ctx.portal_hidden_uninit', { count: hiddenUninit }))}</div>`
     : '';
   if (!scopes.length) {
-    rowsEl.innerHTML = hiddenHint + emptyState(
-      '',
-      t('settings.ctx.portal_no_match', { query: _ctxPortalSearch.trim() }),
-      '',
-    );
+    // Both predicates (search box + runtime-filter chip) can empty the board,
+    // but state for them is split across ``_ctxPortalSearch`` and
+    // ``_ctxPortalRuntimeFilter``. Name the real cause instead of always
+    // interpolating the (possibly blank) query — a blank ``{query}`` rendered
+    // literal empty quotes and hid that a filter chip was the culprit (#1349).
+    const query = _ctxPortalSearch.trim();
+    const runtime = _ctxPortalRuntimeFilter
+      ? _ctxPortalRuntimeLabel(_ctxPortalRuntimeFilter)
+      : '';
+    let message;
+    if (query && runtime) {
+      message = t('settings.ctx.portal_no_match_filtered', { query, runtime });
+    } else if (runtime) {
+      message = t('settings.ctx.portal_no_runtime_match', { runtime });
+    } else if (query) {
+      message = t('settings.ctx.portal_no_match', { query });
+    } else {
+      message = t('settings.ctx.portal_no_projects');
+    }
+    rowsEl.innerHTML = hiddenHint + emptyState('', message, '');
     return;
   }
   rowsEl.innerHTML = hiddenHint + scopes.map(_ctxPortalRowHtml).join('');
