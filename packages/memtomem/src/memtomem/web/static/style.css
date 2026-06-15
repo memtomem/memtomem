@@ -4810,6 +4810,13 @@ button.ctx-runtime-chip--greyed:focus-visible {
 .wiki-seed-action { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; border-top: 1px dashed var(--border); padding-top: 12px; }
 .wiki-seed-btn { padding: 5px 12px; font-size: 0.82rem; }
 .wiki-seed-hint { font-size: 0.76rem; color: var(--muted); }
+/* Dev-tier override editor (ADR-0027 Editor-A). */
+.wiki-override-pre { margin: 0 0 8px; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 0.78rem; }
+.wiki-override-area { width: 100%; min-height: 220px; font-family: var(--mono); font-size: 0.78rem; line-height: 1.5; padding: 10px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--bg); color: var(--text); resize: vertical; box-sizing: border-box; }
+.wiki-override-actions { display: flex; gap: 8px; margin-top: 8px; }
+.wiki-conflict-banner { border: 1px solid var(--warning, #d4a72c); border-radius: 6px; padding: 10px; margin-bottom: 10px; background: var(--warning-bg, rgba(212, 167, 44, 0.08)); }
+.wiki-conflict-msg { margin: 0 0 8px; font-size: 0.82rem; font-weight: 600; }
+.wiki-conflict-fresh { max-height: 200px; }
 /* Unified-diff line kinds the shared .diff-* set doesn't cover. */
 .diff-file { color: var(--muted); font-weight: 600; }
 .diff-hunk { color: var(--accent); }

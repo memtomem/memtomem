@@ -365,3 +365,161 @@ describe('wiki.js install/update (E-3, dev tier)', () => {
     expect(posts.map((p) => p.body.force)).toEqual([false]); // initial only, no retry
   });
 });
+
+describe('wiki.js override editor (ADR-0027 Editor-A, dev tier)', () => {
+  const OVERRIDE_EXISTS = { vendor: 'claude', content: '# orig\n', mtime_ns: '111', exists: true };
+
+  // Serves diff/lint + the override GET and records PUTs. The override GET is
+  // dev-tier and only fetched by _loadWikiVendorView when in dev mode.
+  function recordingEditFetch(window, { override = OVERRIDE_EXISTS } = {}) {
+    const puts = [];
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (p === '/api/wiki/skills/alpha/diff') {
+        return { ok: true, status: 200, json: async () => ALPHA_DIFF_EXISTS, text: async () => '' };
+      }
+      if (p === '/api/wiki/skills/alpha/lint') {
+        return { ok: true, status: 200, json: async () => ALPHA_LINT_OK, text: async () => '' };
+      }
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/override') {
+        return { ok: true, status: 200, json: async () => override, text: async () => '' };
+      }
+      if (method === 'PUT' && p === '/api/wiki/skills/alpha/override') {
+        puts.push({ headers: init.headers || {}, body: JSON.parse(init.body) });
+        return {
+          ok: true, status: 200,
+          json: async () => ({ vendor: 'claude', mtime_ns: '222', wiki_dirty: true, privacy_warning: 0 }),
+          text: async () => '',
+        };
+      }
+      return base(input, init);
+    };
+    return puts;
+  }
+
+  it('renders the read pane + Edit toggle in dev when the override exists', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    recordingEditFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    const pre = window.document.querySelector('.wiki-override-pre');
+    expect(pre).not.toBeNull();
+    expect(pre.textContent).toContain('# orig');
+    expect(window.document.getElementById('wiki-override-edit-btn')).not.toBeNull();
+  });
+
+  it('hides the editor in prod (no dev-mode class, no override fetch)', async () => {
+    const { window } = await boot({
+      '/api/wiki': WIKI_LIST,
+      '/api/wiki/skills/alpha/diff': ALPHA_DIFF_EXISTS,
+      '/api/wiki/skills/alpha/lint': ALPHA_LINT_OK,
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    expect(window.document.querySelector('.wiki-override-editor')).toBeNull();
+  });
+
+  it('does not render the editor for a not-yet-seeded override', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    recordingEditFetch(window, {
+      override: { vendor: 'claude', content: '', mtime_ns: '0', exists: false },
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    expect(window.document.querySelector('.wiki-override-editor')).toBeNull();
+  });
+
+  it('Save PUTs {vendor, content, mtime_ns} with the CSRF header + repaints dirty', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    window.ensureCsrfToken = async () => 'tok-123';
+    const puts = recordingEditFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-override-edit-btn').dispatchEvent(new window.Event('click'));
+    const ta = window.document.getElementById('wiki-override-content');
+    expect(ta.value).toBe('# orig\n');     // seeded from the read content
+    expect(ta.dataset.mtimeNs).toBe('111'); // token from the GET
+    ta.value = '# edited\n';
+    await window._onWikiOverrideSave();
+    expect(puts.length).toBe(1);
+    expect(puts[0].body).toEqual({ vendor: 'claude', content: '# edited\n', mtime_ns: '111', force: false });
+    expect(puts[0].headers['X-Memtomem-CSRF']).toBe('tok-123');
+    const head = window.document.getElementById('wiki-head');
+    expect(head.textContent).toContain(window.t('settings.ctx.wiki_dirty'));
+  });
+
+  it('a 409 shows the conflict banner with the on-disk bytes', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    let sawPut = false;
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (p === '/api/wiki/skills/alpha/diff') return { ok: true, status: 200, json: async () => ALPHA_DIFF_EXISTS, text: async () => '' };
+      if (p === '/api/wiki/skills/alpha/lint') return { ok: true, status: 200, json: async () => ALPHA_LINT_OK, text: async () => '' };
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/override') {
+        // After the conflict, the handler re-fetches the fresh on-disk bytes.
+        return { ok: true, status: 200, json: async () => ({
+          vendor: 'claude', content: sawPut ? '# theirs\n' : '# orig\n',
+          mtime_ns: sawPut ? '999' : '111', exists: true,
+        }), text: async () => '' };
+      }
+      if (method === 'PUT' && p === '/api/wiki/skills/alpha/override') {
+        sawPut = true;
+        return { ok: false, status: 409, json: async () => ({
+          reason_code: 'stale_mtime', mtime_ns: '999', error_kind: 'conflict',
+        }), text: async () => '' };
+      }
+      return base(input, init);
+    };
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-override-edit-btn').dispatchEvent(new window.Event('click'));
+    window.document.getElementById('wiki-override-content').value = '# mine\n';
+    await window._onWikiOverrideSave();
+    const banner = window.document.getElementById('wiki-conflict-banner');
+    expect(banner.hidden).toBe(false);
+    expect(banner.textContent).toContain('# theirs');
+    expect(window.document.getElementById('wiki-conflict-force-btn')).not.toBeNull();
+    expect(window.document.getElementById('wiki-conflict-reload-btn')).not.toBeNull();
+  });
+
+  it('Force save re-PUTs the draft with force:true and the fresh token', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    const puts = recordingEditFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    // Call the writer directly (awaitable) — the force button wires to this.
+    await window._saveWikiOverride('skills', 'alpha', 'claude', '# mine\n', '999', true);
+    expect(puts.length).toBe(1);
+    expect(puts[0].body).toEqual({ vendor: 'claude', content: '# mine\n', mtime_ns: '999', force: true });
+  });
+
+  it('preserves the in-progress draft across a langchange repaint', async () => {
+    // Regression (Codex review): langchange rebuilds the whole detail via
+    // _renderWikiDetail, wiping the textarea BEFORE _renderWikiVendorView runs —
+    // the draft must be stashed before that wipe, not reverted to the saved bytes.
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    recordingEditFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-override-edit-btn').dispatchEvent(new window.Event('click'));
+    window.document.getElementById('wiki-override-content').value = '# unsaved\n';
+    await window.I18N.setLang('ko');
+    window.dispatchEvent(new window.Event('langchange'));
+    const ta = window.document.getElementById('wiki-override-content');
+    expect(ta).not.toBeNull();
+    expect(ta.value).toBe('# unsaved\n'); // draft survived, not reverted to '# orig'
+    await window.I18N.setLang('en');
+  });
+});

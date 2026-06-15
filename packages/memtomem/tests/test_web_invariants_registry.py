@@ -122,6 +122,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "tags.rename_tag",
         "tags.run_auto_tag",
         "watchdog.watchdog_run_now",
+        "wiki_mutations.edit_wiki_override",
         "wiki_mutations.seed_wiki_override",
     }
 )
@@ -235,6 +236,18 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "wiki_mutations.seed_wiki_override": (
         "no content payload — renders existing wiki canonical into overrides/; "
         "Gate A guards wiki→project install, not wiki→wiki seeding"
+    ),
+    # Wiki override editor (ADR-0027 Editor-A) DOES take a user payload, but its
+    # privacy posture is a soft, non-blocking warning (D-E): privacy.scan runs
+    # and returns a count, the write is never refused. _REDACTION_PROTECTED means
+    # "refuse on hit" (the AST guard requires those handlers to call
+    # enforce_write_guard); a non-refusing handler there would be a coverage
+    # false-pass. The wiki is a single-curator host-global store with no push
+    # remote, so a hard gate is over-reach — see ADR-0027 §8 / §D-E.
+    "wiki_mutations.edit_wiki_override": (
+        "user payload, but privacy is a soft non-blocking warning (ADR-0027 §D-E) — "
+        "the write is never refused, so it is not _REDACTION_PROTECTED (which means "
+        "refuse-on-hit); single-curator host-global store, no push remote"
     ),
     # Tag mutations: short labels, separate validation at ingest.
     "chunks.update_chunk_tags": "tags are short labels; redaction not applicable to tag strings",

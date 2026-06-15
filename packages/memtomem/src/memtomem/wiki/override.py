@@ -28,7 +28,14 @@ from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import OVERRIDE_FORMATS, validate_name
 from memtomem.wiki.store import WikiStore
 
-__all__ = ["OverrideExistsError", "SeedResult", "render_seed_bytes", "seed_override"]
+__all__ = [
+    "OverrideExistsError",
+    "SeedResult",
+    "canonical_asset_file",
+    "render_seed_bytes",
+    "seed_override",
+    "write_override",
+]
 
 
 class OverrideExistsError(RuntimeError):
@@ -48,6 +55,19 @@ class SeedResult:
 
     path: Path
     dropped: list[str]
+
+
+def canonical_asset_file(store: WikiStore, asset_type: str, name: str) -> Path:
+    """Absolute path to an asset's canonical source file (may not exist).
+
+    ``skills/<name>/SKILL.md`` for skills; ``<type>/<name>/<type[:-1]>.md`` for
+    agents / commands. The single source of truth for *where the canonical
+    lives*, shared by the seed renderer, the override writer, and the override
+    reader so they cannot disagree about what counts as an existing asset.
+    """
+    if asset_type == "skills":
+        return store.root / "skills" / name / "SKILL.md"
+    return store.root / asset_type / name / f"{asset_type[:-1]}.md"
 
 
 def render_seed_bytes(
@@ -71,12 +91,12 @@ def render_seed_bytes(
     validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
 
     if asset_type == "skills":
-        src = store.root / "skills" / name / "SKILL.md"
+        src = canonical_asset_file(store, "skills", name)
         if not src.is_file():
             raise FileNotFoundError(f"wiki has no skills/{name}/SKILL.md to seed from at {src}")
         return src.read_bytes(), []
 
-    canonical = store.root / asset_type / name / f"{asset_type[:-1]}.md"
+    canonical = canonical_asset_file(store, asset_type, name)
     if not canonical.is_file():
         raise FileNotFoundError(
             f"wiki has no {asset_type}/{name}/{asset_type[:-1]}.md to seed from at {canonical}"
@@ -159,3 +179,51 @@ def seed_override(
         atomic_write_bytes(backup, target.read_bytes())
     atomic_write_bytes(target, seed_bytes)
     return SeedResult(path=target, dropped=dropped)
+
+
+def write_override(
+    store: WikiStore,
+    asset_type: str,
+    name: str,
+    vendor: str,
+    content: bytes,
+) -> Path:
+    """Replace ``<wiki>/<type>/<name>/overrides/<vendor>.<ext>`` with user bytes.
+
+    The in-browser override editor's write primitive (ADR-0027 Editor-A). Unlike
+    :func:`seed_override`, which renders the canonical, this writes the caller's
+    own bytes. Editing (or first-authoring) an override is the normal path, so
+    the write always overwrites — a ``.bak`` sibling is written first whenever a
+    file is already there, so the prior bytes stay recoverable. There is
+    deliberately **no** ``force`` flag: ``force`` in :func:`seed_override` means
+    "clobber an existing override", whereas the editor's only override concept is
+    "bypass a stale-mtime conflict", which lives at the route layer — reusing the
+    name here would conflate two different ideas.
+
+    All preconditions are checked before any filesystem mutation. Requiring the
+    **canonical asset to exist** is load-bearing: :meth:`WikiStore.list_assets`
+    treats any directory under ``<type>/`` as an asset, so writing
+    ``overrides/<vendor>.<ext>`` under a name with no canonical would surface a
+    phantom asset that breaks ``diff`` / ``lint`` / ``install``. A refused write
+    (missing wiki / unknown format / missing canonical) must NOT leave a
+    half-built ``overrides/`` directory or an orphan override behind.
+    """
+    store.require_exists()
+    validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    fmt = OVERRIDE_FORMATS.get((asset_type, vendor))
+    if fmt is None:
+        raise ValueError(f"no override format registered for ({asset_type!r}, {vendor!r})")
+    canonical = canonical_asset_file(store, asset_type, name)
+    if not canonical.is_file():
+        raise FileNotFoundError(
+            f"wiki has no {asset_type}/{name} canonical at {canonical}; "
+            "refusing to write an override for a nonexistent asset"
+        )
+    _, ext = fmt
+    target = store.root / asset_type / name / "overrides" / f"{vendor}.{ext}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        backup = target.with_suffix(target.suffix + ".bak")
+        atomic_write_bytes(backup, target.read_bytes())
+    atomic_write_bytes(target, content)
+    return target

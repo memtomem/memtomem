@@ -16,24 +16,44 @@ surfaces). The dev-tier mount plus the CSRF/Origin/Host guard — POST is an
 unsafe method, so the middleware enforces it automatically — are the access
 controls; overwrite (``force``) is gated client-side because it clobbers an
 existing override (a ``.bak`` sibling keeps the previous content recoverable).
+
+ADR-0027 Editor-A adds the in-browser override **editor** alongside the seed
+verb: ``GET …/override`` reads a vendor override's working-tree bytes for the
+read pane, and ``PUT …/override`` replaces them with user content under an
+optimistic ``mtime_ns`` guard (the ctx skill-editor pattern). Both are dev-tier
+(the editor read pane is part of the editor, §D-F); Save writes + leaves the
+tree dirty but **never commits** (the commit affordance is the deferred §3 PR).
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from memtomem.wiki.override import OverrideExistsError, SeedResult, seed_override
+from memtomem import privacy
+from memtomem.context._names import renderable_vendors
+from memtomem.wiki.inspect import read_override
+from memtomem.wiki.override import (
+    OverrideExistsError,
+    SeedResult,
+    seed_override,
+    write_override,
+)
 from memtomem.wiki.store import WikiNotFoundError, WikiStore
 from memtomem.web.routes._errors import _error
+from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._wiki_common import (
     AssetType,
     _require_vendor,
     _validate_name_or_error,
     _wiki_absent,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/wiki", tags=["wiki-mutations"])
 
@@ -102,3 +122,173 @@ async def seed_wiki_override(asset_type: AssetType, name: str, body: OverrideSee
         "dropped": result.dropped,
         "wiki_dirty": wiki_dirty,
     }
+
+
+# ── Editor (ADR-0027 Editor-A) ─────────────────────────────────────────────
+
+
+@router.get("/{asset_type}/{name}/override")
+async def read_wiki_override(
+    asset_type: AssetType,
+    name: str,
+    vendor: str = Query(..., description="Override vendor whose bytes to read."),
+) -> dict:
+    """Read a vendor override's working-tree bytes for the in-browser editor.
+
+    Returns ``{content, mtime_ns, exists}``. ``mtime_ns`` is a string (JS
+    bigint-unsafe) — the optimistic-concurrency token the editor echoes back on
+    ``PUT``. ``exists=False`` (empty content, ``mtime_ns="0"``) means no override
+    has been seeded yet, so the editor opens a blank pane to author one. The
+    canonical asset must exist (else 404 ``canonical_absent``); the wiki must
+    exist (else 404 ``wiki_absent``). Dev-tier, like the seed verb.
+    """
+    _validate_name_or_error(asset_type, name)
+    _require_vendor(asset_type, vendor)
+    store = WikiStore.at_default()
+    try:
+        override = await asyncio.to_thread(read_override, store, asset_type, name, vendor)
+    except WikiNotFoundError as exc:
+        raise _wiki_absent(exc) from exc
+    except FileNotFoundError as exc:
+        raise _error(
+            404,
+            "missing",
+            f"{asset_type}/{name} has no canonical to override",
+            reason_code="canonical_absent",
+        ) from exc
+    return {
+        "vendor": vendor,
+        "content": override.content,
+        "mtime_ns": str(override.mtime_ns),
+        "exists": override.exists,
+    }
+
+
+class OverrideEditRequest(BaseModel):
+    """Body for ``PUT /api/wiki/{asset_type}/{name}/override``.
+
+    Unlike the content-free seed ``POST``, the editor sends the user's own
+    ``content``. ``mtime_ns`` is the token last read from ``GET …/override`` (a
+    string — JS bigint-unsafe; ``"0"`` for a not-yet-seeded override). ``force``
+    bypasses a stale-mtime conflict — it is the conflict-resolution re-PUT, NOT
+    the seed verb's "clobber an existing override" flag (those are different
+    concepts; see :func:`memtomem.wiki.override.write_override`).
+    """
+
+    vendor: str
+    content: str
+    mtime_ns: str
+    force: bool = False
+
+
+def _override_mtime_conflict(current_mtime_ns: int) -> JSONResponse:
+    # Same 409 shape as the ctx editor (context_skills._mtime_conflict_response)
+    # so the SPA's existing conflict-resolution flow is reused verbatim.
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "aborted",
+            "reason": "override was modified by another writer; reload and retry",
+            "mtime_ns": str(current_mtime_ns),
+            "error_kind": "conflict",
+            "reason_code": "stale_mtime",
+        },
+    )
+
+
+@router.put("/{asset_type}/{name}/override")
+async def edit_wiki_override(
+    asset_type: AssetType, name: str, body: OverrideEditRequest
+) -> JSONResponse:
+    """Replace a vendor override's bytes with user content (mtime-guarded).
+
+    Save semantics (ADR-0027 Editor-A): write the override and leave the wiki
+    working tree dirty; **never commit** (parity with the E-2 seed contract).
+    Optimistic concurrency mirrors the ctx skill editor: an unlocked pre-check
+    and an authoritative re-check inside ``_gateway_lock`` both return the ctx
+    editor's 409 ``stale_mtime`` envelope; a 60s lock-acquire timeout → 503.
+
+    Concurrency honesty: ``_gateway_lock`` is an in-process ``asyncio.Lock`` — it
+    serializes concurrent *browser* PUTs only. An external writer (a CLI
+    ``mm wiki`` or a desktop ``$EDITOR`` on ``~/.memtomem-wiki``) is caught by the
+    ``mtime_ns`` token (the re-stat sees the changed mtime → 409), NOT by the
+    lock. Editor-A adds no cross-process file lock; the ref-CAS a commit needs is
+    the deferred §3 PR.
+
+    Privacy posture (§D-E): ``content`` is scanned with the soft, scope-less
+    ``privacy.scan`` and a non-blocking ``privacy_warning`` count is returned —
+    the write is never refused (the handler is ``_REDACTION_EXEMPT``, not
+    ``_REDACTION_PROTECTED``: a single-curator host-global store).
+    """
+    _validate_name_or_error(asset_type, name)
+    _require_vendor(asset_type, body.vendor)
+    if body.vendor not in renderable_vendors(asset_type):
+        # No renderer → no canonical baseline to diff against; editing such an
+        # override would create state that breaks diff/lint (parity with the seed
+        # verb mapping the ``("commands", "codex")`` placeholder to 400).
+        raise _error(
+            400,
+            "validation",
+            f"vendor {body.vendor!r} has no renderer for {asset_type}",
+            reason_code="vendor_unsupported",
+        )
+    try:
+        body_mtime_ns = int(body.mtime_ns)
+    except ValueError as exc:
+        raise _error(
+            422, "validation", f"invalid mtime_ns: {body.mtime_ns!r}", reason_code="invalid_mtime"
+        ) from exc
+
+    store = WikiStore.at_default()
+    content_bytes = body.content.encode("utf-8")
+    privacy_warning = len(privacy.scan(body.content))
+
+    # Unlocked pre-check (mirrors update_skill): enforce the wiki/canonical gates
+    # (→ 404) and refuse a stale-mtime save before taking the lock.
+    try:
+        pre = read_override(store, asset_type, name, body.vendor)
+    except WikiNotFoundError as exc:
+        raise _wiki_absent(exc) from exc
+    except FileNotFoundError as exc:
+        raise _error(
+            404,
+            "missing",
+            f"{asset_type}/{name} has no canonical to override",
+            reason_code="canonical_absent",
+        ) from exc
+    if pre.mtime_ns != body_mtime_ns and not body.force:
+        return _override_mtime_conflict(pre.mtime_ns)
+
+    # Locked write: authoritative re-stat inside the lock, then write. The file
+    # ops run synchronously inside the lock per the _locks.py convention.
+    try:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                current = pre.override_path.stat().st_mtime_ns if pre.override_path.is_file() else 0
+                if current != body_mtime_ns:
+                    if not body.force:
+                        return _override_mtime_conflict(current)
+                    logger.warning(
+                        "force-save bypassed wiki override mtime check on %s/%s/%s "
+                        "(client_mtime_ns=%s server_mtime_ns=%s)",
+                        asset_type,
+                        name,
+                        body.vendor,
+                        body_mtime_ns,
+                        current,
+                    )
+                target = write_override(store, asset_type, name, body.vendor, content_bytes)
+                new_mtime_ns = target.stat().st_mtime_ns
+                wiki_dirty = store.is_dirty()
+    except TimeoutError as exc:
+        raise _error(
+            503, "busy", "wiki override save timed out — another sync may be in progress"
+        ) from exc
+    return JSONResponse(
+        content={
+            "vendor": body.vendor,
+            "mtime_ns": str(new_mtime_ns),
+            "wiki_dirty": wiki_dirty,
+            "privacy_warning": privacy_warning,
+        }
+    )

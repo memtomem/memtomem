@@ -41,18 +41,28 @@ def _git_commit(root: Path, message: str) -> None:
 def _seed(root: Path) -> None:
     """Init a wiki with canonical-only skill / agent / command (no overrides yet)."""
     WikiStore.at_default().init()
+    # newline="\n": Path.write_text uses text mode, which on Windows would
+    # translate \n -> \r\n. The override editor's GET returns the override's
+    # VERBATIM bytes (no newline translation), so a CRLF canonical would make the
+    # round-tripped content mismatch the LF _SKILL_BODY on Windows. Pin LF so the
+    # fixture is platform-deterministic (the existing read_text-based assertions
+    # are unaffected — read_text translates CRLF->LF on read regardless).
     skill = root / "skills" / "alpha"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text(_SKILL_BODY, encoding="utf-8")
+    (skill / "SKILL.md").write_text(_SKILL_BODY, encoding="utf-8", newline="\n")
     agent = root / "agents" / "beta"
     agent.mkdir(parents=True)
     (agent / "agent.md").write_text(
-        "---\nname: beta\ndescription: a test agent\n---\n\nBody.\n", encoding="utf-8"
+        "---\nname: beta\ndescription: a test agent\n---\n\nBody.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     cmd = root / "commands" / "gamma"
     cmd.mkdir(parents=True)
     (cmd / "command.md").write_text(
-        "---\ndescription: a test command\n---\n\nBody.\n", encoding="utf-8"
+        "---\ndescription: a test command\n---\n\nBody.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     _git_commit(root, "seed")
 
@@ -201,3 +211,249 @@ async def test_override_route_absent_in_prod(prod_client, seeded_wiki: Path) -> 
     assert resp.status_code == 404
     # The read-only browser is still mounted in prod (sanity check).
     assert (await prod_client.get("/api/wiki")).status_code == 200
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Override editor — GET + PUT (ADR-0027 Editor-A)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+async def _seed_and_commit(client, root: Path, vendor: str = "claude") -> str:
+    """Seed an override, commit it (clean tree), return its mtime_ns as a string."""
+    resp = await client.post("/api/wiki/skills/alpha/override", json={"vendor": vendor})
+    assert resp.status_code == 200
+    _git_commit(root, "seed override")
+    target = root / "skills" / "alpha" / "overrides" / f"{vendor}.md"
+    return str(target.stat().st_mtime_ns)
+
+
+# ── GET …/override (read pane) ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_override_not_seeded(dev_client, seeded_wiki: Path) -> None:
+    # No override yet → exists=False, blank pane, mtime_ns="0" (canonical present).
+    resp = await dev_client.get("/api/wiki/skills/alpha/override", params={"vendor": "claude"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["exists"] is False
+    assert data["content"] == ""
+    assert data["mtime_ns"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_get_override_existing_returns_content_and_mtime(
+    dev_client, seeded_wiki: Path
+) -> None:
+    await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+    resp = await dev_client.get("/api/wiki/skills/alpha/override", params={"vendor": "claude"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["exists"] is True
+    assert data["content"] == _SKILL_BODY
+    assert int(data["mtime_ns"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_get_override_missing_canonical_is_404(dev_client, seeded_wiki: Path) -> None:
+    resp = await dev_client.get("/api/wiki/skills/nope/override", params={"vendor": "claude"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "canonical_absent"
+
+
+@pytest.mark.asyncio
+async def test_get_override_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:  # noqa: F811
+    resp = await dev_client.get("/api/wiki/skills/alpha/override", params={"vendor": "claude"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "wiki_absent"
+    assert str(wiki_root) not in resp.text  # no host path leak
+
+
+# ── PUT …/override (save) ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_override_happy_path(dev_client, seeded_wiki: Path) -> None:
+    m = await _seed_and_commit(dev_client, seeded_wiki)
+    target = seeded_wiki / "skills" / "alpha" / "overrides" / "claude.md"
+    new = "# Alpha EDITED\n"
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": new, "mtime_ns": m},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["vendor"] == "claude"
+    assert data["wiki_dirty"] is True  # the edit dirtied the (committed) tree
+    assert data["privacy_warning"] == 0
+    assert int(data["mtime_ns"]) > 0
+    assert target.read_text(encoding="utf-8") == new
+    # Editing an existing override keeps the prior bytes as a .bak sibling.
+    assert target.with_suffix(".md.bak").read_text(encoding="utf-8") == _SKILL_BODY
+
+
+@pytest.mark.asyncio
+async def test_edit_override_create_new_no_bak(dev_client, seeded_wiki: Path) -> None:
+    # mtime_ns="0" + no existing override → create from blank (no .bak written).
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# fresh\n", "mtime_ns": "0"},
+    )
+    assert resp.status_code == 200
+    target = seeded_wiki / "skills" / "alpha" / "overrides" / "claude.md"
+    assert target.read_text(encoding="utf-8") == "# fresh\n"
+    assert not target.with_suffix(".md.bak").exists()
+
+
+@pytest.mark.asyncio
+async def test_edit_stale_mtime_is_409(dev_client, seeded_wiki: Path) -> None:
+    # Unlocked pre-check: a stale token is refused and the current mtime echoed.
+    await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+    target = seeded_wiki / "skills" / "alpha" / "overrides" / "claude.md"
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# x\n", "mtime_ns": "1"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason_code"] == "stale_mtime"
+    assert int(body["mtime_ns"]) == target.stat().st_mtime_ns
+    assert target.read_text(encoding="utf-8") == _SKILL_BODY  # not overwritten
+
+
+@pytest.mark.asyncio
+async def test_edit_inside_lock_restat_is_409(dev_client, seeded_wiki: Path, monkeypatch) -> None:
+    # Codex major: the request passes the UNLOCKED pre-check (its reported mtime
+    # matches the client token) but the real file's mtime differs, so only the
+    # in-lock re-stat catches the race. Monkeypatch the pre-check reader to report
+    # a matching token while pointing at the real (different-mtime) file.
+    from memtomem.web.routes import wiki_mutations as wm
+    from memtomem.wiki.inspect import OverrideContent
+
+    m = await _seed_and_commit(dev_client, seeded_wiki)
+    target = seeded_wiki / "skills" / "alpha" / "overrides" / "claude.md"
+    real_mtime = target.stat().st_mtime_ns
+    assert str(real_mtime) == m
+
+    def _fake_read(store, asset_type, name, vendor):  # noqa: ANN001
+        # exists/content irrelevant; mtime_ns matches the client token so the
+        # unlocked pre-check passes, override_path is the REAL file.
+        return OverrideContent(override_path=target, exists=True, content="x", mtime_ns=4242)
+
+    monkeypatch.setattr(wm, "read_override", _fake_read)
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# never\n", "mtime_ns": "4242"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason_code"] == "stale_mtime"
+    assert int(body["mtime_ns"]) == real_mtime  # the authoritative in-lock value
+    assert target.read_text(encoding="utf-8") == _SKILL_BODY  # nothing written
+
+
+@pytest.mark.asyncio
+async def test_edit_timeout_is_503(dev_client, seeded_wiki: Path, monkeypatch) -> None:
+    # Codex major: a lock-acquire timeout maps to 503 busy.
+    from memtomem.web.routes import wiki_mutations as wm
+
+    m = await _seed_and_commit(dev_client, seeded_wiki)
+
+    class _BoomTimeout:
+        def __init__(self, *a, **k) -> None: ...
+
+        async def __aenter__(self):
+            raise TimeoutError
+
+        async def __aexit__(self, *a) -> bool:
+            return False
+
+    monkeypatch.setattr(wm.asyncio, "timeout", lambda *a, **k: _BoomTimeout())
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# x\n", "mtime_ns": m},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error_kind"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_edit_force_bypasses_stale_and_writes_bak(dev_client, seeded_wiki: Path) -> None:
+    await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+    target = seeded_wiki / "skills" / "alpha" / "overrides" / "claude.md"
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# forced\n", "mtime_ns": "1", "force": True},
+    )
+    assert resp.status_code == 200
+    assert target.read_text(encoding="utf-8") == "# forced\n"
+    assert target.with_suffix(".md.bak").read_text(encoding="utf-8") == _SKILL_BODY
+
+
+@pytest.mark.asyncio
+async def test_edit_missing_canonical_is_404_and_creates_no_dir(
+    dev_client, seeded_wiki: Path
+) -> None:
+    # Codex blocker: a PUT to a valid-but-nonexistent asset must 404 and NOT
+    # create overrides/ (which would surface an orphan asset breaking diff/lint).
+    resp = await dev_client.put(
+        "/api/wiki/skills/nope/override",
+        json={"vendor": "claude", "content": "# x\n", "mtime_ns": "0"},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "canonical_absent"
+    assert not (seeded_wiki / "skills" / "nope").exists()
+
+
+@pytest.mark.asyncio
+async def test_edit_bad_mtime_is_422(dev_client, seeded_wiki: Path) -> None:
+    await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# x\n", "mtime_ns": "not-an-int"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason_code"] == "invalid_mtime"
+
+
+@pytest.mark.asyncio
+async def test_edit_non_renderable_vendor_is_400(dev_client, seeded_wiki: Path) -> None:
+    # ("commands", "codex") has no renderer → editing its override is rejected
+    # (parity with the seed verb's NotImplementedError → 400).
+    resp = await dev_client.put(
+        "/api/wiki/commands/gamma/override",
+        json={"vendor": "codex", "content": "# x\n", "mtime_ns": "0"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["reason_code"] == "vendor_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_edit_privacy_warning_is_non_blocking(dev_client, seeded_wiki: Path) -> None:
+    # D-E: a secret in the content yields a non-blocking warning count — the write
+    # still succeeds (the handler is _REDACTION_EXEMPT, not _REDACTION_PROTECTED).
+    m = await _seed_and_commit(dev_client, seeded_wiki)
+    target = seeded_wiki / "skills" / "alpha" / "overrides" / "claude.md"
+    secret = "AKIA" + "A" * 16
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": f"key: {secret}\n", "mtime_ns": m},
+    )
+    assert resp.status_code == 200  # NON-blocking
+    assert resp.json()["privacy_warning"] >= 1
+    assert secret in target.read_text(encoding="utf-8")  # bytes were written anyway
+
+
+@pytest.mark.asyncio
+async def test_editor_routes_absent_in_prod(prod_client, seeded_wiki: Path) -> None:
+    # The editor mounts dev-only. In prod neither verb reaches a handler: the GET
+    # falls through to the ``/api/{path:path}`` catch-all 404, and the PUT hits
+    # 405 (that catch-all lists GET/POST/PATCH/DELETE but not PUT — a pre-existing
+    # quirk). Either way the editor is unreachable.
+    get = await prod_client.get("/api/wiki/skills/alpha/override", params={"vendor": "claude"})
+    assert get.status_code == 404
+    put = await prod_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "x", "mtime_ns": "0"},
+    )
+    assert put.status_code in (404, 405)

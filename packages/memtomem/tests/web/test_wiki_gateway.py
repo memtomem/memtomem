@@ -271,3 +271,112 @@ def test_wiki_force_update_confirms(page, mm_web_url: str) -> None:
     # the refused force=false, then the confirmed force=true.
     page.wait_for_selector("#toast-container .toast-success", timeout=5_000)
     assert [c.get("force") for c in calls] == [False, True]
+
+
+_OVERRIDE_EXISTS = {"vendor": "claude", "content": "# orig\n", "mtime_ns": "111", "exists": True}
+
+
+def test_wiki_override_edit_in_dev_mode(page, mm_web_url: str) -> None:
+    """Dev tier (ADR-0027 Editor-A): the override read pane + Edit toggle render,
+    Save PUTs ``{vendor, content, mtime_ns}``, and the HEAD badge repaints dirty."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    puts: list[dict] = []
+
+    def _override(route):
+        req = route.request
+        if req.method == "GET":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_OVERRIDE_EXISTS),
+            )
+        elif req.method == "PUT":
+            puts.append(json.loads(req.post_data or "{}"))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "vendor": "claude",
+                        "mtime_ns": "222",
+                        "wiki_dirty": True,
+                        "privacy_warning": 0,
+                    }
+                ),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/wiki/**/override**", _override)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+
+    # Read pane + Edit toggle render for the dev-tier editor; Edit reveals the
+    # textarea seeded from the GET (content + mtime token).
+    page.wait_for_selector("#wiki-override-edit-btn", timeout=5_000)
+    page.locator("#wiki-override-edit-btn").click()
+    ta = page.locator("#wiki-override-content")
+    ta.wait_for(timeout=5_000)
+    assert ta.input_value() == "# orig\n"
+
+    ta.fill("# edited in browser\n")
+    page.locator("#wiki-override-save-btn").click()
+    # wiki_dirty=True from the response → HEAD badge repaints without re-listing.
+    page.wait_for_function(
+        "() => document.querySelector('#wiki-head .badge-warning') !== null",
+        timeout=5_000,
+    )
+    assert puts == [
+        {"vendor": "claude", "content": "# edited in browser\n", "mtime_ns": "111", "force": False}
+    ]
+
+
+def test_wiki_override_edit_conflict_banner(page, mm_web_url: str) -> None:
+    """A 409 ``stale_mtime`` on Save surfaces the conflict banner with reload/force
+    affordances (the in-lock concurrency guard's client side)."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    def _override(route):
+        req = route.request
+        if req.method == "GET":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(_OVERRIDE_EXISTS),
+            )
+        elif req.method == "PUT":
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                body=json.dumps(
+                    {"reason_code": "stale_mtime", "mtime_ns": "999", "error_kind": "conflict"}
+                ),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/wiki/**/override**", _override)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+    page.wait_for_selector("#wiki-override-edit-btn", timeout=5_000)
+    page.locator("#wiki-override-edit-btn").click()
+    page.locator("#wiki-override-content").fill("# mine\n")
+    page.locator("#wiki-override-save-btn").click()
+
+    # 409 → the conflict banner unhides with both reload and force actions.
+    page.wait_for_selector("#wiki-conflict-force-btn", timeout=5_000)
+    assert page.locator("#wiki-conflict-banner").is_visible()
+    assert page.locator("#wiki-conflict-reload-btn").count() == 1

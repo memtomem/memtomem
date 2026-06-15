@@ -22,8 +22,12 @@ let _wikiData = null;
 let _wikiAbsent = false;
 let _wikiActive = null; // { type, name } currently open in the detail pane
 let _wikiVendor = null; // selected vendor in the detail pane
-let _wikiView = null; // { diff, lint } last fetched for the open vendor
+let _wikiView = null; // { diff, lint, override } last fetched for the open vendor
 let _wikiInstallScopeId = ''; // E-3: project picked for install/update ('' = Server CWD)
+// Editor-A (ADR-0027): override-edit mode for the open vendor. `_wikiEditDraft`
+// holds the in-progress textarea value so a langchange repaint doesn't reset it.
+let _wikiEditing = false;
+let _wikiEditDraft = null;
 
 // Seq guards for overlapping fetches (the innerHTML race rule): a newer load
 // bumps the seq so a slower in-flight response can't paint over it.
@@ -296,6 +300,162 @@ async function _seedWikiOverride(type, name, vendor, force) {
   }
 }
 
+// --- Override editor (ADR-0027 Editor-A, dev tier only) ---------------------
+// Edit an EXISTING vendor override in place: a read pane (<pre>) seeded from
+// GET …/override, an Edit toggle → textarea, and Save → PUT …/override under an
+// optimistic mtime_ns guard (the ctx skill-editor pattern). Save writes + leaves
+// the wiki dirty; it never commits (the commit affordance is the deferred PR).
+// Self-contained here — wiki.js avoids a hard load-order dep on context-gateway.js.
+
+function _renderWikiOverrideEditor() {
+  const ov = _wikiView && _wikiView.override;
+  // Only when dev + renderable + the override actually exists (a not-yet-seeded
+  // override is created via the Seed button, which renders from canonical).
+  if (!_wikiDevMode() || !ov || ov._error || !ov.exists) return '';
+  if (!_wikiVendorRenderable(_wikiVendor)) return '';
+  const heading = `<h4>${escapeHtml(t('settings.ctx.wiki_override_title'))}</h4>`;
+  if (!_wikiEditing) {
+    return '<div class="wiki-section wiki-override-editor">'
+      + heading
+      + `<pre class="wiki-override-pre">${escapeHtml(ov.content)}</pre>`
+      + '<div class="wiki-override-actions">'
+      + '<button type="button" class="btn-ghost" id="wiki-override-edit-btn">'
+      + `${escapeHtml(t('settings.ctx.wiki_override_edit'))}</button></div>`
+      + `<span class="wiki-seed-hint">${escapeHtml(t('settings.ctx.wiki_override_hint'))}</span>`
+      + '</div>';
+  }
+  const draft = _wikiEditDraft != null ? _wikiEditDraft : ov.content;
+  return '<div class="wiki-section wiki-override-editor">'
+    + heading
+    + '<div class="wiki-conflict-banner" id="wiki-conflict-banner" hidden></div>'
+    + '<textarea class="wiki-override-area" id="wiki-override-content" '
+    + `aria-label="${escapeHtml(t('settings.ctx.wiki_override_title'))}" `
+    + `data-mtime-ns="${escapeHtml(String(ov.mtime_ns))}">${escapeHtml(draft)}</textarea>`
+    + '<div class="wiki-override-actions">'
+    + '<button type="button" class="btn-ghost" id="wiki-override-cancel-btn">'
+    + `${escapeHtml(t('modal.cancel_btn'))}</button>`
+    + '<button type="button" class="btn-primary" id="wiki-override-save-btn">'
+    + `${escapeHtml(t('settings.ctx.wiki_override_save'))}</button></div>`
+    + '</div>';
+}
+
+function _bindWikiOverrideEditor() {
+  const editBtn = qs('wiki-override-edit-btn');
+  if (editBtn) {
+    editBtn.addEventListener('click', () => {
+      _wikiEditing = true;
+      _wikiEditDraft = null;
+      _renderWikiVendorView();
+    });
+  }
+  const cancelBtn = qs('wiki-override-cancel-btn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      _wikiEditing = false;
+      _wikiEditDraft = null;
+      _renderWikiVendorView();
+    });
+  }
+  const saveBtn = qs('wiki-override-save-btn');
+  if (saveBtn) saveBtn.addEventListener('click', () => { _onWikiOverrideSave(); });
+}
+
+async function _onWikiOverrideSave() {
+  if (!_wikiActive || !_wikiVendor) return;
+  const ta = qs('wiki-override-content');
+  if (!ta) return;
+  await _saveWikiOverride(
+    _wikiActive.type, _wikiActive.name, _wikiVendor, ta.value, ta.dataset.mtimeNs || '0', false,
+  );
+}
+
+async function _saveWikiOverride(type, name, vendor, content, mtimeNs, force) {
+  const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/override`;
+  let res;
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
+    res = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ vendor, content, mtime_ns: mtimeNs, force }),
+    });
+  } catch (err) {
+    showToast(
+      t('settings.ctx.wiki_override_save_failed', { error: String((err && err.message) || err) }),
+      'error',
+    );
+    return;
+  }
+  if (res.status === 409) { await _onWikiOverrideConflict(type, name, vendor, content); return; }
+  if (res.status === 503) { showToast(t('settings.ctx.wiki_override_busy'), 'error'); return; }
+  if (!res.ok) {
+    showToast(t('settings.ctx.wiki_override_save_failed', { error: await _wikiErrDetail(res) }), 'error');
+    return;
+  }
+  const data = await res.json();
+  // Repaint the HEAD dirty badge from the response without re-listing (a11y: no
+  // list re-render / focus loss — feedback_ctx_a11y_conventions).
+  if (_wikiData) { _wikiData.is_dirty = !!data.wiki_dirty; _renderWikiHead(); }
+  _wikiEditing = false;
+  _wikiEditDraft = null;
+  if (data.privacy_warning) {
+    showToast(
+      t('settings.ctx.wiki_override_privacy_warn', { vendor, count: data.privacy_warning }),
+      'error',
+    );
+  } else {
+    showToast(t('settings.ctx.wiki_override_saved', { vendor }), 'success');
+  }
+  // Refresh diff/lint + the read pane: the override changed. Guard against a
+  // vendor/asset switch mid-request.
+  if (_wikiActive && _wikiActive.type === type && _wikiActive.name === name
+      && _wikiVendor === vendor) {
+    await _loadWikiVendorView(type, name, vendor);
+  }
+}
+
+async function _onWikiOverrideConflict(type, name, vendor, draftContent) {
+  // The override changed on disk between read and save. Fetch the current bytes
+  // so the user can compare, then offer Reload (discard my edits) or Force save
+  // (re-PUT my draft with force; a .bak keeps the on-disk copy).
+  let fresh = null;
+  try {
+    const base = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}`;
+    const r = await fetch(`${base}/override?vendor=${encodeURIComponent(vendor)}`);
+    if (r.ok) fresh = await r.json();
+  } catch { /* best-effort — the banner still offers reload/force */ }
+  const banner = qs('wiki-conflict-banner');
+  if (!banner) return; // edit pane gone (vendor/asset switched mid-conflict)
+  const freshContent = fresh ? (fresh.content || '') : '';
+  const freshMtime = fresh ? String(fresh.mtime_ns || '0') : '0';
+  banner.hidden = false;
+  banner.innerHTML = '<p class="wiki-conflict-msg" role="alert">'
+    + `${escapeHtml(t('settings.ctx.wiki_override_conflict_msg'))}</p>`
+    + `<pre class="wiki-override-pre wiki-conflict-fresh">${escapeHtml(freshContent)}</pre>`
+    + '<div class="wiki-override-actions">'
+    + '<button type="button" class="btn-ghost" id="wiki-conflict-reload-btn">'
+    + `${escapeHtml(t('settings.ctx.wiki_override_conflict_reload'))}</button>`
+    + '<button type="button" class="btn-danger" id="wiki-conflict-force-btn">'
+    + `${escapeHtml(t('settings.ctx.wiki_override_conflict_force'))}</button></div>`;
+  const reloadBtn = qs('wiki-conflict-reload-btn');
+  if (reloadBtn) {
+    reloadBtn.addEventListener('click', () => {
+      const ta = qs('wiki-override-content');
+      if (ta) { ta.value = freshContent; ta.dataset.mtimeNs = freshMtime; }
+      banner.hidden = true;
+      banner.innerHTML = '';
+    });
+  }
+  const forceBtn = qs('wiki-conflict-force-btn');
+  if (forceBtn) {
+    forceBtn.addEventListener('click', () => {
+      _saveWikiOverride(type, name, vendor, draftContent, freshMtime, true);
+    });
+  }
+}
+
 // --- Install / update into a project (E-3, dev tier only) -------------------
 // Web parity of `mm context install` / `mm context update`: these READ the
 // host-global wiki but WRITE into a project's .memtomem/, so — unlike the wiki
@@ -441,19 +601,37 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
   }
 }
 
+function _wikiStashEditDraft() {
+  // Capture the in-progress override edit before a full re-render destroys the
+  // textarea, so the draft survives into _renderWikiOverrideEditor's reseed. The
+  // langchange path rebuilds the WHOLE detail via _renderWikiDetail (wiping the
+  // textarea) before _renderWikiVendorView runs, so this must be called at the
+  // top of both re-render entry points — by the time the vendor view rebuilds,
+  // the old textarea is already gone.
+  if (!_wikiEditing) return;
+  const ta = qs('wiki-override-content');
+  if (ta) _wikiEditDraft = ta.value;
+}
+
 function _renderWikiVendorView() {
   const view = qs('wiki-vendor-view');
   if (!view) return;
   if (!_wikiView) { view.innerHTML = ''; return; }
+  _wikiStashEditDraft();
   view.innerHTML = _renderDiffSection(_wikiView.diff)
     + _renderLintSection(_wikiView.lint)
-    + _renderWikiSeedAction();
+    + _renderWikiSeedAction()
+    + _renderWikiOverrideEditor();
   _bindWikiSeedAction();
+  _bindWikiOverrideEditor();
 }
 
 function _renderWikiDetail() {
   const el = qs('wiki-detail');
   if (!el || !_wikiActive) return;
+  // Stash any in-progress override edit BEFORE el.innerHTML wipes the textarea
+  // (e.g. a langchange repaint), so the draft survives the rebuild below.
+  _wikiStashEditDraft();
   const { type, name } = _wikiActive;
   const item = ((_wikiData && _wikiData.items) || []).find(
     (i) => i.type === type && i.name === name,
@@ -495,22 +673,35 @@ async function _loadWikiVendorView(type, name, vendor) {
   if (!view || !vendor) return;
   // Drop the previous vendor's cached diff/lint immediately so a langchange
   // landing mid-fetch repaints an empty pane rather than the OLD vendor's
-  // details under the newly-selected vendor (Codex review on PR-E).
+  // details under the newly-selected vendor (Codex review on PR-E). Switching
+  // vendor also abandons any in-progress override edit.
   _wikiView = null;
+  _wikiEditing = false;
+  _wikiEditDraft = null;
   const seq = ++_wikiDetailSeq;
   panelLoading(view);
   const base = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}`;
   const vq = `?vendor=${encodeURIComponent(vendor)}`;
+  // The override read pane is the dev-tier editor's surface: the GET only mounts
+  // in dev. The prod read-only browser shows diff/lint only — fetching the
+  // override there would 404. Gate on dev + renderable (non-renderable vendors
+  // have no editor, mirroring the disabled <option> and the PUT's 400).
+  const wantOverride = _wikiDevMode() && _wikiVendorRenderable(vendor);
   try {
-    const [diffRes, lintRes] = await Promise.all([
-      fetch(`${base}/diff${vq}`),
-      fetch(`${base}/lint${vq}`),
-    ]);
+    const reqs = [fetch(`${base}/diff${vq}`), fetch(`${base}/lint${vq}`)];
+    if (wantOverride) reqs.push(fetch(`${base}/override${vq}`));
+    const [diffRes, lintRes, overrideRes] = await Promise.all(reqs);
     if (seq !== _wikiDetailSeq) return;
     const diff = diffRes.ok ? await diffRes.json() : { _error: await _wikiErrDetail(diffRes) };
     const lint = lintRes.ok ? await lintRes.json() : { _error: await _wikiErrDetail(lintRes) };
+    let override = null;
+    if (wantOverride && overrideRes) {
+      override = overrideRes.ok
+        ? await overrideRes.json()
+        : { _error: await _wikiErrDetail(overrideRes) };
+    }
     if (seq !== _wikiDetailSeq) return;
-    _wikiView = { diff, lint };
+    _wikiView = { diff, lint, override };
     _renderWikiVendorView();
   } catch (err) {
     if (_wikiIsAbort(err) || seq !== _wikiDetailSeq) return;

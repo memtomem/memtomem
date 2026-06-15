@@ -34,15 +34,17 @@ from memtomem.context._names import (
     InvalidNameError,
     validate_name,
 )
-from memtomem.wiki.override import render_seed_bytes
+from memtomem.wiki.override import canonical_asset_file, render_seed_bytes
 from memtomem.wiki.store import WikiStore
 
 __all__ = [
     "LintFinding",
     "LintReport",
+    "OverrideContent",
     "OverrideDiff",
     "diff_override",
     "lint_asset",
+    "read_override",
 ]
 
 LintLevel = Literal["error", "warning"]
@@ -67,6 +69,27 @@ class OverrideDiff:
     in_sync: bool
     diff_lines: list[str]
     dropped: list[str]
+
+
+@dataclass(frozen=True)
+class OverrideContent:
+    """Outcome of :func:`read_override` — the working-tree bytes of a vendor
+    override, for the in-browser editor's read pane (ADR-0027 Editor-A).
+
+    ``override_path`` is the absolute ``<wiki>/<type>/<name>/overrides/<vendor>.<ext>``.
+    ``exists`` is whether that file is present; when ``False`` the user has not
+    seeded an override yet, ``content`` is empty and ``mtime_ns`` is ``0`` (the
+    editor opens a blank pane to author one). ``content`` is decoded UTF-8 with
+    ``errors="replace"`` — parity with :func:`diff_override`, which never crashes
+    on a mis-encoded override (``lint`` is where bad encodings are flagged).
+    ``mtime_ns`` is the file's ``st_mtime_ns`` (``0`` when absent) — the
+    optimistic-concurrency token the editor's ``PUT`` re-checks.
+    """
+
+    override_path: Path
+    exists: bool
+    content: str
+    mtime_ns: int
 
 
 @dataclass(frozen=True)
@@ -170,6 +193,48 @@ def diff_override(
         in_sync=False,
         diff_lines=diff_lines,
         dropped=dropped,
+    )
+
+
+def read_override(
+    store: WikiStore,
+    asset_type: str,
+    name: str,
+    vendor: str,
+) -> OverrideContent:
+    """Read the working-tree override bytes for the in-browser editor.
+
+    Requires the **canonical asset to exist** (raises :class:`FileNotFoundError`
+    otherwise) so the editor never opens a read pane for a phantom asset — the
+    same gate :func:`memtomem.wiki.override.write_override` enforces, since
+    :meth:`WikiStore.list_assets` treats any ``<type>/<name>/`` dir as an asset.
+    A missing *override* file is NOT an error: it returns ``exists=False`` so the
+    editor can author a new one from a blank pane.
+
+    Raises the same classify-able exceptions as :func:`diff_override`:
+    :class:`memtomem.wiki.store.WikiNotFoundError` (no wiki),
+    :class:`FileNotFoundError` (missing canonical),
+    :class:`memtomem.context._names.InvalidNameError` (bad name),
+    :class:`ValueError` (unregistered ``(asset_type, vendor)``).
+    """
+    store.require_exists()
+    validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    fmt = OVERRIDE_FORMATS.get((asset_type, vendor))
+    if fmt is None:
+        raise ValueError(f"no override format registered for ({asset_type!r}, {vendor!r})")
+    canonical = canonical_asset_file(store, asset_type, name)
+    if not canonical.is_file():
+        raise FileNotFoundError(f"wiki has no {asset_type}/{name} canonical at {canonical}")
+    _, ext = fmt
+    override_path = store.root / asset_type / name / "overrides" / f"{vendor}.{ext}"
+    if not override_path.is_file():
+        return OverrideContent(override_path=override_path, exists=False, content="", mtime_ns=0)
+    stat = override_path.stat()
+    return OverrideContent(
+        override_path=override_path,
+        exists=True,
+        content=override_path.read_bytes().decode("utf-8", errors="replace"),
+        mtime_ns=stat.st_mtime_ns,
     )
 
 
