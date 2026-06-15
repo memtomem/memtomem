@@ -8,7 +8,8 @@ import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+import click
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -814,6 +815,14 @@ async def import_skills(
         result = await _run(dry=dry_run)
     except TimeoutError:
         raise _error(503, "busy", "Skills import timed out — another sync may be in progress")
+    except click.ClickException as exc:
+        # The import engine's only ClickException is the project_shared Gate A
+        # privacy hard-abort (ADR-0011 §5 — no force bypass; _gate_a.py). Render
+        # it as the same string-detail 422 the sync route gives PrivacyScanError
+        # and the MCP import tool gives this exact exception, rather than letting
+        # it fall through to the generic 500 handler (the PrivacyScanError
+        # docstring's stated intent: non-CLI surfaces translate, never 500).
+        raise HTTPException(422, exc.message) from exc
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -878,6 +887,9 @@ async def import_skill(
         result = await _run(dry=False)
     except TimeoutError:
         raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
+    except click.ClickException as exc:
+        # project_shared Gate A privacy block → 422 (see import_skills).
+        raise HTTPException(422, exc.message) from exc
     if not result.imported and not result.skipped:
         raise _error(404, "missing", f"No runtime skill named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)
