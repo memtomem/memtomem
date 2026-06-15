@@ -34,6 +34,7 @@ __all__ = [
     "canonical_asset_file",
     "render_seed_bytes",
     "seed_override",
+    "write_canonical",
     "write_override",
 ]
 
@@ -225,5 +226,48 @@ def write_override(
     if target.exists():
         backup = target.with_suffix(target.suffix + ".bak")
         atomic_write_bytes(backup, target.read_bytes())
+    atomic_write_bytes(target, content)
+    return target
+
+
+def write_canonical(
+    store: WikiStore,
+    asset_type: str,
+    name: str,
+    content: bytes,
+) -> Path:
+    """Replace an asset's base canonical (``SKILL.md`` / ``agent.md`` /
+    ``command.md``) with user bytes — the in-browser canonical editor's write
+    primitive (ADR-0027 Editor-B).
+
+    Unlike :func:`write_override` (one vendor, full-file replacement), the
+    canonical is the artifact, so this write re-derives **every** vendor's
+    ``diff`` / ``lint`` baseline (:func:`render_seed_bytes`) and, once committed,
+    every project pinned to the asset. The caller (the route) parse-gates the
+    bytes first (:func:`memtomem.wiki.inspect.validate_canonical_text`) so a
+    canonical that breaks fan-out never reaches disk; there is deliberately no
+    ``force`` flag here (the editor's only override concept — "bypass a
+    stale-mtime conflict" — lives at the route layer, parity with
+    :func:`write_override`).
+
+    The **canonical must already exist** (:class:`FileNotFoundError` otherwise):
+    Editor-B *edits* an asset, it does not *create* one (a new skill/agent/command
+    is a wider operation — the asset directory, ``mm wiki``, and the seed flow —
+    out of the editor's scope). All preconditions are checked before any mutation;
+    a refused write leaves the prior bytes intact. A ``.bak`` sibling of the prior
+    canonical is written first whenever a file is already there, so the previous
+    content stays recoverable (parity with :func:`write_override` / the seed
+    ``--force`` path).
+    """
+    store.require_exists()
+    validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    target = canonical_asset_file(store, asset_type, name)
+    if not target.is_file():
+        raise FileNotFoundError(
+            f"wiki has no {asset_type}/{name} canonical at {target}; "
+            "the editor edits an existing asset, it does not create one"
+        )
+    backup = target.with_suffix(target.suffix + ".bak")
+    atomic_write_bytes(backup, target.read_bytes())
     atomic_write_bytes(target, content)
     return target

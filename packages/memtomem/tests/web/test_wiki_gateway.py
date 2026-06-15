@@ -380,3 +380,99 @@ def test_wiki_override_edit_conflict_banner(page, mm_web_url: str) -> None:
     page.wait_for_selector("#wiki-conflict-force-btn", timeout=5_000)
     assert page.locator("#wiki-conflict-banner").is_visible()
     assert page.locator("#wiki-conflict-reload-btn").count() == 1
+
+
+_CANONICAL = {"content": "# canon\n", "mtime_ns": "111"}
+_OVERRIDE_NONE = {"vendor": "claude", "content": "", "mtime_ns": "0", "exists": False}
+
+
+def test_wiki_canonical_edit_in_dev_mode(page, mm_web_url: str) -> None:
+    """Dev tier (ADR-0027 Editor-B): the artifact-level canonical read pane + Edit
+    toggle render, Save PUTs ``{content, mtime_ns}`` to ``…/canonical``, and the
+    HEAD badge repaints dirty. The override is not-seeded so only the canonical
+    editor is in play."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/wiki/**/override**", _json(_OVERRIDE_NONE))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    puts: list[dict] = []
+
+    def _canonical(route):
+        req = route.request
+        if req.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(_CANONICAL))
+        elif req.method == "PUT":
+            puts.append(json.loads(req.post_data or "{}"))
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"mtime_ns": "222", "wiki_dirty": True, "privacy_warning": 0}),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/wiki/**/canonical**", _canonical)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+
+    # The canonical editor mounts in the detail head (artifact-level); Edit reveals
+    # the textarea seeded from the GET (content + mtime token).
+    page.wait_for_selector("#wiki-canonical-edit-btn", timeout=5_000)
+    page.locator("#wiki-canonical-edit-btn").click()
+    ta = page.locator("#wiki-canonical-content")
+    ta.wait_for(timeout=5_000)
+    assert ta.input_value() == "# canon\n"
+
+    ta.fill("# edited canon\n")
+    page.locator("#wiki-canonical-save-btn").click()
+    page.wait_for_function(
+        "() => document.querySelector('#wiki-head .badge-warning') !== null",
+        timeout=5_000,
+    )
+    assert puts == [{"content": "# edited canon\n", "mtime_ns": "111", "force": False}]
+
+
+def test_wiki_canonical_edit_conflict_banner(page, mm_web_url: str) -> None:
+    """A 409 ``stale_mtime`` on a canonical Save surfaces the canonical conflict
+    banner with reload/force affordances."""
+    install_default_stubs(page)
+    page.route("**/api/wiki", _json(_WIKI_LIST))
+    page.route("**/api/wiki/**/diff**", _json(_DIFF))
+    page.route("**/api/wiki/**/lint**", _json(_LINT))
+    page.route("**/api/wiki/**/override**", _json(_OVERRIDE_NONE))
+    page.route("**/api/system/ui-mode", _json({"mode": "dev"}))
+
+    def _canonical(route):
+        req = route.request
+        if req.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(_CANONICAL))
+        elif req.method == "PUT":
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                body=json.dumps(
+                    {"reason_code": "stale_mtime", "mtime_ns": "999", "error_kind": "conflict"}
+                ),
+            )
+        else:
+            route.fallback()
+
+    page.route("**/api/wiki/**/canonical**", _canonical)
+
+    page.goto(mm_web_url)
+    _open_wiki(page)
+    page.locator("#wiki-list .wiki-item[data-name='alpha']").click()
+    page.wait_for_selector("#wiki-canonical-edit-btn", timeout=5_000)
+    page.locator("#wiki-canonical-edit-btn").click()
+    page.locator("#wiki-canonical-content").fill("# mine\n")
+    page.locator("#wiki-canonical-save-btn").click()
+
+    # 409 → the canonical conflict banner unhides with both reload and force.
+    page.wait_for_selector("#wiki-canonical-conflict-force-btn", timeout=5_000)
+    assert page.locator("#wiki-canonical-conflict-banner").is_visible()
+    assert page.locator("#wiki-canonical-conflict-reload-btn").count() == 1

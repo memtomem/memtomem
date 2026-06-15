@@ -523,3 +523,167 @@ describe('wiki.js override editor (ADR-0027 Editor-A, dev tier)', () => {
     await window.I18N.setLang('en');
   });
 });
+
+describe('wiki.js canonical editor (ADR-0027 Editor-B, dev tier)', () => {
+  const CANON = { content: '# canon\n', mtime_ns: '111' };
+  const OVERRIDE_NONE = { vendor: 'claude', content: '', mtime_ns: '0', exists: false };
+
+  // Serves the canonical GET (artifact-level) + diff/lint + a not-seeded override
+  // (so the per-vendor override editor stays out of the way) and records canonical
+  // PUTs. The post-save reload re-fetches canonical + the vendor view, so all must
+  // resolve. `putResponse` lets a test return a 409 / 400 instead of success.
+  function recordingCanonFetch(window, { canon = CANON, putResponse } = {}) {
+    const puts = [];
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (p === '/api/wiki/skills/alpha/diff') {
+        return { ok: true, status: 200, json: async () => ALPHA_DIFF_EXISTS, text: async () => '' };
+      }
+      if (p === '/api/wiki/skills/alpha/lint') {
+        return { ok: true, status: 200, json: async () => ALPHA_LINT_OK, text: async () => '' };
+      }
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/override') {
+        return { ok: true, status: 200, json: async () => OVERRIDE_NONE, text: async () => '' };
+      }
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/canonical') {
+        return { ok: true, status: 200, json: async () => canon, text: async () => '' };
+      }
+      if (method === 'PUT' && p === '/api/wiki/skills/alpha/canonical') {
+        puts.push({ headers: init.headers || {}, body: JSON.parse(init.body) });
+        if (putResponse) return putResponse;
+        return {
+          ok: true, status: 200,
+          json: async () => ({ mtime_ns: '222', wiki_dirty: true, privacy_warning: 0 }),
+          text: async () => '',
+        };
+      }
+      return base(input, init);
+    };
+    return puts;
+  }
+
+  it('renders the canonical read pane + Edit toggle in dev', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    recordingCanonFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    const editor = window.document.querySelector('.wiki-canonical-editor');
+    expect(editor).not.toBeNull();
+    expect(editor.textContent).toContain('# canon');
+    expect(window.document.getElementById('wiki-canonical-edit-btn')).not.toBeNull();
+  });
+
+  it('hides the canonical editor in prod (no canonical fetch)', async () => {
+    const { window } = await boot({
+      '/api/wiki': WIKI_LIST,
+      '/api/wiki/skills/alpha/diff': ALPHA_DIFF_EXISTS,
+      '/api/wiki/skills/alpha/lint': ALPHA_LINT_OK,
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    expect(window.document.querySelector('.wiki-canonical-editor')).toBeNull();
+  });
+
+  it('Save PUTs {content, mtime_ns, force} with the CSRF header + repaints dirty', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    window.ensureCsrfToken = async () => 'tok-xyz';
+    const puts = recordingCanonFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-canonical-edit-btn').dispatchEvent(new window.Event('click'));
+    const ta = window.document.getElementById('wiki-canonical-content');
+    expect(ta.value).toBe('# canon\n');     // seeded from the canonical GET
+    expect(ta.dataset.mtimeNs).toBe('111'); // token from the GET
+    ta.value = '# edited canon\n';
+    await window._onWikiCanonicalSave();
+    expect(puts.length).toBe(1);
+    expect(puts[0].body).toEqual({ content: '# edited canon\n', mtime_ns: '111', force: false });
+    expect(puts[0].headers['X-Memtomem-CSRF']).toBe('tok-xyz');
+    const head = window.document.getElementById('wiki-head');
+    expect(head.textContent).toContain(window.t('settings.ctx.wiki_dirty'));
+  });
+
+  it('a 409 shows the conflict banner with the on-disk bytes', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    let sawPut = false;
+    const base = window.fetch;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const p = (url || '').split('?')[0];
+      const method = (init.method || 'GET').toUpperCase();
+      if (p === '/api/wiki/skills/alpha/diff') return { ok: true, status: 200, json: async () => ALPHA_DIFF_EXISTS, text: async () => '' };
+      if (p === '/api/wiki/skills/alpha/lint') return { ok: true, status: 200, json: async () => ALPHA_LINT_OK, text: async () => '' };
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/override') return { ok: true, status: 200, json: async () => OVERRIDE_NONE, text: async () => '' };
+      if (method === 'GET' && p === '/api/wiki/skills/alpha/canonical') {
+        // After the conflict, the handler re-fetches the fresh on-disk bytes.
+        return { ok: true, status: 200, json: async () => ({
+          content: sawPut ? '# theirs\n' : '# canon\n', mtime_ns: sawPut ? '999' : '111',
+        }), text: async () => '' };
+      }
+      if (method === 'PUT' && p === '/api/wiki/skills/alpha/canonical') {
+        sawPut = true;
+        return { ok: false, status: 409, json: async () => ({
+          reason_code: 'stale_mtime', mtime_ns: '999', error_kind: 'conflict',
+        }), text: async () => '' };
+      }
+      return base(input, init);
+    };
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-canonical-edit-btn').dispatchEvent(new window.Event('click'));
+    window.document.getElementById('wiki-canonical-content').value = '# mine\n';
+    await window._onWikiCanonicalSave();
+    const banner = window.document.getElementById('wiki-canonical-conflict-banner');
+    expect(banner.hidden).toBe(false);
+    expect(banner.textContent).toContain('# theirs');
+    expect(window.document.getElementById('wiki-canonical-conflict-force-btn')).not.toBeNull();
+    expect(window.document.getElementById('wiki-canonical-conflict-reload-btn')).not.toBeNull();
+  });
+
+  it('a 400 parse failure toasts and writes nothing (editor stays open)', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    const toasts = [];
+    window.showToast = (msg, kind) => { toasts.push({ msg, kind }); };
+    recordingCanonFetch(window, {
+      putResponse: {
+        ok: false, status: 400,
+        json: async () => ({ detail: { message: 'missing YAML frontmatter: agents/x/agent.md', reason_code: 'canonical_unparseable' } }),
+        text: async () => '',
+      },
+    });
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-canonical-edit-btn').dispatchEvent(new window.Event('click'));
+    window.document.getElementById('wiki-canonical-content').value = 'bad\n';
+    await window._onWikiCanonicalSave();
+    // The parse-failed toast fired and the textarea is still present (not closed).
+    expect(toasts.some((x) => x.kind === 'error')).toBe(true);
+    expect(window.document.getElementById('wiki-canonical-content')).not.toBeNull();
+    // The dirty badge was NOT repainted (nothing was saved).
+    const head = window.document.getElementById('wiki-head');
+    expect(head.textContent).not.toContain(window.t('settings.ctx.wiki_dirty'));
+  });
+
+  it('preserves the in-progress canonical draft across a langchange repaint', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.document.body.classList.add('dev-mode');
+    recordingCanonFetch(window);
+    await window.loadWiki();
+    await window.loadWikiDetail('skills', 'alpha');
+    window.document.getElementById('wiki-canonical-edit-btn').dispatchEvent(new window.Event('click'));
+    window.document.getElementById('wiki-canonical-content').value = '# unsaved canon\n';
+    await window.I18N.setLang('ko');
+    window.dispatchEvent(new window.Event('langchange'));
+    const ta = window.document.getElementById('wiki-canonical-content');
+    expect(ta).not.toBeNull();
+    expect(ta.value).toBe('# unsaved canon\n'); // draft survived the detail rebuild
+    await window.I18N.setLang('en');
+  });
+});

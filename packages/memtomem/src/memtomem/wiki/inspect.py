@@ -38,14 +38,30 @@ from memtomem.wiki.override import canonical_asset_file, render_seed_bytes
 from memtomem.wiki.store import WikiStore
 
 __all__ = [
+    "CanonicalContent",
+    "CanonicalParseError",
     "LintFinding",
     "LintReport",
     "OverrideContent",
     "OverrideDiff",
     "diff_override",
     "lint_asset",
+    "read_canonical",
     "read_override",
+    "validate_canonical_text",
 ]
+
+
+class CanonicalParseError(ValueError):
+    """Raised when candidate canonical bytes fail to parse before a write
+    (ADR-0027 Editor-B parse gate, :func:`validate_canonical_text`).
+
+    A ``ValueError`` subclass — the underlying ``AgentParseError`` /
+    ``CommandParseError`` are too. Its message is **path-safe** (built from a
+    relative source path only) so the route can surface it in a 400 envelope
+    without leaking the absolute wiki path.
+    """
+
 
 LintLevel = Literal["error", "warning"]
 
@@ -88,6 +104,28 @@ class OverrideContent:
 
     override_path: Path
     exists: bool
+    content: str
+    mtime_ns: int
+
+
+@dataclass(frozen=True)
+class CanonicalContent:
+    """Outcome of :func:`read_canonical` — the working-tree bytes of an asset's
+    base canonical source, for the in-browser editor's read pane (ADR-0027
+    Editor-B).
+
+    ``canonical_path`` is the absolute ``SKILL.md`` / ``agent.md`` / ``command.md``
+    (see :func:`memtomem.wiki.override.canonical_asset_file`). Unlike an override,
+    the canonical is the artifact itself — it **must exist** (the editor edits an
+    existing asset, it does not author a new one), so :func:`read_canonical` raises
+    :class:`FileNotFoundError` when it is absent rather than returning a blank pane.
+    ``content`` is decoded UTF-8 with ``errors="replace"`` (parity with
+    :func:`read_override` / :func:`diff_override` — never crash on a mis-encoded
+    file; ``lint`` flags bad encodings). ``mtime_ns`` is the file's ``st_mtime_ns``
+    — the optimistic-concurrency token the editor's ``PUT`` re-checks.
+    """
+
+    canonical_path: Path
     content: str
     mtime_ns: int
 
@@ -236,6 +274,84 @@ def read_override(
         content=override_path.read_bytes().decode("utf-8", errors="replace"),
         mtime_ns=stat.st_mtime_ns,
     )
+
+
+def read_canonical(
+    store: WikiStore,
+    asset_type: str,
+    name: str,
+) -> CanonicalContent:
+    """Read the working-tree base canonical bytes for the in-browser editor.
+
+    The canonical (``SKILL.md`` / ``agent.md`` / ``command.md``) is the artifact
+    itself, so — unlike :func:`read_override`, where a missing override is the
+    "author a new one" case — a **missing canonical is an error**
+    (:class:`FileNotFoundError`): Editor-B edits an existing asset, it does not
+    create one. Returns the verbatim working-tree bytes (uncommitted edits
+    included), the same surface ``diff`` / ``lint`` read.
+
+    Raises:
+    :class:`memtomem.wiki.store.WikiNotFoundError` (no wiki),
+    :class:`FileNotFoundError` (missing canonical),
+    :class:`memtomem.context._names.InvalidNameError` (bad name).
+    """
+    store.require_exists()
+    validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    canonical = canonical_asset_file(store, asset_type, name)
+    if not canonical.is_file():
+        raise FileNotFoundError(f"wiki has no {asset_type}/{name} canonical at {canonical}")
+    stat = canonical.stat()
+    return CanonicalContent(
+        canonical_path=canonical,
+        content=canonical.read_bytes().decode("utf-8", errors="replace"),
+        mtime_ns=stat.st_mtime_ns,
+    )
+
+
+def validate_canonical_text(asset_type: str, name: str, content: str) -> None:
+    """Parse-gate candidate canonical bytes **before** they are written
+    (ADR-0027 Editor-B, Decision 6).
+
+    Agents / commands are parsed with ``layout="dir"`` (the wiki's directory
+    layout — ``agents/<name>/agent.md``), exactly as :func:`render_seed_bytes`
+    parses them on the seed path. A canonical that does not parse would break
+    ``render_seed_bytes`` / fan-out for **every** vendor, so the editor refuses
+    the save (the route maps the raised error to a 400 and writes nothing).
+    Skills are byte-copied to every vendor (no structured shape), so there is
+    nothing to parse — only the already-validated name + UTF-8 (guaranteed: the
+    inbound ``content`` is a ``str``) gate them, and this is a no-op.
+
+    The parser is fed a **relative** source path (``<type>/<name>/<asset>.md``),
+    not the absolute on-disk path: the parse-error message embeds ``source``
+    (e.g. ``"missing YAML frontmatter: agents/beta/agent.md"``), so a relative
+    source keeps the absolute wiki path out of the 400 envelope (the same
+    path-leak discipline :func:`memtomem.web.routes._wiki_common._wiki_absent`
+    enforces). ``parent.name`` still resolves to ``name`` for the ``layout="dir"``
+    default-name fallback, so the parse behaves identically to the on-disk one.
+
+    Raises :class:`CanonicalParseError` (a ``ValueError``) on a parse failure.
+    """
+    if asset_type == "skills":
+        return
+    # Function-body imports dodge the wiki ↔ context import cycle, same as
+    # ``render_seed_bytes`` / ``_lint_canonical_parse``. The ``_text`` parsers
+    # validate already-loaded bytes (the sync flow uses them to close its
+    # scan→write TOCTOU window) — exactly what a before-write gate needs.
+    stem = asset_type[:-1]  # "agents" → "agent", "commands" → "command"
+    source = Path(asset_type) / name / f"{stem}.md"
+    try:
+        if asset_type == "agents":
+            from memtomem.context.agents import _parse_canonical_agent_text
+
+            _parse_canonical_agent_text(content, source=source, layout="dir")
+        elif asset_type == "commands":
+            from memtomem.context.commands import _parse_canonical_command_text
+
+            _parse_canonical_command_text(content, source=source, layout="dir")
+        else:
+            raise ValueError(f"unsupported asset_type for canonical edit: {asset_type!r}")
+    except (ValueError, OSError) as exc:
+        raise CanonicalParseError(str(exc)) from exc
 
 
 def _lint_canonical_parse(asset_type: str, canonical: Path) -> list[LintFinding]:
