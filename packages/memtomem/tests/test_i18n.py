@@ -917,7 +917,9 @@ class TestNoHardcodedStrings:
         from the wiki panel's "Canonical 원본"). "canonical" is a real product
         term (ADR-0008, ``mm wiki``, the in-browser editor), so rather than drop
         it we *define* it: a ``ctx_wiki_tip`` title on the wiki nav button. Pin
-        the tip key + its wiring + the ko de-transliteration."""
+        the tip key + its wiring + the ko de-transliteration, plus the agents
+        nav-sub inline HTML default (the renamed term must not stay stale in the
+        pre-hydration fallback)."""
         leaks: list[str] = []
 
         # (1) agents sub-label must use the "subagent" glossary term.
@@ -944,11 +946,18 @@ class TestNoHardcodedStrings:
                 f" — {ko['settings.nav.ctx_wiki_sub']!r}"
             )
 
-        # The wiki nav button must wire the tooltip, and its pre-hydration inline
-        # ``title`` default must match the en value (the i18n 3-fallback-layer
-        # lesson — a stale inline default is what the user sees before the locale
-        # JSON loads).
+        # index.html pre-hydration inline defaults must match their en values
+        # (the i18n 3-fallback-layer lesson — a stale inline default is what the
+        # user sees before the locale JSON loads, or if the fetch fails):
+        #   - the agents nav-sub text (renamed agents -> subagents), and
+        #   - the wiki nav button's tooltip wiring + its title= default.
         index_html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        agents_sub = en["settings.nav.ctx_agents_sub"]
+        if f'data-i18n="settings.nav.ctx_agents_sub">{agents_sub}</span>' not in index_html:
+            leaks.append(
+                "  index.html: ctx_agents_sub inline default is stale —"
+                " must match en['settings.nav.ctx_agents_sub']"
+            )
         if f'data-i18n-title="{tip_key}"' not in index_html:
             leaks.append(f"  index.html: wiki nav button must wire data-i18n-title={tip_key!r}")
         if f'title="{en[tip_key]}"' not in index_html:

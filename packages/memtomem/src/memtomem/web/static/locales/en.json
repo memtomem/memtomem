@@ -346,7 +346,7 @@
   "settings.nav.ctx_mcp_servers_sub": "Project tool servers",
   "settings.nav.ctx_wiki": "Wiki",
   "settings.nav.ctx_wiki_sub": "Shared canonical library",
-  "settings.nav.ctx_wiki_tip": "Canonical = the one authoritative copy of each skill, agent, and command that every runtime renders from.",
+  "settings.nav.ctx_wiki_tip": "Canonical = the one authoritative copy of each skill, subagent, and command that every runtime renders from.",
   "settings.nav.dedup": "Deduplicate",
   "settings.nav.dedup_sub": "Remove near-duplicates",
   "settings.nav.decay": "Age-out",

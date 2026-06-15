@@ -346,7 +346,7 @@
   "settings.nav.ctx_mcp_servers_sub": "프로젝트 도구 서버",
   "settings.nav.ctx_wiki": "위키",
   "settings.nav.ctx_wiki_sub": "공유 Canonical 라이브러리",
-  "settings.nav.ctx_wiki_tip": "Canonical = 모든 런타임이 렌더링 기준으로 삼는 각 skill·agent·command 의 단일 권위 사본.",
+  "settings.nav.ctx_wiki_tip": "Canonical = 모든 런타임이 렌더링 기준으로 삼는 각 skill·subagent·command 의 단일 권위 사본.",
   "settings.nav.dedup": "중복 정리",
   "settings.nav.dedup_sub": "유사 청크 제거",
   "settings.nav.decay": "오래된 기억 만료",
