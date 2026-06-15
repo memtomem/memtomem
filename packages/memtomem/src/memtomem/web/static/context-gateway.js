@@ -1386,6 +1386,78 @@ async function _ctxConfirmHostWrite(data, resend) {
   return await resend();
 }
 
+// ``_ctxMaybeForceUnsafeImport`` owns the (optional) third import leg. When a
+// user-tier import skipped one or more files because they tripped Gate A's
+// secret-shape heuristic, the engine reports each as a skip with
+// ``reason_code === 'privacy_blocked'`` — the force-able tier. (``project_shared``
+// is a hard 422 the caller never reaches here, and ``project_local`` import is
+// rejected outright, so a ``privacy_blocked`` skip is always a user-tier one.)
+// We offer the same reviewed-bypass valve the CLI's ``--force-unsafe-import``
+// and the upload/memory/chunk web write surfaces already expose.
+//
+// ``reimport(extra)`` is the caller's ``importOnce`` — it merges ``extra`` into
+// the request body. Resolves to the re-imported payload, or ``null`` when
+// nothing was privacy-blocked or the user declined (callers keep the original
+// ``data``). Only the file name and hit count are surfaced — the matched bytes
+// are never echoed (Gate A "never echo secrets" contract).
+//
+// Consent separation: approving the privacy override is NOT consent to write
+// outside the project root. We retry with ``force_unsafe_import`` ALONE first —
+// forcing flips the blocked files to would-import, so the server's user-tier
+// host-write gate now has real ``~/.memtomem/`` destinations to disclose — then
+// run the host-write confirm and resend with both flags. Bundling
+// ``allow_host_writes`` into the first retry would skip the host disclosure
+// whenever the original (non-forced) pass had nothing to disclose (the
+// all-blocked case): the force files would land in the User store unannounced.
+async function _ctxMaybeForceUnsafeImport(data, reimport) {
+  const blocked = (data?.skipped || []).filter(
+    s => s && s.reason_code === 'privacy_blocked',
+  );
+  if (!blocked.length) return null;
+  const names = blocked.map(s => s.name).filter(Boolean);
+  const ok = await showConfirm({
+    title: t('settings.ctx.force_unsafe_title'),
+    message: t('settings.ctx.force_unsafe_message', { count: blocked.length }),
+    warningText: names.join('\n') || '—',
+    confirmText: t('settings.ctx.force_unsafe_btn'),
+    // Overriding a secret-shape detection is the one import action that warrants
+    // the red button — every other import leg passes ``danger: false``.
+    danger: true,
+  });
+  if (!ok) return null;
+  const fail = async (r) => {
+    const err = r ? await r.json().catch(() => ({})) : {};
+    showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+    return null;
+  };
+  let r = await reimport({ force_unsafe_import: true });
+  if (!r || !r.ok) return fail(r);
+  let result = await r.json();
+  if (_ctxIsHostWriteEnvelope(result)) {
+    // Now that forcing surfaced the destinations, disclose the host paths and
+    // resend with both flags only on approval (declining is a choice, not an
+    // error — ``_ctxConfirmHostWrite`` returns null).
+    r = await _ctxConfirmHostWrite(
+      result, () => reimport({ force_unsafe_import: true, allow_host_writes: true }),
+    );
+    if (!r) return null;
+    if (!r.ok) return fail(r);
+    result = await r.json();
+  }
+  return result;
+}
+
+// Import error toast text. The import route's only 422 is the ``project_shared``
+// Gate A privacy hard-block (#1378) — no bypass exists on any surface, so we
+// append a localized hint pointing web users at the ``user`` tier, where the
+// reviewed force valve (``_ctxMaybeForceUnsafeImport``) IS available. Every
+// other status falls back to the shared error-detail renderer unchanged.
+function _ctxImportErrToast(status, detail) {
+  const base = _ctxErrDetail(detail, t('toast.request_failed'));
+  if (status === 422) return `${base} ${t('settings.ctx.privacy_blocked_shared_hint')}`;
+  return base;
+}
+
 // -- Deep-link carrier (ADR-0009 §3) ----------------------------------------
 //
 // Dashboard issue cards push ``?section=<type>&filter=<status>&artifact=<name>``
@@ -5938,7 +6010,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
         let r = await importOnce({});
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          showToast(_ctxImportErrToast(r.status, err.detail), 'error');
           return;
         }
         let data = await r.json();
@@ -5948,11 +6020,17 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
           if (!r) return;
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
-            showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+            showToast(_ctxImportErrToast(r.status, err.detail), 'error');
             return;
           }
           data = await r.json();
         }
+        // A user-tier import may skip files on Gate A's secret-shape heuristic;
+        // offer the reviewed force valve. The helper re-imports through
+        // ``importOnce`` and runs its own host-write disclosure for the forced
+        // destinations before writing.
+        const forced = await _ctxMaybeForceUnsafeImport(data, importOnce);
+        if (forced) data = forced;
         if (data.imported && data.imported.length) {
           showToast(t('settings.ctx.import_success'));
         } else if (data.skipped && data.skipped.length) {
@@ -6275,7 +6353,7 @@ async function _ctxRunImport(type, { btn, onComplete }) {
       let r = await importOnce({});
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+        showToast(_ctxImportErrToast(r.status, err.detail), 'error');
         return;
       }
       let data = await r.json();
@@ -6288,11 +6366,17 @@ async function _ctxRunImport(type, { btn, onComplete }) {
         if (!r) return;
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          showToast(_ctxImportErrToast(r.status, err.detail), 'error');
           return;
         }
         data = await r.json();
       }
+      // A user-tier import may skip files on Gate A's secret-shape heuristic;
+      // offer the reviewed force valve. The helper re-imports through
+      // ``importOnce`` (carrying its ``overwrite`` base body) and runs its own
+      // host-write disclosure for the forced destinations before writing.
+      const forced = await _ctxMaybeForceUnsafeImport(data, importOnce);
+      if (forced) data = forced;
       const statusEl = qs(`ctx-${type}-status`);
       if (statusEl) statusEl.innerHTML = renderImportResult(data);
       const importedCount = data.imported?.length || 0;

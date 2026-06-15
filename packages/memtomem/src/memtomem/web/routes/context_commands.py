@@ -848,6 +848,13 @@ class ImportRequest(BaseModel):
     # #1263 host-write opt-in for target_scope=user (the canonical
     # destination is ~/.memtomem/commands/, outside any project root).
     allow_host_writes: bool = False
+    # Gate A bypass valve — mirrors the CLI's --force-unsafe-import and the
+    # ``force_unsafe`` field the upload/memory/chunk web write surfaces already
+    # expose. Lets a reviewed false positive proceed on the only bypassable web
+    # import tier: ``user``. ``project_local`` is rejected outright and
+    # ``project_shared`` hard-refuses regardless of this flag (ADR-0011 §5),
+    # enforced in the import engine. See context_skills.ImportRequest.
+    force_unsafe_import: bool = False
 
 
 def _import_payload(
@@ -905,6 +912,7 @@ async def import_commands(
     _reject_project_local_write(target_scope, "Import commands")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
+    force_unsafe_import = body.force_unsafe_import if body else False
 
     async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
@@ -914,6 +922,7 @@ async def import_commands(
                     overwrite=overwrite,
                     dry_run=dry,
                     scope=target_scope,
+                    force_unsafe_import=force_unsafe_import,
                     surface="web_context_commands_import",
                 )
 
@@ -968,6 +977,7 @@ async def import_command(
         raise _error(400, "validation", f"Invalid command name: {exc}")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
+    force_unsafe_import = body.force_unsafe_import if body else False
 
     async def _run(dry: bool) -> ExtractResult:
         async with asyncio.timeout(60):
@@ -978,6 +988,7 @@ async def import_command(
                     only_name=name,
                     dry_run=dry,
                     scope=target_scope,
+                    force_unsafe_import=force_unsafe_import,
                     surface="web_context_commands_import",
                 )
 
