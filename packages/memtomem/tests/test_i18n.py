@@ -777,6 +777,46 @@ class TestNoHardcodedStrings:
             "#1352 enrollment copy must use Activate/활성화, not enroll/등록:\n" + "\n".join(leaks)
         )
 
+    def test_ctx_command_artifact_label_has_no_custom_prefix(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """#1352 artifact-type label glossary: the "commands" type was branded
+        "Custom Commands" / "커스텀 명령어" / "사용자 정의 명령어" while the other
+        three types (Skill / Subagent / MCP Server) are adjective-free. Drop the
+        "Custom" prefix so the four labels form a parallel set; the "Slash
+        commands" sub-label still disambiguates from shell/CLI commands.
+
+        Pin the command-label values free of the dropped prefixes so a future
+        edit can't reintroduce the asymmetry."""
+        command_label_keys = [
+            "settings.nav.ctx_commands",
+            "settings.ctx.commands_title",
+            "settings.ctx.commands_phase_title",
+            "settings.ctx.type_names.commands",
+            "settings.ctx.type_names_singular.commands",
+            "settings.ctx.commands_add_project_tooltip",
+            "settings.ctx.commands_add_project_aria",
+            "settings.ctx.commands_create_tooltip",
+            "settings.ctx.commands_create_aria",
+            "settings.ctx.commands_import_tooltip",
+            "settings.ctx.commands_import_aria",
+            "settings.ctx.commands_sync_tooltip",
+            "settings.ctx.commands_sync_aria",
+        ]
+        leaks: list[str] = []
+        for key in command_label_keys:
+            assert key in en, f"en.json missing command-label key: {key}"
+            assert key in ko, f"ko.json missing command-label key: {key}"
+            if "custom" in en[key].lower():
+                leaks.append(f"  en {key}: still says 'custom' — {en[key]!r}")
+            for token in ("커스텀", "사용자 정의"):
+                if token in ko[key]:
+                    leaks.append(f"  ko {key}: still says '{token}' — {ko[key]!r}")
+        assert not leaks, (
+            "#1352 command labels must be adjective-free (Command/명령어), "
+            "not Custom Command/커스텀·사용자 정의 명령어:\n" + "\n".join(leaks)
+        )
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —

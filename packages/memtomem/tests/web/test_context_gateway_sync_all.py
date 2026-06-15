@@ -424,7 +424,7 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
         page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
     ).strip()
     expected = SYNC_PARTIAL_FAILED_TEMPLATE.format(
-        succeeded="Skills, Custom Commands",
+        succeeded="Skills, Commands",
         failed_phase="Subagents",
         reason=agents_reason,
     )
@@ -1107,7 +1107,7 @@ def test_sync_all_noop_run_shows_nothing_synced_toast(page, mm_web_url: str) -> 
 # B-5 (#1288): per-type × per-runtime breakdown in the Sync All confirm. EN
 # copy pinned as constants (not i18n keys) per the module convention.
 SYNC_BREAKDOWN_SKILLS_CREATE = "Skills: 1 create → claude"
-SYNC_BREAKDOWN_COMMANDS_OVERWRITE = "Custom commands: 1 overwrite → claude"
+SYNC_BREAKDOWN_COMMANDS_OVERWRITE = "Commands: 1 overwrite → claude"
 
 
 def _ctx_list_route(page, type_key: str, items: list[dict]) -> None:
