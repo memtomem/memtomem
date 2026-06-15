@@ -144,10 +144,47 @@ def test_dev_only_routers_are_populated() -> None:
     assert _DEV_ONLY_ROUTERS, "_DEV_ONLY_ROUTERS is empty — classification missing"
 
 
+def _iter_api_routes(app):
+    """Yield ``(path, methods)`` for every *mounted* route, flattening the
+    router-inclusion tree.
+
+    This is the one helper that knows fastapi's route-container shape so the
+    tier/mode drift guards below don't have to. Through fastapi 0.136
+    ``app.routes`` is a flat list of ``APIRoute``s, each carrying its full
+    ``.path`` and ``.methods``. fastapi 0.137 turned ``include_router`` into a
+    tree of internal ``_IncludedRouter`` nodes whose leaves are reached via
+    ``effective_candidates()`` — included routes no longer appear as flat
+    ``APIRoute``s (FastAPI's docs now call ``router.routes`` an internal
+    detail). We duck-type both shapes and keep walking the *actual* registered
+    routes — including ``include_in_schema=False`` ones such as the ``/api``
+    catch-all — rather than the narrower OpenAPI projection (which would also
+    drop a hidden tiered route silently).
+    """
+
+    def walk(routes):
+        for route in routes:
+            candidates = getattr(route, "effective_candidates", None)
+            if callable(candidates):  # fastapi>=0.137 _IncludedRouter node
+                yield from walk(candidates())
+                continue
+            path = getattr(route, "path", None)
+            if isinstance(path, str):
+                yield path, set(getattr(route, "methods", None) or ())
+
+    yield from walk(app.routes)
+
+
+def _api_routes(app) -> dict[str, set[str]]:
+    """Map each ``/api/`` path to the union of HTTP methods registered on it."""
+    out: dict[str, set[str]] = {}
+    for path, methods in _iter_api_routes(app):
+        if path.startswith("/api/"):
+            out.setdefault(path, set()).update(methods)
+    return out
+
+
 def _api_paths(app) -> set[str]:
-    return {
-        getattr(r, "path", "") for r in app.routes if getattr(r, "path", "").startswith("/api/")
-    }
+    return set(_api_routes(app))
 
 
 def test_dev_routes_extend_prod_routes() -> None:
@@ -176,13 +213,13 @@ async def test_dev_only_routes_blocked_in_prod_but_exposed_in_dev(path: str, met
 
     The prod check uses real HTTP so we know the 404 comes from the
     catch-all handler, not route-handler failure. The dev check reads the
-    registered ``app.routes`` set directly — this avoids having to wire
+    mounted-route set (see ``_iter_api_routes``) — this avoids having to wire
     ``app.state.storage`` etc. for every dev-only router just to prove
     the path got mounted."""
     prod_app = create_app(mode="prod")
     dev_app = create_app(mode="dev")
 
-    dev_paths = {getattr(r, "path", "") for r in dev_app.routes}
+    dev_paths = _api_paths(dev_app)
     assert path in dev_paths, f"{method} {path} is missing in dev too — parametrize entry is wrong"
 
     async with AsyncClient(
@@ -241,12 +278,7 @@ async def test_namespaces_list_is_prod_mounted_but_admin_routes_blocked() -> Non
     # edit). Rename and delete share the same path template but live on
     # admin_router, so a path string match alone isn't enough — verify
     # the methods registered for the path.
-    patch_methods = {
-        m
-        for r in prod_app.routes
-        if getattr(r, "path", "") == "/api/namespaces/{namespace}"
-        for m in getattr(r, "methods", set()) or set()
-    }
+    patch_methods = _api_routes(prod_app).get("/api/namespaces/{namespace}", set())
     assert "PATCH" in patch_methods, (
         "PATCH /api/namespaces/{namespace} must be prod-mounted via namespaces_read"
     )
@@ -285,14 +317,19 @@ def test_namespaces_list_remains_reachable_in_dev() -> None:
     dead second registration is a code smell).
     """
     dev_app = create_app(mode="dev")
-    list_routes = [
-        r
-        for r in dev_app.routes
-        if getattr(r, "path", "") == "/api/namespaces" and "GET" in getattr(r, "methods", set())
+
+    # Duplicate-registration guard: re-decorating ``list_namespaces`` on
+    # admin_router (or registering any second handler) would mount a second
+    # ``GET /api/namespaces``. Count the actual mounted routes —
+    # ``_iter_api_routes`` flattens the fastapi>=0.137 inclusion tree — so the
+    # invariant holds whether or not the duplicate shares an operation id (the
+    # OpenAPI surface would collapse two different handlers into one slot).
+    list_handlers = [
+        (p, m) for p, m in _iter_api_routes(dev_app) if p == "/api/namespaces" and "GET" in m
     ]
-    assert len(list_routes) == 1, (
+    assert len(list_handlers) == 1, (
         f"Expected exactly one GET /api/namespaces handler in dev; "
-        f"found {len(list_routes)} — admin_router accidentally re-registered the list?"
+        f"found {len(list_handlers)} — admin_router accidentally re-registered the list?"
     )
 
     dev_paths = _api_paths(dev_app)
