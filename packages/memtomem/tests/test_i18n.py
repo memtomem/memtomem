@@ -966,9 +966,33 @@ class TestNoHardcodedStrings:
                 f" must match en[{tip_key!r}]"
             )
 
+        # (3) The wiki-surface prose (desc + hints) names the same artifact type,
+        # so it must use the settled "subagent" / "서브에이전트" term too — ``ko``
+        # already did, ``en`` lagged on a bare "agents". ``\bagents?\b`` matches a
+        # standalone "agent(s)" but not "subagent(s)" (no word boundary mid-word),
+        # so this catches the straggler without a fragile denylist.
+        wiki_prose_keys = [
+            "settings.ctx.wiki_desc",
+            "settings.ctx.wiki_no_assets_hint",
+            "settings.ctx.wiki_canonical_hint",
+        ]
+        bare_agent = re.compile(r"\bagents?\b", re.IGNORECASE)
+        for key in wiki_prose_keys:
+            assert key in en, f"en.json missing wiki key: {key}"
+            assert key in ko, f"ko.json missing wiki key: {key}"
+            if bare_agent.search(en[key]):
+                leaks.append(f"  en {key}: bare 'agent(s)' — use 'subagent' — {en[key]!r}")
+            if bare_agent.search(ko[key]):
+                leaks.append(f"  ko {key}: bare 'agent(s)' — use 'subagent' — {ko[key]!r}")
+        # wiki_desc has an index.html inline default; pin it to the en value so the
+        # pre-hydration fallback carries the same term (and can't silently re-drift).
+        wiki_desc = en["settings.ctx.wiki_desc"]
+        if f'data-i18n="settings.ctx.wiki_desc">{wiki_desc}</p>' not in index_html:
+            leaks.append("  index.html: wiki_desc inline default is stale — must match en value")
+
         assert not leaks, (
-            "#1352 nav-sub glossary: agents must say subagent/서브에이전트 and the "
-            "wiki nav must define 'canonical':\n" + "\n".join(leaks)
+            "#1352 label glossary: agents/wiki prose must say subagent/서브에이전트 "
+            "and the wiki nav must define 'canonical':\n" + "\n".join(leaks)
         )
 
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:

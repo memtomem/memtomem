@@ -488,7 +488,7 @@
   "settings.ctx.wiki_canonical_title": "Canonical 원본",
   "settings.ctx.wiki_canonical_edit": "편집",
   "settings.ctx.wiki_canonical_save": "저장",
-  "settings.ctx.wiki_canonical_hint": "기반 canonical 을 편집합니다 — 모든 vendor 가 이것으로부터 렌더링됩니다. 저장하면 파일을 쓰고 wiki 는 커밋되지 않은 상태로 남습니다. ~/.memtomem-wiki 에서 직접 커밋하세요. agent 와 command 는 파싱에 성공해야 하며, 실패하면 저장이 거부됩니다.",
+  "settings.ctx.wiki_canonical_hint": "기반 canonical 을 편집합니다 — 모든 vendor 가 이것으로부터 렌더링됩니다. 저장하면 파일을 쓰고 wiki 는 커밋되지 않은 상태로 남습니다. ~/.memtomem-wiki 에서 직접 커밋하세요. subagent 와 command 는 파싱에 성공해야 하며, 실패하면 저장이 거부됩니다.",
   "settings.ctx.wiki_canonical_saved": "canonical 을 저장했습니다",
   "settings.ctx.wiki_canonical_save_failed": "canonical 저장 실패: {error}",
   "settings.ctx.wiki_canonical_busy": "wiki 가 사용 중입니다 — 다른 동기화가 진행 중입니다. 다시 시도하세요.",
