@@ -903,6 +903,65 @@ class TestNoHardcodedStrings:
             "not Custom Command/커스텀·사용자 정의 명령어:\n" + "\n".join(leaks)
         )
 
+    def test_ctx_nav_sub_glossary_consistency(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """#1352 label glossary, nav sub-labels: two first-time-user defects.
+
+        (1) ``ctx_agents_sub`` said "Specialized agents" / "전문 에이전트" while
+        every other surface for this type — the nav label, title, type_names, and
+        ``agents_desc`` ("Specialized subagents …") — uses the settled glossary
+        term "subagent" / "서브에이전트". Pin the sub-label onto that term so the
+        type reads consistently.
+
+        (2) ``ctx_wiki_sub`` carries the undefined term "canonical" (and ko had it
+        phonetically transliterated to the meaningless "캐노니컬", off-glossary
+        from the wiki panel's "Canonical 원본"). "canonical" is a real product
+        term (ADR-0008, ``mm wiki``, the in-browser editor), so rather than drop
+        it we *define* it: a ``ctx_wiki_tip`` title on the wiki nav button. Pin
+        the tip key + its wiring + the ko de-transliteration."""
+        leaks: list[str] = []
+
+        # (1) agents sub-label must use the "subagent" glossary term.
+        for key in ("settings.nav.ctx_agents_sub",):
+            assert key in en, f"en.json missing nav key: {key}"
+            assert key in ko, f"ko.json missing nav key: {key}"
+            if "subagent" not in en[key].lower():
+                leaks.append(f"  en {key}: must say 'subagent' — {en[key]!r}")
+            if "서브에이전트" not in ko[key]:
+                leaks.append(f"  ko {key}: must say '서브에이전트' — {ko[key]!r}")
+
+        # (2) "canonical" must be defined via the wiki nav tooltip, and ko must
+        # not re-introduce the "캐노니컬" transliteration.
+        tip_key = "settings.nav.ctx_wiki_tip"
+        assert tip_key in en, f"en.json missing canonical-definition key: {tip_key}"
+        assert tip_key in ko, f"ko.json missing canonical-definition key: {tip_key}"
+        if "canonical" not in en[tip_key].lower():
+            leaks.append(f"  en {tip_key}: must define 'canonical' — {en[tip_key]!r}")
+        if "Canonical" not in ko[tip_key]:
+            leaks.append(f"  ko {tip_key}: must define 'Canonical' — {ko[tip_key]!r}")
+        if "캐노니컬" in ko["settings.nav.ctx_wiki_sub"]:
+            leaks.append(
+                "  ko settings.nav.ctx_wiki_sub: drop the '캐노니컬' transliteration"
+                f" — {ko['settings.nav.ctx_wiki_sub']!r}"
+            )
+
+        # The wiki nav button must wire the tooltip, and its pre-hydration inline
+        # ``title`` default must match the en value (the i18n 3-fallback-layer
+        # lesson — a stale inline default is what the user sees before the locale
+        # JSON loads).
+        index_html = (_STATIC_JS_DIR / "index.html").read_text(encoding="utf-8")
+        if f'data-i18n-title="{tip_key}"' not in index_html:
+            leaks.append(f"  index.html: wiki nav button must wire data-i18n-title={tip_key!r}")
+        if f'title="{en[tip_key]}"' not in index_html:
+            leaks.append(
+                "  index.html: wiki nav button's inline title= default is stale —"
+                f" must match en[{tip_key!r}]"
+            )
+
+        assert not leaks, (
+            "#1352 nav-sub glossary: agents must say subagent/서브에이전트 and the "
+            "wiki nav must define 'canonical':\n" + "\n".join(leaks)
+        )
+
     def test_command_palette_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Cmd+K command palette labels (#1026) — nav/settings/action
         commands, group headers, the open-source label, and the empty state —
