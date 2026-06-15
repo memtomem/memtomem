@@ -16,6 +16,7 @@ observe-only and a plain POST reaches the handler (matching
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -457,3 +458,325 @@ async def test_editor_routes_absent_in_prod(prod_client, seeded_wiki: Path) -> N
         json={"vendor": "claude", "content": "x", "mtime_ns": "0"},
     )
     assert put.status_code in (404, 405)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Canonical editor — GET + PUT (ADR-0027 Editor-B)
+# ════════════════════════════════════════════════════════════════════════════
+
+_AGENT_BODY = "---\nname: beta\ndescription: a test agent\n---\n\nBody.\n"
+
+
+# ── GET …/canonical (read pane) ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_canonical_returns_content_and_mtime(dev_client, seeded_wiki: Path) -> None:
+    resp = await dev_client.get("/api/wiki/skills/alpha/canonical")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["content"] == _SKILL_BODY
+    assert int(data["mtime_ns"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_get_canonical_agent_returns_content(dev_client, seeded_wiki: Path) -> None:
+    resp = await dev_client.get("/api/wiki/agents/beta/canonical")
+    assert resp.status_code == 200
+    assert resp.json()["content"] == _AGENT_BODY
+
+
+@pytest.mark.asyncio
+async def test_get_canonical_missing_is_404(dev_client, seeded_wiki: Path) -> None:
+    # Unlike an override, a missing canonical is an error (Editor-B edits an
+    # existing asset — it never opens a blank pane to author a new one).
+    resp = await dev_client.get("/api/wiki/skills/nope/canonical")
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "canonical_absent"
+
+
+@pytest.mark.asyncio
+async def test_get_canonical_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:  # noqa: F811
+    resp = await dev_client.get("/api/wiki/skills/alpha/canonical")
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "wiki_absent"
+    assert str(wiki_root) not in resp.text  # no host path leak
+
+
+# ── PUT …/canonical (save) ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_happy_path(dev_client, seeded_wiki: Path) -> None:
+    # The fixture commits the canonical, so the tree is clean; editing dirties it.
+    m = (await dev_client.get("/api/wiki/skills/alpha/canonical")).json()["mtime_ns"]
+    target = seeded_wiki / "skills" / "alpha" / "SKILL.md"
+    new = "# Alpha EDITED\n\nNew body.\n"
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": new, "mtime_ns": m}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["wiki_dirty"] is True
+    assert data["privacy_warning"] == 0
+    assert int(data["mtime_ns"]) > 0
+    assert target.read_text(encoding="utf-8") == new
+    # The prior canonical is kept as a .bak sibling.
+    assert target.with_suffix(".md.bak").read_text(encoding="utf-8") == _SKILL_BODY
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_agent_parseable_ok(dev_client, seeded_wiki: Path) -> None:
+    m = (await dev_client.get("/api/wiki/agents/beta/canonical")).json()["mtime_ns"]
+    new = "---\nname: beta\ndescription: edited\n---\n\nEdited body.\n"
+    resp = await dev_client.put(
+        "/api/wiki/agents/beta/canonical", json={"content": new, "mtime_ns": m}
+    )
+    assert resp.status_code == 200
+    assert (seeded_wiki / "agents" / "beta" / "agent.md").read_text(encoding="utf-8") == new
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_unparseable_agent_is_400_writes_nothing(
+    dev_client, seeded_wiki: Path
+) -> None:
+    # ADR-0027 Decision 6 + Validation: an unparseable agent canonical must 400
+    # and leave the file BYTE-UNCHANGED (assert disk bytes, not just the status).
+    target = seeded_wiki / "agents" / "beta" / "agent.md"
+    before = target.read_text(encoding="utf-8")
+    m = (await dev_client.get("/api/wiki/agents/beta/canonical")).json()["mtime_ns"]
+    resp = await dev_client.put(
+        "/api/wiki/agents/beta/canonical",
+        json={"content": "no frontmatter at all\n", "mtime_ns": m},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["reason_code"] == "canonical_unparseable"
+    assert target.read_text(encoding="utf-8") == before  # nothing written
+    assert not target.with_suffix(".md.bak").exists()  # not even a .bak
+    assert str(seeded_wiki) not in resp.text  # path-safe parse-error message
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_skill_has_no_parse_gate(dev_client, seeded_wiki: Path) -> None:
+    # Skills are byte-copied to every vendor — there is no structured parse, so
+    # any UTF-8 markdown saves (only agents/commands are parse-gated).
+    m = (await dev_client.get("/api/wiki/skills/alpha/canonical")).json()["mtime_ns"]
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical",
+        json={"content": "literally anything :: not yaml\n", "mtime_ns": m},
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_stale_mtime_is_409(dev_client, seeded_wiki: Path) -> None:
+    target = seeded_wiki / "skills" / "alpha" / "SKILL.md"
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": "# x\n", "mtime_ns": "1"}
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason_code"] == "stale_mtime"
+    assert int(body["mtime_ns"]) == target.stat().st_mtime_ns
+    assert target.read_text(encoding="utf-8") == _SKILL_BODY  # not overwritten
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_inside_lock_restat_is_409(
+    dev_client, seeded_wiki: Path, monkeypatch
+) -> None:
+    # The request passes the UNLOCKED pre-check (its reported mtime matches the
+    # client token) but the real file's mtime differs, so only the in-lock re-stat
+    # catches the race (mirrors the override editor's in-lock test).
+    from memtomem.web.routes import wiki_mutations as wm
+    from memtomem.wiki.inspect import CanonicalContent
+
+    target = seeded_wiki / "skills" / "alpha" / "SKILL.md"
+    real_mtime = target.stat().st_mtime_ns
+
+    def _fake_read(store, asset_type, name):  # noqa: ANN001
+        # mtime_ns matches the client token so the unlocked pre-check passes;
+        # canonical_path is the REAL (different-mtime) file.
+        return CanonicalContent(canonical_path=target, content="x", mtime_ns=4242)
+
+    monkeypatch.setattr(wm, "read_canonical", _fake_read)
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": "# never\n", "mtime_ns": "4242"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "stale_mtime"
+    assert int(resp.json()["mtime_ns"]) == real_mtime  # authoritative in-lock value
+    assert target.read_text(encoding="utf-8") == _SKILL_BODY  # nothing written
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_timeout_is_503(dev_client, seeded_wiki: Path, monkeypatch) -> None:
+    from memtomem.web.routes import wiki_mutations as wm
+
+    m = (await dev_client.get("/api/wiki/skills/alpha/canonical")).json()["mtime_ns"]
+
+    class _BoomTimeout:
+        def __init__(self, *a, **k) -> None: ...
+
+        async def __aenter__(self):
+            raise TimeoutError
+
+        async def __aexit__(self, *a) -> bool:
+            return False
+
+    monkeypatch.setattr(wm.asyncio, "timeout", lambda *a, **k: _BoomTimeout())
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": "# x\n", "mtime_ns": m}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error_kind"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_force_bypasses_stale_and_writes_bak(
+    dev_client, seeded_wiki: Path, caplog
+) -> None:
+    target = seeded_wiki / "skills" / "alpha" / "SKILL.md"
+    with caplog.at_level(logging.WARNING):
+        resp = await dev_client.put(
+            "/api/wiki/skills/alpha/canonical",
+            json={"content": "# forced\n", "mtime_ns": "1", "force": True},
+        )
+    assert resp.status_code == 200
+    assert target.read_text(encoding="utf-8") == "# forced\n"
+    assert target.with_suffix(".md.bak").read_text(encoding="utf-8") == _SKILL_BODY
+    # The force bypass emits a WARNING audit logging both mtimes (D-D parity).
+    assert any(
+        "force-save bypassed wiki canonical mtime check" in r.message
+        for r in caplog.records
+        if r.levelname == "WARNING"
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_missing_is_404_and_creates_no_asset(
+    dev_client, seeded_wiki: Path
+) -> None:
+    # A PUT to a valid-but-nonexistent asset must 404 and NOT create the asset
+    # (the editor edits an existing canonical, it never authors a new one).
+    resp = await dev_client.put(
+        "/api/wiki/skills/nope/canonical", json={"content": "# x\n", "mtime_ns": "0"}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "canonical_absent"
+    assert not (seeded_wiki / "skills" / "nope").exists()
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_bad_mtime_is_422(dev_client, seeded_wiki: Path) -> None:
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": "# x\n", "mtime_ns": "not-an-int"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason_code"] == "invalid_mtime"
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_unknown_asset_type_is_422(dev_client, seeded_wiki: Path) -> None:
+    resp = await dev_client.put(
+        "/api/wiki/widgets/alpha/canonical", json={"content": "# x\n", "mtime_ns": "0"}
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_privacy_warning_is_non_blocking(
+    dev_client, seeded_wiki: Path
+) -> None:
+    # D-E: a secret in the canonical yields a non-blocking warning — the write
+    # still succeeds (_REDACTION_EXEMPT, not _REDACTION_PROTECTED).
+    m = (await dev_client.get("/api/wiki/skills/alpha/canonical")).json()["mtime_ns"]
+    target = seeded_wiki / "skills" / "alpha" / "SKILL.md"
+    secret = "AKIA" + "A" * 16
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": f"key: {secret}\n", "mtime_ns": m}
+    )
+    assert resp.status_code == 200  # NON-blocking
+    assert resp.json()["privacy_warning"] >= 1
+    assert secret in target.read_text(encoding="utf-8")  # bytes written anyway
+
+
+@pytest.mark.asyncio
+async def test_canonical_editor_routes_absent_in_prod(prod_client, seeded_wiki: Path) -> None:
+    # The editor mounts dev-only. In prod the GET falls through to the catch-all
+    # 404 and the PUT hits the catch-all 405 (it lists GET/POST/PATCH/DELETE, not
+    # PUT) — either way the canonical editor is unreachable.
+    get = await prod_client.get("/api/wiki/skills/alpha/canonical")
+    assert get.status_code == 404
+    put = await prod_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": "x", "mtime_ns": "0"}
+    )
+    assert put.status_code in (404, 405)
+
+
+@pytest.mark.asyncio
+async def test_get_canonical_command_returns_content(dev_client, seeded_wiki: Path) -> None:
+    # The third asset type (commands) round-trips through the canonical GET too.
+    resp = await dev_client.get("/api/wiki/commands/gamma/canonical")
+    assert resp.status_code == 200
+    assert resp.json()["content"] == "---\ndescription: a test command\n---\n\nBody.\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_unparseable_command_is_400_writes_nothing(
+    dev_client, seeded_wiki: Path
+) -> None:
+    # Decision 6 parse-gates BOTH agents and commands. A command fails to parse on
+    # an invalid frontmatter name (commands without frontmatter are tolerated, so a
+    # bad name is the parse failure) — 400 + byte-unchanged on disk, no .bak, and a
+    # path-safe message (parity with the agent parse-gate test).
+    target = seeded_wiki / "commands" / "gamma" / "command.md"
+    before = target.read_text(encoding="utf-8")
+    m = (await dev_client.get("/api/wiki/commands/gamma/canonical")).json()["mtime_ns"]
+    resp = await dev_client.put(
+        "/api/wiki/commands/gamma/canonical",
+        json={"content": "---\nname: ../../etc/passwd\n---\n\nbody\n", "mtime_ns": m},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["reason_code"] == "canonical_unparseable"
+    assert target.read_text(encoding="utf-8") == before  # nothing written
+    assert not target.with_suffix(".md.bak").exists()
+    assert str(seeded_wiki) not in resp.text  # path-safe parse-error message
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_bad_name_is_400(dev_client, seeded_wiki: Path) -> None:
+    # Both the PUT and GET canonical handlers run _validate_name_or_error first.
+    put = await dev_client.put(
+        "/api/wiki/skills/-bad/canonical", json={"content": "# x\n", "mtime_ns": "0"}
+    )
+    assert put.status_code == 400
+    assert put.json()["detail"]["reason_code"] == "invalid_name"
+    get = await dev_client.get("/api/wiki/skills/-bad/canonical")
+    assert get.status_code == 400
+    assert get.json()["detail"]["reason_code"] == "invalid_name"
+
+
+@pytest.mark.asyncio
+async def test_edit_canonical_write_vanished_is_404_no_leak(
+    dev_client, seeded_wiki: Path, monkeypatch
+) -> None:
+    # TOCTOU hardening: if the canonical is removed between the in-lock re-stat and
+    # the write, write_canonical raises FileNotFoundError (which embeds the absolute
+    # wiki path). The handler must convert it to a fixed-message 404 — never a 500
+    # whose traceback would leak the host path.
+    from memtomem.web.routes import wiki_mutations as wm
+
+    m = (await dev_client.get("/api/wiki/skills/alpha/canonical")).json()["mtime_ns"]
+    leaky = seeded_wiki / "skills" / "alpha" / "SKILL.md"
+
+    def _vanish(store, asset_type, name, content):  # noqa: ANN001
+        raise FileNotFoundError(f"wiki has no {asset_type}/{name} canonical at {leaky}")
+
+    monkeypatch.setattr(wm, "write_canonical", _vanish)
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/canonical", json={"content": "# x\n", "mtime_ns": m}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason_code"] == "canonical_absent"
+    assert str(seeded_wiki) not in resp.text  # the absolute path must not leak

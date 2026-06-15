@@ -28,6 +28,14 @@ let _wikiInstallScopeId = ''; // E-3: project picked for install/update ('' = Se
 // holds the in-progress textarea value so a langchange repaint doesn't reset it.
 let _wikiEditing = false;
 let _wikiEditDraft = null;
+// Editor-B (ADR-0027): canonical-edit mode for the open asset. The canonical is
+// artifact-level (NOT per-vendor), so this state lives beside the asset, not the
+// vendor: `_wikiCanonical` caches GET …/canonical ({ content, mtime_ns } or
+// { _error }); `_wikiCanonDraft` keeps the in-progress textarea so a langchange
+// repaint doesn't reset it.
+let _wikiCanonical = null;
+let _wikiCanonEditing = false;
+let _wikiCanonDraft = null;
 
 // Seq guards for overlapping fetches (the innerHTML race rule): a newer load
 // bumps the seq so a slower in-flight response can't paint over it.
@@ -456,6 +464,207 @@ async function _onWikiOverrideConflict(type, name, vendor, draftContent) {
   }
 }
 
+// --- Canonical editor (ADR-0027 Editor-B, dev tier only) --------------------
+// Edit the base CANONICAL (SKILL.md / agent.md / command.md) in place. Unlike
+// the per-vendor override editor, the canonical is ARTIFACT-level: it renders in
+// the detail head (not the per-vendor view), and a successful save re-derives
+// EVERY vendor's diff/lint baseline (render_seed_bytes), so it reloads both the
+// read pane AND the open vendor view. The server parse-gates agents/commands
+// (layout="dir") → a 400 means an unparseable canonical was rejected and nothing
+// was written. Save writes + leaves the wiki dirty; it never commits (the commit
+// affordance is the deferred §3 PR).
+
+function _renderWikiCanonicalEditor() {
+  // Repaints ONLY the #wiki-canonical-editor host (no detail re-render → no focus
+  // loss). Called from _renderWikiDetail (after the host exists), _loadWikiCanonical
+  // (after fetch), and the Edit/Cancel handlers.
+  const host = qs('wiki-canonical-editor');
+  if (!host) return;
+  const cn = _wikiCanonical;
+  // Dev-only, and only once the canonical has loaded (null = still fetching).
+  if (!_wikiDevMode() || !_wikiActive || !cn) { host.innerHTML = ''; return; }
+  const heading = `<h4>${escapeHtml(t('settings.ctx.wiki_canonical_title'))}</h4>`;
+  if (cn._error) {
+    host.innerHTML = '<div class="wiki-section wiki-canonical-editor">'
+      + heading
+      + `<div class="wiki-error">${escapeHtml(cn._error)}</div></div>`;
+    return;
+  }
+  // A well-formed canonical GET always carries a string `content`; anything else
+  // (a malformed/empty body) is not renderable as a read pane — show nothing
+  // rather than the literal "undefined".
+  if (typeof cn.content !== 'string') { host.innerHTML = ''; return; }
+  if (!_wikiCanonEditing) {
+    host.innerHTML = '<div class="wiki-section wiki-canonical-editor">'
+      + heading
+      + `<pre class="wiki-override-pre">${escapeHtml(cn.content)}</pre>`
+      + '<div class="wiki-override-actions">'
+      + '<button type="button" class="btn-ghost" id="wiki-canonical-edit-btn">'
+      + `${escapeHtml(t('settings.ctx.wiki_canonical_edit'))}</button></div>`
+      + `<span class="wiki-seed-hint">${escapeHtml(t('settings.ctx.wiki_canonical_hint'))}</span>`
+      + '</div>';
+    _bindWikiCanonicalEditor();
+    return;
+  }
+  const draft = _wikiCanonDraft != null ? _wikiCanonDraft : cn.content;
+  host.innerHTML = '<div class="wiki-section wiki-canonical-editor">'
+    + heading
+    + '<div class="wiki-conflict-banner" id="wiki-canonical-conflict-banner" hidden></div>'
+    + '<textarea class="wiki-override-area" id="wiki-canonical-content" '
+    + `aria-label="${escapeHtml(t('settings.ctx.wiki_canonical_title'))}" `
+    + `data-mtime-ns="${escapeHtml(String(cn.mtime_ns))}">${escapeHtml(draft)}</textarea>`
+    + '<div class="wiki-override-actions">'
+    + '<button type="button" class="btn-ghost" id="wiki-canonical-cancel-btn">'
+    + `${escapeHtml(t('modal.cancel_btn'))}</button>`
+    + '<button type="button" class="btn-primary" id="wiki-canonical-save-btn">'
+    + `${escapeHtml(t('settings.ctx.wiki_canonical_save'))}</button></div>`
+    + '</div>';
+  _bindWikiCanonicalEditor();
+}
+
+function _bindWikiCanonicalEditor() {
+  const editBtn = qs('wiki-canonical-edit-btn');
+  if (editBtn) {
+    editBtn.addEventListener('click', () => {
+      _wikiCanonEditing = true;
+      _wikiCanonDraft = null;
+      _renderWikiCanonicalEditor();
+    });
+  }
+  const cancelBtn = qs('wiki-canonical-cancel-btn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      _wikiCanonEditing = false;
+      _wikiCanonDraft = null;
+      _renderWikiCanonicalEditor();
+    });
+  }
+  const saveBtn = qs('wiki-canonical-save-btn');
+  if (saveBtn) saveBtn.addEventListener('click', () => { _onWikiCanonicalSave(); });
+}
+
+async function _onWikiCanonicalSave() {
+  if (!_wikiActive) return;
+  const ta = qs('wiki-canonical-content');
+  if (!ta) return;
+  await _saveWikiCanonical(
+    _wikiActive.type, _wikiActive.name, ta.value, ta.dataset.mtimeNs || '0', false,
+  );
+}
+
+async function _saveWikiCanonical(type, name, content, mtimeNs, force) {
+  const url = `/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/canonical`;
+  let res;
+  try {
+    const csrf = await ensureCsrfToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (csrf) headers['X-Memtomem-CSRF'] = csrf;
+    res = await fetch(url, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ content, mtime_ns: mtimeNs, force }),
+    });
+  } catch (err) {
+    showToast(
+      t('settings.ctx.wiki_canonical_save_failed', { error: String((err && err.message) || err) }),
+      'error',
+    );
+    return;
+  }
+  if (res.status === 409) { await _onWikiCanonicalConflict(type, name, content); return; }
+  if (res.status === 503) { showToast(t('settings.ctx.wiki_canonical_busy'), 'error'); return; }
+  if (res.status === 400) {
+    // Parse gate: an unparseable agent/command canonical. Surface the server's
+    // (path-safe) message so the user can fix the frontmatter; nothing was written.
+    showToast(
+      t('settings.ctx.wiki_canonical_parse_failed', { error: await _wikiErrDetail(res) }),
+      'error',
+    );
+    return;
+  }
+  if (!res.ok) {
+    showToast(t('settings.ctx.wiki_canonical_save_failed', { error: await _wikiErrDetail(res) }), 'error');
+    return;
+  }
+  const data = await res.json();
+  // Repaint the HEAD dirty badge from the response without re-listing (a11y: no
+  // list re-render / focus loss — feedback_ctx_a11y_conventions).
+  if (_wikiData) { _wikiData.is_dirty = !!data.wiki_dirty; _renderWikiHead(); }
+  _wikiCanonEditing = false;
+  _wikiCanonDraft = null;
+  if (data.privacy_warning) {
+    showToast(t('settings.ctx.wiki_canonical_privacy_warn', { count: data.privacy_warning }), 'error');
+  } else {
+    showToast(t('settings.ctx.wiki_canonical_saved'), 'success');
+  }
+  // The canonical changed → re-derive the read pane AND every vendor's diff/lint
+  // baseline. Reload the canonical + the open vendor view. Guard against an asset
+  // switch mid-request.
+  if (_wikiActive && _wikiActive.type === type && _wikiActive.name === name) {
+    await _loadWikiCanonical(type, name);
+    if (_wikiVendor) await _loadWikiVendorView(type, name, _wikiVendor);
+  }
+}
+
+async function _onWikiCanonicalConflict(type, name, draftContent) {
+  // The canonical changed on disk between read and save. Fetch the current bytes
+  // so the user can compare, then offer Reload (discard my edits) or Force save
+  // (re-PUT my draft with force; a .bak keeps the on-disk copy).
+  let fresh = null;
+  try {
+    const r = await fetch(`/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/canonical`);
+    if (r.ok) fresh = await r.json();
+  } catch { /* best-effort — the banner still offers reload/force */ }
+  const banner = qs('wiki-canonical-conflict-banner');
+  if (!banner) return; // edit pane gone (asset switched mid-conflict)
+  const freshContent = fresh ? (fresh.content || '') : '';
+  const freshMtime = fresh ? String(fresh.mtime_ns || '0') : '0';
+  banner.hidden = false;
+  banner.innerHTML = '<p class="wiki-conflict-msg" role="alert">'
+    + `${escapeHtml(t('settings.ctx.wiki_canonical_conflict_msg'))}</p>`
+    + `<pre class="wiki-override-pre wiki-conflict-fresh">${escapeHtml(freshContent)}</pre>`
+    + '<div class="wiki-override-actions">'
+    + '<button type="button" class="btn-ghost" id="wiki-canonical-conflict-reload-btn">'
+    + `${escapeHtml(t('settings.ctx.wiki_override_conflict_reload'))}</button>`
+    + '<button type="button" class="btn-danger" id="wiki-canonical-conflict-force-btn">'
+    + `${escapeHtml(t('settings.ctx.wiki_override_conflict_force'))}</button></div>`;
+  const reloadBtn = qs('wiki-canonical-conflict-reload-btn');
+  if (reloadBtn) {
+    reloadBtn.addEventListener('click', () => {
+      const ta = qs('wiki-canonical-content');
+      if (ta) { ta.value = freshContent; ta.dataset.mtimeNs = freshMtime; }
+      banner.hidden = true;
+      banner.innerHTML = '';
+    });
+  }
+  const forceBtn = qs('wiki-canonical-conflict-force-btn');
+  if (forceBtn) {
+    forceBtn.addEventListener('click', () => {
+      _saveWikiCanonical(type, name, draftContent, freshMtime, true);
+    });
+  }
+}
+
+async function _loadWikiCanonical(type, name) {
+  // Dev-tier only: the canonical GET mounts in dev. Fetch the base canonical
+  // bytes for the artifact-level read pane, then repaint just that section. An
+  // asset switch mid-fetch is dropped via the _wikiActive identity guard (the
+  // canonical is asset-scoped, not vendor-scoped — the _wikiDetailSeq guard the
+  // vendor view uses is the wrong axis here).
+  if (!_wikiDevMode()) { _wikiCanonical = null; return; }
+  let next;
+  try {
+    const r = await fetch(`/api/wiki/${encodeURIComponent(type)}/${encodeURIComponent(name)}/canonical`);
+    next = r.ok ? await r.json() : { _error: await _wikiErrDetail(r) };
+  } catch (err) {
+    if (_wikiIsAbort(err)) return;
+    next = { _error: String((err && err.message) || err) };
+  }
+  if (!_wikiActive || _wikiActive.type !== type || _wikiActive.name !== name) return;
+  _wikiCanonical = next;
+  _renderWikiCanonicalEditor();
+}
+
 // --- Install / update into a project (E-3, dev tier only) -------------------
 // Web parity of `mm context install` / `mm context update`: these READ the
 // host-global wiki but WRITE into a project's .memtomem/, so — unlike the wiki
@@ -613,6 +822,17 @@ function _wikiStashEditDraft() {
   if (ta) _wikiEditDraft = ta.value;
 }
 
+function _wikiStashCanonDraft() {
+  // Editor-B counterpart of _wikiStashEditDraft: capture the in-progress canonical
+  // edit before _renderWikiDetail's el.innerHTML wipes the textarea (e.g. a
+  // langchange repaint), so the draft survives into _renderWikiCanonicalEditor's
+  // reseed. The canonical editor lives in the detail head, only rebuilt by
+  // _renderWikiDetail, so this is called there (not in _renderWikiVendorView).
+  if (!_wikiCanonEditing) return;
+  const ta = qs('wiki-canonical-content');
+  if (ta) _wikiCanonDraft = ta.value;
+}
+
 function _renderWikiVendorView() {
   const view = qs('wiki-vendor-view');
   if (!view) return;
@@ -629,9 +849,10 @@ function _renderWikiVendorView() {
 function _renderWikiDetail() {
   const el = qs('wiki-detail');
   if (!el || !_wikiActive) return;
-  // Stash any in-progress override edit BEFORE el.innerHTML wipes the textarea
-  // (e.g. a langchange repaint), so the draft survives the rebuild below.
+  // Stash any in-progress override / canonical edit BEFORE el.innerHTML wipes the
+  // textareas (e.g. a langchange repaint), so the drafts survive the rebuild below.
   _wikiStashEditDraft();
+  _wikiStashCanonDraft();
   const { type, name } = _wikiActive;
   const item = ((_wikiData && _wikiData.items) || []).find(
     (i) => i.type === type && i.name === name,
@@ -654,9 +875,16 @@ function _renderWikiDetail() {
     html += '</select></label>';
   }
   html += _renderWikiInstallAction();
+  // Editor-B mount: the canonical editor is artifact-level (vendor-independent),
+  // so it lives in the detail head, below the install action and above the
+  // per-vendor diff/lint/override view. Filled async by _loadWikiCanonical (and
+  // repainted from cache on langchange via the _renderWikiCanonicalEditor call
+  // below).
+  html += '<div id="wiki-canonical-editor"></div>';
   html += '</div><div id="wiki-vendor-view"></div>';
   el.innerHTML = html;
   show(el);
+  _renderWikiCanonicalEditor();
   _renderWikiVendorView();
   _bindWikiInstallAction();
   const select = qs('wiki-vendor-select');
@@ -716,6 +944,11 @@ async function _loadWikiVendorView(type, name, vendor) {
 async function loadWikiDetail(type, name) {
   _wikiActive = { type, name };
   _wikiView = null;
+  // Switching assets abandons any in-progress canonical edit and the cached
+  // canonical (it belongs to the previous asset).
+  _wikiCanonical = null;
+  _wikiCanonEditing = false;
+  _wikiCanonDraft = null;
   const listEl = qs('wiki-list');
   if (listEl) {
     listEl.querySelectorAll('.wiki-item').forEach((b) => {
@@ -732,6 +965,9 @@ async function loadWikiDetail(type, name) {
   // options (no-op when already cached or not in dev mode).
   if (_wikiDevMode()) await _wikiEnsureProjects();
   _renderWikiDetail();
+  // Editor-B: load the artifact-level canonical read pane (dev-tier; the GET only
+  // mounts in dev). Independent of the per-vendor view below.
+  if (_wikiDevMode()) await _loadWikiCanonical(type, name);
   if (_wikiVendor) await _loadWikiVendorView(type, name, _wikiVendor);
 }
 
@@ -743,6 +979,9 @@ async function loadWiki() {
   _wikiListAbort = (typeof AbortController === 'function') ? new AbortController() : null;
   _wikiActive = null;
   _wikiView = null;
+  _wikiCanonical = null;
+  _wikiCanonEditing = false;
+  _wikiCanonDraft = null;
   _wikiInstallScopeId = _wikiActiveScopeId();
   const detailEl = qs('wiki-detail');
   if (detailEl) { hide(detailEl); detailEl.innerHTML = ''; }

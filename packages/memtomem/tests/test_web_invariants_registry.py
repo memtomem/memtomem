@@ -122,6 +122,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "tags.rename_tag",
         "tags.run_auto_tag",
         "watchdog.watchdog_run_now",
+        "wiki_mutations.edit_wiki_canonical",
         "wiki_mutations.edit_wiki_override",
         "wiki_mutations.seed_wiki_override",
     }
@@ -245,6 +246,16 @@ _REDACTION_EXEMPT: dict[str, str] = {
     # false-pass. The wiki is a single-curator host-global store with no push
     # remote, so a hard gate is over-reach — see ADR-0027 §8 / §D-E.
     "wiki_mutations.edit_wiki_override": (
+        "user payload, but privacy is a soft non-blocking warning (ADR-0027 §D-E) — "
+        "the write is never refused, so it is not _REDACTION_PROTECTED (which means "
+        "refuse-on-hit); single-curator host-global store, no push remote"
+    ),
+    # Wiki canonical editor (ADR-0027 Editor-B): same posture as the override
+    # editor above — a user payload with a soft, non-blocking privacy.scan
+    # warning (D-E). The write is never refused, so it is _REDACTION_EXEMPT, not
+    # _REDACTION_PROTECTED (which means refuse-on-hit and would be a coverage
+    # false-pass for a deliberately non-refusing handler).
+    "wiki_mutations.edit_wiki_canonical": (
         "user payload, but privacy is a soft non-blocking warning (ADR-0027 §D-E) — "
         "the write is never refused, so it is not _REDACTION_PROTECTED (which means "
         "refuse-on-hit); single-curator host-global store, no push remote"
