@@ -357,6 +357,32 @@ async def test_mixed_result_failed_phase_does_not_stop_later_phases(client, cwd_
 
 
 @pytest.mark.asyncio
+async def test_privacy_block_422_message_is_path_free(client, cwd_root: Path) -> None:
+    """#1385 finding 1: the privacy-block 422 envelope must not echo the
+    absolute canonical path. The engine's ``PrivacyScanError.message`` ends
+    with ``… remove the secret from {blocked.path} …`` — a ``.resolve()``'d
+    host path under ``$HOME`` (leaking the OS username over loopback). The
+    sync cores must raise a fixed, path-free detail and keep the full message
+    only on the chained exception (server-side traceback)."""
+    _seed_artifacts(cwd_root)
+    (cwd_root / ".memtomem" / "agents" / "leaky.md").write_bytes(_SECRET_AGENT_BODY)
+
+    resp = await client.post("/api/context/sync-all")
+    assert resp.status_code == 200, resp.text
+    error = _phase(resp.json(), "agents")["error"]
+
+    assert error["reason_code"] == "privacy_blocked"
+    assert error["http_status"] == 422
+    assert "privacy" in error["message"].lower()
+    # The fix: the privacy-block detail carries no absolute canonical path
+    # (in either symlink form). (A settings phase's write ``target`` is a
+    # separate, intentional path surface and is out of scope here.)
+    assert str(cwd_root) not in error["message"]
+    assert str(cwd_root.resolve()) not in error["message"]
+    assert "leaky.md" not in error["message"]
+
+
+@pytest.mark.asyncio
 async def test_settings_error_rolls_up_to_failed_phase(client, cwd_root: Path) -> None:
     """Settings failures are in-band result rows, not exceptions: the phase
     status rolls up to ``failed`` with the rows embedded (no ``error`` key),

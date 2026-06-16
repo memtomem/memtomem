@@ -27,8 +27,16 @@ from fastapi.testclient import TestClient
 from memtomem.context.privacy_scan import FileScan, PrivacyBlockedError
 
 
-_FAKE_BLOCKED = FileScan(Path("/tmp/p/.memtomem/agents/leak.md"), "blocked", 1)
-_FAKE_MSG = "Gate A: leak.md contains 1 privacy pattern hit(s); fan-out rejected."
+_LEAK_PATH = "/tmp/p/.memtomem/agents/leak.md"
+_FAKE_BLOCKED = FileScan(Path(_LEAK_PATH), "blocked", 1)
+# Mirror the real engine remediation, which ends with the absolute canonical
+# path (``privacy_scan.py``). The web 422 must NOT echo it (#1385 finding 1);
+# the MCP tool surface (a different trust boundary — the result goes to the
+# calling agent, not a loopback browser) still round-trips the full message.
+_FAKE_MSG = (
+    "Gate A: leak.md contains 1 privacy pattern hit(s); fan-out rejected. "
+    f"Or remove the secret from {_LEAK_PATH} before re-running sync."
+)
 
 
 def _raise_privacy_block(*args, **kwargs):
@@ -67,9 +75,12 @@ class TestWebSyncTranslatesTo422:
         res = client.post("/context/agents/sync", json={})
 
         assert res.status_code == 422, res.text
-        # FastAPI's default HTTPException renders as ``{"detail": "..."}``;
-        # the formatted message must round-trip so the UI can surface it.
-        assert _FAKE_MSG in res.json()["detail"]
+        # FastAPI's default HTTPException renders as ``{"detail": "..."}``; the
+        # detail is now a fixed, path-free string (the engine message embeds the
+        # absolute canonical path, which must not reach the loopback dashboard).
+        detail = res.json()["detail"]
+        assert _LEAK_PATH not in detail  # #1385 finding 1: host path never leaks
+        assert "secret was detected" in detail  # fixed, path-free PRIVACY_BLOCK_DETAIL
 
     def test_commands_sync_returns_422(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from memtomem.web.routes import context_commands
@@ -80,7 +91,9 @@ class TestWebSyncTranslatesTo422:
         res = client.post("/context/commands/sync", json={})
 
         assert res.status_code == 422, res.text
-        assert _FAKE_MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAK_PATH not in detail  # #1385 finding 1: host path never leaks
+        assert "secret was detected" in detail  # fixed, path-free PRIVACY_BLOCK_DETAIL
 
     def test_skills_sync_returns_422(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from memtomem.web.routes import context_skills
@@ -91,7 +104,9 @@ class TestWebSyncTranslatesTo422:
         res = client.post("/context/skills/sync")
 
         assert res.status_code == 422, res.text
-        assert _FAKE_MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAK_PATH not in detail  # #1385 finding 1: host path never leaks
+        assert "secret was detected" in detail  # fixed, path-free PRIVACY_BLOCK_DETAIL
 
 
 class TestMcpContextToolTranslates:

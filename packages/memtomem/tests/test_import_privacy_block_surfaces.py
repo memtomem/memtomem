@@ -12,7 +12,9 @@ but the three web import routes caught only ``TimeoutError`` — so a real
 secret inside a skill the user clicked "Import" on fell through to the
 generic ``Exception`` handler and came back as
 ``{"detail": "Internal server error"}`` (HTTP 500). These pin the 422
-translation across all three artifact kinds plus the single-item route.
+translation across all three artifact kinds plus the single-item route, and
+that the absolute source path / offending filename never reach the 422
+envelope — the route raises a fixed, path-free detail (#1385 finding 1).
 """
 
 from __future__ import annotations
@@ -24,10 +26,16 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-# Echoes the project_shared block wording; never carries the matched bytes
-# (the ``never echo secrets`` contract — only the hit count + file name).
+# The REAL Gate A block message embeds the absolute source path (the
+# ``… remove the secret from {src} …`` clause, ``_gate_a.py``) plus the
+# offending filename. Reproduce both so the assertions pin that NEITHER reaches
+# the 422 envelope (#1385 finding 1) — the route raises a fixed, path-free detail
+# and keeps the full Gate A text only on the chained exception (server logs).
+_LEAKY_PATH = "/tmp/p/.claude/skills/leak/SKILL.md"
 _MSG = (
-    "Gate A: SKILL.md contains 2 privacy pattern hit(s); import to scope='project_shared' rejected."
+    "Gate A: SKILL.md contains 2 privacy pattern hit(s); import to "
+    f"scope='project_shared' rejected. Retry with --scope=user, or remove the "
+    f"secret from {_LEAKY_PATH} first."
 )
 
 
@@ -69,7 +77,10 @@ class TestWebImportTranslatesTo422:
         res = client.post("/context/skills/import", json={})
 
         assert res.status_code == 422, res.text
-        assert _MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAKY_PATH not in detail  # absolute source path never leaks
+        assert "SKILL.md" not in detail  # nor the offending filename
+        assert "secret was detected" in detail  # fixed, path-free import detail
 
     def test_skills_single_import_returns_422(self, monkeypatch) -> None:
         from memtomem.web.routes import context_skills
@@ -80,7 +91,10 @@ class TestWebImportTranslatesTo422:
         res = client.post("/context/skills/leak/import", json={})
 
         assert res.status_code == 422, res.text
-        assert _MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAKY_PATH not in detail  # absolute source path never leaks
+        assert "SKILL.md" not in detail  # nor the offending filename
+        assert "secret was detected" in detail  # fixed, path-free import detail
 
     def test_agents_section_import_returns_422(self, monkeypatch) -> None:
         from memtomem.web.routes import context_agents
@@ -91,7 +105,10 @@ class TestWebImportTranslatesTo422:
         res = client.post("/context/agents/import", json={})
 
         assert res.status_code == 422, res.text
-        assert _MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAKY_PATH not in detail  # absolute source path never leaks
+        assert "SKILL.md" not in detail  # nor the offending filename
+        assert "secret was detected" in detail  # fixed, path-free import detail
 
     def test_agents_single_import_returns_422(self, monkeypatch) -> None:
         from memtomem.web.routes import context_agents
@@ -102,7 +119,10 @@ class TestWebImportTranslatesTo422:
         res = client.post("/context/agents/leak/import", json={})
 
         assert res.status_code == 422, res.text
-        assert _MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAKY_PATH not in detail  # absolute source path never leaks
+        assert "SKILL.md" not in detail  # nor the offending filename
+        assert "secret was detected" in detail  # fixed, path-free import detail
 
     def test_commands_section_import_returns_422(self, monkeypatch) -> None:
         from memtomem.web.routes import context_commands
@@ -113,7 +133,10 @@ class TestWebImportTranslatesTo422:
         res = client.post("/context/commands/import", json={})
 
         assert res.status_code == 422, res.text
-        assert _MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAKY_PATH not in detail  # absolute source path never leaks
+        assert "SKILL.md" not in detail  # nor the offending filename
+        assert "secret was detected" in detail  # fixed, path-free import detail
 
     def test_commands_single_import_returns_422(self, monkeypatch) -> None:
         from memtomem.web.routes import context_commands
@@ -124,4 +147,7 @@ class TestWebImportTranslatesTo422:
         res = client.post("/context/commands/leak/import", json={})
 
         assert res.status_code == 422, res.text
-        assert _MSG in res.json()["detail"]
+        detail = res.json()["detail"]
+        assert _LEAKY_PATH not in detail  # absolute source path never leaks
+        assert "SKILL.md" not in detail  # nor the offending filename
+        assert "secret was detected" in detail  # fixed, path-free import detail

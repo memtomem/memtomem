@@ -31,7 +31,7 @@ from memtomem.context.skills import (
 )
 from memtomem.config import TargetScope
 from memtomem.web.routes._confirm import host_write_gate
-from memtomem.web.routes._errors import _error
+from memtomem.web.routes._errors import PRIVACY_BLOCK_DETAIL, PRIVACY_BLOCK_IMPORT_DETAIL, _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
 from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
@@ -674,8 +674,10 @@ async def _sync_skills_core(
             force_unsafe=force_unsafe,
         )
     except PrivacyScanError as exc:
+        # Path-free detail — ``exc.message`` embeds the absolute canonical path
+        # (#1385 finding 1). The chained ``exc`` keeps the full text for logs.
         raise SyncPhaseError(
-            422, exc.message, error_kind="validation", reason_code="privacy_blocked"
+            422, PRIVACY_BLOCK_DETAIL, error_kind="validation", reason_code="privacy_blocked"
         ) from exc
     return {
         "generated": [
@@ -852,7 +854,7 @@ async def import_skills(
         # and the MCP import tool gives this exact exception, rather than letting
         # it fall through to the generic 500 handler (the PrivacyScanError
         # docstring's stated intent: non-CLI surfaces translate, never 500).
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -921,7 +923,7 @@ async def import_skill(
         raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see import_skills).
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
         raise _error(404, "missing", f"No runtime skill named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)
@@ -1004,7 +1006,7 @@ async def import_skill_to_user(
         # Defensive: the user dest is force-bypassable, so Gate A raises a
         # ClickException only on a project_shared dest — which this route never
         # uses. Translate to 422 anyway rather than risk a generic 500 (#1378).
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
         raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
     return _import_payload(
