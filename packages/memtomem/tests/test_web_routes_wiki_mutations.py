@@ -203,6 +203,59 @@ async def test_seed_wiki_absent_is_404(dev_client, wiki_root: Path) -> None:  # 
     assert str(wiki_root) not in resp.text
 
 
+@pytest.mark.asyncio
+async def test_seed_timeout_is_503(dev_client, seeded_wiki: Path, monkeypatch) -> None:
+    # #1385 finding 2: the seed mutator now takes _gateway_lock under a 60s
+    # budget like the other three wiki mutators, so a lock-acquire timeout maps
+    # to 503 busy instead of running lock-free (last-writer-wins vs a concurrent
+    # editor PUT). Pre-fix the route never entered asyncio.timeout, so the
+    # patched boom had no effect and the seed returned 200.
+    from memtomem.web.routes import wiki_mutations as wm
+
+    class _BoomTimeout:
+        def __init__(self, *a, **k) -> None: ...
+
+        async def __aenter__(self):
+            raise TimeoutError
+
+        async def __aexit__(self, *a) -> bool:
+            return False
+
+    monkeypatch.setattr(wm.asyncio, "timeout", lambda *a, **k: _BoomTimeout())
+    resp = await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error_kind"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_seed_runs_synchronously_inside_lock(
+    dev_client, seeded_wiki: Path, monkeypatch
+) -> None:
+    # #1385 finding 2 (Codex gate): the seed write must run SYNCHRONOUSLY inside
+    # _gateway_lock, mirroring edit_wiki_override — NOT via asyncio.to_thread. A
+    # to_thread offload would, on an asyncio.timeout, release the lock while the
+    # worker thread kept writing the override past it, letting a second mutator
+    # race the still-running seed. Pinned deterministically by the executing
+    # thread (no fragile timing): a to_thread offload runs on a pool worker,
+    # the synchronous call runs on the event loop's (main) thread.
+    import threading
+
+    from memtomem.web.routes import wiki_mutations as wm
+
+    real_seed = wm.seed_override
+    ran_on_main: dict[str, bool] = {}
+
+    def _record_thread(*args, **kwargs):
+        ran_on_main["value"] = threading.current_thread() is threading.main_thread()
+        return real_seed(*args, **kwargs)
+
+    monkeypatch.setattr(wm, "seed_override", _record_thread)
+    resp = await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+
+    assert resp.status_code == 200, resp.text
+    assert ran_on_main.get("value") is True  # synchronous, inside the lock
+
+
 # ── tier gating ────────────────────────────────────────────────────────────
 
 
