@@ -304,6 +304,61 @@ class TestUnreadableFileFailsClosed:
             )
         assert "leak.sh" in exc_info.value.message
 
+    def test_unreadable_subtree_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1385 finding 6: an unreadable SUBDIRECTORY (enumeration-level OSError)
+        # must hard-abort the scan. ``Path.rglob`` suppressed the per-directory
+        # OSError, so the subtree's files were never inspected yet still sat in
+        # the staged tree to be promoted; the fail-closed walker propagates the
+        # error to a PrivacyScanReadError. (rglob uses ``os.scandir``, not
+        # ``Path.iterdir`` — so pre-fix this patch is a no-op and the scan
+        # completes silently, which is exactly the hole being closed.)
+        skill_root = _seed_skill(tmp_path / "foo")
+        unreadable = skill_root / "scripts"
+        real_iterdir = Path.iterdir
+
+        def explode(self: Path):
+            if self == unreadable:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", explode)
+
+        with pytest.raises(PrivacyScanReadError) as exc_info:
+            scan_artifact_tree(
+                skill_root,
+                surface="t",
+                scope="project_shared",
+                project_root=tmp_path,
+            )
+        assert "scripts" in exc_info.value.message
+        # The unreadable path is carried on the typed error (caller rollback).
+        assert exc_info.value.path == unreadable
+
+    @pytest.mark.requires_symlinks
+    def test_symlinked_directory_not_descended(self, tmp_path: Path) -> None:
+        # #1385 finding 6 (Codex gate): the fail-closed walker must preserve the
+        # prior ``rglob`` file set — a symlinked DIRECTORY is NOT descended.
+        # ``scan_artifact_tree`` is not always a fresh copy_tree_atomic output:
+        # transfer/migrate staging preserves symlinks as links, so following one
+        # would scan out-of-tree bytes that are NOT being promoted (and could
+        # loop a cycle). The symlink itself is promoted as a link, not its target.
+        skill_root = _seed_skill(tmp_path / "foo")  # all clean
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.md").write_text(f"{SECRET}\n", encoding="utf-8")
+        (skill_root / "linkdir").symlink_to(outside, target_is_directory=True)
+
+        result = scan_artifact_tree(
+            skill_root, surface="t", scope="project_shared", project_root=tmp_path
+        )
+        # The out-of-tree target's secret is neither scanned nor blocked — same
+        # file set as the old ``rglob`` walk (which never recursed links).
+        scanned = {d.path for d in result.decisions}
+        assert (outside / "secret.md") not in scanned
+        assert result.blocked == []
+
 
 class TestRaiseOrCollect:
     def test_project_shared_raises(self) -> None:

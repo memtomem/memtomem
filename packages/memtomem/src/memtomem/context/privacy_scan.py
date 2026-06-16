@@ -33,6 +33,7 @@ divergence stabilises (see PR-E3 plan §2d Implementer-side note 9).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -133,6 +134,34 @@ class ScanResult(NamedTuple):
     blocked: list[FileScan]
 
 
+def _iter_scannable_artifact_files(root: Path) -> Iterator[Path]:
+    """Yield every regular file under *root*, failing CLOSED on enumeration error.
+
+    Unlike :meth:`Path.rglob`, which SUPPRESSES per-directory ``OSError`` (an
+    unreadable subtree just vanishes from the results — yet the staged tree
+    still carries its bytes to be promoted), this walker lets any ``iterdir``
+    ``OSError`` propagate so :func:`scan_artifact_tree` can raise
+    :class:`PrivacyScanReadError` instead of fanning out an unscanned subtree.
+    This is the directory-axis sibling of #1381's skills-import enumeration
+    guard (:func:`memtomem.context.skills._iter_scannable_skill_files`).
+
+    Symlink handling matches the ``sorted(p for p in src.rglob("*") if
+    p.is_file())`` this replaces — NOT #1381's copier-mirroring walker. A
+    symlinked DIRECTORY is not descended: ``rglob`` never recurses links, and
+    ``scan_artifact_tree`` is not always a fresh ``copy_tree_atomic`` output —
+    transfer/copy and migrate-EXDEV staging preserve symlinks as links
+    (``transfer.py`` / ``migrate.py``), so following one could escape the staged
+    tree (scanning bytes that are NOT being promoted) or loop a symlink cycle.
+    A symlink to a FILE is still yielded — ``is_file()`` follows it, exactly as
+    the old ``p.is_file()`` filter did.
+    """
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir() and not entry.is_symlink():
+            yield from _iter_scannable_artifact_files(entry)
+        elif entry.is_file():
+            yield entry
+
+
 def scan_artifact_tree(
     src: Path,
     *,
@@ -199,7 +228,23 @@ def scan_artifact_tree(
         ``blocked`` convenience subset. Callers branch on
         ``result.blocked`` and ``scope`` to decide raise-vs-skip.
     """
-    files = [src] if src.is_file() else sorted(p for p in src.rglob("*") if p.is_file())
+    try:
+        files = [src] if src.is_file() else sorted(_iter_scannable_artifact_files(src))
+    except OSError as exc:
+        # Enumeration failure (an unreadable directory). ``Path.rglob`` silently
+        # suppresses per-directory ``OSError`` — the unreadable subtree would
+        # vanish from the scan, its files never inspected yet still present in
+        # the staged tree to be promoted (#1385 finding 6 — the directory-axis
+        # sibling of the per-file read guard below). Fail closed identically.
+        bad = Path(exc.filename) if exc.filename else src
+        raise PrivacyScanReadError(
+            f"Gate A: cannot enumerate {bad} (errno={exc.errno}); refusing to "
+            f"fan-out / migrate to scope='{scope}'. An unreadable directory "
+            "cannot be scanned for secrets — fix the permission or remove it "
+            "before re-running.",
+            path=bad,
+            scope=scope,
+        ) from exc
     decisions: list[FileScan] = []
     audit_context_base: dict[str, object] = {"kind": "sync", "scope": scope}
     if project_root is not None:
