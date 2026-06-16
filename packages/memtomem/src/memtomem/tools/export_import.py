@@ -285,7 +285,13 @@ async def import_chunks(
 
     imported = failed = 0
     if to_upsert:
-        contents = [c.content for c in to_upsert]
+        # Embed ``retrieval_content`` (heading-hierarchy prefix + body), matching
+        # what the index engine embeds at ingest time (``IndexEngine`` uses
+        # ``c.retrieval_content``). Embedding plain ``c.content`` here would store
+        # a *different* vector for a chunk than the one it would get if indexed
+        # natively, so the same content_hash would retrieve differently after an
+        # export -> import roundtrip.
+        contents = [c.retrieval_content for c in to_upsert]
         try:
             embeddings = await embedder.embed_texts(contents)
             for chunk, emb in zip(to_upsert, embeddings):
