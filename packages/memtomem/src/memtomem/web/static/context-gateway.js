@@ -3112,18 +3112,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         break;
       }
       if (!resp.ok) {
-        // A per-phase HTTP error response (e.g. a project_shared privacy-block
-        // 422, or a transient 5xx) is recoverable for the RUN: the server is up
-        // and the OTHER artifact types have no issue, so they must still sync.
-        // Mirror the backend ``/sync-all`` per-phase isolation ("Per-phase
-        // report, NOT cross-type all-or-nothing") instead of the all-or-nothing
-        // this client loop used to do — a single secret-bearing skill no longer
-        // strands every later type as ``not_run`` (#1396). Record the failed
-        // phase and CONTINUE; only a transport failure (``fetch`` threw, above)
-        // aborts, since a dead connection would just fail the siblings too.
-        // ``failed`` holds the FIRST failure — its reason drives the toast and
-        // gates the settings phase; the per-phase summary shows every ``failed``
-        // row, so the toast's failed-phase list is derived from ``phaseStates``.
+        // A per-phase HTTP error (e.g. a project_shared privacy-block 422) is
+        // recoverable for the run: the other types must still sync, so mirror
+        // the backend ``/sync-all`` per-phase isolation — CONTINUE rather than
+        // abort the whole fan-out (only a transport failure, above, aborts). The
+        // FIRST failure drives the toast reason + gates settings; the failed
+        // list comes from ``phaseStates`` (#1396).
         const reason = await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`);
         if (!failed) failed = { phase: typ, reason };
         setPhase(typ, 'failed');
@@ -3185,13 +3179,22 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       setPhase('settings', 'syncing');
       let settingsResp;
       try {
+        // Inline the CSRF headers at the call site (rather than the shared
+        // run-level ``headers`` var): this phase's fetch sits beyond the
+        // invariant guard's binding-lookback window, so thread the token here.
+        // ``csrf`` is the run-level token bound above.
         settingsResp = await fetch(
           _ctxWithTargetScope('/api/context/settings/sync', {
             scopeId: syncAllScopeId,
             scopeResolved: true,
             targetScope: syncAllTier,
           }),
-          { method: 'POST', headers },
+          {
+            method: 'POST',
+            headers: csrf
+              ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+              : { 'Content-Type': 'application/json' },
+          },
         );
       } catch (err) {
         failed = { phase: 'settings', reason: err.message };
