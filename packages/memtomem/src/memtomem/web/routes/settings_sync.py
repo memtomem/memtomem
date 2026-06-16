@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from memtomem.config import TargetScope
+from memtomem.context._atomic import _file_lock, _lock_path_for
 from memtomem.context.privacy_scan import (
     PrivacyBlockedError,
     format_scan_block_message,
@@ -21,6 +22,7 @@ from memtomem.context.privacy_scan import (
 )
 from memtomem.context.projects import compute_scope_id
 from memtomem.context.settings import (
+    _SETTINGS_LOCK_BUDGET_S,
     CANONICAL_SETTINGS_FILE,
     resolve_scope_path,
     _rule_content_equal,
@@ -86,6 +88,56 @@ def _rule_hash(rule: dict) -> str:
 def _mtime_ns(path: Path) -> str | None:
     """Return an mtime token safe for JSON clients, or ``None`` if missing."""
     return str(path.stat().st_mtime_ns) if path.is_file() else None
+
+
+def _locked_cas_write(
+    path: Path, expected_mtime_ns: int | None, doc: dict
+) -> tuple[bool, int | None]:
+    """Commit *doc* to *path* under the cross-process sidecar ``_file_lock``,
+    but only if *path*'s ``st_mtime_ns`` still equals *expected_mtime_ns*
+    (captured at the route's unlocked read). Returns ``(wrote, current_mtime)``:
+    ``(False, current)`` when the file changed under us (caller → 409 stale),
+    ``(True, new_mtime)`` after a successful write.
+
+    The inline rule routes (resolve / delete / promote) hold only the
+    in-process ``_gateway_lock``, which serializes web writers but is invisible
+    to a separate-process writer. ``generate_all_settings`` (the CLI/MCP
+    settings sync) and ``apply_hook_copy`` take the per-file sidecar
+    ``_file_lock`` across their read-merge-write of these SAME files; without
+    participating, a lock-free ``os.replace`` here could land between such a
+    writer's read and write (or vice versa) and silently drop one side's hook
+    rule (#1123 B3-3 shape). Holding the lock across the recheck + write makes
+    the mtime compare-and-swap atomic against every lock-respecting writer: a
+    change captured at the unlocked read is detected and refused (no clobber);
+    a change after our locked recheck cannot occur while we hold the lock.
+
+    Run via ``asyncio.to_thread`` so the bounded ``portalocker`` wait never
+    stalls the event loop (the #1145 shape — mirrors ``apply_settings_sync`` /
+    ``copy_hook_to_project``). ``expected_mtime_ns=None`` means the file was
+    absent at read time (a fresh canonical create); a file appearing
+    cross-process between the read and the lock is then also caught.
+    """
+    with _file_lock(_lock_path_for(path), timeout=_SETTINGS_LOCK_BUDGET_S):
+        current = path.stat().st_mtime_ns if path.is_file() else None
+        if current != expected_mtime_ns:
+            return False, current
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, doc)
+        return True, path.stat().st_mtime_ns
+
+
+def _stale_mtime_response(current_mtime_ns: int | None) -> JSONResponse:
+    """409 envelope for a compare-and-swap that lost to a concurrent writer."""
+    return JSONResponse(
+        status_code=409,
+        content={
+            "status": "aborted",
+            "reason": "Target file was modified by another process. Retry.",
+            "mtime_ns": (str(current_mtime_ns) if current_mtime_ns is not None else None),
+            "error_kind": "conflict",
+            "reason_code": "stale_mtime",
+        },
+    )
 
 
 def _serialize_duplicate_tiers(duplicates: list[DuplicateTier]) -> list[dict]:
@@ -658,29 +710,21 @@ async def resolve_conflict(
                     if not replaced:
                         raise _error(404, "missing", f"Rule '{label}' not found in target")
 
-                # mtime check before write — protects against cross-process
-                # writers (CLI, manual edit) that the in-process lock can't see.
-                # Echo the current ``mtime_ns`` on abort so clients can refresh
-                # local state without an extra round-trip — HTTP 409 with the
-                # same body shape as the Skills/Commands/Agents stale-write
-                # envelope (the comment used to CLAIM that parity while the
-                # route returned 200, #1229).
-                current_mtime_ns = target_path.stat().st_mtime_ns
-                if current_mtime_ns != mtime_ns:
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "status": "aborted",
-                            "reason": "Target file was modified by another process. Retry.",
-                            "mtime_ns": str(current_mtime_ns),
-                            "error_kind": "conflict",
-                            "reason_code": "stale_mtime",
-                        },
-                    )
-
                 target_hooks[body.event] = rules
                 target["hooks"] = target_hooks
-                _write_json(target_path, target)
+                # Commit under the cross-process sidecar lock with an mtime
+                # compare-and-swap (``mtime_ns`` captured at the read above).
+                # The in-process ``_gateway_lock`` does not serialize a separate
+                # ``mm context sync`` writing this same file: a cross-process
+                # write landing after our read is detected here and refused
+                # (409) — HTTP 409 with the Skills/Commands/Agents stale-write
+                # envelope shape (#1229). Offloaded so the portalocker wait
+                # never stalls the event loop (#1145).
+                wrote, current_mtime_ns = await asyncio.to_thread(
+                    _locked_cas_write, target_path, mtime_ns, target
+                )
+                if not wrote:
+                    return _stale_mtime_response(current_mtime_ns)
                 return {
                     "status": "ok",
                     "reason": f"Rule '{label}' replaced with memtomem's version",
@@ -827,6 +871,10 @@ async def delete_target_rule(
                 )
                 if stale:
                     return JSONResponse(status_code=409, content=stale)
+                # mtime baseline for the locked compare-and-swap below, captured
+                # at this read (the freshness check above compares the CLIENT's
+                # mtime, not ours).
+                target_mtime_ns = target_path.stat().st_mtime_ns
                 target = _load_settings_record(target_path, label="Target")
                 match = _target_rule_for_action(
                     target,
@@ -844,7 +892,15 @@ async def delete_target_rule(
                 else:
                     target_hooks.pop(body.event, None)
                 target["hooks"] = target_hooks
-                _write_json(target_path, target)
+                # Cross-process sidecar lock + mtime CAS: a concurrent
+                # ``mm context sync`` writing this target between our read and
+                # write must not be silently clobbered (the in-process
+                # ``_gateway_lock`` can't see it).
+                wrote, current_mtime_ns = await asyncio.to_thread(
+                    _locked_cas_write, target_path, target_mtime_ns, target
+                )
+                if not wrote:
+                    return _stale_mtime_response(current_mtime_ns)
                 return _ok_envelope(
                     reason=f"Rule '{_rule_label(body.event, body.matcher)}' deleted from target",
                     target_path=target_path,
@@ -943,6 +999,12 @@ async def promote_target_rule(
                         "canonical_mtime_ns": _mtime_ns(canonical_path),
                     }
 
+                # mtime baseline for the locked compare-and-swap below (``None``
+                # when the canonical does not exist yet — a fresh create the CAS
+                # still guards against a cross-process file appearing).
+                canonical_mtime_ns = (
+                    canonical_path.stat().st_mtime_ns if canonical_path.is_file() else None
+                )
                 if canonical_path.is_file():
                     canonical = _load_settings_record(canonical_path, label="Canonical")
                 else:
@@ -977,8 +1039,17 @@ async def promote_target_rule(
                 event_rules.append(rule)
                 canonical_hooks[body.event] = event_rules
                 canonical["hooks"] = canonical_hooks
-                canonical_path.parent.mkdir(parents=True, exist_ok=True)
-                _write_json(canonical_path, canonical)
+                # Cross-process sidecar lock + mtime CAS on the CANONICAL file:
+                # ``apply_hook_copy`` (a separate-process ``mm context`` hook
+                # copy) does a locked read-merge-write of this same canonical,
+                # so a lock-free write here could drop its appended rule. The
+                # CAS (baseline captured at the canonical read above) refuses
+                # rather than clobber.
+                wrote, current_mtime_ns = await asyncio.to_thread(
+                    _locked_cas_write, canonical_path, canonical_mtime_ns, canonical
+                )
+                if not wrote:
+                    return _stale_mtime_response(current_mtime_ns)
                 return _ok_envelope(
                     reason=f"Rule '{label}' promoted to canonical",
                     target_path=target_path,
