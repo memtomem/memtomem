@@ -280,9 +280,10 @@ def _print_skills_generate(
     *,
     scope: TargetScope = "project_shared",
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> None:
     try:
-        result = generate_all_skills(root, scope=scope, surface=surface)
+        result = generate_all_skills(root, scope=scope, surface=surface, force_unsafe=force_unsafe)
     except PrivacyScanError as exc:
         raise click.ClickException(exc.message) from exc
     if result.generated:
@@ -377,10 +378,17 @@ def _print_agents_generate(
     scope: TargetScope = "project_shared",
     label: str | None = None,
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> None:
     try:
         result = generate_all_agents(
-            root, strict=strict, on_drop=on_drop, scope=scope, label=label, surface=surface
+            root,
+            strict=strict,
+            on_drop=on_drop,
+            scope=scope,
+            label=label,
+            surface=surface,
+            force_unsafe=force_unsafe,
         )
     except StrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
@@ -489,10 +497,17 @@ def _print_commands_generate(
     scope: TargetScope = "project_shared",
     label: str | None = None,
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> None:
     try:
         result = generate_all_commands(
-            root, strict=strict, on_drop=on_drop, scope=scope, label=label, surface=surface
+            root,
+            strict=strict,
+            on_drop=on_drop,
+            scope=scope,
+            label=label,
+            surface=surface,
+            force_unsafe=force_unsafe,
         )
     except CommandStrictDropError as exc:
         click.secho(f"  [strict] {exc}", fg="red")
@@ -1321,6 +1336,19 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
 )
 @_SCOPE_OPTION
 @_LABEL_OPTION
+@click.option(
+    "--force-unsafe",
+    "force_unsafe",
+    is_flag=True,
+    default=False,
+    help=(
+        "Bypass Gate A on canonical files being fanned out — for a reviewed "
+        "false positive (e.g. an 'api_key: str' type annotation). user / "
+        "project_local destinations only; project_shared hard-refuses "
+        "regardless (ADR-0011 §5). Mirrors 'mm context init "
+        "--force-unsafe-import'."
+    ),
+)
 def sync_cmd(
     include: tuple[str, ...],
     strict: bool,
@@ -1329,6 +1357,7 @@ def sync_cmd(
     all_projects: bool,
     scope_flag: str | None,
     label: str | None,
+    force_unsafe: bool,
 ) -> None:
     """Sync context.md to all detected agent files."""
     # sync accepts mcp-servers on top of the shared kinds (#1311); the other
@@ -1345,6 +1374,16 @@ def sync_cmd(
                 "--scope or pass --scope project_shared (sync other tiers "
                 "per project, without --all-projects)."
             )
+        # The batch is project_shared, where Gate A hard-refuses a forced
+        # fan-out regardless of the flag (ADR-0011 §5) — reject the combo
+        # rather than silently ignore it (sibling of the --scope guard above).
+        if force_unsafe:
+            raise click.UsageError(
+                "--force-unsafe does not apply to --all-projects (project_shared "
+                "tier only — Gate A hard-refuses a forced fan-out there). "
+                "Force-sync a user / project_local tier per project, without "
+                "--all-projects."
+            )
         _warn_label_ineligible_kinds(label, inc)
         _run_sync_all_projects(inc=inc, strict=strict, on_drop=on_drop, yes=yes, label=label)
         return
@@ -1358,6 +1397,7 @@ def sync_cmd(
         yes=yes,
         scope_flag=scope_flag,
         label=label,
+        force_unsafe=force_unsafe,
     ):
         click.secho("Synced.", fg="green")
 
@@ -1373,6 +1413,7 @@ def _run_sync_legs(
     label: str | None,
     batch: bool = False,
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> bool:
     """Run one project's sync legs (project memory + included artifact kinds).
 
@@ -1451,18 +1492,32 @@ def _run_sync_legs(
 
     if "skills" in inc:
         click.echo("")
-        _print_skills_generate(root, scope=artifact_scope, surface=surface)
+        _print_skills_generate(
+            root, scope=artifact_scope, surface=surface, force_unsafe=force_unsafe
+        )
 
     if "agents" in inc:
         click.echo("")
         _print_agents_generate(
-            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label, surface=surface
+            root,
+            strict=strict,
+            on_drop=on_drop,
+            scope=artifact_scope,
+            label=label,
+            surface=surface,
+            force_unsafe=force_unsafe,
         )
 
     if "commands" in inc:
         click.echo("")
         _print_commands_generate(
-            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label, surface=surface
+            root,
+            strict=strict,
+            on_drop=on_drop,
+            scope=artifact_scope,
+            label=label,
+            surface=surface,
+            force_unsafe=force_unsafe,
         )
 
     if "settings" in inc:

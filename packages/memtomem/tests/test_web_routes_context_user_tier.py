@@ -180,7 +180,11 @@ class TestUserTierSync:
         assert calls == [
             (
                 (Path(client._transport.app.state.project_root),),
-                {"scope": "user", "surface": "web_context_skills_sync"},
+                {
+                    "scope": "user",
+                    "surface": "web_context_skills_sync",
+                    "force_unsafe": False,
+                },
             )  # type: ignore[attr-defined]
         ]
 
@@ -244,10 +248,20 @@ class TestUserTierSync:
         )
         assert ra.status_code == 200 and rc.status_code == 200
         assert agent_calls == [
-            {"on_drop": "warn", "scope": "user", "surface": "web_context_agents_sync"}
+            {
+                "on_drop": "warn",
+                "scope": "user",
+                "surface": "web_context_agents_sync",
+                "force_unsafe": False,
+            }
         ]
         assert cmd_calls == [
-            {"on_drop": "warn", "scope": "user", "surface": "web_context_commands_sync"}
+            {
+                "on_drop": "warn",
+                "scope": "user",
+                "surface": "web_context_commands_sync",
+                "force_unsafe": False,
+            }
         ]
 
     @pytest.mark.anyio

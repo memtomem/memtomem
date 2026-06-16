@@ -464,6 +464,7 @@ def generate_all_skills(
     *,
     scope: TargetScope = "project_shared",
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> SkillSyncResult:
     """Fan out every canonical skill to the requested runtime targets.
 
@@ -474,6 +475,14 @@ def generate_all_skills(
         scope: ADR-0011 PR-E3 — selects canonical root and runtime
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
+        force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) threaded to
+            both :func:`scan_artifact_tree` sites. ``True`` lets a
+            reviewed false positive (e.g. an ``api_key: str`` type
+            annotation in a skill doc) fan out to ``user`` /
+            ``project_local`` destinations; ``project_shared`` stays
+            hard-refused regardless (the engine's Gate A is
+            authoritative — same contract as ``--force-unsafe-import``).
+            Default ``False``.
         surface: Audit identifier forwarded verbatim to
             :func:`privacy.enforce_write_guard` via both
             :func:`scan_artifact_tree` sites (the project_shared batch
@@ -616,6 +625,7 @@ def generate_all_skills(
                         scope=scope,
                         project_root=project_root,
                         on_blocked="fail_fast",
+                        force_unsafe=force_unsafe,
                     )
                     if scan.blocked:
                         raise_or_collect(
@@ -765,6 +775,7 @@ def generate_all_skills(
                         scope=scope,
                         project_root=project_root,
                         on_blocked="fail_fast",
+                        force_unsafe=force_unsafe,
                     )
                     if scan.blocked:
                         # raise_or_collect raises ClickException for project_shared;

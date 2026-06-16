@@ -734,6 +734,7 @@ def generate_all_agents(
     scope: TargetScope = "project_shared",
     label: str | None = None,
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> AgentSyncResult:
     """Fan out every canonical sub-agent to the requested runtimes.
 
@@ -761,6 +762,10 @@ def generate_all_agents(
             ``"cli_context_sync"``; the Web sync route passes
             ``"web_context_agents_sync"`` and the MCP tools pass
             ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246).
+        force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) forwarded to
+            the engine. ``True`` lets a reviewed false positive fan out
+            to ``user`` / ``project_local``; ``project_shared`` stays
+            hard-refused regardless. Default ``False``.
     """
     adapter = _AGENT_ADAPTER
     if label is not None and label != "latest":
@@ -779,6 +784,7 @@ def generate_all_agents(
             on_drop=on_drop,
             scope=scope,
             surface=surface,
+            force_unsafe=force_unsafe,
         ),
     )
 

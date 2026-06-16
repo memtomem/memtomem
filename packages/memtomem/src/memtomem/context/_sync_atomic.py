@@ -183,6 +183,7 @@ def sync_atomic_artifact(
     *,
     scope: TargetScope = "project_shared",
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> AtomicSyncResult:
     """Fan out every canonical artifact to the requested runtimes (atomic-file shape).
 
@@ -210,6 +211,12 @@ def sync_atomic_artifact(
             pass ``"web_context_<kind>_sync"``, and the MCP tools pass
             ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246
             — sibling of the import-side #1242 fix).
+        force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) threaded to
+            both :func:`scan_text_content` sites. ``True`` lets a
+            reviewed false positive fan out to ``user`` /
+            ``project_local`` destinations; ``project_shared`` is
+            hard-refused regardless (the engine's Gate A is
+            authoritative). Default ``False``.
 
     Returns:
         :class:`AtomicSyncResult` carrying ``generated``, ``dropped``, and
@@ -371,6 +378,7 @@ def sync_atomic_artifact(
                 surface=surface,
                 scope=scope,
                 project_root=project_root,
+                force_unsafe=force_unsafe,
             )
             if file_scan.decision in ("blocked", "blocked_project_shared"):
                 code, reason = raise_or_collect(
@@ -444,6 +452,7 @@ def sync_atomic_artifact(
                         surface=surface,
                         scope=scope,
                         project_root=project_root,
+                        force_unsafe=force_unsafe,
                     )
                     if file_scan.decision in ("blocked", "blocked_project_shared"):
                         code, reason = raise_or_collect(

@@ -12,10 +12,16 @@ underneath, but the two surfaces differ on:
   to ``"cli_context_init"``; the Web import routes pass
   ``"web_context_<kind>_import"`` and the MCP tool passes
   ``"mcp_context_init"`` (#1229).
-* ``force_unsafe`` valve — sync has none (ADR §5: canonical → runtime
-  fan-out is a write-amplifying loop, so a single bypass-flagged content
-  would propagate to every registered runtime; the ADR explicitly
-  reserves ``--force-unsafe-import`` for the import direction only).
+* ``force_unsafe`` valve — both sides now expose a reviewed bypass, but
+  scope-asymmetrically (ADR §5). ``project_shared`` is ALWAYS hard-refused
+  regardless of the flag (git history is forever; a forced fan-out is a
+  write-amplifying loop into every runtime AND the repo), so
+  :func:`enforce_write_guard` returns ``blocked_project_shared`` there.
+  Only ``user`` / ``project_local`` destinations honour the bypass —
+  ``mm context sync --force-unsafe`` (fan-out) and
+  ``mm context init --force-unsafe-import`` (import). Both
+  :func:`scan_artifact_tree` and :func:`scan_text_content` take a
+  ``force_unsafe`` param (default ``False``) the sync callers thread.
 * Block-message wording — "fan-out … rejected" vs "import … rejected"
   with a remediation hint that points at ``mm context migrate`` (the
   cross-tier move command landing in PR-E4) instead of "retry with a
@@ -135,11 +141,19 @@ def scan_artifact_tree(
     project_root: Path | None,
     on_blocked: OnBlocked = "fail_fast",
     record_outcome: bool = True,
+    force_unsafe: bool = False,
 ) -> ScanResult:
     """Walk ``src`` (file or directory) and run :func:`enforce_write_guard` per file.
 
-    Sync-side privacy gate. ``force_unsafe`` is hardcoded ``False`` —
-    sync has no escape valve regardless of ``scope`` (ADR §5).
+    Sync-side privacy gate. ``force_unsafe`` is the caller's reviewed
+    Gate A bypass valve (ADR-0011 §5) — defaults ``False`` so every
+    non-forced sync keeps blocking on a hit. ``force_unsafe=True`` is
+    NOT a blanket escape: :func:`privacy.enforce_write_guard` still
+    hard-refuses it for ``scope == "project_shared"`` (returns a
+    ``blocked_project_shared`` decision and emits the bypass-attempt
+    audit line), so git-tracked content can never be forced out. Only
+    ``user`` / ``project_local`` destinations honour the bypass — the
+    same asymmetry the import side exposes via ``--force-unsafe-import``.
 
     Args:
         src: Either a single file (agents/commands canonical entry) or a
@@ -173,6 +187,12 @@ def scan_artifact_tree(
             audit callers (``mm context rescan``) pass ``False`` so the
             re-check does not double-count outcomes or re-emit bypass
             audit lines.
+        force_unsafe: Reviewed Gate A bypass forwarded verbatim to
+            :func:`enforce_write_guard`. ``True`` flips a ``user`` /
+            ``project_local`` hit from ``blocked`` to ``bypassed`` (the
+            file is no longer in ``ScanResult.blocked`` and the caller
+            promotes it); ``project_shared`` is hard-refused regardless
+            (``blocked_project_shared``). Default ``False``.
 
     Returns:
         :class:`ScanResult` with the per-file ``decisions`` list and the
@@ -226,7 +246,7 @@ def scan_artifact_tree(
         guard = privacy.enforce_write_guard(
             text,
             surface=surface,
-            force_unsafe=False,
+            force_unsafe=force_unsafe,
             scope=scope,
             audit_context=audit_context,
             record_outcome=record_outcome,
@@ -248,6 +268,7 @@ def scan_text_content(
     surface: str,
     scope: TargetScope,
     project_root: Path | None,
+    force_unsafe: bool = False,
 ) -> FileScan:
     """Scan an already-loaded content string against :func:`enforce_write_guard`.
 
@@ -258,8 +279,12 @@ def scan_text_content(
     PR-E3 commit (concurrent edit between scan and write would otherwise
     let unscanned bytes fan out).
 
-    ``force_unsafe`` is hardcoded ``False`` per ADR §5 (sync has no
-    escape valve regardless of scope).
+    ``force_unsafe`` is the caller's reviewed Gate A bypass (ADR-0011
+    §5), forwarded verbatim to :func:`enforce_write_guard`. It honours
+    the same scope asymmetry as :func:`scan_artifact_tree`:
+    ``project_shared`` stays hard-refused (``blocked_project_shared``)
+    even when ``True``; only ``user`` / ``project_local`` flip a hit to
+    ``bypassed``. Default ``False`` keeps every non-forced sync blocking.
 
     Returns a :class:`FileScan` with the path attribution preserved for
     downstream messaging; caller branches on
@@ -276,7 +301,7 @@ def scan_text_content(
     guard = privacy.enforce_write_guard(
         text,
         surface=surface,
-        force_unsafe=False,
+        force_unsafe=force_unsafe,
         scope=scope,
         audit_context=audit_context,
         record_outcome=True,

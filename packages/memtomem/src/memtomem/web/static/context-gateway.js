@@ -1458,6 +1458,60 @@ function _ctxImportErrToast(status, detail) {
   return base;
 }
 
+// ``_ctxMaybeForceUnsafeSync`` is the fan-out (sync) mirror of
+// ``_ctxMaybeForceUnsafeImport``: when a user-tier sync skipped one or more
+// canonical files because they tripped Gate A's secret-shape heuristic, the
+// engine reports each as a skip with ``reason_code === 'privacy_blocked'``.
+// (``project_shared`` is a hard 422 the caller renders as an error before this
+// point, and ``project_local`` sync is rejected outright, so a
+// ``privacy_blocked`` *skip* is always user-tier.) We offer the same reviewed
+// bypass valve the import side and the CLI's ``--force-unsafe`` expose. The
+// sync skip tuple serializes the artifact name under the ``runtime`` key, so
+// names read from ``s.runtime`` (``s.name`` tolerated for shape drift). Only
+// the name + the fact of a hit are surfaced — matched bytes are never echoed
+// (Gate A "never echo secrets" contract).
+//
+// Consent: unlike import, a forced sync needs NO second host-write
+// disclosure. ``_user_sync_host_targets`` is name-based (every canonical
+// name → its fan-out destinations, an upper bound independent of the privacy
+// outcome), so the pre-force host-write confirm in ``_ctxRunSync`` already
+// disclosed and got approval for the exact paths a forced write lands on —
+// even in the all-blocked case. The only NEW consent is the red secret
+// override below, after which we resend with BOTH flags. (Import differs:
+// forcing CHANGES which files import, so it must disclose AFTER forcing —
+// see ``_ctxMaybeForceUnsafeImport``.)
+//
+// ``resync(extra)`` is the caller's ``syncOnce`` — merges ``extra`` into the
+// POST body. Resolves to the re-synced payload, or ``null`` when nothing was
+// privacy-blocked or the user declined (callers keep the original ``data``).
+async function _ctxMaybeForceUnsafeSync(data, resync) {
+  const blocked = (data?.skipped || []).filter(
+    s => s && s.reason_code === 'privacy_blocked',
+  );
+  if (!blocked.length) return null;
+  const names = blocked.map(s => s.runtime || s.name).filter(Boolean);
+  const ok = await showConfirm({
+    title: t('settings.ctx.force_unsafe_sync_title'),
+    message: t('settings.ctx.force_unsafe_sync_message', { count: blocked.length }),
+    warningText: [...new Set(names)].join('\n') || '—',
+    confirmText: t('settings.ctx.force_unsafe_sync_btn'),
+    // Overriding a secret-shape detection is the one sync action that warrants
+    // the red button.
+    danger: true,
+  });
+  if (!ok) return null;
+  // Host writes were already disclosed + approved (see consent note above), so
+  // the forced re-sync carries allow_host_writes — the gate passes without a
+  // second envelope.
+  const r = await resync({ force_unsafe_sync: true, allow_host_writes: true });
+  if (!r || !r.ok) {
+    const err = r ? await r.json().catch(() => ({})) : {};
+    showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+    return null;
+  }
+  return await r.json();
+}
+
 // Shared single-item import flow used by both the runtime-only "Import" button
 // (imports at the current tier) and the "Import to user library" button (the
 // cross-tier project→user route). ``importOnce(extra)`` is the route-specific
@@ -6218,6 +6272,12 @@ async function _ctxRunSync(type, { btn, canonicalCount, noFanout, onComplete }) 
         }
         data = await r.json();
       }
+      // A user-tier sync may skip files on Gate A's secret-shape heuristic;
+      // offer the reviewed force valve and re-sync on consent. The host paths
+      // were already disclosed in the host-write confirm above, so the helper
+      // resends with both flags (see its consent note).
+      const forced = await _ctxMaybeForceUnsafeSync(data, syncOnce);
+      if (forced) data = forced;
       const generated = data.generated || [];
       const dropped = data.dropped || [];
       const skipped = data.skipped || [];

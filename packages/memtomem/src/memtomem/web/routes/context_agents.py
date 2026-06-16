@@ -730,6 +730,11 @@ class SyncRequest(BaseModel):
     on_drop: str = "warn"
     # #1263 host-write opt-in for target_scope=user (see AgentCreateRequest).
     allow_host_writes: bool = False
+    # Gate A bypass valve for fan-out — the sync-side mirror of
+    # ImportRequest.force_unsafe_import (#1379). user-tier only;
+    # project_shared hard-refuses regardless (ADR-0011 §5). See
+    # context_skills.SyncRequest.
+    force_unsafe_sync: bool = False
 
     # An out-of-vocabulary value used to slip through to the engine, where it
     # silently behaved as "ignore" (#1247 id 47) — reject at the boundary
@@ -751,6 +756,7 @@ async def _sync_agents_core(
     *,
     on_drop: str = "warn",
     surface: str = "web_context_agents_sync",
+    force_unsafe: bool = False,
 ) -> dict:
     """Lock-free agents sync core — the caller MUST hold ``_gateway_lock``.
 
@@ -774,6 +780,7 @@ async def _sync_agents_core(
             on_drop=on_drop,
             scope=target_scope,
             surface=surface,
+            force_unsafe=force_unsafe,
         )
     except PrivacyScanError as exc:
         # 422 Unprocessable Entity — request is well-formed but the canonical
@@ -842,10 +849,13 @@ async def sync_agents(
     )
     if gate is not None:
         return gate
+    force_unsafe = body.force_unsafe_sync if body else False
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                return await _sync_agents_core(project_root, target_scope, on_drop=on_drop)
+                return await _sync_agents_core(
+                    project_root, target_scope, on_drop=on_drop, force_unsafe=force_unsafe
+                )
     except TimeoutError:
         raise _error(503, "busy", "Agents sync timed out — another sync may be in progress")
 

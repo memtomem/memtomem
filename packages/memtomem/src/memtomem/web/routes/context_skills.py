@@ -624,11 +624,17 @@ async def diff_skill(
 class SyncRequest(BaseModel):
     """Optional body for the sync routes (#1263).
 
-    Absent body keeps the historical no-body POST working; the only field
-    is the user-tier host-write opt-in.
+    Absent body keeps the historical no-body POST working.
     """
 
     allow_host_writes: bool = False
+    # Gate A bypass valve for fan-out — the sync-side mirror of
+    # ImportRequest.force_unsafe_import (#1379). Lets a reviewed false
+    # positive (e.g. an ``api_key: str`` type annotation in a skill doc)
+    # fan out to the only bypassable tier: ``user``. ``project_local`` is
+    # rejected outright and ``project_shared`` hard-refuses regardless of
+    # this flag (ADR-0011 §5 — the engine's Gate A is authoritative).
+    force_unsafe_sync: bool = False
 
 
 async def _sync_skills_core(
@@ -636,6 +642,7 @@ async def _sync_skills_core(
     target_scope: TargetScope,
     *,
     surface: str = "web_context_skills_sync",
+    force_unsafe: bool = False,
 ) -> dict:
     """Lock-free skills sync core — the caller MUST hold ``_gateway_lock``.
 
@@ -664,6 +671,7 @@ async def _sync_skills_core(
             project_root,
             scope=target_scope,
             surface=surface,
+            force_unsafe=force_unsafe,
         )
     except PrivacyScanError as exc:
         raise SyncPhaseError(
@@ -705,10 +713,13 @@ async def sync_skills(
     )
     if gate is not None:
         return gate
+    force_unsafe = body.force_unsafe_sync if body else False
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                return await _sync_skills_core(project_root, target_scope)
+                return await _sync_skills_core(
+                    project_root, target_scope, force_unsafe=force_unsafe
+                )
     except TimeoutError:
         raise _error(503, "busy", "Skills sync timed out — another sync may be in progress")
 

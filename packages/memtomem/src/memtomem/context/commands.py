@@ -459,6 +459,7 @@ def generate_all_commands(
     scope: TargetScope = "project_shared",
     label: str | None = None,
     surface: str = "cli_context_sync",
+    force_unsafe: bool = False,
 ) -> CommandSyncResult:
     """Fan out every canonical command to the requested runtimes.
 
@@ -486,6 +487,10 @@ def generate_all_commands(
             ``"cli_context_sync"``; the Web sync route passes
             ``"web_context_commands_sync"`` and the MCP tools pass
             ``"mcp_context_generate"`` / ``"mcp_context_sync"`` (#1246).
+        force_unsafe: Reviewed Gate A bypass (ADR-0011 §5) forwarded to
+            the engine. ``True`` lets a reviewed false positive fan out
+            to ``user`` / ``project_local``; ``project_shared`` stays
+            hard-refused regardless. Default ``False``.
     """
     adapter = _COMMAND_ADAPTER
     if label is not None and label != "latest":
@@ -501,6 +506,7 @@ def generate_all_commands(
             on_drop=on_drop,
             scope=scope,
             surface=surface,
+            force_unsafe=force_unsafe,
         ),
     )
 
