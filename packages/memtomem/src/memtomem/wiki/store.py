@@ -186,17 +186,39 @@ class WikiStore:
                 f"directory {self.root} is not empty and is not a wiki — refusing to init"
             )
 
+        # The guard above leaves the root either absent or pre-existing-empty;
+        # remember which so rollback never deletes a dir the user already had.
+        root_preexisted = self.root.exists()
         self.root.mkdir(parents=True, exist_ok=True)
-        for asset_type in WIKI_ASSET_TYPES:
-            asset_dir = self.root / asset_type
-            asset_dir.mkdir(exist_ok=True)
-            (asset_dir / ".gitkeep").write_text("", encoding="utf-8")
+        try:
+            for asset_type in WIKI_ASSET_TYPES:
+                asset_dir = self.root / asset_type
+                asset_dir.mkdir(exist_ok=True)
+                (asset_dir / ".gitkeep").write_text("", encoding="utf-8")
 
-        (self.root / "README.md").write_text(_README_TEMPLATE, encoding="utf-8")
+            (self.root / "README.md").write_text(_README_TEMPLATE, encoding="utf-8")
 
-        _git(["init", "-b", "main"], cwd=self.root)
-        _git(["add", "."], cwd=self.root)
-        _git(["commit", "-m", _INITIAL_COMMIT_MESSAGE], cwd=self.root)
+            _git(["init", "-b", "main"], cwd=self.root)
+            _git(["add", "."], cwd=self.root)
+            _git(["commit", "-m", _INITIAL_COMMIT_MESSAGE], cwd=self.root)
+        except RuntimeError:
+            # Bootstrap failed — most plausibly ``git commit`` with no resolvable
+            # user identity (a minimal/rootless container, ``user.useConfigOnly``).
+            # Without rollback, ``.git/`` survives → ``exists()`` returns True, so
+            # re-running ``init`` / ``init_from_url`` is refused AND every read op
+            # (``current_commit``, ``is_dirty``, …) fails on the HEAD-less repo —
+            # manual ``rm -rf`` the only escape. Remove exactly what we created
+            # (never a pre-existing root) and re-raise so the caller still
+            # surfaces the failure. We add no fallback identity: the "memtomem
+            # injects no git identity" invariant is preserved.
+            if root_preexisted:
+                shutil.rmtree(self.root / ".git", ignore_errors=True)
+                for asset_type in WIKI_ASSET_TYPES:
+                    shutil.rmtree(self.root / asset_type, ignore_errors=True)
+                (self.root / "README.md").unlink(missing_ok=True)
+            else:
+                shutil.rmtree(self.root, ignore_errors=True)
+            raise
 
     def init_from_url(self, url: str) -> None:
         """Clone an existing wiki from ``url`` into ``root``."""
