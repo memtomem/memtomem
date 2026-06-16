@@ -711,6 +711,7 @@ class TestUserTierImport:
                 "overwrite": False,
                 "dry_run": False,
                 "scope": "user",
+                "force_unsafe_import": False,
                 "surface": "web_context_skills_import",
             }
         ]
