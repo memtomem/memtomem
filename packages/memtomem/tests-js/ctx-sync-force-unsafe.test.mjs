@@ -74,6 +74,41 @@ describe('_ctxMaybeForceUnsafeSync (reviewed Gate A bypass on fan-out)', () => {
     expect(out).toEqual({ generated: [{ runtime: 'claude' }], skipped: [] });
   });
 
+  it('counts UNIQUE files, not per-runtime skip tuples (#1397)', async () => {
+    // The engine emits one privacy_blocked skip PER RUNTIME for the same
+    // artifact. The red confirm's count must match the de-duped file list it
+    // shows (1 file), not the runtime fan-out (4 tuples) — overstating the
+    // affected-file count in a "bypass secret detection" dialog is misleading.
+    const window = await boot();
+    const confirms = [];
+    window.showConfirm = async (opts) => { confirms.push(opts); return true; };
+    window.showToast = () => {};
+    const { I18N } = window;
+
+    const fourRuntimesOneFile = {
+      generated: [],
+      skipped: [
+        { runtime: 'user-secret', reason: 'privacy blocked', reason_code: 'privacy_blocked' },
+        { runtime: 'user-secret', reason: 'privacy blocked', reason_code: 'privacy_blocked' },
+        { runtime: 'user-secret', reason: 'privacy blocked', reason_code: 'privacy_blocked' },
+        { runtime: 'user-secret', reason: 'privacy blocked', reason_code: 'privacy_blocked' },
+      ],
+    };
+    const resync = resyncSpy([okResp({ generated: [{ runtime: 'claude' }], skipped: [] })]);
+    await window._ctxMaybeForceUnsafeSync(fourRuntimesOneFile, resync);
+
+    expect(confirms.length).toBe(1);
+    // Count matches the 1 unique file, NOT the 4 runtime tuples (the bug).
+    expect(confirms[0].message).toBe(
+      I18N.t('settings.ctx.force_unsafe_sync_message', { count: 1 }),
+    );
+    expect(confirms[0].message).not.toBe(
+      I18N.t('settings.ctx.force_unsafe_sync_message', { count: 4 }),
+    );
+    // The warning list shows the single file once (de-duped, same source).
+    expect(confirms[0].warningText).toBe('user-secret');
+  });
+
   it('returns null and re-syncs nothing when the override is declined', async () => {
     const window = await boot();
     window.showConfirm = async () => false;
