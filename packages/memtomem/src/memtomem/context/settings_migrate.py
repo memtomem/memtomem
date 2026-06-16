@@ -608,21 +608,37 @@ def apply_migration(plan: MigratePlan) -> MigrateResult:
                 # source entry.
                 sigs_to_drop.add(move.signature)
 
+            # Target mtime recheck (second layer, like generate_all_settings
+            # Step 3): catches a direct disk edit that bypassed the sidecar
+            # lock during classification. It must run before we mutate EITHER
+            # file — i.e. whenever ``sigs_to_drop`` is non-empty, not only when
+            # ``moves_to_write`` is. The all-"exact" batch writes nothing to
+            # the target but still drops the now-redundant entries from the
+            # source, and cleaning the source is only valid while the target
+            # provably still carries them. A stale target snapshot here would
+            # let the source entry be deleted while the target no longer holds
+            # it — the entry irrecoverably lost from BOTH tiers (no
+            # staging/backup). Pre-fix this guard lived inside ``if
+            # moves_to_write:`` and was skipped whenever every applicable move
+            # re-classified to "exact".
+            #
+            # Compare against the missing-file sentinel ``0`` (the
+            # ``_read_with_mtime`` convention), NOT a bare ``is_file()`` guard:
+            # a concurrent DELETE of the target (mtime → 0) is just as much an
+            # external change as an edit, and on the all-"exact" path a bare
+            # ``is_file()`` check would skip the abort and clean the source
+            # against a target that no longer exists.
+            current_target_mtime_ns = (
+                plan.target_path.stat().st_mtime_ns if plan.target_path.is_file() else 0
+            )
+            if sigs_to_drop and current_target_mtime_ns != target_mtime_ns:
+                result.warnings.append(
+                    f"{plan.target_path} was modified by another process "
+                    f"during apply; nothing was written. {retry_hint}"
+                )
+                return result
+
             if moves_to_write:
-                # mtime recheck (second layer, like generate_all_settings
-                # Step 3): catches a direct disk edit that bypassed the
-                # sidecar lock during classification. Abort the whole apply —
-                # the target was not written, so the source must not be
-                # cleaned either.
-                if (
-                    plan.target_path.is_file()
-                    and plan.target_path.stat().st_mtime_ns != target_mtime_ns
-                ):
-                    result.warnings.append(
-                        f"{plan.target_path} was modified by another process "
-                        f"during apply; nothing was written. {retry_hint}"
-                    )
-                    return result
                 # ``already_at_target`` is forced False so _add_target_rules
                 # appends every move we decided to write — including a
                 # plan-time "already" move that re-classified to "missing"
