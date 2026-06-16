@@ -300,12 +300,14 @@ def test_sync_all_artifact_422_surfaces_backend_error(
     body: str,
     expected_error: str,
 ) -> None:
-    """S1-b.1: artifact sync HTTP 422 must preserve the backend error body.
+    """S1-b.1: a blocked artifact sync (HTTP 422) must surface the backend error
+    body AND not abort the run (#1396).
 
-    Privacy blocks include remediation guidance in ``detail``. Sync All used
-    to discard that body and throw ``Sync <type> failed``, leaving users with
-    no way to resolve the blocked fan-out from the toast. Plain-text bodies
-    cover the helper's non-JSON fallback path.
+    Privacy blocks include remediation guidance in ``detail``. Sync All used to
+    discard that body and throw ``Sync <type> failed`` AND ``break`` the whole
+    fan-out. Now the reason is preserved in the partial-failure toast and the
+    later artifact phases still sync. Plain-text bodies cover the helper's
+    non-JSON fallback path.
     """
     install_default_stubs(page)
     _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
@@ -320,13 +322,13 @@ def test_sync_all_artifact_422_surfaces_backend_error(
             body=body,
         )
 
-    def _unexpected_sync(route):
+    def _record_sync(route):
         sync_calls.append(route.request.url)
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     page.route("**/api/context/skills/sync", _skills_privacy_block)
-    page.route("**/api/context/agents/sync", _unexpected_sync)
-    page.route("**/api/context/settings/sync", _unexpected_sync)
+    page.route("**/api/context/agents/sync", _record_sync)
+    page.route("**/api/context/settings/sync", _record_sync)
 
     page.goto(mm_web_url)
     _open_context_gateway(page)
@@ -346,34 +348,49 @@ def test_sync_all_artifact_422_surfaces_backend_error(
     toast_text = (
         page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
     ).strip()
-    expected = SYNC_FAILED_TEMPLATE.format(error=expected_error)
+    # skills is blocked first, but commands/agents/mcp-servers (all 200) still
+    # sync; the backend detail is carried as the partial toast's reason.
+    expected = SYNC_PARTIAL_FAILED_TEMPLATE.format(
+        succeeded="Commands, Subagents, MCP Servers",
+        failed_phase="Skills",
+        reason=expected_error,
+    )
     assert toast_text == expected, (
-        f"Artifact privacy block toast must surface backend detail {expected!r}, got {toast_text!r}"
+        f"Blocked artifact must surface its backend detail in the partial toast "
+        f"({expected!r}), got {toast_text!r}"
     )
 
     sync_paths = [u.split("/api/")[-1] for u in sync_calls]
-    assert sync_paths == ["context/skills/sync"], (
-        f"Sync All must stop after the blocked artifact sync, got {sync_paths!r}"
+    # The loop no longer aborts at the blocked artifact: agents (a later phase)
+    # still fired. Settings stays gated behind a clean artifact run, so it does
+    # NOT fire after a failure.
+    assert "context/agents/sync" in sync_paths, (
+        f"Sync All must continue past the blocked artifact, got {sync_paths!r}"
+    )
+    assert "context/settings/sync" not in sync_paths, (
+        f"Settings must stay skipped after an artifact failure, got {sync_paths!r}"
     )
 
 
 def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
     page, mm_web_url: str
 ) -> None:
-    """S1-b.2 (#1074): skills succeed → agents fails → settings is skipped,
-    but the overview is still refreshed and the toast names what landed.
+    """S1-b.2 (#1074 / #1396): skills + commands succeed → agents fails →
+    mcp-servers STILL syncs (the failed phase is isolated, not abort-the-run);
+    settings is skipped, but the overview is still refreshed and the toast names
+    what landed.
 
-    Pre-fix the handler ``throw``-ed on the first non-OK response and the
-    ``catch`` branch fell straight through to ``btnLoading(btn, false)``
-    without re-fetching the overview. Disk had changed (skills already
-    wrote) but the dashboard kept showing the pre-sync counts — a stale
-    diff target that made retries confusing.
+    Pre-fix the handler ``break``-ed on the first non-OK response, stranding
+    every later type, and the ``catch`` branch fell straight through to
+    ``btnLoading(btn, false)`` without re-fetching the overview. Disk had
+    changed (skills already wrote) but the dashboard kept showing the pre-sync
+    counts — a stale diff target that made retries confusing.
 
     Symmetric pin (``feedback_pin_invert_symmetric_assertion.md``):
-    positive on the partial toast text + overview reload counter, negative
-    on the settings sync POST not firing (we stop on first failure to
-    avoid cascading noise; settings often shares root cause with
-    artifact failures).
+    positive on the partial toast text + the later mcp-servers POST firing +
+    overview reload counter; negative on the settings sync POST not firing
+    (settings stays gated behind a clean artifact run — it often shares root
+    cause with artifact failures).
     """
     install_default_stubs(page)
     overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
@@ -401,6 +418,7 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
     page.route("**/api/context/skills/sync", _record_ok)
     page.route("**/api/context/commands/sync", _record_ok)
     page.route("**/api/context/agents/sync", _agents_fail)
+    page.route("**/api/context/mcp-servers/sync", _record_ok)
     page.route("**/api/context/settings/sync", _unexpected_settings)
 
     page.goto(mm_web_url)
@@ -424,7 +442,7 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
         page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
     ).strip()
     expected = SYNC_PARTIAL_FAILED_TEMPLATE.format(
-        succeeded="Skills, Commands",
+        succeeded="Skills, Commands, MCP Servers",
         failed_phase="Subagents",
         reason=agents_reason,
     )
@@ -444,13 +462,19 @@ def test_sync_all_mid_run_failure_refreshes_overview_with_partial_toast(
         f"Partial failure must not render the bare {sync_failed_only!r} toast; saw {error_toasts!r}"
     )
 
-    # Settings POST must not have fired — we stop on first failure.
+    # mcp-servers (a later phase) still fired after the agents failure — the run
+    # isolates the failed phase instead of aborting. Settings stays gated behind
+    # a clean artifact run, so it does NOT fire.
     sync_paths = [u.split("/api/")[-1] for u in sync_calls]
     assert sync_paths == [
         "context/skills/sync",
         "context/commands/sync",
         "context/agents/sync",
-    ], f"Sync All must stop at the failed phase, got {sync_paths!r}"
+        "context/mcp-servers/sync",
+    ], f"Sync All must isolate the failed phase and run the rest, got {sync_paths!r}"
+    assert "context/settings/sync" not in sync_paths, (
+        f"Settings must stay skipped after an artifact failure, got {sync_paths!r}"
+    )
 
     # Load-bearing assertion for #1074: overview reloaded even though the
     # run failed mid-way. Without this the dashboard would show the

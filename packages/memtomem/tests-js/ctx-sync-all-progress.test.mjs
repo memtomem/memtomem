@@ -194,13 +194,17 @@ describe('Sync All — per-phase progress + result summary', () => {
     expect(window.document.querySelector('#toast-container .toast-success')).toBeNull();
   });
 
-  it('marks phases after a mid-run failure as not_run, not a frozen spinner', async () => {
+  it('isolates a failed artifact phase — later types still sync, no frozen spinner (#1396)', async () => {
+    // A per-phase HTTP error (here agents → 422) must NOT abort the run: the
+    // LATER artifact type (mcp-servers) still syncs (``done``) instead of being
+    // stranded ``not_run``, mirroring the backend per-phase isolation. Settings
+    // is still skipped after an artifact failure (its own deliberate gate) →
+    // ``not_run``. The frozen-spinner guard (#1074) is retained.
     const window = await bootSyncAll({
       skills: { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
       commands: { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
-      // agents fails → loop breaks; mcp-servers + settings never fire.
       agents: { ok: false, status: 422, body: { detail: 'Agents target is read-only' } },
-      'mcp-servers': { body: { generated: [] } },
+      'mcp-servers': { body: { generated: [{ runtime: 'claude' }] } },
       settings: { body: { results: [{ name: 'claude', status: 'ok' }] } },
     });
     const { I18N } = window;
@@ -211,11 +215,12 @@ describe('Sync All — per-phase progress + result summary', () => {
     const region = window.document.getElementById('ctx-sync-status');
     expect(region.hidden).toBe(false);
 
-    // skills + commands done; agents failed; mcp-servers + settings not_run.
-    expect(region.querySelectorAll('.ctx-sync-phase--done').length).toBe(2);
+    // skills + commands + mcp-servers done (mcp-servers ran AFTER the agents
+    // failure — the isolation fix); agents failed; settings not_run.
+    expect(region.querySelectorAll('.ctx-sync-phase--done').length).toBe(3);
     expect(region.querySelectorAll('.ctx-sync-phase--failed').length).toBe(1);
-    expect(region.querySelectorAll('.ctx-sync-phase--not_run').length).toBe(2);
-    // No phase left mid-flight (a frozen spinner is the bug this guards).
+    expect(region.querySelectorAll('.ctx-sync-phase--not_run').length).toBe(1);
+    // No phase left mid-flight (a frozen spinner is the bug this also guards).
     expect(region.querySelectorAll('.ctx-sync-phase--syncing').length).toBe(0);
     expect(region.querySelector('.ctx-sync-spinner')).toBeNull();
 
@@ -223,10 +228,62 @@ describe('Sync All — per-phase progress + result summary', () => {
     expect(failedRow.textContent).toContain(I18N.t('settings.ctx.agents_phase_title'));
     expect(failedRow.textContent).toContain(I18N.t('settings.ctx.sync_state_failed'));
 
-    // Partial-failure toast names what landed + the failed phase (#1074).
+    // Partial-failure toast names what landed (incl. mcp-servers, which ran
+    // after the failure) + the failed phase (#1074 / #1396).
     const toast = window.document.querySelector('#toast-container .toast-error .toast-msg');
     expect(toast).not.toBeNull();
     expect(toast.textContent).toContain(I18N.t('settings.ctx.agents_phase_title'));
+    expect(toast.textContent).toContain(I18N.t('settings.ctx.mcp_servers_phase_title'));
+  });
+
+  it('continues past a first-phase privacy block so clean types still sync (#1396)', async () => {
+    // The reported bug: a project_shared privacy block is a hard 422 from the
+    // FIRST phase (skills). The loop used to ``break`` → every later type
+    // ``not_run`` and zero partial progress. Now skills reads ``failed`` while
+    // commands / agents / mcp-servers all sync.
+    const calls = [];
+    const window = await bootSyncAll({
+      skills: {
+        ok: false,
+        status: 422,
+        body: { detail: 'A value here looks like a secret; remove it and retry.' },
+      },
+      commands: { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
+      agents: { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
+      'mcp-servers': { body: { generated: [{ runtime: 'claude' }], skipped: [] } },
+      settings: { body: { results: [{ name: 'claude', status: 'ok' }] } },
+    });
+    const { I18N } = window;
+    // Record which /sync endpoints actually fire — proves the loop did not abort
+    // at the skills 422.
+    const upstream = window.fetch;
+    window.fetch = async (input, opts) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      const m = url.split('?')[0].match(/\/api\/context\/([^/]+)\/sync$/);
+      if (m) calls.push(m[1]);
+      return upstream(input, opts);
+    };
+
+    window.document.getElementById('ctx-sync-all-btn').click();
+    await flush(window);
+
+    // All three clean artifact types were POSTed AFTER the skills 422.
+    expect(calls).toContain('commands');
+    expect(calls).toContain('agents');
+    expect(calls).toContain('mcp-servers');
+
+    const region = window.document.getElementById('ctx-sync-status');
+    // skills failed; the three clean types done; settings skipped (not_run).
+    expect(region.querySelectorAll('.ctx-sync-phase--failed').length).toBe(1);
+    expect(region.querySelectorAll('.ctx-sync-phase--done').length).toBe(3);
+    const failedRow = region.querySelector('.ctx-sync-phase--failed');
+    expect(failedRow.textContent).toContain(I18N.t('settings.ctx.skills_phase_title'));
+
+    // Partial-failure toast: skills failed, the clean phases landed.
+    const toast = window.document.querySelector('#toast-container .toast-error .toast-msg');
+    expect(toast).not.toBeNull();
+    expect(toast.textContent).toContain(I18N.t('settings.ctx.skills_phase_title'));
+    expect(toast.textContent).toContain(I18N.t('settings.ctx.commands_phase_title'));
   });
 
   it('renders the settings phase as attention (not done) on needs_confirmation', async () => {

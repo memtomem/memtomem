@@ -197,6 +197,55 @@ def test_portal_sync_fires_scoped_posts_for_enrolled_scope(page, mm_web_url: str
     assert state["projects"] > projects_before, "portal did not refresh after sync"
 
 
+def test_portal_sync_isolates_a_blocked_artifact_phase(page, mm_web_url: str) -> None:
+    """#1396: a per-phase privacy-block 422 on the card fan-out must NOT abort
+    the run — the other artifact types still sync. Mirrors the Overview Sync All
+    isolation fix on the toast-only portal-card path.
+
+    skills → 422 (privacy block); commands/agents/mcp-servers still POST.
+    Settings stays gated behind a clean artifact run (no POST after a failure).
+    """
+    state = _stub_portal_sync(page)
+
+    # Re-route skills to a privacy-block 422 AFTER the default recording stub
+    # (last-route-wins); still record the URL so the ordering assertion holds.
+    def _skills_block(route):
+        state["sync"].append(route.request.url)
+        route.fulfill(
+            status=422,
+            content_type="application/json",
+            body=json.dumps({"detail": "A value looks like a secret; remove it and retry."}),
+        )
+
+    page.route("**/api/context/skills/sync**", _skills_block)
+
+    _open_portal(page, mm_web_url)
+    _click_sync_and_confirm(page, "scope-on")
+
+    # 4 artifact POSTs fire (skills failed, but commands/agents/mcp-servers still
+    # ran); settings is gated behind a clean artifact run, so it does NOT fire.
+    deadline = time.monotonic() + 4.0
+    while len(state["sync"]) < 4 and time.monotonic() < deadline:
+        page.wait_for_timeout(50)
+    synced = [u.split("/api/")[-1].split("?")[0] for u in state["sync"]]
+    assert "context/commands/sync" in synced, synced
+    assert "context/agents/sync" in synced, synced
+    assert "context/mcp-servers/sync" in synced, synced
+    assert "context/settings/sync" not in synced, (
+        f"settings must stay skipped after an artifact failure, got {synced}"
+    )
+
+    # Partial-failure toast (real partial progress, not a hard abort): names a
+    # landed phase + the blocked one, rather than the bare "Sync failed".
+    page.wait_for_selector("#toast-container .toast.toast-error", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-error .toast-msg").text_content() or ""
+    ).strip()
+    assert "Commands" in toast_text and "Skills" in toast_text, (
+        f"expected a partial-failure toast naming landed + blocked phases, got {toast_text!r}"
+    )
+
+
 def test_portal_sync_server_cwd_empty_scope_id(page, mm_web_url: str) -> None:
     """Server CWD's effective scope_id collapses to '' — its Sync fans out with
     no scope_id param (blocking parity with the removed matrix path)."""
