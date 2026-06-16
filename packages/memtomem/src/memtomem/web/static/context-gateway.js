@@ -1448,14 +1448,16 @@ async function _ctxMaybeForceUnsafeImport(data, reimport) {
 }
 
 // Import error toast text. The import route's only 422 is the ``project_shared``
-// Gate A privacy hard-block (#1378) — no bypass exists on any surface, so we
-// append a localized hint pointing web users at the ``user`` tier, where the
-// reviewed force valve (``_ctxMaybeForceUnsafeImport``) IS available. Every
-// other status falls back to the shared error-detail renderer unchanged.
+// Gate A privacy hard-block (#1378), whose server ``detail`` is a fixed,
+// deliberately path-free ENGLISH string (issue-pinned, locale-unaware). In the
+// Korean UI that English body read alongside the appended Korean hint (#1398
+// item 1), so for the 422 — which is ALWAYS this one block — we surface the
+// fully-localized user-tier hint ALONE (it already states the block AND the
+// remedy) rather than prefixing the English detail. Every other status falls
+// back to the shared error-detail renderer unchanged.
 function _ctxImportErrToast(status, detail) {
-  const base = _ctxErrDetail(detail, t('toast.request_failed'));
-  if (status === 422) return `${base} ${t('settings.ctx.privacy_blocked_shared_hint')}`;
-  return base;
+  if (status === 422) return t('settings.ctx.privacy_blocked_shared_hint');
+  return _ctxErrDetail(detail, t('toast.request_failed'));
 }
 
 // ``_ctxMaybeForceUnsafeSync`` is the fan-out (sync) mirror of

@@ -24,13 +24,57 @@ const I18N = (() => {
     _cache[lang] = await resp.json();
   }
 
-  /** Translate key with optional {param} interpolation. */
+  // Korean particle (josa) allomorph pairs: [후-받침 form, 무-받침 form]. The
+  // pick depends on the final character of the preceding noun (받침 유무), with a
+  // ``ㄹ`` exception for ``으로/로`` (a ㄹ 받침 takes 로, like a 무-받침 noun).
+  const _JOSA_FORMS = {
+    '을/를': ['을', '를'],
+    '은/는': ['은', '는'],
+    '이/가': ['이', '가'],
+    '으로/로': ['으로', '로'],
+  };
+
+  // Resolve a josa ``pair`` for ``noun`` from its final character. Hangul
+  // syllables occupy U+AC00–U+D7A3; ``(code - 0xAC00) % 28`` is the 종성 index
+  // (0 ≡ no 받침, 8 ≡ ``ㄹ``). A non-Hangul / empty final (Latin, digit,
+  // punctuation — e.g. an arbitrary artifact name or a closing quote) has no
+  // reliable 받침 rule, so fall back to the 무-받침 form, which reads naturally
+  // for the all-Hangul type/tier nouns this is applied to.
+  function _josaPick(noun, pair) {
+    const forms = _JOSA_FORMS[pair];
+    const s = String(noun == null ? '' : noun);
+    const code = s.charCodeAt(s.length - 1);
+    if (!(code >= 0xac00 && code <= 0xd7a3)) return forms[1];
+    const jong = (code - 0xac00) % 28;
+    if (jong === 0) return forms[1];
+    if (pair === '으로/로' && jong === 8) return forms[1];
+    return forms[0];
+  }
+
+  /** Translate key with optional {param} interpolation + Korean josa markers.
+   *
+   * Beyond ``{param}`` substitution, a josa marker ``[을/를]`` (or ``은/는`` /
+   * ``이/가`` / ``으로/로``) renders the correct allomorph for the MOST RECENT
+   * substituted value — so ``{type}[을/를]`` → "스킬을", and across an
+   * intervening quote ``"{name}"[을/를]`` resolves on ``{name}`` (#1398). Only
+   * the four known pairs are markers; any other ``[...]`` is left verbatim, so
+   * ordinary bracketed text is unaffected. Param-less calls skip interpolation
+   * entirely (unchanged), so a josa-marked string is only ever rendered with
+   * its params. */
   function t(key, params) {
     const str = (_cache[_lang] && _cache[_lang][key])
       || (_cache.en && _cache.en[key])
       || key;
     if (!params) return str;
-    return str.replace(/\{(\w+)\}/g, (_, k) => (params[k] != null ? params[k] : `{${k}}`));
+    let last = '';
+    return str.replace(/\{(\w+)\}|\[([^\]]+)\]/g, (m, k, pair) => {
+      if (k !== undefined) {
+        const v = params[k] != null ? String(params[k]) : `{${k}}`;
+        last = v;
+        return v;
+      }
+      return _JOSA_FORMS[pair] ? _josaPick(last, pair) : m;
+    });
   }
 
   /** Apply translations to all [data-i18n] elements in the DOM. */

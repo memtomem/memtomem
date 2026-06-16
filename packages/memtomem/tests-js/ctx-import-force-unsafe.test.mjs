@@ -15,8 +15,10 @@
  *     confirmed. (Consent separation: approving the privacy override is not
  *     consent to write outside the project root.) Inert for the hard
  *     ``privacy_blocked_project_shared`` code and unrelated skips.
- *   - ``_ctxImportErrToast`` — appends the "switch to the User tier" hint to
- *     the project_shared 422 only, leaving every other status untouched.
+ *   - ``_ctxImportErrToast`` — surfaces the localized "switch to the User tier"
+ *     hint ALONE on the project_shared 422 (every import 422 is that one privacy
+ *     block, and its server detail is fixed English — #1398 item 1), leaving
+ *     every other status' detail untouched.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -60,15 +62,17 @@ function reimportSpy(responses) {
 const okResp = (json) => ({ ok: true, status: 200, json: async () => json });
 
 describe('_ctxImportErrToast (project_shared privacy hint)', () => {
-  it('appends the user-tier hint on a 422 only', async () => {
+  it('shows the localized hint ALONE on a 422, dropping the English detail', async () => {
     const window = await boot();
     const hint = window.t('settings.ctx.privacy_blocked_shared_hint');
     expect(hint).not.toBe('settings.ctx.privacy_blocked_shared_hint'); // localized, not key echo
 
+    // The English server detail must NOT leak into the Korean-UI toast (#1398
+    // item 1): the 422 is always the privacy block, so the hint stands alone.
     const detail = "Gate A: SKILL.md contains 2 privacy pattern hit(s); import to scope='project_shared' rejected.";
     const at422 = window._ctxImportErrToast(422, detail);
-    expect(at422).toContain(detail);
-    expect(at422).toContain(hint);
+    expect(at422).toBe(hint);
+    expect(at422).not.toContain(detail);
 
     const at500 = window._ctxImportErrToast(500, 'boom');
     expect(at500).toBe('boom');
