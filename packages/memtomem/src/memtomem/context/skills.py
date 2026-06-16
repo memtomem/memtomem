@@ -25,6 +25,7 @@ import os
 import secrets
 import shutil
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -807,6 +808,43 @@ def generate_all_skills(
 # ── Reverse: runtimes → canonical ─────────────────────────────────────
 
 
+def _iter_scannable_skill_files(root: Path) -> Iterator[Path]:
+    """Yield every file under *root* that the extract copy would mirror.
+
+    Gate A must inspect the EXACT byte surface the import promotes, and it
+    must never silently shrink that surface. :meth:`Path.rglob` fails both
+    ways and must not be used here:
+
+    * it SUPPRESSES per-directory ``OSError`` — an unreadable subtree just
+      vanishes from the results, yet :func:`_copy_tree_collect` re-walks the
+      source and can still copy that subtree's bytes into the canonical
+      (a Gate A bypass, demonstrated under Python 3.13's glob);
+    * it does not apply the copier's skip rules, so the scanned set drifts
+      from the copied set.
+
+    This mirrors :func:`memtomem.context._atomic._copy_tree_collect` for the
+    extract copy config — ``_stage_skill(skill_dir, dst)`` passes
+    ``skip_top_level=None`` and the default empty ``skip_suffixes``, so
+    ``.bak`` files ARE copied and therefore ARE scanned (using
+    :func:`iter_installed_files`, which drops ``DIRTY_SKIP_SUFFIXES``, would
+    leave a ``secret.bak`` unscanned-but-copied). Only :data:`COPY_SKIP_NAMES`
+    and symlinks are excluded, exactly as the copier excludes them. Any
+    ``iterdir`` / ``stat`` ``OSError`` propagates so the caller fails CLOSED
+    (skip the whole skill) instead of promoting an unscanned subtree.
+    """
+    for entry in sorted(root.iterdir()):
+        if entry.name in COPY_SKIP_NAMES:
+            continue
+        if entry.is_symlink():
+            # The copier skips symlinks (never dereferences out-of-tree bytes
+            # into canonical), so neither does the scan.
+            continue
+        if entry.is_file():
+            yield entry
+        elif entry.is_dir():
+            yield from _iter_scannable_skill_files(entry)
+
+
 def extract_skills_to_canonical(
     project_root: Path,
     overwrite: bool = False,
@@ -864,10 +902,17 @@ def extract_skills_to_canonical(
     the DESTINATION ``scope`` (so a ``user`` dest stays force-bypassable),
     never ``source_scope``.
 
-    Gate A walks every file in the source skill tree (``rglob``) — secrets
-    routinely live in ``scripts/*.py`` and ``references/*.md`` rather
-    than just ``SKILL.md``. The skill is **atomic**: a single blocked
-    file aborts that skill's import without copying any of its files.
+    Gate A walks every file in the source skill tree
+    (:func:`_iter_scannable_skill_files`, which mirrors the copier's surface
+    and fails closed on an enumeration error — see why ``rglob`` is unsafe
+    there) — secrets routinely live in ``scripts/*.py`` and
+    ``references/*.md`` rather than just ``SKILL.md``. The skill is
+    **atomic**: a single blocked file aborts that skill's import without
+    copying any of its files. A source file or subtree Gate A cannot READ
+    (a genuine I/O / permission error, or a path vanishing mid-walk) aborts
+    the skill the same way — fail-closed, never copied unscanned (a
+    ``parse_error`` skip, source-runtime-specific so a later runtime's
+    readable copy of the same name still imports).
     ``project_shared`` destinations hard-abort via :class:`click.ClickException`
     on the first hit (with or without ``force_unsafe_import``).
 
@@ -966,20 +1011,36 @@ def extract_skills_to_canonical(
             # One blocked file aborts the whole skill (atomic — never
             # leave a partial copy in canonical). The project_shared
             # hard-abort path raises ClickException inside apply_gate_a;
-            # the rglob loop only sees ``proceed=False`` for non-
-            # project_shared scopes.
+            # the loop only sees ``proceed=False`` for non-project_shared
+            # scopes.
+            #
+            # The enumeration FAILS CLOSED: ``_iter_scannable_skill_files``
+            # mirrors the copier's surface and lets an unreadable-subtree
+            # ``OSError`` propagate (``rglob`` would silently SUPPRESS it,
+            # dropping the subtree from the scan while ``copy_tree_atomic``
+            # re-walks and still copies it — a Gate A bypass). A per-file
+            # read OSError fails closed the same way: a file we cannot read
+            # cannot be proven free of secrets, so the WHOLE skill is skipped
+            # rather than copied unscanned (``errors="replace"`` already
+            # absorbs non-UTF8 bytes, so this fires only on a genuine I/O /
+            # permission error or a file vanishing mid-walk). Mirrors the
+            # sync side's ``scan_artifact_tree`` ``PrivacyScanReadError`` and
+            # the agents/commands OSError → whole-artifact skip. (The waived
+            # double-read byte-swap TOCTOU above is a separate, adversarial-FS
+            # concern; this closes the accidental-unreadable holes.)
             blocked: tuple[Path, GateABlocked] | None = None
-            for src_file in sorted(skill_dir.rglob("*")):
-                if not src_file.is_file():
-                    continue
+            unreadable: tuple[Path, OSError] | None = None
+            try:
+                scan_files = sorted(_iter_scannable_skill_files(skill_dir))
+            except OSError as walk_exc:
+                unreadable = (skill_dir, walk_exc)
+                scan_files = []
+            for src_file in scan_files:
                 try:
                     content_text = src_file.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    # Truly unreadable file — skip the scan; _stage_skill
-                    # will surface the OSError during the actual copy as a
-                    # typed ``parse_error`` skip if it is real, otherwise
-                    # the file passes through as a binary asset.
-                    continue
+                except OSError as read_exc:
+                    unreadable = (src_file, read_exc)
+                    break
                 outcome = apply_gate_a(
                     content_text=content_text,
                     src=src_file,
@@ -997,6 +1058,24 @@ def extract_skills_to_canonical(
                 if isinstance(outcome, GateABlocked):
                     blocked = (src_file, outcome)
                     break
+
+            if unreadable is not None:
+                unreadable_path, unreadable_exc = unreadable
+                # No ``seen`` mark: unreadability is source-runtime-specific
+                # (agents/commands parity, and the ``_stage_skill`` OSError
+                # skip below), so a later runtime's readable+clean copy of
+                # the same name still imports.
+                skipped.append(
+                    (skill_name, f"unreadable: {unreadable_exc}", skip_codes.PARSE_ERROR)
+                )
+                logger.warning(
+                    "skip %s from %s: unreadable %s: %s",
+                    skill_name,
+                    runtime_label,
+                    unreadable_path,
+                    unreadable_exc,
+                )
+                continue
 
             if blocked is not None:
                 blocked_file, blocked_outcome = blocked

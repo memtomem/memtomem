@@ -30,6 +30,7 @@ from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.context.skills import (
     SKILL_GENERATORS,
     SKILL_MANIFEST,
+    _iter_scannable_skill_files,
     _promote_staging,
     _stage_skill,
     canonical_skills_root,
@@ -1019,6 +1020,151 @@ class TestExtractLock:
 
         assert [p.name for p in result.imported] == ["foo"]
         assert not canonical.exists(), "dry_run touched disk"
+
+
+class TestExtractGateAFailClosed:
+    """The reverse-import Gate A must FAIL CLOSED on a source file it cannot
+    READ. The old ``except OSError: continue`` skipped just that file's scan
+    and copied the whole skill anyway, so a file transiently unreadable at
+    scan time but readable by copy time promoted into the canonical UNSCANNED
+    — into ``project_shared`` (git history is forever). The sync side
+    (``scan_artifact_tree`` → ``PrivacyScanReadError``) and the agents/commands
+    importers already fail closed on the same OSError; this pins parity.
+    """
+
+    @staticmethod
+    def _patch_secret_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+        import errno as _errno
+        import pathlib
+
+        orig_read_text = pathlib.Path.read_text
+
+        def failing_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            # Only the would-be secret file is unreadable at scan time; its
+            # bytes (read via read_bytes during the copy) are NOT patched, so
+            # pre-fix the unscanned secret would still copy into canonical.
+            if self.name == "secret.py":
+                raise OSError(_errno.EIO, "Input/output error", str(self))
+            return orig_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(pathlib.Path, "read_text", failing_read_text)
+
+    def test_unreadable_source_at_scan_does_not_promote_unscanned(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable-at-scan source file aborts the whole skill (typed
+        ``parse_error`` skip) and nothing lands in the ``project_shared``
+        canonical — the unscanned secret never reaches git-tracked storage."""
+        skill_dir = _seed_runtime_skill(tmp_path, name="foo")
+        secret_file = skill_dir / "scripts" / "secret.py"
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        secret_file.write_text(f"TOKEN = {SECRET!r}\n", encoding="utf-8")
+        canonical = canonical_skills_root(tmp_path)
+
+        self._patch_secret_unreadable(monkeypatch)
+        result = extract_skills_to_canonical(tmp_path)  # default scope=project_shared
+
+        assert [p.name for p in result.imported] == []
+        assert not (canonical / "foo").exists(), "unscanned skill promoted — Gate A bypass"
+        parse_skips = [s for s in result.skipped if s[2] == skip_codes.PARSE_ERROR]
+        assert len(parse_skips) == 1, result.skipped
+        assert parse_skips[0][0] == "foo"
+        assert parse_skips[0][1].startswith("unreadable:")
+
+    def test_unreadable_source_at_scan_surfaces_in_dry_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The scan runs in dry-run too, so the fail-closed skip shows in the
+        preview — preview and apply agree (pre-fix the OSError only surfaced
+        at real-run copy time, so the preview wrongly looked importable)."""
+        skill_dir = _seed_runtime_skill(tmp_path, name="foo")
+        secret_file = skill_dir / "scripts" / "secret.py"
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        secret_file.write_text(f"TOKEN = {SECRET!r}\n", encoding="utf-8")
+
+        self._patch_secret_unreadable(monkeypatch)
+        result = extract_skills_to_canonical(tmp_path, dry_run=True)
+
+        assert [p.name for p in result.imported] == []
+        parse_skips = [s for s in result.skipped if s[2] == skip_codes.PARSE_ERROR]
+        assert len(parse_skips) == 1 and parse_skips[0][0] == "foo", result.skipped
+
+    def test_unreadable_source_at_scan_leaves_no_seen_mark(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Source-runtime-specific: the unreadable claude copy fails closed
+        without marking the name ``seen``, so the readable+clean gemini copy
+        of the same skill still imports (agents/commands fallback parity)."""
+        claude = _seed_runtime_skill(tmp_path, runtime_dir=".claude/skills", name="foo")
+        (claude / "scripts").mkdir(parents=True, exist_ok=True)
+        (claude / "scripts" / "secret.py").write_text(f"TOKEN = {SECRET!r}\n", encoding="utf-8")
+        _seed_runtime_skill(
+            tmp_path,
+            runtime_dir=".gemini/skills",
+            name="foo",
+            body="---\nname: foo\n---\ngemini clean\n",
+        )
+        canonical = canonical_skills_root(tmp_path)
+
+        self._patch_secret_unreadable(monkeypatch)
+        result = extract_skills_to_canonical(tmp_path)
+
+        assert [p.name for p in result.imported] == ["foo"]
+        text = (canonical / "foo" / SKILL_MANIFEST).read_text(encoding="utf-8")
+        assert text == "---\nname: foo\n---\ngemini clean\n"
+        parse_skips = [s for s in result.skipped if s[2] == skip_codes.PARSE_ERROR]
+        assert len(parse_skips) == 1 and parse_skips[0][0] == "foo", result.skipped
+        assert skip_codes.ALREADY_IMPORTED not in [s[2] for s in result.skipped], result.skipped
+
+
+class TestScannableSkillFilesWalker:
+    """``_iter_scannable_skill_files`` replaces ``Path.rglob`` for the Gate A
+    enumeration. ``rglob`` SUPPRESSED a per-directory ``OSError`` (an
+    unreadable subtree silently vanished from the scan while
+    ``copy_tree_atomic`` re-walked and still copied it — a Gate A bypass) and
+    did not apply the copier's skip rules. The walker must fail LOUD on an
+    enumeration error and mirror the copier's exact surface.
+    """
+
+    def test_propagates_oserror_from_unreadable_subdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unreadable subtree raises out of the walker (the caller then
+        fails closed) — it is NOT silently dropped the way ``rglob`` did."""
+        import errno as _errno
+        import pathlib
+
+        root = tmp_path / "skill"
+        (root / "scripts").mkdir(parents=True)
+        (root / SKILL_MANIFEST).write_text("---\nname: x\n---\n", encoding="utf-8")
+        (root / "scripts" / "run.sh").write_text("echo hi\n", encoding="utf-8")
+
+        orig_iterdir = pathlib.Path.iterdir
+
+        def failing_iterdir(self: Path):
+            if self.name == "scripts":
+                raise OSError(_errno.EACCES, "Permission denied", str(self))
+            return orig_iterdir(self)
+
+        monkeypatch.setattr(pathlib.Path, "iterdir", failing_iterdir)
+        with pytest.raises(OSError):
+            list(_iter_scannable_skill_files(root))
+
+    def test_mirrors_copier_surface_includes_bak_excludes_skip_names(self, tmp_path: Path) -> None:
+        """Scans exactly what ``_stage_skill``'s copy mirrors: ``.bak`` IS
+        included (the copy uses an empty ``skip_suffixes``, so dropping it
+        like ``iter_installed_files`` would leave a ``secret.bak``
+        unscanned-but-copied); ``COPY_SKIP_NAMES`` dirs are excluded."""
+        root = tmp_path / "skill"
+        (root / "scripts").mkdir(parents=True)
+        (root / "__pycache__").mkdir()
+        (root / SKILL_MANIFEST).write_text("a", encoding="utf-8")
+        (root / "secret.bak").write_text("b", encoding="utf-8")
+        (root / "scripts" / "run.sh").write_text("c", encoding="utf-8")
+        (root / "__pycache__" / "x.pyc").write_text("d", encoding="utf-8")
+
+        rels = sorted(p.relative_to(root).as_posix() for p in _iter_scannable_skill_files(root))
+        assert rels == [SKILL_MANIFEST, "scripts/run.sh", "secret.bak"]
 
 
 class TestSyncPromoteRaceClassification:
