@@ -413,6 +413,65 @@ def test_unreadable_file_classifies_dirty_with_warning(
 
 
 @requires_posix_perms
+def test_unreadable_subdir_classifies_dirty_not_crash(
+    wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``is_asset_dirty`` must survive an unreadable SUBDIRECTORY, not just an
+    unreadable file. Removing a subtree's search bit makes ``iterdir`` raise;
+    pre-fix that escaped ``is_asset_dirty`` (no surrounding guard) and 500'd the
+    whole ``mm context status`` table over N projects. The walk now catches the
+    enumeration error and classifies DIRTY — protective ("cannot prove clean"),
+    never a crash, never a silent clean."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"# web\n", "scripts/run.sh": b"echo hi\n"})
+    install_skill(tmp_path, "web")
+
+    scripts = tmp_path / ".memtomem" / "skills" / "web" / "scripts"
+    scripts.chmod(0o000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="memtomem.context.dirty"):
+            report = is_asset_dirty(tmp_path, "skills", "web")
+    finally:
+        scripts.chmod(0o755)
+
+    assert report.reason == "dirty"
+    assert any("cannot enumerate" in r.message for r in caplog.records)
+
+
+@requires_posix_perms
+def test_unreadable_subdir_pre_manifest_legacy_classifies_dirty(
+    wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The crash-guard must also fail-CLOSED on a PRE-MANIFEST legacy entry
+    (no digests, no ``files`` manifest): there is no recorded set to surface a
+    skipped subtree as ``missing``, so a walker that silently skipped would
+    report CLEAN — vouching for bytes it could not read. Catching the
+    enumeration error and classifying dirty closes that on both branches."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"# web\n", "scripts/run.sh": b"echo hi\n"})
+    install_skill(tmp_path, "web")
+
+    # Strip the entry down to a pre-#1247 legacy shape: keep only wiki_commit +
+    # installed_at, drop the digests/files manifest entirely (the legacy
+    # branch with manifest_from_entry() == None).
+    lock = Lockfile.at(tmp_path)
+    entry = lock.read_entry("skills", "web")
+    assert entry is not None
+    legacy_entry = {"wiki_commit": entry["wiki_commit"], "installed_at": entry["installed_at"]}
+
+    scripts = tmp_path / ".memtomem" / "skills" / "web" / "scripts"
+    scripts.chmod(0o000)
+    try:
+        with caplog.at_level(logging.WARNING, logger="memtomem.context.dirty"):
+            report = is_asset_dirty(tmp_path, "skills", "web", lock_entry=legacy_entry)
+    finally:
+        scripts.chmod(0o755)
+
+    assert report.reason == "dirty"  # not a silent clean
+    assert any("cannot enumerate" in r.message for r in caplog.records)
+
+
+@requires_posix_perms
 def test_unreadable_file_force_update_fails_loudly_before_any_mutation(
     wiki_root: Path, tmp_path: Path
 ) -> None:
@@ -435,6 +494,37 @@ def test_unreadable_file_force_update_fails_loudly_before_any_mutation(
             update_skill(tmp_path, "web", force=True)
     finally:
         locked.chmod(0o644)
+
+    assert not list(dest.rglob("*.bak"))
+    assert (dest / "SKILL.md").read_bytes() == b"# web\n"  # v2 never landed
+    assert _entry(tmp_path) == entry_before
+
+
+@requires_posix_perms
+def test_unreadable_subdir_force_update_refuses_before_any_mutation(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Mutation half of the subtree case: when the dest tree can't be fully
+    enumerated (unreadable SUBDIRECTORY), ``is_asset_dirty`` reports
+    ``walk_failed`` and ``update --force`` must REFUSE before any mutation —
+    the at-risk files can't be enumerated to ``.bak``, so proceeding would
+    copy/reconcile the readable files and only then fail on the subtree,
+    leaving a partial update with no backups. No ``.bak``, dest bytes
+    untouched, no lockfile drift."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"# web\n", "scripts/run.sh": b"echo hi\n"})
+    install_skill(tmp_path, "web")
+    entry_before = _entry(tmp_path)
+
+    _modify_wiki_skill(wiki_root, "web", {"SKILL.md": b"# web v2\n"})
+    dest = tmp_path / ".memtomem" / "skills" / "web"
+    scripts = dest / "scripts"
+    scripts.chmod(0o000)
+    try:
+        with pytest.raises(StaleInstallError, match="can't be enumerated"):
+            update_skill(tmp_path, "web", force=True)
+    finally:
+        scripts.chmod(0o755)
 
     assert not list(dest.rglob("*.bak"))
     assert (dest / "SKILL.md").read_bytes() == b"# web\n"  # v2 never landed

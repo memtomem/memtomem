@@ -248,3 +248,32 @@ class TestIsCopySkippedRel:
         for rel, skipped in verdicts.items():
             assert is_copy_skipped_rel(rel) is skipped
             assert (rel in walked) is (not skipped)
+
+
+class TestIterInstalledFilesFailClosed:
+    """``iter_installed_files`` is FAIL-CLOSED: an unreadable directory or
+    entry raises rather than silently shrinking the result. The privacy-gate
+    source scan (``install._gate_a_scan_src_tree``) walks it to decide what to
+    copy, so a silently-dropped file would be copied UNSCANNED. Callers that
+    must survive an unreadable subtree (the read-only ``is_asset_dirty`` status
+    walk) wrap the iteration themselves and degrade to dirty — they do not push
+    a skip policy down into the walker (see test_dirty_digest)."""
+
+    def test_raises_on_unreadable_subdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "asset"
+        (root / "scripts").mkdir(parents=True)
+        (root / "SKILL.md").write_bytes(b"a")
+        (root / "scripts" / "run.sh").write_bytes(b"b")
+
+        orig_iterdir = Path.iterdir
+
+        def failing_iterdir(self: Path):
+            if self.name == "scripts":
+                raise PermissionError(13, "Permission denied", str(self))
+            return orig_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", failing_iterdir)
+        with pytest.raises(OSError):
+            list(iter_installed_files(root))

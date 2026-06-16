@@ -319,6 +319,17 @@ def iter_installed_files(root: Path) -> Iterator[Path]:
     helper), so both consume the exact same set of files —
     ``installed_at`` cannot reference a file the dirty-checker will
     later ignore, and vice versa.
+
+    Enumeration is FAIL-CLOSED by design: an unreadable directory or entry
+    raises ``OSError`` rather than silently shrinking the result. The
+    privacy-gate source scan (``install._gate_a_scan_src_tree``) walks this
+    to decide what to copy, so a silently-dropped file would be copied
+    UNSCANNED — the same fail-open hole the skills-import scanner avoids with
+    its own fail-closed walker. Callers that must instead survive an
+    unreadable subtree (the read-only ``is_asset_dirty`` status walk) wrap the
+    iteration in their own ``try``/``except OSError`` and degrade to "dirty"
+    (cannot prove clean) — they do NOT push that policy down here, because
+    doing so would relax the gate's fail-closed contract too.
     """
     for entry in root.iterdir():
         if entry.name in COPY_SKIP_NAMES:

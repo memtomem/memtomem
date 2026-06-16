@@ -789,6 +789,20 @@ def _apply_update(
     """
     dirty_report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
 
+    if dirty_report.walk_failed:
+        # The dest tree could not be fully enumerated (an unreadable subtree).
+        # We cannot identify the at-risk files to back up, so even --force must
+        # NOT proceed: copy + reconcile would mutate the readable files and
+        # only then fail on the unreadable subtree, leaving a partial update
+        # with no .bak. Fail loudly BEFORE any mutation (is_asset_dirty used to
+        # raise straight out here; the status walk no longer crashes, so the
+        # refusal is explicit now).
+        raise StaleInstallError(
+            f"{asset_type}/{name}: {dirty_report.summary()} under "
+            f"{dest} — refusing to update even with --force, because the "
+            f"at-risk files can't be enumerated to back up; fix permissions and retry"
+        )
+
     if dirty_report.reason == "dirty" and not force:
         raise StaleInstallError(
             f"{asset_type}/{name}: {dirty_report.summary()} "
@@ -1386,6 +1400,16 @@ def _apply_pinned_install(
     # classified install/skip and went dirty during the prompt refuses loud
     # here (the CLI loop catches → red row, file intact).
     report = is_asset_dirty(project_root, asset_type, name, lock_entry=classification.lock_entry)
+    if report.walk_failed:
+        # Unenumerable dest tree (unreadable subtree): refuse before any
+        # mutation even with --force — the at-risk files can't be backed up.
+        # Mirrors _apply_update; the --all CLI loop catches → red row, file
+        # intact.
+        raise StaleInstallError(
+            f"{asset_type}/{name}: {report.summary()} under {dest} — refusing to "
+            f"update even with --force, because the at-risk files can't be "
+            f"enumerated to back up; fix permissions and retry"
+        )
     unprovable = report.reason == "never_installed" and dest.is_dir()
     if report.reason == "dirty" and not force:
         raise StaleInstallError(
