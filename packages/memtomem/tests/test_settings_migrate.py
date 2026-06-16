@@ -895,6 +895,83 @@ class TestApplyConcurrencyGuards:
         assert _read_settings(plan.target_path) == concurrent
         assert _read_settings(plan.source_path) == source_before
 
+    def test_all_exact_batch_rechecks_target_before_cleaning_source(self, project_root, fake_home):
+        """All-"exact" two-tier data-loss guard: when every applicable move
+        re-classifies "exact" (target already carries the rule), nothing is
+        written to the target but the source clean-up still runs. The target
+        ``st_mtime_ns`` recheck must therefore fire on this batch too — a
+        concurrent edit that removes the entry from the target between the read
+        and the source write must ABORT, else the entry is dropped from the
+        source while the target no longer holds it: lost from BOTH tiers.
+
+        Pre-fix the recheck lived inside ``if moves_to_write:`` and was skipped
+        whenever ``moves_to_write`` was empty (the all-"exact" batch), so the
+        source was cleaned against a stale target snapshot."""
+        import os
+        import unittest.mock
+
+        from memtomem.context import settings_migrate as migrate_mod
+
+        plan = self._plan(project_root, fake_home)
+        # Drift to all-"exact": the target already carries the canonical rule,
+        # so every applicable move re-classifies exact (moves_to_write empty).
+        _write_settings(plan.target_path, _settings_doc(_bundled_hook()))
+        source_before = _read_settings(plan.source_path)
+
+        # A concurrent process removes the entry from the target after our read.
+        concurrent = {"hooks": {}, "_concurrent": True}
+        orig_read = migrate_mod._read_with_mtime
+
+        def patched_read(path):
+            result = orig_read(path)
+            if path == plan.target_path:
+                _write_settings(plan.target_path, concurrent)
+                st = plan.target_path.stat()
+                os.utime(plan.target_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            return result
+
+        with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
+            result = apply_migration(plan)
+
+        assert result.target_written is False
+        # The fix: the source is NOT cleaned, so the entry survives in the
+        # source instead of vanishing from both tiers.
+        assert result.source_written is False
+        assert any("modified by another process" in w for w in result.warnings)
+        assert _read_settings(plan.source_path) == source_before
+        assert _read_settings(plan.target_path) == concurrent
+
+    def test_all_exact_batch_aborts_on_target_deletion(self, project_root, fake_home):
+        """All-"exact" path, target DELETED mid-apply (not merely edited): the
+        recheck compares against the missing-file sentinel ``0`` (not a bare
+        ``is_file()`` guard), so a concurrent delete still aborts and the
+        source is not cleaned against a target that no longer exists — the
+        entry survives in the source instead of vanishing from both tiers."""
+        import unittest.mock
+
+        from memtomem.context import settings_migrate as migrate_mod
+
+        plan = self._plan(project_root, fake_home)
+        _write_settings(plan.target_path, _settings_doc(_bundled_hook()))  # force all-"exact"
+        source_before = _read_settings(plan.source_path)
+
+        orig_read = migrate_mod._read_with_mtime
+
+        def patched_read(path):
+            result = orig_read(path)
+            if path == plan.target_path:
+                plan.target_path.unlink()  # concurrent delete after our read
+            return result
+
+        with unittest.mock.patch.object(migrate_mod, "_read_with_mtime", patched_read):
+            result = apply_migration(plan)
+
+        assert result.target_written is False
+        assert result.source_written is False
+        assert any("modified by another process" in w for w in result.warnings)
+        assert _read_settings(plan.source_path) == source_before
+        assert not plan.target_path.exists()
+
     def test_aborts_on_source_mtime_change_after_target_write(self, project_root, fake_home):
         """Same second layer on the source clean-up: a direct edit during the
         strip computation survives; only the clean-up is refused (the target
