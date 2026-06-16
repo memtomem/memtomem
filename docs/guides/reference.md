@@ -1212,6 +1212,7 @@ mm context status                      # installed wiki assets + their drift sta
 mm context status --all-projects       # aggregated drift across enrolled on-disk projects (read-only; same data as GET /api/context/status-all)
 mm context sync                        # sync context.md → agent files (project_shared default)
 mm context sync --scope user           # fan out from ~/.memtomem/... → ~/.{claude,gemini,codex,kimi}/...
+mm context sync --include=skills --scope user --force-unsafe   # bypass Gate A on a reviewed false positive (user/project_local only; project_shared hard-refuses)
 mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)
 mm context sync --include=agents,commands --label production # sync using the 'production' labeled version (agents/commands only)
 mm context sync --all-projects --yes   # batch over every enrolled on-disk project (project_shared only, ADR-0025)
@@ -1260,14 +1261,15 @@ mm context move agents foo --from user --to project_local --apply       # --from
 # can bypass with --force-unsafe-import (audit-logged); project_shared
 # destinations hard-refuse on any hit (no force bypass available).
 #
-# Gate A on `sync` write path (PR-E3): same per-file scan, but sync has NO
-# escape valve — `--force-unsafe-import` is init-only (ADR §5). user /
-# project_local destinations skip-and-warn on hits with PRIVACY_BLOCKED;
-# project_shared destinations raise ClickException with a remediation hint
-# pointing at `mm context migrate` (PR-E4) for moving the artifact to a
-# writable tier first. Skills fan-out uses staging-dir-first scan + atomic
-# os.replace promote so a blocked sync leaves the existing dst tree
-# unchanged.
+# Gate A on `sync` write path (PR-E3): same per-file scan. user /
+# project_local destinations skip-and-warn on hits with PRIVACY_BLOCKED, or
+# bypass with `--force-unsafe` (audit-logged) for a reviewed false positive
+# — the fan-out mirror of init's `--force-unsafe-import` (#1386). project_shared
+# destinations raise ClickException regardless of the flag (ADR §5: git history
+# is forever), with a remediation hint pointing at `mm context migrate` (PR-E4)
+# for moving the artifact to a writable tier first. Skills fan-out uses
+# staging-dir-first scan + atomic os.replace promote so a blocked sync leaves
+# the existing dst tree unchanged.
 #
 # Web Context Gateway missing-canonical remediation:
 #   project_shared → web Import can initialize from detected runtime files;
