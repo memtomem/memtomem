@@ -12,9 +12,10 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -137,6 +138,28 @@ def _git(
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}") from exc
 
 
+def _force_rmtree(path: Path) -> None:
+    """Best-effort recursive remove that survives Windows read-only git files.
+
+    Plain ``shutil.rmtree(ignore_errors=True)`` *silently* leaves files behind
+    on Windows: git marks ``.git`` pack/loose-object files read-only, and
+    Windows refuses to unlink a read-only file. The swallowed error means a
+    failed ``init`` bootstrap leaves a surviving ``.git/`` — ``exists()`` then
+    reports a wedged half-wiki, defeating the rollback. Clear the read-only bit
+    and retry per failed entry; stay best-effort (the caller re-raises the
+    original bootstrap error, so a residual file must not mask it).
+    """
+
+    def _on_error(func: Callable[[str], object], p: str, _exc: BaseException) -> None:
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onexc=_on_error)
+
+
 def _require_clean_rel(rel: str) -> None:
     """Reject anything that isn't a clean wiki-relative POSIX path.
 
@@ -212,12 +235,12 @@ class WikiStore:
             # surfaces the failure. We add no fallback identity: the "memtomem
             # injects no git identity" invariant is preserved.
             if root_preexisted:
-                shutil.rmtree(self.root / ".git", ignore_errors=True)
+                _force_rmtree(self.root / ".git")
                 for asset_type in WIKI_ASSET_TYPES:
-                    shutil.rmtree(self.root / asset_type, ignore_errors=True)
+                    _force_rmtree(self.root / asset_type)
                 (self.root / "README.md").unlink(missing_ok=True)
             else:
-                shutil.rmtree(self.root, ignore_errors=True)
+                _force_rmtree(self.root)
             raise
 
     def init_from_url(self, url: str) -> None:
