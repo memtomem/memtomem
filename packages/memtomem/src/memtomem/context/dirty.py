@@ -100,6 +100,15 @@ class DirtyReport:
     :func:`memtomem.context.lockfile.manifest_from_entry`) on legacy
     entries that carry one; pre-manifest entries keep deletions
     invisible.
+
+    ``walk_failed`` is set with ``reason="dirty"`` when the dest tree could
+    not be fully enumerated (an unreadable subtree, or a path vanishing
+    mid-walk). The "dirty" verdict is then a FAIL-SAFE ("cannot prove
+    clean"), not an enumerated diff: ``dirty_files`` / ``missing_files`` are
+    incomplete because the at-risk set is unknown. Read-only callers (``mm
+    context status``, the update/install previews) treat it as plain dirty;
+    MUTATION callers must REFUSE on it even with ``--force`` — they cannot
+    back up files they could not enumerate.
     """
 
     reason: DirtyReason
@@ -107,6 +116,7 @@ class DirtyReport:
     dirty_files: tuple[Path, ...]
     checked_files: int
     missing_files: tuple[Path, ...] = ()
+    walk_failed: bool = False
 
     def summary(self) -> str:
         """Human-readable local-edit summary for messages and status rows.
@@ -119,6 +129,8 @@ class DirtyReport:
             parts.append(f"{len(self.dirty_files)} file(s) modified locally")
         if self.missing_files:
             parts.append(f"{len(self.missing_files)} file(s) deleted locally")
+        if self.walk_failed:
+            parts.append("tree could not be fully read (unreadable file or directory)")
         return " and ".join(parts) if parts else "0 file(s) changed"
 
 
@@ -189,62 +201,88 @@ def is_asset_dirty(
     checked = 0
     present_rels: set[str] = set()
     missing: list[Path] = []
+    # An unreadable subtree / entry that aborts the enumeration. The walker is
+    # fail-closed (it raises), which is correct for the privacy-gate source
+    # scan but would crash this read-only status walk over N projects. Catch it
+    # here and degrade to "dirty" — "cannot prove clean" protects, and unlike
+    # `missing` this fires on BOTH branches (a pre-manifest legacy entry has no
+    # recorded set to surface a skipped subtree, so silently skipping would
+    # report clean). Never push the skip down into the walker: that would relax
+    # the gate's fail-closed contract too.
+    walk_failed = False
     digests = digests_from_entry(lock_entry)
-    if digests is not None:
-        # Digest branch (#1247 id 15): byte equality against the SHA-256
-        # recorded for the bytes the install wrote. mtime is deliberately
-        # not consulted — it would re-import touch-only false positives
-        # for zero detection gain. Deltas vs legacy: touch-only edit →
-        # clean, backdated edit/addition → dirty, unreadable → dirty+warn.
-        for file_path in iter_installed_files(dest):
-            checked += 1
-            rel = file_path.relative_to(dest).as_posix()
-            present_rels.add(rel)
-            recorded = digests.get(rel)
-            if recorded is None:
-                dirty.append(file_path)  # local addition — never recorded
-                continue
-            try:
-                blob = file_path.read_bytes()
-            except OSError as exc:
-                # Fail-safe: cannot prove clean. The read error itself
-                # surfaces loudly pre-mutation (Gate A / copy2), not here —
-                # `mm context status` over N projects must stay usable.
-                logger.warning(
-                    "%s/%s: cannot read %s for digest check (%s); classifying dirty",
-                    asset_type,
-                    name,
-                    file_path,
-                    exc,
-                )
-                dirty.append(file_path)
-                continue
-            if hashlib.sha256(blob).hexdigest() != recorded:
-                dirty.append(file_path)
-        # Deletion detection from the digest map's own keys — when digests
-        # validate, `files` was written by the same upsert from the same
-        # set; if a hand-edit makes them diverge, the digest map is the
-        # single record we trust (mirrored on the reconcile side).
-        missing = [dest / rel for rel in sorted(digests.keys() - present_rels)]
-    else:
-        # Legacy branch — pre-digest behavior verbatim.
-        for file_path in iter_installed_files(dest):
-            checked += 1
-            present_rels.add(file_path.relative_to(dest).as_posix())
-            if file_path.stat().st_mtime > installed_at_epoch:
-                dirty.append(file_path)
+    try:
+        if digests is not None:
+            # Digest branch (#1247 id 15): byte equality against the SHA-256
+            # recorded for the bytes the install wrote. mtime is deliberately
+            # not consulted — it would re-import touch-only false positives
+            # for zero detection gain. Deltas vs legacy: touch-only edit →
+            # clean, backdated edit/addition → dirty, unreadable → dirty+warn.
+            for file_path in iter_installed_files(dest):
+                checked += 1
+                rel = file_path.relative_to(dest).as_posix()
+                present_rels.add(rel)
+                recorded = digests.get(rel)
+                if recorded is None:
+                    dirty.append(file_path)  # local addition — never recorded
+                    continue
+                try:
+                    blob = file_path.read_bytes()
+                except OSError as exc:
+                    # Fail-safe: cannot prove clean. The read error itself
+                    # surfaces loudly pre-mutation (Gate A / copy2), not here —
+                    # `mm context status` over N projects must stay usable.
+                    logger.warning(
+                        "%s/%s: cannot read %s for digest check (%s); classifying dirty",
+                        asset_type,
+                        name,
+                        file_path,
+                        exc,
+                    )
+                    dirty.append(file_path)
+                    continue
+                if hashlib.sha256(blob).hexdigest() != recorded:
+                    dirty.append(file_path)
+            # Deletion detection from the digest map's own keys — when digests
+            # validate, `files` was written by the same upsert from the same
+            # set; if a hand-edit makes them diverge, the digest map is the
+            # single record we trust (mirrored on the reconcile side).
+            missing = [dest / rel for rel in sorted(digests.keys() - present_rels)]
+        else:
+            # Legacy branch — pre-digest behavior verbatim.
+            for file_path in iter_installed_files(dest):
+                checked += 1
+                present_rels.add(file_path.relative_to(dest).as_posix())
+                if file_path.stat().st_mtime > installed_at_epoch:
+                    dirty.append(file_path)
 
-        # Deletion detection (#1247): a manifest-recorded file gone from disk
-        # is a local edit. Valid-manifest entries only — legacy/stale/malformed
-        # manifests degrade to the pre-manifest behavior (deletions invisible).
-        manifest = manifest_from_entry(lock_entry)
-        if manifest is not None:
-            missing = [dest / rel for rel in sorted(manifest - present_rels)]
+            # Deletion detection (#1247): a manifest-recorded file gone from
+            # disk is a local edit. Valid-manifest entries only —
+            # legacy/stale/malformed manifests degrade to the pre-manifest
+            # behavior (deletions invisible).
+            manifest = manifest_from_entry(lock_entry)
+            if manifest is not None:
+                missing = [dest / rel for rel in sorted(manifest - present_rels)]
+    except OSError as exc:
+        # An unreadable directory (search bit removed) or a path vanishing
+        # mid-walk aborts the enumeration: we cannot enumerate the installed
+        # tree, so we cannot prove the asset clean. Degrade to dirty instead of
+        # crashing the status walk. Also covers the legacy branch's unguarded
+        # `file_path.stat()` racing-delete.
+        logger.warning(
+            "%s/%s: cannot enumerate %s for dirty check (%s); classifying dirty",
+            asset_type,
+            name,
+            dest,
+            exc,
+        )
+        walk_failed = True
 
     return DirtyReport(
-        reason="dirty" if (dirty or missing) else "clean",
+        reason="dirty" if (dirty or missing or walk_failed) else "clean",
         installed_at=installed_at,
         dirty_files=tuple(dirty),
         checked_files=checked,
         missing_files=tuple(missing),
+        walk_failed=walk_failed,
     )
