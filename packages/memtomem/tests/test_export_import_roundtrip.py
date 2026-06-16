@@ -14,7 +14,11 @@ Run with: ``uv run pytest tests/test_export_import_roundtrip.py -s``
 
 from __future__ import annotations
 
+import hashlib
+import math
+import re
 from collections import Counter
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -22,11 +26,6 @@ import pytest
 from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import Components, close_components, create_components
 from memtomem.tools.export_import import export_chunks, import_chunks
-
-pytest.importorskip(
-    "fastembed",
-    reason="fastembed not installed — install with `pip install memtomem[onnx]`",
-)
 
 
 # Synthetic corpus — distinctive content per doc so content_hash and top-k
@@ -67,11 +66,95 @@ _CORPUS: dict[str, str] = {
 }
 
 
-async def _make_onnx_components(tmp_path: Path, tag: str) -> tuple[Components, Path]:
-    """Build a hermetic onnx-backed component stack with its own DB + mem dir.
+class _DeterministicEmbedder:
+    """Hermetic, content-addressed embedder for the roundtrip suite.
 
-    Mirrors ``conftest.onnx_components`` but is parameterised so we can spin up
-    two independent instances (PC A, PC B) inside one test.
+    Maps each text to a stable unit vector derived from a SHA-256 digest of the
+    text. No network and no model download: this deliberately replaces the real
+    ONNX/fastembed model so the roundtrip tests stay hermetic in the main CI
+    matrix, which — unlike the dedicated ``golden-path`` job — does not
+    pre-cache the model. Live HuggingFace downloads here made the suite flaky
+    under HF ``429 Too Many Requests`` rate-limiting, reddening required checks.
+
+    Determinism is the only property the roundtrip asserts rely on: identical
+    content embedded the same way on both instances yields identical vectors, so
+    content_hash dedup and top-k result *sets* survive the export/import
+    roundtrip. The vector combines a bag-of-words feature hash (the "hashing
+    trick" — texts sharing words get correlated vectors, so each query separates
+    its intended doc decisively) with a small per-text dense background. The
+    background gives docs that share *no* query words a distinct, non-zero
+    similarity, mirroring how a real dense model never returns exactly-orthogonal
+    vectors; without it zero-overlap distractors tie and the lowest top-k slot is
+    ordered by an arbitrary tie-break. The vectors carry no real semantic
+    meaning; embedding quality floors live in
+    ``test_multilingual_regression.py`` against the real model.
+    """
+
+    _WORD_RE = re.compile(r"\w+", re.UNICODE)
+    _BACKGROUND_WEIGHT = 0.15
+
+    def __init__(self, dimension: int) -> None:
+        self._dimension = dimension
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def model_name(self) -> str:
+        return "deterministic-test"
+
+    def _background(self, text: str) -> list[float]:
+        """Per-text dense vector in [-1, 1), expanded from a SHA-256 digest."""
+        values: list[float] = []
+        counter = 0
+        while len(values) < self._dimension:
+            digest = hashlib.sha256(f"{counter}\x00{text}".encode()).digest()
+            for offset in range(0, len(digest), 2):
+                if len(values) >= self._dimension:
+                    break
+                values.append(int.from_bytes(digest[offset : offset + 2], "big") / 32768.0 - 1.0)
+            counter += 1
+        return values
+
+    def _vector(self, text: str) -> list[float]:
+        values = self._background(text)
+        for i in range(self._dimension):
+            values[i] *= self._BACKGROUND_WEIGHT
+        for token in self._WORD_RE.findall(text.lower()):
+            digest = hashlib.sha256(token.encode()).digest()
+            slot = int.from_bytes(digest[:4], "big") % self._dimension
+            values[slot] += 1.0 if digest[4] & 1 else -1.0
+        norm = math.sqrt(sum(v * v for v in values)) or 1.0
+        return [v / norm for v in values]
+
+    async def embed_texts(
+        self,
+        texts: Sequence[str],
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[list[float]]:
+        vectors = [self._vector(t) for t in texts]
+        if on_progress is not None:
+            on_progress(len(texts), len(texts))
+        return vectors
+
+    async def embed_query(self, query: str) -> list[float]:
+        return self._vector(query)
+
+    async def close(self) -> None:
+        pass
+
+
+async def _make_components(tmp_path: Path, tag: str) -> tuple[Components, Path]:
+    """Build a hermetic component stack with its own DB + mem dir.
+
+    Spins up an independent instance (PC A or PC B) backed by
+    ``_DeterministicEmbedder`` instead of the real ONNX model, so two stacks can
+    be created inside one test without any network access. ``create_embedder``
+    is patched at its single construction point in ``component_factory`` so the
+    index engine, search pipeline, and ``Components.embedder`` all share the same
+    deterministic embedder.
     """
     db_path = tmp_path / f"{tag}.db"
     mem_dir = tmp_path / f"{tag}_mem"
@@ -81,21 +164,42 @@ async def _make_onnx_components(tmp_path: Path, tag: str) -> tuple[Components, P
     config.storage.sqlite_path = db_path
     config.indexing.memory_dirs = [mem_dir]
     config.embedding.provider = "onnx"
-    config.embedding.model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    config.embedding.model = "deterministic-test"
     config.embedding.dimension = 384
+    # ``Mem2MemConfig()`` reads ``MEMTOMEM_*`` env at construction (before the
+    # load_config_d / load_config_overrides patches below), so a developer/CI
+    # env could still flip on the only network-bearing optional components
+    # ``create_components`` builds — the reranker (cross-encoder download) and
+    # the LLM provider. Force them off so the stack stays hermetic.
+    config.rerank.enabled = False
+    config.llm.enabled = False
 
     import memtomem.config as _cfg
+    from memtomem.server import component_factory as _factory
 
-    _orig = _cfg.load_config_overrides
+    _orig_config_d = _cfg.load_config_d
+    _orig_overrides = _cfg.load_config_overrides
+    _orig_create_embedder = _factory.create_embedder
 
     def _noop(config: Mem2MemConfig) -> None:
         return None
 
+    def _deterministic_embedder(_embedding_config: object) -> _DeterministicEmbedder:
+        return _DeterministicEmbedder(config.embedding.dimension)
+
+    # Neutralise BOTH config layers ``create_components`` applies — ``config.d``
+    # fragments and ``config.json`` overrides — so a developer/CI environment
+    # can't flip on a network-bearing feature (reranker cross-encoder, LLM) or
+    # repoint the embedding provider and break hermeticity.
+    _cfg.load_config_d = _noop
     _cfg.load_config_overrides = _noop
+    _factory.create_embedder = _deterministic_embedder
     try:
         comp = await create_components(config)
     finally:
-        _cfg.load_config_overrides = _orig
+        _cfg.load_config_d = _orig_config_d
+        _cfg.load_config_overrides = _orig_overrides
+        _factory.create_embedder = _orig_create_embedder
     return comp, mem_dir
 
 
@@ -128,8 +232,8 @@ class TestRoundtripBaseline:
     """One consolidated baseline — prints metrics, fails only on must-holds."""
 
     async def test_phase1_baseline(self, tmp_path):
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a")
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a")
+        comp_b, _ = await _make_components(tmp_path, "pc_b")
         try:
             await _index_corpus(comp_a, mem_a)
             chunks_a = await comp_a.storage.recall_chunks(limit=10_000)
@@ -226,11 +330,14 @@ class TestRoundtripBaseline:
                 f"metadata drift across roundtrip: {len(meta_mismatches)} field(s) "
                 f"mismatched. First 3: {meta_mismatches[:3]}"
             )
-            # Top-k result sets must match on both sides. Both instances use the
-            # same ONNX model on identical content, so ranks are deterministic.
-            # Compare as sets (order-insensitive) to tolerate any tie-breaking
-            # difference; a set drift = imported chunks are not equivalent to
-            # the source for retrieval purposes.
+            # Top-k result sets must match on both sides. Import re-embeds
+            # ``retrieval_content`` exactly as the index engine does, so a chunk
+            # carries the same vector whether it was indexed natively (A) or
+            # imported (B); with the deterministic embedder that makes retrieval a
+            # pure function of content and the result sets identical. Compare as
+            # sets (order-insensitive) so an in-set tie-break reorder is fine; a
+            # set drift = imported chunks are not equivalent to the source for
+            # retrieval purposes.
             for q, ca, cb in topk_results:
                 assert set(ca) == set(cb), (
                     f"top-3 result set drift across roundtrip for {q!r}: "
@@ -246,8 +353,8 @@ class TestRoundtripBaseline:
         must be a no-op: the second import contributes zero new rows and
         reports every record as ``conflict_skipped``.
         """
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_re")
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_re")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_re")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_re")
         try:
             await _index_corpus(comp_a, mem_a)
             chunks_a = await comp_a.storage.recall_chunks(limit=10_000)
@@ -297,8 +404,8 @@ class TestRoundtripBaseline:
         content overlap, the resulting DB should contain |A| + |B| chunks and
         the content_hash sets must be disjoint.
         """
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_m")
-        comp_b, mem_b = await _make_onnx_components(tmp_path, "pc_b_m")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_m")
+        comp_b, mem_b = await _make_components(tmp_path, "pc_b_m")
         try:
             await _index_corpus(comp_a, mem_a, _CORPUS)
             await _index_corpus(comp_b, mem_b, _CORPUS_B)
@@ -356,8 +463,8 @@ class TestRoundtripBaseline:
         native row survives, A's colliding record is not added. Only the
         non-colliding A-records contribute new rows.
         """
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_c")
-        comp_b, mem_b = await _make_onnx_components(tmp_path, "pc_b_c")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_c")
+        comp_b, mem_b = await _make_components(tmp_path, "pc_b_c")
         try:
             await _index_corpus(comp_a, mem_a, _CORPUS)
             # PC_B has one doc with content identical to PC_A's caching.md
@@ -421,8 +528,8 @@ class TestOnConflictModes:
         mode is kept so existing callers don't break, but it no longer
         produces row duplication.
         """
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_dup")
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_dup")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_dup")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_dup")
         try:
             await _index_corpus(comp_a, mem_a)
             chunks_a = await comp_a.storage.recall_chunks(limit=10_000)
@@ -448,8 +555,8 @@ class TestOnConflictModes:
     async def test_update_mode_overwrites_metadata_and_preserves_uuid(self, tmp_path):
         """``on_conflict="update"`` keeps the existing UUID and rewrites
         metadata (tags/namespace) from the bundle record."""
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_upd")
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_upd")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_upd")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_upd")
         try:
             await _index_corpus(comp_a, mem_a)
             bundle_path = tmp_path / "bundle.json"
@@ -486,8 +593,8 @@ class TestOnConflictModes:
             await close_components(comp_b)
 
     async def test_invalid_on_conflict_raises(self, tmp_path):
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_inv")
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_inv")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_inv")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_inv")
         try:
             await _index_corpus(comp_a, mem_a)
             bundle_path = tmp_path / "bundle.json"
@@ -512,7 +619,7 @@ class TestOnConflictModes:
         import json
         from datetime import datetime, timezone
 
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_v1")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_v1")
         try:
             v1_bundle = {
                 "version": "1",
@@ -552,8 +659,8 @@ class TestOnConflictModes:
         reuses the bundle's original UUIDs — the "same chunk on two PCs"
         identity guarantee.
         """
-        comp_a, mem_a = await _make_onnx_components(tmp_path, "pc_a_pres")
-        comp_b, _ = await _make_onnx_components(tmp_path, "pc_b_pres")
+        comp_a, mem_a = await _make_components(tmp_path, "pc_a_pres")
+        comp_b, _ = await _make_components(tmp_path, "pc_b_pres")
         try:
             await _index_corpus(comp_a, mem_a)
             chunks_a = await comp_a.storage.recall_chunks(limit=10_000)
