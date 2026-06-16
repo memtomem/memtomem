@@ -81,6 +81,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_skills.create_skill",
         "context_skills.delete_skill",
         "context_skills.import_skill",
+        "context_skills.import_skill_to_user",
         "context_skills.import_skills",
         "context_skills.sync_skills",
         "context_skills.update_skill",
@@ -207,6 +208,7 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_skills.create_skill": "structured artifact; see above",
     "context_skills.update_skill": "structured artifact; see above",
     "context_skills.import_skill": "structured artifact import",
+    "context_skills.import_skill_to_user": "structured artifact import (project runtime → user library)",
     "context_skills.import_skills": "bulk structured artifact import",
     "context_skills.sync_skills": "filesystem-driven sync",
     "context_sync_all.sync_all_context": "filesystem-driven sync (per-type "

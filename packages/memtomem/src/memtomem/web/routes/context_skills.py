@@ -736,6 +736,7 @@ def _import_payload(
     project_root: Path,
     target_scope: TargetScope,
     dry_run: bool | None,
+    source_scope: TargetScope | None = None,
 ) -> dict:
     """Wire shape shared by both import routes (and the gate's nested plan).
 
@@ -743,6 +744,12 @@ def _import_payload(
     carried one. ``_safe_rel`` (not bare ``relative_to``) because user-tier
     canonical paths live under ``~/.memtomem/`` and would otherwise raise
     out of the response encoder.
+
+    ``scanned_dirs`` describes where the import READ from, which is the
+    destination ``target_scope`` for the coupled routes but the decoupled
+    SOURCE for ``import_skill_to_user`` (project runtime → user library);
+    pass ``source_scope`` there so the field doesn't misreport the user
+    runtime roots for a project-runtime read.
     """
     payload: dict = {
         "imported": [
@@ -753,7 +760,9 @@ def _import_payload(
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
-        "scanned_dirs": _scanned_dirs_for(target_scope),
+        "scanned_dirs": _scanned_dirs_for(
+            source_scope if source_scope is not None else target_scope
+        ),
     }
     if dry_run is not None:
         payload["dry_run"] = dry_run
@@ -905,3 +914,88 @@ async def import_skill(
     if not result.imported and not result.skipped:
         raise _error(404, "missing", f"No runtime skill named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)
+
+
+@router.post("/context/skills/{name}/import-to-user")
+async def import_skill_to_user(
+    name: str,
+    body: ImportRequest | None = None,
+    project_root: Path = Depends(resolve_scope_root),
+) -> dict:
+    """Import a PROJECT-runtime skill into the USER library (~/.memtomem/skills).
+
+    The one web path for a project-runtime skill that trips Gate A's
+    false-positive secret heuristic. ``/import`` to ``project_shared`` is a
+    hard 422 (git history is forever — no bypass, ADR-0011 §5),
+    ``project_local`` web import is rejected (ADR-0011 §3), and a plain
+    ``user``-tier import reads ``~/.claude/skills`` — the wrong source for a
+    skill that lives under ``<project>/.claude/skills``. This route reads the
+    PROJECT runtime (``source_scope="project_shared"``) but writes the USER
+    canonical (``scope="user"``), so Gate A's block decision keys off the
+    ``user`` destination and is force-bypassable after a reviewed confirm —
+    exactly the upload/memory/CLI ``--force-unsafe-import`` valve. The user
+    library is shared across every project, so this is the natural home for a
+    reusable skill the project tier can't (and shouldn't) accept.
+
+    Writes land outside any project root (``~/.memtomem/``), so the user-tier
+    host-write disclosure (``allow_host_writes`` round-trip) applies — same as
+    the user-tier ``/import``. 404 when no PROJECT runtime skill matches.
+    """
+    try:
+        validate_name(name, kind="skill name")
+    except InvalidNameError as exc:
+        raise _error(400, "validation", f"Invalid skill name: {exc}")
+    overwrite = body.overwrite if body else False
+    allow_host_writes = body.allow_host_writes if body else False
+    force_unsafe_import = body.force_unsafe_import if body else False
+
+    async def _run(dry: bool) -> ExtractResult:
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                # Thread offload (#1247 id 18): see import_skills above. Reads
+                # the project runtime, writes the user canonical — the only
+                # call site that decouples source_scope from the dest scope.
+                return await asyncio.to_thread(
+                    extract_skills_to_canonical,
+                    project_root,
+                    overwrite=overwrite,
+                    only_name=name,
+                    dry_run=dry,
+                    scope="user",
+                    source_scope="project_shared",
+                    force_unsafe_import=force_unsafe_import,
+                    surface="web_context_skills_import_to_user",
+                )
+
+    try:
+        if not allow_host_writes:
+            # User dest → host write. Disclose the ~/.memtomem destinations the
+            # confirmed run would touch; the dry preview threads force too, so a
+            # reviewed force surfaces the would-import target (see #1379).
+            preview = await _run(dry=True)
+            if not preview.imported and not preview.skipped:
+                raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
+            gate = host_write_gate(
+                "user",
+                allow_host_writes,
+                action="Import skill to user library",
+                host_targets=[str(p) for p in preview.imported],
+                plan=_import_payload(
+                    preview, project_root, "user", dry_run=None, source_scope="project_shared"
+                ),
+            )
+            if gate is not None:
+                return gate
+        result = await _run(dry=False)
+    except TimeoutError:
+        raise _error(503, "busy", "Skill import timed out — another sync may be in progress")
+    except click.ClickException as exc:
+        # Defensive: the user dest is force-bypassable, so Gate A raises a
+        # ClickException only on a project_shared dest — which this route never
+        # uses. Translate to 422 anyway rather than risk a generic 500 (#1378).
+        raise HTTPException(422, exc.message) from exc
+    if not result.imported and not result.skipped:
+        raise _error(404, "missing", f"No project runtime skill named {name!r} to import")
+    return _import_payload(
+        result, project_root, "user", dry_run=None, source_scope="project_shared"
+    )

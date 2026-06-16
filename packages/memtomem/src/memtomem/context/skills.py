@@ -813,6 +813,7 @@ def extract_skills_to_canonical(
     only_name: str | None = None,
     *,
     scope: TargetScope = "project_shared",
+    source_scope: TargetScope | None = None,
     force_unsafe_import: bool = False,
     dry_run: bool = False,
     surface: str = "cli_context_init",
@@ -851,6 +852,18 @@ def extract_skills_to_canonical(
     ``~/.claude/skills`` etc.). ``project_local`` short-circuits to an
     empty result with ``NO_PROJECT_FANOUT_FOR_RUNTIME``.
 
+    ``source_scope`` decouples the SOURCE runtime root from the destination
+    when set (default ``None`` keeps them coupled — the historical
+    behavior). It exists for one sanctioned cross-tier flow: importing a
+    *project* runtime skill (``source_scope="project_shared"`` →
+    ``<project>/.claude/skills``) into the *user* library
+    (``scope="user"`` → ``~/.memtomem/skills``), the only web path for a
+    project-runtime skill that trips Gate A's false-positive secret
+    heuristic (``project_shared`` dest is hard-blocked with no bypass;
+    ``user`` dest is force-bypassable). The Gate A block decision keys off
+    the DESTINATION ``scope`` (so a ``user`` dest stays force-bypassable),
+    never ``source_scope``.
+
     Gate A walks every file in the source skill tree (``rglob``) — secrets
     routinely live in ``scripts/*.py`` and ``references/*.md`` rather
     than just ``SKILL.md``. The skill is **atomic**: a single blocked
@@ -884,6 +897,10 @@ def extract_skills_to_canonical(
         )
 
     canonical_root = canonical_artifact_dir("skills", scope, project_root)
+    # Source runtime root scope — decoupled from the destination only when the
+    # caller asks (default keeps them equal, the historical coupling). See the
+    # ``source_scope`` docstring for the one sanctioned project→user flow.
+    source_scope_eff: TargetScope = source_scope if source_scope is not None else scope
     imported: list[Path] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # skill_name → first runtime label
@@ -899,7 +916,7 @@ def extract_skills_to_canonical(
 
     for runtime in ("claude", "gemini", "codex", "kimi"):
         try:
-            runtime_dir = runtime_fanout_root("skills", runtime, scope, project_root)
+            runtime_dir = runtime_fanout_root("skills", runtime, source_scope_eff, project_root)
         except KeyError:
             continue
         if runtime_dir is None or not runtime_dir.is_dir():

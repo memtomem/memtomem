@@ -715,3 +715,92 @@ class TestUserTierImport:
                 "surface": "web_context_skills_import",
             }
         ]
+
+
+class TestImportSkillToUserLibrary:
+    """``POST /context/skills/{name}/import-to-user`` — read the PROJECT
+    runtime, write the USER canonical. The one web path for a project-runtime
+    skill that trips Gate A's false-positive secret heuristic (project_shared
+    dest is hard-blocked; user dest is force-bypassable)."""
+
+    def _seed_project_skill(self, proj: Path, name: str, content: str = "# proj skill\n") -> Path:
+        d = proj / ".claude" / "skills" / name
+        d.mkdir(parents=True)
+        (d / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+        return d
+
+    @pytest.mark.anyio
+    async def test_clean_skill_discloses_host_write_then_imports(
+        self, client: AsyncClient, proj: Path, home: Path
+    ):
+        self._seed_project_skill(proj, "proj_skill")
+        # First call: user dest → host-write disclosure envelope naming the
+        # ~/.memtomem destination.
+        r = await client.post("/api/context/skills/proj_skill/import-to-user")
+        assert r.status_code == 200, r.text
+        env = r.json()
+        assert env["status"] == "needs_confirmation"
+        assert env["confirm"] == "allow_host_writes"
+        assert env["host_targets"] == [str(home / ".memtomem" / "skills" / "proj_skill")]
+        assert not (home / ".memtomem" / "skills").exists()  # nothing written yet
+        # Confirmed: reads the PROJECT runtime, writes the USER canonical.
+        r2 = await client.post(
+            "/api/context/skills/proj_skill/import-to-user",
+            json={"allow_host_writes": True},
+        )
+        assert r2.status_code == 200, r2.text
+        assert [i["name"] for i in r2.json()["imported"]] == ["proj_skill"]
+        assert (home / ".memtomem" / "skills" / "proj_skill" / SKILL_MANIFEST).is_file()
+
+    @pytest.mark.anyio
+    async def test_flagged_skill_skips_without_force_imports_with_force(
+        self, client: AsyncClient, proj: Path, home: Path
+    ):
+        self._seed_project_skill(
+            proj, "flagged", "---\nname: flagged\n---\nclass S:\n    api_key: str\n"
+        )
+        # No force (host-write already confirmed): user dest blocks → surfaced
+        # as a privacy_blocked skip, NOT a 500 and NOT a host envelope (nothing
+        # would import without force).
+        r = await client.post(
+            "/api/context/skills/flagged/import-to-user",
+            json={"allow_host_writes": True},
+        )
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["imported"] == []
+        assert any(s["reason_code"] == "privacy_blocked" for s in data["skipped"])
+        assert not (home / ".memtomem" / "skills" / "flagged").exists()
+        # Reviewed force: the project skill lands in the user library.
+        r2 = await client.post(
+            "/api/context/skills/flagged/import-to-user",
+            json={"allow_host_writes": True, "force_unsafe_import": True},
+        )
+        assert r2.status_code == 200, r2.text
+        assert [i["name"] for i in r2.json()["imported"]] == ["flagged"]
+        assert (home / ".memtomem" / "skills" / "flagged" / SKILL_MANIFEST).is_file()
+
+    @pytest.mark.anyio
+    async def test_reads_project_runtime_not_user_runtime(
+        self, client: AsyncClient, proj: Path, home: Path
+    ):
+        # Same name in BOTH runtimes — the route must read the PROJECT copy.
+        self._seed_project_skill(proj, "dup", "# from project\n")
+        ud = home / ".claude" / "skills" / "dup"
+        ud.mkdir(parents=True)
+        (ud / SKILL_MANIFEST).write_text("# from user runtime\n", encoding="utf-8")
+        r = await client.post(
+            "/api/context/skills/dup/import-to-user",
+            json={"allow_host_writes": True},
+        )
+        assert r.status_code == 200, r.text
+        canonical = home / ".memtomem" / "skills" / "dup" / SKILL_MANIFEST
+        assert canonical.read_text(encoding="utf-8") == "# from project\n"
+
+    @pytest.mark.anyio
+    async def test_missing_project_skill_404(self, client: AsyncClient, proj: Path, home: Path):
+        r = await client.post(
+            "/api/context/skills/ghost/import-to-user",
+            json={"allow_host_writes": True},
+        )
+        assert r.status_code == 404, r.text

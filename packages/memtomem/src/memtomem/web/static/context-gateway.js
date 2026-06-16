@@ -1458,6 +1458,36 @@ function _ctxImportErrToast(status, detail) {
   return base;
 }
 
+// Shared single-item import flow used by both the runtime-only "Import" button
+// (imports at the current tier) and the "Import to user library" button (the
+// cross-tier project→user route). ``importOnce(extra)`` is the route-specific
+// fetch. Handles the #1263 user-tier host-write disclosure envelope and then
+// offers the #1379 reviewed Gate A force valve. Resolves to the final payload,
+// or ``null`` when the user bailed at a gate or an error was already toasted
+// (the caller owns the success/skip toast + list refresh).
+async function _ctxRunRuntimeImportFlow(importOnce) {
+  let r = await importOnce({});
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    showToast(_ctxImportErrToast(r.status, err.detail), 'error');
+    return null;
+  }
+  let data = await r.json();
+  if (_ctxIsHostWriteEnvelope(data)) {
+    r = await _ctxConfirmHostWrite(data, () => importOnce({ allow_host_writes: true }));
+    if (!r) return null;
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast(_ctxImportErrToast(r.status, err.detail), 'error');
+      return null;
+    }
+    data = await r.json();
+  }
+  const forced = await _ctxMaybeForceUnsafeImport(data, importOnce);
+  if (forced) data = forced;
+  return data;
+}
+
 // -- Deep-link carrier (ADR-0009 §3) ----------------------------------------
 //
 // Dashboard issue cards push ``?section=<type>&filter=<status>&artifact=<name>``
@@ -5980,10 +6010,22 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     // would 404 — the residual dead-import leg #1223's toolbar map missed.
     const caps = _CTX_TOOLBAR_CAPS[type] || {};
     if (caps.import !== false) {
+      // Cross-tier "import to user library" escape hatch (skills only, outside
+      // the user tier). The plain Import targets the current project tier,
+      // which may hard-block a Gate A false positive (project_shared, no bypass)
+      // or reject the write (project_local); this button reads the PROJECT
+      // runtime but writes the force-bypassable USER library instead. It is
+      // intentionally tier-independent, so it is NOT in the write-block sweep.
+      const userLibBtn = (type === 'skills' && _ctxTargetScope !== 'user')
+        ? `<button class="btn-ghost ctx-runtime-import-to-user">
+             ${escapeHtml(t('settings.ctx.import_to_user'))}
+           </button>`
+        : '';
       html += `<div class="ctx-edit-actions" style="margin-top:12px">
         <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
           ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
         </button>
+        ${userLibBtn}
       </div>`;
     }
 
@@ -6007,30 +6049,8 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
             body: JSON.stringify({ ...extra }),
           },
         );
-        let r = await importOnce({});
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          showToast(_ctxImportErrToast(r.status, err.detail), 'error');
-          return;
-        }
-        let data = await r.json();
-        if (_ctxIsHostWriteEnvelope(data)) {
-          // #1263 user-tier single import (see the section Import above).
-          r = await _ctxConfirmHostWrite(data, () => importOnce({ allow_host_writes: true }));
-          if (!r) return;
-          if (!r.ok) {
-            const err = await r.json().catch(() => ({}));
-            showToast(_ctxImportErrToast(r.status, err.detail), 'error');
-            return;
-          }
-          data = await r.json();
-        }
-        // A user-tier import may skip files on Gate A's secret-shape heuristic;
-        // offer the reviewed force valve. The helper re-imports through
-        // ``importOnce`` and runs its own host-write disclosure for the forced
-        // destinations before writing.
-        const forced = await _ctxMaybeForceUnsafeImport(data, importOnce);
-        if (forced) data = forced;
+        const data = await _ctxRunRuntimeImportFlow(importOnce);
+        if (!data) return;
         if (data.imported && data.imported.length) {
           showToast(t('settings.ctx.import_success'));
         } else if (data.skipped && data.skipped.length) {
@@ -6041,6 +6061,48 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
           showToast(data.skipped[0].reason || t('toast.request_failed'), 'warning');
         }
         loadCtxList(type);
+      } catch (err) {
+        showToast(t('toast.import_failed', { error: err.message }), 'error');
+      } finally {
+        btnLoading(btn, false);
+      }
+    });
+
+    // "Import to user library" (skills only): reads the PROJECT runtime, writes
+    // the force-bypassable USER canonical. The route pins the dest tier
+    // (scope=user) and source (source_scope=project_shared) itself, so we must
+    // NOT send a ``target_scope`` — but we DO need the active ``scope_id`` or
+    // ``resolve_scope_root`` falls back to server CWD and reads the wrong
+    // project's runtime. ``targetScope: 'project_shared'`` is the default tier,
+    // which ``_ctxTargetScopeParam`` omits from the URL, so this appends
+    // ``scope_id`` alone. Reviewed force + host-write run in the shared flow.
+    detailEl.querySelector('.ctx-runtime-import-to-user')?.addEventListener('click', async () => {
+      const btn = detailEl.querySelector('.ctx-runtime-import-to-user');
+      btnLoading(btn, true);
+      try {
+        const csrf = await ensureCsrfToken();
+        const headers = csrf
+          ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+          : { 'Content-Type': 'application/json' };
+        const importOnce = (extra) => fetch(
+          _ctxWithTargetScope(
+            `/api/context/skills/${encodeURIComponent(name)}/import-to-user`,
+            { targetScope: 'project_shared' },
+          ),
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ ...extra }),
+          },
+        );
+        const data = await _ctxRunRuntimeImportFlow(importOnce);
+        if (!data) return;
+        if (data.imported && data.imported.length) {
+          showToast(t('settings.ctx.import_to_user_success'));
+          loadCtxList('skills');
+        } else if (data.skipped && data.skipped.length) {
+          showToast(data.skipped[0].reason || t('toast.request_failed'), 'warning');
+        }
       } catch (err) {
         showToast(t('toast.import_failed', { error: err.message }), 'error');
       } finally {

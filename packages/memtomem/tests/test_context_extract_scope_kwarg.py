@@ -153,6 +153,63 @@ def test_extract_skills_project_local_no_fanout(home: Path, proj: Path) -> None:
     assert result.imported == []
 
 
+# ── Skills — source_scope decoupling (project runtime → user library) ────
+#
+# The cross-tier flow behind the web "import to user library" route: read the
+# PROJECT runtime but write the USER canonical, so a project-runtime skill that
+# trips Gate A's false-positive secret heuristic has a force-bypassable path
+# (project_shared dest is hard-blocked with no bypass).
+
+
+def test_extract_skills_source_scope_project_runtime_to_user_canonical(
+    home: Path, proj: Path
+) -> None:
+    _write_skill(home / ".claude" / "skills", "user_skill")
+    _write_skill(proj / ".claude" / "skills", "proj_skill")
+
+    result = extract_skills_to_canonical(proj, scope="user", source_scope="project_shared")
+    names = [p.name for p in result.imported]
+    # The PROJECT skill is read (source_scope), not the user-runtime one...
+    assert "proj_skill" in names
+    assert "user_skill" not in names
+    # ...and written into the USER canonical store (dest scope=user).
+    for p in result.imported:
+        assert (home / ".memtomem" / "skills") in p.parents
+
+
+def test_extract_skills_source_scope_user_dest_is_force_bypassable(home: Path, proj: Path) -> None:
+    """A project skill that trips Gate A is skipped on a user dest but proceeds
+    with force — the block keys off the DEST scope (user), not the source."""
+    sk = proj / ".claude" / "skills" / "flagged"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text(
+        "---\nname: flagged\n---\nclass S:\n    api_key: str\n", encoding="utf-8"
+    )
+
+    blocked = extract_skills_to_canonical(proj, scope="user", source_scope="project_shared")
+    assert blocked.imported == []
+    assert any(c == skip_codes.PRIVACY_BLOCKED for _, _, c in blocked.skipped)
+
+    forced = extract_skills_to_canonical(
+        proj, scope="user", source_scope="project_shared", force_unsafe_import=True
+    )
+    assert [p.name for p in forced.imported] == ["flagged"]
+    for p in forced.imported:
+        assert (home / ".memtomem" / "skills") in p.parents
+
+
+def test_extract_skills_source_scope_none_keeps_dest_coupling(home: Path, proj: Path) -> None:
+    """Default source_scope=None keeps source==dest (historical behavior):
+    scope=user still reads the USER runtime, not the project's."""
+    _write_skill(home / ".claude" / "skills", "user_skill")
+    _write_skill(proj / ".claude" / "skills", "proj_skill")
+
+    result = extract_skills_to_canonical(proj, scope="user")  # source_scope defaults to None
+    names = [p.name for p in result.imported]
+    assert "user_skill" in names
+    assert "proj_skill" not in names
+
+
 # ── Commands — per-scope, both branches ────────────────────────────────
 
 
