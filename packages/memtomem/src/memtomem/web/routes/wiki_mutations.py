@@ -119,7 +119,21 @@ async def seed_wiki_override(asset_type: AssetType, name: str, body: OverrideSee
         return result, store.is_dirty()
 
     try:
-        result, wiki_dirty = await asyncio.to_thread(_seed)
+        # Force-seed mutates ``overrides/<vendor>.<ext>`` (and a ``.bak`` on
+        # re-seed); hold ``_gateway_lock`` under the same 60s budget as the
+        # other three mutators (PUT override/canonical, POST commit) so a seed
+        # concurrent with an editor PUT to the same file serialises instead of
+        # last-writer-wins (#1385 finding 2). ``_seed`` runs SYNCHRONOUSLY
+        # inside the lock — the ``_locks.py`` convention the editor writers
+        # follow. A ``to_thread`` offload would reintroduce an await inside the
+        # lock: on an ``asyncio.timeout`` the await is cancelled and the lock
+        # released, yet the worker thread keeps writing past it, so a second
+        # mutator could acquire the lock and race the still-running seed (Codex
+        # review gate). With no await between acquire and release, the timeout
+        # can only fire while CONTENDING for the lock — never mid-write.
+        async with asyncio.timeout(60):
+            async with _gateway_lock:
+                result, wiki_dirty = _seed()
     except WikiNotFoundError as exc:
         raise _wiki_absent(exc) from exc
     except OverrideExistsError as exc:
@@ -139,6 +153,10 @@ async def seed_wiki_override(asset_type: AssetType, name: str, body: OverrideSee
             "missing",
             f"{asset_type}/{name} has no canonical to seed from",
             reason_code="canonical_absent",
+        ) from exc
+    except TimeoutError as exc:
+        raise _error(
+            503, "busy", "wiki override seed timed out — another sync may be in progress"
         ) from exc
     return {
         "seeded": True,
