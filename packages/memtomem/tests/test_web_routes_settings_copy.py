@@ -354,4 +354,10 @@ async def test_gate_a_422_string_before_consent(client, tmp_path, cwd_root) -> N
     assert isinstance(detail, str)
     assert "git history is forever" in detail
     assert SECRET not in detail
+    # #1385 finding-1 sibling (Codex rec A): the 422 detail must not echo the
+    # absolute canonical settings path. Pre-fix it ended with "… remove the
+    # secret from {blocked.path} …" under cwd_root (the source canonical).
+    assert str(cwd_root) not in detail
+    assert str(cwd_root.resolve()) not in detail
+    assert str(other) not in detail
     assert not (other / CANONICAL_SETTINGS_FILE).exists()
