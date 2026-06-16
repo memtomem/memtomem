@@ -775,6 +775,64 @@ def test_destination_appeared_during_lock(two_projects, monkeypatch):
     assert not list(dst_dir.parent.glob(".migrate-*"))
 
 
+def _racing_scan_creating_dst(transfer_mod, dst_dir: Path):
+    """A ``scan_artifact_tree`` wrapper that creates *dst_dir* as a side effect.
+
+    The scan runs between the in-lock ``dst_path.exists()`` check and
+    ``_promote_move`` — so this reproduces the TOCTOU where an external writer
+    (one not holding our sidecar lock) creates the destination in that window
+    (#1385 finding 3). Delegates to the real scan so a clean staging tree still
+    reports no privacy block.
+    """
+    real_scan = transfer_mod.scan_artifact_tree
+
+    def racing_scan(staging, **kwargs):
+        result = real_scan(staging, **kwargs)
+        if not dst_dir.exists():
+            dst_dir.mkdir(parents=True)
+            (dst_dir / "agent.md").write_text("---\nname: foo\n---\n\nracer\n", encoding="utf-8")
+        return result
+
+    return racing_scan
+
+
+@pytest.mark.parametrize("mode", ["copy", "move"])
+def test_destination_appeared_during_promote(two_projects, monkeypatch, mode):
+    """dst created in the window between the in-lock check and the promote →
+    typed ``TransferCollisionError`` (web 409 / clean CLI ``ClickException``),
+    NOT a bare ``FileExistsError`` that ``_classify_exception`` maps to a 500 /
+    the CLI dumps as a traceback. #1385 finding 3 — pins BOTH promote call
+    sites (copy at transfer.py:911, move at :950)."""
+    import memtomem.context.transfer as transfer_mod
+    from memtomem.context.transfer import TransferCollisionError
+
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    dst_dir = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
+    monkeypatch.setattr(
+        transfer_mod, "scan_artifact_tree", _racing_scan_creating_dst(transfer_mod, dst_dir)
+    )
+
+    with pytest.raises(TransferCollisionError, match="appeared during promote"):
+        transfer_artifact(
+            "agents",
+            "foo",
+            src_project_root=two_projects["a"],
+            from_scope="project_shared",
+            dst_project_root=two_projects["b"],
+            to_scope="project_shared",
+            mode=mode,
+            apply_=True,
+        )
+
+    # Rollback ran (it lives in the outer ``except BaseException``): the racer's
+    # dst is intact, the source bytes are recovered, and no staging residue.
+    assert src_manifest.read_text(encoding="utf-8") == _AGENT_BODY_CLEAN
+    assert "racer" in (dst_dir / "agent.md").read_text(encoding="utf-8")
+    assert not list(dst_dir.parent.glob(".migrate-*"))
+
+
 def test_exdev_fallback_cross_project_move(two_projects, monkeypatch):
     """EXDEV on the staging rename falls back to copy; move still completes."""
     import os as os_mod

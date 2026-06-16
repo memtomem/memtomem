@@ -908,7 +908,19 @@ def transfer_artifact(
                                 scan.blocked[0].path, staging, src_path
                             ),
                         )
-                _promote_move(staging, dst_path)
+                try:
+                    _promote_move(staging, dst_path)
+                except FileExistsError as exc:
+                    # TOCTOU: an external writer (one not holding our sidecar
+                    # lock) created dst between the in-lock ``dst_path.exists()``
+                    # check and the promote. Surface the typed collision (web
+                    # 409 / CLI ``ClickException``) instead of a bare
+                    # ``FileExistsError`` the engine never declares (#1385
+                    # finding 3). Nested inside the outer ``try`` so the staging
+                    # cleanup below still runs.
+                    raise TransferCollisionError(
+                        f"destination appeared during promote: {dst_path}."
+                    ) from exc
             except BaseException:
                 # Copy staging never consumed the source — the source
                 # bytes are intact at src_path by construction, so
@@ -947,7 +959,15 @@ def transfer_artifact(
                             ),
                         )
 
-                _promote_move(staging, dst_path)
+                try:
+                    _promote_move(staging, dst_path)
+                except FileExistsError as exc:
+                    # Same promote-window TOCTOU as the copy branch — typed
+                    # collision so the move rollback below runs and the caller
+                    # sees a 409 / clean CLI error (#1385 finding 3).
+                    raise TransferCollisionError(
+                        f"destination appeared during promote: {dst_path}."
+                    ) from exc
             except BaseException:
                 # Roll back: put bytes back at src so the caller can retry
                 # without manual cleanup.
