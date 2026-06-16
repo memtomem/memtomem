@@ -82,6 +82,50 @@ class TestInitScratch:
         with pytest.raises(WikiAlreadyExistsError, match="not empty"):
             store.init()
 
+    def test_init_rolls_back_when_commit_has_no_identity(
+        self, wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1385 finding 5: a bootstrap ``git commit`` with no resolvable identity
+        # (minimal / rootless container) must NOT leave a wedged half-wiki — a
+        # surviving ``.git/`` makes ``exists()`` return True (re-init refused) and
+        # every read op fail on the HEAD-less repo. init() rolls back exactly what
+        # it created and re-raises; NO fallback identity is injected (invariant).
+        import os
+
+        # Strip every identity source. ``user.useConfigOnly`` defeats git's
+        # auto-derive-from-system fallback, so ``commit`` fails on every git build.
+        for var in (
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        no_identity = tmp_path / "no-identity.gitconfig"
+        no_identity.write_text("[user]\n\tuseConfigOnly = true\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(no_identity))
+        monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+        store = WikiStore.at_default()
+        with pytest.raises(RuntimeError, match="git commit"):
+            store.init()
+
+        # Rollback removed everything init() created — no wedge left behind.
+        assert not store.exists()
+        assert not (wiki_root / ".git").exists()
+        assert not (wiki_root / "README.md").exists()
+        for asset_type in WIKI_ASSET_TYPES:
+            assert not (wiki_root / asset_type).exists()
+
+        # An env identity bypasses ``useConfigOnly``, so a retry now succeeds —
+        # proving the directory was not left wedged.
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "test")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "test")
+        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+        store.init()
+        assert store.exists()
+
 
 class TestInitFromUrl:
     def test_clone_from_local_file_url(

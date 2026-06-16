@@ -12,9 +12,10 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -137,6 +138,28 @@ def _git(
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}") from exc
 
 
+def _force_rmtree(path: Path) -> None:
+    """Best-effort recursive remove that survives Windows read-only git files.
+
+    Plain ``shutil.rmtree(ignore_errors=True)`` *silently* leaves files behind
+    on Windows: git marks ``.git`` pack/loose-object files read-only, and
+    Windows refuses to unlink a read-only file. The swallowed error means a
+    failed ``init`` bootstrap leaves a surviving ``.git/`` — ``exists()`` then
+    reports a wedged half-wiki, defeating the rollback. Clear the read-only bit
+    and retry per failed entry; stay best-effort (the caller re-raises the
+    original bootstrap error, so a residual file must not mask it).
+    """
+
+    def _on_error(func: Callable[[str], object], p: str, _exc: BaseException) -> None:
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onexc=_on_error)
+
+
 def _require_clean_rel(rel: str) -> None:
     """Reject anything that isn't a clean wiki-relative POSIX path.
 
@@ -186,17 +209,39 @@ class WikiStore:
                 f"directory {self.root} is not empty and is not a wiki — refusing to init"
             )
 
+        # The guard above leaves the root either absent or pre-existing-empty;
+        # remember which so rollback never deletes a dir the user already had.
+        root_preexisted = self.root.exists()
         self.root.mkdir(parents=True, exist_ok=True)
-        for asset_type in WIKI_ASSET_TYPES:
-            asset_dir = self.root / asset_type
-            asset_dir.mkdir(exist_ok=True)
-            (asset_dir / ".gitkeep").write_text("", encoding="utf-8")
+        try:
+            for asset_type in WIKI_ASSET_TYPES:
+                asset_dir = self.root / asset_type
+                asset_dir.mkdir(exist_ok=True)
+                (asset_dir / ".gitkeep").write_text("", encoding="utf-8")
 
-        (self.root / "README.md").write_text(_README_TEMPLATE, encoding="utf-8")
+            (self.root / "README.md").write_text(_README_TEMPLATE, encoding="utf-8")
 
-        _git(["init", "-b", "main"], cwd=self.root)
-        _git(["add", "."], cwd=self.root)
-        _git(["commit", "-m", _INITIAL_COMMIT_MESSAGE], cwd=self.root)
+            _git(["init", "-b", "main"], cwd=self.root)
+            _git(["add", "."], cwd=self.root)
+            _git(["commit", "-m", _INITIAL_COMMIT_MESSAGE], cwd=self.root)
+        except RuntimeError:
+            # Bootstrap failed — most plausibly ``git commit`` with no resolvable
+            # user identity (a minimal/rootless container, ``user.useConfigOnly``).
+            # Without rollback, ``.git/`` survives → ``exists()`` returns True, so
+            # re-running ``init`` / ``init_from_url`` is refused AND every read op
+            # (``current_commit``, ``is_dirty``, …) fails on the HEAD-less repo —
+            # manual ``rm -rf`` the only escape. Remove exactly what we created
+            # (never a pre-existing root) and re-raise so the caller still
+            # surfaces the failure. We add no fallback identity: the "memtomem
+            # injects no git identity" invariant is preserved.
+            if root_preexisted:
+                _force_rmtree(self.root / ".git")
+                for asset_type in WIKI_ASSET_TYPES:
+                    _force_rmtree(self.root / asset_type)
+                (self.root / "README.md").unlink(missing_ok=True)
+            else:
+                _force_rmtree(self.root)
+            raise
 
     def init_from_url(self, url: str) -> None:
         """Clone an existing wiki from ``url`` into ``root``."""
