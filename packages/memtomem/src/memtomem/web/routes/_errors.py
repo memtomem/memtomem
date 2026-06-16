@@ -47,6 +47,29 @@ _HOME = str(Path.home())
 _ERROR_MESSAGE_LIMIT = 200
 _SECRET_REDACTED_MARKER = "<redacted: secret-shape>"
 
+#: Fixed, path-free 422 details for a ``project_shared`` privacy block (#1385
+#: finding 1). The engine messages embed an absolute, ``.resolve()``'d host
+#: path — the sync remediation ends with ``… remove the secret from
+#: {blocked.path} …`` (``privacy_scan.py``) and the import Gate A block with
+#: ``… remove the secret from {src} …`` (``_gate_a.py``). Over the loopback
+#: dashboard that leaks ``$HOME`` and the OS username. The web cores raise
+#: THESE fixed strings (the privacy 422 keeps a *string* detail, issue-pinned)
+#: and chain the original exception (``raise … from exc``) so the full path
+#: survives only in the server-side traceback. Mirrors the path-free
+#: ``context_mutations._privacy_blocked()`` precedent.
+PRIVACY_BLOCK_DETAIL = (
+    "Privacy scan blocked this sync: a secret was detected in the canonical bytes. "
+    "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
+    "Remove the secret, or migrate the artifact to a writable tier (project_local), "
+    "then re-run sync."
+)
+PRIVACY_BLOCK_IMPORT_DETAIL = (
+    "Privacy scan blocked this import: a secret was detected in the source bytes. "
+    "git history is forever — project_shared has no force bypass (ADR-0011 §5). "
+    "Import into the user or project_local tier instead, or remove the secret "
+    "from the source first."
+)
+
 
 def _classify_exception(exc: BaseException) -> str:
     """Map an exception to one of {parse, permission, missing, internal}.

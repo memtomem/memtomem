@@ -50,7 +50,7 @@ from memtomem.web.routes.context_projects import (
 )
 from memtomem.web.routes.context_versions import include_has, version_summary
 from memtomem.web.routes._confirm import host_write_gate
-from memtomem.web.routes._errors import _error
+from memtomem.web.routes._errors import PRIVACY_BLOCK_DETAIL, PRIVACY_BLOCK_IMPORT_DETAIL, _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
 
@@ -786,9 +786,11 @@ async def _sync_agents_core(
         # 422 Unprocessable Entity — request is well-formed but the canonical
         # bytes violate the project_shared privacy gate. ADR-0011 §5: no
         # bypass valve, so the user must remove the secret or migrate the
-        # artifact to a writable tier (the message body explains how).
+        # artifact to a writable tier (the message body explains how). The
+        # detail is fixed/path-free — ``exc.message`` embeds the absolute
+        # canonical path (#1385 finding 1); the chained ``exc`` keeps it for logs.
         raise SyncPhaseError(
-            422, exc.message, error_kind="validation", reason_code="privacy_blocked"
+            422, PRIVACY_BLOCK_DETAIL, error_kind="validation", reason_code="privacy_blocked"
         ) from exc
     except StrictDropError as exc:
         # on_drop="error" aborts mid-Phase-2 with earlier writes persisted
@@ -965,7 +967,7 @@ async def import_agents(
         raise _error(503, "busy", "Agents import timed out — another sync may be in progress")
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
@@ -1031,7 +1033,7 @@ async def import_agent(
         raise _error(503, "busy", "Agent import timed out — another sync may be in progress")
     except click.ClickException as exc:
         # project_shared Gate A privacy block → 422 (see context_skills.import_skills).
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, PRIVACY_BLOCK_IMPORT_DETAIL) from exc
     if not result.imported and not result.skipped:
         raise _error(404, "missing", f"No runtime agent named {name!r} to import")
     return _import_payload(result, project_root, target_scope, dry_run=None)
