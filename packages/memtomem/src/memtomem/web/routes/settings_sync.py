@@ -63,6 +63,20 @@ router = APIRouter(tags=["settings-sync", "context-gateway"])
 
 _MALFORMED = object()
 
+#: Fixed, path-free 422 detail for a project_shared settings privacy block
+#: (#1385 finding-1 sibling, Codex-scoped). ``PrivacyBlockedError.message`` comes
+#: from ``format_scan_block_message``, which ends with the absolute canonical
+#: settings path (``… remove the secret from {blocked.path} …``) — leaking the
+#: host $HOME over the loopback dashboard, with no product contract requiring it
+#: (unlike the transfer route's deliberate source-path hint). Keeps the
+#: issue-pinned STRING-detail shape; the chained ``exc`` retains the full path
+#: for server logs.
+_PRIVACY_BLOCK_DETAIL = (
+    "Privacy scan blocked this settings copy: a secret was detected in the hook "
+    "bytes. git history is forever — no force bypass for project_shared "
+    "(ADR-0011 §5). Remove the secret and retry."
+)
+
 
 def _claude_target(project_root: Path, scope: str) -> Path:
     """Resolve the Claude Code settings file under *scope* (ADR-0010 §3).
@@ -1203,7 +1217,7 @@ async def copy_hook_to_project(
     try:
         gate_a_scan(plan, "web_context_settings_hook_copy")
     except PrivacyBlockedError as exc:
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, _PRIVACY_BLOCK_DETAIL) from exc
 
     git_tracked_write = plan.pending_canonical_write or (
         plan.pending_target_write and body.to_target_scope == "project_shared"
@@ -1247,7 +1261,7 @@ async def copy_hook_to_project(
             503, "busy", "Copy timed out — another sync or settings write may be in progress"
         )
     except PrivacyBlockedError as exc:
-        raise HTTPException(422, exc.message) from exc
+        raise HTTPException(422, _PRIVACY_BLOCK_DETAIL) from exc
 
     status = "noop" if plan.is_noop else ("conflicts" if result.warnings else "ok")
     return {"status": status, **_serialize_hook_copy_result(result)}
