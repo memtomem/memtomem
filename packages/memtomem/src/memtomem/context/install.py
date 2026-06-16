@@ -75,6 +75,20 @@ __all__ = [
 ]
 
 
+class ProjectRootMissingError(FileNotFoundError):
+    """Raised by ``_install_asset`` / ``_update_asset`` when the destination
+    project root does not exist (the ``project_root.is_dir()`` guard).
+
+    Subclasses ``FileNotFoundError`` (not ``RuntimeError`` like its siblings) so
+    every existing ``except FileNotFoundError`` caller — the CLI verbs, any
+    ``str(exc)`` consumer — keeps working byte-for-byte. The distinct type lets
+    the web route map ONLY this guard to a fixed 404 ``project_root_missing``
+    envelope; a bare ``FileNotFoundError`` from a later source-walk / copy race
+    (``iter_installed_files``, ``copy_tree_atomic``, ``installed_at_from_dest``)
+    must NOT be mislabeled as a missing destination project (#1385 finding 4).
+    """
+
+
 class AssetNotFoundError(RuntimeError):
     """Raised when the requested asset directory does not exist in the wiki."""
 
@@ -523,7 +537,7 @@ def _install_asset(
     validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     project_root = Path(project_root).expanduser()
     if not project_root.is_dir():
-        raise FileNotFoundError(f"project root does not exist: {project_root}")
+        raise ProjectRootMissingError(f"project root does not exist: {project_root}")
 
     wiki = wiki if wiki is not None else WikiStore.at_default()
     wiki.require_exists()
@@ -687,7 +701,7 @@ def _update_asset(
     validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
     project_root = Path(project_root).expanduser()
     if not project_root.is_dir():
-        raise FileNotFoundError(f"project root does not exist: {project_root}")
+        raise ProjectRootMissingError(f"project root does not exist: {project_root}")
 
     wiki = wiki if wiki is not None else WikiStore.at_default()
     wiki.require_exists()

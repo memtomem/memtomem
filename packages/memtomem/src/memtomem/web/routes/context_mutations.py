@@ -32,6 +32,7 @@ from memtomem.context.install import (
     AssetNotFoundError,
     InstallResult,
     NotInstalledError,
+    ProjectRootMissingError,
     StaleInstallError,
     UpdateResult,
     install_agent,
@@ -151,6 +152,21 @@ async def install_asset(
         raise _error(
             409, "conflict", "project lock.json is unreadable", reason_code="lockfile_corrupt"
         ) from exc
+    except ProjectRootMissingError as exc:
+        # Narrow TOCTOU: the project root was deleted between dependency
+        # resolution and the ``to_thread`` engine call (the engine's is_dir
+        # guard). A DEDICATED exception — never a bare ``FileNotFoundError`` —
+        # so a later source-walk / copy race (iter_installed_files /
+        # copy_tree_atomic) is not mislabeled as a missing destination project.
+        # Fixed message — no ``str(exc)`` (it embeds the absolute project path)
+        # — so the router's fixed-envelope contract holds, not a default 500
+        # (#1385 finding 4).
+        raise _error(
+            404,
+            "missing",
+            f"{asset_type}/{name}: destination project no longer exists",
+            reason_code="project_root_missing",
+        ) from exc
     return {
         "installed": True,
         "asset_type": result.asset_type,
@@ -222,6 +238,20 @@ async def update_asset(
     except LockfileError as exc:
         raise _error(
             409, "conflict", "project lock.json is unreadable", reason_code="lockfile_corrupt"
+        ) from exc
+    except ProjectRootMissingError as exc:
+        # Narrow TOCTOU: the project root was deleted between dependency
+        # resolution and the ``to_thread`` engine call (the engine's is_dir
+        # guard). A DEDICATED exception — never a bare ``FileNotFoundError`` —
+        # so a later source-walk / copy race is not mislabeled as a missing
+        # destination project. Fixed message — no ``str(exc)`` (absolute path)
+        # — so the router's fixed-envelope contract holds, not a default 500
+        # (#1385 finding 4).
+        raise _error(
+            404,
+            "missing",
+            f"{asset_type}/{name}: destination project no longer exists",
+            reason_code="project_root_missing",
         ) from exc
     return {
         "updated": True,

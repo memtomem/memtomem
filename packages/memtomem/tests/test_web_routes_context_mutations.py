@@ -163,6 +163,93 @@ async def test_install_agent_and_command(client, seeded_wiki, project_root: Path
     assert _lock_entry(project_root, "commands", "gamma") is not None
 
 
+@pytest.mark.asyncio
+async def test_install_project_root_deleted_is_404(
+    client, seeded_wiki, project_root: Path, monkeypatch
+) -> None:
+    # #1385 finding 4: the project root is deleted in the TOCTOU window between
+    # dependency resolution and the to_thread engine call, so the engine's
+    # ``is_dir()`` guard raises a BARE FileNotFoundError. The handler must map
+    # it to the fixed 404 envelope (no FastAPI default 500), with no absolute
+    # project path in the body.
+    import shutil
+
+    import memtomem.web.routes.context_mutations as cm
+
+    original = cm._INSTALLERS["skills"]
+
+    def _delete_then_install(*args, **kwargs):
+        shutil.rmtree(project_root, ignore_errors=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setitem(cm._INSTALLERS, "skills", _delete_then_install)
+    resp = await client.post("/api/context/skills/alpha/install")
+
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "missing"
+    assert detail["reason_code"] == "project_root_missing"
+    assert detail["message"] == "skills/alpha: destination project no longer exists"
+    # Fixed message — neither the absolute project path nor the raw engine
+    # ``str(exc)`` ("project root does not exist: ...") reaches the envelope.
+    assert str(project_root) not in resp.text
+    assert "project root does not exist" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_update_project_root_deleted_is_404(
+    client, seeded_wiki, project_root: Path, monkeypatch
+) -> None:
+    # Same TOCTOU on the update path: the ``is_dir()`` guard fires before the
+    # not-installed check, so no prior install is needed to reach it.
+    import shutil
+
+    import memtomem.web.routes.context_mutations as cm
+
+    original = cm._UPDATERS["skills"]
+
+    def _delete_then_update(*args, **kwargs):
+        shutil.rmtree(project_root, ignore_errors=True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setitem(cm._UPDATERS, "skills", _delete_then_update)
+    resp = await client.post("/api/context/skills/alpha/update")
+
+    assert resp.status_code == 404, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "missing"
+    assert detail["reason_code"] == "project_root_missing"
+    assert detail["message"] == "skills/alpha: destination project no longer exists"
+    assert str(project_root) not in resp.text
+    assert "project root does not exist" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_non_guard_filenotfound_is_not_project_root_missing(
+    client, seeded_wiki, project_root: Path, monkeypatch
+) -> None:
+    # #1385 finding 4 (Codex gate): ONLY the engine's project-root is_dir guard
+    # (ProjectRootMissingError) maps to 404 project_root_missing. A BARE
+    # FileNotFoundError from a later source-walk / copy race (iter_installed_files,
+    # copy_tree_atomic, installed_at_from_dest) must NOT be mislabeled — it falls
+    # through to the generic 500, not a clean "destination project no longer
+    # exists" 404. Pins the fix away from the original broad ``except
+    # FileNotFoundError``, which WOULD have caught this and mislabeled it.
+    import memtomem.web.routes.context_mutations as cm
+
+    def _raise_plain_fnf(*args, **kwargs):
+        raise FileNotFoundError("wiki source file vanished mid-copy")
+
+    monkeypatch.setitem(cm._INSTALLERS, "skills", _raise_plain_fnf)
+    # The plain FNF is not ProjectRootMissingError, so the route does NOT catch
+    # it — it propagates (a generic 500 in production) rather than being
+    # mislabeled as a clean 404 project_root_missing. The original broad
+    # ``except FileNotFoundError`` WOULD have caught and mislabeled it, so this
+    # ``raises`` (the FNF reaches the test transport) would fail pre-fix.
+    with pytest.raises(FileNotFoundError, match="vanished mid-copy"):
+        await client.post("/api/context/skills/alpha/install")
+
+
 # ── update lifecycle ───────────────────────────────────────────────────────
 
 
