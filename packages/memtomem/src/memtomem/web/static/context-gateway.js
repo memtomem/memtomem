@@ -1490,10 +1490,17 @@ async function _ctxMaybeForceUnsafeSync(data, resync) {
   );
   if (!blocked.length) return null;
   const names = blocked.map(s => s.runtime || s.name).filter(Boolean);
+  // The sync skip tuple serializes one entry PER RUNTIME for the same artifact,
+  // so ``blocked.length`` is the runtime fan-out count, not the file count. The
+  // count and the warning list must agree on UNIQUE files — a security-sensitive
+  // "override secret detection" dialog overstating the affected-file count by
+  // the fan-out factor (e.g. "4 files" for 1 file × 4 runtimes) is misleading
+  // (#1397). Derive both from one de-duped list.
+  const uniqueNames = [...new Set(names)];
   const ok = await showConfirm({
     title: t('settings.ctx.force_unsafe_sync_title'),
-    message: t('settings.ctx.force_unsafe_sync_message', { count: blocked.length }),
-    warningText: [...new Set(names)].join('\n') || '—',
+    message: t('settings.ctx.force_unsafe_sync_message', { count: uniqueNames.length }),
+    warningText: uniqueNames.join('\n') || '—',
     confirmText: t('settings.ctx.force_unsafe_sync_btn'),
     // Overriding a secret-shape detection is the one sync action that warrants
     // the red button.
