@@ -50,6 +50,16 @@ SYNC_FAILED_TEMPLATE = "Sync failed: {error}"  # toast.sync_failed
 SYNC_PARTIAL_FAILED_TEMPLATE = (
     "{succeeded} synced — {failed_phase} failed: {reason}"  # toast.sync_partial_failed
 )
+# en.json source of truth — the SYNC privacy-block hint (#1409),
+# ``settings.ctx.privacy_blocked_shared_sync_hint``. A per-type sync privacy
+# 422 now carries ``reason_code: "privacy_blocked"`` on the wire, so the client
+# surfaces THIS localized hint instead of the raw English server ``detail``.
+# Distinct from the IMPORT hint (whose "Import to user library" remedy is wrong
+# for the fan-out direction).
+PRIVACY_BLOCKED_SHARED_SYNC_HINT = (
+    "Shared (project) sync can't override a flagged secret — git history is "
+    "permanent. Remove the flagged line, then re-run sync."
+)
 
 
 _HEALTHY_OVERVIEW = {
@@ -271,27 +281,36 @@ def test_sync_all_happy_path_emits_success_toast(page, mm_web_url: str) -> None:
     ("content_type", "body", "expected_error"),
     [
         (
+            # A 422 WITHOUT reason_code (e.g. a parse error) surfaces its detail
+            # string verbatim — the helper's default path.
             "application/json",
-            json.dumps(
-                {
-                    "detail": (
-                        "Privacy scan blocked project_shared skill sync. Remove the "
-                        "secret or migrate the artifact to a writable tier."
-                    )
-                }
-            ),
-            (
-                "Privacy scan blocked project_shared skill sync. Remove the "
-                "secret or migrate the artifact to a writable tier."
-            ),
+            json.dumps({"detail": "Failed to parse skill front-matter at line 3"}),
+            "Failed to parse skill front-matter at line 3",
         ),
         (
             "text/plain",
             "Plain-text artifact sync failure",
             "Plain-text artifact sync failure",
         ),
+        (
+            # A privacy block now carries reason_code on the wire (#1409): the
+            # client localizes it instead of surfacing the path-free English
+            # server detail. End-to-end proof that the Sync-All partial toast
+            # renders the localized SYNC hint, not the raw PRIVACY_BLOCK_DETAIL.
+            "application/json",
+            json.dumps(
+                {
+                    "detail": (
+                        "Privacy scan blocked this sync: a secret was detected in "
+                        "the canonical bytes. git history is forever …"
+                    ),
+                    "reason_code": "privacy_blocked",
+                }
+            ),
+            PRIVACY_BLOCKED_SHARED_SYNC_HINT,
+        ),
     ],
-    ids=["json-detail", "text-body"],
+    ids=["json-detail", "text-body", "json-reason-code-privacy"],
 )
 def test_sync_all_artifact_422_surfaces_backend_error(
     page,

@@ -51,6 +51,7 @@ from memtomem.web.routes import (
     wiki,
     wiki_mutations,
 )
+from memtomem.web.routes._sync_phase import register_sync_phase_error_handler
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,11 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     if mode == "dev":
         for router_mod in _DEV_ONLY_ROUTERS:
             app.include_router(router_mod.router, prefix="/api")
+
+    # Surface a per-type sync ``SyncPhaseError``'s ``reason_code`` to the client
+    # (#1409) — FastAPI's default HTTPException handler would drop it. Path-free
+    # string details stay byte-identical; see ``_sync_phase_error_handler``.
+    register_sync_phase_error_handler(app)
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:

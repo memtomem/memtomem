@@ -679,6 +679,7 @@
   "settings.ctx.force_unsafe_sync_message": "{count} file(s) look like they may contain a secret (e.g. an API key). If you've reviewed them and they're safe — for example a type annotation like 'api_key: str' — you can sync them to your runtimes anyway:",
   "settings.ctx.force_unsafe_sync_btn": "Sync anyway",
   "settings.ctx.privacy_blocked_shared_hint": "Shared (project) imports can't override a flagged secret — git history is permanent. Open the skill and use 'Import to user library' instead, or remove the flagged line.",
+  "settings.ctx.privacy_blocked_shared_sync_hint": "Shared (project) sync can't override a flagged secret — git history is permanent. Remove the flagged line, then re-run sync.",
   "settings.ctx.import_to_user": "Import to user library",
   "settings.ctx.import_to_user_success": "Imported into your user library (~/.memtomem)",
   "settings.ctx.runtime_only_detail_hint": "Runtime preview — not yet in .memtomem/.",

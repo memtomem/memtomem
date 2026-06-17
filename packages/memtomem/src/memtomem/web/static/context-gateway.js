@@ -419,6 +419,14 @@ async function _ctxErrorMessageFromResponse(resp, fallback) {
   const contentType = resp.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
     const err = await resp.json().catch(() => ({}));
+    // #1409: the per-type sync privacy 422 hoists ``reason_code`` to a top-level
+    // sibling of its path-free string ``detail``. Map it to the localized sync
+    // hint here so the Sync All per-phase summary localizes the block the same
+    // way the per-row Sync button does (``_ctxSyncErrToast``), instead of
+    // surfacing the raw locale-unaware English ``detail``.
+    if (err && err.reason_code === 'privacy_blocked') {
+      return t('settings.ctx.privacy_blocked_shared_sync_hint');
+    }
     const detail = err.detail;
     // Defensive branch for structured payloads shaped like `{detail: "..."}`
     // (ProjectTierBlocked / redaction) — a different shape than #1210's 409, so
@@ -1458,6 +1466,22 @@ async function _ctxMaybeForceUnsafeImport(data, reimport) {
 function _ctxImportErrToast(status, detail) {
   if (status === 422) return t('settings.ctx.privacy_blocked_shared_hint');
   return _ctxErrDetail(detail, t('toast.request_failed'));
+}
+
+// Sync error toast text. Unlike import — whose ONLY 422 is the privacy block,
+// so it keys on ``status`` (#1398 item 1) — the per-type sync route has OTHER
+// 422 causes (parse_error, strict_drop), so the privacy block can't be inferred
+// from the status alone. It's disambiguated by the top-level ``reason_code`` the
+// server now hoists alongside the path-free string ``detail`` (#1409). On
+// ``privacy_blocked`` we surface the fully-localized sync hint (the English
+// server detail is locale-unaware AND issue-pinned path-free, so it's shown to
+// nobody); every other error falls back to the shared detail renderer unchanged.
+// ``err`` is the parsed response body (``{detail, reason_code?}``).
+function _ctxSyncErrToast(err) {
+  if (err && err.reason_code === 'privacy_blocked') {
+    return t('settings.ctx.privacy_blocked_shared_sync_hint');
+  }
+  return _ctxErrDetail(err && err.detail, t('toast.request_failed'));
 }
 
 // ``_ctxMaybeForceUnsafeSync`` is the fan-out (sync) mirror of
@@ -6297,7 +6321,7 @@ async function _ctxRunSync(type, { btn, canonicalCount, noFanout, onComplete }) 
       let r = await syncOnce(null);
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+        showToast(_ctxSyncErrToast(err), 'error');
         return;
       }
       let data = await r.json();
@@ -6308,7 +6332,7 @@ async function _ctxRunSync(type, { btn, canonicalCount, noFanout, onComplete }) 
         if (!r) return;
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
+          showToast(_ctxSyncErrToast(err), 'error');
           return;
         }
         data = await r.json();
