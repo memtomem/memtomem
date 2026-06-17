@@ -926,6 +926,34 @@ class TestNoHardcodedStrings:
             "comment:\n" + "\n".join(leaks)
         )
 
+    def test_wiki_surface_canonical_ko_not_transliterated(self, ko: dict[str, str]) -> None:
+        """#1418: the wiki section body keeps ``canonical`` as its real product
+        term (ADR-0008 / ``mm wiki`` / the in-browser editor all use it, and the
+        nav glossary pins it — ``test_ctx_nav_sub_glossary_consistency``), but ko
+        must use ONE consistent form: the English word, never the phonetic
+        transliteration ``캐노니컬``.
+
+        The surface mixed ``캐노니컬`` (``wiki_desc`` / ``wiki_diff_title`` /
+        ``wiki_seed_hint``) with English ``Canonical`` (the ``wiki_canonical_*``
+        family) within a single surface. The maintainer decision on #1418
+        (``needs-maintainer-decision``) was to keep ``canonical`` and
+        de-transliterate ko — ADR-0026 D-A's ``canonical``→``Store`` remap is
+        tied to the project ``.memtomem/`` Store axis, which the tier-less
+        host-global wiki has no analogue of, so it does not transfer here. This
+        pins the decision so the transliteration cannot regress in."""
+        offenders = sorted(
+            key
+            for key, value in ko.items()
+            if key.startswith("settings.ctx.wiki_")
+            and isinstance(value, str)
+            and "캐노니컬" in value
+        )
+        assert not offenders, (
+            "#1418: ko wiki copy must use the English term 'canonical' / "
+            "'Canonical', not the transliteration '캐노니컬' (one consistent ko "
+            "form across the wiki surface). Offending keys: " + ", ".join(offenders)
+        )
+
     def test_ctx_command_artifact_label_has_no_custom_prefix(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:
