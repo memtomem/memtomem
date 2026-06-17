@@ -525,19 +525,19 @@ try {
 // section nav and renders the Overview as a one-line verdict + per-type rows.
 // P1b: each fixable row runs Sync/Import inline (same confirm flow as Advanced);
 // clean rows show a check, and rows with no safe one-click fix keep the Manage
-// deep-link into Advanced. Advanced — the default per ADR-0026 D-F's staged
-// rollout — restores today's UI verbatim. Persisted like the active-scope flag;
-// default off so power users are unaffected until the post-validation
-// default-flip lands.
+// deep-link into Advanced. Advanced — reachable via the toggle (the reversible
+// rollback) — restores today's UI verbatim. Persisted like the active-scope
+// flag; Simple is the default-when-unset since the D-F flip, so power users who
+// prefer Advanced toggle once and stay there.
 const _CTX_SIMPLE_MODE_KEY = 'memtomem_ctx_simple_mode';
-// D-F staged flip switch point (ADR-0026 §"Implementation status"). This is the
-// default used WHEN NO value is stored. It stays ``false`` (Advanced default)
-// until the §Validation first-run user test clears probes 1-3; flipping it to
-// ``true`` makes Simple the default-when-unset and is the entire mechanical flip
-// (see the ADR-0026 §Validation runbook). While it is ``false`` the explicit
-// read below is byte-identical to the old ``=== '1'`` form, so this refactor
-// changes nothing today — it only isolates the one line the live flip will edit.
-const _CTX_SIMPLE_DEFAULT = false;
+// D-F flip switch point (ADR-0026 §"Implementation status"). This is the default
+// used WHEN NO value is stored. Flipped to ``true`` 2026-06-18 — Simple is the
+// default-when-unset — as a REVERSIBLE experiment: the §Validation naive user
+// test was skipped as impractical (6 naive participants out of reach), so the
+// rollback is the safety net — the Advanced toggle (per-user, persisted) and
+// setting this back to ``false`` (global). P2 (the irreversible Push/Pull
+// re-frame) stays deferred and still needs genuine naive evidence.
+const _CTX_SIMPLE_DEFAULT = true;
 let _ctxSimpleMode = _CTX_SIMPLE_DEFAULT;
 try {
   const stored = localStorage.getItem(_CTX_SIMPLE_MODE_KEY);

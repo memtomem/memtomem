@@ -151,6 +151,9 @@ def _stub_portal(page):
 def _open_portal(page, mm_web_url: str) -> None:
     page.goto(mm_web_url)
     page.locator("#tabbtn-context-gateway").click()
+    # ADR-0026 D-F flip: Simple is the default and hides the section nav on the
+    # Overview — switch to Advanced so the Projects nav button is clickable.
+    page.evaluate("() => _ctxSetSimpleMode(false)")
     page.locator(".settings-nav-btn[data-section='ctx-projects']").click()
     page.wait_for_selector(".ctx-portal-row", timeout=3_000)
     # Heading chips render before the rows in loadCtxProjects, so once a row is
@@ -253,6 +256,9 @@ def test_runtime_deeplink_applies_filter_on_mount(page, mm_web_url: str) -> None
     # Land directly on a ``?runtime=claude`` URL — the filter applies on mount.
     page.goto(f"{mm_web_url}/?runtime=claude")
     page.locator("#tabbtn-context-gateway").click()
+    # ADR-0026 D-F flip: Simple is the default and hides the section nav on the
+    # Overview — switch to Advanced so the Projects nav button is clickable.
+    page.evaluate("() => _ctxSetSimpleMode(false)")
     page.locator(".settings-nav-btn[data-section='ctx-projects']").click()
     page.wait_for_selector(".ctx-portal-row", timeout=3_000)
 

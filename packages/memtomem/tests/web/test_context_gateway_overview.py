@@ -52,6 +52,9 @@ def _open_context_gateway(page) -> None:
     check is what the assertions actually depend on.
     """
     page.evaluate("() => activateTab('settings')")
+    # ADR-0026 D-F flip: Simple is the production default — switch to Advanced
+    # (the tile-grid surface these specs assert), as a user would via the toggle.
+    page.evaluate("() => _ctxSetSimpleMode(false)")
     page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_function(
         "() => {"

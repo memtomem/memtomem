@@ -122,7 +122,7 @@ def test_seed_overview_summary_verdicts(tmp_path: Path) -> None:
         {p.stem for p in list_canonical_mcp_servers(tmp_path)},
     )
     # parse_error outranks missing_canonical in _ctxSimpleVerdict -> attention;
-    # both rows remain individually visible in the default Advanced view.
+    # both rows remain individually visible in the Advanced view (one toggle away).
     assert mcp.get("parse_error", 0) == 1
     assert mcp.get("missing_canonical", 0) == 1
 

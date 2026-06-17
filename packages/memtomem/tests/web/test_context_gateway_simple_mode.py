@@ -1,12 +1,13 @@
 """Browser tests for the Context Gateway Simple mode (ADR-0026 P1a/P1b, #1353).
 
 Simple mode is a progressive-disclosure layer over the Overview: a
-``localStorage`` flag (default OFF = Advanced, per ADR-0026 D-F's staged
-rollout) that toggles a ``.ctx-simple`` class on ``#tab-context-gateway``.
-``.ctx-simple`` hides the section nav, the hoisted control bar, and the tile
-grid (CSS) while the Overview renders a one-line verdict + a per-type row list
-(3-state display remap). P1b adds one inline control per row (Sync / Import / a
-check / Manage) and a counted cross-tier summary on an empty active tier (D-D).
+``localStorage`` flag (default ON = Simple since the D-F flip 2026-06-18, a
+reversible experiment; Advanced via the toggle) that toggles a ``.ctx-simple``
+class on ``#tab-context-gateway``. ``.ctx-simple`` hides the section nav, the
+hoisted control bar, and the tile grid (CSS) while the Overview renders a
+one-line verdict + a per-type row list (3-state display remap). P1b adds one
+inline control per row (Sync / Import / a check / Manage) and a counted
+cross-tier summary on an empty active tier (D-D).
 
 These specs cover what the jsdom unit suite
 (``tests-js/ctx-simple-mode.test.mjs``) cannot — real-browser CSS visibility
@@ -108,32 +109,14 @@ def _switch_tier(page, scope: str) -> None:
     )
 
 
-def test_default_is_advanced_grid_and_nav_visible(page, mm_web_url: str) -> None:
-    """Default (no flag) is Advanced — today's UI verbatim: the tile grid + the
-    section nav render, no ``.ctx-simple`` class, no Simple body, and the toggle
-    reports its un-pressed state."""
+def test_default_is_simple_verdict_and_rows_visible(page, mm_web_url: str) -> None:
+    """Default (no flag) is Simple (ADR-0026 D-F flipped 2026-06-18, reversible):
+    the ``.ctx-simple`` class is on, the Simple verdict + per-type rows render,
+    the Advanced nav / control bar / tile grid are CSS-hidden, and the toggle
+    reports its pressed state (Advanced stays one click away as the rollback)."""
     _stub_overview(page)
     page.goto(mm_web_url)
     _open_context_gateway(page)
-
-    tab = page.locator("#tab-context-gateway")
-    assert "ctx-simple" not in (tab.get_attribute("class") or "")
-    assert page.locator("#ctx-overview-content .ctx-overview-grid").is_visible()
-    assert page.locator("#tab-context-gateway .settings-nav").is_visible()
-    assert page.locator(".ctx-overview-simple").count() == 0
-    assert page.locator("#ctx-mode-toggle").get_attribute("aria-pressed") == "false"
-
-
-def test_toggle_enters_simple_hides_nav_control_bar_grid(page, mm_web_url: str) -> None:
-    """Toggling Simple flips the class + aria-pressed and, via the linked CSS,
-    hides the nav, the hoisted control bar, and the tile grid — while the Simple
-    verdict + per-type rows become visible with text-bearing status (never
-    color-only, ADR-0026 D-G)."""
-    _stub_overview(page)
-    page.goto(mm_web_url)
-    _open_context_gateway(page)
-
-    page.locator("#ctx-mode-toggle").click()
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
 
     tab = page.locator("#tab-context-gateway")
@@ -160,11 +143,46 @@ def test_toggle_enters_simple_hides_nav_control_bar_grid(page, mm_web_url: str) 
     )
 
 
+def test_toggle_exits_to_advanced_then_back(page, mm_web_url: str) -> None:
+    """From the default Simple view, the toggle flips to Advanced (nav + control
+    bar + tile grid restored, no Simple body) and back to Simple — Advanced is
+    the reversible rollback (ADR-0026 D-F)."""
+    _stub_overview(page)
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
+
+    # Default Simple → click exits to Advanced: nav / control bar / grid restored.
+    page.locator("#ctx-mode-toggle").click()
+    page.wait_for_function(
+        "() => !document.getElementById('tab-context-gateway').classList.contains('ctx-simple')",
+        timeout=3_000,
+    )
+    assert page.locator("#ctx-mode-toggle").get_attribute("aria-pressed") == "false"
+    # The toggle re-renders the Overview async (loadCtxOverview), so wait for the
+    # Advanced grid to come back rather than asserting before the render lands.
+    page.locator("#ctx-overview-content .ctx-overview-grid").wait_for(
+        state="visible", timeout=3_000
+    )
+    assert page.locator("#tab-context-gateway .settings-nav").is_visible()
+    assert page.locator(".ctx-overview-simple").count() == 0
+
+    # Click again → back to Simple: class on, verdict + rows return.
+    page.locator("#ctx-mode-toggle").click()
+    page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
+    assert "ctx-simple" in (page.locator("#tab-context-gateway").get_attribute("class") or "")
+    assert page.locator("#ctx-mode-toggle").get_attribute("aria-pressed") == "true"
+    assert page.locator(".ctx-simple-row").count() == 4
+
+
 def test_toggle_is_keyboard_focusable(page, mm_web_url: str) -> None:
     """D-G: the toggle is a real, keyboard-reachable button — focusing it lands
     the document focus on it (so its focus-visible ring + Enter/Space activation
     come for free)."""
     _stub_overview(page)
+    page.goto(mm_web_url)
+    # Start from Advanced (the non-default now) so the Enter press enters Simple.
+    page.evaluate("() => localStorage.setItem('memtomem_ctx_simple_mode', '0')")
     page.goto(mm_web_url)
     _open_context_gateway(page)
 
@@ -187,7 +205,7 @@ def test_mcp_not_saved_falls_back_to_manage_and_navigates(page, mm_web_url: str)
     page.goto(mm_web_url)
     _open_context_gateway(page)
 
-    page.locator("#ctx-mode-toggle").click()
+    # Simple is the default — land straight on the verdict + rows, no toggle.
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
 
     row = page.locator(".ctx-simple-row[data-section='ctx-mcp-servers']")
@@ -216,7 +234,7 @@ def test_inline_sync_button_focusable_and_opens_confirm(page, mm_web_url: str) -
     page.goto(mm_web_url)
     _open_context_gateway(page)
 
-    page.locator("#ctx-mode-toggle").click()
+    # Simple is the default — land straight on the verdict + rows, no toggle.
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
 
     sync = page.locator(".ctx-simple-row[data-section='ctx-skills'] [data-ctx-action='sync']")
@@ -259,7 +277,7 @@ def test_empty_tier_names_items_in_another_tier(page, mm_web_url: str) -> None:
     page.goto(mm_web_url)
     _open_context_gateway(page)
 
-    page.locator("#ctx-mode-toggle").click()
+    # Simple is the default — land straight on the verdict + rows, no toggle.
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
 
     # The generic hint is patched with the cross-tier summary once the fan-out
@@ -280,7 +298,7 @@ def test_empty_state_shows_hint_and_open_advanced_cta(page, mm_web_url: str) -> 
     page.goto(mm_web_url)
     _open_context_gateway(page)
 
-    page.locator("#ctx-mode-toggle").click()
+    # Simple is the default — land straight on the empty-state hint, no toggle.
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
 
     assert page.locator(".ctx-simple-empty-hint").is_visible()
@@ -297,24 +315,29 @@ def test_empty_state_shows_hint_and_open_advanced_cta(page, mm_web_url: str) -> 
     )
 
 
-def test_simple_mode_persists_across_reload(page, mm_web_url: str) -> None:
-    """The flag is persisted (localStorage), so a reload re-enters Simple mode
-    without the user re-toggling — the Advanced toggle stays the visible
-    rollback signal (ADR-0026 D-F)."""
+def test_advanced_choice_persists_across_reload(page, mm_web_url: str) -> None:
+    """The flag is persisted (localStorage), so a user's explicit switch to
+    Advanced survives a reload (it does not snap back to the Simple default) —
+    the toggle is a durable per-user rollback (ADR-0026 D-F)."""
     _stub_overview(page)
     page.goto(mm_web_url)
     _open_context_gateway(page)
-
-    page.locator("#ctx-mode-toggle").click()
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
-    assert page.evaluate("() => localStorage.getItem('memtomem_ctx_simple_mode')") == "1"
+
+    # Default is Simple; switch to Advanced and confirm the flag persists as '0'.
+    page.locator("#ctx-mode-toggle").click()
+    page.wait_for_function(
+        "() => !document.getElementById('tab-context-gateway').classList.contains('ctx-simple')",
+        timeout=3_000,
+    )
+    assert page.evaluate("() => localStorage.getItem('memtomem_ctx_simple_mode')") == "0"
 
     page.goto(mm_web_url)
     _open_context_gateway(page)
-    # Re-entered Simple mode on its own: class applied + Simple body present.
-    assert "ctx-simple" in (page.locator("#tab-context-gateway").get_attribute("class") or "")
-    page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
-    assert page.locator(".ctx-simple-row").count() == 4
+    # Stayed Advanced on its own: no .ctx-simple class, the tile grid is visible.
+    assert "ctx-simple" not in (page.locator("#tab-context-gateway").get_attribute("class") or "")
+    assert page.locator("#ctx-overview-content .ctx-overview-grid").is_visible()
+    assert page.locator(".ctx-overview-simple").count() == 0
 
 
 def test_persisted_simple_on_non_overview_section_keeps_nav_visible(page, mm_web_url: str) -> None:
@@ -367,6 +390,10 @@ def test_project_local_inline_sync_is_write_blocked(page, mm_web_url: str) -> No
         route.fulfill(status=200, content_type="application/json", body="{}")
 
     page.route("**/api/context/skills/sync**", _record_sync)
+    page.goto(mm_web_url)
+    # Start from Advanced so the control bar (Simple-hidden) is reachable to
+    # switch tiers; then toggle into Simple to observe the inline write-block.
+    page.evaluate("() => localStorage.setItem('memtomem_ctx_simple_mode', '0')")
     page.goto(mm_web_url)
     _open_context_gateway(page)
     _switch_tier(page, "project_local")

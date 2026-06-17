@@ -1,12 +1,12 @@
 /* ADR-0026 P1a/P1b (#1353) — Context Gateway Simple mode.
  *
  * Simple mode is a progressive-disclosure layer over the Overview: a
- * localStorage flag (default OFF = Advanced, per ADR-0026 D-F's staged rollout)
- * that toggles a ``.ctx-simple`` class on the gateway tab and swaps the
- * four-axis tile grid for a one-line verdict + a per-type row list (3-state
- * display remap). P1a guards:
- *   (1) default is Advanced — the grid renders, no ``.ctx-simple`` class, no
- *       Simple body (today's UI verbatim);
+ * localStorage flag (default ON = Simple since the D-F flip 2026-06-18, a
+ * reversible experiment; Advanced via the toggle) that toggles a ``.ctx-simple``
+ * class on the gateway tab and swaps the four-axis tile grid for a one-line
+ * verdict + a per-type row list (3-state display remap). P1a guards:
+ *   (1) default is Simple — the ``.ctx-simple`` class is on and the verdict +
+ *       per-type rows render (Advanced is one toggle click away);
  *   (2) the toggle flips the class + aria-pressed + persists the flag, and the
  *       Overview re-renders into the verdict + per-type rows (hooks excluded);
  *   (3) the 3-state remap maps each type's raw counts to the right Simple state
@@ -142,31 +142,42 @@ async function boot(overview = OVERVIEW) {
 }
 
 describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
-  it('defaults to Advanced: tile grid renders, no .ctx-simple class, no Simple body', async () => {
+  it('defaults to Simple: .ctx-simple class on, verdict + per-type rows render, toggle pressed', async () => {
     const window = await boot();
     await window.loadCtxOverview();
     await flush(window);
 
     const tab = window.document.getElementById('tab-context-gateway');
-    expect(tab.classList.contains('ctx-simple')).toBe(false);
-    expect(window.document.querySelector('.ctx-overview-grid')).not.toBeNull();
-    expect(window.document.querySelector('.ctx-overview-simple')).toBeNull();
-    // The toggle is present and reports the un-pressed (Advanced) state.
+    expect(tab.classList.contains('ctx-simple')).toBe(true);
+    // Simple body renders by default; the Advanced grid stays in the DOM
+    // (CSS-hidden — visibility is the Playwright spec's job, not jsdom's).
+    expect(window.document.querySelector('.ctx-overview-simple')).not.toBeNull();
+    // The toggle is present and reports the pressed (Simple) state.
     const toggle = window.document.getElementById('ctx-mode-toggle');
     expect(toggle).not.toBeNull();
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('toggle flips the class + aria-pressed + persists, and renders verdict + per-type rows', async () => {
+  it('toggle flips the class + aria-pressed + persists, and re-renders the Overview', async () => {
     const window = await boot();
     await window.loadCtxOverview();
     await flush(window);
 
     const tab = window.document.getElementById('tab-context-gateway');
     const toggle = window.document.getElementById('ctx-mode-toggle');
+
+    // Default is Simple; the first click flips to Advanced (class off, flag '0',
+    // Simple body gone).
     toggle.click();
     await flush(window);
+    expect(tab.classList.contains('ctx-simple')).toBe(false);
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(window.localStorage.getItem('memtomem_ctx_simple_mode')).toBe('0');
+    expect(window.document.querySelector('.ctx-overview-simple')).toBeNull();
 
+    // Flip back to Simple: class on, flag '1', verdict + per-type rows render.
+    toggle.click();
+    await flush(window);
     expect(tab.classList.contains('ctx-simple')).toBe(true);
     expect(toggle.getAttribute('aria-pressed')).toBe('true');
     expect(window.localStorage.getItem('memtomem_ctx_simple_mode')).toBe('1');
@@ -181,13 +192,6 @@ describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
     rows.forEach((r) => {
       expect(r.querySelector('.ctx-simple-status-text').textContent.trim().length).toBeGreaterThan(0);
     });
-
-    // Flip back: class off, flag persisted as '0'.
-    toggle.click();
-    await flush(window);
-    expect(tab.classList.contains('ctx-simple')).toBe(false);
-    expect(toggle.getAttribute('aria-pressed')).toBe('false');
-    expect(window.localStorage.getItem('memtomem_ctx_simple_mode')).toBe('0');
   });
 
   it('3-state remap maps raw counts to the right Simple state per type', async () => {

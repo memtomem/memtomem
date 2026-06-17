@@ -353,6 +353,10 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
                 assert tab.get_attribute("aria-selected") == "true"
 
         page.locator('.tab-btn[data-tab="context-gateway"]').click()
+        # ADR-0026 D-F flip: Simple is the production default and hides the gateway
+        # section nav on the Overview — switch to Advanced so the nested-nav walk
+        # below reaches each section (as a user would via the toggle).
+        page.evaluate("() => _ctxSetSimpleMode(false)")
         gateway_sections = [
             "ctx-overview",
             "ctx-skills",

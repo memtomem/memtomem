@@ -4020,10 +4020,11 @@ body.help-hidden #help-toggle { opacity: 0.5; }
 .ctx-overview-pointer:hover { background: rgba(108, 143, 255, 0.08); color: var(--text); border-color: var(--border); }
 .ctx-overview-pointer:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ADR-0026 P1a (#1353): Context Gateway Simple mode. The ``.ctx-simple`` class
-   on ``#tab-context-gateway`` swaps the four-axis tile grid for a one-line
-   verdict + a read-only per-type row list on the Overview. Advanced (the
-   default) is unchanged.
+/* ADR-0026 P1a/P1b (#1353): Context Gateway Simple mode — the default since the
+   D-F flip (2026-06-18, reversible). The ``.ctx-simple`` class on
+   ``#tab-context-gateway`` swaps the four-axis tile grid for a one-line verdict
+   + a per-type row list (each row may carry an inline Sync/Import action) on the
+   Overview. Advanced, one toggle away, is unchanged.
    The section nav + hoisted control bar are hidden ONLY while the Overview is
    the active section (``:has``) — otherwise a persisted Simple flag plus a deep
    link to a non-Overview leaf (e.g. ``?section=ctx-skills``) would strip the

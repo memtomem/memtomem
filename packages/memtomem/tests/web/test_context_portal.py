@@ -103,6 +103,9 @@ def _stub_portal(page, captured=None):
 def _open_portal(page, mm_web_url: str) -> None:
     page.goto(mm_web_url)
     page.locator("#tabbtn-context-gateway").click()
+    # ADR-0026 D-F flip: Simple is the default and hides the section nav while the
+    # Overview is active — switch to Advanced so the Projects nav button is shown.
+    page.evaluate("() => _ctxSetSimpleMode(false)")
     page.locator(".settings-nav-btn[data-section='ctx-projects']").click()
     page.wait_for_selector(".ctx-portal-row", timeout=3_000)
 

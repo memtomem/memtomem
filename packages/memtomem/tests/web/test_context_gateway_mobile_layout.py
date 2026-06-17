@@ -63,6 +63,7 @@ def test_gateway_mobile_390px_no_overflow(page, mm_web_url) -> None:
     )
     # The Gateway now lands on Projects by default; this test pins the
     # Overview section's mobile layout, so switch to Overview explicitly.
+    page.evaluate("() => _ctxSetSimpleMode(false)")  # ADR-0026 D-F: Advanced for the grid layout
     page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_selector("#ctx-sync-all-btn", timeout=4_000)
 
@@ -141,6 +142,7 @@ def test_gateway_overview_grid_single_column_at_480px(page, mm_web_url) -> None:
     )
     # The Gateway now lands on Projects by default; this test pins the
     # Overview grid's column count, so switch to Overview explicitly.
+    page.evaluate("() => _ctxSetSimpleMode(false)")  # ADR-0026 D-F: Advanced for the grid layout
     page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_selector("#tab-context-gateway .ctx-overview-grid", timeout=4_000)
 

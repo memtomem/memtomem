@@ -1,15 +1,19 @@
 # ADR-0026: Context Gateway first-time-user onboarding & comprehension layer
 
-**Status:** Accepted & partially shipped — P0 and P1a/P1b are merged; the
-P1 Simple-as-default flip and all of P2 remain deferred pending the
-§Validation first-run user test. See §"Implementation status (as of
-2026-06-17)". D-F (staged rollout, Advanced default first) is followed.
+**Status:** Accepted & partially shipped — P0, P1a/P1b, and the P1
+Simple-as-default flip (D-F) are merged; all of P2 remains deferred. See
+§"Implementation status (as of 2026-06-18)". **D-F shipped 2026-06-18 as a
+reversible experiment** (Simple is now the default) rather than gated on the
+§Validation user test — 6 naive participants proved impractical, and the
+Advanced toggle (per-user) plus the one-line constant (global) are the
+rollback. The §Validation test + kit remain available if P2 (irreversible)
+ever needs naive evidence.
 **D-A is now decided (2026-06-17):** the Web display uses friendly tier
 labels ("User" / "Project (shared)" / "Project (local)") + a "Stored in"
 axis — a narrow supersession of ADR-0016 §7 for Web display copy only, with
 the CLI / request identifiers unchanged. The remaining provisional decisions
 (D-B / D-C) stay open, gated on the §Validation user test.
-**Date:** 2026-06-14 (status updated 2026-06-17)
+**Date:** 2026-06-14 (status updated 2026-06-18)
 **Context:** A first-time-user end-to-end smoke test of the Context Gateway
 web UI (driven through Playwright against an isolated, seeded HOME) found
 that the dashboard is *functionally* complete but *conceptually* opaque to
@@ -230,9 +234,10 @@ Each item: **what** · **where** · **acceptance criterion**.
 
 1. **Simple/Advanced toggle** (`localStorage` flag) shows/hides
    `#ctx-control-bar` and the Projects/Wiki/Hooks nav. Simple is the
-   *target* default — but per D-F the rollout is staged (ship with
-   **Advanced default first**, flip to Simple after the §Validation user
-   test). Advanced restores today's UI verbatim; `#ctx-control-bar` stays
+   *target* default — and per D-F it shipped: Simple is the default since
+   2026-06-18 (a reversible flip; the §Validation test was skipped as
+   impractical, the toggle is the rollback). Advanced restores today's UI
+   verbatim; `#ctx-control-bar` stays
    in the DOM (hidden) so the existing hoist guard stays green.
 2. **One-line verdict + per-type inline actions** — each surfaced problem
    carries its resolving verb button on its own row; Sync vs Import is
@@ -242,8 +247,8 @@ Each item: **what** · **where** · **acceptance criterion**.
    untouched.
 4. **Default-flip fan-out** — Simple-as-default ships with its
    onboarding-docs fan-out in the same change (per the repo's
-   default-change discipline); consider a staged opt-in (Advanced default,
-   flip after the user test) — see D-F.
+   default-change discipline) — shipped 2026-06-18 as a reversible flip (the
+   staged opt-in was skipped as impractical; the toggle is the rollback) — see D-F.
 
 **Simple default mode (P1) — low-fi mockup:**
 
@@ -283,9 +288,10 @@ Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
 - The glossary (§2) becomes the term set #1351's ko.json pass localizes
   against; #1351 and this ADR must agree on terms before either lands
   user-facing strings, to avoid double-churn.
-- No behavioural, route, schema, or gate change in P0/P1. P2 changes only
-  display copy + status presentation, never `reason_code`s or request
-  params (ADR-0015 preserved).
+- No route, schema, or gate change in P0/P1. P1's Simple-as-default flip
+  changes first-run *presentation* only and stays reversible (Advanced toggle /
+  one-line constant). P2 changes only display copy + status presentation, never
+  `reason_code`s or request params (ADR-0015 preserved).
 - P0 item 4 overlaps #1348's confirm-copy edit at `en.json:415`;
   sequencing must be coordinated (D-E) so the two do not collide.
 - The tier display-term decision (D-A) is **taken** (2026-06-17): the Web
@@ -293,7 +299,7 @@ Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
   supersession, Web display only) without colliding with ADR-0015 or
   pre-empting #922 — request identifiers (`target_scope`) are unchanged.
 
-## Implementation status (as of 2026-06-17)
+## Implementation status (as of 2026-06-18)
 
 Shipped-state companion to the phased plan in §3. #1353 remains the home
 for the remaining work; this table is the source of truth for *what has
@@ -307,9 +313,9 @@ drifted.
 | **P0 — Minimal** — Overview primer, Store→Runtimes flow diagram, always-visible status legend, glossary tooltips, `(current folder)` naming, i18n/a11y hygiene (D-G) | **Shipped** | #1356 |
 | P0-3 status-legend help-tip a11y — static aria-label | **Shipped** (follow-up) | #1377 |
 | P0-4 confirm/glossary de-jargon — `move_copy_shared_confirm_message` rewritten (now "…into the project's shared store — committed to git…", no raw `canonical`/`project_shared`); scope-ID tooltips; nav glossary *defines* "canonical" | **Shipped** | #1356 (confirm rewrite); de-jargon companion PRs #1368 / #1375 (under issue #1352) |
-| **P1a — Simple-mode scaffold** — Simple/Advanced `localStorage` toggle, read-only, **Advanced default** (D-F staged opt-in) | **Shipped** | #1358 |
+| **P1a — Simple-mode scaffold** — Simple/Advanced `localStorage` toggle, read-only (default later flipped to Simple — see the D-F row) | **Shipped** | #1358 |
 | **P1b — Simple-mode inline actions** — per-type Sync/Import rows, cross-tier empty-state summary (D-D lean iii), 3-state Simple labels | **Shipped** | #1360 |
-| **P1 — Simple-as-default flip** (D-F) | **Staged** — the switch point (`context-gateway.js` `_CTX_SIMPLE_DEFAULT`) and the §Validation harness are in place; the live default **stays Advanced** (`_CTX_SIMPLE_DEFAULT = false`) until the §Validation user test clears probes 1–3. The flip itself = set the constant `true`, then a follow-up PR (deep-link scoping tighten + reference.md copy) flips this row to Shipped. Still gated on the user test. | staged (switch point + harness) |
+| **P1 — Simple-as-default flip** (D-F) | **Shipped (reversible)** — `_CTX_SIMPLE_DEFAULT = true` (`context-gateway.js`); Simple is the default-when-unset. Shipped 2026-06-18 as a reversible experiment instead of gating on the §Validation test (6 naive participants impractical): the Advanced toggle (per-user, persisted) + reverting the constant (global) are the rollback. Onboarding-docs fan-out shipped same-PR (the `context-gateway.md` guide). The "scoping tighten" the staged plan anticipated is a no-op — the nav/control-bar deep-link trap was already `:has`-guarded in P1a and the tile grid lives only in the Overview, so it cannot strand a user. | 2026-06-18 |
 | **P2 — Bold** — Push/Pull verb rename, status collapse to ahead/behind/in-sync (D-B / D-C) | **Deferred** — gated on the §Validation user test | — |
 
 **§Validation status:**
@@ -328,10 +334,14 @@ drifted.
   placeholder in empty-state hints,
   so a namespace-wide grep would false-positive. Extending the per-key
   guard as new user-facing keys are added remains open work under #1353.
-- *First-run user test (5–6 naive participants).* **Not yet run.** It gates
-  the P1 default flip and all of P2. Use the pass bars defined below
-  verbatim — they are the single source of truth; do not re-derive
-  thresholds elsewhere.
+- *First-run user test (5–6 naive participants).* **Not run — and no longer
+  gating P1.** Recruiting 6 naive participants proved impractical, so the P1
+  Simple-as-default flip (D-F) shipped 2026-06-18 as a reversible experiment
+  instead (the Advanced toggle is the rollback). The test now gates only **P2**
+  (the irreversible Push/Pull re-frame); the moderated + Option-A async
+  protocols + the seed harness in `memtomem-docs/memtomem/testing/` remain
+  ready if P2 is taken up. Use the pass bars defined below verbatim — they are
+  the single source of truth; do not re-derive thresholds elsewhere.
 
 **Companion string issues** #1348 / #1349 / #1350 / #1351 / #1352 — all
 **closed**.
@@ -359,10 +369,12 @@ master copy, what does Sync do?"; (3) identity — "how many projects, which
 are you in?"; (4) scope — "you want your teammate to get this skill —
 which tier?"; (5) **safety (P2 gate)** — "what will Push do to the Claude
 copy that's ahead?" (must predict "overwrite"); (6) recovery — seed a
-parse-error item, "what's wrong, how fix?". **Pass bars:** P0 ships if
-probes 1–3 succeed for ≥4/6 without docs; P2 is gated on probe 5
-succeeding for ≥5/6 and the status-merge not costing power users the
-create-vs-overwrite distinction.
+parse-error item, "what's wrong, how fix?". **Pass bars:** probes 1–3
+(≥4/6 without docs) were the original P0/P1 comprehension gate — now
+**diagnostic/historical**, since P0/P1 (incl. the reversible
+Simple-as-default flip) shipped without the study. The live gate is **P2
+only**: probe 5 succeeding for ≥5/6 **and** the status-merge not costing
+power users the create-vs-overwrite distinction.
 
 ### Reproducing the first-run state
 
@@ -448,15 +460,18 @@ to the prior open question Q-x.)
   - **Alternatives (kept):** let #1351 land first and have this ADR conform
     to whatever terms emerge; or run them fully in parallel with a
     post-hoc reconciliation pass (higher churn risk).
-- **D-F. Default-flip blast radius.**
-  - **Lean:** **staged opt-in first** — ship Simple mode with **Advanced as
-    the default**, gather the §Validation user-test signal, then flip the
-    default in a follow-up (with the onboarding-docs fan-out in the same
-    change), per the repo's default-change discipline. Keep the toggle
-    visible (not buried) as the rollback signal.
-  - **Alternatives (kept):** flip Simple-as-default immediately (with
-    same-change docs fan-out) — faster comprehension win, larger blast
-    radius and weaker rollback signal.
+- **D-F. Default-flip blast radius. DECIDED 2026-06-18 — flip now, reversibly.**
+  - **Decision:** shipped Simple-as-default immediately (`_CTX_SIMPLE_DEFAULT =
+    true`) with the onboarding-docs fan-out in the same change, keeping the
+    Advanced toggle visible (not buried) as the rollback signal. The
+    §Validation signal the original lean waited for was skipped as impractical
+    (6 naive participants out of reach); the bet is acceptable because the
+    change is reversible — per-user via the toggle, globally via the one-line
+    constant — and is watched by real-world feedback rather than a pre-ship study.
+  - **Original lean (not taken):** staged opt-in first — ship with Advanced as
+    the default, gather the §Validation signal, then flip. Rejected on the
+    recruiting cost alone; revisit if real-world feedback shows the flip hurt
+    naive first-runs.
 - **D-G. Accessibility & localization of the new visual onboarding.**
   - **Lean:** make a11y a **P0 gate** (not deferred): the Store→Runtimes
     diagram must carry an equivalent text alternative (it is never the only

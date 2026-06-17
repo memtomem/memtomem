@@ -87,6 +87,9 @@ def _open_context_gateway(page) -> None:
     twice (#813 / #816) and a click-based path keeps re-breaking.
     """
     page.evaluate("() => activateTab('settings')")
+    # ADR-0026 D-F flip: Simple is the production default — switch to Advanced
+    # (the control bar + Sync All these specs assert), as a user would.
+    page.evaluate("() => _ctxSetSimpleMode(false)")
     page.evaluate("() => switchSettingsSection('ctx-overview')")
     page.wait_for_function(
         "() => {"

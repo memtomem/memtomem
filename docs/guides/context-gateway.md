@@ -83,10 +83,11 @@ equivalent paths.
 mm web      # http://127.0.0.1:8080
 ```
 
-Open **Settings → Context Gateway**, find the **Skills** section, and look at the
-status of the skill:
+Open **Settings → Context Gateway**. The default **Simple view** shows one row
+per artifact type — find the **Skills** row:
 
-- If it shows **Out of sync** or **Not in runtime**, click **Sync** on that row.
+- If the skill isn't in your tools yet the row reads **Needs sync** and offers a
+  **Sync** button. Click it.
 - A confirmation appears first — it tells you exactly what will change, e.g.
   *"This will create N missing and overwrite M out-of-sync runtime files in:
   …"*. Read it, then confirm.
@@ -118,8 +119,9 @@ mm context sync --include=skills --scope user
 
 ## Sync vs Import — reading the status
 
-The Web UI shows one of these statuses per artifact. Map the status to the action
-that resolves it:
+The **Advanced** view labels each artifact with one of these precise statuses
+(the default Simple view collapses them into a single per-row verdict + fix
+button). Map the status to the action that resolves it:
 
 | Status | What it means | Action |
 |---|---|---|
@@ -141,14 +143,15 @@ export-only and are never read back.
 
 The Context Gateway tab has two views, toggled by the **Simple view** switch:
 
-- **Advanced** (the current default) — per-type sections (Skills, Subagents,
-  Custom Commands, MCP servers, settings/hooks), each with a status badge and per
-  row Sync/Import buttons, plus a control bar to filter by artifact type, the
-  **Stored in** tier, project, and sync state. **Sync All** pushes everything in
-  the current Store at once (with the same create/overwrite confirmation).
-- **Simple view** — a one-line overview per type with a single fix button on each
-  row, and a **Manage** link that drops you into Advanced for anything without a
-  one-click fix.
+- **Simple view** (the default) — a one-line overview per type with a single fix
+  button on each row, and a **Manage** link that drops you into Advanced for
+  anything without a one-click fix.
+- **Advanced** — per-type sections (Skills, Subagents, Custom Commands, MCP
+  servers, settings/hooks), each with a status badge and per-row Sync/Import
+  buttons, plus a control bar to filter by artifact type, the **Stored in** tier,
+  project, and sync state. **Sync All** pushes everything in the current Store at
+  once (with the same create/overwrite confirmation). The **Simple view** toggle
+  switches back; your choice persists.
 
 The **Projects** portal lists the project roots memtomem knows about: the folder
 the server is running in (marked *current folder*), any roots you registered, and
