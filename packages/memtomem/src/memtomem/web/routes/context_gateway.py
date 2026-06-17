@@ -51,11 +51,26 @@ def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
     the overview ``error_message`` field. Shared by every context_* list
     and per-name diff route so the sanitization boundary cannot drift
     per kind.
+
+    Strip BOTH the given root and its ``.resolve()``'d form (#1412): engine
+    paths are resolved (``canonical_mcp_server_root`` etc.), but the route may
+    receive an unresolved/symlinked ``project_root`` (macOS ``/tmp``→
+    ``/private/tmp``, a symlinked home, a case-variant mount). Stripping only
+    one form leaves the absolute resolved path in the reason — the same
+    canonical-path disclosure #1412 closes on the parse-error 422s, here on the
+    list/diff ``reason`` surface. Longest-first so a root that contains the
+    other as a prefix can't be half-stripped.
     """
     if not message:
         return None
-    root = str(project_root)
-    cleaned = message.replace(root + os.sep, "").replace(root, ".")
+    roots = {str(project_root)}
+    try:
+        roots.add(str(project_root.resolve()))
+    except (AttributeError, OSError):
+        pass  # PurePath input / unresolvable root — the bare form still strips
+    cleaned = message
+    for root in sorted(roots, key=len, reverse=True):
+        cleaned = cleaned.replace(root + os.sep, "").replace(root, ".")
     return _redact_message(cleaned)
 
 

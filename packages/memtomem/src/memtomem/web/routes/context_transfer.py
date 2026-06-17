@@ -513,8 +513,10 @@ async def transfer_context_artifact(
         # mcp-servers copy refuses to propagate a definition the
         # destination's sync would choke its whole mcp phase on (A-12);
         # same 422 status the mcp CRUD routes use for this error, in this
-        # route's object envelope.
-        raise _error(422, "parse", str(exc)) from exc
+        # route's object envelope. Path-free detail at the loopback boundary
+        # (#1412): a syntax error embeds the resolved SOURCE path in
+        # ``str(exc)``; ``raise … from`` keeps it in the server log.
+        raise _error(422, "parse", exc.safe_message) from exc
     except InvalidNameError as exc:
         raise _error(400, "validation", str(exc)) from exc
     except click.ClickException as exc:

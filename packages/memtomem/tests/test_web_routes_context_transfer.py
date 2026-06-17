@@ -724,6 +724,38 @@ async def test_mcp_copy_ok(client, cwd_root: Path, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_copy_malformed_source_is_path_free(
+    client, cwd_root: Path, tmp_path: Path
+) -> None:
+    # Real parse path for the transfer-copy catch site (#1412): a malformed
+    # SOURCE canonical makes the copy adapter's parser embed the resolved
+    # source path in ``str(exc)``; the web boundary must render the path-free
+    # ``exc.safe_message`` (basename + the JSON problem) instead. A trailing
+    # comma is invalid JSON but secret-free, so Gate A passes and the parse
+    # branch is the one that fires.
+    store = cwd_root / ".memtomem" / "mcp-servers"
+    store.mkdir(parents=True, exist_ok=True)
+    src = store / "pg.json"
+    src.write_text('{\n  "command": "echo",\n}\n', encoding="utf-8")
+    other = _other_project(tmp_path)
+    scope_b = await _register(client, other)
+
+    resp = await client.post("/api/context/mcp-servers/pg/transfer", json=_mcp_copy_body(scope_b))
+
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["detail"]["error_kind"] == "parse", body
+    message = body["detail"]["message"]
+    assert "pg.json" in message, message  # names the artifact
+    assert "invalid JSON" in message, message  # names the problem
+    blob = json.dumps(body)
+    assert str(src.resolve()) not in blob, body  # full source path never leaks
+    assert str(src.resolve().parent) not in blob, body
+    assert str(cwd_root.resolve()) not in blob, body
+    assert str(Path.home()) not in blob, body  # #1385 literal: no $HOME / username
+
+
+@pytest.mark.asyncio
 async def test_mcp_needs_confirmation_round_trip(client, cwd_root: Path, tmp_path: Path) -> None:
     _write_mcp_server(cwd_root)
     other = _other_project(tmp_path)

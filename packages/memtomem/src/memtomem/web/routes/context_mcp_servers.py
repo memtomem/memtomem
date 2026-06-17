@@ -50,11 +50,29 @@ def _safe_rel(p: Path, project_root: Path) -> str:
     ``project_root``. Parity with ``context_agents`` / ``context_commands``
     (#1264); this route was never covered by #1256's diff tests, so the
     ``str()`` form lingered latent (#1325).
+
+    ``p`` is a ``.resolve()``'d canonical/runtime path, but the route may receive
+    an unresolved/symlinked ``project_root`` (macOS ``/tmp``→``/private/tmp``),
+    so ``relative_to`` against the bare root raises ``ValueError`` and the
+    fallback would emit the ABSOLUTE resolved path to the loopback dashboard
+    (#1412, the same disclosure as the parse-error reason). Try the resolved
+    root too before falling back. ``resolve()`` lives only on concrete ``Path``
+    objects — the cross-platform ``PureWindowsPath`` tests (#1325) drive this
+    with a pure path, so the resolved attempt is guarded and skipped there.
     """
+    roots = [project_root]
     try:
-        return p.relative_to(project_root).as_posix()
-    except ValueError:
-        return p.as_posix()
+        resolved_root = project_root.resolve()
+    except (AttributeError, OSError):
+        resolved_root = project_root
+    if resolved_root != project_root:
+        roots.append(resolved_root)
+    for root in roots:
+        try:
+            return p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return p.as_posix()
 
 
 def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
@@ -220,7 +238,10 @@ async def create_mcp_server(
     except TimeoutError:
         raise _error(503, "busy", "MCP server create timed out — another sync may be in progress")
     except McpServerParseError as exc:
-        raise _error(422, "parse", str(exc)) from exc
+        # Path-free detail at the loopback boundary (#1412): a syntax error
+        # embeds the resolved canonical path in ``str(exc)``. ``raise … from``
+        # keeps the full message in the server log.
+        raise _error(422, "parse", exc.safe_message) from exc
     except McpServerPrivacyError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"name": name, "canonical_path": _safe_rel(path, project_root)}
@@ -285,7 +306,8 @@ async def _update_mcp_server_impl(
     except TimeoutError:
         raise _error(503, "busy", "MCP server update timed out — another sync may be in progress")
     except McpServerParseError as exc:
-        raise _error(422, "parse", str(exc)) from exc
+        # Path-free detail at the loopback boundary (#1412); see create route.
+        raise _error(422, "parse", exc.safe_message) from exc
     except McpServerPrivacyError as exc:
         raise HTTPException(422, str(exc)) from exc
     return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
@@ -398,8 +420,12 @@ async def diff_mcp_server(
                 ).definition
             except McpServerParseError as exc:
                 # Canonical-side parse failure — the reason names the
-                # canonical file (#1229 U7; previously discarded).
-                reason = sanitize_diff_reason(str(exc), project_root)
+                # canonical file (#1229 U7; previously discarded). Use the
+                # path-free twin (#1412): ``sanitize_diff_reason`` strips the
+                # project root, but only when it prefix-matches the resolved
+                # canonical path (macOS ``/tmp``→``/private/tmp`` defeats it);
+                # ``safe_message`` is path-free at the source regardless.
+                reason = sanitize_diff_reason(exc.safe_message, project_root)
 
     # Runtime side is read INDEPENDENTLY of canonical health (#1247 id 31):
     # the runtime-only detail pane fetches this route, and a server that
@@ -472,7 +498,12 @@ async def _sync_mcp_servers_core(project_root: Path) -> dict:
     try:
         result = generate_all_mcp_servers(project_root, surface="web_context_mcp_servers_sync")
     except McpServerParseError as exc:
-        raise SyncPhaseError(422, str(exc), error_kind="parse") from exc
+        # Path-free detail at the loopback boundary (#1412): the engine message
+        # embeds the resolved canonical path. This single point covers BOTH the
+        # standalone sync route (``_sync_phase_error_handler`` renders
+        # ``exc.detail``) and the Sync-All aggregation (``_phase_error_envelope``
+        # does ``str(detail)`` with no redaction). CLI / MCP keep the full path.
+        raise SyncPhaseError(422, exc.safe_message, error_kind="parse") from exc
     except McpServerPrivacyError as exc:
         raise SyncPhaseError(
             422, str(exc), error_kind="validation", reason_code="privacy_blocked"

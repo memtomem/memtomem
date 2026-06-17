@@ -140,10 +140,11 @@ class TestWebSyncTranslatesTo422:
         # ``reason_code`` on the wire AND a path-free body.
         #
         # Scope note: this covers the privacy branch only. The route's OTHER 422
-        # branch (``McpServerParseError`` → ``str(exc)`` with ``error_kind=
-        # "parse"``, no reason_code) embeds the full canonical path and is a
-        # SEPARATE, pre-existing $HOME-leak concern (#1385-class, on the parse
-        # path) that predates and is untouched by #1409 — tracked on its own.
+        # branch (``McpServerParseError`` → ``error_kind="parse"``, no
+        # reason_code) embedded the full canonical path until #1412, which routes
+        # the parse detail through ``exc.safe_message`` (basename only) at every
+        # web catch site — see ``TestMcpServersParseBranchPathFree`` below, which
+        # exercises the REAL parse path (a genuinely malformed canonical file).
         from memtomem.context.mcp_servers import McpServerPrivacyError
         from memtomem.web.routes import context_mcp_servers
 
@@ -159,6 +160,182 @@ class TestWebSyncTranslatesTo422:
         res = client.post("/context/mcp-servers/sync")
 
         _assert_path_free_privacy_422(res, detail_contains="MCP server fan-out")
+
+
+class TestMcpServersParseBranchPathFree:
+    """#1412 — the mcp-servers parse-error 422 must be path-free at every web
+    (loopback) catch site, the #1385 finding-1 invariant extended from the
+    privacy branch to the parse branch.
+
+    Unlike the privacy tests above (which monkeypatch the generator to raise a
+    crafted error), these drive the REAL parse path: a genuinely malformed
+    canonical ``.mcp.json`` reaches ``parse_mcp_server_text``, whose JSON-decode
+    raise embeds the resolved canonical ``Path``. The fix renders
+    ``exc.safe_message`` (basename + the JSON problem) instead of ``str(exc)``,
+    so the resolved host path never reaches the dashboard while the CLI / MCP
+    surfaces keep the full path.
+    """
+
+    # A trailing comma → ``json.JSONDecodeError`` ("Expecting property name
+    # enclosed in double quotes"), the issue's reproduction. No secret shape, so
+    # the sync route's Gate-A scan (which runs BEFORE the parser) passes and the
+    # parse branch is actually reached.
+    _MALFORMED = '{\n  "command": "echo",\n}\n'
+
+    @staticmethod
+    def _build_app(project_root: Path) -> TestClient:
+        from memtomem.web.routes import context_mcp_servers
+        from memtomem.web.routes._sync_phase import register_sync_phase_error_handler
+        from memtomem.web.routes.context_projects import (
+            resolve_scope_root,
+            resolve_writable_scope_root,
+        )
+
+        app = FastAPI()
+        app.include_router(context_mcp_servers.router)
+        register_sync_phase_error_handler(app)
+        # Override BOTH resolvers (reads use ``resolve_scope_root``, sync uses
+        # the writable variant) so the routes run against a real project root
+        # without the eligibility / selector machinery.
+        app.dependency_overrides[resolve_scope_root] = lambda: project_root
+        app.dependency_overrides[resolve_writable_scope_root] = lambda: project_root
+        return TestClient(app)
+
+    @staticmethod
+    def _assert_path_free(body: dict, project_root: Path, *, basename: str) -> None:
+        """Whole-body path-free assertions (no assumption about the body shape).
+
+        Asserts the resolved canonical absolute path (and its parent dir) and
+        the resolved project root never appear ANYWHERE in the body — not just
+        in the message field, so a future shape change that echoes the path
+        under a new key is caught (mirrors the privacy-branch whole-body check).
+        The basename alone is not an absolute path, so it may (and should)
+        survive; each test asserts its own actionable field separately.
+        """
+        from memtomem.context.mcp_servers import canonical_mcp_server_root
+
+        resolved = canonical_mcp_server_root(project_root) / basename
+        blob = json.dumps(body)
+        assert str(resolved) not in blob, body  # full canonical path never leaks
+        assert str(resolved.parent) not in blob, body  # nor its directory
+        assert str(project_root.resolve()) not in blob, body  # nor the project root
+        assert str(Path.home()) not in blob, body  # #1385 literal: no $HOME / username
+
+    def _seed(self, tmp_path: Path) -> Path:
+        from memtomem.context.mcp_servers import CANONICAL_MCP_SERVER_ROOT
+
+        project_root = tmp_path / "proj"
+        canon = project_root / CANONICAL_MCP_SERVER_ROOT
+        canon.mkdir(parents=True)
+        (canon / "broken.json").write_text(self._MALFORMED, encoding="utf-8")
+        return project_root
+
+    def test_sync_real_malformed_canonical_is_path_free(self, tmp_path: Path) -> None:
+        # The route the issue found: SyncPhaseError(error_kind="parse") → string
+        # ``detail``. One fix point covers both this standalone route and the
+        # Sync-All aggregation (``_phase_error_envelope`` does ``str(detail)``).
+        project_root = self._seed(tmp_path)
+        res = self._build_app(project_root).post("/context/mcp-servers/sync")
+
+        assert res.status_code == 422, res.text
+        body = res.json()
+        assert isinstance(body["detail"], str), body  # parse 422 keeps a string detail
+        self._assert_path_free(body, project_root, basename="broken.json")
+        message = body["detail"]
+        assert "broken.json" in message, message  # names the artifact
+        assert "invalid JSON" in message, message  # names the problem
+
+    def test_create_real_malformed_content_is_path_free(self, tmp_path: Path) -> None:
+        # create renders the object envelope (``_error`` → ``detail`` is a dict);
+        # the path-free message lives at ``detail.message``.
+        project_root = self._seed(tmp_path)
+        res = self._build_app(project_root).post(
+            "/context/mcp-servers",
+            json={"name": "broken", "content": self._MALFORMED},
+        )
+
+        assert res.status_code == 422, res.text
+        body = res.json()
+        assert body["detail"]["error_kind"] == "parse", body
+        self._assert_path_free(body, project_root, basename="broken.json")
+        message = body["detail"]["message"]
+        assert "broken.json" in message, message
+        assert "invalid JSON" in message, message
+
+    def test_update_real_malformed_content_is_path_free(self, tmp_path: Path) -> None:
+        # update renders the object envelope like create. The seeded canonical
+        # already exists (``is_file`` passes); the malformed *body* content hits
+        # the parser before the mtime/lock dance, so any integer ``mtime_ns``
+        # reaches the parse 422.
+        project_root = self._seed(tmp_path)
+        res = self._build_app(project_root).put(
+            "/context/mcp-servers/broken",
+            json={"content": self._MALFORMED, "mtime_ns": "0", "force": False},
+        )
+
+        assert res.status_code == 422, res.text
+        body = res.json()
+        assert body["detail"]["error_kind"] == "parse", body
+        self._assert_path_free(body, project_root, basename="broken.json")
+        message = body["detail"]["message"]
+        assert "broken.json" in message, message
+        assert "invalid JSON" in message, message
+
+    def test_diff_real_malformed_canonical_is_path_free(self, tmp_path: Path) -> None:
+        # The diff route routes the reason through ``sanitize_diff_reason``, but
+        # that only strips a prefix-matching project root; ``safe_message`` is
+        # path-free at the source regardless (macOS ``/tmp``→``/private/tmp``).
+        project_root = self._seed(tmp_path)
+        res = self._build_app(project_root).get("/context/mcp-servers/broken/diff")
+
+        assert res.status_code == 200, res.text  # diff diagnoses, never 422s
+        body = res.json()
+        reason = body["runtimes"][0].get("reason", "")
+        assert body["runtimes"][0]["status"] == "parse error", body
+        self._assert_path_free(body, project_root, basename="broken.json")
+        assert "broken.json" in reason, reason
+
+    def test_list_symlinked_root_is_path_free(self, tmp_path: Path) -> None:
+        # Codex #1412-review repro: under a symlinked / case-variant project
+        # root the canonical path is ``.resolve()``'d but the route's
+        # ``project_root`` is not, so the single-form strips left the absolute
+        # resolved path in BOTH ``canonical_path`` (``_safe_rel`` fallback) and
+        # the diff-row ``reason`` (``sanitize_diff_reason``). Pin both path-free.
+        from memtomem.context.mcp_servers import CANONICAL_MCP_SERVER_ROOT
+
+        real = (tmp_path / "real").resolve()
+        canon = real / CANONICAL_MCP_SERVER_ROOT
+        canon.mkdir(parents=True)
+        (canon / "broken.json").write_text(self._MALFORMED, encoding="utf-8")
+        link = tmp_path / "link"
+        link.symlink_to(real)
+
+        # The route receives the UNRESOLVED symlink as project_root.
+        res = self._build_app(link).get("/context/mcp-servers")
+
+        assert res.status_code == 200, res.text
+        body = res.json()
+        self._assert_path_free(body, link, basename="broken.json")  # resolves link→real
+        server = body["mcp-servers"][0]
+        assert server["canonical_path"] == ".memtomem/mcp-servers/broken.json", server
+        assert server["runtimes"][0]["status"] == "parse error", server
+        assert "broken.json" in server["runtimes"][0]["reason"], server
+
+    def test_safe_message_is_basename_only(self) -> None:
+        # The core contract every web catch site relies on: ``safe_message``
+        # names only the basename while ``str(exc)`` keeps the full path the CLI
+        # / MCP surfaces want. Driven through the real parser (no hand-built
+        # exception) so the raise site and the twin stay in lockstep.
+        from memtomem.context.mcp_servers import McpServerParseError, parse_mcp_server_text
+
+        src = Path("/abs/home-username/proj/.memtomem/mcp-servers/x.json")
+        with pytest.raises(McpServerParseError) as ei:
+            parse_mcp_server_text(self._MALFORMED, name="x", source=src)
+        exc = ei.value
+        assert str(src) in str(exc)  # CLI / MCP keep the full path
+        assert str(src) not in exc.safe_message  # web boundary stays path-free
+        assert str(src.parent) not in exc.safe_message
+        assert exc.safe_message.startswith("invalid JSON in x.json:")  # names the artifact
 
 
 class TestSyncPhaseErrorHandlerContract:

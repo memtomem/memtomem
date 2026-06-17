@@ -36,7 +36,22 @@ MCP_RUNTIME = "project_mcp"
 
 
 class McpServerParseError(ValueError):
-    """Raised when a canonical MCP server definition cannot be parsed."""
+    """Raised when a canonical MCP server definition cannot be parsed.
+
+    ``safe_message`` is a path-free rendering of the failure for the web
+    trust boundary (#1412). The JSON-decode raise embeds the absolute,
+    ``.resolve()``'d source ``Path`` in the default message — useful on the
+    CLI / MCP surfaces, but a ``$HOME``/username disclosure over the loopback
+    dashboard (the #1385 finding-1 class, on the parse branch). Web catch
+    sites render ``exc.safe_message`` (basename + the JSON problem, no host
+    path); CLI / MCP keep ``str(exc)`` with the full path. The validation-shape
+    raises already name only the server (``'{name}'``), never a path, so
+    ``safe_message`` defaults to the full message.
+    """
+
+    def __init__(self, message: str, *, safe_message: str | None = None) -> None:
+        super().__init__(message)
+        self.safe_message = message if safe_message is None else safe_message
 
 
 class McpServerPrivacyError(ValueError):
@@ -116,7 +131,14 @@ def parse_mcp_server_text(text: str, *, name: str, source: Path) -> McpServerDef
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise McpServerParseError(f"invalid JSON in {source}: {exc.msg}") from exc
+        raise McpServerParseError(
+            f"invalid JSON in {source}: {exc.msg}",
+            # Path-free twin for the loopback web boundary (#1412): the default
+            # message embeds the resolved source path ($HOME/username leak over
+            # the dashboard), so web catch sites render this basename form. The
+            # JSON-decode ``exc.msg`` ("Expecting ...") never carries the path.
+            safe_message=f"invalid JSON in {source.name}: {exc.msg}",
+        ) from exc
     return McpServerDefinition(
         name=validate_name(name, kind="MCP server"),
         definition=validate_mcp_server_definition(data, name=name),
