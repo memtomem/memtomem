@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=118" />
+  <link rel="stylesheet" href="/style.css?v=119" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -551,6 +551,19 @@
             <span class="nav-label" data-i18n="settings.nav.ctx_wiki">Wiki</span>
             <span class="nav-sub" data-i18n="settings.nav.ctx_wiki_sub">Reuse across your own projects</span>
           </span>
+          <!-- #1417: nav/glance dirty dot. The wiki section body shows the same
+               state in #wiki-head, but from any OTHER gateway section the sidebar
+               gave no signal that the wiki has uncommitted edits `mm context
+               install` won't reach yet. Hidden until wiki.js (_renderWikiNavBadge)
+               or the eager /api/wiki/status probe flips it on. role=img + an
+               aria-label folds the meaning into the button's accessible name; no
+               aria-live (ctx a11y convention — a glance dot, never announced as
+               it appears). -->
+          <span class="wiki-nav-dirty" role="img" hidden
+                data-i18n-title="settings.nav.ctx_wiki_dirty_tip"
+                title="Uncommitted wiki edits — not yet reachable by `mm context install`"
+                data-i18n-aria-label="settings.nav.ctx_wiki_dirty_tip"
+                aria-label="Uncommitted wiki edits — not yet reachable by `mm context install`"></span>
         </button>
       </nav>
       <div class="settings-content">
@@ -1595,7 +1608,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=5"></script>
-  <script src="/app.js?v=130"></script>
+  <script src="/app.js?v=131"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=11"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
@@ -1606,7 +1619,7 @@
   <script src="/timeline.js?v=3"></script>
   <script src="/context-gateway.js?v=97"></script>
   <script src="/context-portal.js?v=7"></script>
-  <script src="/wiki.js?v=6"></script>
+  <script src="/wiki.js?v=7"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>
 </html>

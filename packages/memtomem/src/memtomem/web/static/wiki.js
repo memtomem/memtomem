@@ -90,6 +90,38 @@ function _renderWikiAbsent() {
       t('settings.ctx.wiki_empty_hint'),
     );
   }
+  // No wiki on disk → nothing to commit → clear any stale nav dot (#1417).
+  _renderWikiNavBadge(false);
+}
+
+// Nav/glance dirty badge (#1417). The section body already shows the dirty
+// state in #wiki-head, but from any OTHER Context Gateway section the sidebar
+// gave no signal that the wiki has uncommitted edits `mm context install` won't
+// reach yet. This toggles a small dot on the Wiki nav button, driven by the
+// SAME is_dirty the section tracks: every dirty-state repaint flows through
+// _renderWikiHead / _renderWikiAbsent, so both call here. a11y: just toggle the
+// element's `hidden` (no aria-live) — the dot's aria-label is read when a SR
+// reaches the nav button, but its appearance is never announced (no spam, per
+// the ctx dashboard conventions).
+function _renderWikiNavBadge(isDirty) {
+  const badge = document.querySelector(
+    '.settings-nav-btn[data-section="ctx-wiki"] .wiki-nav-dirty',
+  );
+  if (badge) badge.hidden = !isDirty;
+}
+
+// Eager probe so the nav badge is correct on a cold gateway open, before the
+// Wiki section has been visited (a wiki left dirty in a prior session). Cheap —
+// HEAD + `git status` only, no asset list. Best-effort: a missing wiki
+// (present:false) or any fetch failure leaves the dot hidden rather than
+// surfacing an error. Called from app.js on Context Gateway activation.
+async function _probeWikiNavStatus() {
+  try {
+    const res = await fetch('/api/wiki/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    _renderWikiNavBadge(!!data.is_dirty);
+  } catch { /* glance signal only — never block the gateway on it */ }
 }
 
 function _renderWikiHead() {
@@ -115,6 +147,11 @@ function _renderWikiHead() {
   headEl.innerHTML = html;
   const commitBtn = qs('wiki-commit-btn');
   if (commitBtn) commitBtn.addEventListener('click', () => { _openWikiCommitModal(); });
+  // Mirror the dirty state onto the nav/glance dot (#1417). Every site that
+  // flips _wikiData.is_dirty (load + the Save/seed/commit responses) repaints
+  // the head, so this single hook keeps the sidebar in sync without touching
+  // each call site.
+  _renderWikiNavBadge(!!_wikiData.is_dirty);
 }
 
 // --- Commit affordance (ADR-0027 §3, dev tier only) -------------------------

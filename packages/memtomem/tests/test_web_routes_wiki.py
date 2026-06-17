@@ -113,6 +113,47 @@ async def test_list_wiki_absent_is_404_not_500(client, wiki_root: Path) -> None:
     assert str(wiki_root) not in resp.text
 
 
+# ── GET /api/wiki/status ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wiki_status_clean(client, seeded_wiki: Path) -> None:
+    resp = await client.get("/api/wiki/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["present"] is True
+    assert data["is_dirty"] is False
+    assert len(data["wiki_head"]) == 40  # full SHA
+
+
+@pytest.mark.asyncio
+async def test_wiki_status_dirty(client, seeded_wiki: Path) -> None:
+    # An uncommitted working-tree edit (the exact state `install` cannot reach).
+    (seeded_wiki / "skills" / "alpha" / "SKILL.md").write_bytes(b"# Alpha EDITED\n")
+    resp = await client.get("/api/wiki/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["present"] is True
+    assert data["is_dirty"] is True
+
+
+@pytest.mark.asyncio
+async def test_wiki_status_absent_is_present_false_not_404(
+    client,
+    wiki_root: Path,  # noqa: F811
+) -> None:
+    # Unlike the asset-listing routes, the nav probe must not 404 on an absent
+    # wiki — it fires on every gateway open, so it degrades to a hidden badge.
+    resp = await client.get("/api/wiki/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["present"] is False
+    assert data["is_dirty"] is False
+    assert data["wiki_head"] is None
+    # The /status literal must not be parsed as an {asset_type} (would 422).
+    assert str(wiki_root) not in resp.text
+
+
 # ── GET /api/wiki/{type}/{name}/diff ──────────────────────────────────────
 
 

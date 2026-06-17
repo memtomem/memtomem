@@ -797,3 +797,64 @@ describe('wiki.js commit affordance (ADR-0027 §3, dev tier)', () => {
     expect(window.document.getElementById('wiki-commit-btn')).toBeNull();
   });
 });
+
+describe('wiki.js nav/glance dirty badge (#1417)', () => {
+  const WIKI_LIST_DIRTY = { ...WIKI_LIST, is_dirty: true };
+  const navDot = (window) =>
+    window.document.querySelector('.settings-nav-btn[data-section="ctx-wiki"] .wiki-nav-dirty');
+
+  it('starts hidden in the shipped markup', async () => {
+    const { window } = await boot();
+    expect(navDot(window)).not.toBeNull();
+    expect(navDot(window).hidden).toBe(true);
+  });
+
+  it('reveals the dot after loading a dirty wiki and hides it for a clean one', async () => {
+    const dirty = await boot({ '/api/wiki': WIKI_LIST_DIRTY });
+    await dirty.window.loadWiki();
+    expect(navDot(dirty.window).hidden).toBe(false);
+
+    const clean = await boot({ '/api/wiki': WIKI_LIST }); // is_dirty: false
+    await clean.window.loadWiki();
+    expect(navDot(clean.window).hidden).toBe(true);
+  });
+
+  it('clears the dot when the wiki is absent (404)', async () => {
+    const { window } = await boot();
+    window._renderWikiNavBadge(true); // pretend a prior dirty state lit it
+    expect(navDot(window).hidden).toBe(false);
+    window.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      if (url && url.includes('/api/wiki')) {
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: { reason_code: 'wiki_absent' } }),
+          text: async () => '',
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '{}' };
+    };
+    await window.loadWiki();
+    expect(navDot(window).hidden).toBe(true);
+  });
+
+  it('eager probe lights the dot from /api/wiki/status before the section is opened', async () => {
+    const { window } = await boot({ '/api/wiki/status': { present: true, is_dirty: true } });
+    expect(navDot(window).hidden).toBe(true); // not opened yet
+    await window._probeWikiNavStatus();
+    expect(navDot(window).hidden).toBe(false);
+  });
+
+  it('eager probe leaves the dot hidden for an absent/clean wiki and never throws', async () => {
+    const absent = await boot({ '/api/wiki/status': { present: false, is_dirty: false } });
+    await absent.window._probeWikiNavStatus();
+    expect(navDot(absent.window).hidden).toBe(true);
+
+    // A failed probe must not surface — the dot just stays as-is.
+    const broken = await boot();
+    broken.window.fetch = async () => { throw new Error('network'); };
+    await broken.window._probeWikiNavStatus();
+    expect(navDot(broken.window).hidden).toBe(true);
+  });
+});
