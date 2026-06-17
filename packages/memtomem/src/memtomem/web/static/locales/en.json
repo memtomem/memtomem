@@ -430,6 +430,7 @@
   "settings.ctx.agents_title": "Subagents",
   "settings.ctx.mcp_servers_title": "MCP Servers",
   "settings.ctx.wiki_title": "Wiki",
+  "settings.ctx.wiki_scope_chip": "Global wiki",
   "settings.ctx.wiki_desc": "Browse the global wiki (~/.memtomem-wiki) of canonical skills, subagents, and commands. Read-only in prod; in dev mode you can seed vendor overrides, edit canonical and override files, and commit — all in the browser.",
   "settings.ctx.wiki_empty": "No wiki found",
   "settings.ctx.wiki_empty_hint": "Run `mm wiki init` to create ~/.memtomem-wiki, then reload.",

@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=116" />
+  <link rel="stylesheet" href="/style.css?v=117" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -679,7 +679,10 @@
         <div class="settings-section" id="settings-ctx-wiki">
           <p class="settings-section-desc" data-i18n="settings.ctx.wiki_desc">Browse the global wiki (~/.memtomem-wiki) of canonical skills, subagents, and commands. Read-only in prod; in dev mode you can seed vendor overrides, edit canonical and override files, and commit — all in the browser.</p>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.wiki_title">Wiki</h2>
+            <div class="ctx-header-title">
+              <h2 data-i18n="settings.ctx.wiki_title">Wiki</h2>
+              <span class="badge wiki-scope-chip" data-i18n="settings.ctx.wiki_scope_chip">Global wiki</span>
+            </div>
             <div id="wiki-head" class="wiki-head"></div>
           </div>
           <div id="wiki-status"></div>

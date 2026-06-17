@@ -600,3 +600,44 @@ def test_wiki_commit_stale_head_refreshes(page, mm_web_url: str) -> None:
         timeout=5_000,
     )
     assert page.locator("#wiki-commit-btn").count() == 0
+
+
+def test_wiki_scope_chip_renders_and_localizes(page, mm_web_url: str) -> None:
+    """PR-1b scope chip (ADR-0008 / plan #1353): the Wiki pane carries an
+    always-on "Global wiki" scope chip beside the heading so even a read-only
+    (prod) browser sees the host-global scope without entering dev mode. Pin the
+    three properties only a real browser exercises:
+
+    * it renders inside the Wiki section host (``#settings-ctx-wiki``) and is the
+      sole chip — NOT injected into the Projects-owned
+      ``#ctx-portal-heading-chips`` (a different DOM host);
+    * it resolves through the ``settings.ctx.wiki_scope_chip`` i18n key, so a
+      mid-view language switch repaints it (static ``data-i18n`` → applyDOM);
+    * the English default reads "Global wiki" and Korean "전역 위키"."""
+    install_default_stubs(page)
+    _stub_wiki(page)
+    page.goto(mm_web_url)
+    _open_wiki(page)
+
+    chip = page.locator("#settings-ctx-wiki .wiki-scope-chip")
+    chip.wait_for(state="visible", timeout=5_000)
+    assert chip.inner_text().strip() == "Global wiki"
+
+    # Exactly one chip, and it never lives in the Projects heading-chips host.
+    assert page.locator(".wiki-scope-chip").count() == 1
+    assert page.locator("#ctx-portal-heading-chips .wiki-scope-chip").count() == 0
+    # Pin the exact placement contract: it sits in the heading-title wrapper and
+    # never inside the langchange-repainted #wiki-head row — a future JS-rendered
+    # chip in #wiki-head (the inject-clobber host this design avoids) must fail.
+    assert page.locator("#settings-ctx-wiki .ctx-header-title > .wiki-scope-chip").count() == 1
+    assert page.locator("#wiki-head .wiki-scope-chip").count() == 0
+
+    # langchange repaints the static data-i18n chip via applyDOM (ko locale).
+    page.evaluate("async () => { await I18N.setLang('ko'); }")
+    page.wait_for_function(
+        "() => {"
+        "  const el = document.querySelector('#settings-ctx-wiki .wiki-scope-chip');"
+        "  return el && el.textContent.trim() === '전역 위키';"
+        "}",
+        timeout=5_000,
+    )
