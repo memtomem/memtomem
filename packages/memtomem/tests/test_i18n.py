@@ -878,9 +878,10 @@ class TestNoHardcodedStrings:
         denylist over ``settings.ctx.*`` would false-positive — so two
         legitimate-use classes are allowlisted, and only for ``canonical``:
 
-        * **Wiki surface** (``"wiki" in key``) — "canonical" is the real product
-          term for the wiki's canonical/override model; the nav glossary even
-          *requires* it be defined (``test_ctx_nav_sub_glossary_consistency``).
+        * **Wiki surface** (exact ``settings.ctx.wiki_`` key prefix) —
+          "canonical" is the real product term for the wiki's canonical/override
+          model; the nav glossary even *requires* it be defined
+          (``test_ctx_nav_sub_glossary_consistency``).
         * **Path placeholder** ``{canonical}`` — the empty-state hints render the
           on-disk store path through this i18n placeholder, not as bare prose.
 
