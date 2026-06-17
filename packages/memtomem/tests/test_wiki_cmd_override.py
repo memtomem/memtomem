@@ -296,9 +296,13 @@ def test_wiki_skill_override_stdout_contract(wiki_root: Path) -> None:
     # Bare absolute path on its own line for shell capture.
     target_path = wiki_root / "skills" / "hello" / "overrides" / "codex.md"
     assert target_path.as_posix() in out
-    # Commit hint mentioning git commit.
-    assert "git commit" in out
-    assert "git add skills/hello/overrides/codex.md" in out
+    # Isolated-commit-first hint: points at ``mm wiki skill commit ... --vendor``
+    # (override only seeds the vendor file), then the project install step — never
+    # a raw ``git add``/``git commit`` that would sweep unrelated staged changes.
+    assert "mm wiki skill commit hello --vendor codex" in out
+    assert "mm context install skill hello" in out
+    assert "git add" not in out
+    assert "git commit" not in out
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -480,8 +484,10 @@ def test_wiki_agent_override_stdout_contract(wiki_root: Path) -> None:
     assert "Seeded agents/demo/overrides/codex.toml" in out
     target_path = wiki_root / "agents" / "demo" / "overrides" / "codex.toml"
     assert target_path.as_posix() in out
-    assert "git commit" in out
-    assert "git add agents/demo/overrides/codex.toml" in out
+    assert "mm wiki agent commit demo --vendor codex" in out
+    assert "mm context install agent demo" in out
+    assert "git add" not in out
+    assert "git commit" not in out
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -671,8 +677,10 @@ def test_wiki_command_override_stdout_contract(wiki_root: Path) -> None:
     assert "Seeded commands/demo/overrides/gemini.toml" in out
     target_path = wiki_root / "commands" / "demo" / "overrides" / "gemini.toml"
     assert target_path.as_posix() in out
-    assert "git commit" in out
-    assert "git add commands/demo/overrides/gemini.toml" in out
+    assert "mm wiki command commit demo --vendor gemini" in out
+    assert "mm context install command demo" in out
+    assert "git add" not in out
+    assert "git commit" not in out
 
 
 # ─────────────────────────────────────────────────────────────────────────

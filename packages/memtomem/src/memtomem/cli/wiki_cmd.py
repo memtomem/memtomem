@@ -49,7 +49,12 @@ _COMMAND_VENDORS = override_vendors("commands")
 
 @click.group("wiki")
 def wiki() -> None:
-    """Manage the local memtomem wiki (skills/agents/commands library)."""
+    """Manage the host-global wiki (~/.memtomem-wiki) of canonical skills, agents, and commands.
+
+    These commands edit, check, and commit the host-global wiki itself. Use
+    mm context install / mm context update to copy committed wiki artifacts into
+    a project's .memtomem/ directory.
+    """
 
 
 def _run_seed_override(
@@ -92,13 +97,17 @@ def _run_seed_override(
     # No is_relative_to fallback — a violation is a real bug worth
     # surfacing as ValueError, not a silent path mismatch to mask.
     rel = result.path.relative_to(store.root)
-    ext = result.path.suffix.lstrip(".")
-    # ``as_posix()`` matches the hardcoded ``/`` in the ``git add`` hint below.
+    # ``as_posix()`` keeps the displayed relative path forward-slashed on Windows.
     click.secho(f"Seeded {rel.as_posix()}", fg="green")
     click.echo(str(result.path))
+    # Steer to the target-isolated commit, not a raw ``git add``/``git commit``
+    # (which would sweep unrelated staged changes). ``override`` only seeds the
+    # vendor file, so the hint points at ``--vendor`` — never ``--canonical``.
+    singular = asset_type[:-1]  # "skills" -> "skill": the per-type CLI verb is singular
+    click.echo(f"# next: mm wiki {singular} commit {name} --vendor {vendor}")
     click.echo(
-        f"# next: cd {store.root} && "
-        f"git add {asset_type}/{name}/overrides/{vendor}.{ext} && git commit"
+        f"# then: cd <project> && mm context install {singular} {name}"
+        "   # or update an installed copy"
     )
 
     if result.dropped:
@@ -337,7 +346,7 @@ def _run_commit(
     help="Clone the wiki from a git URL instead of initializing from scratch.",
 )
 def init_cmd(from_url: str | None) -> None:
-    """Create or clone the wiki at ``~/.memtomem-wiki/``."""
+    """Create or clone the wiki at ~/.memtomem-wiki/."""
     store = WikiStore.at_default()
     try:
         if from_url:
@@ -391,7 +400,10 @@ def list_cmd(asset_type: str | None) -> None:
 
 @wiki.group("skill")
 def skill_group() -> None:
-    """Per-skill operations on the wiki (override seeding, ...)."""
+    """Manage wiki skills.
+
+    Seed vendor overrides, then diff, lint, and commit selected paths.
+    """
 
 
 @skill_group.command("override")
@@ -421,8 +433,10 @@ def skill_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> Non
     ``mm wiki skill override <name> --vendor <claude|gemini|codex|kimi>`` writes
     ``<wiki>/skills/<name>/overrides/<vendor>.md`` using the canonical
     ``SKILL.md`` as the working baseline. Edit the file (``--editor`` opens
-    ``$EDITOR``) and commit it inside the wiki repo so that future
-    ``mm context install`` snapshots pick it up.
+    ``$EDITOR``), then record it with
+    ``mm wiki skill commit <name> --vendor <vendor>`` (or the in-browser Commit
+    button) so a later ``mm context install`` can snapshot it — no raw ``git``
+    needed.
     """
     _run_seed_override("skills", name, vendor, force=force, editor=editor)
 
@@ -507,7 +521,10 @@ def skill_commit_cmd(
 
 @wiki.group("agent")
 def agent_group() -> None:
-    """Per-agent operations on the wiki (override seeding, ...)."""
+    """Manage wiki agents.
+
+    Seed vendor overrides, then diff, lint, and commit selected paths.
+    """
 
 
 @agent_group.command("override")
@@ -540,7 +557,9 @@ def agent_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> Non
     matches what the runtime would produce. Fields the vendor format
     cannot represent (e.g. gemini agents drop ``skills`` / ``isolation``)
     are surfaced via a stderr warning so the editor knows what the
-    runtime won't see.
+    runtime won't see. Record the seeded override with
+    ``mm wiki agent commit <name> --vendor <vendor>`` so a later
+    ``mm context install`` can snapshot it.
     """
     _run_seed_override("agents", name, vendor, force=force, editor=editor)
 
@@ -625,7 +644,10 @@ def agent_commit_cmd(
 
 @wiki.group("command")
 def command_group() -> None:
-    """Per-command operations on the wiki (override seeding, ...)."""
+    """Manage wiki commands.
+
+    Seed vendor overrides, then diff, lint, and commit selected paths.
+    """
 
 
 @command_group.command("override")
@@ -658,7 +680,9 @@ def command_override_cmd(name: str, vendor: str, force: bool, editor: bool) -> N
     command surfaces a classified error rather than silently failing.
     Fields the vendor format cannot represent (e.g. gemini commands drop
     ``argument-hint`` / ``allowed-tools`` / ``model``) are surfaced via a
-    stderr warning so the editor knows what the runtime won't see.
+    stderr warning so the editor knows what the runtime won't see. Record the
+    seeded override with ``mm wiki command commit <name> --vendor <vendor>`` so
+    a later ``mm context install`` can snapshot it.
     """
     _run_seed_override("commands", name, vendor, force=force, editor=editor)
 
