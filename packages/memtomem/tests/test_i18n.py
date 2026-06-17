@@ -863,6 +863,69 @@ class TestNoHardcodedStrings:
             "(저장소/저장 위치) and hooks must say target (대상):\n" + "\n".join(leaks)
         )
 
+    def test_ctx_settings_namespace_no_raw_jargon(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """ADR-0026 §Validation (#1353): a namespace-wide backstop that fails if
+        raw implementation vocabulary re-enters *any* user-facing
+        ``settings.ctx.*`` string. The per-key pins above
+        (``test_ctx_p0_onboarding_keys_jargon_free`` etc.) only cover an
+        enumerated key list, so a *newly added* key can slip jargon past review
+        until someone remembers to extend the list. This scan covers the whole
+        Context Gateway copy namespace, so new keys are guarded by default.
+
+        ADR-0026 §Validation asks for exactly this guard, but warns a blanket
+        denylist over ``settings.ctx.*`` would false-positive — so two
+        legitimate-use classes are allowlisted, and only for ``canonical``:
+
+        * **Wiki surface** (``"wiki" in key``) — "canonical" is the real product
+          term for the wiki's canonical/override model; the nav glossary even
+          *requires* it be defined (``test_ctx_nav_sub_glossary_consistency``).
+        * **Path placeholder** ``{canonical}`` — the empty-state hints render the
+          on-disk store path through this i18n placeholder, not as bare prose.
+
+        Every other token (``project_shared`` / ``project_local`` / ``fan-out`` /
+        ``fanout`` / ``target_scope``) is request/identifier vocabulary
+        (ADR-0015 / ADR-0016) and is forbidden in ``settings.ctx.*`` values
+        outright. The allowlist is token-specific: a wiki key that leaked
+        ``project_shared`` still fails. Key *names* may keep the internal concept
+        words — only the rendered VALUES are scanned.
+
+        If a new string legitimately needs one of these terms (e.g. a new wiki
+        surface), widen the allowlist below with a comment explaining why, rather
+        than relaxing the assertion."""
+        strict = ("project_shared", "project_local", "fan-out", "fanout", "target_scope")
+        leaks: list[str] = []
+        for name, locale in [("en", en), ("ko", ko)]:
+            for key, value in locale.items():
+                if not key.startswith("settings.ctx.") or not isinstance(value, str):
+                    continue
+                # Case-insensitive so capitalized re-introductions ("Fan-out",
+                # "Canonical", "PROJECT_SHARED") can't slip past the guard.
+                folded = value.casefold()
+                for token in strict:
+                    if token in folded:
+                        leaks.append(f"  {name} {key}: raw '{token}' — {value!r}")
+                # ``canonical`` is legitimate only on the wiki surface
+                # (``settings.ctx.wiki_*``) and as the ``{canonical}`` store-path
+                # placeholder; bare prose anywhere else is the regression we guard
+                # against. The wiki predicate is an exact prefix — not
+                # ``"wiki" in key`` — so a future non-wiki key that merely
+                # contains the substring can't silently earn the exemption.
+                if "canonical" in folded and not key.startswith("settings.ctx.wiki_"):
+                    if "canonical" in folded.replace("{canonical}", ""):
+                        leaks.append(
+                            f"  {name} {key}: bare 'canonical' (not the "
+                            f"{{canonical}} placeholder, not a wiki key) — {value!r}"
+                        )
+        assert not leaks, (
+            "ADR-0026 §Validation: user-facing settings.ctx.* copy must not "
+            "expose raw canonical / project_shared / project_local / fan-out / "
+            "target_scope jargon (the #1352 purge must not regress). If a term "
+            "is legitimately user-facing, extend this test's allowlist with a "
+            "comment:\n" + "\n".join(leaks)
+        )
+
     def test_ctx_command_artifact_label_has_no_custom_prefix(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:
