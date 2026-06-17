@@ -364,6 +364,19 @@ probes 1–3 succeed for ≥4/6 without docs; P2 is gated on probe 5
 succeeding for ≥5/6 and the status-merge not costing power users the
 create-vs-overwrite distinction.
 
+### Reproducing the first-run state
+
+`seed_adr0026_validation_states`
+(`packages/memtomem/tests/fixtures/ctx_validation_states.py`) seeds the six
+probe affordances above into one project — out-of-sync, not-yet-imported, empty
+type, MCP orphan, MCP parse-error, and an in-sync baseline — so every
+participant sees the same Overview. `test_ctx_validation_harness.py` pins the
+seed against the real diff engine, including the easy-to-invert Store-vs-runtime
+direction (a runtime-only artifact reads as "Not yet imported", never "Out of
+sync"), so it cannot silently rot. It is version-controlled (not the gitignored
+`scripts/` tree) so it stays in lockstep with the moderated facilitator protocol
+that consumes it.
+
 ## Provisional decisions
 
 These are the author's **recommended leans**, filled in so the ADR reads
