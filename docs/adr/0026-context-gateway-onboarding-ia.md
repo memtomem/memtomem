@@ -3,10 +3,12 @@
 **Status:** Accepted & partially shipped — P0 and P1a/P1b are merged; the
 P1 Simple-as-default flip and all of P2 remain deferred pending the
 §Validation first-run user test. See §"Implementation status (as of
-2026-06-17)". Provisional decisions remain open as recorded; the staged
-rollout (Advanced default first) follows the D-F lean, while the shipped
-tier-value display labels ("Project (shared)") diverge from the D-A(ii)
-literal-token lean — the D-A tier-display question stays open.
+2026-06-17)". D-F (staged rollout, Advanced default first) is followed.
+**D-A is now decided (2026-06-17):** the Web display uses friendly tier
+labels ("User" / "Project (shared)" / "Project (local)") + a "Stored in"
+axis — a narrow supersession of ADR-0016 §7 for Web display copy only, with
+the CLI / request identifiers unchanged. The remaining provisional decisions
+(D-B / D-C) stay open, gated on the §Validation user test.
 **Date:** 2026-06-14 (status updated 2026-06-17)
 **Context:** A first-time-user end-to-end smoke test of the Context Gateway
 web UI (driven through Playwright against an isolated, seeded HOME) found
@@ -46,15 +48,16 @@ is deliberately **non-normative** on the request / identifier vocabulary:
   ADR-0023 transfer gates all stand). It changes copy, one display-label
   helper, and additive UI affordances.
 - **Caveat — ADR-0016 §7 (load-bearing).** ADR-0016 §7 ("CLI / Web UI
-  user-facing names") already **decided** that user-facing surfaces use
-  the literal tier tokens `user` / `project_shared` / `project_local` and
-  **rejects** display aliases ("Personal" / "Team" / "Local Draft"). The
-  glossary below therefore keeps the literal tokens by default and only
-  *defines* them. Friendlier tier-value labels would be a **narrow
-  supersession of ADR-0016 §7 for Web display copy only** — that is a
-  maintainer decision (D-A), not something this ADR assumes. So this ADR
-  is non-normative on prior decisions **except** that D-A explicitly puts
-  ADR-0016 §7 on the table.
+  user-facing names") **decided** that user-facing surfaces use the literal
+  tier tokens `user` / `project_shared` / `project_local` and **rejects**
+  display aliases ("Personal" / "Team" / "Local Draft"). D-A (decided
+  2026-06-17) **narrowly supersedes ADR-0016 §7 for Web display copy only**:
+  the Context Gateway **Web** surface renders friendly labels ("User" /
+  "Project (shared)" / "Project (local)") + a "Stored in" axis and defines
+  them, while CLI `--scope=` flags, `?target_scope=` params, config, MCP, and
+  path segments keep the literal tokens unchanged. So this ADR is
+  non-normative on prior decisions **except** that D-A narrowly supersedes
+  ADR-0016 §7 for Web display copy.
 
 The string-level localization/copy *defects* found by the same smoke test
 are tracked and fixed separately (#1348 raw move/copy verbs, #1349 portal
@@ -113,16 +116,16 @@ only in code, request params, and ADRs).
 | fan-out | **Sync** / "pushes" (verb) | Copying the Store's items out to every detected runtime — one-way. |
 | Sync / Sync All | **Sync** (kept) | Push the Store's items out to your runtimes. |
 | Import | **Import** (kept) | Pull an existing item from a runtime back into the Store. |
-| tier (the `target_scope` axis) | **"Tier"** (kept + defined) — _provisional_, see Decision D-A; "Scope" is rejected (collides with ADR-0015) | Where in the Store a copy lives and how widely it applies. |
-| user / project_shared / project_local (values) | **Keep the literal tokens** + a one-line tooltip — see D-A. ADR-0016 §7 pins these tokens and rejects display aliases; friendlier labels ("Personal"/"Team"/"Draft") would need to supersede ADR-0016 §7 (Web display only). | All your projects / committed to git, your team gets it / gitignored draft, never pushed. |
+| tier (the `target_scope` axis) | **"Stored in" / "Store in"** (저장 위치) — _decided, D-A (2026-06-17)_; "Tier" kept only as the code/concept word; "Scope" rejected (collides with ADR-0015) | Where in the Store a copy lives and how widely it applies. |
+| user / project_shared / project_local (values) | **Web display: friendly labels** "User" / "Project (shared)" / "Project (local)" + a one-line tooltip (_decided, D-A_ — narrow ADR-0016 §7 supersession, Web display only); CLI / params / config keep the literal tokens. | All your projects / committed to git, your team gets it / gitignored draft, never pushed. |
 | enroll | **Track** ("Enable sync") | Opt a project in to receiving pushes — like adding a git remote. |
 | Server CWD | the project's real label + a **`(current folder)`** marker | The folder the server launched in; show the real label, not a synthetic second identity. |
 | status: out of sync / not in runtime | **Out of sync → Sync** / **Not in runtimes → Sync** | Store has changes/items the runtime lacks; Sync to push. |
 | status: not yet imported | **In runtime only → Import** | A runtime has an item the Store doesn't; Import to bring it in. |
 
 `project_shared` means "git-tracked", **not** "shared between agents"
-(inherited verbatim from ADR-0011 / ADR-0015 Terminology). Whatever D-A
-decides for the rendered tier values, the `project_shared` tooltip must
+(inherited verbatim from ADR-0011 / ADR-0015 Terminology). Under D-A's
+friendly rendered labels, the `project_shared` tooltip must still
 carry that meaning ("committed to git — your team will see it"); the
 `project_local` tooltip must carry "gitignored draft — never pushed"
 (ADR-0011 §3).
@@ -134,11 +137,12 @@ here as written, because **ADR-0015 explicitly retired unqualified
 (project-root selector) and `target_scope` (tier). Introducing "Scope" as
 the *display* word for the tier axis would re-create exactly the ambiguity
 ADR-0015 fought, and would collide with the project axis users already
-read as "Project". The tier-axis display term is therefore left as an
-explicit open question (D-A), with non-colliding candidates: keep "Tier"
-(and define it), "Storage location", or "Visibility". The current UI label
-"저장 위치" / "Stored in" is already a non-colliding choice and may simply
-need a definition rather than a rename.
+read as "Project". "Scope" stays rejected as the display word. The
+tier-axis display term was an open question (D-A); it is **now resolved
+(2026-06-17)** to the already-shipped, non-colliding UI label
+**"Stored in" / "저장 위치"**, which the glossary defines (the other kept
+candidates were "Storage location" and "Visibility"; "Tier" survives only
+as the code/concept word).
 
 ### 3. Phased delivery — Minimal → Moderate → (validate) → Bold
 
@@ -265,8 +269,9 @@ Each item: **what** · **where** · **acceptance criterion**.
 
 Re-frame as a "git push console": rename Sync→Push↑ / Import→Pull↓,
 collapse the statuses to ahead/behind/in-sync (+ two error states), add a
-`git status`-style headline verdict, and resolve the tier display-term
-(D-A) under the same metaphor (e.g. Global/Shared/Draft). This relabels
+`git status`-style headline verdict, and — as a *separate, later*
+supersession of the now-decided D-A display copy — optionally re-frame the
+tier labels under the same metaphor (e.g. Global/Shared/Draft). This relabels
 ~40 `settings.ctx.*` keys in both locales and breaks external
 docs/screenshots, so it is **deferred pending** the §Validation user test.
 Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
@@ -283,8 +288,10 @@ Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
   params (ADR-0015 preserved).
 - P0 item 4 overlaps #1348's confirm-copy edit at `en.json:415`;
   sequencing must be coordinated (D-E) so the two do not collide.
-- The tier display-term decision (D-A) is intentionally *not* taken here,
-  to avoid colliding with ADR-0015 / pre-empting #922.
+- The tier display-term decision (D-A) is **taken** (2026-06-17): the Web
+  display uses friendly labels + a "Stored in" axis (narrow ADR-0016 §7
+  supersession, Web display only) without colliding with ADR-0015 or
+  pre-empting #922 — request identifiers (`target_scope`) are unchanged.
 
 ## Implementation status (as of 2026-06-17)
 
@@ -363,21 +370,32 @@ These are the author's **recommended leans**, filled in so the ADR reads
 as a concrete draft. Each is **provisional** — it records the chosen
 option *and keeps its alternatives* so the maintainer can re-open any one
 without re-deriving the analysis. Until the maintainer confirms, treat
-every D-x as a recommendation, not a settled decision. (Each D-x maps 1:1
+each D-x as a recommendation, not a settled decision — **except D-A, which
+is now decided (2026-06-17); D-B–D-G remain leans.** (Each D-x maps 1:1
 to the prior open question Q-x.)
 
-- **D-A. Tier vocabulary — axis term AND value display.**
-  - **Lean:** (i) keep **"Tier"** as the axis display term and *define* it
-    (reject "Scope" — collides with ADR-0015's retired unqualified
-    "scope"); (ii) keep the **literal tier-value tokens**
-    `user`/`project_shared`/`project_local` + a one-line tooltip each — so
-    nothing supersedes ADR-0016 §7. Lowest-risk, zero ADR conflict.
-  - **Alternatives (kept):** axis term "Storage location" / "Visibility" /
-    "Stored in"; OR adopt friendlier value labels ("Personal"/"Team"/
-    "Draft") via a **narrow supersession of ADR-0016 §7 for Web display
-    only** (would need its own §7-supersession note).
-  - **Constraint:** neither sub-decision may pre-empt the #922
-    `target_scope`→`target_tier` *identifier* rename.
+- **D-A. Tier vocabulary — axis term AND value display. — DECIDED 2026-06-17
+  (ratifies what shipped in #1356 / #1372).**
+  - **Decision (Web display):** (i) the axis display term is **"Stored in" /
+    "Store in"** (KO "저장 위치") — the non-colliding alternative; "Scope"
+    stays rejected (collides with ADR-0015's retired unqualified "scope") and
+    "Tier" is kept only as the *code/concept* word, never rendered as the Web
+    axis label. (ii) the tier values render as friendly labels **"User" /
+    "Project (shared)" / "Project (local)"** (KO "사용자" / "프로젝트(공유)" /
+    "프로젝트(로컬)"), each with a defining tooltip — a **narrow supersession
+    of ADR-0016 §7 for Web display copy only**, recorded in the §7
+    supersession note in ADR-0016.
+  - **Scope of the supersession:** Web UI *display copy* only. CLI `--scope=`
+    flags, `?target_scope=` query params, MCP, config files, runtime path
+    segments, i18n KEY names, and the `{tier}` placeholder keep the literal
+    tokens `user`/`project_shared`/`project_local` unchanged; the ADR-0016 §7
+    inline "no runtime fan-out" annotation on `project_local` still stands.
+  - **Constraint (unchanged):** this display-only decision must **not**
+    pre-empt the #922 `target_scope`→`target_tier` *identifier* rename
+    (TRACKER row "0016 §2", deferred to 2026-08-11).
+  - **Original lean (not taken — superseded by what shipped):** keep "Tier"
+    as the rendered axis term + the literal value tokens. Other kept axis
+    candidates: "Storage location" / "Visibility".
 - **D-B. P2 directional verbs.**
   - **Lean:** option (b) **soft** — keep the action names Sync/Import but
     add a secondary directional cue ("push to runtimes" ↑ / "pull into
@@ -461,10 +479,12 @@ D-B/D-C (trigger: the §Validation first-run user test) pointing at #1353.
 - ADR-0015 — request vocabulary `project_scope_id` / `target_scope` and
   the retirement of unqualified "scope" (load-bearing for §2 / D-A);
   this ADR is the display-layer counterpart and does not change it.
-- ADR-0016 §7 ("CLI / Web UI user-facing names") — **pins** the literal
-  tier tokens for user-facing surfaces and rejects display aliases
-  (load-bearing for D-A(ii); the glossary keeps literals unless D-A elects
-  to supersede it for Web display copy). §"Open questions" raises the
+- ADR-0016 §7 ("CLI / Web UI user-facing names") — originally **pinned**
+  the literal tier tokens for user-facing surfaces and rejected display
+  aliases; **D-A (decided 2026-06-17) narrowly supersedes it for Context
+  Gateway Web display copy only** (CLI / params / config / identifiers keep
+  the literal tokens — see the §7 supersession note). §"Open questions"
+  raises the
   deferred `target_scope`→`target_tier` *identifier* rename (bound to #922
   with a 2026-08-11 review window in TRACKER.md, row "0016 §2"); D-A must
   not pre-empt it.

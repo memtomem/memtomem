@@ -339,6 +339,18 @@ CLI list output already does this per ADR-0011 §"Consequences"
 (`(draft, no fan-out)`); the Web UI badges shipped in #929 inherit
 the same rule.
 
+**Supersession — Web display copy only (2026-06-17, ADR-0026 §D-A).**
+ADR-0026 §D-A narrowly supersedes this section *for the Context Gateway
+Web UI display copy only*: that surface renders the tier axis as
+"Stored in" and the values as "User" / "Project (shared)" /
+"Project (local)" (each defined by a tooltip) instead of the literal
+tokens. This is display-layer only — CLI `--scope=` flags,
+`?target_scope=` query params, MCP, config files, runtime path segments,
+and i18n key names keep the literal `user` / `project_shared` /
+`project_local` tokens, and the `project_local` "no fan-out" annotation
+rule above still applies. The identifier rename
+(`target_scope`→`target_tier`, #922) is unaffected.
+
 ### 8. Relationship to ADR-0015 — tier and runtime scope are not 1:1
 
 ADR-0015 §1 already established `target_scope` (canonical tier) as
