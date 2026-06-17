@@ -1,12 +1,15 @@
 """Wiki override-seed mutation endpoint (ADR-0008 PR-E E-2, dev tier).
 
 The read-only browser in ``wiki.py`` ships in the prod tier; this companion
-router carries the single mutating verb — seeding a vendor override file — and
-mounts only when ``MEMTOMEM_WEB__MODE=dev`` (``_DEV_ONLY_ROUTERS``). It is the
-web parity of ``mm wiki <type> override``: it renders the canonical baseline
-into ``~/.memtomem-wiki/<type>/<name>/overrides/<vendor>.<ext>`` for the user
-to edit and commit themselves. Seeding never commits — ADR-0008 makes seeding
-a staging step, so the new file is left dirty in the wiki working tree (the
+router carries the dev-tier mutating verbs — seeding a vendor override, the
+in-browser editor save, and the isolated commit (the latter two detailed
+below) — and mounts only when ``MEMTOMEM_WEB__MODE=dev``
+(``_DEV_ONLY_ROUTERS``). It is the web parity of ``mm wiki <type> override``:
+it renders the canonical baseline into
+``~/.memtomem-wiki/<type>/<name>/overrides/<vendor>.<ext>`` for the user to
+edit and then commit (via the §3 affordance below). Seeding never commits —
+ADR-0008 makes seeding a staging step, so the new file is left dirty in the
+wiki working tree (the
 ``wiki_dirty`` flag in the response lets the UI repaint the HEAD badge without
 re-listing).
 

@@ -1,6 +1,6 @@
 # ADR-0008: Wiki layer for shared canonical artifacts
 
-**Status:** Accepted (PR-A/B/C/D merged; PR-E Web UI in progress — read-only browser + dev-tier override-seed + dev-tier project install/update shipped; in-browser editor deferred to ADR-0027 — see PR Breakdown)
+**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown)
 **Date:** 2026-04-30
 **Context:** Context gateway today is a per-project canonical → multi-runtime
 fan-out router (ADR-0001). Users with several projects must re-author the
@@ -121,16 +121,16 @@ be reconsidered in v2 if a real workflow demands it.
 
 ## Subcommands
 
-`mm wiki` is nested per asset type so `{edit, override, diff, lint}` form
+`mm wiki` is nested per asset type so `{override, diff, lint, commit}` form
 a single mental group of "manipulate this artifact":
 
 ```
 mm wiki init [--from <git-url>]
 mm wiki list
 
-mm wiki skill   {edit, override, diff, lint} <name> [--vendor <vendor>]
-mm wiki agent   {edit, override, diff, lint} <name> [--vendor <vendor>]
-mm wiki command {edit, override, diff, lint} <name> [--vendor <vendor>]
+mm wiki skill   {override, diff, lint, commit} <name> [--vendor <vendor>]
+mm wiki agent   {override, diff, lint, commit} <name> [--vendor <vendor>]
+mm wiki command {override, diff, lint, commit} <name> [--vendor <vendor>]
 
 mm context install <type> <name>
 mm context install --all                # lockfile-driven re-setup
@@ -283,7 +283,7 @@ override slots. They can be added in v2 if their runtime surface grows.
 | **B** | `mm context install`, lockfile schema, `shutil.copytree`, lockfile concurrency | Inv 1 (copytree), Inv 3 (graceful absence) |
 | **C** | Install widening to agents/commands + dir-layout fan-out BC read; `OVERRIDE_FORMATS`, `context/override.py` resolver, skills override hook; `mm wiki skill override` seed CLI. Override resolution active for skills only — agents/commands gated by `_PR_C_ACTIVE_TYPES` until a follow-up PR opens them. | Inv 4 (skills) |
 | **D** | `mm context {update, install --all, status, migrate}`, `mm wiki <type> {diff, lint}`, dirty detection, remove the `_PR_C_ACTIVE_TYPES` gate to activate agents/commands override | Inv 2 (refuse-if-dirty + `--force` + `.bak`) |
-| **E** | Web UI (mirrors `web/routes/context_*` patterns post-#488), delivered read-only-first. **E-1 (shipped):** read-only wiki browser — `GET /api/wiki` + per-vendor `diff`/`lint`, a `ctx-wiki` Gateway section (prod tier, no project/tier bar since the wiki is host-global). **E-2 (shipped):** dev-tier override-seed — `POST /api/wiki/{type}/{name}/override` (web parity of `mm wiki <type> override`, mounts only in `mode=dev` via `wiki_mutations.py`), renders the canonical baseline into `overrides/<vendor>.<ext>` and leaves it dirty for the user to commit (never auto-commits); `force` re-seeds behind a client confirm + `.bak`. No project-scope/host-write gate (wiki is host-global); no Gate-A scan (renders existing canonical, not user input). **E-3 (shipped):** dev-tier project install/update — `POST /api/context/{type}/{name}/{install,update}` (`context_mutations.py`, mounts only in `mode=dev`); READS the wiki and WRITES into a project's `.memtomem/` (project-scoped, unlike host-global E-1/E-2). **Deferred:** an in-browser canonical/override editor (ADR-0027 — save→wiki-write→commit semantics). | Inv 4 (override seed) |
+| **E** | Web UI (mirrors `web/routes/context_*` patterns post-#488), delivered read-only-first. **E-1 (shipped):** read-only wiki browser — `GET /api/wiki` + per-vendor `diff`/`lint`, a `ctx-wiki` Gateway section (prod tier, no project/tier bar since the wiki is host-global). **E-2 (shipped):** dev-tier override-seed — `POST /api/wiki/{type}/{name}/override` (web parity of `mm wiki <type> override`, mounts only in `mode=dev` via `wiki_mutations.py`), renders the canonical baseline into `overrides/<vendor>.<ext>` and leaves it dirty for the user to commit (never auto-commits); `force` re-seeds behind a client confirm + `.bak`. No project-scope/host-write gate (wiki is host-global); no Gate-A scan (renders existing canonical, not user input). **E-3 (shipped):** dev-tier project install/update — `POST /api/context/{type}/{name}/{install,update}` (`context_mutations.py`, mounts only in `mode=dev`); READS the wiki and WRITES into a project's `.memtomem/` (project-scoped, unlike host-global E-1/E-2). **Shipped (ADR-0027):** the in-browser canonical/override editor + isolated commit affordance (save→wiki-write→commit semantics). | Inv 4 (override seed) |
 
 ## Consequences
 

@@ -1198,6 +1198,32 @@ mm embedding-reset                     # check/resolve embedding model mismatch
 mm reset                               # delete all data and reinitialize the DB
 mm reset --yes                         # skip confirmation prompt
 
+# Wiki — host-global canonical library (~/.memtomem-wiki); ADR-0008 / ADR-0027
+# Author, check, and commit canonical artifacts here, then project them into a
+# project with `mm context install`. The wiki is GLOBAL; install/status are
+# project-scoped and need a git or pyproject project root.
+mm wiki init                           # create ~/.memtomem-wiki (writes a README documenting the layout)
+mm wiki list                           # list canonical assets (--type skills|agents|commands)
+
+# Minimal first asset (canonical-only) — empty wiki to installed project copy:
+#   create ~/.memtomem-wiki/skills/<name>/SKILL.md   (see the wiki README for the layout)
+mm wiki skill lint <name>              # CI gate — exits non-zero on errors
+mm wiki skill commit <name> --canonical   # ONE isolated commit of just the canonical path
+cd <your project>                      # wiki is global; install/status are project-scoped
+mm context install skill <name>        # snapshot the wiki asset into <project>/.memtomem/
+mm context status                      # installed wiki assets + drift (reads the CURRENT project)
+
+# Add-on — seed a vendor override (only when a runtime needs a divergent render):
+mm wiki skill override <name> --vendor claude --editor  # writes overrides/claude.md (+ .bak under --force)
+mm wiki skill diff <name> --vendor claude               # canonical render vs this vendor override (--vendor required)
+mm wiki skill commit <name> --vendor claude             # override-only commit (add --canonical only for a combined commit)
+
+# Notes:
+#   - commit only records files that already exist on disk (create canonical / seed override first)
+#   - `mm wiki <type> commit` makes ONE isolated commit of the selected paths; it never
+#     sweeps unrelated staged changes (no `git add . && git commit`)
+#   - agents/commands mirror skill: `mm wiki agent ...`, `mm wiki command ...`
+
 # Agent context sync
 mm context detect                      # find agent config files
 mm context init                        # create unified context.md (project_shared default)

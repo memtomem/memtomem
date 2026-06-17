@@ -86,9 +86,11 @@ CLI.**" (`en.json:431`). To tweak the seeded override, fix a typo in a
 canonical `agent.md`, or correct a lint error, the user must drop to a
 terminal (`$EDITOR` / hand-edit) and then `git add … && git commit`. The
 CLI `mm wiki <type> override --editor` only opens `$EDITOR` on the file
-and prints a manual commit hint (`cli/wiki_cmd.py:86-100`); there is no
-`mm wiki commit` verb anywhere. The in-browser editor closes this loop
-for the dev-tier user.
+and prints a manual commit hint (`cli/wiki_cmd.py`, `_run_seed_override`).
+When this ADR was first drafted, no isolated commit verb existed in the CLI;
+per-type `mm wiki <type> commit` verbs have since shipped (§3), while a flat
+top-level `mm wiki commit` remains unbuilt. The in-browser editor closes this
+loop for the dev-tier user.
 
 ### The working-tree vs committed-objects asymmetry (load-bearing)
 
@@ -533,8 +535,9 @@ settled decision.
     envelope, Decision 3); Commit is dev-tier only and HEAD-precondition
     guarded.
   - **Alternatives (kept):** require a non-empty user message (no
-    default); a dedicated `mm wiki commit` CLI verb for parity (currently
-    none exists) — recommended as a sibling follow-up, not blocking;
+    default); a dedicated `mm wiki commit` CLI verb for parity (since shipped
+    as per-type `mm wiki <type> commit` in §3; a flat top-level verb remains
+    unbuilt) — was recommended as a sibling follow-up, not blocking;
     forbid commit in web entirely and only mark dirty (rejected — defeats
     the loop-closing purpose).
 
@@ -707,7 +710,8 @@ symbol if they drift.
   `layout="flat"`, `commands.py:174`; the editor must pass `layout="dir"`).
 - `packages/memtomem/src/memtomem/cli/wiki_cmd.py` — `mm wiki <type>
   override --editor` + the manual `git add && git commit` hint
-  (`:86-100`; sibling `mm wiki commit` is a kept D-C alternative).
+  (`_run_seed_override`; the sibling per-type `mm wiki <type> commit` D-C
+  alternative has since shipped — §3).
 - `packages/memtomem/src/memtomem/web/static/context-gateway.js` — the ctx
   editor UI: `_ctxStashDraft` / conflict modal (`:3943-4082`) + the
   `ctx-edit-area` Save/Cancel handlers to reuse.
