@@ -36,7 +36,7 @@ from memtomem.wiki.override import (
     canonical_asset_file,
     seed_override,
 )
-from memtomem.wiki.store import WikiHeadMovedError
+from memtomem.wiki.store import WikiHeadMovedError, _redact_url_userinfo
 
 # ``--vendor`` Choices derive from OVERRIDE_FORMATS (the single source of
 # truth) so they never drift from the matrix: kimi is valid for skills/agents
@@ -393,6 +393,95 @@ def list_cmd(asset_type: str | None) -> None:
             click.secho(f"  {asset.type}/", fg="cyan")
             last_type = asset.type
         click.echo(f"    {asset.name}")
+
+
+# ── Remote / backup ─────────────────────────────────────────────────────
+#
+# Thin wrappers over git (ADR-0008: "git remotes — no new sync protocol"): they
+# surface git's own errors and own no merge/conflict resolution. The wiki is a
+# normal git repo, so anything these don't cover is plain `git -C <wiki> ...`.
+
+
+@wiki.command("remote")
+@click.argument("url", required=False, default=None)
+def remote_cmd(url: str | None) -> None:
+    """Show or set the wiki's backup remote ('origin').
+
+    With no argument, prints the configured origin URL (credentials redacted).
+    With a git URL, configures origin so `mm wiki push` / `mm wiki pull` can back
+    up and restore the wiki across machines.
+
+    WARNING: a URL with embedded credentials (https://user:token@host/...) is
+    stored as plaintext in the wiki's .git/config — prefer SSH keys or a git
+    credential helper.
+    """
+    store = WikiStore.at_default()
+    try:
+        if url is None:
+            current = store.remote_url()
+            if current is None:
+                click.secho("No wiki remote configured.", fg="yellow")
+                click.echo("# set one: mm wiki remote <git-url>")
+                return
+            click.echo(f"origin\t{_redact_url_userinfo(current)}")
+            return
+        action = store.set_remote(url)
+        click.secho(
+            f"Set wiki remote 'origin' → {_redact_url_userinfo(url)} ({action})",
+            fg="green",
+        )
+        click.echo("# back up: mm wiki push   # restore elsewhere: mm wiki pull")
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@wiki.command("push")
+def push_cmd() -> None:
+    """Push the wiki to its backup remote ('origin').
+
+    Thin pass-through to `git push origin <branch>`. memtomem owns no conflict
+    resolution: if git rejects the push (e.g. the remote moved), git's own
+    message — which already tells you to `mm wiki pull` / `git pull` first —
+    is surfaced verbatim. Configure the remote once with `mm wiki remote <url>`.
+    """
+    store = WikiStore.at_default()
+    try:
+        output = store.push()
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except RuntimeError as exc:
+        # Covers WikiDetachedHeadError, the no-remote precondition, and any git
+        # failure (non-fast-forward, auth, unborn branch). str(exc) is already
+        # credential-redacted at the _git boundary; the local wiki path it may
+        # carry is the user's own (the init/commit CLI convention).
+        raise click.ClickException(str(exc)) from exc
+    if output:
+        click.echo(output)
+    click.secho("Pushed.", fg="green")
+
+
+@wiki.command("pull")
+def pull_cmd() -> None:
+    """Pull the wiki from its backup remote ('origin').
+
+    Thin pass-through to `git pull origin <branch>` (a normal merge). On a merge
+    conflict or dirty working tree git stops and leaves the wiki for you to
+    resolve with ordinary git — memtomem owns no conflict resolution; git's own
+    message is surfaced verbatim. To restore onto a fresh machine instead, clone
+    with `mm wiki init --from <url>`.
+    """
+    store = WikiStore.at_default()
+    try:
+        output = store.pull()
+    except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if output:
+        click.echo(output)
+    click.secho("Pulled.", fg="green")
 
 
 # ── Skill subgroup ──────────────────────────────────────────────────────

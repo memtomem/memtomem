@@ -14,6 +14,7 @@ from memtomem.wiki.store import (
     WIKI_ASSET_TYPES,
     WikiAlreadyExistsError,
     WikiAsset,
+    WikiDetachedHeadError,
     WikiNotFoundError,
     WikiStore,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "WIKI_ASSET_TYPES",
     "WikiAlreadyExistsError",
     "WikiAsset",
+    "WikiDetachedHeadError",
     "WikiNotFoundError",
     "WikiStore",
 ]
