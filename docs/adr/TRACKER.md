@@ -32,6 +32,7 @@ pointer so a maintainer can scan due dates without opening each ADR.
 | 0022 §"Open questions" §1 | Skills versioning — directory-tree snapshot model (`versions/v1/<SKILL.md + assets>`) with the same label layer (v1 covers agents + commands only) | A concrete need to freeze/rollback a skill OR user-reported parity-gap pain vs agents/commands versioning (criteria in ADR §"Open questions") | (none — tracked in ADR) | (event-driven) |
 | 0027 §"Provisional decisions" D-A | in-browser wiki editor save→commit model | first dev-tier dogfooding of the now-shipped commit affordance; criteria in ADR-0027 §"Provisional decisions" | (none — tracked in ADR) | (event-driven) |
 | 0027 §"Provisional decisions" D-E | wiki editor privacy posture (soft-warn vs hard-gate) | wiki gains a configured push remote; criteria in ADR-0027 §D-E | (none — tracked in ADR) | (event-driven) |
+| 0026 §"Provisional decisions" D-B / D-C | P2 "Bold" re-frame — directional verb rename (D-B: Sync→Push↑ / Import→Pull↓) and status-merge to ahead/behind/in-sync (D-C) | The §Validation first-run user test clears the P2 gate: probe 5 overwrite-prediction ≥5/6 AND the status-merge keeps the create-vs-overwrite distinction (criteria in ADR-0026 §Validation) | [#1353](https://github.com/memtomem/memtomem/issues/1353) | (event-driven) |
 
 ## Adding a row
 
