@@ -1,9 +1,13 @@
 # ADR-0026: Context Gateway first-time-user onboarding & comprehension layer
 
-**Status:** Proposed (recommended leans filled in §"Provisional
-decisions"; each keeps its alternatives and is reversible — maintainer to
-confirm or re-open)
-**Date:** 2026-06-14
+**Status:** Accepted & partially shipped — P0 and P1a/P1b are merged; the
+P1 Simple-as-default flip and all of P2 remain deferred pending the
+§Validation first-run user test. See §"Implementation status (as of
+2026-06-17)". Provisional decisions remain open as recorded; the staged
+rollout (Advanced default first) follows the D-F lean, while the shipped
+tier-value display labels ("Project (shared)") diverge from the D-A(ii)
+literal-token lean — the D-A tier-display question stays open.
+**Date:** 2026-06-14 (status updated 2026-06-17)
 **Context:** A first-time-user end-to-end smoke test of the Context Gateway
 web UI (driven through Playwright against an isolated, seeded HOME) found
 that the dashboard is *functionally* complete but *conceptually* opaque to
@@ -281,6 +285,49 @@ Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
   sequencing must be coordinated (D-E) so the two do not collide.
 - The tier display-term decision (D-A) is intentionally *not* taken here,
   to avoid colliding with ADR-0015 / pre-empting #922.
+
+## Implementation status (as of 2026-06-17)
+
+Shipped-state companion to the phased plan in §3. #1353 remains the home
+for the remaining work; this table is the source of truth for *what has
+landed* so that later work does not re-implement shipped pieces or read the
+provisional design language as an unstarted project. Phase rows map to
+merged PRs; verify by symbol grep if the §"Source files" line numbers have
+drifted.
+
+| Phase / item | Status | Shipped in |
+|---|---|---|
+| **P0 — Minimal** — Overview primer, Store→Runtimes flow diagram, always-visible status legend, glossary tooltips, `(current folder)` naming, i18n/a11y hygiene (D-G) | **Shipped** | #1356 |
+| P0-3 status-legend help-tip a11y — static aria-label | **Shipped** (follow-up) | #1377 |
+| P0-4 confirm/glossary de-jargon — `move_copy_shared_confirm_message` rewritten (now "…into the project's shared store — committed to git…", no raw `canonical`/`project_shared`); scope-ID tooltips; nav glossary *defines* "canonical" | **Shipped** | #1356 (confirm rewrite); de-jargon companion PRs #1368 / #1375 (under issue #1352) |
+| **P1a — Simple-mode scaffold** — Simple/Advanced `localStorage` toggle, read-only, **Advanced default** (D-F staged opt-in) | **Shipped** | #1358 |
+| **P1b — Simple-mode inline actions** — per-type Sync/Import rows, cross-tier empty-state summary (D-D lean iii), 3-state Simple labels | **Shipped** | #1360 |
+| **P1 — Simple-as-default flip** (D-F) | **Deferred** — gated on the §Validation user test | — |
+| **P2 — Bold** — Push/Pull verb rename, status collapse to ahead/behind/in-sync (D-B / D-C) | **Deferred** — gated on the §Validation user test | — |
+
+**§Validation status:**
+
+- *Heuristic terminology guard.* **Partially in place.** Per-key
+  jargon-free guards already cover the shipped surfaces —
+  `test_ctx_p0_onboarding_keys_jargon_free`,
+  `test_ctx_scope_id_tooltips_jargon_free`, and the #1352 tier/enroll
+  guards in `packages/memtomem/tests/test_i18n.py` — each enumerating the
+  specific user-facing keys and forbidding raw `canonical` /
+  `project_shared` / `project_local` / `fan-out` in their values. A
+  **blanket** scan over all `settings.ctx.*` values is deliberately **not**
+  used: "canonical" is a legitimate product term on the Wiki editor surface
+  (where `test_ctx_nav_sub_glossary_consistency` requires it to be
+  *defined*, not removed) and also appears as the `{canonical}` path
+  placeholder in empty-state hints,
+  so a namespace-wide grep would false-positive. Extending the per-key
+  guard as new user-facing keys are added remains open work under #1353.
+- *First-run user test (5–6 naive participants).* **Not yet run.** It gates
+  the P1 default flip and all of P2. Use the pass bars defined below
+  verbatim — they are the single source of truth; do not re-derive
+  thresholds elsewhere.
+
+**Companion string issues** #1348 / #1349 / #1350 / #1351 / #1352 — all
+**closed**.
 
 ## Validation
 
