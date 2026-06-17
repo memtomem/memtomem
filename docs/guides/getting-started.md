@@ -451,6 +451,8 @@ uv pip install -e "packages/memtomem[all]"  # Source
 
 If you use multiple AI editors, keep their config files — and their agent **skills**, **sub-agents**, and **slash commands** — in sync from one source under `.memtomem/`:
 
+> For the full picture — the Store → Sync → Runtime model, the Web UI, and the tier choices — see the [Context Gateway](context-gateway.md) guide.
+
 ```bash
 mm context init                         # create .memtomem/context.md from existing files
 mm context generate --agent all         # generate CLAUDE.md, .cursorrules, GEMINI.md, etc.
@@ -573,5 +575,6 @@ rm -rf ~/.memtomem
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
 - [LLM Providers](llm-providers.md) — Ollama, OpenAI, and compatible endpoints
 - [MCP Client Setup](mcp-clients.md) — editor-specific configuration
+- [Context Gateway](context-gateway.md) — share Skills, Commands, and Subagents across your AI tools from one Store
 - [Multi-device sync](multi-device-sync.md) — keep markdown memories in sync across personal devices via a private git repo
 - [Scheduled jobs](reference.md#9-scheduled-jobs--mm-schedule-schedule_) — `mm schedule` for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans

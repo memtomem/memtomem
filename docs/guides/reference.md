@@ -1354,6 +1354,10 @@ All commands support `-h` and `--help`.
 
 ## Moving artifacts between tiers and projects
 
+> New to the Store → Sync → Runtime model? Start with the
+> [Context Gateway](context-gateway.md) walkthrough; this section covers the
+> transfer verbs.
+
 Three verbs share the transfer engine (ADR-0023). Pick by what should
 happen to the source:
 

@@ -805,6 +805,10 @@ from `~/.claude/projects/`. These project roots populate `project_shared`
 and `project_local` tier entries; the `user` tier (per ADR-0011 §1) is a
 separate axis gated by `USER_TIER_ENABLED` below.
 
+> For a task-first walkthrough of the Store → Sync → Runtime model, see the
+> [Context Gateway](context-gateway.md) guide. This section is the
+> environment-variable reference.
+
 When an artifact row is `Not yet imported`, the Web Context Gateway shows a
 scope-aware remediation block. `project_shared` can be bootstrapped with the
 web Import action or with `mm context init --include=agents,commands,skills
