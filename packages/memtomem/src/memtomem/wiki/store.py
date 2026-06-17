@@ -94,6 +94,17 @@ class WikiNothingToCommitError(RuntimeError):
     """
 
 
+class WikiDetachedHeadError(RuntimeError):
+    """Raised when a branch operation runs on a detached-HEAD wiki.
+
+    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``);
+    a detached HEAD has no branch to name, so :meth:`WikiStore.current_branch`
+    refuses rather than let git emit a cryptic refspec error. The message is
+    deliberately path- and SHA-free so it stays safe if a future web surface
+    ever reuses it (CLI surfaces it as a classified ``ClickException``).
+    """
+
+
 @dataclass(frozen=True)
 class WikiAsset:
     """An entry in the wiki — a skill, agent, or command directory."""
@@ -108,6 +119,38 @@ def _wiki_path_from_env() -> Path:
     if env:
         return Path(env).expanduser()
     return DEFAULT_WIKI_PATH
+
+
+# Match the ``userinfo@`` segment of a ``scheme://userinfo@host`` URL. The
+# authority ends at ``/``, ``?``, or ``#``, so excluding those (and whitespace)
+# keeps the greedy match inside it: it strips up to the LAST ``@`` in the
+# authority (so a password containing ``@`` still goes) without reaching into a
+# path/query/fragment that legitimately contains ``@`` (e.g. ``?email=a@b``).
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/?#\s]*@")
+
+
+def _redact_url_userinfo(text: str) -> str:
+    """Strip ``userinfo@`` (``user``, ``user:pass``, or a bare token) from any
+    ``scheme://userinfo@host`` URL in *text*.
+
+    Display/diagnostic hygiene for the common case — git remote URLs may embed
+    credentials (``https://user:token@host/repo.git``), and a properly-formed
+    (RFC 3986) credential is kept out of terminals, shell history, and error
+    messages. The real URL stays intact in ``.git/config`` (git's own credential
+    store; memtomem doesn't manage it).
+
+    Best-effort, not a guarantee: a credential containing an unencoded ``/`` or
+    whitespace is not valid URL userinfo (RFC 3986 requires percent-encoding), so
+    it falls outside the authority this matches and may survive — but such a
+    value is already exposed on the command line that set it. The CLI help and
+    docs steer users to SSH keys / credential helpers over inline credentials.
+
+    Applied at the :func:`_git` error boundary so every git-subprocess failure
+    (clone / remote / push / pull) is redacted in one place. scp-like SSH
+    (``git@host:repo``) is left untouched: no scheme, no password syntax — the
+    ``git@`` is a username, not a secret.
+    """
+    return _URL_USERINFO_RE.sub(r"\1", text)
 
 
 def _git(
@@ -135,7 +178,36 @@ def _git(
         )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
-        raise RuntimeError(f"git {' '.join(args)} failed: {detail}") from exc
+        # Redact the WHOLE message: both the echoed argv (``clone <url>`` /
+        # ``remote add origin <url>`` embed the URL) and git's stderr may carry
+        # credentials. See :func:`_redact_url_userinfo`.
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {detail}")) from exc
+    except OSError as exc:
+        # git binary missing / cwd vanished mid-call. Classify as RuntimeError so
+        # a raw OSError never escapes a caller's (or the CLI's) RuntimeError
+        # handler; redact in case the message carries a URL.
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {exc}")) from exc
+
+
+def _git_query(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run ``git <args>`` allowing a non-zero exit; normalize only ``OSError``.
+
+    Like :func:`_git` but does NOT raise on a non-zero return code — the caller
+    inspects ``returncode`` (e.g. ``git config --get`` exit 1 == key absent).
+    The not-found/IO ``OSError`` (missing git binary, vanished cwd) is still
+    converted to a redacted :class:`RuntimeError` so a raw ``OSError`` never
+    escapes a caller's — or the CLI's — ``except RuntimeError`` handler.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {exc}")) from exc
 
 
 def _force_rmtree(path: Path) -> None:
@@ -256,6 +328,121 @@ class WikiStore:
         if self.root.exists():
             self.root.rmdir()
         _git(["clone", url, str(self.root)], cwd=self.root.parent)
+
+    # ── Remote / backup (ADR-0008: "git remotes — no new sync protocol") ─────
+    #
+    # ``remote`` / ``push`` / ``pull`` are deliberately THIN wrappers over git:
+    # they surface git's own errors (non-fast-forward, merge conflict, dirty
+    # tree, auth) and own no merge/conflict resolution and no ff-only policy.
+    # push/pull always pass an explicit ``origin <branch>`` refspec — never
+    # ``-u`` / tracking config — so behavior is predictable and a first pull
+    # works without a tracking branch having been set up.
+    #
+    # No cross-process lock is taken (unlike :meth:`commit_paths`): a concurrent
+    # ``mm web`` / ``mm wiki commit`` advances HEAD under its own ref CAS, which
+    # already fails cleanly if push/pull moves the ref underneath it. push/pull
+    # are foreground user actions; running them alongside a commit is the user's
+    # call, like any git repo.
+
+    def remote_url(self, name: str = "origin") -> str | None:
+        """Return the configured URL of remote *name*, or ``None`` if unset.
+
+        Uses ``git config --get remote.<name>.url`` (stable since git 1.6) rather
+        than ``git remote get-url`` (git 2.7+, rc=2 on a missing remote). Exit 1
+        means the key is absent → ``None`` (the expected "no remote" case); any
+        OTHER non-zero code (e.g. 128 = unparsable ``.git/config``) is a real
+        failure and is surfaced (redacted) rather than masked as an absent remote
+        — otherwise a broken config would read as the friendly push/pull
+        no-remote precondition.
+        """
+        self.require_exists()
+        result = _git_query(["config", "--get", f"remote.{name}.url"], self.root)
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            return url or None
+        if result.returncode == 1:
+            return None
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            _redact_url_userinfo(f"git config --get remote.{name}.url failed: {detail}")
+        )
+
+    def set_remote(self, url: str, name: str = "origin") -> str:
+        """Configure remote *name* to *url*; return ``"added"`` or ``"updated"``.
+
+        ``git remote set-url`` fails if the remote does not exist, so add when
+        absent and set-url otherwise. The URL is written verbatim to
+        ``.git/config`` (git's store) — callers that echo it back must redact
+        credentials first (:func:`_redact_url_userinfo`).
+        """
+        self.require_exists()
+        if self.remote_url(name) is None:
+            _git(["remote", "add", name, url], cwd=self.root)
+            return "added"
+        _git(["remote", "set-url", name, url], cwd=self.root)
+        return "updated"
+
+    def current_branch(self) -> str:
+        """Return the checked-out branch name (e.g. ``"main"``).
+
+        Uses ``git symbolic-ref --short HEAD``, which resolves to the branch
+        name even on an *unborn* branch (a clone of an empty remote) — so push
+        then surfaces git's own "src refspec ... does not match any" rather than
+        this method crashing on ``rev-parse`` of a missing HEAD. A detached HEAD
+        is not a symbolic ref (rc != 0), so we raise
+        :class:`WikiDetachedHeadError`: push/pull operate on a branch, and a
+        detached HEAD has none to name. (Mirrors :meth:`commit_paths`, which
+        also derives the branch via ``symbolic-ref``.)
+        """
+        self.require_exists()
+        result = _git_query(["symbolic-ref", "--short", "HEAD"], self.root)
+        if result.returncode != 0:
+            raise WikiDetachedHeadError(
+                "wiki is in detached HEAD state; check out a branch before push/pull"
+            )
+        branch = result.stdout.strip()
+        if not branch:
+            # symbolic-ref rc 0 with empty output should never happen, but guard
+            # so push/pull never run `git push origin ""`.
+            raise RuntimeError("could not determine the wiki's current branch")
+        return branch
+
+    def push(self, name: str = "origin") -> str:
+        """Push the current branch to remote *name*; return git's output.
+
+        Thin pass-through: ``git push <name> <branch>``. A missing remote is the
+        one memtomem-level precondition (points the user at ``mm wiki remote``);
+        every other failure (non-fast-forward, auth, unborn branch) surfaces
+        git's own message verbatim via :class:`RuntimeError`.
+        """
+        self.require_exists()
+        if self.remote_url(name) is None:
+            raise RuntimeError(
+                f"no remote named {name!r} configured; set one with `mm wiki remote <url>`"
+            )
+        branch = self.current_branch()
+        result = _git(["push", name, branch], cwd=self.root)
+        return _redact_url_userinfo((result.stdout + result.stderr).strip())
+
+    def pull(self, name: str = "origin") -> str:
+        """Pull the current branch from remote *name*; return git's output.
+
+        Thin pass-through: ``git pull <name> <branch>``. Divergent histories
+        follow the user's own git config (``pull.rebase`` / ``pull.ff``); with
+        none set, modern git refuses and says so — that message is surfaced
+        verbatim. On a merge conflict or dirty tree git exits non-zero and
+        leaves the working tree as-is for the user to resolve — memtomem owns no
+        conflict resolution. A missing remote is the one memtomem-level
+        precondition.
+        """
+        self.require_exists()
+        if self.remote_url(name) is None:
+            raise RuntimeError(
+                f"no remote named {name!r} configured; set one with `mm wiki remote <url>`"
+            )
+        branch = self.current_branch()
+        result = _git(["pull", name, branch], cwd=self.root)
+        return _redact_url_userinfo((result.stdout + result.stderr).strip())
 
     def current_commit(self) -> str:
         """Return the wiki HEAD commit SHA as the full 40-character hex string.

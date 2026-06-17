@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **CLI: `mm wiki remote` / `push` / `pull` — wiki backup & cross-device sync
+  (ADR-0008).** The wiki (`~/.memtomem-wiki`) has always been a normal git repo,
+  but until now the only product affordance was the one-time `mm wiki init --from
+  <url>` clone — backup and sync meant dropping to raw `git`. `mm wiki remote
+  [<url>]` shows or sets the `origin` backup remote; `mm wiki push` and `mm wiki
+  pull` are **thin pass-through** wrappers over `git push`/`git pull origin
+  <branch>`. They surface git's own errors verbatim (non-fast-forward, merge
+  conflict, dirty tree) and own no merge/conflict resolution or fast-forward
+  policy — divergent histories follow your own `git pull` config, exactly like
+  any private repo (no new sync protocol). Credentials embedded in a remote URL
+  are redacted from all displayed output and error messages (they still persist
+  in `.git/config` — prefer SSH keys or a git credential helper). Restoring onto
+  a fresh machine stays `mm wiki init --from <url>`.
+
 - **CLI: `mm wiki {skill,agent,command} commit` (ADR-0027 §3).** The terminal
   parity of the in-browser wiki **Commit** affordance. After editing a canonical
   asset or a vendor override (e.g. with `mm wiki skill override <name> --vendor

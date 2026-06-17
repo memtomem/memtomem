@@ -293,7 +293,12 @@ override slots. They can be added in v2 if their runtime surface grows.
   work without a lockfile.
 - **`~/.memtomem-wiki/` is a normal git repo.** Backup, sharing, and
   versioning use git remotes — the same workflow as any private repo.
-  No new sync protocol.
+  `mm wiki remote [<url>]` (show or set `origin`), `mm wiki push`, and
+  `mm wiki pull` are thin pass-through wrappers over `git -C ~/.memtomem-wiki`
+  that make this actionable without a new sync protocol: they surface git's
+  own errors (non-fast-forward, merge conflict, dirty tree) and own no
+  merge/conflict resolution. Restoring onto a fresh machine stays
+  `mm wiki init --from <url>` (clone). No new sync protocol.
 - **Vendor overrides are opt-in.** Default (no overrides directory)
   means existing fan-out behavior is unchanged. Override usage is
   surfaced in `mm context update` log lines (`[override applied:

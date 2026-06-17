@@ -1218,11 +1218,20 @@ mm wiki skill override <name> --vendor claude --editor  # writes overrides/claud
 mm wiki skill diff <name> --vendor claude               # canonical render vs this vendor override (--vendor required)
 mm wiki skill commit <name> --vendor claude             # override-only commit (add --canonical only for a combined commit)
 
+# Back up / sync the wiki across machines (it is a normal git repo — no new sync protocol):
+mm wiki remote git@github.com:you/memtomem-wiki.git    # configure the 'origin' backup remote (no arg = show it)
+mm wiki push                                           # back up: git push origin <branch>
+mm wiki pull                                           # sync down: git pull origin <branch>
+mm wiki init --from <url>                              # restore onto a fresh machine (one-time clone)
+
 # Notes:
 #   - commit only records files that already exist on disk (create canonical / seed override first)
 #   - `mm wiki <type> commit` makes ONE isolated commit of the selected paths; it never
 #     sweeps unrelated staged changes (no `git add . && git commit`)
 #   - agents/commands mirror skill: `mm wiki agent ...`, `mm wiki command ...`
+#   - push/pull are thin git wrappers: they surface git's own errors and own no conflict
+#     resolution — resolve merge conflicts / divergent histories with ordinary git, and avoid
+#     embedding credentials in the remote URL (prefer SSH keys or a git credential helper)
 
 # Agent context sync
 mm context detect                      # find agent config files
