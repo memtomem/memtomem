@@ -1436,8 +1436,8 @@ const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
 // per-call-site updates.
 const GATEWAY_SECTIONS = new Set([
   'ctx-overview', 'ctx-projects', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers',
-  'ctx-wiki',
   'hooks-sync',
+  'ctx-wiki',
 ]);
 
 function loadNavCollapseState() {
@@ -1467,6 +1467,9 @@ function applyNavCollapseState() {
     const groupId = btn.dataset.group;
     if (groupId === 'danger') return;
     btn.classList.toggle('collapsed-member', !!state[groupId]);
+  });
+  document.querySelectorAll('.settings-nav-divider[data-group]').forEach(divider => {
+    divider.classList.toggle('collapsed-member', !!state[divider.dataset.group]);
   });
 }
 

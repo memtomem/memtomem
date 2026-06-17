@@ -240,6 +240,13 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
 .settings-nav-btn .nav-sub { font-size: 0.68rem; color: var(--muted); line-height: 1.2; }
 .settings-nav-btn.active .nav-sub { color: var(--accent); opacity: 0.75; }
 .settings-nav-btn.collapsed-member { display: none; }
+.settings-nav-divider {
+  height: 1px;
+  margin: 8px 14px;
+  background: var(--border);
+  opacity: 0.85;
+}
+.settings-nav-divider.collapsed-member { display: none; }
 .settings-nav-group {
   display: flex; align-items: center; gap: 6px;
   width: 100%; text-align: left;
