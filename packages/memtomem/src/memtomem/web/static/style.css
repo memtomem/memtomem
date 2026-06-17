@@ -240,6 +240,21 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
 .settings-nav-btn .nav-sub { font-size: 0.68rem; color: var(--muted); line-height: 1.2; }
 .settings-nav-btn.active .nav-sub { color: var(--accent); opacity: 0.75; }
 .settings-nav-btn.collapsed-member { display: none; }
+/* #1417: glance-level wiki-dirty dot. `display:block` so the empty span sizes
+   (an inline span ignores width/height); `margin-left:auto` parks it at the
+   button's trailing edge. The `hidden` toggle is handled by the global
+   `[hidden] { display:none !important }` (top of this file), which outranks this
+   non-important `display:block` — no local override needed. */
+.settings-nav-btn .wiki-nav-dirty {
+  display: block;
+  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yellow);
+}
 .settings-nav-divider {
   height: 1px;
   margin: 8px 14px;

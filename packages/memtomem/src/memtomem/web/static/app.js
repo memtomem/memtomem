@@ -1411,6 +1411,12 @@ function activateTab(tabName, opts = {}) {
     // still resume their last-viewed section via the localStorage branch above.
     if (!GATEWAY_SECTIONS.has(start)) start = 'ctx-overview';
     switchSettingsSection(start);
+    // #1417: refresh the Wiki nav dirty dot whenever the gateway opens, so a
+    // cold reload landing on any section (not just ctx-wiki) still flags a wiki
+    // left with uncommitted edits. Cheap + best-effort — wiki.js no-ops on an
+    // absent wiki or fetch error. Guarded for script-load order (wiki.js loads
+    // after app.js).
+    if (typeof _probeWikiNavStatus === 'function') _probeWikiNavStatus();
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();
 }

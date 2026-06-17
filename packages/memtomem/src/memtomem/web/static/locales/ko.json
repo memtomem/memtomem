@@ -347,6 +347,7 @@
   "settings.nav.ctx_wiki": "위키",
   "settings.nav.ctx_wiki_sub": "내 여러 프로젝트에서 재사용",
   "settings.nav.ctx_wiki_tip": "내 canonical skill·subagent·command 를 모아 둔 개인 git 라이브러리 — Canonical = 각 프로젝트가 `mm context install` 로 고정된 스냅샷을 가져오는 단일 권위 사본(위키가 프로젝트로 직접 렌더링하지는 않음). ~/.memtomem-wiki 에 있으며, 다른 컴퓨터로 옮기려면 일반 git 으로 직접 push/pull 하세요. 위키는 선택 사항이라 없어도 프로젝트는 그대로 동작합니다.",
+  "settings.nav.ctx_wiki_dirty_tip": "커밋되지 않은 위키 변경 — 아직 `mm context install` 로 전달되지 않습니다(install 은 커밋된 git 객체만 가져옴). 위키 섹션에서 커밋하면 프로젝트가 가져갈 수 있습니다.",
   "settings.nav.dedup": "중복 정리",
   "settings.nav.dedup_sub": "유사 청크 제거",
   "settings.nav.decay": "오래된 기억 만료",

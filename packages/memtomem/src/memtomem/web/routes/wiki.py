@@ -74,6 +74,36 @@ async def list_wiki() -> dict:
         raise _wiki_absent(exc) from exc
 
 
+@router.get("/status")
+async def wiki_status() -> dict:
+    """Lightweight wiki HEAD + dirty probe for the nav-level glance badge (#1417).
+
+    Unlike :func:`list_wiki` this lists NO assets — it is a single HEAD read
+    plus ``git status``, cheap enough to fire on every Context Gateway open so
+    the sidebar can flag a wiki whose uncommitted edits ``mm context install``
+    would not yet reach (``install`` reads committed git objects only). Declared
+    before the ``/{asset_type}/...`` routes so the literal ``/status`` path can
+    never be captured as an asset type.
+
+    A missing wiki is the common onboarding state, not an error here: it returns
+    ``present=False`` (the nav badge simply stays hidden) rather than the 404 the
+    asset-listing routes raise, so the probe never surfaces an error toast.
+    """
+    store = WikiStore.at_default()
+
+    def _probe() -> dict:
+        return {
+            "present": True,
+            "wiki_head": store.current_commit(),
+            "is_dirty": store.is_dirty(),
+        }
+
+    try:
+        return await asyncio.to_thread(_probe)
+    except WikiNotFoundError:
+        return {"present": False, "wiki_head": None, "is_dirty": False}
+
+
 @router.get("/{asset_type}/{name}/diff")
 async def wiki_diff(asset_type: AssetType, name: str, vendor: str = Query(...)) -> dict:
     """Diff a committed override against the freshly rendered canonical baseline."""

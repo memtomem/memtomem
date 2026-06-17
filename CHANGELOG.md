@@ -5,6 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Web UI: wiki "uncommitted changes" badge at the nav/glance level
+  (ADR-0008).** A saved-but-not-committed wiki edit is invisible to `mm context
+  install`, which installs committed git objects only — yet from the Context
+  Gateway sidebar there was no signal that the wiki had edits that won't reach
+  projects yet (the in-section `#wiki-head` badge only shows once you open the
+  **Wiki** section). The Wiki nav entry now carries a small dirty dot driven by
+  the same `is_dirty` state, kept live by the existing save/seed/commit
+  responses and refreshed by a lightweight `GET /api/wiki/status` probe on
+  Context Gateway open (HEAD + `git status` only — so a cold reload with a
+  wiki left dirty in a prior session flags it without first opening the
+  section). Legibility only — no change to install/sync behavior. The dot is a
+  screen-reader-labelled indicator with no live region (it is never announced as
+  it appears).
+
 - **CLI: `mm wiki remote` / `push` / `pull` — wiki backup & cross-device sync
   (ADR-0008).** The wiki (`~/.memtomem-wiki`) has always been a normal git repo,
   but until now the only product affordance was the one-time `mm wiki init --from
