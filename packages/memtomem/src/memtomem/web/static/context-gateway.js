@@ -530,11 +530,20 @@ try {
 // default off so power users are unaffected until the post-validation
 // default-flip lands.
 const _CTX_SIMPLE_MODE_KEY = 'memtomem_ctx_simple_mode';
-let _ctxSimpleMode = false;
+// D-F staged flip switch point (ADR-0026 §"Implementation status"). This is the
+// default used WHEN NO value is stored. It stays ``false`` (Advanced default)
+// until the §Validation first-run user test clears probes 1-3; flipping it to
+// ``true`` makes Simple the default-when-unset and is the entire mechanical flip
+// (see the ADR-0026 §Validation runbook). While it is ``false`` the explicit
+// read below is byte-identical to the old ``=== '1'`` form, so this refactor
+// changes nothing today — it only isolates the one line the live flip will edit.
+const _CTX_SIMPLE_DEFAULT = false;
+let _ctxSimpleMode = _CTX_SIMPLE_DEFAULT;
 try {
-  _ctxSimpleMode = localStorage.getItem(_CTX_SIMPLE_MODE_KEY) === '1';
+  const stored = localStorage.getItem(_CTX_SIMPLE_MODE_KEY);
+  _ctxSimpleMode = stored !== null ? stored === '1' : _CTX_SIMPLE_DEFAULT;
 } catch {
-  _ctxSimpleMode = false;
+  _ctxSimpleMode = _CTX_SIMPLE_DEFAULT;
 }
 
 // Toggle the ``.ctx-simple`` class on the gateway tab (CSS hides the nav +
