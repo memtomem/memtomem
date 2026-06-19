@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+- **Security: bump vendored DOMPurify 3.4.10 → 3.4.11 (GHSA-cmwh-pvxp-8882).**
+  The pinned `web/static/vendor/purify.min.js` carried a MODERATE advisory —
+  permanent `ALLOWED_ATTR` pollution via `setConfig()` bypassing the hook
+  clone-guard, fixed upstream in 3.4.11. Refreshed the file, its SHA-256 pin in
+  `THIRD_PARTY_LICENSES.md`, the README fetch recipe, and the `?v=` cache-bust.
+  memtomem uses DOMPurify with the default config (no `setConfig()` attribute
+  hooks), so exposure was low, but this clears the `vendored-assets` OSV gate.
+
 - **Web UI: wiki "uncommitted changes" badge at the nav/glance level
   (ADR-0008).** A saved-but-not-committed wiki edit is invisible to `mm context
   install`, which installs committed git objects only — yet from the Context
