@@ -1,8 +1,9 @@
 """Guard the ADR-0026 §Validation first-run harness against silent rot.
 
 These are pure-Python tests against the *real* diff engine — no browser. They
-exist so the seeder in ``fixtures/ctx_validation_states.py`` keeps producing the
-six distinct user-test affordances, and in particular so the Store-vs-runtime
+exist so the seeder in ``memtomem.context._validation_seed`` (shipped in the
+wheel, exposed as ``mm context seed-validation``) keeps producing the six
+distinct user-test affordances, and in particular so the Store-vs-runtime
 direction (the bug class called out in the seeder docstring) can never silently
 invert: "Not yet imported" must stay a runtime-only / ``missing canonical`` row,
 not a ``missing target`` row.
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fixtures.ctx_validation_states import seed_adr0026_validation_states
+from memtomem.context._validation_seed import seed_adr0026_validation_states
 
 from memtomem.context.agents import canonical_agent_name, diff_agents, list_canonical_agents
 from memtomem.context.commands import (

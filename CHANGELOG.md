@@ -13,6 +13,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   memtomem uses DOMPurify with the default config (no `setConfig()` attribute
   hooks), so exposure was low, but this clears the `vendored-assets` OSV gate.
 
+- **CLI: `mm context seed-validation <dir>` — hidden first-run seeder
+  (ADR-0026 §Validation).** A hidden QA helper that seeds a fresh project with
+  the six Context Gateway first-run affordances (out-of-sync, not-imported,
+  empty, MCP orphan, MCP parse-error, in-sync) so the onboarding user test is
+  reproducible from an installed wheel — previously the seeder lived in
+  `tests/fixtures/` and was unreachable by anyone who only `pip install`-ed
+  memtomem (the prerequisite for an unmoderated async run). The seeder logic
+  moved to `memtomem.context._validation_seed` (shipped under `src/`); the
+  command refuses a non-empty target directory unless `--force`, so it can never
+  overwrite a real project. No change to any user-facing behavior — the command
+  is hidden and writes only into the directory you point it at.
+
 - **Web UI: wiki "uncommitted changes" badge at the nav/glance level
   (ADR-0008).** A saved-but-not-committed wiki edit is invisible to `mm context
   install`, which installs committed git objects only — yet from the Context

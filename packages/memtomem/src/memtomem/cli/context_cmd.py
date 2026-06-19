@@ -5219,3 +5219,73 @@ def projects_pause_cmd(selector: str) -> None:
 def projects_resume_cmd(selector: str) -> None:
     """Resume sync enrollment for a paused project."""
     _projects_set_enabled(selector, enabled=True, verb="resume")
+
+
+# ── seed-validation (hidden QA helper) ──────────────────────────────────────
+
+
+@context.command("seed-validation", hidden=True)
+@click.argument(
+    "directory",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Re-seed even if DIRECTORY already contains a .memtomem/ Store.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Print the seed manifest as JSON (for scripting the facilitator setup).",
+)
+def seed_validation_cmd(directory: Path, force: bool, as_json: bool) -> None:
+    """Seed the ADR-0026 §Validation first-run demo project into DIRECTORY.
+
+    Hidden QA helper. Writes the six Context Gateway first-run affordances
+    (out-of-sync / not-imported / empty / mcp-orphan / parse-error / in-sync)
+    into a fresh project so a moderator — or an async user-test participant who
+    only ``pip install``-ed memtomem — can reproduce the exact state ADR-0026
+    §Validation measures. The recipe lives in the seeder docstring
+    (``memtomem.context._validation_seed``); ``test_ctx_validation_harness``
+    pins it against the real diff engine.
+
+    Refuses a non-empty target directory unless ``--force`` so it can never
+    silently overwrite a real project — the seeder writes ``.memtomem/`` *and*
+    runtime trees (``.claude/`` …), ``.mcp.json``, and ``pyproject.toml``, any
+    of which a real repo may already have, and the Gateway shows the server-cwd
+    project, so launching ``mm web`` from a real repo would otherwise mix the
+    seed into live data.
+    """
+    from memtomem.context._validation_seed import seed_adr0026_validation_states
+
+    if directory.exists() and any(directory.iterdir()) and not force:
+        raise click.ClickException(
+            f"{directory} is not empty — refusing to seed so a real project is never "
+            "overwritten. Pass a fresh/empty directory, or --force to seed in place."
+        )
+
+    manifest = seed_adr0026_validation_states(directory)
+
+    if as_json:
+        click.echo(json.dumps(manifest, indent=2))
+        return
+
+    root = manifest["project_root"]
+    click.secho(f"Seeded ADR-0026 §Validation first-run state at {root}", fg="green")
+    click.echo("\nSix Context Gateway affordances seeded:")
+    for state in manifest["states"].values():
+        name = state.get("name", "—")
+        status = state.get("diff_status") or "empty"
+        click.echo(f"  {state['tile']:12s} {name:16s} {status}")
+    click.echo(
+        "\nNext — launch the Gateway against this project:\n"
+        f"  cd {root}\n"
+        "  mm web\n"
+        "  # open the Gateway tab — the Simple view is the default (ADR-0026 D-F).\n"
+        "  # the Project path shown must match the directory above (the Gateway\n"
+        "  # follows the server's working dir)."
+    )

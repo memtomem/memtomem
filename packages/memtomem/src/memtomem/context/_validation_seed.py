@@ -1,9 +1,16 @@
-"""First-run validation harness for ADR-0026 §Validation.
+"""First-run validation seeder for ADR-0026 §Validation.
 
 Seeds a project on disk so the Context Gateway Overview surfaces all six
 user-test affordances at once, giving a moderator a reproducible first-run
 state to drive the lightweight 5-6 participant test described in ADR-0026
 §Validation.
+
+This module ships in the wheel (it lives under ``src/`` rather than
+``tests/fixtures/``) so a naive participant who only ``pip install``-ed
+memtomem can reproduce the state with one command: ``mm context
+seed-validation <dir>`` (a hidden QA helper in ``cli/context_cmd.py``). The
+guard test ``tests/test_ctx_validation_harness.py`` imports this same function,
+so the seeder and its rot-guard stay in lockstep.
 
 The six affordances (one per §Validation probe family):
 
@@ -29,10 +36,6 @@ imported" (pull into the Store); a Store artifact with a stale/missing runtime
 copy reads as "Out of sync" (push to the runtime). ``test_ctx_validation_harness``
 pins both directions against the real diff engine so a future edit cannot
 silently swap them.
-
-This module lives under version control (``tests/fixtures/``) on purpose — the
-gitignored ``scripts/`` tree cannot hold the harness the runbook depends on, and
-keeping the seeder beside its guard test keeps the two in lockstep.
 """
 
 from __future__ import annotations
@@ -41,8 +44,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from memtomem.config import TargetScope
+from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.mcp_servers import CANONICAL_MCP_SERVER_ROOT, PROJECT_MCP_CONFIG
+from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.context.skills import CANONICAL_SKILL_ROOT, SKILL_GENERATORS, SKILL_MANIFEST
 
 # Names chosen to read naturally under the §Validation framing task
@@ -57,7 +63,7 @@ MCP_PARSE_ERROR = "broken-server"
 # root from the production table (rather than hard-coding ".claude/skills")
 # means the seeder follows any future relocation of the runtime layout.
 _RUNTIME = "claude"
-_SCOPE = "project_shared"
+_SCOPE: TargetScope = "project_shared"
 
 
 def _write_lf(path: Path, content: str) -> None:
@@ -65,13 +71,16 @@ def _write_lf(path: Path, content: str) -> None:
 
     Byte-for-byte LF (never CRLF) so the in-sync baseline compares equal to its
     runtime copy on Windows too — mirrors ``_write_text_lf`` in the web route
-    tests.
+    tests. Routed through ``atomic_write_bytes`` (not a bare ``write_bytes``)
+    because this module lives under ``context/``, the gateway atomic-write
+    surface (``test_no_bare_writes_on_gateway_surfaces``); the helper also
+    creates parent dirs. ``0o644`` matches the runtime-readable convention of
+    ``copy_tree_atomic``.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content.encode("utf-8"))
+    atomic_write_bytes(path, content.encode("utf-8"), mode=0o644)
 
 
-def _runtime_root(artifact: str, project_root: Path) -> Path:
+def _runtime_root(artifact: ArtifactKind, project_root: Path) -> Path:
     root = runtime_fanout_root(artifact, _RUNTIME, _SCOPE, project_root)
     if root is None:  # pragma: no cover - claude has a project_shared fan-out
         raise RuntimeError(
@@ -112,9 +121,10 @@ def seed_adr0026_validation_states(project_root: Path) -> dict[str, Any]:
     # directory as a project (cheapest marker, mirrors the CLI e2e seeder).
     pyproject = project_root / "pyproject.toml"
     if not pyproject.exists():
-        pyproject.write_text(
+        atomic_write_text(
+            pyproject,
             '[project]\nname = "adr0026-firstrun-fixture"\nversion = "0.0.0"\n',
-            encoding="utf-8",
+            mode=0o644,
         )
 
     skill_canon = project_root / CANONICAL_SKILL_ROOT

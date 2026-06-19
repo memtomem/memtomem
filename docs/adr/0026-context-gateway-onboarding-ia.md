@@ -378,16 +378,20 @@ power users the create-vs-overwrite distinction.
 
 ### Reproducing the first-run state
 
-`seed_adr0026_validation_states`
-(`packages/memtomem/tests/fixtures/ctx_validation_states.py`) seeds the six
-probe affordances above into one project — out-of-sync, not-yet-imported, empty
-type, MCP orphan, MCP parse-error, and an in-sync baseline — so every
-participant sees the same Overview. `test_ctx_validation_harness.py` pins the
-seed against the real diff engine, including the easy-to-invert Store-vs-runtime
+`mm context seed-validation <dir>` (a hidden CLI helper backed by
+`seed_adr0026_validation_states` in `memtomem.context._validation_seed`) seeds
+the six probe affordances above into one project — out-of-sync, not-yet-imported,
+empty type, MCP orphan, MCP parse-error, and an in-sync baseline — so every
+participant sees the same Overview. The seeder ships in the wheel (it lives under
+`src/`, not the unpackaged `tests/`), so a participant who only `pip install`-ed
+memtomem can reproduce the state without a source checkout — the prerequisite for
+an unmoderated async run. The command refuses a non-empty target directory
+unless `--force`, so it cannot silently overwrite a real project (the Gateway
+follows the server's working dir). `test_ctx_validation_harness.py` pins the seed
+against the real diff engine, including the easy-to-invert Store-vs-runtime
 direction (a runtime-only artifact reads as "Not yet imported", never "Out of
-sync"), so it cannot silently rot. It is version-controlled (not the gitignored
-`scripts/` tree) so it stays in lockstep with the moderated facilitator protocol
-that consumes it.
+sync"), so it cannot silently rot, and stays in lockstep with the moderated
+facilitator protocol that consumes it.
 
 ## Provisional decisions
 
