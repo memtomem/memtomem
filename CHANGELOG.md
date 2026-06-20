@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-20
+
 - **Security: bump vendored DOMPurify 3.4.10 → 3.4.11 (GHSA-cmwh-pvxp-8882).**
   The pinned `web/static/vendor/purify.min.js` carried a MODERATE advisory —
   permanent `ALLOWED_ATTR` pollution via `setConfig()` bypassing the hook
@@ -12,6 +14,114 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `THIRD_PARTY_LICENSES.md`, the README fetch recipe, and the `?v=` cache-bust.
   memtomem uses DOMPurify with the default config (no `setConfig()` attribute
   hooks), so exposure was low, but this clears the `vendored-assets` OSV gate.
+
+- **Web UI: the Context Gateway now opens in a comprehension-first Simple
+  view by default (ADR-0026, headline of 0.3.0).** First-run no longer drops
+  you into the four-axis (artifact / tier / runtime / scope) control grid.
+  Simple renders a one-line verdict for the active project — "Everything is in
+  your tools.", "Some items aren't in your tools yet — sync to push them out.",
+  "Some items need your attention — open Advanced to review.", or "Nothing is
+  stored for this project yet." — above a per-type row list where each fixable
+  row carries a single inline action (Sync to push a stored copy out, Import to
+  pull a runtime's copy back in) that runs the same confirm flow as Advanced,
+  clean rows show a check, rows with no safe one-click fix keep a **Manage**
+  deep-link, and copies living in another tier are summarized as "Stored
+  elsewhere". An onboarding layer frames it: a plain-language primer ("memtomem
+  keeps your master copies in one **Store** (`.memtomem/`) and Syncs them out to
+  your **Runtimes**… Import pulls a runtime's copy back in. It's one-way: edit
+  in the Store, then Sync."), a **Store ── Sync → Runtimes** flow diagram, a
+  status legend, and glossary help-tips on the Runtimes and tier vocabulary.
+  The flip is **reversible** by construction: Advanced (today's full UI,
+  byte-identical) is one **Simple view** toggle away and the choice persists
+  per browser, and the global default can be set back with a single
+  `_CTX_SIMPLE_DEFAULT` constant — the deferred P2 Push/Pull re-frame is
+  *not* part of this. Alongside it, the gateway's first-run vocabulary was
+  de-jargoned: the user-facing **Enroll** action is now **Activate** ("Project
+  activated for sync"), raw scope IDs and "fan-out" no longer leak into
+  tooltips, storage-vs-hooks-target wording is split, friendly tier labels
+  (User / Project (shared) / Project (local)) replace the internal scope names,
+  and the nav glossary is harmonized (e.g. "canonical" is now defined and
+  "Custom" is dropped from the commands type label).
+
+- **Context Gateway: cross-project / cross-tier artifact transfer engine —
+  `move` and `copy` across all four surfaces (ADR-0023; #1273–#1276, #1283,
+  #1289, #1314).** One engine (`transfer_artifact`) now moves or copies a
+  single canonical artifact (`agents` / `commands` / `skills`) between tiers
+  (`user` / `project_shared` / `project_local`) and/or between projects, faced
+  by the CLI verbs `mm context copy` and `mm context move`, the web
+  `POST /api/context/{kind}/{name}/transfer` route behind a per-artifact
+  "Move / Copy" destination modal, and the headless `mem_context_artifact_transfer`
+  MCP action — all sharing one gate contract. `move` consumes the source and
+  cleans its stale runtime fan-out; `copy` never touches the source and takes
+  `--as NEW_NAME` for a renamed copy. Destination projects are restricted to
+  the registered discovery set and selected by `p-<sha12>` scope_id (a typed
+  filesystem path is consent and is CLI-only); paused or never-enrolled
+  destinations refuse. Destination collisions always refuse with no `--force`
+  valve, a `project_shared` landing runs the privacy scan (Gate A) and demands
+  `--confirm-project-shared` with `--apply`, and the default is a dry-run
+  preview. On a shared→shared transfer the install-provenance `lock.json` pin
+  carries over so `mm context status` / `update` keep working at the
+  destination (gated — a missing or pre-digest pin is skipped, not minted).
+  `asset_type=mcp-servers` rides the same surfaces through a constrained
+  copy-only modal (cross-project only, no `--as`, tiers fixed at
+  `project_shared`), and destination runtime fan-out is never generated — every
+  successful transfer prints the follow-up `mm context sync` command to run.
+
+- **Context Gateway: cross-project multi-project operations — registry,
+  bulk sync, and fleet drift (ADR-0025, #1272/#1278/#1279/#1280/#1292).**
+  The multi-project registry (`known_projects.json`) now has a first-class
+  CLI face and two cross-project batch verbs, all gated to the
+  `project_shared` tier:
+  - **`mm context projects` group** — `list` (add `--json` for the
+    `GET /api/context/projects` payload), `add <path>`, `remove <selector>`,
+    and `pause`/`resume <selector>` flip the per-project sync-enrollment flag
+    that the batch verbs and the web Sync gate honor. A selector is either a
+    `p-<sha12>` scope_id (from `list`) or a filesystem path; `add` is
+    idempotent and reports `Already registered:` on a re-add.
+  - **Bulk sync** — `mm context sync --all-projects` and
+    `POST /api/context/sync-all-projects` fan every per-type phase into every
+    eligible project under one gateway-lock window. Ineligible projects are
+    reported and skipped (missing root, paused enrollment, discovery-only, or
+    no `.memtomem/` store), an all-skipped run still reads as success, and a
+    failed project's already-written phases still count. `--force-unsafe`
+    does **not** apply to `--all-projects`.
+  - **Fleet drift** — `mm context status --all-projects` and
+    `GET /api/context/status-all` answer "which of my projects drifted" in one
+    read-only call (no gateway lock); each entry is `ok`/`drift`/`skipped`/
+    `error` and the summary is counts only, no roll-up status string.
+  - **`POST /api/context/sync-all`** runs every per-type sync phase for ONE
+    project under a single gateway-lock window, returning HTTP 200 with
+    `{phases, summary}` so mixed per-phase outcomes live in the report.
+  - **Add-Project transparency** — `POST /api/context/known-projects` returns
+    a `created` flag; the Add Project UI branches its toast so a no-op re-add
+    reads as "Project already tracked" rather than a fresh "added" success.
+  None of these touch any tier other than `project_shared`: the user tier is
+  one global store and `project_local` has no runtime fan-out to drift.
+
+- **Context Gateway: manage user-scoped skills/agents/commands, with a
+  host-write confirm and a user-tier force-unsafe valve (#1263, #1379,
+  #1386, #1380, ADR-0011 §3/§5).** The skills/agents/commands write,
+  sync, and import routes now accept `target_scope=user` alongside
+  `project_shared`, so the gateway can create, update, delete, fan-out, and
+  import canonical artifacts under the host user store (`~/.memtomem/<kind>/`
+  and the `~/.claude`-family runtime roots). Because those paths live outside
+  any project root, every user-tier write goes through a disclose-then-confirm
+  round-trip: the first request writes nothing and returns HTTP 200 with
+  `status: "needs_confirmation"`, `confirm: "allow_host_writes"`, and the exact
+  `host_targets` list, which the dashboard surfaces as a "Write outside the
+  project?" dialog before re-sending with `allow_host_writes=true` — idempotent
+  no-ops (nothing to import, empty canonical sets, missing-name deletes) never
+  prompt, and cheap 404/409 conflicts are refused before the gate. A reviewed-
+  bypass valve mirrors the CLI's `--force-unsafe-import` for the same tier:
+  `force_unsafe_import` on the import routes (#1379) and `force_unsafe_sync` on
+  the sync routes (#1386) let a confirmed false-positive secret (e.g. an
+  `api_key: str` annotation) proceed — but **only on the `user` tier**;
+  `project_local` is rejected outright and `project_shared` hard-refuses
+  regardless of the flag (git history is permanent, ADR-0011 §5). For the one
+  artifact a shared import can't accept, `POST /context/skills/{name}/import-to-user`
+  (skills only) reads the project runtime and writes the user library, so a
+  reusable skill flagged by the shared-tier gate has a home; the dialog and the
+  shared-import "Import to user library" hint route there.
 
 - **CLI: `mm context seed-validation <dir>` — hidden first-run seeder
   (ADR-0026 §Validation).** A hidden QA helper that seeds a fresh project with
@@ -93,6 +203,35 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   /api/wiki`, `.../{type}/{name}/diff`, `.../{type}/{name}/lint` are prod-tier;
   an absent wiki returns a structured onboarding state, never a traceback.
 
+- **Web: the Context Gateway Wiki section is now editable in the browser
+  (ADR-0027 Editor-A/Editor-B/§3, ADR-0008 PR-E E-3).** In dev mode
+  (`MEMTOMEM_WEB__MODE=dev`) the global wiki (`~/.memtomem-wiki/`) pane gains
+  the full author loop without leaving the browser: edit the base **canonical**
+  (`GET`/`PUT /api/wiki/{type}/{name}/canonical`, Editor-B) or a vendor
+  **override** (`GET`/`PUT /api/wiki/{type}/{name}/override`, Editor-A), seed an
+  override from canonical, then **Commit…** (`POST
+  /api/wiki/{type}/{name}/commit`, web parity of `mm wiki … commit`). Save and
+  Commit stay two acts — Save writes the file and leaves the wiki dirty but
+  **never commits**, and the Commit button only appears after a Save. Commit
+  builds an *isolated* git commit of only the server-resolved typed targets
+  (canonical / named vendor overrides), guarded by an `expected_head`
+  compare-and-swap and a per-target `mtime_ns` token, so a commit landing
+  underneath or an external same-path edit is refused with a precise 409 rather
+  than clobbering. A separate **Install** / **Update** affordance (`POST
+  /api/context/{type}/{name}/install` and `…/update`, parity of `mm context
+  install`/`update`) snapshots a wiki asset into the current project's
+  `.memtomem/` at wiki HEAD; install refuses an already-installed asset (use
+  Update), and a force-update keeps each locally edited file as a `.bak`
+  sibling. The editors, commit, seed, and install/update all mount **dev-tier
+  only** — the **read-only wiki browser stays prod-tier** and is unchanged. The
+  pane is reached via the new **"Global wiki"** scope chip (#1406) and a global
+  Wiki nav section separated from the per-project context groups (#1414); a
+  nav-level badge flags uncommitted wiki edits that `mm context install` (which
+  reads committed git objects only) would not yet reach. Canonical edits to
+  subagents/commands must still parse or the save is rejected; override and
+  canonical content is privacy-scanned as a non-blocking warning, never refused
+  (single-curator host-global store).
+
 - **`mm wiki` exposes the Kimi vendor; `--vendor` Choices derive from the
   matrix (ADR-0008).** `mm wiki skill|agent {override,diff,lint} --vendor kimi`
   now works. Kimi skills/agents have had `OVERRIDE_FORMATS` rows and renderers
@@ -167,6 +306,47 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   re-reads the canonical under the per-target lock, so a concurrently
   in-flight sync can no longer prune a rule another gateway writer just
   landed (#1281).
+
+- **Fixed: Context Gateway, wiki, and export/import correctness &
+  robustness.** A roundup of user-notable fixes not implied by a feature entry
+  above.
+  - *Privacy gates fail closed on an unreadable subtree.* The skills-import
+    Gate A scan (#1381) and the sync/transfer `scan_artifact_tree` scan (#1393)
+    enumerated the staged tree with `Path.rglob`, which silently swallows a
+    per-directory `OSError` — an unreadable subdirectory vanished from the file
+    list yet its bytes were still promoted **unscanned**. Both now walk with a
+    fail-closed iterator that raises `PrivacyScanReadError`, so the caller's
+    rollback runs instead of leaking an unscanned subtree.
+  - *Privacy-block 422s no longer leak host paths.* The sync and import
+    `project_shared` Gate A blocks returned a 422 whose `detail` echoed an
+    absolute `.resolve()`d path (host `$HOME` + OS username) over the loopback
+    dashboard; they now emit fixed, path-free constants (#1387), as does the
+    mcp-servers parse-error 422 (#1413) and the settings-copy block (#1395). The
+    install/update project-root guard maps to a 404 envelope instead of a raw
+    error (#1391).
+  - *`mm context status` survives an unreadable installed subtree.* An
+    unenumerable subdirectory in a project's installed tree used to crash the
+    whole multi-project status walk; the dirty walk now classifies that asset
+    DIRTY (with a warning) rather than 500-ing, while update/`--all` apply still
+    refuse before any `.bak`/copy so no partial, backup-less mutation occurs
+    (#1383).
+  - *Context Gateway "Sync All" isolates per-phase failures.* A recoverable
+    per-phase HTTP error (e.g. a first-phase privacy 422) no longer aborts the
+    remaining artifact types — each phase reports independently and only a
+    transport failure stops the run (#1399). The force-unsafe sync confirm now
+    counts **unique files**, not per-runtime skip tuples, so it no longer claims
+    "4 files contain secrets" when one file across four runtimes is affected
+    (#1400). The import 422 toast shows the localized user-tier hint alone, and a
+    Korean josa resolver renders the correct particle for interpolated names
+    (#1401).
+  - *Two data-loss / drift fixes.* `mm wiki init` now rolls back a wedged
+    half-created `.git/` when the bootstrap commit fails (e.g. no resolvable git
+    identity) so re-running is not blocked (#1392); the all-"exact"
+    `settings-migrate` batch rechecks the target's mtime before stripping the
+    source, so a concurrent external edit can no longer drop a hook entry from
+    both tiers (#1382); and export→import now embeds `retrieval_content` (the
+    heading-hierarchy-prefixed text the index engine embeds) so a roundtripped
+    chunk retrieves identically to a natively-indexed one (#1394).
 
 ## [0.2.4] — 2026-06-04
 
