@@ -342,6 +342,13 @@ drifted.
   protocols + the seed harness in `memtomem-docs/memtomem/testing/` remain
   ready if P2 is taken up. Use the pass bars defined below verbatim — they are
   the single source of truth; do not re-derive thresholds elsewhere.
+  A facilitator **self-run gauge** (not a naive run) on build `6080fcb7`
+  (2026-06-20) re-verified the seed harness rendering and confirmed the
+  reversible D-F default lands a clean first-run in Simple with no
+  `localStorage` step (harness + default-path only — no comprehension claim);
+  it is recorded on #1353. By the self-run's own validity limit an informed
+  N=1 cannot clear the /6 bars, so it yields harness validation + a friction
+  gauge only — **P2 stays deferred** pending a naive run.
 
 **Companion string issues** #1348 / #1349 / #1350 / #1351 / #1352 — all
 **closed**.
@@ -441,6 +448,15 @@ to the prior open question Q-x.)
     the row badge + per-runtime chips** for detail, and keep the
     create-vs-overwrite cue on list/Sync-All rows *before* the confirm
     modal (do not hide it in the modal).
+  - *Observed 2026-06-20 (author self-run gauge, build `6080fcb7`; string
+    rendering only):* today's four-status model already surfaces this cue
+    explicitly in the Sync confirm modal — `settings.ctx.confirm_sync_impact`
+    ("create {create} missing and overwrite {overwrite} out-of-sync runtime
+    files…") plus `settings.ctx.confirm_sync_overwrite_warning`. A P2
+    status-collapse to ahead/behind/in-sync must therefore preserve an
+    equivalent create-vs-overwrite signal, not regress it — this constraint is
+    the concrete form of the second P2 gate condition (the gate itself stays
+    unmet, pending the naive run).
   - **Alternatives (kept):** collapse to a single ahead/behind/in-sync
     badge with no per-runtime chips (simpler, but loses the mixed-state and
     overwrite-risk signal at a glance); keep today's four-status model
