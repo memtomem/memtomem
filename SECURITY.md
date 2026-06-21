@@ -2,13 +2,16 @@
 
 ## Reporting Vulnerabilities
 
-Please report security issues via [GitHub private advisory](https://github.com/memtomem/memtomem/security/advisories/new) or email **contact@dapada.co.kr**. Do NOT open public issues for vulnerabilities.
+Please report security issues via [GitHub private advisory](https://github.com/memtomem/memtomem/security/advisories/new) or email **contact@dapada.co.kr**. Do NOT open public issues for vulnerabilities. We aim to acknowledge security reports within 2 business days.
 
 ## Supported Versions
 
+memtomem is alpha (`0.x`); only the latest published minor receives security fixes.
+
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
+| 0.3.x   | Yes       |
+| < 0.3   | No        |
 
 ## Security Measures
 

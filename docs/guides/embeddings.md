@@ -6,8 +6,8 @@ memtomem supports three embedding providers: **ONNX** (local, no server), **Olla
 
 | Model | Provider | Dimension | Best for |
 |-------|----------|-----------|----------|
-| `all-MiniLM-L6-v2` | ONNX | 384 | Quick local dense search, tiny (~22 MB) |
-| `bge-small-en-v1.5` | ONNX | 384 | Better English accuracy (~33 MB) |
+| `all-MiniLM-L6-v2` | ONNX | 384 | Quick local dense search, tiny (~90 MB) |
+| `bge-small-en-v1.5` | ONNX | 384 | Better English accuracy (~67 MB) |
 | `bge-m3` | ONNX / Ollama | 1024 | Multilingual (KR/EN/JP/CN), highest accuracy |
 | `nomic-embed-text` | Ollama | 768 | General English, lightweight, no GPU |
 | `text-embedding-3-small` | OpenAI | 1536 | Cloud-based, no GPU needed |
@@ -35,7 +35,7 @@ export MEMTOMEM_EMBEDDING__DIMENSION=384
 
 Or run `mm init` and select "Local ONNX".
 
-The model is downloaded automatically on first use (~22 MB for all-MiniLM-L6-v2) and cached in `~/.cache/fastembed/`.
+The model is downloaded automatically on first use (~90 MB for all-MiniLM-L6-v2) and cached in `~/.memtomem/cache/fastembed/` (override with `MEMTOMEM_FASTEMBED_CACHE` or `FASTEMBED_CACHE_PATH`).
 
 For multilingual content (Korean, Chinese, Japanese):
 
@@ -44,7 +44,7 @@ export MEMTOMEM_EMBEDDING__MODEL=bge-m3
 export MEMTOMEM_EMBEDDING__DIMENSION=1024
 ```
 
-> **Note:** `bge-m3` is ~1.2 GB — similar in size to Ollama models. For lightweight English-only search, use `all-MiniLM-L6-v2` or `bge-small-en-v1.5`.
+> **Note:** `bge-m3` is ~2.3 GB on disk — a substantial download, and much larger than the Ollama models below. For lightweight English-only search, use `all-MiniLM-L6-v2` or `bge-small-en-v1.5`.
 
 ## Ollama (local server)
 

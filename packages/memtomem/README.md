@@ -33,8 +33,8 @@ The picker offers three presets and an Advanced fallback:
 | Preset | Embedding | Reranker | Tokenizer |
 |---|---|---|---|
 | Minimal | BM25 only (no download) | — | unicode61 |
-| English (Recommended) | ONNX `bge-small-en-v1.5` (~33 MB, 384d) | English (`ms-marco-MiniLM-L-6-v2`) | unicode61 |
-| Korean-optimized | ONNX `bge-m3` (~1.2 GB, 1024d) | Multilingual (`jina-reranker-v2`) | `kiwipiepy` |
+| English (Recommended) | ONNX `bge-small-en-v1.5` (~67 MB, 384d) | English (`ms-marco-MiniLM-L-6-v2`) | unicode61 |
+| Korean-optimized | ONNX `bge-m3` (~2.3 GB, 1024d) | Multilingual (`jina-reranker-v2`) | `kiwipiepy` |
 | Advanced | — | — | — (full 10-step wizard, all options) |
 
 Pick a preset interactively, or use `mm init -y` (minimal), `mm init --preset korean -y`, or `mm init --advanced` for scripted runs. See [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) for the full model matrix.
@@ -99,7 +99,7 @@ the editor: `~/.cursor/mcp.json` (Cursor),
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
-- **🛠️ 84 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing all registered actions in `core` mode (default) for minimal context usage
+- **🛠️ 87 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing all registered actions in `core` mode (default) for minimal context usage
 
 ## Documentation
 

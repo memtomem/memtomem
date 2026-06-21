@@ -329,9 +329,11 @@ not enforcement.
 ## Auto-memory (Claude Code)
 
 Claude Code stores per-project memory at `~/.claude/projects/<slug>/memory/`,
-where `<slug>` is the absolute working-directory path with `/` → `-`
-(e.g. `-Users-alice-Work-project`). The slug is computed at session-open
-time from `cwd`, not configurable.
+where `<slug>` is the absolute working-directory path with every character
+outside ASCII `[A-Za-z0-9]` replaced by `-` (so `/`, `.`, `_`, and the rest
+all collapse to `-`; e.g. `/Users/alice/Work/my.project` →
+`-Users-alice-Work-my-project`). The slug is computed at session-open time
+from `cwd`, not configurable.
 
 Two workable strategies, both out of memtomem's control:
 
@@ -476,7 +478,7 @@ What each check means:
 | `no *.db files staged` | The git index does not contain `*.db` / `*.db-wal` / `*.db-shm`. If it does, your `.gitignore` is wrong — propagating these between devices corrupts SQLite under WAL. |
 | `config.json absent from worktree` | `~/.memtomem/config.json` is not staged. It's machine-local; only `config.d/` is portable. |
 | `config.d/ fragments present` | `~/.memtomem/config.d/` exists on this machine and contains at least one `*.json` fragment. If missing, the synced fragment was never bridged into the canonical location. |
-| `~/.claude/projects/ slug` | The current working tree corresponds to a `~/.claude/projects/<slug>/` entry that matches your cwd. Skipped silently when `~/.claude/projects/` is absent. |
+| `~/.claude/projects/ slug` | The current working tree corresponds to a `~/.claude/projects/<slug>/` entry that matches your cwd. Reported as an informational (non-failing) line and skipped when `~/.claude/projects/` is absent. |
 | `memory_dir paths resolve under $HOME` | All `indexing.memory_dirs` entries sit under your home dir. Outside-`$HOME` paths are not portable across users. |
 | `cloud-sync mount detected` | One of your `memory_dirs` is under a known cloud-sync mount (`~/Library/CloudStorage/`, `~/Library/Mobile Documents/com~apple~CloudDocs/`, `~/Dropbox/`, `~/OneDrive*/`). Watcher reliability there is best-effort — flip `startup_backfill` on, or trigger `mem_index` manually. |
 

@@ -85,7 +85,7 @@ Example of a successful response:
 memtomem status:
   - Storage backend: SQLite
   - Total chunks: 0 (not yet indexed)
-  - Embedding model: ollama/nomic-embed-text
+  - Embedding model: none (keyword-only — configure a provider for semantic search)
 ```
 
 Or skip the editor and run the same check directly:
@@ -178,7 +178,7 @@ mem_search("Transformer attention mechanism")
 No. memtomem operates as separate MCP tools and does not affect Claude Desktop's existing functionality.
 
 **Q: Do I need to install Ollama locally?**
-The default embedding provider is Ollama (local, free). OpenAI is also supported as an alternative — set `MEMTOMEM_EMBEDDING__PROVIDER=openai` with an API key. If using Ollama, it must be installed locally.
+No. The default is keyword-only search (BM25, `MEMTOMEM_EMBEDDING__PROVIDER=none`) — no embedding model or server required. Semantic search is opt-in via one of three providers: ONNX (`provider=onnx`, local, no server), Ollama (`provider=ollama`, local and free, must be installed locally), or OpenAI (`provider=openai`, cloud, needs an API key).
 
 **Q: Are indexed notes sent to Anthropic's servers?**
 No. memtomem runs locally, and data is stored only in the local SQLite DB. Ollama runs locally, so no data is sent externally.
