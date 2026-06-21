@@ -495,7 +495,7 @@ class RerankConfig(BaseSettings):
     # Deprecated: superseded by oversample/min_pool/max_pool. Kept as a
     # field so legacy config.json and MEMTOMEM_RERANK__TOP_K env vars
     # still load without errors; ``_migrate_legacy_top_k`` rewrites it
-    # to ``min_pool`` during validation. Slated for removal in 0.3.
+    # to ``min_pool`` during validation. Slated for removal in a future release.
     top_k: int = 20
 
     @model_validator(mode="before")
@@ -509,7 +509,7 @@ class RerankConfig(BaseSettings):
             warnings.warn(
                 "rerank.top_k is deprecated and is ignored when rerank.min_pool "
                 "is set. Remove rerank.top_k from your config. "
-                "(Slated for removal in memtomem 0.3.)",
+                "(Slated for removal in a future release.)",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -519,7 +519,7 @@ class RerankConfig(BaseSettings):
                 "rerank.top_k is deprecated; migrating to rerank.min_pool. "
                 "Use rerank.oversample + rerank.min_pool + rerank.max_pool to "
                 "scale the reranker candidate pool with the request top_k. "
-                "(Slated for removal in memtomem 0.3.)",
+                "(Slated for removal in a future release.)",
                 DeprecationWarning,
                 stacklevel=2,
             )
