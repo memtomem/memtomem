@@ -427,8 +427,15 @@ trigger:
 
 If your old install was indexing `~/.claude/projects/` wholesale (session
 JSONL transcripts, staging dirs, etc.), the migration narrows that to the
-canonical `*/memory/` subdirs only. To clean stale entries left over from
-the wider scan, run `mm index --rebuild` after the migration.
+canonical `*/memory/` subdirs only. The migration only narrows what gets
+indexed *going forward* — it does not retroactively delete chunks already
+stored from the wider scan. To reclaim those, run `mm purge
+--matching-excluded`: it deletes stored chunks whose source the indexer would
+now exclude (built-in noise/secret denylist, `indexing.exclude_patterns`, and
+provider index-file conventions such as a `claude-memory` root's `MEMORY.md`).
+It prints a dry-run summary by default; re-run with `--apply` to delete. For
+any leftover source the exclude rules don't cover, remove it directly with
+`mem_delete(source_file=...)`.
 
 > **Tip:** `mm ingest claude-memory`, `mm ingest gemini-memory`, and
 > `mm ingest codex-memory` apply per-tool tagging and namespace assignment
@@ -463,7 +470,7 @@ so the pool scales with the caller's requested `top_k` while staying bounded by 
 
 `rerank.enabled`, `rerank.oversample`, `rerank.min_pool`, and `rerank.max_pool` are runtime-tunable via `mm config set` or the Web UI Settings panel — no restart required. `rerank.provider` / `rerank.model` / `rerank.api_key` are load-time only because the reranker instance is cached on startup.
 
-> **Deprecated:** earlier releases exposed `MEMTOMEM_RERANK__TOP_K` / `rerank.top_k` as an absolute candidate-pool size. The field still loads (legacy configs are migrated to `rerank.min_pool` with a `DeprecationWarning`) but will be removed in 0.3. Use `rerank.oversample` + `rerank.min_pool` + `rerank.max_pool` instead.
+> **Deprecated:** earlier releases exposed `MEMTOMEM_RERANK__TOP_K` / `rerank.top_k` as an absolute candidate-pool size. The field still loads (legacy configs are migrated to `rerank.min_pool` with a `DeprecationWarning`) but is slated for removal in a future release. Use `rerank.oversample` + `rerank.min_pool` + `rerank.max_pool` instead.
 
 ### Provider-specific models
 
@@ -594,9 +601,12 @@ Example `~/.memtomem/config.d/10-namespace-rules.json`:
   alphabetical filename order**, so use numeric prefixes
   (`10-claude.json`, `20-gdrive.json`, `99-override.json`) to control
   precedence across fragments.
-- Placeholder whitelist: only `{parent}` is supported in this release.
-  Unknown placeholders (e.g. `{unknown}`) cause config load to fail so
-  typos are caught at startup.
+- Placeholder whitelist: `{parent}` (the immediate parent folder, equivalent
+  to `{ancestor:0}`) and `{ancestor:N}` (the folder `N` levels above the
+  immediate parent — `{ancestor:0}` is the parent, `{ancestor:1}` the
+  grandparent) are supported. Unknown placeholders (e.g. `{unknown}`), or a
+  non-integer / negative `ancestor` index, cause config load to fail so typos
+  are caught at startup.
 
 **Verifying your rules:**
 
@@ -606,19 +616,19 @@ mm config show | grep -A 20 namespace
 
 # After editing rules, force re-index so existing chunks pick up the
 # new namespace:
-mm mem index ~/.claude/projects --force
+mm index ~/.claude/projects --force
 
-# Inspect namespace distribution:
-mm session list             # CLI
-# http://localhost:8080/#sources   # Web UI Sources view (colon prefixes
-                                   # group into collapsible sections)
+# Inspect namespace distribution — open the Web UI Sources view:
+#   http://localhost:8080/#sources    (colon prefixes group into collapsible
+#                                      sections). There is no dedicated CLI
+#   listing for rule-derived namespaces; the search below shows the label.
 ```
 
 Search results surface the namespace label, so you can confirm a rule
 fired:
 
 ```bash
-mm mem search "your query"
+mm search "your query"
 # → "[claude:memory] …"
 ```
 

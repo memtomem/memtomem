@@ -91,7 +91,7 @@ Add the following to your editor's MCP config file — e.g.,
 `~/Library/Application Support/Claude/claude_desktop_config.json`
 (Claude Desktop), `~/.gemini/antigravity-cli/mcp_config.json`
 (Antigravity CLI — its entries also carry `"type": "stdio"`; see
-[mcp-clients.md](mcp-clients.md#7-antigravity)), or
+[mcp-clients.md](mcp-clients.md#8-antigravity)), or
 `~/.gemini/settings.json` (Gemini CLI, deprecated 2026-06-18). For Claude
 Code, use `claude mcp add` instead of editing a file. See
 [MCP Client Configuration](mcp-clients.md) for the full list.

@@ -167,10 +167,10 @@ Restart Claude Desktop after configuration.
 ## 5. Gemini CLI
 
 > **Deprecated upstream.** Google is transitioning Gemini CLI to the
-> Antigravity CLI (see [§7](#7-antigravity)). Gemini CLI stops serving
+> Antigravity CLI (see [§8](#8-antigravity)). Gemini CLI stopped serving
 > free/Pro/Ultra individual tiers on **2026-06-18** (enterprise Gemini Code
 > Assist Standard/Enterprise keep it). New setups should prefer the
-> **Antigravity CLI (`agy`)** instructions in §7.
+> **Antigravity CLI (`agy`)** instructions in §8.
 
 Create or edit the `~/.gemini/settings.json` file:
 
@@ -329,7 +329,7 @@ working unchanged.
 
 ---
 
-## 8. Verifying Your Connection
+## 9. Verifying Your Connection
 
 These verification methods work across all clients.
 
@@ -387,12 +387,12 @@ uses, so the output is identical. Useful as a sanity check between
 |----------|-------|
 | **Search** | `mem_search` (hybrid BM25+Dense+RRF, optional `as_of` for temporal-validity queries), `mem_recall` (date-range retrieval), `mem_expand` (context-window expansion) |
 | **Browse** | `mem_list` (indexed sources), `mem_read` (chunk by UUID) |
-| **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add` |
+| **CRUD** | `mem_add`, `mem_edit`, `mem_delete`, `mem_batch_add`, `mem_add_redaction_stats` |
 | **Indexing** | `mem_index` (file/directory indexing, optional `auto_tag`) |
 | **Meta** | `mem_do` (routes to all registered actions, supports aliases — including `schedule_register`, `schedule_list`, `schedule_run_now`, `schedule_delete` for cron jobs) |
 | **Ask** | `mem_ask` (natural-language Q&A over indexed memories) |
 | **Namespace** | `mem_ns_list`, `mem_ns_set`, `mem_ns_get`, `mem_ns_assign`, `mem_ns_update`, `mem_ns_rename`, `mem_ns_delete` |
-| **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_delete`, `mem_auto_tag` |
+| **Tags** | `mem_tag_list`, `mem_tag_rename`, `mem_tag_merge`, `mem_tag_delete`, `mem_auto_tag` |
 | **Cross-ref** | `mem_link`, `mem_unlink`, `mem_related` |
 | **Fetch** | `mem_fetch` (URL → markdown → index) |
 | **Sessions** | `mem_session_start` (with optional `title`), `mem_session_end`, `mem_session_list` |
@@ -407,6 +407,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Entity** | `mem_entity_scan`, `mem_entity_search` |
 | **Temporal** | `mem_timeline`, `mem_activity` |
 | **Policy** | `mem_policy_add`, `mem_policy_list`, `mem_policy_delete`, `mem_policy_run` |
+| **Schedule** | `mem_schedule_register`, `mem_schedule_list`, `mem_schedule_run_now`, `mem_schedule_delete` (cron-driven compaction, decay, dead-link cleanup, dedup; also reachable as `mem_do` actions) |
 | **Health** | `mem_watchdog`, `mem_cleanup_orphans` |
 | **Import** | `mem_import_notion`, `mem_import_obsidian` |
 | **Maintenance** | `mem_dedup_scan`, `mem_dedup_merge`, `mem_decay_scan`, `mem_decay_expire` |
@@ -426,7 +427,7 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 ---
 
-## 9. Environment Variable Overrides
+## 10. Environment Variable Overrides
 
 You can override settings by adding environment variables to the `env` block.
 
@@ -494,7 +495,7 @@ ollama pull bge-m3
 
 ---
 
-## 10. Network transports (advanced)
+## 11. Network transports (advanced)
 
 Every editor section above launches `memtomem-server` over **stdio** — the
 MCP client spawns the server as a subprocess and talks to it on stdin/stdout.
@@ -616,7 +617,7 @@ section in the reference guide.
 
 > Running `uvx --from memtomem memtomem-server` bare in a terminal prints
 > a setup hint (MCP client configuration plus the network-transport
-> examples from §10) and exits — it is **not** a "does it serve?" smoke
+> examples from §11) and exits — it is **not** a "does it serve?" smoke
 > test because no MCP client is connected. To test stdio, configure your
 > editor and call `mem_status` from there; to test a network transport,
 > start the server with `--transport http|sse` and connect a client.

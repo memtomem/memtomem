@@ -14,7 +14,7 @@ for you to clean manually.
 mm uninstall                  # interactive, removes everything
 mm uninstall -y               # skip the confirmation prompt
 mm uninstall --keep-config    # preserve config.json + config.d/* + backups
-mm uninstall --keep-data      # preserve the SQLite DB + ~/.memtomem/memories/
+mm uninstall --keep-data      # preserve the SQLite DB + ~/.memtomem/memories/ (uploads/ are still removed)
 mm uninstall --force          # bypass the running-server safety check
 ```
 
@@ -47,6 +47,8 @@ config file, then restart the editor.
 | Antigravity CLI (`agy`) | `~/.gemini/antigravity-cli/mcp_config.json` |
 | Antigravity IDE | MCP Servers panel → remove the memtomem entry |
 | Gemini CLI (deprecated 2026-06-18) | `~/.gemini/settings.json` |
+| Codex CLI | `~/.codex/config.toml` (remove the `[mcp_servers.memtomem]` section) |
+| Kimi | `~/.kimi/mcp.json` (or `$KIMI_SHARE_DIR/mcp.json` if that variable is set) |
 
 Also delete any project-level `.mcp.json` files that contain a memtomem server
 block.
@@ -69,7 +71,11 @@ pip uninstall memtomem
 ## 3. Delete the data directory
 
 All databases, config, session state, and uploaded files live under
-`~/.memtomem/` by default (or the path set via `MEMTOMEM_HOME`):
+`~/.memtomem/` by default. The state directory location is fixed; only the
+SQLite database file can be relocated, via `storage.sqlite_path` in
+`config.json` or the `MEMTOMEM_STORAGE__SQLITE_PATH` environment variable
+(`mm uninstall` cleans up a custom DB path and its `-wal`/`-shm`/`-journal`
+siblings too):
 
 ```bash
 rm -rf ~/.memtomem
@@ -79,7 +85,7 @@ This removes:
 
 | Path | Contents |
 |------|----------|
-| `memtomem.db` (+ `-wal`, `-journal`) | SQLite database (chunks, embeddings, sessions, history) |
+| `memtomem.db` (+ `-wal`, `-shm`, `-journal`) | SQLite database (chunks, embeddings, sessions, history) |
 | `config.json` | Persisted configuration overrides |
 | `config.d/*.json` | Integration-installed drop-in fragments (if present) |
 | `memories/` | User-created memories from `mem_add` |

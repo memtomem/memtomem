@@ -32,8 +32,8 @@ don't have to decide now.
 | Option | Setup | When to pick it |
 |--------|-------|-----------------|
 | **Keyword-only (BM25)** | None | Default. Fast, no external deps. Great for short, exact-term notes. |
-| **ONNX (local, no server)** | `uv tool install 'memtomem[onnx]'` | Semantic search without running a server. ~22 MB–1.2 GB model on first use. |
-| **Ollama (local server)** | Install [Ollama](https://ollama.com), then `ollama pull nomic-embed-text` (English) or `ollama pull bge-m3` (multilingual, 1.2 GB). | Semantic search with full local control; best Korean/JP/CN quality with `bge-m3`. |
+| **ONNX (local, no server)** | `uv tool install 'memtomem[onnx]'` | Semantic search without running a server. ~90 MB–2.3 GB model on first use. |
+| **Ollama (local server)** | Install [Ollama](https://ollama.com), then `ollama pull nomic-embed-text` (English) or `ollama pull bge-m3` (multilingual, ~2.3 GB). | Semantic search with full local control; best Korean/JP/CN quality with `bge-m3`. |
 | **OpenAI (cloud)** | `OPENAI_API_KEY` env var. | No local model to manage; pay-per-call. |
 
 > **Multilingual tip**: if you work with Korean, Japanese, or Chinese,
@@ -140,8 +140,8 @@ uv run mm init  # Project or source install
 | Preset | What it bundles | When to pick |
 |---|---|---|
 | **Minimal** | BM25 keyword search, no downloads, unicode61 tokenizer, no reranker | Want the lightest possible install, or starting from scratch to explore |
-| **English (Recommended)** | ONNX `bge-small-en-v1.5` (384d, ~33 MB) + English reranker (`Xenova/ms-marco-MiniLM-L-6-v2`) + auto-discover provider memory folders | Most English-language setups — good default if you're unsure |
-| **Korean-optimized** | ONNX `bge-m3` (1024d, ~1.2 GB) + multilingual reranker (`jinaai/jina-reranker-v2-base-multilingual`) + `kiwipiepy` tokenizer + auto-discover | Korean content (or Korean/Chinese/Japanese mixed) |
+| **English (Recommended)** | ONNX `bge-small-en-v1.5` (384d, ~67 MB) + English reranker (`Xenova/ms-marco-MiniLM-L-6-v2`) + auto-discover provider memory folders | Most English-language setups — good default if you're unsure |
+| **Korean-optimized** | ONNX `bge-m3` (1024d, ~2.3 GB) + multilingual reranker (`jinaai/jina-reranker-v2-base-multilingual`) + `kiwipiepy` tokenizer + auto-discover | Korean content (or Korean/Chinese/Japanese mixed) |
 | **Advanced** | — (10-step wizard, full control) | Need to set every knob — custom model, separate DB path, decay, etc. |
 
 Type `b` to go back or `q` to quit at any prompt.
@@ -251,12 +251,12 @@ Add to your MCP config file:
 > **Note**: Claude Code stores its MCP config in `~/.claude.json`, not a separate file.
 >
 > **Gemini CLI → Antigravity CLI.** Google is replacing Gemini CLI with the
-> Antigravity CLI (`agy`); Gemini CLI stops serving free/Pro/Ultra individual
+> Antigravity CLI (`agy`); Gemini CLI stopped serving free/Pro/Ultra individual
 > tiers on 2026-06-18 (enterprise keeps it). Antigravity CLI uses its own
 > `mcp_config.json` above but still reads `~/.gemini/GEMINI.md`, so memory
 > indexed with `mm ingest gemini-memory` keeps working. In that file each
 > server object also carries `"type": "stdio"` — see the
-> [Antigravity section](mcp-clients.md#7-antigravity) of the MCP client guide
+> [Antigravity section](mcp-clients.md#8-antigravity) of the MCP client guide
 > for the exact CLI shape.
 
 ### Verify connection
@@ -384,6 +384,8 @@ mm context generate        # generate CLAUDE.md, .cursorrules, GEMINI.md, etc.
 mm context diff            # show pending changes before syncing
 mm context sync            # update all editors after editing context.md
 mm context version --help  # manage version snapshots + label pointers (ADR-0022)
+mm context copy agents foo --to project_local   # copy a canonical artifact to another tier/project (dry-run; ADR-0023)
+mm context move agents foo --to project_shared  # move a canonical artifact, consuming the source (see reference.md for flags)
 mm session start           # start a tracked session
 mm session end             # end session with auto-summary
 mm session list            # list sessions
@@ -443,7 +445,7 @@ uv pip install -e "packages/memtomem[all]"  # Source
 > serve?" check — for that, configure your editor and call `mem_status`
 > from there. The network-transport flags (`--transport http|sse`) are
 > intended for remote deployments; see
-> [mcp-clients.md → Network transports](mcp-clients.md#10-network-transports-advanced).
+> [mcp-clients.md → Network transports](mcp-clients.md#11-network-transports-advanced).
 
 ---
 

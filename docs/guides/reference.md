@@ -1178,7 +1178,7 @@ Tab classification changes over time — run `mm web --dev` against your install
 
 ```bash
 # Setup
-mm init                                # 9-step interactive wizard (b: back, q: quit)
+mm init                                # preset picker; `--advanced` opens the full 10-step wizard (b: back, q: quit)
 
 # Core (daily use)
 mm search "deployment"                 # hybrid search (keywords + meaning)
