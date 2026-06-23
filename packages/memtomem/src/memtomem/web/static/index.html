@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=120" />
+  <link rel="stylesheet" href="/style.css?v=121" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -19,6 +19,7 @@
       <span class="stat-pill indexing-pill" id="indexing-indicator" hidden data-i18n="index.indicator" aria-live="polite">⏳ Indexing…</span>
       <span class="stat-pill" id="stat-chunks" data-i18n="header.stat_chunks">— chunks</span>
       <span class="stat-pill" id="stat-sources" data-i18n="header.stat_sources">— sources</span>
+      <span class="help-tip" data-help-i18n="glossary.units" tabindex="0" role="img" aria-label="Sources are the files you add. Chunks are the searchable pieces. Memories are everything together.">i</span>
     </div>
     <div class="header-actions">
       <button id="settings-btn" class="btn-ghost btn-icon" data-i18n-title="header.settings_title" data-i18n-aria-label="header.settings_title" title="Settings" aria-label="Settings">⚙️</button>
@@ -287,6 +288,19 @@
             <option value="markdown">MD</option>
           </select>
           <button id="bulk-export-btn" class="btn-ghost btn-xs" disabled>Export</button>
+        </div>
+        <!-- First-run welcome card: a sibling of #results-empty so the empty
+             render path (which rewrites #results-empty.innerHTML) cannot wipe
+             it. Its visibility tracks the empty state via _syncWelcomeVisibility. -->
+        <div id="search-welcome" class="search-welcome" hidden>
+          <button id="search-welcome-dismiss" class="search-welcome-dismiss" data-i18n-title="welcome.dismiss" data-i18n-aria-label="welcome.dismiss" title="Dismiss" aria-label="Dismiss">✕</button>
+          <h2 class="search-welcome-title" data-i18n="welcome.title">Welcome to memtomem</h2>
+          <p class="search-welcome-intro" data-i18n="welcome.intro">Search your indexed memories by meaning — not just exact keywords.</p>
+          <p class="search-welcome-units" data-i18n="glossary.units">Sources are the files you add. Chunks are the searchable pieces. Memories are everything together.</p>
+          <div class="search-welcome-actions">
+            <button id="search-welcome-add" class="btn-primary" data-i18n="welcome.cta_add">+ Add a memory</button>
+            <button id="search-welcome-search" class="btn-ghost" data-i18n="welcome.cta_search">Try a search</button>
+          </div>
         </div>
         <div id="results-empty" class="empty-state">
           <span class="empty-state-icon">🔍</span>
@@ -1608,7 +1622,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=5"></script>
-  <script src="/app.js?v=136"></script>
+  <script src="/app.js?v=137"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=12"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>

@@ -2350,6 +2350,30 @@ select:focus-visible {
 .empty-state-hint { font-size: 0.78rem; color: var(--muted); opacity: 0.7; }
 .empty-state-cta { font-size: 0.82rem; color: var(--accent); text-decoration: none; margin-top: 4px; }
 .empty-state-cta:hover { text-decoration: underline; }
+/* S1.5 — first-run welcome card inside the search empty panel */
+.search-welcome {
+  position: relative;
+  max-width: 420px;
+  margin-bottom: 14px;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  text-align: center;
+  color: var(--text);
+}
+.search-welcome-dismiss {
+  position: absolute; top: 6px; right: 8px;
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 0.9rem; line-height: 1; padding: 4px;
+}
+.search-welcome-dismiss:hover { color: var(--text); }
+.search-welcome-title { margin: 0 0 6px; font-size: 1rem; font-weight: 600; }
+.search-welcome-intro { margin: 0 0 8px; font-size: 0.84rem; color: var(--muted); }
+.search-welcome-units { margin: 0 0 14px; font-size: 0.78rem; color: var(--muted); opacity: 0.85; line-height: 1.5; }
+.search-welcome-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.search-welcome-actions .btn-primary,
+.search-welcome-actions .btn-ghost { font-size: 0.82rem; padding: 6px 14px; }
 
 /* Recent search chips (empty state) */
 .recent-chips {

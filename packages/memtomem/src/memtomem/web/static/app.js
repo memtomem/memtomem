@@ -122,6 +122,7 @@ const STATE = {
     // on it (#580).
     loadPrivacyPatterns();
     renderRecentChips();
+    _initSearchWelcome();
     _initTabHelp();
     // Server-bound indicator hydration (#582 item 4.11). Restores the
     // header pill if a run is in flight (page-reload survival, second-
@@ -2679,6 +2680,8 @@ async function doSearch() {
     hide(qs('results-empty'));
     show(list);
     list.innerHTML = emptyState('⚠', 'Search failed', escapeHtml(err.message));
+    // #results-empty is now hidden, so the sibling welcome card must hide too.
+    _syncWelcomeVisibility();
     clearDetail();
   } finally {
     btnLoading(btn, false);
@@ -3017,11 +3020,13 @@ function renderResults(results, retrievalStats) {
     empty.innerHTML = !_hasSearchAxis()
       ? emptyState('🔍', 'Enter a query to search', '<kbd>/</kbd> focus · <kbd>j</kbd>/<kbd>k</kbd> navigate · <kbd>p</kbd> pin · <kbd>c</kbd> copy')
       : emptyState('○', 'No results found', 'Try different keywords or filters');
+    _syncWelcomeVisibility();
     clearDetail();
     return;
   }
   hide(empty);
   show(list);
+  _syncWelcomeVisibility();
 
   // Keep a raw max for fallback paths; primary result bars use score views.
   STATE.maxResultScore = Math.max(0.001, ...filtered.map(r => r.score));
@@ -6683,6 +6688,35 @@ function renderRecentChips() {
 
 // Render chips on initial load
 // renderRecentChips() is now called from the unified DOMContentLoaded handler in initTheme()
+
+// S1.5 — first-run welcome card. It sits next to #results-empty (a sibling,
+// so the empty render path that rewrites #results-empty.innerHTML can't wipe
+// it) and is shown only while the search panel is in its empty state and the
+// card hasn't been dismissed (persisted in localStorage).
+function _welcomeDismissed() {
+  try { return !!localStorage.getItem('m2m-welcome-dismissed'); } catch { return false; }
+}
+
+function _syncWelcomeVisibility() {
+  const welcome = qs('search-welcome');
+  if (!welcome) return;
+  const empty = qs('results-empty');
+  const emptyShown = !!empty && !empty.hidden;
+  welcome.hidden = _welcomeDismissed() || !emptyShown;
+}
+
+function _initSearchWelcome() {
+  const welcome = qs('search-welcome');
+  if (!welcome) return;
+  qs('search-welcome-dismiss')?.addEventListener('click', () => {
+    try { localStorage.setItem('m2m-welcome-dismissed', '1'); } catch {}
+    welcome.hidden = true;
+  });
+  // "Add a memory" → the Index tab; "Try a search" → focus the query box.
+  qs('search-welcome-add')?.addEventListener('click', () => activateTab('index'));
+  qs('search-welcome-search')?.addEventListener('click', () => qs('search-input')?.focus());
+  _syncWelcomeVisibility();
+}
 
 // ---------------------------------------------------------------------------
 // Keyboard Shortcuts (B)
