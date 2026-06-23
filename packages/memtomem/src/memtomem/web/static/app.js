@@ -1701,6 +1701,13 @@ window.addEventListener('langchange', () => {
   // cache is ready (and on every later toggle). No-op if no mismatch is
   // showing. See feedback_i18n_init_order_race.
   renderEmbMismatchBanner();
+  // NOTE: search-results / chunk-browser microcopy keyed in S1.3 is rendered
+  // imperatively via t() and localizes on the next render, not on a live
+  // language toggle. A safe live repaint needs per-surface state preservation
+  // (bulk selection, selected result, unsaved editor drafts, chunk-browser
+  // edit state) and spans several stateful surfaces, so it is deferred to a
+  // dedicated pass rather than risking draft/selection loss here. This matches
+  // the pre-existing behavior of the other imperatively-rendered search nodes.
 });
 loadStats();
 checkEmbeddingMismatch();
@@ -2680,7 +2687,7 @@ async function doSearch() {
 
 function updateBulkToolbar(total) {
   const count = STATE.selectedIds.size;
-  qs('bulk-count').textContent = count > 0 ? `${count} selected` : '0 selected';
+  qs('bulk-count').textContent = t('search.bulk_count', { count });
   qs('bulk-delete-btn').disabled = count === 0;
   qs('bulk-export-btn').disabled = count === 0;
   const allCb = qs('bulk-select-all');
@@ -2933,7 +2940,7 @@ function _attachResultTagRow(chunkId, liveTagsArr, bodyEl) {
     const removeBtn = document.createElement('button');
     removeBtn.className = 'result-tag-remove';
     removeBtn.textContent = '✕';
-    removeBtn.title = `Remove tag "${tag}"`;
+    removeBtn.title = t('search.tag_remove_named', { tag });
     removeBtn.addEventListener('click', async e => {
       e.stopPropagation();
       const idx = liveTagsArr.indexOf(tag);
@@ -3056,7 +3063,7 @@ function renderResults(results, retrievalStats) {
         <div class="results-debug-body">${sourceParts.join('')}${funnelHtml}</div>
       </details>`
     : '';
-  const summaryHtml = `<div class="results-summary"><span class="results-summary-total">${total} total</span>${debugHtml}</div>`;
+  const summaryHtml = `<div class="results-summary"><span class="results-summary-total">${escapeHtml(t('search.results_total', { count: total }))}</span>${debugHtml}</div>`;
 
   show(qs('bulk-toolbar'));
   if (results.length >= STATE.currentTopK) show(qs('load-more-row'));
@@ -3484,14 +3491,14 @@ function renderTagChips(tags) {
   const container = qs('d-tag-chips');
   container.innerHTML = '';
   if (!tags.length) {
-    container.innerHTML = '<span class="tag-empty-hint">No tags — type below to add</span>';
+    container.innerHTML = `<span class="tag-empty-hint">${escapeHtml(t('search.tags_empty_hint'))}</span>`;
     return;
   }
   currentTags.forEach((tag, idx) => {
     const chip = document.createElement('span');
     chip.className = 'tag-chip';
     chip.style.cursor = 'pointer';
-    chip.innerHTML = `${escapeHtml(tag)}<button class="tag-chip-remove" data-idx="${idx}" title="Remove tag">✕</button>`;
+    chip.innerHTML = `${escapeHtml(tag)}<button class="tag-chip-remove" data-idx="${idx}" title="${escapeAttr(t('search.tag_remove_title'))}">✕</button>`;
     chip.querySelector('.tag-chip-remove').addEventListener('click', async () => {
       if (!STATE.selectedChunkId) return;
       currentTags.splice(idx, 1);
@@ -5122,7 +5129,7 @@ function _renderMemorySourceItem(s, maxChunks) {
     </div>
     ${summaryHtml}
     <div class="source-item-row2">
-      ${s.chunk_count ?? '?'} chunks${size ? ' · ' + size : ''}${s.avg_tokens ? ' · avg ' + s.avg_tokens + ' tok' : ''}${age ? ' · ' + age : ''}
+      ${escapeHtml(t(s.chunk_count === 1 ? 'home.source_chunks_one' : 'home.source_chunks_other', { count: s.chunk_count ?? '?' }))}${size ? ' · ' + size : ''}${s.avg_tokens ? ' · ' + escapeHtml(t('sources.meta_avg_tokens', { n: s.avg_tokens })) : ''}${age ? ' · ' + age : ''}
     </div>
     <div class="source-chunk-bar">
       <div class="source-chunk-bar-fill" style="width:${barPct}%"></div>
@@ -5174,8 +5181,8 @@ async function browseSource(path, limit = 100) {
     header.className = 'chunks-browser-header';
     header.innerHTML = `
       <span class="file-path">${escapeHtml(path)}</span>
-      <span class="badge badge-blue">${data.total} chunks</span>
-      <span class="chunks-browser-info">${data.chunks.length} of ${data.total} shown</span>
+      <span class="badge badge-blue">${escapeHtml(t(data.total === 1 ? 'home.source_chunks_one' : 'home.source_chunks_other', { count: data.total }))}</span>
+      <span class="chunks-browser-info">${escapeHtml(t('chunks.shown_of_total', { shown: data.chunks.length, total: data.total }))}</span>
     `;
     if (data.chunks.length < data.total) {
       const loadAllBtn = document.createElement('button');
@@ -5192,17 +5199,17 @@ async function browseSource(path, limit = 100) {
     viewToggle.className = 'view-mode-toggle';
     const chunksBtn = document.createElement('button');
     chunksBtn.className = 'view-mode-btn active';
-    chunksBtn.textContent = 'Chunks';
+    chunksBtn.textContent = t('chunks.view_chunks');
     const docBtn = document.createElement('button');
     docBtn.className = 'view-mode-btn';
-    docBtn.textContent = 'Document';
+    docBtn.textContent = t('chunks.view_document');
     viewToggle.appendChild(chunksBtn);
     viewToggle.appendChild(docBtn);
     header.appendChild(viewToggle);
     content.appendChild(header);
 
     if (!data.chunks.length) {
-      content.innerHTML += '<div class="empty-state" style="height:80px"><p>No chunks found</p></div>';
+      content.innerHTML += `<div class="empty-state" style="height:80px"><p>${escapeHtml(t('chunks.none_found'))}</p></div>`;
     } else {
       // Document view container (hidden initially)
       const docView = document.createElement('div');
@@ -5243,9 +5250,9 @@ async function browseSource(path, limit = 100) {
             ${_tierBadgeHtml(c.target_scope)}
             ${c.heading_hierarchy.length ? `<span class="hierarchy-trail">${escapeHtml(c.heading_hierarchy.join(' › '))}</span>` : ''}
             <div class="chunk-card-actions">
-              <button class="btn-ghost btn-xs card-copy-btn" title="Copy content">Copy</button>
-              <button class="btn-ghost btn-xs card-edit-btn" title="Edit chunk">Edit</button>
-              <button class="btn-danger btn-xs card-delete-btn" title="Delete chunk">Delete</button>
+              <button class="btn-ghost btn-xs card-copy-btn" title="${escapeAttr(t('chunks.card_copy_title'))}">${escapeHtml(t('chunks.card_copy'))}</button>
+              <button class="btn-ghost btn-xs card-edit-btn" title="${escapeAttr(t('chunks.card_edit_title'))}">${escapeHtml(t('chunks.card_edit'))}</button>
+              <button class="btn-danger btn-xs card-delete-btn" title="${escapeAttr(t('chunks.card_delete_title'))}">${escapeHtml(t('chunks.card_delete'))}</button>
             </div>
           </div>
         `;
@@ -7359,7 +7366,7 @@ function _updateWordCount() {
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
   const tokens = Math.round(chars / 4);
   const el = qs('d-word-count');
-  if (el) el.textContent = `${chars} chars · ${words} words · ~${tokens} tokens`;
+  if (el) el.textContent = t('search.editor_word_count', { chars, words, tokens });
 }
 
 qs('d-editor').addEventListener('input', _updateWordCount);
