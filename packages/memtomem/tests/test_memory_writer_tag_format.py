@@ -61,3 +61,21 @@ class TestAppendEntryTagFormat:
         append_entry(f, "Body.", title="H", tags=["x"])
         text = f.read_text(encoding="utf-8")
         assert "\n> created: " in text
+
+    def test_non_ascii_tags_written_as_characters_not_escapes(self, tmp_path: Path):
+        """Hangul tags land in the file as real characters, not ``\\uXXXX`` text.
+
+        ``ensure_ascii=True`` (the old default) wrote ``["\\ucee4..."]`` — the
+        literal escape sequence — which the hand-split parser then stored
+        verbatim, surfacing ``\\ucee4...`` in the tag cloud.
+        """
+        f = tmp_path / "out.md"
+        tags_in = ["커리큘럼설계", "재사용자산"]
+        append_entry(f, "Body.", title="제목", tags=tags_in)
+        text = f.read_text(encoding="utf-8")
+        assert '> tags: ["커리큘럼설계", "재사용자산"]' in text
+        # No literal backslash-u escape sequence may survive.
+        assert "\\u" not in text
+        # And the line still parses as JSON back to the originals.
+        line = next(line for line in text.splitlines() if line.startswith("> tags: "))
+        assert json.loads(line.split("> tags: ", 1)[1]) == tags_in

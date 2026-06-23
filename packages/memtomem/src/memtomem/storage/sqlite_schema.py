@@ -25,6 +25,15 @@ _CHUNK_LINKS_BACKFILL_KEY = "chunk_links_backfill_v1"
 
 _SHARED_FROM_TAG_PREFIX = "shared-from="
 
+# One-shot repair key for tags that were stored as their literal ``\uXXXX``
+# escape text instead of the characters they encode (pre ``ensure_ascii=False``
+# memory_writer fix). Bump (``..._v2``) to force a re-run.
+_TAGS_UNICODE_REPAIR_KEY = "tags_unicode_repair_v1"
+
+# Matches a single ``\uXXXX`` BMP escape sequence as literal text (a backslash,
+# a ``u``, then four hex digits) — what a mis-decoded tag still carries.
+_UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
+
 
 def create_tables(
     db: sqlite3.Connection,
@@ -456,6 +465,7 @@ def create_tables(
     )
 
     _backfill_chunk_links(db, meta)
+    _repair_unicode_escaped_tags(db, meta)
 
     # --- Entity extraction table ---
     db.execute("""
@@ -590,6 +600,84 @@ def _backfill_chunk_links(db: sqlite3.Connection, meta: MetaManager) -> int:
 
     meta.set_meta(_CHUNK_LINKS_BACKFILL_KEY, "done")
     return inserted
+
+
+def _decode_unicode_escaped(text: str) -> str:
+    """Decode literal ``\\uXXXX`` escape text, composing surrogate pairs.
+
+    Replacing each ``\\uXXXX`` token independently yields *lone* surrogate
+    code points for non-BMP characters (an emoji is two escapes, e.g.
+    ``\\ud83d\\ude00``). A UTF-16 ``surrogatepass`` round-trip recombines an
+    adjacent high+low pair back into the real code point so the result is a
+    str that SQLite can store. Strings with no escapes return unchanged.
+    """
+    decoded = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(0)[2:], 16)), text)
+    if decoded == text:
+        return text
+    try:
+        return decoded.encode("utf-16", "surrogatepass").decode("utf-16")
+    except UnicodeError:
+        # Lone/un-pairable surrogate — hand back the per-escape decode; the
+        # caller test-encodes before writing and skips anything un-encodable.
+        return decoded
+
+
+def _repair_unicode_escaped_tags(db: sqlite3.Connection, meta: MetaManager) -> int:
+    """Decode literal ``\\uXXXX`` escapes left in chunk tags by older ingest.
+
+    Tags written before the ``memory_writer`` ``ensure_ascii=False`` fix were
+    serialized as their JSON escape *text* (e.g. ``\\ucee4\\ub9ac...``) and the
+    markdown parser split the array by hand without JSON-decoding, so the
+    literal escape survived into ``ChunkMetadata.tags`` and the DB. This pass
+    walks the affected rows once, decodes the escapes to their characters,
+    de-duplicates (preserving order), and rewrites the row. It is idempotent —
+    completion is recorded in ``_memtomem_meta`` and clean tags (already
+    Hangul) carry no escape text, so re-runs are no-ops.
+
+    A row whose decoded tags cannot be UTF-8 encoded (un-pairable surrogate
+    junk) is left untouched rather than crash startup.
+
+    Returns the number of rows rewritten on this call (0 once recorded).
+    """
+    if meta.get_meta(_TAGS_UNICODE_REPAIR_KEY) == "done":
+        return 0
+
+    # ``ensure_ascii`` serialization means every non-ASCII tag's column text
+    # contains ``\u`` — clean *and* broken alike — so the LIKE is only a cheap
+    # pre-filter; the json.loads round-trip below is what tells them apart.
+    rows = db.execute("SELECT id, tags FROM chunks WHERE tags LIKE '%\\u%'").fetchall()
+
+    repaired = 0
+    for chunk_id, tags_json in rows:
+        if not tags_json:
+            continue
+        try:
+            tags = json.loads(tags_json)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(tags, list):
+            continue
+        seen: set[str] = set()
+        new_tags: list[str] = []
+        for tag in tags:
+            if isinstance(tag, str):
+                tag = _decode_unicode_escaped(tag)
+            if tag not in seen:
+                seen.add(tag)
+                new_tags.append(tag)
+        if new_tags == tags:
+            continue
+        payload = json.dumps(new_tags, ensure_ascii=False)
+        try:
+            payload.encode("utf-8")
+        except UnicodeEncodeError:
+            # Un-encodable (lone surrogate) — skip rather than fail the write.
+            continue
+        db.execute("UPDATE chunks SET tags=? WHERE id=?", (payload, chunk_id))
+        repaired += 1
+
+    meta.set_meta(_TAGS_UNICODE_REPAIR_KEY, "done")
+    return repaired
 
 
 def _migrate_chunks_uniqueness(db: sqlite3.Connection, *, has_vec_table: bool) -> None:

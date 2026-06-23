@@ -26,11 +26,16 @@ def append_entry(
     parses as YAML downstream. The chunker promotes ``> tags:`` into
     ``ChunkMetadata.tags`` and strips the header from chunk content (see
     ``memtomem.chunking.markdown.MarkdownChunker``).
+
+    ``ensure_ascii=False`` keeps non-ASCII tags (e.g. Hangul) as their
+    real characters in the file rather than ``\\uXXXX`` escape text. The
+    parser does not JSON-decode the array element-by-element, so escaped
+    text would otherwise survive verbatim into the stored tag.
     """
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    tag_line = f"\n> tags: {json.dumps(list(tags))}" if tags else ""
+    tag_line = f"\n> tags: {json.dumps(list(tags), ensure_ascii=False)}" if tags else ""
 
     # Skip heading if content already starts with one (e.g., from a template)
     stripped = content.strip()

@@ -8,6 +8,7 @@ content so it does not leak into BM25 / embedding inputs. See
 ``planning/mem-add-tags-blockquote-promote-rfc.md``.
 """
 
+import json
 from pathlib import Path
 
 from memtomem.chunking.markdown import MarkdownChunker
@@ -126,6 +127,32 @@ class TestSectionBlockquoteTags:
         chunks_double = _chunk(content_double)
         assert set(chunks_single[0].metadata.tags) == {"x", "y"}
         assert set(chunks_double[0].metadata.tags) == {"x", "y"}
+
+    def test_legacy_unicode_escaped_tags_decode_to_hangul(self):
+        """Pre-fix files wrote ``ensure_ascii`` escape text — decode it on read.
+
+        Older ``memory_writer`` emitted ``> tags: ["\\ucee4..."]`` (the literal
+        JSON escape sequence). The hand-split parser stored that verbatim, so
+        the tag cloud showed ``\\ucee4...`` instead of Hangul. The parser now
+        JSON-decodes the array, recovering the real characters from files
+        already on disk (and thus on re-index).
+        """
+        tags_in = ["커리큘럼설계", "재사용자산"]
+        escaped = json.dumps(tags_in)  # ensure_ascii=True → literal \uXXXX text
+        assert "\\u" in escaped, "test must reproduce the on-disk escaped shape"
+        content = (
+            "## 강의 설계\n"
+            "\n"
+            "> created: 2026-04-24T22:12:30+00:00\n"
+            f"> tags: {escaped}\n"
+            "\n"
+            "본문 텍스트.\n"
+        )
+        chunks = _chunk(content)
+        assert len(chunks) == 1
+        assert set(chunks[0].metadata.tags) == set(tags_in)
+        # The escape text must not survive into the stored tag.
+        assert not any("\\u" in t for t in chunks[0].metadata.tags)
 
     def test_block_list_shape_in_blockquote(self):
         """``> tags:`` followed by ``> - a`` / ``> - b`` block-list lines.

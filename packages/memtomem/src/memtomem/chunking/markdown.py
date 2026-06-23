@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -330,6 +331,17 @@ class MarkdownChunker:
         """
         value = value.strip()
         if value.startswith("[") and value.endswith("]"):
+            # Prefer strict JSON: this decodes ``\uXXXX`` escapes (the shape
+            # ``json.dumps(..., ensure_ascii=True)`` produced for older files)
+            # back to their characters and keeps quoted commas intact. Fall
+            # back to the lenient hand-split for non-JSON shapes that we also
+            # accept (single quotes ``['a']``, bare ``[a, b]``).
+            try:
+                parsed = json.loads(value)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(t).strip() for t in parsed if str(t).strip()]
             return [t.strip().strip("'\"") for t in value[1:-1].split(",") if t.strip()]
         if value:
             return [value.strip("'\"")]
