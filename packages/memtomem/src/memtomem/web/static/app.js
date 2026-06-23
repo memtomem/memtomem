@@ -7,6 +7,14 @@ const HOME_ACTIVITY_TIMELINE_LIMIT = 1000;
 // ── Early declarations (referenced before their section) ──
 const _HELP_VISIBLE_KEY = 'm2m-help-visible';
 
+// Safe localStorage read — returns null when storage is unavailable. Some
+// locked-down private modes throw on any access (not just setItem), so boot
+// reads must route through this or a locked-down browser aborts app.js at module
+// load, before the UI (and the first-run landing fallback) ever wires up.
+function _lsGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
 // ── Unified global state ──
 const STATE = {
   lastSettingsSection: null,
@@ -101,7 +109,7 @@ const STATE = {
 
 // ── C3: Theme init ──
 (function initTheme() {
-  const saved = localStorage.getItem('m2m-theme');
+  const saved = _lsGet('m2m-theme');
   const el = document.documentElement;
   if (saved === 'light') {
     el.setAttribute('data-theme', 'light');
@@ -7063,25 +7071,58 @@ qs('d-pin-btn').addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 
 function _loadSettings() {
-  return {
-    defaultTab: localStorage.getItem('m2m-default-tab') || 'search',
-  };
+  return { defaultTab: _lsGet('m2m-default-tab') || 'search' };
 }
+
+// S2.1 — a brand-new install lands on Home (orientation) instead of the empty
+// Search screen. "First run" means localStorage carries no app-owned state yet:
+// no key under the app's prefixes, including our own "seen" stamp. The prefix
+// scan keeps this robust as new persisted keys are added (search history, saved
+// queries, gateway state, …) so an existing user upgrading into this feature is
+// never misread as fresh and yanked off their usual landing.
+//
+// Exception: a few keys are written by the app itself on a cold boot and so are
+// present even on a genuinely fresh install — setIndexMode() persists the
+// applied default at module load (app.js:5570). Those are excluded below. The
+// invariant that this list is complete (no *other* boot-time write slips in
+// before we land) is pinned by the cold-boot first-run test, which lands on
+// Search instead of Home the moment a new boot-time write appears.
+const _BOOT_WRITTEN_LS_KEYS = new Set(['memtomem.index.mode']);
+function _hasPriorAppState() {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && (k.startsWith('m2m-') || k.startsWith('memtomem'))
+          && !_BOOT_WRITTEN_LS_KEYS.has(k)) return true;
+    }
+    return false;
+  } catch {
+    // Can't read storage (private mode) — treat as a returning user so we
+    // never force-route someone whose state we can't inspect.
+    return true;
+  }
+}
+function _isFirstRun() { return !_hasPriorAppState(); }
 
 // Deferred until DOMContentLoaded so sibling scripts (settings-config.js, etc.)
 // have parsed — activateTab('settings') calls loadConfig() defined there.
-document.addEventListener('DOMContentLoaded', () => {
-  const s = _loadSettings();
-  // top-k default is synced from server config via _syncSearchDefaults()
-  // Apply default tab only if no hash deep link is present
-  if (!location.hash.slice(1)) {
-    const currentActive = document.querySelector('.tab-btn.active');
-    const currentTab = currentActive ? currentActive.dataset.tab : null;
-    if (currentTab !== s.defaultTab) {
-      activateTab(s.defaultTab);
-    }
+function _applyLandingTab() {
+  // A deep-link hash is owned by the earlier hash handler — never override it.
+  if (location.hash.slice(1)) return;
+  const firstRun = _isFirstRun();
+  // Stamp the install as oriented, and only honor first-run routing if the
+  // stamp actually persisted — otherwise a private-mode session (setItem
+  // throws) would be force-routed to Home on every visit.
+  let stamped = false;
+  try { localStorage.setItem('m2m-app-initialized', '1'); stamped = true; } catch {}
+  const target = (firstRun && stamped) ? 'home' : _loadSettings().defaultTab;
+  const currentActive = document.querySelector('.tab-btn.active');
+  const currentTab = currentActive ? currentActive.dataset.tab : null;
+  if (currentTab !== target) {
+    activateTab(target);
   }
-});
+}
+document.addEventListener('DOMContentLoaded', _applyLandingTab);
 
 let _settingsRelease = null;
 function openSettingsModal() {
