@@ -657,14 +657,18 @@ def _repair_unicode_escaped_tags(db: sqlite3.Connection, meta: MetaManager) -> i
             continue
         if not isinstance(tags, list):
             continue
+        # Tags are contractually strings; a non-str element (e.g. a dict) is
+        # malformed and un-hashable for the dedup below — leave such a row
+        # untouched rather than crash startup.
+        if not all(isinstance(tag, str) for tag in tags):
+            continue
         seen: set[str] = set()
         new_tags: list[str] = []
         for tag in tags:
-            if isinstance(tag, str):
-                tag = _decode_unicode_escaped(tag)
-            if tag not in seen:
-                seen.add(tag)
-                new_tags.append(tag)
+            decoded = _decode_unicode_escaped(tag)
+            if decoded not in seen:
+                seen.add(decoded)
+                new_tags.append(decoded)
         if new_tags == tags:
             continue
         payload = json.dumps(new_tags, ensure_ascii=False)

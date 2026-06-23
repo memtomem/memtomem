@@ -189,3 +189,16 @@ class TestRepairUnicodeEscapedTags:
             _rerun_migration(db)  # must not raise
         finally:
             db.close()
+
+    def test_non_string_tag_element_left_untouched(self) -> None:
+        """A valid JSON array whose element is non-str (e.g. a dict) is malformed
+        and un-hashable for dedup — the row must be skipped, never crash."""
+        db = _connect()
+        try:
+            _initialize(db)
+            # ensure_ascii column text carries \u so the LIKE prefilter walks it.
+            _insert_chunk(db, "obj-1", tags_json=json.dumps([{"label": "가"}]))
+            _rerun_migration(db)  # must not raise
+            assert _stored_tags(db, "obj-1") == [{"label": "가"}]
+        finally:
+            db.close()
