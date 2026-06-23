@@ -2821,6 +2821,58 @@ body.show-retrieval-debug .score-detail-row[data-tooltip-debug]:hover::after {
 /* ── Sprint 4: Home Tab ── */
 .home-layout { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; }
 
+/* S2.3 — first-run orientation block (collapsible getting-started card). */
+.home-orientation {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+}
+.home-orientation > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.home-orientation > summary::-webkit-details-marker { display: none; }
+.home-orientation > summary::before {
+  content: '▸';
+  color: var(--muted);
+  font-size: 0.8rem;
+  transition: transform 0.15s ease;
+}
+.home-orientation[open] > summary::before { transform: rotate(90deg); }
+.home-orientation-intro { margin: 10px 0 12px; font-size: 0.84rem; color: var(--muted); }
+.home-orientation-steps { display: flex; flex-direction: column; gap: 10px; }
+.home-orientation-step { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.home-orientation-step-num {
+  flex: 0 0 auto;
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+  font-size: 0.78rem; font-weight: 600;
+}
+.home-orientation-step-text { flex: 1; min-width: 0; font-size: 0.86rem; color: var(--text); }
+.home-orientation-step .btn-primary,
+.home-orientation-step .btn-ghost { font-size: 0.8rem; padding: 5px 12px; white-space: nowrap; }
+
+/* The embedding/storage line is reference metadata, not a top-of-page callout;
+   demoted to a quiet footer row (strip the shared .config-hint card chrome). */
+#home-config-info {
+  background: transparent; border: none; padding: 0;
+  margin: 0; font-size: 0.72rem; opacity: 0.7;
+}
+
+/* Hide the heatmap's "sample" summary while the new-user orientation block is
+   expanded — the sampled-day phrasing is confusing before there's real data. */
+.home-layout.orientation-open .activity-summary-sample { display: none; }
+
 /* C. Quick Search */
 .home-search-row { display: flex; justify-content: center; }
 .home-search-wrap { display: flex; gap: 8px; width: 100%; max-width: 600px; }
