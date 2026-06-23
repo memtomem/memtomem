@@ -142,6 +142,11 @@ window.addEventListener('langchange', () => {
   // from path)`` / ``(from config)`` suffix translates on toggle. Without
   // this re-sync the placeholder stays in the previous locale's wording.
   _syncIndexHints();
+  // The search-config status line is rendered imperatively via ``t()`` (it
+  // interpolates a {count}), so it must re-render on langchange too — both to
+  // pick up the active locale after init and to follow the language toggle.
+  // Skipped harmlessly when serverConfig hasn't loaded yet.
+  _syncSearchConfig();
 });
 
 // Compute the config-derived placeholder (no path entered yet). Pulled
@@ -255,21 +260,17 @@ function _syncSearchConfig() {
   const s = STATE.serverConfig?.search;
   if (!s) { hide(el); return; }
 
-  // Standard info (always shown as text)
+  // Always-on text: plain-language summary only. Retrieval internals (the
+  // BM25/Dense/RRF/rerank acronyms) are jargon for first-time users, so the
+  // default config stays silent here — non-default tweaks still surface as the
+  // clickable badges below, and the full knobs live in Settings → Config.
   const textParts = [];
-  if (s.default_top_k) textParts.push(`Top-K: ${s.default_top_k}`);
-  const retrievers = [];
-  if (s.enable_bm25 !== false) retrievers.push('BM25');
-  if (s.enable_dense !== false) retrievers.push('Dense');
-  textParts.push(retrievers.length ? retrievers.join('+') : 'No retriever');
-  if (s.rrf_k) textParts.push(`RRF k=${s.rrf_k}`);
-
-  const rerank = STATE.serverConfig?.rerank;
-  if (rerank) {
-    textParts.push(rerank.enabled
-      ? `Rerank: ${rerank.provider || 'unknown'}/${rerank.model || 'unknown'}`
-      : 'Rerank: off');
+  if (s.default_top_k) textParts.push(t('search.status_results', { count: s.default_top_k }));
+  if (s.enable_bm25 !== false && s.enable_dense !== false) {
+    textParts.push(t('search.status_hybrid'));
   }
+  const rerank = STATE.serverConfig?.rerank;
+  if (rerank?.enabled) textParts.push(t('search.status_rerank_on'));
 
   // Non-default settings (shown as clickable badges)
   const badges = [];

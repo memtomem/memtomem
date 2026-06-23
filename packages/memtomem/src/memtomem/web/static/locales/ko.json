@@ -107,7 +107,10 @@
   "home.pin.remove_label": "제거",
   "home.pin.remove_title": "오래된 고정 제거",
 
-  "search.help": "인덱싱된 기억을 시맨틱 검색합니다. 필터: 태그, 네임스페이스, 유형, 점수. 파이프라인: BM25 (키워드) + Dense (시맨틱) → RRF 융합.",
+  "search.help": "인덱싱된 기억을 의미 기반으로 검색합니다. 태그·네임스페이스·유형·관련도로 필터링하세요.",
+  "search.status_results": "결과 최대 {count}개",
+  "search.status_hybrid": "하이브리드 검색",
+  "search.status_rerank_on": "재정렬 켜짐",
   "search.filter_toggle_title": "태그, 유형, 정렬 등 필터 표시/숨기기",
   "search.filter_toggle": "▾ 필터",
   "search.filter_count_aria_one": "필터 {count}개 적용됨",
