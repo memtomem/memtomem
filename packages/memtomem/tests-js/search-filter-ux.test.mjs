@@ -197,6 +197,32 @@ describe('Search filters - add/remove UX', () => {
     expect(window.STATE.showRetrievalDebug).toBe(false);
     expect(document.body.classList.contains('show-retrieval-debug')).toBe(false);
   });
+
+  it('shows a friendly namespace label while keeping the full id reachable (S1.4)', () => {
+    const longNs = 'claude:-Users-pdstudio-Work-agent-harness-memtomem';
+    window.renderResults([{
+      chunk: {
+        id: 'ns1', content: 'content', source_file: '/repo/notes.md',
+        chunk_type: 'paragraph', start_line: 1, end_line: 3,
+        heading_hierarchy: [], tags: [], namespace: longNs,
+        created_at: '2026-05-13T00:00:00Z', updated_at: '2026-05-13T00:00:00Z',
+        target_scope: 'user',
+      },
+      score: 0.03, rank: 1, source: 'fused',
+    }], { bm25_candidates: 1, dense_candidates: 1, fused_total: 1, final_total: 1 });
+
+    // List badge: truncated label, full id in title (not the raw 50-char id).
+    const listBadge = document.querySelector('.result-item .badge-ns');
+    expect(listBadge.textContent).toBe('claude: .../harness/memtomem');
+    expect(listBadge.getAttribute('title')).toBe(longNs);
+
+    // Detail panel: same friendly label, full id in title + aria-label.
+    const nsEl = document.getElementById('d-namespace');
+    expect(nsEl.hidden).toBe(false);
+    expect(nsEl.textContent).toBe('claude: .../harness/memtomem');
+    expect(nsEl.getAttribute('title')).toBe(longNs);
+    expect(nsEl.getAttribute('aria-label')).toBe(`namespace ${longNs}`);
+  });
 });
 
 describe('Search config hint stays jargon-free', () => {

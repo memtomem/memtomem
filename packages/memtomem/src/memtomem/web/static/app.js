@@ -2200,7 +2200,11 @@ function _renderChunkDist(distribution) {
 }
 
 // G. Namespace Summary
-function _formatHomeNsLabel(nsName) {
+// Shared friendly-label formatter for long namespace ids (Home chart, search
+// result badge, detail panel). Short ids (≤28 chars) pass through unchanged;
+// long auto-namespaces collapse to "provider: .../tail". The full id is always
+// preserved by callers in title/aria-label. Filter dropdowns keep full names.
+function formatNsLabel(nsName) {
   const raw = String(nsName || '');
   if (raw.length <= 28) return raw;
 
@@ -2252,7 +2256,7 @@ function _renderNsChart(namespaces) {
     const color = ns.color || palette[i % palette.length];
     const nsName = String(ns.namespace || '');
     const fullNs = escapeHtml(nsName);
-    const shortNs = escapeHtml(_formatHomeNsLabel(nsName));
+    const shortNs = escapeHtml(formatNsLabel(nsName));
     const nsAttr = escapeAttr(nsName);
     const actionLabel = escapeAttr(_homeNsActionLabel(nsName, ns.chunk_count));
     return `<div class="home-bar-row home-ns-row">
@@ -2784,7 +2788,7 @@ function _buildResultItem(r) {
   const ariaParts = [fname, lineRange, nsLabel, age].filter(Boolean);
   item.setAttribute('aria-label', ariaParts.join(', '));
   const nsBadge = r.chunk.namespace && r.chunk.namespace !== 'default'
-    ? ` <span class="badge badge-ns">${escapeHtml(r.chunk.namespace)}</span>` : '';
+    ? ` <span class="badge badge-ns" title="${escapeAttr(r.chunk.namespace)}">${escapeHtml(formatNsLabel(r.chunk.namespace))}</span>` : '';
   // ADR-0016 §7 canonical-residency tier badge. Default-omit for the
   // user tier so the common case stays visually quiet — only the
   // non-default tiers (project_shared / project_local) earn pixels.
@@ -3125,9 +3129,14 @@ function showDetail(r) {
   qs('d-type').textContent = r.chunk.chunk_type.replace('_', ' ');
   const nsEl = qs('d-namespace');
   if (r.chunk.namespace && r.chunk.namespace !== 'default') {
-    nsEl.textContent = r.chunk.namespace;
+    // Friendly label; full id preserved in title + aria-label.
+    nsEl.textContent = formatNsLabel(r.chunk.namespace);
+    nsEl.title = r.chunk.namespace;
+    nsEl.setAttribute('aria-label', `namespace ${r.chunk.namespace}`);
     show(nsEl);
   } else {
+    nsEl.removeAttribute('title');
+    nsEl.removeAttribute('aria-label');
     hide(nsEl);
   }
   const srcEl = qs('d-source');

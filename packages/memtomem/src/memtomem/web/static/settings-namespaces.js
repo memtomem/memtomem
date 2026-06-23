@@ -586,7 +586,7 @@ _renderNsChart = function(namespaces) {
     const c = ns.color || palette[i % palette.length];
     const nsName = String(ns.namespace || '');
     const nsAttr = escapeAttr(nsName);
-    const label = escapeHtml(_formatHomeNsLabel(nsName));
+    const label = escapeHtml(formatNsLabel(nsName));
     const actionLabel = escapeAttr(_homeNsActionLabel(nsName, ns.chunk_count));
     return `<div class="ns-legend-item">
       <button class="ns-legend-action" type="button" data-home-ns="${nsAttr}" aria-label="${actionLabel}">
