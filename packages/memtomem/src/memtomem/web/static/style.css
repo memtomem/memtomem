@@ -3046,6 +3046,11 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
   .header-sys-info { display: none; }
   .header-sep { display: none; }
   .stat-pill { font-size: 0.7rem; }
+  /* The glossary "i" tip is flex-shrink:0, so when the info bar is squeezed
+     on narrow screens it overflows the bar and lands on top of #settings-btn,
+     intercepting its clicks. The same explanation is shown in the welcome card
+     and the search-welcome units line, so drop the redundant header tip here. */
+  .header-info-bar .help-tip { display: none; }
 
   /* Search bar/filters: stack on small screens */
   .search-bar { flex-wrap: wrap; padding: 10px 12px; }
