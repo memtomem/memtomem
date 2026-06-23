@@ -129,6 +129,7 @@
   "search.tag_filter_title": "Comma-separated tags to include in results",
   "search.min_relevance_aria": "Minimum relevance score",
   "search.relevance_label": "Relevance",
+  "search.relevance_tooltip": "How closely this result matches your query.",
   "search.advanced_details": "Advanced details",
   "search.ns_all": "All Namespaces",
   "search.ns_filter_title": "Limit search to a specific namespace",

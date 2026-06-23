@@ -129,6 +129,7 @@
   "search.tag_filter_title": "결과에 포함할 태그 (쉼표로 구분)",
   "search.min_relevance_aria": "최소 관련성 점수",
   "search.relevance_label": "관련도",
+  "search.relevance_tooltip": "이 결과가 검색어와 얼마나 일치하는지 나타냅니다.",
   "search.advanced_details": "고급 세부정보",
   "search.ns_all": "전체 네임스페이스",
   "search.ns_filter_title": "특정 네임스페이스로 제한",

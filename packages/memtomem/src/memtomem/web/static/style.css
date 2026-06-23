@@ -2574,6 +2574,14 @@ select:focus-visible {
 .results-summary-total { font-size: 0.72rem; color: var(--muted); margin-right: 2px; }
 .results-summary-pipeline { font-size: 0.68rem; color: var(--muted); font-family: var(--mono); margin-left: auto; opacity: 0.7; }
 .result-debug-meta { display: none !important; }
+/* Retrieval internals (raw score, fused/bm25 source badge, RRF math) stay
+   hidden for first-time users. Expanding "Advanced details" sets
+   body.show-retrieval-debug, which reveals them list-wide + in the detail
+   panel and swaps the friendly score tooltip for the raw retrieval math. */
+body.show-retrieval-debug .result-debug-meta { display: inline-block !important; }
+body.show-retrieval-debug .score-detail-row[data-tooltip-debug]:hover::after {
+  content: attr(data-tooltip-debug);
+}
 .results-debug-details {
   margin-left: auto;
   font-size: 0.68rem;

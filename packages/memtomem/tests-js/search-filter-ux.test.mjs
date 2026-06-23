@@ -145,7 +145,57 @@ describe('Search filters - add/remove UX', () => {
     expect(badges).toEqual(['Relevance 100%', 'Relevance 1%']);
     expect(badges.join(' ')).not.toContain('-');
     expect(document.getElementById('d-score').textContent).toBe('rank #1 · 100%');
-    expect(document.getElementById('d-score-detail').dataset.tooltip).toContain('raw score -0.420000');
+
+    // S1.2: raw score + retrieval source are debug-only (hidden by default via
+    // .result-debug-meta), and the score-bar tooltip is plain-language. The raw
+    // retrieval math moves to data-tooltip-debug, surfaced only in debug mode.
+    expect(document.getElementById('d-score').classList.contains('result-debug-meta')).toBe(true);
+    expect(document.getElementById('d-source').classList.contains('result-debug-meta')).toBe(true);
+    const detailRow = document.getElementById('d-score-detail');
+    expect(detailRow.dataset.tooltip).toBe('How closely this result matches your query.');
+    expect(detailRow.dataset.tooltip).not.toMatch(/RRF|raw score|percentile/);
+    expect(detailRow.dataset.tooltipDebug).toContain('raw score -0.420000');
+  });
+
+  it('keeps retrieval internals hidden until Advanced details is expanded', () => {
+    const mkResult = (id, score, rank, source) => ({
+      chunk: {
+        id, content: `content ${id}`, source_file: `/repo/${id}.md`,
+        chunk_type: 'paragraph', start_line: 1, end_line: 3,
+        heading_hierarchy: [], tags: [], namespace: 'default',
+        created_at: '2026-05-13T00:00:00Z', updated_at: '2026-05-13T00:00:00Z',
+        target_scope: 'user',
+      },
+      score, rank, source,
+    });
+
+    expect(document.body.classList.contains('show-retrieval-debug')).toBe(false);
+
+    window.renderResults(
+      [mkResult('a', 0.03, 1, 'fused'), mkResult('b', 0.02, 2, 'bm25')],
+      { bm25_candidates: 2, dense_candidates: 2, fused_total: 2, final_total: 2 },
+    );
+
+    // Default render: debug class absent, raw per-result source badge carries
+    // the hide hook.
+    expect(document.body.classList.contains('show-retrieval-debug')).toBe(false);
+    expect(document.querySelector('.result-item .badge-retrieval').classList
+      .contains('result-debug-meta')).toBe(true);
+
+    // Expanding "Advanced details" flips the app-wide reveal.
+    const details = document.querySelector('.results-debug-details');
+    expect(details).not.toBeNull();
+    expect(details.open).toBe(false);
+    details.open = true;
+    details.dispatchEvent(new window.Event('toggle'));
+    expect(window.STATE.showRetrievalDebug).toBe(true);
+    expect(document.body.classList.contains('show-retrieval-debug')).toBe(true);
+
+    // Collapsing it hides them again.
+    details.open = false;
+    details.dispatchEvent(new window.Event('toggle'));
+    expect(window.STATE.showRetrievalDebug).toBe(false);
+    expect(document.body.classList.contains('show-retrieval-debug')).toBe(false);
   });
 });
 
