@@ -2433,10 +2433,14 @@ qs('home-search-btn').addEventListener('click', () => {
 });
 qs('home-index-btn').addEventListener('click', () => {
   activateTab('index');
+  // These quick actions are folder-flow specific (focus index-path / set
+  // index-force), so force folder mode — the default is now compose (S1.6).
+  setIndexMode('folder');
   showQuickActionToast('toast.quick_action.open_index', 'index-path');
 });
 qs('home-reindex-btn').addEventListener('click', () => {
   activateTab('index');
+  setIndexMode('folder');
   qs('index-force').checked = true;
   showQuickActionToast('toast.quick_action.reindex_ready', 'index-path');
 });
@@ -5520,7 +5524,10 @@ function _readIndexMode() {
     const v = localStorage.getItem(INDEX_MODE_LS_KEY);
     if (v && INDEX_MODES.includes(v)) return v;
   } catch (_e) { /* private mode */ }
-  return 'folder';
+  // S1.6: a new install defaults to the most intuitive "New memory" (compose)
+  // mode rather than the technical folder scan. Returning users keep their
+  // saved choice (handled above).
+  return 'compose';
 }
 
 function setIndexMode(mode) {
