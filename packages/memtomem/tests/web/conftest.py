@@ -85,6 +85,28 @@ def mm_web_url() -> Iterator[str]:
         thread.join(timeout=5.0)
 
 
+@pytest.fixture(autouse=True)
+def _returning_install(request) -> None:
+    """Boot every browser spec as a returning install (S2.1).
+
+    S2.1 routes a *genuine* first run — a fresh context with no app-owned
+    localStorage key — to the Home tab for orientation. These specs each open a
+    fresh browser context, so without a seeded "seen" sentinel they would all
+    land on Home and fail the moment they touch a Search-tab element (tag
+    filters, result snippets, the skip-link to ``#main``). Seeding the sentinel
+    before navigation restores the historical Search default; a spec that wants
+    the first-run landing can clear it with its own ``add_init_script``.
+
+    Gated on the ``browser`` marker and requests ``page`` lazily so the
+    non-browser specs in this directory (CSS / asset-pin checks) aren't forced
+    to launch a browser in the no-browser test job.
+    """
+    if request.node.get_closest_marker("browser") is None:
+        return
+    page = request.getfixturevalue("page")
+    page.add_init_script("try { localStorage.setItem('m2m-app-initialized', '1'); } catch (e) {}")
+
+
 def install_default_stubs(page) -> None:
     """Stub every endpoint the SPA hits during boot so the page renders
     cleanly without any real components wired up.

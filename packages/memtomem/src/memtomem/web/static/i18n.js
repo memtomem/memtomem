@@ -8,7 +8,10 @@ const I18N = (() => {
   let _lang = 'en';
 
   function _detect() {
-    const stored = localStorage.getItem(_STORAGE_KEY);
+    // Read defensively — some locked-down private modes throw on any access,
+    // and a thrown _detect would abort i18n.init() during boot.
+    let stored = null;
+    try { stored = localStorage.getItem(_STORAGE_KEY); } catch { /* locked-down storage */ }
     if (stored && _SUPPORTED.includes(stored)) return stored;
     if (navigator.language && navigator.language.startsWith('ko')) return 'ko';
     return 'en';
@@ -118,7 +121,7 @@ const I18N = (() => {
   async function setLang(lang) {
     if (!_SUPPORTED.includes(lang)) return;
     _lang = lang;
-    localStorage.setItem(_STORAGE_KEY, lang);
+    try { localStorage.setItem(_STORAGE_KEY, lang); } catch { /* locked-down storage */ }
     document.documentElement.lang = lang;
     await _load(lang);
     applyDOM();

@@ -102,6 +102,8 @@ export async function bootApp({
   scripts = ['i18n.js', 'app.js'],
   state = {},
   apiResponses = {},
+  firstRun = false,
+  storageBlock = [],
 } = {}) {
   let html = readStatic('index.html');
   // Strip every <script ...>...</script> element so JSDOM's loader
@@ -118,6 +120,21 @@ export async function bootApp({
 
   shimBrowserAPIs(window);
   window.fetch = makeFetchStub(apiResponses);
+
+  // Default tests to a returning install so boot lands on the historical Search
+  // default. S2.1 routes a *genuine* first run (empty localStorage) to Home,
+  // which triggers a dashboard load that would clobber test-seeded STATE. Tests
+  // exercising the first-run landing opt in with ``bootApp({ firstRun: true })``.
+  if (!firstRun) {
+    try { window.localStorage.setItem('m2m-app-initialized', '1'); } catch {}
+  }
+
+  // Simulate a locked-down storage (some private modes throw on access). Applied
+  // after the seed and before scripts load so a module-load read that isn't
+  // guarded would abort app.js — the boot must survive it. e.g. ['getItem'].
+  for (const method of storageBlock) {
+    window.Storage.prototype[method] = () => { throw new Error(`localStorage.${method} blocked`); };
+  }
 
   for (const filename of scripts) {
     const code = readStatic(filename);
