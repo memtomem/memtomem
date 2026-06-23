@@ -2800,6 +2800,11 @@ function _buildResultItem(r) {
   const scorePct = scoreView.percent;
   const barColor = scorePct > 70 ? 'var(--green)' : scorePct > 40 ? 'var(--accent)' : 'var(--muted)';
   const relevanceLabel = _relevanceLabel();
+  // The score badge is always visible and communicates relevance, so its hover
+  // title stays plain-language in every mode (no stale render-time state). The
+  // raw per-result retrieval score lives in the detail panel's #d-score, which
+  // the Advanced-details reveal un-hides. (aria-label is already friendly.)
+  const scoreTitle = _relevanceTooltip();
 
   const body = document.createElement('div');
   body.className = 'result-body';
@@ -2807,7 +2812,7 @@ function _buildResultItem(r) {
     <div class="result-item-row1">
       <span class="result-type-dot" style="background:${fileTypeColor(r.chunk.source_file || '')}"></span>
       <span class="result-filename">${escapeHtml(fname)}</span>
-      <span class="score-badge" title="${escapeAttr(scoreView.tooltip)}" aria-label="${escapeAttr(relevanceLabel)} ${escapeAttr(scoreView.label)}">${escapeHtml(relevanceLabel)} ${escapeHtml(scoreView.label)}</span>
+      <span class="score-badge" title="${escapeAttr(scoreTitle)}" aria-label="${escapeAttr(relevanceLabel)} ${escapeAttr(scoreView.label)}">${escapeHtml(relevanceLabel)} ${escapeHtml(scoreView.label)}</span>
       <span class="badge badge-retrieval badge-retrieval--${escapeAttr(r.source)} result-debug-meta">${escapeHtml(r.source)}</span>
       ${nsBadge}${tierBadge}${validityBadge}
     </div>

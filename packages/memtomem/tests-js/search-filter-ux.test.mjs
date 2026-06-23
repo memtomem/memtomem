@@ -141,10 +141,16 @@ describe('Search filters - add/remove UX', () => {
       final_total: 2,
     });
 
-    const badges = [...document.querySelectorAll('.result-item .score-badge')].map(el => el.textContent);
+    const scoreBadges = [...document.querySelectorAll('.result-item .score-badge')];
+    const badges = scoreBadges.map(el => el.textContent);
     expect(badges).toEqual(['Relevance 100%', 'Relevance 1%']);
     expect(badges.join(' ')).not.toContain('-');
     expect(document.getElementById('d-score').textContent).toBe('rank #1 · 100%');
+
+    // S1.2: the always-visible score badge's hover title is plain-language by
+    // default — it must NOT leak the raw "Raw reranker score …" tooltip.
+    expect(scoreBadges[0].getAttribute('title')).toBe('How closely this result matches your query.');
+    expect(scoreBadges.map(b => b.getAttribute('title')).join(' ')).not.toMatch(/Raw|percentile|score -/);
 
     // S1.2: raw score + retrieval source are debug-only (hidden by default via
     // .result-debug-meta), and the score-bar tooltip is plain-language. The raw
@@ -196,6 +202,46 @@ describe('Search filters - add/remove UX', () => {
     details.dispatchEvent(new window.Event('toggle'));
     expect(window.STATE.showRetrievalDebug).toBe(false);
     expect(document.body.classList.contains('show-retrieval-debug')).toBe(false);
+  });
+
+  it('keeps the score-badge title friendly across the live Advanced-details toggle', () => {
+    // Drive the real user path (render default → expand Advanced details), not
+    // a pre-seeded STATE, so a stale-on-toggle reintroduction would be caught.
+    const FRIENDLY = 'How closely this result matches your query.';
+    const stats = { bm25_candidates: 1, dense_candidates: 1, fused_total: 1, final_total: 1 };
+    const mk = (id) => ({
+      chunk: {
+        id, content: 'content', source_file: `/repo/${id}.md`,
+        chunk_type: 'paragraph', start_line: 1, end_line: 3,
+        heading_hierarchy: [], tags: [], namespace: 'default',
+        created_at: '2026-05-13T00:00:00Z', updated_at: '2026-05-13T00:00:00Z',
+        target_scope: 'user',
+      },
+      score: 0.0302, rank: 1, source: 'fused',
+    });
+
+    // Default render (debug off): badge title is plain-language.
+    window.renderResults([mk('a')], stats);
+    let badge = document.querySelector('.result-item .score-badge');
+    expect(badge.getAttribute('title')).toBe(FRIENDLY);
+
+    // Live-toggle Advanced details ON — the already-rendered badge title must
+    // NOT go stale/raw; the raw score instead becomes reachable via the
+    // now-revealed detail-panel #d-score.
+    const details = document.querySelector('.results-debug-details');
+    details.open = true;
+    details.dispatchEvent(new window.Event('toggle'));
+    expect(window.STATE.showRetrievalDebug).toBe(true);
+    expect(badge.getAttribute('title')).toBe(FRIENDLY);
+    expect(badge.getAttribute('title')).not.toMatch(/Raw|score 0\./);
+    expect(document.getElementById('d-score').classList.contains('result-debug-meta')).toBe(true);
+    expect(document.getElementById('d-score').title).toMatch(/Raw fused score/);
+
+    // A fresh render while debug is genuinely on (real state) still produces a
+    // plain-language badge title.
+    window.renderResults([mk('b')], stats);
+    badge = document.querySelector('.result-item .score-badge');
+    expect(badge.getAttribute('title')).toBe(FRIENDLY);
   });
 
   it('shows a friendly namespace label while keeping the full id reachable (S1.4)', () => {
