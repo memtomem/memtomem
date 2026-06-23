@@ -107,7 +107,10 @@
   "home.pin.remove_label": "Remove",
   "home.pin.remove_title": "Remove stale pin",
 
-  "search.help": "Semantic search across indexed memories. Filters: tag, namespace, type, score. Pipeline: BM25 (keyword) + Dense (semantic) → RRF fusion.",
+  "search.help": "Semantic search across your indexed memories. Filter by tag, namespace, type, or relevance.",
+  "search.status_results": "Up to {count} results",
+  "search.status_hybrid": "Hybrid search",
+  "search.status_rerank_on": "Reranking on",
   "search.filter_toggle_title": "Show/hide tag, type, sort and other filters",
   "search.filter_toggle": "▾ Filters",
   "search.filter_count_aria_one": "{count} filter applied",

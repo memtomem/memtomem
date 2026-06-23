@@ -149,37 +149,68 @@ describe('Search filters - add/remove UX', () => {
   });
 });
 
-describe('Search config reranker visibility', () => {
-  it('shows current reranker provider, model, and pool in the Search tab hint', async () => {
+describe('Search config hint stays jargon-free', () => {
+  const SERVER_CONFIG = {
+    search: {
+      default_top_k: 10,
+      enable_bm25: true,
+      enable_dense: true,
+      rrf_k: 60,
+      rrf_weights: [1, 1],
+      tokenizer: 'unicode61',
+    },
+    rerank: {
+      enabled: true,
+      provider: 'fastembed',
+      model: 'jinaai/jina-reranker-v2-base-multilingual',
+      oversample: 2,
+      min_pool: 20,
+      max_pool: 200,
+    },
+  };
+
+  it('summarizes config in plain language, not raw retrieval acronyms', async () => {
     const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'settings-config.js'] });
     const { window } = dom;
-    const { document } = window;
+    const { document, I18N } = window;
+    await I18N.init(); // load the real locale so t() returns translated strings
 
-    window.STATE.serverConfig = {
-      search: {
-        default_top_k: 10,
-        enable_bm25: true,
-        enable_dense: true,
-        rrf_k: 60,
-        rrf_weights: [1, 1],
-        tokenizer: 'unicode61',
-      },
-      rerank: {
-        enabled: true,
-        provider: 'fastembed',
-        model: 'jinaai/jina-reranker-v2-base-multilingual',
-        oversample: 2,
-        min_pool: 20,
-        max_pool: 200,
-      },
-    };
-
+    window.STATE.serverConfig = SERVER_CONFIG;
     window._syncConfigToUI();
 
     const hint = document.getElementById('search-config-info');
     expect(hint.hidden).toBe(false);
-    expect(hint.textContent).toContain('Rerank: fastembed/jinaai/jina-reranker-v2-base-multilingual');
+    // Localized plain-language summary — no raw i18n keys leaked.
+    expect(hint.textContent).toContain('Up to 10 results');
+    expect(hint.textContent).toContain('Hybrid search');
+    expect(hint.textContent).not.toContain('search.status_');
+    // Non-default reranker tuning still surfaces as a clickable badge.
     expect(hint.textContent).toContain('Pool 20-200 ×2');
+    // First-time users must not meet retrieval-engine jargon in the always-on
+    // summary: no acronyms, and no raw provider/model id leak.
+    for (const jargon of ['BM25', 'Dense', 'RRF', 'Top-K', 'jina-reranker-v2-base-multilingual']) {
+      expect(hint.textContent).not.toContain(jargon);
+    }
+  });
+
+  it('re-renders the hint on langchange (i18n init-order + toggle) in the active locale', async () => {
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'settings-config.js'] });
+    const { window } = dom;
+    const { document, I18N } = window;
+    await I18N.init();
+
+    window.STATE.serverConfig = SERVER_CONFIG;
+    // The hint is built imperatively with ``t()``; switching the locale fires
+    // ``langchange``, which must re-render it in the new language (not freeze
+    // the previous render or raw keys).
+    await I18N.setLang('ko');
+
+    const hint = document.getElementById('search-config-info');
+    expect(hint.hidden).toBe(false);
+    expect(hint.textContent).toContain('결과 최대 10개');
+    expect(hint.textContent).toContain('하이브리드 검색');
+    expect(hint.textContent).not.toContain('search.status_');
+    expect(hint.textContent).not.toContain('Up to 10 results');
   });
 });
 
