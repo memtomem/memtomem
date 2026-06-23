@@ -147,6 +147,9 @@ window.addEventListener('langchange', () => {
   // pick up the active locale after init and to follow the language toggle.
   // Skipped harmlessly when serverConfig hasn't loaded yet.
   _syncSearchConfig();
+  // The Home embedding/storage line is likewise t()-rendered (S2.3); relocalize
+  // it on toggle. Harmless no-op until serverConfig has loaded.
+  _syncHomeConfig();
 });
 
 // Compute the config-derived placeholder (no path entered yet). Pulled
@@ -243,10 +246,10 @@ function _syncHomeConfig() {
     const model = emb.model || 'unknown';
     const provider = emb.provider || 'unknown';
     const dim = emb.dimension || '?';
-    parts.push(`Embedding: ${provider}/${model} (${dim}d)`);
+    parts.push(`${t('home.config.embedding_label')}: ${provider}/${model} (${dim}d)`);
   }
   const stor = STATE.serverConfig?.storage;
-  if (stor?.backend) parts.push(`Storage: ${stor.backend}`);
+  if (stor?.backend) parts.push(`${t('home.config.storage_label')}: ${stor.backend}`);
   if (parts.length) {
     el.textContent = parts.join(' \u00B7 ');
     show(el);

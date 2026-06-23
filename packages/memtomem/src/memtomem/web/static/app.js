@@ -123,6 +123,7 @@ const STATE = {
     loadPrivacyPatterns();
     renderRecentChips();
     _initSearchWelcome();
+    _initHomeOrientation();
     _initTabHelp();
     // Server-bound indicator hydration (#582 item 4.11). Restores the
     // header pill if a run is in flight (page-reload survival, second-
@@ -2048,7 +2049,7 @@ function _renderActivityMap(chunks, options) {
       { total: totalCount, active: activeDays, last7: last7Count, date: mostActiveDate, count: mostActiveCount },
       `${totalCount} chunks across ${activeDays} active days. ${last7Count} chunks in the last 7 days. Most active day: ${mostActiveDate}, ${mostActiveCount} chunks.`,
     );
-  html += `<div class="activity-summary" aria-label="${escapeAttr(summaryAria)}">`;
+  html += `<div class="activity-summary${isSample ? ' activity-summary-sample' : ''}" aria-label="${escapeAttr(summaryAria)}">`;
   if (isSample) {
     html += `<span>${escapeHtml(tr('home.activity.summary_sample', { count: chunks.length }, `Recent sample: ${chunks.length}`))}</span>`;
     html += `<span>${escapeHtml(tr('home.activity.summary_sample_active_days', { count: activeDays }, `Sample active days: ${activeDays}`))}</span>`;
@@ -6723,6 +6724,29 @@ function _initSearchWelcome() {
   qs('search-welcome-add')?.addEventListener('click', () => activateTab('index'));
   qs('search-welcome-search')?.addEventListener('click', () => qs('search-input')?.focus());
   _syncWelcomeVisibility();
+}
+
+// S2.3 — first-run Home orientation block. It's a <details open>, so the first
+// visit lands expanded; we persist the collapse choice (m2m-home-orientation-
+// collapsed) and mirror the open state onto .home-layout so the activity
+// heatmap's confusing "sample" summary stays hidden while a new user is still
+// orienting. The three CTAs jump to the add → connect → search journey.
+function _initHomeOrientation() {
+  const details = qs('home-orientation');
+  if (!details) return;
+  const layout = details.closest('.home-layout');
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('m2m-home-orientation-collapsed') === '1'; } catch {}
+  if (collapsed) details.open = false;
+  const syncLayout = () => layout?.classList.toggle('orientation-open', details.open);
+  syncLayout();
+  details.addEventListener('toggle', () => {
+    try { localStorage.setItem('m2m-home-orientation-collapsed', details.open ? '0' : '1'); } catch {}
+    syncLayout();
+  });
+  qs('home-orientation-add')?.addEventListener('click', () => activateTab('index'));
+  qs('home-orientation-connect')?.addEventListener('click', () => activateTab('context-gateway'));
+  qs('home-orientation-search')?.addEventListener('click', () => activateTab('search'));
 }
 
 // ---------------------------------------------------------------------------
