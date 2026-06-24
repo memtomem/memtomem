@@ -2835,3 +2835,119 @@ class TestConfigPanelI18n:
                 f"Config render path no longer references {needle!r} — the panel "
                 "may have stopped localizing."
             )
+
+
+class TestSearchSurfaceJargonFree:
+    """S3.3 — the default search surface must stay free of retrieval-engine
+    jargon. Stage 1 removed BM25/Dense/RRF/Top-K from ``search.help`` and hid
+    the retrieval funnel behind the "Advanced details" disclosure; Stage 3 adds
+    a regression backstop so the acronyms can't creep back into the first-time
+    user's view. The terms are *defined* once in the ``glossary.*`` keys (and in
+    the Config panel's own guides), so those namespaces are out of scope here —
+    this guard only watches the ``search.*`` copy and the help-tip prose that
+    renders inside the results panel.
+    """
+
+    # Retrieval internals a first-time user should never meet on the default
+    # search surface. ``re.ASCII`` makes ``\b`` use ASCII word chars only — so a
+    # Latin acronym glued to a Korean particle ("BM25는", "Dense는", "RRF가")
+    # still sits at an ASCII word boundary and trips the guard (a Unicode ``\b``
+    # treats "25" and "는" as both-word, leaving no boundary, and misses it).
+    # Case-folded, so "BM25", "Bm25", "top-k", "top k", "TopK" all match.
+    # ``dense`` stays ASCII-bounded so "condensed" / the "bm25_candidates"
+    # identifier are excluded; ``rerank`` is intentionally NOT here — "Reranking
+    # on" is the accepted plain-language status label (``search.status_rerank_on``).
+    _JARGON_RE = re.compile(
+        r"\b(bm25|rrf|top[- ]?k|mmr|dense|reciprocal rank)\b", re.IGNORECASE | re.ASCII
+    )
+
+    def test_search_surface_jargon_free(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Every ``search.*`` value (both locales) must be jargon-free. The
+        acronyms live single-source in ``glossary.*`` and the Config guides; the
+        search microcopy abstracts them ("Hybrid search", "Relevance",
+        "Reranking on"). A new search string carrying BM25/RRF/Top-K/MMR/Dense
+        fails here — surface the friendly term and let the glossary define the
+        acronym."""
+        leaks: list[str] = []
+        for name, locale in [("en", en), ("ko", ko)]:
+            for key, value in locale.items():
+                if not key.startswith("search.") or not isinstance(value, str):
+                    continue
+                m = self._JARGON_RE.search(value)
+                if m:
+                    leaks.append(f"  {name} {key}: raw {m.group(0)!r} — {value!r}")
+        assert not leaks, (
+            "S3.3: search.* copy must stay free of retrieval-engine jargon "
+            "(BM25/RRF/Top-K/MMR/Dense). Use the friendly term in the search "
+            "surface and define the acronym in a glossary.* key instead:\n" + "\n".join(leaks)
+        )
+
+    def test_search_js_no_jargon_literals(self) -> None:
+        """The results-panel help-tip prose must be sourced from
+        ``t('glossary.search_pipeline')``, not a hardcoded ``data-help`` literal,
+        so the BM25/Dense/RRF explanation localizes and lives single-source in
+        the glossary. Scan ``app.js`` + ``settings-config.js`` for *static*
+        ``data-help="..."`` attribute values carrying retrieval jargon.
+
+        A templated value (``data-help="${...}"``) is the desired shape — it
+        resolves through ``t()`` at render time — and is skipped (it contains a
+        ``${``). The funnel's bare stage labels (``<span ...>BM25</span>``) and
+        the pipeline-config status badges (``label: 'BM25 Off'``) are NOT
+        help-tip prose and stay out of scope: they render only inside the
+        "Advanced details" reveal / for non-default settings, never on the
+        first-time default surface."""
+        leaks: list[str] = []
+        attr_re = re.compile(r'data-help="([^"]*)"')
+        for name in ("app.js", "settings-config.js"):
+            text = (_STATIC_JS_DIR / name).read_text(encoding="utf-8")
+            for m in attr_re.finditer(text):
+                value = m.group(1)
+                if "${" in value:  # templated → localizes through t(), good
+                    continue
+                jm = self._JARGON_RE.search(value)
+                if jm:
+                    lineno = text.count("\n", 0, m.start()) + 1
+                    leaks.append(f"  {name}:{lineno}: data-help {jm.group(0)!r} — {value!r}")
+        assert not leaks, (
+            "S3.3: a results help-tip still hardcodes retrieval jargon in a "
+            "data-help literal — source it from t('glossary.search_pipeline') so "
+            "it localizes and the jargon lives single-source in the glossary:\n" + "\n".join(leaks)
+        )
+
+        # Positive contract: the funnel help-tip must resolve the glossary key.
+        # The ``${`` skip above trusts any templated value, so a regression to a
+        # hardcoded *templated* fallback (``data-help="${pipelineFallback}"``)
+        # would slip past it — this assertion catches that by pinning that the
+        # render path actually calls ``t('glossary.search_pipeline')``.
+        app_text = (_STATIC_JS_DIR / "app.js").read_text(encoding="utf-8")
+        assert "t('glossary.search_pipeline')" in app_text, (
+            "app.js no longer resolves t('glossary.search_pipeline') for the "
+            "retrieval funnel help-tip — its prose must come from the glossary so "
+            "it localizes (data-help=\"${escapeHtml(t('glossary.search_pipeline'))}\")."
+        )
+
+    def test_jargon_regex_catches_latin_with_korean_particles(self) -> None:
+        """Pin the boundary behavior the ``re.ASCII`` flag buys us: Latin jargon
+        glued to a Korean particle (the realistic ko.json leak "BM25는 키워드…")
+        and the spaced "Top K" form must match, while words that merely contain a
+        token ("condensed", the "bm25_candidates" identifier) and the accepted
+        "Reranking" status must not."""
+        must_match = [
+            "BM25는 키워드 일치",
+            "Dense는 의미",
+            "RRF가 합칩니다",
+            "Top K 결과",
+            "top-k",
+            "topk",
+        ]
+        must_not = [
+            "condensed milk",
+            "bm25_candidates",
+            "Reranking on",
+            "재정렬 켜짐",
+            "rank order",
+        ]
+        missed = [s for s in must_match if not self._JARGON_RE.search(s)]
+        false_pos = [s for s in must_not if self._JARGON_RE.search(s)]
+        assert not missed, f"_JARGON_RE failed to catch jargon: {missed}"
+        assert not false_pos, f"_JARGON_RE false-positived on benign text: {false_pos}"
