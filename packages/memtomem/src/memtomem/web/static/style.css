@@ -3470,6 +3470,41 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 .ns-layout { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; }
 .ns-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .ns-header h2 { font-size: 1rem; font-weight: 600; }
+/* Provider-prefix reference: a collapsed <details> mirroring .home-orientation. */
+.ns-help {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+}
+.ns-help-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.88rem; font-weight: 600; color: var(--text);
+}
+.ns-help-summary::-webkit-details-marker { display: none; }
+.ns-help-summary::before {
+  content: '▸';
+  color: var(--muted); font-size: 0.8rem;
+  transition: transform 0.15s ease;
+}
+.ns-help[open] > .ns-help-summary::before { transform: rotate(90deg); }
+.ns-help-intro { margin: 10px 0 12px; font-size: 0.84rem; color: var(--muted); line-height: 1.5; }
+.ns-help-list {
+  display: grid;
+  grid-template-columns: fit-content(45%) 1fr;
+  gap: 6px 16px;
+  margin: 0 0 12px;
+  align-items: baseline;
+}
+.ns-help-list dt { margin: 0; }
+.ns-help-list dt code {
+  font-family: var(--mono); font-size: 0.78rem; color: var(--accent);
+}
+.ns-help-list dd { margin: 0; font-size: 0.83rem; color: var(--text); line-height: 1.45; }
+.ns-help-foot { margin: 0; font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+.ns-help-foot a { color: var(--accent); }
 .ns-list { display: flex; flex-direction: column; gap: 8px; }
 .ns-card {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
