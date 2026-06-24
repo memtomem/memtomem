@@ -2024,6 +2024,28 @@ kbd {
   font-size: 0.78rem; color: var(--text);
 }
 
+/* ── First-run wizard (S3.1) ── */
+.fr-wizard-inner { max-width: 440px; }
+.fr-wizard-counter { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.fr-wizard-dots { display: flex; gap: 6px; }
+.fr-wizard-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+.fr-wizard-dot.is-done { background: var(--muted); }
+.fr-wizard-dot.is-active { background: var(--accent); }
+.fr-wizard-counter-text { font-size: 0.75rem; color: var(--muted); }
+/* Fixed min-height keeps Next/Back from jumping as steps of different copy
+ * length swap in. */
+.fr-wizard-steps { min-height: 132px; }
+.fr-wizard-step { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.fr-wizard-step[hidden] { display: none; }
+.fr-wizard-step-title { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text); }
+.fr-wizard-step-body { margin: 0; font-size: 0.875rem; line-height: 1.5; color: var(--muted); }
+.fr-wizard-cta { margin-top: 4px; }
+.fr-wizard-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
+}
+.fr-wizard-nav-right { display: flex; gap: 8px; }
+
 /* ── Timeline ── */
 .timeline-controls {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;

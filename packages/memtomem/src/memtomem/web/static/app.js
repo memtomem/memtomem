@@ -146,6 +146,7 @@ const STATE = {
     renderRecentChips();
     _initSearchWelcome();
     _initHomeOrientation();
+    _initFirstRunWizard();
     _initTabHelp();
     // Server-bound indicator hydration (#582 item 4.11). Restores the
     // header pill if a run is in flight (page-reload survival, second-
@@ -6893,6 +6894,106 @@ function _initHomeOrientation() {
   qs('home-orientation-search')?.addEventListener('click', () => activateTab('search'));
 }
 
+// S3.1 — first-run wizard. A one-time, three-step guided intro (add → search →
+// connect, matching the orientation block's order and reusing its copy) shown
+// over Home on a genuine first run. The trigger lives in _applyLandingTab, on
+// the same ``firstRun && stamped`` branch that routes to Home — so it inherits
+// the once-only guarantee (m2m-app-initialized) and the private-mode guard (no
+// stamp → no wizard) for free, with no extra storage key to gate on. Reuses the
+// modal a11y stack (openModal pushes onto _ACTIVE_MODALS / traps focus); the
+// Esc dispatcher and registerModalCloser route the close back through
+// _closeFirstRunWizard. The wizard never calls activateTab on its own to open,
+// so the landing-tab tests' activateTab spy stays clean.
+const FR_WIZARD_TOTAL_STEPS = 3;
+let _frWizardStep = 1;
+let _frWizardRelease = null;
+let _frWizardInited = false;
+
+function _renderFirstRunWizardStep() {
+  const modal = qs('first-run-wizard');
+  if (!modal) return;
+  modal.querySelectorAll('.fr-wizard-step').forEach(sec => {
+    sec.hidden = Number(sec.dataset.step) !== _frWizardStep;
+  });
+  modal.querySelectorAll('.fr-wizard-dot').forEach(dot => {
+    const n = Number(dot.dataset.step);
+    dot.classList.toggle('is-active', n === _frWizardStep);
+    dot.classList.toggle('is-done', n < _frWizardStep);
+  });
+  // Counter + Next/Done label are JS-rendered (params / step-dependent), so they
+  // re-render here on every step change and on the langchange hook below — the
+  // static data-i18n labels are handled by applyDOM.
+  if (typeof t === 'function') {
+    const counter = qs('fr-wizard-counter-text');
+    if (counter) counter.textContent = t('wizard.step_counter', { n: _frWizardStep, total: FR_WIZARD_TOTAL_STEPS });
+    const next = qs('fr-wizard-next');
+    if (next) next.textContent = _frWizardStep === FR_WIZARD_TOTAL_STEPS ? t('common.done') : t('wizard.next');
+  }
+  const back = qs('fr-wizard-back');
+  if (back) back.hidden = _frWizardStep === 1;
+}
+
+function _closeFirstRunWizard() {
+  const modal = qs('first-run-wizard');
+  if (!modal) return;
+  hide(modal);
+  if (_frWizardRelease) { _frWizardRelease(); _frWizardRelease = null; }
+  // The user just walked the same three steps, so collapse the always-visible
+  // Home orientation recap (still expandable) instead of showing it twice.
+  // Setting .open fires the orientation block's toggle handler, which persists
+  // the collapsed choice.
+  const details = qs('home-orientation');
+  if (details && details.open) details.open = false;
+}
+
+function _showFirstRunWizard() {
+  const modal = qs('first-run-wizard');
+  if (!modal || typeof window.openModal !== 'function') return;
+  // The async boot handler (initTheme's DOMContentLoaded listener) is still
+  // suspended on ``await I18N.init()`` when the *separate*, synchronous landing
+  // listener opens the wizard — so _initFirstRunWizard() (line ~149) has not run
+  // yet and the closer is unregistered. Wire it here (idempotent) before opening,
+  // or an Esc/click in that window would route through closeModal's fallback
+  // hide() and never call _frWizardRelease(), leaving the modal a11y stack
+  // (_ACTIVE_MODALS / background inert / focus trap) stuck.
+  _initFirstRunWizard();
+  _frWizardStep = 1;
+  _renderFirstRunWizardStep();
+  _frWizardRelease = window.openModal(modal, {
+    focusables: () => Array.from(modal.querySelectorAll('button'))
+      .filter(el => !el.disabled && !el.closest('[hidden]')),
+  });
+}
+
+function _initFirstRunWizard() {
+  const modal = qs('first-run-wizard');
+  if (!modal || _frWizardInited) return;  // idempotent: show-path + DCL both call this
+  _frWizardInited = true;
+  registerModalCloser(modal, _closeFirstRunWizard);
+  qs('fr-wizard-close')?.addEventListener('click', _closeFirstRunWizard);
+  qs('fr-wizard-skip')?.addEventListener('click', _closeFirstRunWizard);
+  qs('fr-wizard-back')?.addEventListener('click', () => {
+    if (_frWizardStep > 1) { _frWizardStep -= 1; _renderFirstRunWizardStep(); }
+  });
+  qs('fr-wizard-next')?.addEventListener('click', () => {
+    if (_frWizardStep < FR_WIZARD_TOTAL_STEPS) { _frWizardStep += 1; _renderFirstRunWizardStep(); }
+    else _closeFirstRunWizard();
+  });
+  // Each step's primary CTA drops the user straight into that tab and closes the
+  // wizard (the happy path); Next/Back page through for readers.
+  const cta = (id, tab) => qs(id)?.addEventListener('click', () => { _closeFirstRunWizard(); activateTab(tab); });
+  cta('fr-wizard-cta-add', 'index');
+  cta('fr-wizard-cta-search', 'search');
+  cta('fr-wizard-cta-connect', 'context-gateway');
+}
+// Registered at module load (not inside _initFirstRunWizard) so it is in place
+// before I18N.init()'s one-shot langchange — which can fire before or after
+// DOMContentLoaded. The counter + Next/Done labels are JS-rendered, so the first
+// paint (during the landing handler, before the locale cache populates) holds
+// the raw-key fallback until this re-render swaps in the real strings. Cheap and
+// idempotent when the wizard is closed (re-applies step state to a hidden node).
+window.addEventListener('langchange', _renderFirstRunWizardStep);
+
 // ---------------------------------------------------------------------------
 // Keyboard Shortcuts (B)
 // ---------------------------------------------------------------------------
@@ -6906,6 +7007,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     const confirmModal = qs('confirm-modal');
     if (confirmModal && !confirmModal.hidden) return; // handled by showConfirm's own listener
+    const frWizard = qs('first-run-wizard');
+    if (frWizard && !frWizard.hidden) { closeModal(frWizard); return; }
     const installGuideModal = qs('ctx-install-guide-modal');
     if (installGuideModal && !installGuideModal.hidden) { closeModal(installGuideModal); return; }
     const srcPreview = qs('source-preview-modal');
@@ -7263,6 +7366,12 @@ function _applyLandingTab() {
   const currentTab = currentActive ? currentActive.dataset.tab : null;
   if (currentTab !== target) {
     activateTab(target);
+  }
+  // S3.1 — the same genuine-first-run signal that routes to Home also opens the
+  // one-time guided wizard over it. Wrapped so a missing element or a sibling
+  // init throw can never abort the landing routing above.
+  if (firstRun && stamped) {
+    try { _showFirstRunWizard(); } catch {}
   }
 }
 document.addEventListener('DOMContentLoaded', _applyLandingTab);

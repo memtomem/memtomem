@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=125" />
+  <link rel="stylesheet" href="/style.css?v=126" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1644,6 +1644,53 @@
     </div>
   </div>
 
+  <!-- First-run wizard (S3.1) — a one-time, 3-step guided intro shown over Home
+       on a genuine first run (see _showFirstRunWizard / _applyLandingTab). The
+       always-available recap is the Home orientation block above; this modal is
+       the active first-run tour and collapses that block on close so a
+       dismissing user is not shown the same three steps twice. Reuses the modal
+       a11y stack (openModal / registerModalCloser). -->
+  <div id="first-run-wizard" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="fr-wizard-title" aria-describedby="fr-wizard-counter-text">
+    <div class="modal-inner fr-wizard-inner">
+      <div class="modal-header">
+        <span id="fr-wizard-title" class="modal-title" data-i18n="welcome.title">Welcome to memtomem</span>
+        <button id="fr-wizard-close" class="btn-ghost" data-i18n-title="common.close" data-i18n-aria-label="common.close" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div class="fr-wizard-counter">
+        <span class="fr-wizard-dots" aria-hidden="true">
+          <span class="fr-wizard-dot" data-step="1"></span>
+          <span class="fr-wizard-dot" data-step="2"></span>
+          <span class="fr-wizard-dot" data-step="3"></span>
+        </span>
+        <span id="fr-wizard-counter-text" class="fr-wizard-counter-text"></span>
+      </div>
+      <div class="fr-wizard-steps">
+        <section class="fr-wizard-step" data-step="1">
+          <h3 class="fr-wizard-step-title" data-i18n="wizard.step1_title">Add your memories</h3>
+          <p class="fr-wizard-step-body" data-i18n="home.orientation.step_add">Add your notes, docs, and code.</p>
+          <button id="fr-wizard-cta-add" class="btn-primary fr-wizard-cta" data-i18n="home.orientation.step_add_cta">Add memories</button>
+        </section>
+        <section class="fr-wizard-step" data-step="2" hidden>
+          <h3 class="fr-wizard-step-title" data-i18n="wizard.step2_title">Search by meaning</h3>
+          <p class="fr-wizard-step-body" data-i18n="home.orientation.step_search">Search everything by meaning, anytime.</p>
+          <button id="fr-wizard-cta-search" class="btn-primary fr-wizard-cta" data-i18n="home.orientation.step_search_cta">Try a search</button>
+        </section>
+        <section class="fr-wizard-step" data-step="3" hidden>
+          <h3 class="fr-wizard-step-title" data-i18n="wizard.step3_title">Connect your tools</h3>
+          <p class="fr-wizard-step-body" data-i18n="home.orientation.step_connect">Sync your skills, subagents, and commands out to Claude Code, Codex, and more.</p>
+          <button id="fr-wizard-cta-connect" class="btn-primary fr-wizard-cta" data-i18n="home.orientation.step_connect_cta">Open Gateway</button>
+        </section>
+      </div>
+      <div class="fr-wizard-nav">
+        <button id="fr-wizard-skip" class="btn-ghost" data-i18n="wizard.skip">Skip</button>
+        <div class="fr-wizard-nav-right">
+          <button id="fr-wizard-back" class="btn-ghost" data-i18n="wizard.back" hidden>Back</button>
+          <button id="fr-wizard-next" class="btn-ghost" data-i18n="wizard.next">Next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/vendor/purify.min.js?v=3"></script>
   <script src="/vendor/marked.umd.js?v=2"></script>
   <script src="/vendor/prism.min.js?v=2"></script>
@@ -1653,7 +1700,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=6"></script>
-  <script src="/app.js?v=141"></script>
+  <script src="/app.js?v=142"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=14"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>
