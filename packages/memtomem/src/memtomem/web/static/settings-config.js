@@ -8,25 +8,23 @@
 // Config tab
 // ---------------------------------------------------------------------------
 
-const _CONFIG_LABELS = {
-  embedding: { provider: 'Provider', model: 'Model', dimension: 'Dimension',
-                base_url: 'Base URL', batch_size: 'Batch Size', api_key: 'API Key',
-                threads: 'ONNX Threads' },
-  storage:   { backend: 'Backend', sqlite_path: 'SQLite Path', collection_name: 'Collection' },
-  search:    { default_top_k: 'Default top-k', bm25_candidates: 'BM25 Candidates',
-                dense_candidates: 'Dense Candidates', rrf_k: 'RRF k',
-                enable_bm25: 'BM25 Enabled', enable_dense: 'Dense Enabled',
-                tokenizer: 'Tokenizer', rrf_weights: 'RRF Weights (BM25, Dense)' },
-  decay:     { enabled: 'Enabled', half_life_days: 'Half-life (days)' },
-  mmr:       { enabled: 'Enabled', lambda_param: 'Lambda' },
-  rerank:    { enabled: 'Enabled', provider: 'Provider', model: 'Model',
-                api_key: 'API Key', oversample: 'Oversample',
-                min_pool: 'Min Pool', max_pool: 'Max Pool' },
-  indexing:  { supported_extensions: 'Extensions',
-                max_chunk_tokens: 'Max Chunk Tokens', min_chunk_tokens: 'Min Chunk Tokens',
-                target_chunk_tokens: 'Target Chunk Tokens',
-                chunk_overlap_tokens: 'Chunk Overlap', structured_chunk_mode: 'Structured Chunk Mode' },
-  namespace: { default_namespace: 'Default NS', enable_auto_ns: 'Auto NS' },
+// Known config fields per section. Each field's row label renders through
+// ``t('settings.config.label.<section>.<field>')`` (localized); a server field
+// not listed here falls back to its raw snake_case key name. Keeping this as a
+// field LIST (not an English {field: label} map) guarantees the Config panel
+// carries no hard-coded English labels — enforced by
+// ``test_no_hardcoded_config_labels`` in tests/test_i18n.py.
+const _CONFIG_LABEL_FIELDS = {
+  embedding: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'api_key', 'threads'],
+  storage:   ['backend', 'sqlite_path', 'collection_name'],
+  search:    ['default_top_k', 'bm25_candidates', 'dense_candidates', 'rrf_k',
+              'enable_bm25', 'enable_dense', 'tokenizer', 'rrf_weights'],
+  decay:     ['enabled', 'half_life_days'],
+  mmr:       ['enabled', 'lambda_param'],
+  rerank:    ['enabled', 'provider', 'model', 'api_key', 'oversample', 'min_pool', 'max_pool'],
+  indexing:  ['supported_extensions', 'exclude_patterns', 'max_chunk_tokens', 'min_chunk_tokens',
+              'target_chunk_tokens', 'chunk_overlap_tokens', 'structured_chunk_mode'],
+  namespace: ['default_namespace', 'enable_auto_ns'],
 };
 
 // Sections that are fully read-only (require restart)
@@ -67,15 +65,14 @@ function _renderReloadBanner(data) {
   if (!el) return;
   const err = data.config_reload_error;
   if (err) {
-    el.textContent = 'Config file invalid on disk: ' + err +
-      ' — fix it (or run `mm init --fresh`) before saving from the UI.';
+    el.textContent = t('settings.config.reload_invalid', { error: err });
     el.className = 'config-reload-banner err';
     show(el);
     return;
   }
   const mtime = data.config_mtime_ns;
   if (_lastConfigMtimeNs !== null && mtime !== _lastConfigMtimeNs && mtime > 0) {
-    el.textContent = 'Config file changed externally — reloaded from disk.';
+    el.textContent = t('settings.config.reload_external');
     el.className = 'config-reload-banner info';
     show(el);
     setTimeout(() => hide(el), 5000);
@@ -150,6 +147,13 @@ window.addEventListener('langchange', () => {
   // The Home embedding/storage line is likewise t()-rendered (S2.3); relocalize
   // it on toggle. Harmless no-op until serverConfig has loaded.
   _syncHomeConfig();
+  // The Config-tab decay / namespace status lines are t()-rendered (S2.4) and
+  // draft-free, so they follow the toggle in place like the siblings above.
+  // (The editable config CARDS are NOT re-synced here on purpose: a full
+  // _syncConfigToUI() re-render would discard an in-progress field edit — they
+  // relocalize on the next tab render instead. Documented deferral, #1436.)
+  _syncDecayStatus();
+  _syncNamespaceInfo();
 });
 
 // Compute the config-derived placeholder (no path entered yet). Pulled
@@ -212,10 +216,10 @@ function _syncDecayStatus() {
   const decay = STATE.serverConfig?.decay;
   if (!decay) { hide(el); return; }
   if (decay.enabled) {
-    el.textContent = `Score Decay: Active (half-life ${decay.half_life_days}d)`;
+    el.textContent = t('settings.config.decay_status_active', { days: decay.half_life_days });
     el.className = 'config-status config-status-on';
   } else {
-    el.textContent = 'Score Decay: Inactive';
+    el.textContent = t('settings.config.decay_status_inactive');
     el.className = 'config-status config-status-off';
   }
   show(el);
@@ -228,8 +232,8 @@ function _syncNamespaceInfo() {
   const ns = STATE.serverConfig?.namespace;
   if (!ns) { hide(el); return; }
   const parts = [];
-  if (ns.default_namespace) parts.push(`Default NS: ${ns.default_namespace}`);
-  if (ns.enable_auto_ns) parts.push('Auto-NS: Active');
+  if (ns.default_namespace) parts.push(t('settings.config.ns_default', { ns: ns.default_namespace }));
+  if (ns.enable_auto_ns) parts.push(t('settings.config.ns_auto_active'));
   if (parts.length) {
     el.textContent = parts.join(' \u00B7 ');
     show(el);
@@ -386,20 +390,23 @@ async function loadConfig() {
       header.className = 'config-card-header';
       const title = document.createElement('h3');
       title.className = 'config-section-title';
-      const _SECTION_TITLES = { mmr: 'MMR', namespace: 'Namespace', rerank: 'Reranker', rrf: 'RRF' };
-      title.textContent = _SECTION_TITLES[section] || section.charAt(0).toUpperCase() + section.slice(1);
+      // Section header: localized name keyed by section id, with a title-cased
+      // fallback for any unmapped section the server might add.
+      const fallbackTitle = section.charAt(0).toUpperCase() + section.slice(1);
+      const titleStr = t(`settings.config.section.${section}`);
+      title.textContent = titleStr === `settings.config.section.${section}` ? fallbackTitle : titleStr;
       header.appendChild(title);
       if (isReadonly) {
         const badge = document.createElement('span');
         badge.className = 'config-readonly-badge';
-        badge.textContent = 'Read-only';
+        badge.textContent = t('settings.config.readonly_badge');
         header.appendChild(badge);
       } else {
         const saveBtn = document.createElement('button');
         saveBtn.className = 'btn btn-sm btn-primary config-save-btn';
         saveBtn.dataset.section = section;
         saveBtn.disabled = true;
-        saveBtn.textContent = 'Save';
+        saveBtn.textContent = t('common.save');
         saveBtn.addEventListener('click', () => _saveSection(section));
         header.appendChild(saveBtn);
       }
@@ -407,14 +414,14 @@ async function loadConfig() {
 
       const table = document.createElement('table');
       table.className = 'config-table';
-      const labels = _CONFIG_LABELS[section] || {};
+      const labelFields = new Set(_CONFIG_LABEL_FIELDS[section] || []);
       const readonlyFields = _READONLY_FIELDS[section] || new Set();
 
       const hiddenFields = _HIDDEN_CONFIG_FIELDS[section] || new Set();
       Object.entries(values).forEach(([key, val]) => {
         if (hiddenFields.has(key)) return;
         const fieldReadonly = isReadonly || readonlyFields.has(key);
-        const label = labels[key] || key;
+        const label = labelFields.has(key) ? t(`settings.config.label.${section}.${key}`) : key;
         const tr = document.createElement('tr');
         tr.innerHTML = `<td class="config-key">${escapeHtml(label)}</td>`;
         const td = document.createElement('td');
@@ -479,23 +486,24 @@ async function loadConfig() {
     hide(loadingEl);
     show(contentEl);
   } catch (err) {
-    loadingEl.innerHTML = emptyState('⚙', 'Config load failed: ' + err.message);
+    loadingEl.innerHTML = emptyState('⚙', t('settings.config.load_failed', { error: err.message }));
   }
 }
 
+// Per-section Config guide content. ``title``/``desc`` and each item's
+// label+text render through ``t('settings.config.guide.<section>.*')`` and are
+// fully localized (the ``items`` array holds id slugs, not English prose). The
+// per-step ``howto.steps`` and the ``envs`` snippets are DELIBERATELY kept as
+// English literals — they are deep procedural reference and ``MEMTOMEM_*`` /
+// command snippets where a translation would drift from the exact tab names,
+// commands, and identifiers a user must type. A localized one-line
+// ``howto.summary`` (keyed) renders above the English steps so a Korean reader
+// gets the gist; ``howto.warn`` (when ``warn: true``) and ``howto.title`` ARE
+// localized. This English-island choice is asserted in tests/test_i18n.py
+// (``test_no_hardcoded_config_labels`` only scans the localized fields).
 const _CONFIG_GUIDES = {
   embedding: {
-    title: 'Embedding',
-    desc: 'Controls how text is converted to vector representations for semantic search.',
-    items: [
-      { label: 'Provider', text: 'ollama (local, free) or openai (cloud, paid). Determines which API to call for embeddings.' },
-      { label: 'Model', text: 'nomic-embed-text (768d, English-optimized), bge-m3 (1024d, multilingual) etc. Must match Provider.' },
-      { label: 'Dimension', text: 'Vector dimension. Must match the model output. Changing this requires re-indexing all data.' },
-      { label: 'Base URL', text: 'API endpoint. Ollama: http://localhost:11434. OpenAI: https://api.openai.com/v1 (or compatible endpoint).' },
-      { label: 'Batch Size', text: 'Number of texts embedded per API call. Higher = faster indexing but more memory. Default 64.' },
-      { label: 'API Key', text: 'Required for OpenAI provider. Not needed for local Ollama. Masked in UI for security.' },
-      { label: 'ONNX Threads', text: 'ONNX Runtime intra-op thread cap for the local fastembed provider. Default 4 — caps ONNX so a bulk reindex stays responsive on the same machine. Set to 0 to opt back into ORT default (all physical cores) for maximum throughput on dedicated machines, or any other small integer for finer control. Ignored for ollama/openai. Restart required.' },
-    ],
+    items: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'api_key', 'threads'],
     envs: [
       'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
       'MEMTOMEM_EMBEDDING__MODEL=bge-m3',
@@ -506,31 +514,23 @@ const _CONFIG_GUIDES = {
       'MEMTOMEM_EMBEDDING__THREADS=4',
     ],
     howto: {
-      title: 'Embedding Model Change',
       restart: true,
+      warn: true,
       steps: [
         'Set env vars (PROVIDER, MODEL, DIMENSION, BASE_URL)',
         'Restart the server — config auto-syncs to new model',
         'Use Settings > Embedding Status to check for mismatch',
         'Reset embedding metadata, then re-index all (Index tab > Force)',
       ],
-      warn: 'Changing model/dimension invalidates all existing vectors. Must reset + re-index after restart.',
     },
   },
   storage: {
-    title: 'Storage',
-    desc: 'Database backend for storing chunks, vectors, and FTS index.',
-    items: [
-      { label: 'Backend', text: 'Currently only sqlite is supported. Single-file DB, no external dependencies.' },
-      { label: 'SQLite Path', text: 'Full path to the database file. Contains all chunks, embeddings, FTS index, and metadata.' },
-      { label: 'Collection', text: 'Logical table name for storing chunks. Change to use separate storage within the same DB.' },
-    ],
+    items: ['backend', 'sqlite_path', 'collection'],
     envs: [
       'MEMTOMEM_STORAGE__SQLITE_PATH=~/.memtomem/memtomem.db',
       'MEMTOMEM_STORAGE__COLLECTION_NAME=memories',
     ],
     howto: {
-      title: 'Change DB Path',
       restart: true,
       steps: [
         'Set MEMTOMEM_STORAGE__SQLITE_PATH env var',
@@ -540,16 +540,7 @@ const _CONFIG_GUIDES = {
     },
   },
   search: {
-    title: 'Search Pipeline',
-    desc: 'Hybrid search: BM25 (keyword) + Dense (semantic) fused via Reciprocal Rank Fusion.',
-    items: [
-      { label: 'Default top-k', text: 'Number of results returned by default. Can be overridden per query.' },
-      { label: 'BM25/Dense Enabled', text: 'Toggle retrievers independently. BM25 = exact keyword matching (FTS5). Dense = semantic vector similarity.' },
-      { label: 'Candidates', text: 'BM25/Dense Candidates control how many results each retriever fetches before fusion. Higher = better recall but slower.' },
-      { label: 'RRF k', text: 'Smoothing constant for rank fusion. Lower (10-30) = top ranks dominate. Higher (60-100) = more uniform blending.' },
-      { label: 'RRF Weights', text: 'Balance slider between BM25 and Dense. Center = equal weight. Left = keyword heavier. Right = semantic heavier.' },
-      { label: 'Tokenizer', text: 'FTS5 tokenizer for keyword search. unicode61: built-in (all languages). kiwipiepy: Korean morphological analysis.' },
-    ],
+    items: ['top_k', 'retrievers', 'candidates', 'rrf_k', 'rrf_weights', 'tokenizer'],
     envs: [
       'MEMTOMEM_SEARCH__DEFAULT_TOP_K=10',
       'MEMTOMEM_SEARCH__ENABLE_BM25=true',
@@ -560,29 +551,19 @@ const _CONFIG_GUIDES = {
       'MEMTOMEM_SEARCH__TOKENIZER=unicode61',
     ],
     howto: {
-      title: 'Tune Search Quality',
       restart: false,
+      warn: true,
       steps: [
         'Adjust weights: slide toward BM25 for exact matches, Dense for semantic similarity',
         'Increase candidates for better recall at the cost of latency',
         'Click Save — applies immediately to all searches',
         'Settings persist to ~/.memtomem/config.json',
       ],
-      warn: 'Changing tokenizer to kiwipiepy requires: pip install kiwipiepy. Falls back to unicode61 if unavailable.',
     },
   },
   indexing: {
-    title: 'Indexing',
-    desc: 'Controls how files are discovered, chunked, and stored as searchable units.',
-    items: [
-      { label: 'Extensions', text: 'File types recognized for chunking: .md, .py, .js, .ts, .tsx, .jsx, .json, .yaml, .yml, .toml. Edit inline; changes persist immediately.' },
-      { label: 'Exclude Patterns', text: 'Glob patterns skipped during indexing. Built-in secret/noise groups are read-only; user patterns are editable inline.' },
-      { label: 'Max Chunk Tokens', text: 'Upper bound for chunk size. Long sections are split to stay under this limit.' },
-      { label: 'Target Chunk Tokens', text: 'Soft target the chunker aims for between Min and Max. Most chunks land near this size; Max is the hard cap.' },
-      { label: 'Min Chunk Tokens', text: 'Short chunks below this threshold are merged with their neighbor. 0 = no merging.' },
-      { label: 'Chunk Overlap', text: 'Token overlap between adjacent chunks. Adds shared context at boundaries for better retrieval. 0 = no overlap.' },
-      { label: 'Structured Chunk Mode', text: 'For JSON/YAML/TOML files. "original": extracts raw text lines per key (preserves formatting, line numbers). "recursive": serializes via json.dumps, recursively splits deep nested structures by sub-keys.' },
-    ],
+    items: ['extensions', 'exclude_patterns', 'max_chunk', 'target_chunk', 'min_chunk',
+            'overlap', 'structured_mode'],
     envs: [
       'MEMTOMEM_INDEXING__SUPPORTED_EXTENSIONS=\'[".md",".json",".yaml",".yml",".toml",".py",".js",".ts",".tsx",".jsx"]\'',
       'MEMTOMEM_INDEXING__MAX_CHUNK_TOKENS=512',
@@ -592,29 +573,22 @@ const _CONFIG_GUIDES = {
       'MEMTOMEM_INDEXING__STRUCTURED_CHUNK_MODE=original',
     ],
     howto: {
-      title: 'Indexing Settings',
       restart: false,
+      warn: true,
       steps: [
         'Extensions / Exclude Patterns: edit inline; each change persists immediately. Changing Extensions also surfaces a re-index hint toast.',
         'Chunk token settings: edit here + Save (immediate, no restart)',
         'After changing chunk settings, re-index to apply to existing data',
       ],
-      warn: 'Extensions / Exclude Patterns / chunk size changes only affect data indexed after the change. Re-index to apply to existing chunks.',
     },
   },
   decay: {
-    title: 'Time Decay',
-    desc: 'Reduces search scores of older chunks over time, prioritizing recent information.',
-    items: [
-      { label: 'Enabled', text: 'When active, search scores are multiplied by a time-based decay factor. Newer chunks rank higher.' },
-      { label: 'Half-life (days)', text: 'Days until decay factor reaches 0.5. A 30-day half-life means month-old chunks score ~50% of fresh ones.' },
-    ],
+    items: ['enabled', 'half_life'],
     envs: [
       'MEMTOMEM_DECAY__ENABLED=true',
       'MEMTOMEM_DECAY__HALF_LIFE_DAYS=30',
     ],
     howto: {
-      title: 'Enable Decay',
       restart: false,
       steps: [
         'Check "Enabled" and set Half-life',
@@ -624,18 +598,12 @@ const _CONFIG_GUIDES = {
     },
   },
   mmr: {
-    title: 'Maximal Marginal Relevance',
-    desc: 'Diversifies search results by penalizing chunks too similar to already-selected ones.',
-    items: [
-      { label: 'Enabled', text: 'When active, results are re-ranked after retrieval to reduce redundancy.' },
-      { label: 'Lambda', text: 'Balance between relevance and diversity. 1.0 = pure relevance (no MMR effect). 0.0 = max diversity. Default 0.7.' },
-    ],
+    items: ['enabled', 'lambda'],
     envs: [
       'MEMTOMEM_MMR__ENABLED=true',
       'MEMTOMEM_MMR__LAMBDA_PARAM=0.7',
     ],
     howto: {
-      title: 'Enable MMR',
       restart: false,
       steps: [
         'Check "Enabled" and adjust Lambda',
@@ -645,26 +613,20 @@ const _CONFIG_GUIDES = {
     },
   },
   namespace: {
-    title: 'Namespace',
-    desc: 'Organize chunks into logical groups for scoped search and management.',
-    items: [
-      { label: 'Default NS', text: 'Applied when no namespace is specified during indexing or memory add. Leaving this as "default" results in untagged chunks (backward compatibility — chunks indexed before namespaces existed).' },
-      { label: 'Auto NS', text: 'When enabled, derives namespace from the parent folder name during indexing. Overrides Default NS.' },
-    ],
+    items: ['default_ns', 'auto_ns'],
     envs: [
       'MEMTOMEM_NAMESPACE__DEFAULT_NAMESPACE=default',
       'MEMTOMEM_NAMESPACE__ENABLE_AUTO_NS=false',
     ],
     howto: {
-      title: 'Use Namespaces',
       restart: false,
+      warn: true,
       steps: [
         'Set Default NS (e.g., "work", "personal") for auto-tagging',
         'Or enable Auto NS — parent folder names become namespaces',
         'Click Save — applies to next indexing operation',
         'Manage namespaces in Settings > Namespaces tab',
       ],
-      warn: 'Auto NS takes priority over Default NS. Existing chunks keep their namespace until re-indexed.',
     },
   },
 };
@@ -674,42 +636,52 @@ function _showConfigGuide(section) {
   if (!guide) return;
   const info = _CONFIG_GUIDES[section];
   if (!info) {
+    // No guide for this section (e.g. rerank): show the localized section
+    // name as the heading and a "no guide" note.
+    const secKey = `settings.config.section.${section}`;
+    const secName = t(secKey);
     guide.querySelector('.config-guide-inner').innerHTML =
-      `<h4 class="config-guide-title">${section}</h4><p class="config-guide-text">No guide available.</p>`;
+      `<h4 class="config-guide-title">${escapeHtml(secName === secKey ? section : secName)}</h4>` +
+      `<p class="config-guide-text">${escapeHtml(t('settings.config.no_guide'))}</p>`;
     return;
   }
-  let html = `<h4 class="config-guide-title">${escapeHtml(info.title)}</h4>`;
-  html += `<p class="config-guide-text">${escapeHtml(info.desc)}</p>`;
+  const base = `settings.config.guide.${section}`;
+  let html = `<h4 class="config-guide-title">${escapeHtml(t(`${base}.title`))}</h4>`;
+  html += `<p class="config-guide-text">${escapeHtml(t(`${base}.desc`))}</p>`;
 
-  // Field descriptions
+  // Field descriptions (localized label + text per item id slug)
   if (info.items) {
-    info.items.forEach(it => {
-      html += `<div class="config-guide-section"><h5>${escapeHtml(it.label)}</h5><p>${escapeHtml(it.text)}</p></div>`;
+    info.items.forEach(item => {
+      const label = t(`${base}.item.${item}.label`);
+      const text = t(`${base}.item.${item}.text`);
+      html += `<div class="config-guide-section"><h5>${escapeHtml(label)}</h5><p>${escapeHtml(text)}</p></div>`;
     });
   }
 
-  // How-to steps
+  // How-to: localized title + 1-line summary, then the English step list
+  // (deep procedural reference kept verbatim — see _CONFIG_GUIDES note).
   if (info.howto) {
     const h = info.howto;
     html += '<div class="config-guide-howto">';
-    html += `<h5>${escapeHtml(h.title)}`;
+    html += `<h5>${escapeHtml(t(`${base}.howto.title`))}`;
     html += h.restart
-      ? ' <span class="config-guide-badge restart">Restart Required</span>'
-      : ' <span class="config-guide-badge live">Live Update</span>';
+      ? ` <span class="config-guide-badge restart">${escapeHtml(t('settings.config.badge_restart'))}</span>`
+      : ` <span class="config-guide-badge live">${escapeHtml(t('settings.config.badge_live'))}</span>`;
     html += '</h5>';
+    html += `<p class="config-guide-howto-summary">${escapeHtml(t(`${base}.howto.summary`))}</p>`;
     html += '<ol class="config-guide-steps">';
     h.steps.forEach(s => { html += `<li>${escapeHtml(s)}</li>`; });
     html += '</ol>';
     if (h.warn) {
-      html += `<p class="config-guide-warn">${escapeHtml(h.warn)}</p>`;
+      html += `<p class="config-guide-warn">${escapeHtml(t(`${base}.howto.warn`))}</p>`;
     }
     html += '</div>';
   }
 
-  // Env var examples
+  // Env var examples (English — code/identifiers, intentionally not localized)
   if (info.envs) {
     html += '<div class="config-guide-env">';
-    html += '<h5>Environment Variables</h5>';
+    html += `<h5>${escapeHtml(t('settings.config.env_vars_title'))}</h5>`;
     html += '<pre class="config-guide-pre">';
     info.envs.forEach(e => { html += escapeHtml(e) + '\n'; });
     html += '</pre>';
@@ -720,19 +692,23 @@ function _showConfigGuide(section) {
 }
 
 // Fields that should render as <select> dropdowns: key → [options, descriptions]
+// Fields rendered as <select>. ``descriptions`` map each option value to an
+// i18n key resolved through ``t()`` at render time (localized hint text); the
+// option values themselves (unicode61, kiwipiepy, …) are identifiers and stay
+// verbatim.
 const _CONFIG_SELECT_OPTIONS = {
   'search.tokenizer': {
     options: ['unicode61', 'kiwipiepy'],
     descriptions: {
-      unicode61: 'Built-in FTS5 Unicode tokenizer (all languages)',
-      kiwipiepy: 'Korean morphological analyzer (pip install kiwipiepy)',
+      unicode61: 'settings.config.select.tokenizer.unicode61',
+      kiwipiepy: 'settings.config.select.tokenizer.kiwipiepy',
     },
   },
   'indexing.structured_chunk_mode': {
     options: ['original', 'recursive'],
     descriptions: {
-      original: 'Extract original text lines per key, split large sections by line count',
-      recursive: 'Serialize via json.dumps, recursively split by sub-keys',
+      original: 'settings.config.select.structured_mode.original',
+      recursive: 'settings.config.select.structured_mode.recursive',
     },
   },
 };
@@ -789,10 +765,10 @@ function _buildRRFWeightsWidget(section, key, val) {
   function updateDisplay(v) {
     const bm25Pct = 100 - v;
     const densePct = v;
-    if (v === 50) display.textContent = 'Balanced (1 : 1)';
-    else if (v === 0) display.textContent = 'BM25 only';
-    else if (v === 100) display.textContent = 'Dense only';
-    else display.textContent = `BM25 ${bm25Pct}% : Dense ${densePct}%`;
+    if (v === 50) display.textContent = t('settings.config.rrf_balanced');
+    else if (v === 0) display.textContent = t('settings.config.rrf_bm25_only');
+    else if (v === 100) display.textContent = t('settings.config.rrf_dense_only');
+    else display.textContent = t('settings.config.rrf_mix', { bm25: bm25Pct, dense: densePct });
   }
   updateDisplay(pct);
   wrap.appendChild(display);
@@ -1170,9 +1146,10 @@ function _buildConfigInput(section, key, val) {
     if (cfg.descriptions) {
       const hint = document.createElement('div');
       hint.className = 'config-select-hint';
-      hint.textContent = cfg.descriptions[val] || '';
+      const descFor = (v) => { const k = cfg.descriptions[v]; return k ? t(k) : ''; };
+      hint.textContent = descFor(val);
       sel.addEventListener('change', () => {
-        hint.textContent = cfg.descriptions[sel.value] || '';
+        hint.textContent = descFor(sel.value);
         _markConfigDirty(section);
       });
       wrap.appendChild(hint);
@@ -1432,19 +1409,19 @@ function _showReindexWarning(applied) {
 
   let msg = '';
   if (needsFtsRebuild && needsReindex) {
-    msg = 'Tokenizer and chunk settings changed. FTS index rebuild and re-indexing recommended for full effect.';
+    msg = t('settings.config.reindex_both');
   } else if (needsFtsRebuild) {
-    msg = 'Tokenizer changed. FTS index rebuild is recommended so existing data uses the new tokenizer.';
+    msg = t('settings.config.reindex_fts');
   } else {
-    msg = 'Chunk settings changed. Re-indexing is recommended to apply new chunking to existing files.';
+    msg = t('settings.config.reindex_chunk');
   }
 
   warn.innerHTML = `
     <div class="config-reindex-warn-text">${escapeHtml(msg)}</div>
     <div class="config-reindex-warn-actions">
-      ${needsFtsRebuild ? '<button class="btn-primary btn-sm" id="cfg-fts-rebuild-btn">Rebuild FTS Index</button>' : ''}
-      ${needsReindex ? '<button class="btn-primary btn-sm" id="cfg-reindex-btn">Re-index All</button>' : ''}
-      <button class="btn-ghost btn-sm config-reindex-dismiss">Dismiss</button>
+      ${needsFtsRebuild ? `<button class="btn-primary btn-sm" id="cfg-fts-rebuild-btn">${escapeHtml(t('settings.config.reindex_fts_btn'))}</button>` : ''}
+      ${needsReindex ? `<button class="btn-primary btn-sm" id="cfg-reindex-btn">${escapeHtml(t('settings.config.reindex_all_btn'))}</button>` : ''}
+      <button class="btn-ghost btn-sm config-reindex-dismiss">${escapeHtml(t('common.dismiss'))}</button>
     </div>
   `;
 

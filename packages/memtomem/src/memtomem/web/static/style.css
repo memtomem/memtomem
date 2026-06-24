@@ -1304,6 +1304,7 @@ button:active { opacity: 0.7; }
 .config-guide-section p { margin: 0 0 4px; color: var(--muted); font-size: 0.78rem; }
 .config-guide-howto { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .config-guide-howto h5 { margin: 0 0 8px; font-size: 0.82rem; color: var(--text); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.config-guide-howto-summary { margin: 0 0 8px; font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
 .config-guide-badge {
   font-size: 0.68rem; padding: 1px 6px; border-radius: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
 }

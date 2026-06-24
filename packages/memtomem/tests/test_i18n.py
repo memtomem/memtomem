@@ -31,6 +31,8 @@ _INTENTIONALLY_UNTRANSLATED = {
     "settings.ctx.wiki_head",  # Git symbolic ref; renders as "HEAD: <sha>".
     "settings.ctx.create_name_placeholder",  # identifier example "my-{type}" (names are ASCII).
     "settings.ctx.guide_antigravity_cli",  # product name + CLI alias "Antigravity CLI (agy)".
+    "settings.config.section.mmr",  # acronym; the Config section header is "MMR" in both.
+    "settings.config.rrf_mix",  # "BM25 {bm25}% : Dense {dense}%" — product terms + format only.
 }
 
 
@@ -2635,3 +2637,201 @@ class TestNoHardcodedStrings:
             "Found legacy '\\u26A0' glyph on the count line — Visual-1 "
             "removed the per-tile glyph branch."
         )
+
+
+# ── S2.4: Config panel localization ────────────────────────────────────────
+#
+# The Config tab moved its hard-coded English ``_CONFIG_LABELS`` /
+# ``_CONFIG_GUIDES`` strings into the ``settings.config.*`` locale family so the
+# panel renders Korean. Row labels and guide content (section titles, 1-line
+# descriptions, per-field item label+text, how-to title/summary/warn) are keyed;
+# the deep ``howto.steps`` and ``envs`` snippets stay English on purpose (command
+# / ``MEMTOMEM_*`` reference) with a localized one-line summary above them. These
+# guards keep the JS render path and the locale files in sync.
+
+_SETTINGS_CONFIG_JS = _STATIC_JS_DIR / "settings-config.js"
+
+
+def _balanced_object(src: str, start_marker: str) -> str:
+    """Return the brace-balanced ``{...}`` literal that follows ``start_marker``."""
+    i = src.index(start_marker)
+    j = src.index("{", i)
+    depth = 0
+    for k in range(j, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[j : k + 1]
+    raise AssertionError(f"unbalanced braces after {start_marker!r}")
+
+
+def _config_label_fields() -> dict[str, list[str]]:
+    """Parse ``_CONFIG_LABEL_FIELDS`` (section -> [field, ...]) from the JS."""
+    block = _balanced_object(
+        _SETTINGS_CONFIG_JS.read_text(encoding="utf-8"), "const _CONFIG_LABEL_FIELDS"
+    )
+    out: dict[str, list[str]] = {}
+    for m in re.finditer(r"(\w+):\s*\[(.*?)\]", block, re.DOTALL):
+        out[m.group(1)] = re.findall(r"'([^']+)'", m.group(2))
+    return out
+
+
+def _config_guide_sections() -> dict[str, dict]:
+    """Parse ``_CONFIG_GUIDES`` -> {section: {items: [...], warn: bool}} from JS.
+
+    Each section literal opens with its ``items:`` array (id slugs, not prose);
+    ``warn: true`` marks the sections whose how-to carries a localized warning.
+    """
+    block = _balanced_object(
+        _SETTINGS_CONFIG_JS.read_text(encoding="utf-8"), "const _CONFIG_GUIDES"
+    )
+    heads = [(m.group(1), m.start()) for m in re.finditer(r"\n  (\w+):\s*\{", block)]
+    heads.append(("__end__", len(block)))
+    out: dict[str, dict] = {}
+    for (name, pos), (_, nxt) in zip(heads, heads[1:]):
+        seg = block[pos:nxt]
+        im = re.search(r"items:\s*\[(.*?)\]", seg, re.DOTALL)
+        out[name] = {
+            "items": re.findall(r"'([^']+)'", im.group(1)) if im else [],
+            "warn": "warn: true" in seg,
+        }
+    return out
+
+
+class TestConfigPanelI18n:
+    """S2.4 — the Config tab must render through ``settings.config.*`` keys."""
+
+    def test_config_label_and_item_keys_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Every field label and guide item the JS will request must exist in
+        BOTH locales. Keys are derived straight from ``_CONFIG_LABEL_FIELDS`` and
+        ``_CONFIG_GUIDES`` so adding a field/item without its translation fails
+        here (no hand-maintained duplicate list to drift)."""
+        required: set[str] = set()
+        label_fields = _config_label_fields()
+        assert label_fields, "Could not parse _CONFIG_LABEL_FIELDS from settings-config.js"
+        for section, fields in label_fields.items():
+            for field in fields:
+                required.add(f"settings.config.label.{section}.{field}")
+        guides = _config_guide_sections()
+        assert guides, "Could not parse _CONFIG_GUIDES from settings-config.js"
+        for section, info in guides.items():
+            required.add(f"settings.config.guide.{section}.title")
+            required.add(f"settings.config.guide.{section}.desc")
+            required.add(f"settings.config.guide.{section}.howto.title")
+            required.add(f"settings.config.guide.{section}.howto.summary")
+            if info["warn"]:
+                required.add(f"settings.config.guide.{section}.howto.warn")
+            for item in info["items"]:
+                required.add(f"settings.config.guide.{section}.item.{item}.label")
+                required.add(f"settings.config.guide.{section}.item.{item}.text")
+        missing_en = sorted(required - set(en))
+        missing_ko = sorted(required - set(ko))
+        assert not missing_en, f"Config keys missing from en.json: {missing_en}"
+        assert not missing_ko, f"Config keys missing from ko.json: {missing_ko}"
+
+    def test_config_static_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """Section headers + the non-derived Config UI strings (badges, banners,
+        re-index actions, RRF balance display, select hints) must be keyed, with
+        ``{error}`` / ``{bm25}`` / ``{dense}`` placeholders preserved in both
+        locales."""
+        required: dict[str, set[str]] = {
+            "settings.config.section.embedding": set(),
+            "settings.config.section.storage": set(),
+            "settings.config.section.search": set(),
+            "settings.config.section.decay": set(),
+            "settings.config.section.mmr": set(),
+            "settings.config.section.rerank": set(),
+            "settings.config.section.indexing": set(),
+            "settings.config.section.namespace": set(),
+            "settings.config.readonly_badge": set(),
+            "settings.config.no_guide": set(),
+            "settings.config.load_failed": {"error"},
+            "settings.config.badge_restart": set(),
+            "settings.config.badge_live": set(),
+            "settings.config.env_vars_title": set(),
+            "settings.config.reload_invalid": {"error"},
+            "settings.config.reload_external": set(),
+            "settings.config.reindex_both": set(),
+            "settings.config.reindex_fts": set(),
+            "settings.config.reindex_chunk": set(),
+            "settings.config.reindex_fts_btn": set(),
+            "settings.config.reindex_all_btn": set(),
+            "settings.config.rrf_balanced": set(),
+            "settings.config.rrf_bm25_only": set(),
+            "settings.config.rrf_dense_only": set(),
+            "settings.config.rrf_mix": {"bm25", "dense"},
+            "settings.config.select.tokenizer.unicode61": set(),
+            "settings.config.select.tokenizer.kiwipiepy": set(),
+            "settings.config.select.structured_mode.original": set(),
+            "settings.config.select.structured_mode.recursive": set(),
+            "settings.config.decay_status_active": {"days"},
+            "settings.config.decay_status_inactive": set(),
+            "settings.config.ns_default": {"ns"},
+            "settings.config.ns_auto_active": set(),
+            "common.dismiss": set(),
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Config keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Config keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Config placeholder drift:\n" + "\n".join(bad_ph)
+
+    def test_no_hardcoded_config_labels(self) -> None:
+        """``settings-config.js`` must not carry hard-coded English row labels or
+        guide prose (the pre-S2.4 pattern). ``_CONFIG_LABEL_FIELDS`` holds only
+        identifier slugs and ``_CONFIG_GUIDES`` holds no ``title``/``desc``/
+        ``label``/``text`` prose keys — those render through ``t()``. The English
+        ``howto.steps`` / ``envs`` snippets are the intended exception and are not
+        scanned here."""
+        text = _SETTINGS_CONFIG_JS.read_text(encoding="utf-8")
+
+        # The English {field: label} map and inline _SECTION_TITLES map are gone.
+        assert "const _CONFIG_LABELS " not in text, (
+            "Re-introduced the English _CONFIG_LABELS map — labels must render via "
+            "t('settings.config.label.<section>.<field>')."
+        )
+        assert "_SECTION_TITLES" not in text, (
+            "Re-introduced the inline English _SECTION_TITLES map — section headers "
+            "must render via t('settings.config.section.<section>')."
+        )
+
+        # _CONFIG_LABEL_FIELDS values are identifier slugs, never English prose.
+        for section, fields in _config_label_fields().items():
+            for field in fields:
+                assert re.fullmatch(r"[a-z0-9_]+", field), (
+                    f"_CONFIG_LABEL_FIELDS[{section!r}] has a non-identifier entry "
+                    f"{field!r} — it must be a config field name, not a label."
+                )
+
+        # The migrated prose fields no longer live in the _CONFIG_GUIDES literal.
+        # Word-boundary match so a future key like ``subtitle:`` can't slip past a
+        # bare ``in`` substring check, and so the legitimate ``items:`` / ``envs:``
+        # / ``howto:`` / ``restart:`` / ``warn:`` / ``steps:`` keys never match.
+        guides_block = _balanced_object(text, "const _CONFIG_GUIDES")
+        prose_field = re.search(r"\b(title|desc|label|text):", guides_block)
+        assert prose_field is None, (
+            f"Found a {prose_field.group(1)!r} prose field in _CONFIG_GUIDES — that "
+            "content moved to settings.config.guide.* locale keys; only items/envs/"
+            "howto remain."
+        )
+
+        # The render path resolves the localized families.
+        for needle in (
+            "settings.config.label.",
+            "settings.config.section.",
+            "`settings.config.guide.${section}`",
+        ):
+            assert needle in text, (
+                f"Config render path no longer references {needle!r} — the panel "
+                "may have stopped localizing."
+            )
