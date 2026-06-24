@@ -213,6 +213,17 @@ header h1 { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-sp
 .tab-btn:hover  { color: var(--text); }
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* Core / advanced group divider (S3.4): a subtle separator before the first
+   advanced-only tab (Tags), so the nav reads as [core] | [advanced]. The rule
+   lives on that first advanced tab, so in Simple mode — where body.app-simple
+   sets display:none on [data-ui-adv="advanced"] tabs — the divider vanishes
+   with them; no separate Simple-mode guard, no double-hiding. */
+.tab-nav .tab-btn:not([data-ui-adv="advanced"]) + .tab-btn[data-ui-adv="advanced"] {
+  border-left: 1px solid var(--border);
+  margin-left: 8px;
+  padding-left: 20px;
+}
+
 /* ── ⚙ Settings tab button ── */
 /* "More" tab — same style as other tabs */
 
