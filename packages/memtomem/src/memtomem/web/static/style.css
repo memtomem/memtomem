@@ -4126,6 +4126,22 @@ body.help-hidden #help-toggle { opacity: 0.5; }
    aria-pressed for assistive tech — never color-only). */
 .ctx-mode-toggle[aria-pressed="true"] { background: rgba(var(--accent-rgb), 0.12); border-color: var(--accent); color: var(--text); }
 .ctx-overview-simple { margin-top: 4px; }
+
+/* S2.2: app-level Simple/Advanced progressive disclosure. While the app is in
+   Simple mode, hide every surface demoted to Advanced (the Tags/Timeline tabs +
+   the Settings → Data group). Class-based (no inline style) so it composes with
+   the server dev/prod ui-tier filter — which owns the inline ``display`` channel
+   in _applyUiModeFilter — and with the settings-nav ``.collapsed-member`` class,
+   without any of the three stomping the others. Navigation is gated separately
+   in JS (_visibleMainTabs); this rule only paints. The header toggle lives in
+   global chrome (outside every panel), so unlike the gateway's section-scoped
+   ``.ctx-simple`` it needs no ``:has()`` guard to stay reachable. */
+body.app-simple [data-ui-adv="advanced"] { display: none; }
+/* Header mode toggle. aria-pressed="true" === Advanced engaged (the expanded,
+   non-default state) — highlight it so "extra surfaces shown" reads at a glance
+   (state also carried by aria-pressed for AT — never color-only). */
+.app-mode-toggle { font-size: 0.78rem; padding: 4px 10px; white-space: nowrap; }
+.app-mode-toggle[aria-pressed="true"] { background: rgba(var(--accent-rgb), 0.12); border-color: var(--accent); color: var(--text); }
 .ctx-simple-verdict { margin: 0 0 14px; font-size: 0.95rem; color: var(--text); }
 .ctx-simple-verdict--warn { color: var(--yellow); }
 .ctx-simple-verdict--muted { color: var(--muted); }

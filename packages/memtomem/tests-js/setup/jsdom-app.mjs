@@ -104,6 +104,7 @@ export async function bootApp({
   apiResponses = {},
   firstRun = false,
   storageBlock = [],
+  seedStorage = {},
 } = {}) {
   let html = readStatic('index.html');
   // Strip every <script ...>...</script> element so JSDOM's loader
@@ -127,6 +128,14 @@ export async function bootApp({
   // exercising the first-run landing opt in with ``bootApp({ firstRun: true })``.
   if (!firstRun) {
     try { window.localStorage.setItem('m2m-app-initialized', '1'); } catch {}
+  }
+
+  // Test-controlled localStorage seeds, applied before scripts load so a
+  // module-load read sees them (e.g. the S2.2 ``m2m-app-simple`` flag, which is
+  // read once at app.js parse time). After the returning-install sentinel so a
+  // test can still override it.
+  for (const [k, v] of Object.entries(seedStorage)) {
+    try { window.localStorage.setItem(k, v); } catch {}
   }
 
   // Simulate a locked-down storage (some private modes throw on access). Applied
