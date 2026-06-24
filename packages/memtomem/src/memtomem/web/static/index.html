@@ -112,7 +112,7 @@
         </div>
         <div class="stat-card card">
           <div class="stat-value" id="home-namespaces">—</div>
-          <div class="stat-label" data-i18n="home.stat.namespaces">Namespaces</div>
+          <div class="stat-label"><span data-i18n="home.stat.namespaces">Namespaces</span> <span class="help-tip" data-help-i18n="glossary.namespace" tabindex="0" role="img" aria-label="A namespace groups related memories — by project, agent, or runtime — so you can scope a search to one set.">i</span></div>
         </div>
         <div class="stat-card card">
           <div class="stat-value" id="home-total-size">—</div>
@@ -143,7 +143,7 @@
           <div id="home-activity-map" class="home-activity-map"></div>
         </div>
         <div class="card home-chart-card">
-          <div class="home-section-title"><span data-i18n="home.section.chunk_sizes">Chunk Sizes</span> <span class="muted-sm" data-i18n="home.section.chunk_sizes_unit">(tokens)</span></div>
+          <div class="home-section-title"><span data-i18n="home.section.chunk_sizes">Chunk Sizes</span> <span class="muted-sm" data-i18n="home.section.chunk_sizes_unit">(tokens)</span> <span class="help-tip" data-help-i18n="glossary.token" tabindex="0" role="img" aria-label="Tokens are how models count text — roughly three-quarters of a word each. Chunk size is measured in tokens.">i</span></div>
           <div id="home-chunk-dist" class="home-bar-chart"></div>
         </div>
       </div>
@@ -724,7 +724,7 @@
         <div class="settings-section" id="settings-ctx-mcp-servers">
           <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">Project-scoped MCP server definitions synced to .mcp.json.</p>
           <div class="ctx-header">
-            <h2 data-i18n="settings.ctx.mcp_servers_title">MCP Servers</h2>
+            <h2><span data-i18n="settings.ctx.mcp_servers_title">MCP Servers</span> <span class="help-tip" data-help-i18n="glossary.mcp" tabindex="0" role="img" aria-label="MCP (Model Context Protocol) is the open standard memtomem uses to expose memory tools to AI assistants.">i</span></h2>
             <div class="ctx-toolbar" data-type="mcp-servers"></div>
           </div>
           <div id="ctx-mcp-servers-status"></div>
@@ -1127,6 +1127,7 @@
             <input id="scratch-key" type="text" data-i18n-placeholder="settings.scratch.key_placeholder" placeholder="Key" class="w-120" />
             <input id="scratch-value" type="text" data-i18n-placeholder="settings.scratch.value_placeholder" placeholder="Value" />
             <input id="scratch-ttl" type="number" data-i18n-placeholder="settings.scratch.ttl_placeholder" placeholder="TTL (min)" class="w-70" min="1" />
+            <span class="help-tip" data-help-i18n="glossary.ttl" tabindex="0" role="img" aria-label="TTL (time-to-live) is how long an entry is kept before it expires, in minutes.">i</span>
             <button id="scratch-add-btn" class="btn-primary btn-xs" data-i18n="settings.scratch.add_btn">Add</button>
           </div>
           <div id="scratch-list" class="harness-list">
@@ -1700,7 +1701,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=6"></script>
-  <script src="/app.js?v=142"></script>
+  <script src="/app.js?v=143"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=14"></script>
   <script src="/sources-memory-dirs.js?v=12"></script>

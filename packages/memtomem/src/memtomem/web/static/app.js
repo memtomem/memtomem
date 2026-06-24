@@ -3194,8 +3194,20 @@ function renderResults(results, retrievalStats) {
     const bm25Warn = s.bm25_error
       ? `<span class="badge badge-yellow retrieval-warning" title="${escapeHtml(s.bm25_error)}" role="status" aria-label="Keyword search degraded: ${escapeHtml(s.bm25_error)}">Keyword degraded</span>`
       : '';
+    // Funnel help-tip prose is single-sourced from the glossary so it localizes
+    // and the BM25/Dense/RRF jargon lives in one place (the glossary), not as a
+    // hardcoded literal. This is dynamically rendered, so resolve t() inline
+    // rather than relying on data-help-i18n (i18n.js applyDOM only re-runs on
+    // init + langchange, not on every results render). Fallback === en value.
+    const pipelineFallback =
+      'BM25 finds keyword matches, Dense finds meaning-based matches, RRF merges both into one ranking, and Final is the list after reranking and filters.';
+    let pipelineTip = pipelineFallback;
+    if (typeof t === 'function') {
+      const translated = t('glossary.search_pipeline');
+      pipelineTip = translated === 'glossary.search_pipeline' ? pipelineFallback : translated;
+    }
     funnelHtml = `<div class="results-funnel">
-      <span class="help-tip" data-help="BM25: keyword matching. Dense: semantic embedding similarity. RRF: reciprocal rank fusion merges both. Final: after reranking and filters." tabindex="0" role="img" aria-label="BM25: keyword matching. Dense: semantic embedding similarity. RRF: reciprocal rank fusion merges both. Final: after reranking and filters.">i</span>
+      <span class="help-tip" data-help="${escapeHtml(pipelineTip)}" tabindex="0" role="img" aria-label="${escapeHtml(pipelineTip)}">i</span>
       <span class="funnel-stage"><span class="funnel-stage-label">BM25</span> <span class="funnel-stage-count">${s.bm25_candidates}</span></span>
       <span class="funnel-arrow">+</span>
       <span class="funnel-stage"><span class="funnel-stage-label">Dense</span> <span class="funnel-stage-count">${s.dense_candidates}</span></span>
