@@ -380,7 +380,20 @@ your machine and lets you accept them per category:
 |----------|--------|-------|
 | `claude-memory` | `~/.claude/projects/<project>/memory/` | Claude Code per-project auto-memory ([official docs](https://code.claude.com/docs/en/memory)) |
 | `claude-plans` | `~/.claude/plans/` | Claude Code plan files (local convention) |
-| `codex` | `~/.codex/memories/` | Codex CLI memories ([official docs](https://developers.openai.com/codex/memories)) |
+| `codex` | `~/.codex/memories/` | Codex memories ([official docs](https://developers.openai.com/codex/memories)) |
+
+#### How provider memory namespaces map back to each tool
+
+`mm init` adds namespace rules so provider memory folders stay searchable by
+origin instead of collapsing into one generic namespace. These are memtomem
+indexing labels; they do not replace each tool's own memory or instruction
+scope model.
+
+| Tool | Upstream memory shape | memtomem namespace shape |
+|------|-----------------------|--------------------------|
+| Claude Code | Auto memory is per repository at `~/.claude/projects/<project>/memory/`, with a `MEMORY.md` index plus topic files. Claude also has explicit `CLAUDE.md` / `.claude/rules/` instruction scopes. | `claude:<project>` via the `<project>` folder above `memory/`. `MEMORY.md` is treated as a provider index file, so the topic files carry most searchable detail. |
+| Codex | Generated memories live under `~/.codex/memories/` and include summaries, durable entries, recent inputs, and supporting evidence from prior threads. | `codex:rollout_summaries` for per-session recap files, `codex:extensions` for ad-hoc/manual note extensions, and `codex:global` for the remaining consolidated top-level memory files. |
+| Gemini CLI / Antigravity | Hierarchical instructional memory is loaded from `GEMINI.md` files, with `/memory` commands to list, refresh, show, or add entries ([commands](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/commands.md), [configuration](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/configuration.md)). Settings are under `~/.gemini/settings.json` and project `.gemini/settings.json`. | Not added as a watched `memory_dirs` provider because the canonical memory surface is a file, not a directory. Use `mm ingest gemini-memory` for a one-shot import with `gemini-memory:<slug>` namespaces. |
 
 Accepted categories get appended directly to `indexing.memory_dirs` in
 `~/.memtomem/config.json`. Per-project Claude memory subdirs without any
