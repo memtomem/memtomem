@@ -46,7 +46,7 @@
   "home.orientation.intro": "Three steps to start using memtomem.",
   "home.orientation.step_add": "Add your notes, docs, and code.",
   "home.orientation.step_add_cta": "Add memories",
-  "home.orientation.step_connect": "Connect your agent so it can reuse them.",
+  "home.orientation.step_connect": "Sync your skills, subagents, and commands out to Claude Code, Codex, and more.",
   "home.orientation.step_connect_cta": "Open Gateway",
   "home.orientation.step_search": "Search everything by meaning, anytime.",
   "home.orientation.step_search_cta": "Try a search",

@@ -21,7 +21,7 @@ describe('First-run Home orientation block (S2.3)', () => {
     expect(details.closest('.home-layout').classList.contains('orientation-open')).toBe(true);
   });
 
-  it('wires the three add → connect → search CTAs to their tabs', async () => {
+  it('wires the three add → search → connect CTAs to their tabs', async () => {
     const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
     const { window } = dom;
     const { document, I18N } = window;
@@ -33,10 +33,12 @@ describe('First-run Home orientation block (S2.3)', () => {
     const calls = [];
     window.activateTab = (name) => { calls.push(name); };
 
+    // Clicked in the rendered order: add (memory) → search (memory) →
+    // connect (Gateway = skill/subagent/command sync, a distinct surface).
     document.getElementById('home-orientation-add').click();
-    document.getElementById('home-orientation-connect').click();
     document.getElementById('home-orientation-search').click();
-    expect(calls).toEqual(['index', 'context-gateway', 'search']);
+    document.getElementById('home-orientation-connect').click();
+    expect(calls).toEqual(['index', 'search', 'context-gateway']);
   });
 
   it('persists the collapse choice and restores it on the next load', async () => {
