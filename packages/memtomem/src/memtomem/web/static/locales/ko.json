@@ -8,6 +8,10 @@
   "nav.timeline": "타임라인",
   "nav.more": "설정",
   "nav.skip_to_main": "본문으로 건너뛰기",
+  "nav.mode_simple": "간단히",
+  "nav.mode_advanced": "고급",
+  "nav.app_mode_tip": "간단히 보기와 고급 보기를 전환합니다. 고급에서는 태그·타임라인 탭과 설정 → 데이터 도구가 추가됩니다.",
+  "nav.app_mode_aria": "간단히 / 고급 보기 전환",
 
   "header.stat_chunks": "— 청크",
   "header.stat_sources": "— 소스",
@@ -1221,6 +1225,7 @@
   "toast.fts_rebuilt": "FTS 인덱스가 재구축되었습니다 ({count}개 청크).",
   "toast.diff_shown": "차이점 표시: 기록 → 현재",
   "toast.dev_only_section": "알 수 없는 섹션 (dev 전용)",
+  "toast.advanced_only_section": "이 화면은 고급 보기에 있어요 — 우측 상단에서 고급으로 전환하면 열립니다.",
   "toast.quick_action.open_search": "검색을 열었습니다.",
   "toast.quick_action.open_index": "인덱스를 열었습니다. 소스를 선택한 뒤 인덱싱을 실행하세요.",
   "toast.quick_action.reindex_ready": "강제 재인덱스가 선택되었습니다. 소스를 확인한 뒤 인덱싱을 실행하세요.",

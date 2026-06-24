@@ -15,6 +15,20 @@ function _lsGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
 }
 
+// App-level Simple/Advanced progressive-disclosure flag (S2.2). A SECOND,
+// independent axis from the server-driven dev/prod ui-tier: this one is a
+// per-user persisted preference (Simple by default, gateway D-F precedent) that
+// demotes power-user surfaces (Tags, Timeline, the Settings → Data group) behind
+// an Advanced toggle in the global <header>. Declared early — next to _lsGet —
+// because the shared visibility predicate (_isUiTierVisible) reads it. The full
+// lifecycle contract lives on _applyAppSimpleMode below.
+const APP_SIMPLE_KEY = 'm2m-app-simple';
+const APP_SIMPLE_DEFAULT = true;  // Simple-when-unset (no stamp on boot)
+let _appSimple = (() => {
+  const stored = _lsGet(APP_SIMPLE_KEY);
+  return stored !== null ? stored === '1' : APP_SIMPLE_DEFAULT;
+})();
+
 // ── Unified global state ──
 const STATE = {
   lastSettingsSection: null,
@@ -157,8 +171,16 @@ const STATE = {
     // ``t()`` at build time, so they must run after the locale cache is
     // populated to avoid raw-key flashes.
     const hash = location.hash.slice(1);
-    if (hash && _visibleMainTabs().includes(hash)) {
-      activateTab(hash);
+    if (hash) {
+      if (_visibleMainTabs().includes(hash)) {
+        activateTab(hash);
+      } else if (document.querySelector(`.tab-btn[data-tab="${hash}"]`)) {
+        // A real tab that the current mode hides (e.g. a deep-link to #timeline
+        // while in Simple). Don't strand on an empty panel — the statically
+        // active tab stays; surface *why* the link didn't open so the user can
+        // flip to Advanced. (No dev main-tabs exist, so the advanced copy fits.)
+        showToast(t('toast.advanced_only_section'), 'info');
+      }
     }
   });
 })();
@@ -206,21 +228,85 @@ function _applyUiModeFilter() {
   if (typeof loadNamespaceDropdowns === 'function') loadNamespaceDropdowns();
 }
 
+// Single source of truth for "is this tab / settings-section button shown".
+// Composes the TWO orthogonal visibility axes — an element is visible only if
+// NEITHER hides it:
+//   * server dev/prod : data-ui-tier="dev" is hidden unless STATE.uiMode==='dev'
+//   * user Simple/Adv  : data-ui-adv="advanced" is hidden while _appSimple is on
+// Every navigation guard (boot-hash dispatch, popstate, arrow-nav,
+// activateTab, switchSettingsSection, the landing-default) routes through
+// _visibleMainTabs / _visibleSettingsSections, so a demoted surface can never be
+// *reached* while it is painted-hidden — closing the #1358 strand class for both
+// axes at once. The two channels never collide: dev/prod writes inline
+// style.display in _applyUiModeFilter; app-simple paints via the body.app-simple
+// CSS class. data-ui-adv is orthogonal to data-ui-tier (an element may carry
+// both); dev mode reveals dev-tier regardless of app-simple, and app-simple
+// independently governs the advanced (non-dev) surface.
+function _isUiTierVisible(btn) {
+  if (STATE.uiMode !== 'dev' && btn.dataset.uiTier === 'dev') return false;
+  if (_appSimple && btn.dataset.uiAdv === 'advanced') return false;
+  return true;
+}
+
 function _visibleMainTabs() {
-  const isProd = STATE.uiMode !== 'dev';
   return Array.from(document.querySelectorAll('.tab-btn'))
-    .filter(btn => !isProd || btn.dataset.uiTier !== 'dev')
+    .filter(_isUiTierVisible)
     .map(btn => btn.dataset.tab)
     .filter(Boolean);
 }
 
 function _visibleSettingsSections() {
-  const isProd = STATE.uiMode !== 'dev';
   return Array.from(document.querySelectorAll('.settings-nav-btn'))
-    .filter(btn => !isProd || btn.dataset.uiTier !== 'dev')
+    .filter(_isUiTierVisible)
     .map(btn => btn.dataset.section)
     .filter(Boolean);
 }
+
+// -- App Simple/Advanced lifecycle (S2.2) -------------------------------------
+// Mirror of the gateway's _ctxSimpleMode pattern, promoted to app level. The
+// toggle lives in the global <header> (outside <main> and every .tab-panel), so
+// it stays reachable on EVERY entry path — deep-link, reload-into-subsection,
+// Back/Forward — the central #1358 lesson that a persisted mode flag must never
+// hide its own escape hatch. Idempotent; safe to call on load and every flip.
+function _applyAppSimpleMode() {
+  document.body.classList.toggle('app-simple', _appSimple);
+  const btn = document.getElementById('app-mode-toggle');
+  if (!btn) return;
+  // aria-pressed reflects "Advanced engaged" (the expanded, non-default state),
+  // so the pressed/highlighted cue means "extra surfaces shown".
+  btn.setAttribute('aria-pressed', _appSimple ? 'false' : 'true');
+  const label = btn.querySelector('.app-mode-label');
+  if (!label) return;
+  // Mode-display label: shows the CURRENT mode. Drive it through the data-i18n
+  // attribute so i18n applyDOM (init + every langchange) keeps it translated;
+  // update textContent now only once the locale cache is populated (t() returns
+  // the raw key until then — the guard avoids a key flash, and t may not even be
+  // defined yet depending on script order).
+  const key = _appSimple ? 'nav.mode_simple' : 'nav.mode_advanced';
+  label.dataset.i18n = key;
+  const txt = typeof t === 'function' ? t(key) : key;
+  // Localized text once the cache is populated; otherwise a literal that still
+  // matches the CURRENT mode, so a persisted-Advanced boot never momentarily
+  // reads "Simple" before applyDOM runs. applyDOM (init + every langchange) then
+  // swaps in the translated string from the data-i18n attribute set above.
+  label.textContent = txt !== key ? txt : (_appSimple ? 'Simple' : 'Advanced');
+}
+
+// Flip the flag, persist (only on explicit user action — never stamped on boot,
+// so a fresh install has no key and the tri-state default yields Simple without
+// polluting first-run detection), and re-apply.
+function _setAppSimple(on) {
+  _appSimple = !!on;
+  try {
+    localStorage.setItem(APP_SIMPLE_KEY, _appSimple ? '1' : '0');
+  } catch { /* locked-down storage — in-memory flag still applies this session */ }
+  _applyAppSimpleMode();
+}
+
+// Apply the persisted flag once at module load. app.js is the last script before
+// </body>, so the header toggle markup already exists; advanced tabs are inert
+// until activated, so toggling the body class now causes no flash.
+_applyAppSimpleMode();
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -1309,17 +1395,23 @@ function activateTab(tabName, opts = {}) {
   //   * history mutation uses replaceState so cycling N tabs does not push
   //     N entries the user has to press Back through to escape
   const fromKeyboard = opts.fromKeyboard === true;
-  // In prod mode, hide dev-only tabs by redirecting to the first visible
-  // main tab instead of showing a dev panel the polished surface doesn't
-  // expose.
+  // Redirect to the first visible tab when the target is hidden by EITHER
+  // visibility axis (dev-only in prod, or advanced-only in Simple mode) instead
+  // of showing a panel whose tab button is off-screen. This single guard catches
+  // every programmatic caller (Home heatmap/Tags quick-actions, Cmd+K palette,
+  // number keys, g-prefix, a stale saved default) — the post-guard loaders never
+  // fire for a hidden tab, so no orphaned panel + no strand.
   const targetBtn = document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
-  if (targetBtn && targetBtn.dataset.uiTier === 'dev' && STATE.uiMode !== 'dev') {
+  if (targetBtn) {
     const visible = _visibleMainTabs();
-    showToast(t('toast.dev_only_section'), 'info');
-    if (visible.length && visible[0] !== tabName) {
-      activateTab(visible[0], opts);
+    if (!visible.includes(tabName)) {
+      const devHidden = targetBtn.dataset.uiTier === 'dev' && STATE.uiMode !== 'dev';
+      showToast(t(devHidden ? 'toast.dev_only_section' : 'toast.advanced_only_section'), 'info');
+      if (visible.length && visible[0] !== tabName) {
+        activateTab(visible[0], opts);
+      }
+      return;
     }
-    return;
   }
 
   // Deactivate all main tabs. ``tabindex=-1`` keeps non-current tabs out of
@@ -1523,17 +1615,28 @@ function switchSettingsSection(sectionName) {
       return;
     }
   }
-  // In prod mode, redirect dev-only sections to the first visible one.
+  // Redirect to the first visible section when the target is hidden by EITHER
+  // axis (dev-only in prod, or the advanced Data group in Simple mode) — the
+  // section's loader (loadConfig / resetDedupPanel / …) must not run for a
+  // demoted section reached via a Home quick-action or the Cmd+K palette.
   const targetBtn = document.querySelector(
     `.settings-nav-btn[data-section="${sectionName}"]`,
   );
-  if (targetBtn && targetBtn.dataset.uiTier === 'dev' && STATE.uiMode !== 'dev') {
+  if (targetBtn) {
     const visible = _visibleSettingsSections();
-    showToast(t('toast.dev_only_section'), 'info');
-    if (visible.length && visible[0] !== sectionName) {
-      switchSettingsSection(visible[0]);
+    if (!visible.includes(sectionName)) {
+      const devHidden = targetBtn.dataset.uiTier === 'dev' && STATE.uiMode !== 'dev';
+      showToast(t(devHidden ? 'toast.dev_only_section' : 'toast.advanced_only_section'), 'info');
+      // Fall back to the first visible *Settings-tab* section (config, …), never
+      // a Gateway sidebar section: ctx-overview & friends share .settings-nav-btn
+      // but sit earlier in the DOM, so a bare visible[0] would yank the user to
+      // the Gateway tab instead of Settings → Config (Codex review).
+      const fallback = visible.find(s => !GATEWAY_SECTIONS.has(s));
+      if (fallback && fallback !== sectionName) {
+        switchSettingsSection(fallback);
+      }
+      return;
     }
-    return;
   }
   STATE.lastSettingsSection = sectionName;
   try { localStorage.setItem(LAST_SECTION_KEY, sectionName); } catch {}
@@ -1627,10 +1730,12 @@ function _arrowNavIndex(length, currentIdx, key) {
 
 document.querySelector('.tab-nav')?.addEventListener('keydown', (e) => {
   if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-  // Filter out dev-only buttons in prod mode so arrow nav matches what the
-  // user actually sees on screen — otherwise focus could land on a hidden tab.
+  // Walk only the tabs the user actually sees — otherwise ArrowRight/Left could
+  // land focus on (and activate) a tab hidden by either axis (dev-only in prod,
+  // advanced-only in Simple). Reuse the shared predicate so this never diverges.
+  const visible = new Set(_visibleMainTabs());
   const buttons = Array.from(document.querySelectorAll('.tab-nav .tab-btn'))
-    .filter(b => b.dataset.uiTier !== 'dev' || STATE.uiMode === 'dev');
+    .filter(b => visible.has(b.dataset.tab));
   const currentIdx = buttons.indexOf(document.activeElement);
   const nextIdx = _arrowNavIndex(buttons.length, currentIdx === -1 ? 0 : currentIdx, e.key);
   if (nextIdx < 0) return;
@@ -1658,6 +1763,32 @@ qs('theme-toggle').addEventListener('click', () => {
   localStorage.setItem('m2m-theme', goLight ? 'light' : 'dark');
 });
 
+// ── App-level Simple / Advanced toggle (S2.2) ──
+document.getElementById('app-mode-toggle')?.addEventListener('click', () => {
+  _setAppSimple(!_appSimple);
+  // Flipping INTO Simple can hide the tab/section the user is currently on —
+  // bounce to the first still-visible one so the panel + its nav cue never
+  // vanish from under them. (Flipping into Advanced only reveals, nothing to do.)
+  if (!_appSimple) return;
+  const activeTab = document.querySelector('.tab-btn.active');
+  const visibleTabs = _visibleMainTabs();
+  if (activeTab && !visibleTabs.includes(activeTab.dataset.tab)) {
+    activateTab(visibleTabs[0] || 'home');
+    return;
+  }
+  // On the Settings tab, the active *section* may be the one that just got
+  // demoted (Data group) — hop to the first visible section in place.
+  if (activeTab?.dataset.tab === 'settings') {
+    const activeSection = document.querySelector('.settings-nav-btn.active');
+    const visibleSections = _visibleSettingsSections();
+    if (activeSection && !visibleSections.includes(activeSection.dataset.section)) {
+      // First visible Settings-tab section (skip Gateway sidebar sections, which
+      // would bounce to the Gateway tab — see switchSettingsSection's note).
+      switchSettingsSection(visibleSections.find(s => !GATEWAY_SECTIONS.has(s)) || 'config');
+    }
+  }
+});
+
 // ── C1: Mobile back button ──
 qs('mobile-back-btn').addEventListener('click', () => {
   document.querySelector('.results-layout').classList.remove('mobile-detail');
@@ -1665,7 +1796,12 @@ qs('mobile-back-btn').addEventListener('click', () => {
 
 // ── History API: back/forward navigation + hash deep link ──
 window.addEventListener('popstate', (e) => {
-  if (e.state?.tab) activateTab(e.state.tab);
+  const tab = e.state?.tab;
+  // Gate on current visibility (mirrors the boot-hash dispatch): a history
+  // entry pushed while Tags/Timeline were visible must not replay
+  // activateTab('timeline') after the user flipped to Simple — that would strand
+  // them on a panel with no active tab button. Staying put is the safe floor.
+  if (tab && _visibleMainTabs().includes(tab)) activateTab(tab);
 });
 // Note: initial hash-based activateTab dispatch moved into the i18n init
 // handler above so ``t()``-backed JS widgets (Sources tab's Memory Dirs
@@ -7115,7 +7251,14 @@ function _applyLandingTab() {
   // throws) would be force-routed to Home on every visit.
   let stamped = false;
   try { localStorage.setItem('m2m-app-initialized', '1'); stamped = true; } catch {}
-  const target = (firstRun && stamped) ? 'home' : _loadSettings().defaultTab;
+  let target = (firstRun && stamped) ? 'home' : _loadSettings().defaultTab;
+  // Clamp a returning user's saved default (selectable as Tags/Timeline in the
+  // settings modal) to a currently-visible tab — otherwise Simple-by-default
+  // force-routes them onto a hidden advanced tab on every boot. The highest-
+  // probability real-world strand for this feature.
+  if (!_visibleMainTabs().includes(target)) {
+    target = _visibleMainTabs()[0] || 'home';
+  }
   const currentActive = document.querySelector('.tab-btn.active');
   const currentTab = currentActive ? currentActive.dataset.tab : null;
   if (currentTab !== target) {

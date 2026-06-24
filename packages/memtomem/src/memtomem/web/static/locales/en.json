@@ -8,6 +8,10 @@
   "nav.timeline": "Timeline",
   "nav.more": "Settings",
   "nav.skip_to_main": "Skip to main content",
+  "nav.mode_simple": "Simple",
+  "nav.mode_advanced": "Advanced",
+  "nav.app_mode_tip": "Switch between the Simple and Advanced views. Advanced adds the Tags and Timeline tabs and the Settings → Data tools.",
+  "nav.app_mode_aria": "Toggle Simple / Advanced view",
 
   "header.stat_chunks": "— chunks",
   "header.stat_sources": "— sources",
@@ -1221,6 +1225,7 @@
   "toast.fts_rebuilt": "FTS index rebuilt ({count} chunks).",
   "toast.diff_shown": "Showing diff: history → current",
   "toast.dev_only_section": "Unknown section (dev-only)",
+  "toast.advanced_only_section": "That view lives in Advanced mode — switch to Advanced (top-right) to open it.",
   "toast.quick_action.open_search": "Opened Search.",
   "toast.quick_action.open_index": "Opened Index. Choose a source, then run indexing.",
   "toast.quick_action.reindex_ready": "Force re-index is selected. Review the source, then run indexing.",

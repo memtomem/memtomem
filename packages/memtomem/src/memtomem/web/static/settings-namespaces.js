@@ -612,21 +612,32 @@ _renderNsChart = function(namespaces) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function _buildCommands() {
+  // Only list destinations the current mode actually exposes — otherwise Simple
+  // mode (S2.2) would offer Tags / Timeline / Dedup / Export commands that just
+  // redirect away with a toast, and dev-tier entries would leak in prod. Route
+  // through the same predicates the nav guards use so the palette matches the
+  // visible surface. (Both are app.js globals; guard for load order.)
+  const visibleTabs = new Set(
+    typeof _visibleMainTabs === 'function' ? _visibleMainTabs() : [],
+  );
+  const visibleSections = new Set(
+    typeof _visibleSettingsSections === 'function' ? _visibleSettingsSections() : [],
+  );
   const tabs = [
-    { icon: '🏠', label: t('cmd.nav.home'), action: () => activateTab('home'), hint: '1' },
-    { icon: '🔍', label: t('cmd.nav.search'), action: () => activateTab('search'), hint: '2' },
-    { icon: '📁', label: t('cmd.nav.sources'), action: () => activateTab('sources'), hint: '3' },
-    { icon: '📥', label: t('cmd.nav.index'), action: () => activateTab('index'), hint: '4' },
-    { icon: '🏷', label: t('cmd.nav.tags'), action: () => activateTab('tags'), hint: '5' },
-    { icon: '📅', label: t('cmd.nav.timeline'), action: () => activateTab('timeline'), hint: '6' },
-    { icon: '⚙', label: t('cmd.nav.settings'), action: () => activateTab('settings'), hint: '7' },
-  ];
+    { icon: '🏠', label: t('cmd.nav.home'), action: () => activateTab('home'), hint: '1', tab: 'home' },
+    { icon: '🔍', label: t('cmd.nav.search'), action: () => activateTab('search'), hint: '2', tab: 'search' },
+    { icon: '📁', label: t('cmd.nav.sources'), action: () => activateTab('sources'), hint: '3', tab: 'sources' },
+    { icon: '📥', label: t('cmd.nav.index'), action: () => activateTab('index'), hint: '4', tab: 'index' },
+    { icon: '🏷', label: t('cmd.nav.tags'), action: () => activateTab('tags'), hint: '5', tab: 'tags' },
+    { icon: '📅', label: t('cmd.nav.timeline'), action: () => activateTab('timeline'), hint: '6', tab: 'timeline' },
+    { icon: '⚙', label: t('cmd.nav.settings'), action: () => activateTab('settings'), hint: '7', tab: 'settings' },
+  ].filter(c => visibleTabs.has(c.tab));
 
   const settings = [
-    { icon: '🔧', label: t('cmd.open.config'), action: () => { activateTab('settings'); switchSettingsSection('config'); } },
-    { icon: '📋', label: t('cmd.open.dedup'), action: () => { activateTab('settings'); switchSettingsSection('dedup'); } },
-    { icon: '📦', label: t('cmd.open.export_import'), action: () => { activateTab('settings'); switchSettingsSection('export'); } },
-  ];
+    { icon: '🔧', label: t('cmd.open.config'), action: () => { activateTab('settings'); switchSettingsSection('config'); }, section: 'config' },
+    { icon: '📋', label: t('cmd.open.dedup'), action: () => { activateTab('settings'); switchSettingsSection('dedup'); }, section: 'dedup' },
+    { icon: '📦', label: t('cmd.open.export_import'), action: () => { activateTab('settings'); switchSettingsSection('export'); }, section: 'export' },
+  ].filter(c => visibleSections.has(c.section));
 
   const actions = [
     { icon: '🔍', label: t('cmd.action.focus_search'), action: () => { activateTab('search'); qs('search-input').focus(); }, hint: '/' },
