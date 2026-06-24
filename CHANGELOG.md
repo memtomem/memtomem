@@ -5,6 +5,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-24
+
+A first-time-user experience pass over the web UI, plus a non-ASCII tag-storage
+fix. No CLI, MCP, or HTTP API surface changed: every default flip is reversible
+(a saved choice always wins) and the full power-user surface stays one
+**Advanced** toggle away.
+
+- **A brand-new install now opens on an orientation-first Home instead of an
+  empty Search box.** The first no-hash visit lands on the Home tab (#1440),
+  which leads with a collapsible "Getting started" block walking the
+  add → search → connect journey (#1439), and a one-time three-step wizard
+  guides that same path over Home on a genuine first run (#1444). First-run is
+  detected by scanning `localStorage` for any app-owned key, so deep-links and a
+  saved default tab still win and a returning user is never misread as fresh; the
+  Search empty state also gains a dismissible welcome card that explains
+  Sources / Chunks / Memories (#1437).
+
+- **A Simple view is the default; the power-user surface is one toggle away.** A
+  global-header Simple/Advanced toggle (persisted per browser, Simple by default)
+  demotes the Tags and Timeline tabs and the Settings → Data group behind
+  Advanced, with a single visibility predicate gating every navigation path (hash
+  dispatch, popstate, arrow-keys, command palette, default-tab clamp) so a
+  demoted surface can never strand the user (#1441). A subtle 1px divider marks
+  the core / advanced split in the tab row, vanishing with the advanced tabs in
+  Simple mode (#1446).
+
+- **The Index tab defaults to the intuitive "New memory" (compose) mode for fresh
+  installs** rather than the more technical Folder scan; a saved
+  `memtomem.index.mode` is still honored, so the flip is reversible (#1438).
+
+- **The search surface no longer greets first-time users with retrieval-engine
+  jargon.** The "BM25 (keyword) + Dense (semantic) → RRF fusion" help banner and
+  the "Top-K · BM25+Dense · RRF k=60" status line are replaced with
+  plain-language summaries ("Up to 10 results · Hybrid search"); the raw score,
+  retrieval-source badge, and RRF-math tooltip move behind the existing "Advanced
+  details" expander, and long auto-namespaces render as friendly
+  `provider: …/tail` labels with the full id preserved in `title`/`aria-label`
+  (#1434, #1435). The acronyms now live single-source in a glossary (namespace,
+  token, MCP, TTL, search pipeline) surfaced as in-context help tips where each
+  term first appears, guarded by a test that keeps the search copy jargon-free
+  (#1445).
+
+- **More of the UI speaks Korean.** The Config panel is fully localized — field
+  labels, section titles, status lines, and the right-hand guide — with en/ko
+  parity enforced by a test (the deep `MEMTOMEM_*` env snippets stay English by
+  design, under a localized one-line summary) (#1443), and high-frequency
+  search/sources micro-copy (result counts, tag hints, the chunk browser, editor
+  word counts) now routes through the translation layer (#1436).
+
+- **The Home orientation's Gateway step now says what the Gateway actually
+  does** — syncs your skills, subagents, and commands out to coding agents —
+  rather than implying it reuses your memories (that is Search) (#1442).
+
+- **Fixed: non-ASCII tags (Korean, emoji, …) are stored and displayed correctly
+  instead of as literal `\uXXXX` escape text.** The write path serialized the
+  `> tags:` line with `ensure_ascii=True` while the reader hand-split the JSON
+  array without decoding it, so a Korean tag round-tripped as its escape sequence
+  into the database. The writer now uses `ensure_ascii=False`, the parser
+  JSON-decodes first (with a lenient fallback for legacy shapes), and a one-shot,
+  idempotent migration repairs already-indexed escaped tags in place —
+  recomposing emoji surrogate pairs via UTF-16 and skipping un-encodable rows
+  rather than crashing startup — so existing databases self-heal on the next
+  start without a re-embed (#1433).
+
+- **Fixed: corrected the stale `rerank.top_k` deprecation notice.** The field
+  comment and both `DeprecationWarning` messages still predicted removal "in 0.3"
+  even though the field remains in 0.3.x (migrated to `min_pool` with a warning);
+  they now read "a future release". No behavior change (#1430).
+
+- **Maintenance: bumped runtime dependencies** — pydantic-settings
+  2.14.1 → 2.14.2, openai 2.41.1 → 2.43.0, fastapi 0.137.0 → 0.138.0, and
+  langfuse 4.7.1 → 4.9.1 (#1432).
+
 ## [0.3.0] — 2026-06-20
 
 - **Security: bump vendored DOMPurify 3.4.10 → 3.4.11 (GHSA-cmwh-pvxp-8882).**
