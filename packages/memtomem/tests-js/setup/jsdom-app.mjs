@@ -36,10 +36,15 @@ function jsonResponse(body, ok = true, status = 200) {
   };
 }
 
-function makeFetchStub(apiResponses = {}) {
+function makeFetchStub(apiResponses = {}, localeGate = null) {
   return async function fetchStub(input) {
     const url = typeof input === 'string' ? input : input?.url;
     if (url && url.startsWith('/locales/')) {
+      // Optional gate: a test can hold every locale fetch open to reproduce the
+      // pre-I18N.init() window (e.g. the first-run wizard rendering before the
+      // locale cache loads). Installed before scripts run, so it covers the
+      // module-load init fetch that no post-bootApp override could intercept.
+      if (localeGate) await localeGate;
       const lang = url.replace('/locales/', '').replace('.json', '').split('?')[0];
       const file = path.join(STATIC_DIR, 'locales', `${lang}.json`);
       if (fs.existsSync(file)) {
@@ -96,6 +101,9 @@ function shimBrowserAPIs(window) {
  *   fetch stub returns for matching requests (query string ignored), e.g.
  *   ``{ '/api/embedding-status': { has_mismatch: true, ... } }``. Lets a
  *   test seed an endpoint before app.js's module-load fetches fire.
+ * @param {Promise} [opts.localeGate] — when set, every ``/locales/*`` fetch
+ *   awaits this promise before resolving, letting a test hold the pre-init
+ *   window open (e.g. asserting first-run wizard chrome before the locale loads).
  * @returns {Promise<JSDOM>}
  */
 export async function bootApp({
@@ -105,6 +113,7 @@ export async function bootApp({
   firstRun = false,
   storageBlock = [],
   seedStorage = {},
+  localeGate = null,
 } = {}) {
   let html = readStatic('index.html');
   // Strip every <script ...>...</script> element so JSDOM's loader
@@ -120,7 +129,7 @@ export async function bootApp({
   const { window } = dom;
 
   shimBrowserAPIs(window);
-  window.fetch = makeFetchStub(apiResponses);
+  window.fetch = makeFetchStub(apiResponses, localeGate);
 
   // Default tests to a returning install so boot lands on the historical Search
   // default. S2.1 routes a *genuine* first run (empty localStorage) to Home,

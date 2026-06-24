@@ -6922,15 +6922,34 @@ function _renderFirstRunWizardStep() {
   });
   // Counter + Next/Done label are JS-rendered (params / step-dependent), so they
   // re-render here on every step change and on the langchange hook below — the
-  // static data-i18n labels are handled by applyDOM.
-  if (typeof t === 'function') {
-    const counter = qs('fr-wizard-counter-text');
-    if (counter) counter.textContent = t('wizard.step_counter', { n: _frWizardStep, total: FR_WIZARD_TOTAL_STEPS });
-    const next = qs('fr-wizard-next');
-    if (next) next.textContent = _frWizardStep === FR_WIZARD_TOTAL_STEPS ? t('common.done') : t('wizard.next');
+  // static data-i18n labels are handled by applyDOM. _frWizardText() falls back
+  // to English when t() returns the raw key, because the wizard can open from the
+  // synchronous landing handler before I18N.init() loads the locale cache — and a
+  // raw "wizard.step_counter" flash is exactly the jargon this onboarding fights.
+  // The English fallbacks equal the en.json values, so en users see no change and
+  // the langchange re-render swaps in the real locale (e.g. KO) once init fires.
+  const counter = qs('fr-wizard-counter-text');
+  if (counter) {
+    counter.textContent = _frWizardText(
+      'wizard.step_counter', { n: _frWizardStep, total: FR_WIZARD_TOTAL_STEPS },
+      `Step ${_frWizardStep} of ${FR_WIZARD_TOTAL_STEPS}`);
+  }
+  const next = qs('fr-wizard-next');
+  if (next) {
+    next.textContent = _frWizardStep === FR_WIZARD_TOTAL_STEPS
+      ? _frWizardText('common.done', null, 'Done')
+      : _frWizardText('wizard.next', null, 'Next');
   }
   const back = qs('fr-wizard-back');
   if (back) back.hidden = _frWizardStep === 1;
+}
+
+// t() returns the raw key when the locale cache is not loaded yet; substitute an
+// explicit English fallback so a pre-init render degrades like a static
+// data-i18n default instead of showing the key verbatim.
+function _frWizardText(key, params, fallback) {
+  const s = (typeof t === 'function') ? t(key, params) : key;
+  return s === key ? fallback : s;
 }
 
 function _closeFirstRunWizard() {

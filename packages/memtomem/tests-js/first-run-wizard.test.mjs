@@ -30,6 +30,24 @@ describe('First-run wizard (S3.1)', () => {
     expect(byId(window, 'fr-wizard-counter-text').textContent).toBe('Step 1 of 3');
   });
 
+  it('renders English-fallback chrome, never a raw i18n key, before locale init', async () => {
+    // Regression guard (Codex review): hold every locale fetch open so the wizard
+    // opens from the synchronous landing handler while the async boot handler is
+    // still suspended on ``await I18N.init()`` — the real pre-init window. The
+    // JS-rendered counter / Next must degrade to English, not flash the raw
+    // "wizard.step_counter" / "wizard.next" keys.
+    let releaseLocale;
+    const localeGate = new Promise((resolve) => { releaseLocale = resolve; });
+    const dom = await bootApp({ firstRun: true, localeGate });
+    const { window } = dom;
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let DCL open + render the wizard
+    expect(wiz(window).hidden).toBe(false);
+    expect(byId(window, 'fr-wizard-counter-text').textContent).toBe('Step 1 of 3');
+    expect(byId(window, 'fr-wizard-next').textContent).toBe('Next');
+    releaseLocale();
+    await window.I18N.init();
+  });
+
   it('stays hidden for a returning install', async () => {
     const dom = await bootApp(); // returning — bootApp seeds m2m-app-initialized
     const { window } = dom;
