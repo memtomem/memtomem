@@ -34,6 +34,7 @@ from typing import Any, Callable
 
 import pytest
 
+from memtomem.constants import SHARED_NAMESPACE
 from memtomem.server import mcp
 from memtomem.server.instructions import INSTRUCTIONS
 from memtomem.server.tools.multi_agent import (
@@ -83,6 +84,29 @@ def test_instructions_mentions_workflow_token(token: str) -> None:
         f"instructions string lost reference to {token!r}; if the "
         f"workflow changed, update memtomem/server/instructions.py "
         f"and the REQUIRED_TOKENS tuple in lockstep."
+    )
+
+
+def test_shared_namespace_label_has_no_colon() -> None:
+    """The cross-agent namespace is exactly ``SHARED_NAMESPACE`` (``shared``),
+    with no trailing colon — unlike the ``agent-runtime:`` *prefix*.
+
+    The substring ``REQUIRED_TOKENS`` pin can't guard this: ``"shared" in
+    "shared:"`` is True, so a regression to the ``shared:`` typo would slip
+    past it. Assert the exact namespace-conventions row and reject the colon
+    form explicitly. Derived from ``SHARED_NAMESPACE`` so the constant stays
+    the single source of truth.
+    """
+    ns = re.escape(SHARED_NAMESPACE)
+    assert re.search(rf"^  {ns}\s+cross-agent shared scope$", INSTRUCTIONS, re.MULTILINE), (
+        f"namespace-conventions table must list the shared namespace as the "
+        f"colon-free {SHARED_NAMESPACE!r} (SHARED_NAMESPACE); see "
+        f"memtomem/server/instructions.py"
+    )
+    assert not re.search(rf"^  {ns}:", INSTRUCTIONS, re.MULTILINE), (
+        f"namespace-conventions table reintroduced the {SHARED_NAMESPACE + ':'!r} "
+        f"typo; the shared namespace has no colon (SHARED_NAMESPACE = "
+        f"{SHARED_NAMESPACE!r})."
     )
 
 
