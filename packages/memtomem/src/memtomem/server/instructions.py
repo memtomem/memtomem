@@ -36,7 +36,7 @@ isolation or shared knowledge between agents):
 Namespace conventions:
   default                 single-agent / pre-multi-agent
   agent-runtime:<id>      per-agent isolated scope
-  shared:                 cross-agent shared scope
+  shared                  cross-agent shared scope
 Pass explicit namespace= only when overriding the derived value.
 
 Session-bound write contract:

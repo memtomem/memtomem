@@ -54,8 +54,10 @@ REQUIRED_TOKENS: tuple[str, ...] = (
     "mem_agent_share",
     "mem_session_end",
     # Namespace conventions — the vocabulary the LLM needs to recognize.
+    # ``agent-runtime:`` is a prefix (colon + id); ``shared`` and ``default``
+    # are exact namespaces with no colon (SHARED_NAMESPACE = "shared").
     "agent-runtime:",
-    "shared:",
+    "shared",
     "default",
 )
 
