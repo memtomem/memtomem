@@ -72,6 +72,43 @@ A few load-bearing details:
   [Privacy and git safety](#privacy-and-git-safety) below) because git history is
   permanent.
 
+## The wiki — a separate global library, not the Store
+
+The names look alike, so state it plainly: **`~/.memtomem-wiki` is not
+`~/.memtomem`.** They are different things.
+
+- **`~/.memtomem/`** is your memtomem home — `config.json`, the database, and the
+  **User**-tier Store at `~/.memtomem/<artifact>/`. It is part of the Store model
+  above.
+- **`~/.memtomem-wiki/`** is the **wiki**: an *optional*, host-global **git
+  library** of *canonical* skills, subagents, and commands you author once and
+  reuse across every project. It is a normal git repo you can back up and clone
+  (`mm wiki push` / `pull`). It is **not** a Store tier and is never synced to a
+  runtime directly.
+
+The wiki sits one step *upstream* of the Store — you pull from it explicitly:
+
+```
+wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memtomem/)  ──sync──▶  runtime (.claude/ …)
+```
+
+- **Install** — `mm context install <type> <name>` (or the **Install** button in
+  the Web UI's Wiki section) snapshots one canonical asset from the wiki into the
+  **current project's** `.memtomem/` Store, pinned to the wiki's HEAD commit.
+- **Update** — `mm context update <type> <name>` refreshes an installed snapshot
+  to the wiki's latest HEAD.
+
+Install and Update only ever write the **project** Store. They do **not** edit
+`~/.memtomem/config.json` or the `~/.memtomem/<artifact>/` User tier — so a wiki
+install never changes your machine-wide settings or User-tier copies. Once
+installed, the snapshot is an ordinary Store artifact: you Sync it out to your
+runtimes like any other.
+
+In the Web UI the wiki panel is **read-only** (browse + Install); authoring
+canonical or vendor-override files is done with the `mm wiki …` CLI (or the
+in-browser editor in dev mode). See [`reference.md`](reference.md#cli-reference)
+for the full `mm wiki` / `mm context install` command matrix.
+
 ## Walkthrough — get this project's skills into your AI tools
 
 Say this project has a skill in its Store that isn't in your tools yet. Two

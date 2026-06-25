@@ -679,7 +679,7 @@
 
         <!-- Context Gateway: Skills -->
         <div class="settings-section" id="settings-ctx-skills">
-          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows synced to Claude Code, Codex, and other detected runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows stored in .memtomem/skills/ and synced to each runtime's skills folder (.claude/skills/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
             <!-- rank 21: artifact-section toolbars render from one source
@@ -698,7 +698,7 @@
 
         <!-- Context Gateway: Commands -->
         <div class="settings-section" id="settings-ctx-commands">
-          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project slash commands stored in .memtomem/commands/ and synced out to each runtime's command folder (.claude/commands/ etc.).</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project slash commands stored in .memtomem/commands/ and synced to each runtime's commands folder (.claude/commands/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Commands</h2>
             <div class="ctx-toolbar" data-type="commands"></div>
@@ -710,7 +710,7 @@
 
         <!-- Context Gateway: Agents -->
         <div class="settings-section" id="settings-ctx-agents">
-          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents synced to Claude Code, Codex, and other detected runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents stored in .memtomem/agents/ and synced to each runtime's agents folder (.claude/agents/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
             <div class="ctx-toolbar" data-type="agents"></div>
@@ -722,7 +722,7 @@
 
         <!-- Context Gateway: MCP Servers -->
         <div class="settings-section" id="settings-ctx-mcp-servers">
-          <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">Project-scoped MCP server definitions synced to .mcp.json.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">MCP server definitions stored in .memtomem/mcp-servers/ and synced to the project's .mcp.json. Project-scoped only — a single store, with no user-level copy.</p>
           <div class="ctx-header">
             <h2><span data-i18n="settings.ctx.mcp_servers_title">MCP Servers</span> <span class="help-tip" data-help-i18n="glossary.mcp" tabindex="0" role="img" aria-label="MCP (Model Context Protocol) is the open standard memtomem uses to expose memory tools to AI assistants.">i</span></h2>
             <div class="ctx-toolbar" data-type="mcp-servers"></div>
@@ -736,10 +736,11 @@
              GLOBAL ~/.memtomem-wiki repo. No ctx-toolbar / project-tier bar:
              this surface is host-global, not project-scoped. -->
         <div class="settings-section" id="settings-ctx-wiki">
-          <p class="settings-section-desc" data-i18n="settings.ctx.wiki_desc">Browse the global wiki (~/.memtomem-wiki) of canonical skills, subagents, and commands. Read-only in prod; in dev mode you can seed vendor overrides, edit canonical and override files, and commit — all in the browser.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.wiki_desc">Browse the global wiki (~/.memtomem-wiki) — a separate git library, not your ~/.memtomem user store or config — of canonical skills, subagents, and commands. Install snapshots an item into the current project's .memtomem/ store.</p>
           <div class="ctx-header">
             <div class="ctx-header-title">
               <h2 data-i18n="settings.ctx.wiki_title">Wiki</h2>
+              <span class="help-tip" data-help-i18n="settings.ctx.wiki_dev_tip" tabindex="0" role="img" aria-label="Read-only in production. In dev mode you can seed vendor overrides, edit canonical and override files, and commit — all in the browser.">i</span>
               <span class="badge wiki-scope-chip" data-i18n="settings.ctx.wiki_scope_chip">Global wiki</span>
             </div>
             <div id="wiki-head" class="wiki-head"></div>
@@ -751,7 +752,7 @@
 
         <!-- Hooks Sync section -->
         <div class="settings-section" id="settings-hooks-sync">
-          <p class="settings-section-desc" data-i18n="settings.hooks.desc">Lifecycle hooks defined in .memtomem/settings.json, applied to the active runtime.</p>
+          <p class="settings-section-desc" data-i18n="settings.hooks.desc">Lifecycle hooks run a command on events like a tool call or session end, stored in .memtomem/settings.json and applied to the active runtime only.</p>
           <div class="hooks-sync-header">
             <h2 data-i18n="settings.hooks.title">Hooks</h2>
             <button id="hooks-sync-btn" class="btn-primary"

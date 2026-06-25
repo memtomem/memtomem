@@ -1089,6 +1089,63 @@ class TestNoHardcodedStrings:
             "and the wiki nav must define 'canonical':\n" + "\n".join(leaks)
         )
 
+    def test_wiki_copy_separates_global_wiki_from_user_store(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """Wiki copy must not collapse the host-global wiki with ~/.memtomem.
+
+        The wiki is a separate git library that projects explicitly snapshot
+        from; ~/.memtomem remains the user store/config root and user-tier
+        canonical location. Keep the distinction visible in the panel copy and
+        the install action hint.
+        """
+        missing: list[str] = []
+
+        en_desc = en["settings.ctx.wiki_desc"]
+        if "~/.memtomem-wiki" not in en_desc or "separate git library" not in en_desc:
+            missing.append(f"  en wiki_desc must frame ~/.memtomem-wiki as separate: {en_desc!r}")
+        if "current project's .memtomem/ store" not in en_desc:
+            missing.append(
+                f"  en wiki_desc must name the project snapshot destination: {en_desc!r}"
+            )
+
+        ko_desc = ko["settings.ctx.wiki_desc"]
+        if "~/.memtomem-wiki" not in ko_desc or "분리된 git 라이브러리" not in ko_desc:
+            missing.append(f"  ko wiki_desc must frame ~/.memtomem-wiki as separate: {ko_desc!r}")
+        if "현재 프로젝트의 .memtomem/ 저장소" not in ko_desc:
+            missing.append(
+                f"  ko wiki_desc must name the project snapshot destination: {ko_desc!r}"
+            )
+
+        for lang, text in (
+            ("en", en["settings.ctx.wiki_install_hint"]),
+            ("ko", ko["settings.ctx.wiki_install_hint"]),
+        ):
+            for token in ("~/.memtomem-wiki", "~/.memtomem/config.json", "~/.memtomem/<artifact>/"):
+                if token not in text:
+                    missing.append(f"  {lang} wiki_install_hint missing {token!r}: {text!r}")
+
+        # Drawing the boundary must not reach for the purged residency word: the
+        # ADR-0026 / #1352 de-jargon campaign removed "tier"/"계층"/"티어" from
+        # user-facing copy and #1450 said not to regress it. These wiki keys are
+        # NOT in ``test_ctx_storage_vocab_surface_split``'s ``artifact_keys``, so
+        # without this pin "user tier" can (and did) slip back in silently. The
+        # user-residency concept surfaces as "user-level" / "사용자 레벨" instead.
+        for lang, text in (
+            ("en", en["settings.ctx.wiki_desc"]),
+            ("en", en["settings.ctx.wiki_install_hint"]),
+            ("ko", ko["settings.ctx.wiki_desc"]),
+            ("ko", ko["settings.ctx.wiki_install_hint"]),
+        ):
+            purged = [w for w in ("tier", "계층", "티어") if w in text.lower()]
+            if purged:
+                missing.append(f"  {lang} wiki copy reintroduced purged {purged}: {text!r}")
+
+        assert not missing, (
+            "Wiki copy must distinguish the global wiki from ~/.memtomem settings/user-level "
+            "storage without reintroducing purged 'tier' jargon:\n" + "\n".join(missing)
+        )
+
     def test_ctx_overview_desc_dejargoned_with_cta(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:
