@@ -964,7 +964,7 @@
   "settings.ns.empty.title": "아직 네임스페이스가 없습니다",
   "settings.ns.empty.body": "파일을 인덱싱할 때 네임스페이스를 지정하거나, 설정 규칙에 정의해 기억을 분류하세요.",
   "settings.ns.empty.cta": "네임스페이스 사용법 알아보기",
-  "settings.ns.help.summary": "이 네임스페이스 접두사는 무슨 뜻인가요?",
+  "settings.ns.help.summary": "이 네임스페이스 라벨은 무슨 뜻인가요?",
   "settings.ns.help.intro": "네임스페이스는 각 기억이 어디서 왔는지 라벨링해 출처별로 검색 범위를 좁힐 수 있게 합니다. memtomem의 색인 라벨일 뿐, 각 도구 자체의 기억 모델을 대체하지 않습니다.",
   "settings.ns.help.default": "네임스페이스 없이 직접 추가한 기억.",
   "settings.ns.help.claude": "Claude Code의 프로젝트별 자동 기억. memory/ 상위의 프로젝트 폴더로 묶입니다.",

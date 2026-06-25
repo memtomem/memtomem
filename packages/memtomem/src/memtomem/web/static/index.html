@@ -1007,14 +1007,14 @@
               <h2 data-i18n="settings.ns.title">Namespaces</h2>
               <button id="ns-refresh-btn" class="btn-ghost" data-i18n="settings.ns.refresh">Refresh</button>
             </div>
-            <!-- Collapsed-by-default reference for the provider namespace prefixes
-                 a user sees in the list below. Prefixes are literal code, so the
+            <!-- Collapsed-by-default reference for the provider namespace labels
+                 a user sees in the list below. The labels are literal code, so the
                  <dt><code> cells carry no data-i18n; only the <dd> descriptions are
                  localized (applyDOM sets textContent, which would clobber inline
                  markup inside a translated node). Mirrors docs/guides/configuration.md
                  "How provider memory namespaces map back to each tool". -->
             <details class="ns-help">
-              <summary class="ns-help-summary" data-i18n="settings.ns.help.summary">What do these namespace prefixes mean?</summary>
+              <summary class="ns-help-summary" data-i18n="settings.ns.help.summary">What do these namespace labels mean?</summary>
               <p class="ns-help-intro" data-i18n="settings.ns.help.intro">Namespaces label where each memory came from so you can scope a search by origin. They are memtomem indexing labels — they do not replace each tool's own memory model.</p>
               <dl class="ns-help-list">
                 <dt><code>default</code></dt>
@@ -1027,7 +1027,7 @@
                 <dd data-i18n="settings.ns.help.gemini">Antigravity / Gemini global memory (~/.gemini/GEMINI.md), imported one-shot via mm ingest gemini-memory.</dd>
                 <dt><code>agent-runtime:&lt;id&gt;</code></dt>
                 <dd data-i18n="settings.ns.help.agent">A single agent's isolated scope during multi-agent runs.</dd>
-                <dt><code>shared:</code></dt>
+                <dt><code>shared</code></dt>
                 <dd data-i18n="settings.ns.help.shared">Knowledge shared across agents.</dd>
               </dl>
               <p class="ns-help-foot">

@@ -964,7 +964,7 @@
   "settings.ns.empty.title": "No namespaces yet",
   "settings.ns.empty.body": "Index files with a namespace, or define one in your config rules to bucket memories.",
   "settings.ns.empty.cta": "Learn how namespaces work",
-  "settings.ns.help.summary": "What do these namespace prefixes mean?",
+  "settings.ns.help.summary": "What do these namespace labels mean?",
   "settings.ns.help.intro": "Namespaces label where each memory came from so you can scope a search by origin. They are memtomem indexing labels — they do not replace each tool's own memory model.",
   "settings.ns.help.default": "Memories you add directly, with no namespace set.",
   "settings.ns.help.claude": "Claude Code per-project auto-memory, bucketed by the project folder above memory/.",
