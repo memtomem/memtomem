@@ -34,7 +34,7 @@ don't have to decide now.
 | **Keyword-only (BM25)** | None | Default. Fast, no external deps. Great for short, exact-term notes. |
 | **ONNX (local, no server)** | `uv tool install 'memtomem[onnx]'` | Semantic search without running a server. ~90 MB–2.3 GB model on first use. |
 | **Ollama (local server)** | Install [Ollama](https://ollama.com), then `ollama pull nomic-embed-text` (English) or `ollama pull bge-m3` (multilingual, ~2.3 GB). | Semantic search with full local control; best Korean/JP/CN quality with `bge-m3`. |
-| **OpenAI (cloud)** | `OPENAI_API_KEY` env var. | No local model to manage; pay-per-call. |
+| **OpenAI (cloud)** | OpenAI API key, set via `mm init` or `MEMTOMEM_EMBEDDING__API_KEY`. | No local model to manage; pay-per-call. |
 
 > **Multilingual tip**: if you work with Korean, Japanese, or Chinese,
 > pick Ollama with `bge-m3` or OpenAI `text-embedding-3-small` — both
@@ -108,6 +108,7 @@ uv pip install -e "packages/memtomem[all]"
 | `korean` | Korean tokenizer (`kiwipiepy`) |
 | `code` | Code chunking (`tree-sitter` for Python/JS/TS) |
 | `web` | Web UI (`fastapi`, `uvicorn`) |
+| `langfuse` | LLM tracing / observability via Langfuse |
 | `all` | All of the above |
 
 ```bash
@@ -400,7 +401,7 @@ mm ingest claude-memory    # index Claude Code auto-memory
 mm ingest gemini-memory    # index Gemini CLI / Antigravity CLI memory (GEMINI.md)
 mm ingest codex-memory     # index Codex CLI memory
 mm shell                   # interactive REPL
-mm web                     # launch Web UI (http://localhost:8080)
+mm web                     # launch Web UI (http://127.0.0.1:8080)
 ```
 
 ---
