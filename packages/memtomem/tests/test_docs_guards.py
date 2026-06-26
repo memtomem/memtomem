@@ -28,13 +28,22 @@ from __future__ import annotations
 
 import json
 import re
+import types
+import typing
 from pathlib import Path
 
+import click
+import pydantic
 import pytest
+
+from memtomem.cli import cli as _CLI
+from memtomem.config import Mem2MemConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GUIDES = _REPO_ROOT / "docs" / "guides"
 _INTEGRATIONS = _GUIDES / "integrations"
+_README = _REPO_ROOT / "README.md"
+_SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
 _PLUGIN_HOOKS_JSON = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "hooks" / "hooks.json"
 _HOOKS_SNIPPET_ANCHOR = "Add the following to `~/.claude/settings.json`:"
 
@@ -260,3 +269,236 @@ class TestNoJsoncFenceInPublicGuides:
             "PR #853 / multi-device-sync.md:262-268 for the canonical "
             f"shape, and #854 for the trap. Offenders: {offenders}"
         )
+
+
+# ===========================================================================
+# Doc <-> source drift guards.
+#
+# These three guards catch the class of documentation bug fixed in
+# #1453-#1459 the moment it is reintroduced: a CLI command/flag that no
+# longer exists (e.g. the nonexistent ``mm server``), a ``MEMTOMEM_*`` env
+# var that is a typo or was removed, and an internal link/anchor that no
+# longer resolves. The source of truth is introspected live (the Click tree,
+# the pydantic settings model, the on-disk headings), so the guards update
+# themselves -- there is no hand-maintained list to drift.
+#
+# Direction is doc -> source (every *documented* item must exist). The
+# reverse direction (every command/var must be documented) is a separate,
+# noisier completeness concern and is intentionally not enforced here.
+# ===========================================================================
+
+
+def _iter_code_context(text: str):
+    """Yield ``(line, in_fence)`` so callers can scope to code, not prose.
+
+    A prose mention such as an inline-code ``mm`` followed by ordinary words
+    must not be validated as an invocation; only fenced blocks and inline-code
+    spans that actually contain ``mm <word>`` are.
+    """
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        yield line, in_fence
+
+
+def _doc_mm_paths(text: str) -> set[tuple[str, ...]]:
+    """Leading bare-word token sequence of every ``mm ...`` call in code.
+
+    Collects every leading token that looks like a command/subcommand name
+    (``[a-z][a-z0-9-]*``) and stops at the first argument, flag, or
+    placeholder (``<name>`` / ``--apply`` / ``~/notes`` / ``key.path``), so
+    what remains is the candidate command path to walk against the Click
+    tree -- at full depth, not just two levels.
+    """
+    paths: set[tuple[str, ...]] = set()
+    for line, in_fence in _iter_code_context(text):
+        segments: list[str] = []
+        if in_fence:
+            segments = re.findall(r"(?<![\w-])(?:uv run )?mm ([a-z][^\n`#]*)", line)
+        else:
+            for span in re.findall(r"`([^`]+)`", line):
+                if span.startswith(("mm ", "uv run mm ")):
+                    segments.append(re.sub(r"^(?:uv run )?mm ", "", span))
+        for seg in segments:
+            toks: list[str] = []
+            for word in seg.split():
+                if re.fullmatch(r"[a-z][a-z0-9-]*", word):
+                    toks.append(word)
+                else:
+                    break
+            if toks:
+                paths.add(tuple(toks))
+    return paths
+
+
+_CLI_DOCS = (
+    _README,
+    _GUIDES / "getting-started.md",
+    _GUIDES / "reference.md",
+    _GUIDES / "configuration.md",
+)
+
+
+class TestDocumentedCliExists:
+    """Every ``mm <cmd ...>`` shown in the docs must resolve in ``memtomem.cli``."""
+
+    def test_documented_mm_commands_resolve(self) -> None:
+        offenders: list[str] = []
+        for doc in _CLI_DOCS:
+            for path in _doc_mm_paths(_read(doc)):
+                node: click.Command = _CLI
+                walked: list[str] = []
+                for tok in path:
+                    if not isinstance(node, click.Group):
+                        break  # reached a leaf command; remaining tokens are args
+                    if tok not in node.commands:
+                        where = (
+                            "a command" if not walked else f"a subcommand of `{' '.join(walked)}`"
+                        )
+                        offenders.append(
+                            f"{doc.name}: `mm {' '.join([*walked, tok])}` -- `{tok}` is not {where}"
+                        )
+                        break
+                    node = node.commands[tok]
+                    walked.append(tok)
+        assert not offenders, (
+            "Docs reference CLI commands/subcommands that no longer exist in "
+            "memtomem.cli (fix the doc or the command):\n  " + "\n  ".join(sorted(set(offenders)))
+        )
+
+
+def _settings_class(annotation: object) -> type[pydantic.BaseModel] | None:
+    """The nested settings model an annotation points at, unwrapping
+    ``Annotated[...]`` and ``Optional`` / ``X | None`` wrappers; else ``None``.
+    """
+    ann = annotation
+    if hasattr(ann, "__metadata__"):  # Annotated[T, ...]
+        ann = typing.get_args(ann)[0]
+    if typing.get_origin(ann) in (typing.Union, types.UnionType):
+        non_none = [a for a in typing.get_args(ann) if a is not type(None)]
+        ann = non_none[0] if len(non_none) == 1 else None
+    if isinstance(ann, type) and issubclass(ann, pydantic.BaseModel):
+        return ann
+    return None
+
+
+def _pydantic_env_vars(model: type[pydantic.BaseModel], prefix: str = "MEMTOMEM_") -> set[str]:
+    """All ``MEMTOMEM_*`` names derivable from a pydantic settings model."""
+    out: set[str] = set()
+    for name, field in model.model_fields.items():
+        sub = _settings_class(field.annotation)
+        if sub is not None:
+            out |= _pydantic_env_vars(sub, f"{prefix}{name.upper()}__")
+        else:
+            out.add(f"{prefix}{name.upper()}")
+    return out
+
+
+# ``MEMTOMEM_*`` vars read straight from ``os.environ`` rather than declared as
+# pydantic settings fields. A new env-only knob that gets documented must be
+# added here; ``test_env_only_allowlist_is_real`` asserts every entry is an
+# actual literal in the source so this list cannot itself drift into fiction.
+_ENV_ONLY_VARS = frozenset(
+    {
+        "MEMTOMEM_TOOL_MODE",  # server/__init__.py
+        "MEMTOMEM_WEB__MODE",  # web/app.py (_WEB_MODE_ENV)
+        "MEMTOMEM_WEB__HOST",  # web/app.py
+        "MEMTOMEM_WEB__PORT",  # web/app.py
+        "MEMTOMEM_WEB__CSRF_ENFORCE",  # web/app.py (_CSRF_ENFORCE_ENV) + middleware/csrf.py
+        "MEMTOMEM_LOG_LEVEL",  # server/lifespan.py
+        "MEMTOMEM_LOG_FORMAT",  # server/lifespan.py
+        "MEMTOMEM_WIKI_PATH",  # wiki/store.py
+        "MEMTOMEM_FASTEMBED_CACHE",  # embedding/fastembed_cache.py
+        "MEMTOMEM_INDEX_DEBOUNCE_QUEUE",  # indexing/debounce.py
+    }
+)
+
+
+def _source_env_literals() -> set[str]:
+    """Every ``MEMTOMEM_*`` literal present anywhere in src (used only to
+    sanity-check that the env-only allowlist names are real)."""
+    blob = "\n".join(p.read_text(encoding="utf-8") for p in _SRC.rglob("*.py"))
+    return set(re.findall(r"MEMTOMEM_[A-Z0-9_]+", blob))
+
+
+class TestDocumentedEnvVarsExist:
+    """Every ``MEMTOMEM_*`` in configuration.md must exist in source."""
+
+    def test_env_only_allowlist_is_real(self) -> None:
+        bogus = _ENV_ONLY_VARS - _source_env_literals()
+        assert not bogus, f"_ENV_ONLY_VARS names not found as literals in src: {sorted(bogus)}"
+
+    def test_configuration_env_vars_resolve(self) -> None:
+        valid = _pydantic_env_vars(Mem2MemConfig) | _ENV_ONLY_VARS
+        used = set(re.findall(r"MEMTOMEM_[A-Z0-9_]+", _read(_GUIDES / "configuration.md")))
+        unknown = used - valid
+        assert not unknown, (
+            "configuration.md documents MEMTOMEM_* variables that are neither a "
+            "pydantic settings field nor a known os.environ read "
+            f"(typo, removed, or missing from _ENV_ONLY_VARS?): {sorted(unknown)}"
+        )
+
+
+def _slug(text: str) -> str:
+    """GitHub-style heading anchor slug (no collapse of repeated separators)."""
+    s = text.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)
+    return s.replace(" ", "-")
+
+
+def _anchors(md_text: str) -> set[str]:
+    """Heading slugs (with -1/-2 dedup) plus explicit HTML ``<a id|name>``."""
+    out: set[str] = set()
+    seen: dict[str, int] = {}
+    for line in md_text.splitlines():
+        m = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line)
+        if not m:
+            continue
+        base = _slug(m.group(1))
+        n = seen.get(base, 0)
+        out.add(base if n == 0 else f"{base}-{n}")
+        seen[base] = n + 1
+    for aid in re.findall(r"<a[^>]+(?:id|name)=\"([^\"]+)\"", md_text):
+        out.add(aid.lower())
+    return out
+
+
+_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+
+
+class TestInternalDocLinksResolve:
+    """Internal markdown links and #anchors across the guides must resolve."""
+
+    def test_links_and_anchors_resolve(self) -> None:
+        docs = sorted(_GUIDES.rglob("*.md")) + [_README]
+        anchor_cache: dict[Path, set[str]] = {}
+        offenders: list[str] = []
+        for doc in docs:
+            text = _read(doc)
+            for line, in_fence in _iter_code_context(text):
+                if in_fence:
+                    continue
+                # Drop inline-code spans so a `[title](target)` shown as a
+                # literal example (reference.md:692) is not read as a link.
+                line = re.sub(r"`[^`]*`", "", line)
+                for raw in _LINK.findall(line):
+                    target = raw.strip().strip("<>")
+                    if target.startswith(("http://", "https://", "mailto:", "tel:")):
+                        continue
+                    file_part, _, anchor = target.partition("#")
+                    if file_part:
+                        tgt = (doc.parent / file_part).resolve()
+                        if not tgt.exists():
+                            offenders.append(f"{doc.name}: missing target -> {target}")
+                            continue
+                        anchor_src = tgt
+                    else:
+                        anchor_src = doc
+                    if anchor and anchor_src.suffix == ".md":
+                        if anchor_src not in anchor_cache:
+                            anchor_cache[anchor_src] = _anchors(_read(anchor_src))
+                        if anchor.lower() not in anchor_cache[anchor_src]:
+                            offenders.append(f"{doc.name}: broken anchor -> {target}")
+        assert not offenders, "Broken internal doc links/anchors:\n  " + "\n  ".join(offenders)
