@@ -97,7 +97,7 @@ The running server's pid/flock file lives **outside** `~/.memtomem/`
 under `$XDG_RUNTIME_DIR/memtomem/server.pid` (Linux w/ systemd) or
 `$TMPDIR/memtomem-$UID/server.pid` (macOS, BSD). It is cleaned by
 `mm uninstall` automatically; a manual cleanup is rarely needed but
-equivalent to `rm -rf "${XDG_RUNTIME_DIR:-/tmp}/memtomem"*`.
+equivalent to `rm -rf "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/memtomem"*`.
 
 ## 4. Clean up project-scoped files (optional)
 

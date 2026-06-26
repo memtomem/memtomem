@@ -96,7 +96,7 @@ In Claude Code (or run `/memtomem:status` if using the plugin):
 Call the mem_status tool
 ```
 
-Example of a successful response (Ollama config; first 12 lines of the
+Example of a successful response (Ollama config; first 13 lines of the
 full report — the `Embedding` and `Dimension` rows change with the
 provider picked in the wizard):
 
@@ -441,7 +441,7 @@ Yes. Auto-memory automatically extracts from conversations, while memtomem only 
 
 ## Cross-runtime agent context with `mm context`
 
-If you also use Gemini CLI (or its Antigravity CLI successor) or Codex CLI on the same repo, treat `.memtomem/` as the single source of truth and let memtomem fan it out. Claude Code is the richest target — it preserves every canonical sub-agent field (`name`, `description`, `tools`, `model`, `skills`, `isolation`) without loss, so Claude is the natural place to author canonical agents and skills.
+If you also use Gemini CLI (or its Antigravity CLI successor) or Codex CLI on the same repo, treat `.memtomem/` as the single source of truth and let memtomem fan it out. Claude Code is the richest target — it preserves the canonical sub-agent fields most authors set (`name`, `description`, `tools`, `model`, `skills`, `isolation`), dropping only the rarely-used `kind` and `temperature`, so Claude is the natural place to author canonical agents and skills.
 
 ```bash
 # Mirror .memtomem/skills/<name>/SKILL.md to .claude/skills/, .gemini/skills/, .agents/skills/
