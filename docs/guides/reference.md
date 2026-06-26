@@ -1197,6 +1197,20 @@ mm config unset mmr.enabled            # drop a pinned override
 mm embedding-reset                     # check/resolve embedding model mismatch
 mm reset                               # delete all data and reinitialize the DB
 mm reset --yes                         # skip confirmation prompt
+mm upgrade                             # stop the running server, clear the stale pid, reinstall with --refresh
+mm upgrade --version 0.3.1 --dry-run   # preview a pinned upgrade (also: --grace, --extras, -y/--yes, --json)
+
+# Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)
+mm tags list                           # list every tag with its chunk count
+mm tags rename old new --apply         # rename a tag across all chunks
+mm tags merge a b --into c --apply     # fold tags a, b into c
+mm tags delete stale --apply           # drop a tag from all chunks
+
+# Multi-agent memory — per-agent scopes (see the MCP server's multi-agent workflow)
+mm agent register planner --description "research agent"  # register an agent id (optional --color)
+mm agent list                          # list registered agents (--json for scripting)
+mm agent share <chunk_id> --target shared    # copy a chunk into the shared scope (default target: shared)
+mm agent migrate                       # migrate legacy agent records into the registry (--dry-run to preview)
 
 # Wiki — host-global canonical library (~/.memtomem-wiki); ADR-0008 / ADR-0027
 # Author, check, and commit canonical artifacts here, then project them into a
@@ -1211,6 +1225,7 @@ mm wiki skill lint <name>              # CI gate — exits non-zero on errors
 mm wiki skill commit <name> --canonical   # ONE isolated commit of just the canonical path
 cd <your project>                      # wiki is global; install/status are project-scoped
 mm context install skill <name>        # snapshot the wiki asset into <project>/.memtomem/
+mm context update skill <name>         # re-snapshot an installed asset after the wiki changed (--all, --force, --yes)
 mm context status                      # installed wiki assets + drift (reads the CURRENT project)
 
 # Add-on — seed a vendor override (only when a runtime needs a divergent render):
