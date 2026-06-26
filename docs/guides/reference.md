@@ -176,7 +176,7 @@ mem_index(path="~/personal/notes", namespace="personal")
 ### Auto-watch vs manual seed
 
 `MEMTOMEM_INDEXING__MEMORY_DIRS` feeds a file watcher that runs inside
-the `mm server` (MCP) process. The watcher is **reactive only** — it
+the `memtomem-server` (MCP) process. The watcher is **reactive only** — it
 reindexes files when the filesystem emits modify / create / move events.
 Two cases it does NOT cover:
 

@@ -288,7 +288,8 @@ When enabled, search results include surrounding chunks from the same source fil
 ### `memory_dirs` — reactive watch vs one-shot seed
 
 `indexing.memory_dirs` is the source-of-truth list for the file watcher
-that `mm server` starts on boot. The watcher is **reactive only** — it
+that the running MCP server (`memtomem-server`) starts on boot. The
+watcher is **reactive only** — it
 reindexes files when the filesystem emits modify / create / move events
 for paths under these directories. Pre-existing files on disk at the
 time the watcher starts are **NOT auto-scanned**; you seed them once
@@ -300,7 +301,7 @@ with either
 Both paths are idempotent: chunks are content-hashed, so unchanged files
 are skipped on re-runs. This is why the `mm init` wizard's `Next steps`
 prints `mm index {memory_dir}` as step 1 — once seeded, subsequent edits
-flow through the watcher automatically (as long as `mm server` is
+flow through the watcher automatically (as long as the MCP server is
 running).
 
 > **Adding a folder via the Web UI** registers and indexes in one call:

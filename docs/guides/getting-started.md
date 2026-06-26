@@ -280,9 +280,10 @@ mm status
 ### 1. Index your notes
 
 This one-shot command seeds the index with files already on disk. After
-this, the `mm server` file watcher keeps your `memory_dirs` in sync with
-new edits automatically — you only need to run `mm index` again when you
-add a brand-new directory or want a forced rebuild (`--force`).
+this, the MCP server's file watcher (`memtomem-server`, launched by your
+editor) keeps your `memory_dirs` in sync with new edits automatically —
+you only need to run `mm index` again when you add a brand-new directory
+or want a forced rebuild (`--force`).
 
 In your editor:
 ```
