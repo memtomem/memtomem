@@ -165,7 +165,7 @@ mem_search("Transformer attention mechanism")
 
 ---
 
-# Claude Desktop x memtomem Integration Guide > ## Built-in Features vs memtomem Comparison
+## Built-in Features vs memtomem Comparison
 
 | Feature | Claude Desktop Built-in | memtomem |
 |---------|------------------------|---------|

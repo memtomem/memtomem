@@ -151,7 +151,7 @@ machine):
 
 ```bash
 mm context sync --include=skills --scope user
-# fans out from ~/.memtomem/skills/ → ~/.{claude,gemini,codex,kimi}/...
+# fans out from ~/.memtomem/skills/ → ~/.claude/skills/, ~/.gemini/skills/, ~/.agents/skills/ (Codex), ~/.kimi/skills/
 ```
 
 ## Sync vs Import — reading the status
