@@ -40,7 +40,7 @@ top of the default:
 |-------|----------|-------|
 | `indexing.memory_dirs` | APPEND | Each fragment contributes more roots, dedup by path string |
 | `indexing.exclude_patterns` | APPEND | Multiple denylists merge cleanly |
-| `search.system_namespace_prefixes` | APPEND | Integrations can add further hidden namespaces on top of `archive:` |
+| `search.system_namespace_prefixes` | APPEND | Integrations can add further hidden namespaces on top of the `archive:` / `agent-runtime:` defaults |
 | `webhook.events` | APPEND | Fragments can subscribe to additional event types |
 | `search.rrf_weights` | REPLACE | Positional tuning knob — appending would misalign `[BM25, Dense]` slots |
 | `importance.weights` | REPLACE | Same positional constraint |
@@ -204,7 +204,7 @@ Resolving it is a two-step process — pick **one** of:
 
   ```bash
   uv run mm embedding-reset --mode apply-current   # drops old vectors
-  uv run mm index                                  # re-embed all files
+  uv run mm index <memory_dir>                     # re-embed (repeat per memory_dir)
   ```
 
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
@@ -260,9 +260,9 @@ envelope shape.
 | `MEMTOMEM_SEARCH__RRF_WEIGHTS` | `[1.0, 1.0]` | RRF weights for `[BM25, Dense]` — adjust to favor one retriever |
 | `MEMTOMEM_SEARCH__TOKENIZER` | `unicode61` | FTS tokenizer (`unicode61` or `kiwipiepy`) |
 | `MEMTOMEM_SEARCH__CACHE_TTL` | `30.0` | Search result cache TTL in seconds |
-| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:"]` | Namespace prefixes excluded from default search (max 10) |
+| `MEMTOMEM_SEARCH__SYSTEM_NAMESPACE_PREFIXES` | `["archive:", "agent-runtime:"]` | Namespace prefixes excluded from default search (max 10) |
 
-Chunks in system namespaces (e.g. `archive:*`) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. Set to `[]` to make all namespaces searchable by default.
+Chunks in system namespaces (e.g. `archive:*` and the per-agent `agent-runtime:*` buckets) are hidden from `namespace=None` searches but remain retrievable with an explicit namespace argument. Set to `[]` to make all namespaces searchable by default.
 
 ## Query Expansion
 
