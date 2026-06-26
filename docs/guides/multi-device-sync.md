@@ -478,7 +478,7 @@ What each check means:
 | `no *.db files staged` | The git index does not contain `*.db` / `*.db-wal` / `*.db-shm`. If it does, your `.gitignore` is wrong — propagating these between devices corrupts SQLite under WAL. |
 | `config.json absent from worktree` | `~/.memtomem/config.json` is not staged. It's machine-local; only `config.d/` is portable. |
 | `config.d/ fragments present` | `~/.memtomem/config.d/` exists on this machine and contains at least one `*.json` fragment. If missing, the synced fragment was never bridged into the canonical location. |
-| `~/.claude/projects/ slug` | The current working tree corresponds to a `~/.claude/projects/<slug>/` entry that matches your cwd. Reported as an informational (non-failing) line and skipped when `~/.claude/projects/` is absent. |
+| `~/.claude/projects/ slug` | The current working tree corresponds to a `~/.claude/projects/<slug>/` entry that matches your cwd. **A mismatch fails the exit code** (the `✗` line in the example above); it is only an informational, skipped line when `~/.claude/projects/` is absent. |
 | `memory_dir paths resolve under $HOME` | All `indexing.memory_dirs` entries sit under your home dir. Outside-`$HOME` paths are not portable across users. |
 | `cloud-sync mount detected` | One of your `memory_dirs` is under a known cloud-sync mount (`~/Library/CloudStorage/`, `~/Library/Mobile Documents/com~apple~CloudDocs/`, `~/Dropbox/`, `~/OneDrive*/`). Watcher reliability there is best-effort — flip `startup_backfill` on, or trigger `mem_index` manually. |
 
@@ -531,7 +531,7 @@ End-to-end smoke when you set up sync for the first time:
    A, attempt push from B → rebase, resolve, verify search returns the
    merged content.
 4. **`config.json` portability.** Copy `~/.memtomem/config.json` from
-   machine A to machine B (different `$HOME`). On a memtomem ≥ 0.1.37
+   machine A to machine B (different `$HOME`). On a memtomem ≥ 0.2.0
    build the file already contains `~/...` paths and resolves correctly
    under HOME-B. (You typically don't want to do this — keep
    `config.json` machine-local — but the round-trip is symmetric if you
