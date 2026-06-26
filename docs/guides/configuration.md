@@ -186,6 +186,8 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 | `MEMTOMEM_EMBEDDING__API_KEY` | _(empty)_ | API key (required for OpenAI) |
 | `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | Texts per embedding API call |
 | `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Max parallel embedding requests |
+| `MEMTOMEM_EMBEDDING__THREADS` | `4` | ONNX intra-op thread cap for the local `fastembed` provider |
+| `MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD` | `32` | Show an embedding progress indicator once a batch exceeds this many texts |
 
 See [Embedding Providers](embeddings.md) for the supported model list and the dimension values you must use with each one.
 
@@ -321,6 +323,12 @@ running).
 | `MEMTOMEM_INDEXING__PARAGRAPH_SPLIT_THRESHOLD` | `800` | Split long prose into paragraphs above this token count (must be ≥ 0) |
 | `MEMTOMEM_INDEXING__EXCLUDE_PATTERNS` | `[]` | Pathspec (gitignore-style) globs for files the indexer should skip |
 | `MEMTOMEM_INDEXING__STARTUP_BACKFILL` | `false` | When `true`, `mm web` runs a one-shot backfill scan over `memory_dirs` on boot to catch files added while the server was down. Off by default — multi-minute embed jobs blocked the server on a multi-GB memory_dir during 0.1.24 testing, so the wizard offers it as opt-in. `mm index <dir>` and the Web UI per-dir Reindex button cover ad-hoc backfills idempotently without flipping this. |
+| `MEMTOMEM_INDEXING__TARGET_CHUNK_TOKENS` | `384` | Pass-2 semantic-packing target chunk size; `0` disables packing |
+| `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments |
+| `MEMTOMEM_INDEXING__AUTO_SUMMARIZE` | `false` | Generate a per-source LLM summary chunk at index time (requires LLM enabled) |
+| `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
+| `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Skip the per-source summary when the source body exceeds this many characters |
+| `MEMTOMEM_INDEXING__SUMMARY_MAX_TOKENS` | `256` | Output token cap for each per-source summary |
 
 ### Exclude patterns
 
@@ -757,6 +765,22 @@ assert request.headers["X-Webhook-Signature"] == f"sha256={expected}"
 
 The watchdog runs three tiers of checks at different intervals. Use `mem_watchdog` (or `mem_do(action="watchdog")`) to query health status on demand.
 
+## Scheduler
+
+Cron scheduler for memory-lifecycle jobs — compaction, importance decay,
+dead-link cleanup, and dedup scans (see
+[`mm schedule`](reference.md#9-scheduled-jobs--mm-schedule-schedule_)). Both
+`scheduler.enabled` **and** `health_watchdog.enabled` must be true for
+schedules to fire: the dispatcher rides the watchdog loop, so the watchdog
+gate wins.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_SCHEDULER__ENABLED` | `false` | Master switch for cron-driven scheduled jobs (also gated by `health_watchdog.enabled`) |
+| `MEMTOMEM_SCHEDULER__MAX_CONCURRENT_JOBS` | `1` | Maximum scheduled jobs running at once (must be ≥ 1) |
+| `MEMTOMEM_SCHEDULER__DEFAULT_TIMEZONE` | `utc` | Schedule timezone. Phase A honors only `utc`; other values warn at startup and fall back to UTC |
+| `MEMTOMEM_SCHEDULER__RUNNER_TIMEOUT_SECONDS` | `300.0` | Per-job wall-clock timeout in seconds (must be > 0) |
+
 ## LLM
 
 | Variable | Default | Description |
@@ -780,6 +804,9 @@ The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM
 | `MEMTOMEM_SESSION_SUMMARY__MAX_SUMMARY_TOKENS` | `500` | Output cap for the generated summary |
 | `MEMTOMEM_SESSION_SUMMARY__MAX_INPUT_CHARS` | `60000` | Skip auto-summary when the assembled chunk body exceeds this; pass an explicit `summary=` instead |
 | `MEMTOMEM_SESSION_SUMMARY__MAX_SUMMARY_LINKS` | `50` | Cap on `chunk_links` rows (`link_type="summarizes"`) written from the summary chunk back to the source chunks. Newest first, tail dropped. |
+| `MEMTOMEM_SESSION_SUMMARY__EXPANSION_LOOKUP_TOP_K` | `3` | Rescue leg: top-K session-summary chunks examined to find source files to re-retrieve |
+| `MEMTOMEM_SESSION_SUMMARY__EXPANSION_SCORE_THRESHOLD` | `0.3` | Minimum summary-chunk score before its summarized source files are pulled into the rescue leg |
+| `MEMTOMEM_SESSION_SUMMARY__EXPANSION_RESCUE_WEIGHT` | `0.5` | RRF weight applied to the rescue-leg result list (past-session source chunks) |
 
 Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. Generated summaries are persisted as `archive:session:<id>` chunks (hidden from default `mem_search`). Skip reasons (`disabled`, `no llm`, `below min_chunks`, `too large`, `empty output`, `llm error`) surface in the `mem_session_end` response so operators can see why auto-summary did not fire.
 
@@ -813,6 +840,9 @@ In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_WEB__MODE` | `prod` | Web UI surface: `prod` shows the polished page set; `dev` adds opt-in maintainer pages |
+| `MEMTOMEM_WEB__HOST` | `127.0.0.1` | Bind address for `mm web` (overridden by `--host`) |
+| `MEMTOMEM_WEB__PORT` | `8080` | Bind port for `mm web` (overridden by `--port`) |
+| `MEMTOMEM_WEB__CSRF_ENFORCE` | `true` | CSRF protection for the Web UI's mutating endpoints; set `0`/`false`/`no` only for emergency rollback |
 
 `mm web --mode {prod,dev}` overrides the env. `mm web --dev` is a shortcut for `--mode dev` and is mutually exclusive with `--mode`. An invalid value fails fast rather than silently falling back.
 
@@ -859,6 +889,27 @@ registry and stores local absolute paths.
 | `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered project root. |
 | `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered roots. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
 | `MEMTOMEM_CONTEXT_GATEWAY__USER_TIER_ENABLED` | `false` | Forward-compat flag for the `user`-tier canonical artifact surface (ADR-0011 §1; canonical lives under `~/.memtomem/<artifact>/`). While `false`, `user`-tier entries are hidden from discovery responses entirely. |
+| `MEMTOMEM_CONTEXT_GATEWAY__AUTO_DISPLAY_CONFIGURED_PROJECTS` | `true` | Auto-surface `~/.claude/projects/` scan candidates that already carry a runtime marker, without an explicit Add Project step |
+
+## Hooks
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_HOOKS__TARGET_SCOPE` | `user` | Tier that `mm context` writes memtomem-managed Claude Code hook rules into: `user` (`~/.claude/settings.json`), `project_shared` (`<project>/.claude/settings.json`), or `project_local` (`<project>/.claude/settings.local.json`). See ADR-0010 §3. |
+
+## Advanced / operator environment variables
+
+These are read directly from the process environment (not the layered
+`config.json` / `config.d/` sources) and are rarely changed. They still
+carry the `MEMTOMEM_` prefix.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_LOG_LEVEL` | `INFO` | `memtomem-server` log level (`DEBUG`, `INFO`, `WARNING`, ...) |
+| `MEMTOMEM_LOG_FORMAT` | `text` | `memtomem-server` log format: `text` or `json` |
+| `MEMTOMEM_WIKI_PATH` | `~/.memtomem-wiki` | Override the wiki store location (ADR-0008) |
+| `MEMTOMEM_FASTEMBED_CACHE` | _(platform cache dir)_ | Override the ONNX / `fastembed` model cache directory |
+| `MEMTOMEM_INDEX_DEBOUNCE_QUEUE` | _(state dir)_ | Override the file-watcher debounce queue file path |
 
 ## Querying and Modifying at Runtime
 
