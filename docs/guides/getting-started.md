@@ -538,7 +538,7 @@ mm web stop                # stop the tracked Web UI process
 mm web --dev               # adds opt-in maintainer pages
 ```
 
-The default surface covers the Home, Search, Sources, Index, Tags, Timeline, and More tabs (the More tab hosts Settings, Dedup, Age-out, Export/Import, and Reset Database). Pass `--dev` (or set `MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages like Namespaces, Sessions, Working Memory, and Health Report — see [Configuration → Web UI Mode](configuration.md#web-ui-mode) for details.
+The Web UI opens in **Simple** mode by default, showing the Home, Search, Sources, Gateway, Index, and Settings tabs (the Settings tab holds Config, Namespaces, and Reset Database). Flip the header's **Advanced** toggle to add the Tags and Timeline tabs, plus the Dedup, Age-out, and Export/Import sections inside Settings. Pass `--dev` (or set `MEMTOMEM_WEB__MODE=dev` in your shell profile) to expose maintainer pages like Sessions, Working Memory, and Health Report — see [Configuration → Web UI Mode](configuration.md#web-ui-mode) for details.
 
 ---
 

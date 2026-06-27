@@ -120,7 +120,7 @@ equivalent paths.
 mm web      # http://127.0.0.1:8080
 ```
 
-Open **Settings → Context Gateway**. The default **Simple view** shows one row
+Open the **Gateway** tab. Its default **Simple view** shows one row
 per artifact type — find the **Skills** row:
 
 - If the skill isn't in your tools yet the row reads **Needs sync** and offers a
