@@ -626,7 +626,7 @@ rm -rf ~/.memtomem
 ## Next steps
 
 - [Reference](reference.md) — complete feature reference for all tools and patterns
-- [Example notebooks](../../examples/notebooks/) — runnable Python-API walkthrough; start with `01_hello_memory.ipynb` (local ONNX, no server needed)
+- Example notebooks — runnable Python-API walkthroughs (local ONNX, no server): [Hello memory](../../examples/notebooks/01_hello_memory.ipynb), [Indexing & filters](../../examples/notebooks/02_index_and_filter.ipynb), [Agent memory patterns](../../examples/notebooks/03_agent_memory_patterns.ipynb)
 - [Configuration](configuration.md) — all `MEMTOMEM_*` environment variables
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
 - [LLM Providers](llm-providers.md) — Ollama, OpenAI, and compatible endpoints
