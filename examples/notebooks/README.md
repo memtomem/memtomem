@@ -5,10 +5,13 @@ One quick-start notebook is kept here as a runnable demo of the Python API:
 - [`01_hello_memory.ipynb`](./01_hello_memory.ipynb) — install memtomem,
   index a folder, run a hybrid search, add a memory. ~5 minutes end-to-end.
 
+It runs against local ONNX embeddings — **no embedding server to start**; the
+model downloads once on first use.
+
 Run it with:
 
 ```bash
-uv pip install "memtomem[ollama]" jupyter ipykernel
+uv pip install "memtomem[onnx]" jupyter ipykernel
 uv run jupyter lab examples/notebooks/01_hello_memory.ipynb
 ```
 

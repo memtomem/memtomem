@@ -2,6 +2,20 @@
 
 This guide takes you from zero to a working memtomem setup. You'll be able to index your notes and search them from your AI editor in under 5 minutes.
 
+> **Quickstart at a glance** — the whole flow in four commands; each step is
+> detailed below.
+>
+> ```bash
+> uv tool install 'memtomem[all]'    # 1. install (includes the mm CLI)
+> mm init                            # 2. configure (preset picker)
+> mm index ~/notes                   # 3. index your notes
+> mm search "deployment checklist"   # 4. search them
+> ```
+>
+> Don't want the CLI? `uvx` runs the server on demand — see
+> [Install → Option A](#option-a-from-pypi-recommended-for-most-users). New to
+> the ideas behind it? Start with [What is memtomem?](#what-is-memtomem).
+
 ---
 
 ## What is memtomem?
@@ -35,6 +49,10 @@ don't have to decide now.
 | **ONNX (local, no server)** | `uv tool install 'memtomem[onnx]'` | Semantic search without running a server. ~90 MB–2.3 GB model on first use. |
 | **Ollama (local server)** | Install [Ollama](https://ollama.com), then `ollama pull nomic-embed-text` (English) or `ollama pull bge-m3` (multilingual, ~2.3 GB). | Semantic search with full local control; best Korean/JP/CN quality with `bge-m3`. |
 | **OpenAI (cloud)** | OpenAI API key, set via `mm init` or `MEMTOMEM_EMBEDDING__API_KEY`. | No local model to manage; pay-per-call. |
+
+**Not sure?** For English-only notes, **ONNX** is the best default — local
+semantic search, no server to run, no API cost. The setup wizard's *English*
+preset picks it for you, and you can switch later by re-running `mm init`.
 
 > **Multilingual tip**: if you work with Korean, Japanese, or Chinese,
 > pick Ollama with `bge-m3` or OpenAI `text-embedding-3-small` — both
@@ -278,6 +296,10 @@ mm status
 
 ## First use
 
+> Prefer Python to an editor? The same index → search → add flow is a runnable
+> notebook: [`examples/notebooks/01_hello_memory.ipynb`](../../examples/notebooks/01_hello_memory.ipynb)
+> (local ONNX embeddings, no server needed).
+
 ### 1. Index your notes
 
 This one-shot command seeds the index with files already on disk. After
@@ -407,6 +429,35 @@ mm web                     # launch Web UI (http://127.0.0.1:8080)
 ---
 
 ## Troubleshooting
+
+### Indexed, but search returns nothing
+
+1. Confirm something was actually indexed — `mm status` should show a non-zero
+   chunk count. If it's `0`, your `memory_dirs` had no supported files (see the
+   next entry).
+2. Re-index explicitly against the folder your notes really live in:
+   `mm index ~/notes`.
+3. Broaden the query and drop filters — try a single common word before
+   narrowing with `--source-filter` / `--tag-filter` / `--namespace`.
+4. If you recently switched embedding models, the old vectors no longer match:
+   `mm embedding-reset --mode apply-current` then `mm index ~/notes`.
+
+### "Nothing gets indexed" — path outside your index roots
+
+`mm index PATH` only indexes files **within a configured index root** — your
+user-tier `indexing.memory_dirs` (what `mm init` sets up) or a project-tier
+`indexing.project_memory_dirs`. A path outside every root is a silent no-op:
+it logs `Path … resolves outside configured memory_dirs, skipping` and indexes
+nothing.
+
+1. Check the configured roots: `mm config show` (look for
+   `indexing.memory_dirs` and `indexing.project_memory_dirs`).
+2. To index a new folder, register it first — re-run `mm init` and set it at
+   the *Memory directory* step (or add it to `indexing.memory_dirs` in
+   `~/.memtomem/config.json`) — then `mm index ~/that-folder`.
+3. Make sure the folder has at least one supported file. Only these extensions
+   are indexed (`.md`, `.json`, `.yaml`, `.py`, `.js`, `.ts`, …) — a folder of
+   only `.pdf` or `.docx` files indexes nothing.
 
 ### "Ollama not found" or "not running"
 
@@ -575,6 +626,7 @@ rm -rf ~/.memtomem
 ## Next steps
 
 - [Reference](reference.md) — complete feature reference for all tools and patterns
+- [Example notebooks](../../examples/notebooks/) — runnable Python-API walkthrough; start with `01_hello_memory.ipynb` (local ONNX, no server needed)
 - [Configuration](configuration.md) — all `MEMTOMEM_*` environment variables
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
 - [LLM Providers](llm-providers.md) — Ollama, OpenAI, and compatible endpoints
