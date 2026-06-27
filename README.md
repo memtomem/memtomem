@@ -156,6 +156,7 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, setup wizard, first use |
+| [Example notebooks](examples/notebooks/) | Runnable Python-API walkthrough (start with `01_hello_memory.ipynb`, local ONNX — no server) |
 | [Reference](docs/guides/reference.md) | Complete feature reference for all tools and patterns |
 | [Configuration](docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
 | [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
