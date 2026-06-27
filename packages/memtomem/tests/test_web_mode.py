@@ -472,7 +472,7 @@ def test_shortcut_switch_tabs_copy_matches_tab_count() -> None:
     """#962 review P3 fold: the keyboard-shortcuts help row claims
     digits 1-N map to the main tabs. The Gateway tab promotion
     bumped N from 7 to 8 (Home/Search/Sources/Gateway/Index/Tags/
-    Timeline/More). Pin both the digit range row and the per-locale
+    Timeline/Settings). Pin both the digit range row and the per-locale
     ``shortcut.switch_tabs`` copy so a future tab add/remove can't
     silently leave a stale digit there.
     """
