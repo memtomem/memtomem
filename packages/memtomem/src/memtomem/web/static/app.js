@@ -840,7 +840,7 @@ function _formatValidityDate(unix) {
 // quiet) and a token-literal span for ``project_shared`` /
 // ``project_local``. The three tokens are rendered verbatim (no
 // display aliases — pinned by the Tiered Context Gateway v2 contract).
-// ``isContextRow`` adds the ``(no runtime fan-out)`` annotation for
+// ``isContextRow`` adds the ``(not synced to runtimes)`` annotation for
 // project_local context artifacts (agents / skills / commands) per
 // ADR-0011 §3 — memory rows skip the annotation because project_local
 // memory still fans out via memory's own contract.
@@ -859,7 +859,7 @@ function _tierBadgeHtml(targetScope, { isContextRow = false } = {}) {
     // reach the DOM (CI Playwright caught exactly that race).
     const annotationKey = 'settings.ctx.tier_no_fanout_annotation';
     const translated = typeof t === 'function' ? t(annotationKey) : annotationKey;
-    const annotation = translated === annotationKey ? '(no runtime fan-out)' : translated;
+    const annotation = translated === annotationKey ? '(not synced to runtimes)' : translated;
     return `${badge}<span class="tier-fanout-annotation">${annotation}</span>`;
   }
   return badge;
