@@ -12,6 +12,37 @@ export MEMTOMEM_EMBEDDING__API_KEY=sk-...
 
 For interactive setup, run `mm init` instead of editing env vars by hand.
 
+**On this page**
+
+- [Precedence and merge behaviour](#precedence-and-merge-behaviour)
+- [Storage](#storage)
+- [Embedding](#embedding)
+- [Reset Flow](#reset-flow)
+- [Search](#search)
+- [Query Expansion](#query-expansion)
+- [Context Window](#context-window)
+- [Indexing](#indexing)
+- [Rerank (Cross-Encoder)](#rerank-cross-encoder)
+- [Access Frequency Boost](#access-frequency-boost)
+- [Importance Boost](#importance-boost)
+- [Decay](#decay)
+- [MMR (Maximal Marginal Relevance)](#mmr-maximal-marginal-relevance)
+- [Namespace](#namespace)
+- [Policy](#policy)
+- [Webhook](#webhook)
+- [Consolidation Schedule](#consolidation-schedule)
+- [Health Watchdog](#health-watchdog)
+- [Scheduler](#scheduler)
+- [LLM](#llm)
+- [Session Summary](#session-summary)
+- [Session Trace](#session-trace)
+- [Tool Mode](#tool-mode)
+- [Web UI Mode](#web-ui-mode)
+- [Context Gateway](#context-gateway)
+- [Hooks](#hooks)
+- [Advanced / operator environment variables](#advanced--operator-environment-variables)
+- [Querying and Modifying at Runtime](#querying-and-modifying-at-runtime)
+
 ## Precedence and merge behaviour
 
 memtomem resolves each field from up to four sources at startup, in order
@@ -250,6 +281,10 @@ The `kind` field is an open enum — new warning kinds (e.g. `stale_index`,
 envelope shape.
 
 ## Search
+
+Search fuses two retrievers: **BM25** (keyword/lexical matching, via SQLite FTS5)
+and **dense** (semantic vector) search, combined with **RRF** (Reciprocal Rank
+Fusion). The variables below tune each retriever and the fusion.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

@@ -1,6 +1,18 @@
 # Embedding Providers
 
-memtomem supports three embedding providers: **ONNX** (local, no server), **Ollama** (local server), and **OpenAI** (cloud). Embedding is optional — memtomem works with **BM25-only mode** (provider `none`, the default) for keyword search without any embedding setup. The provider, model, and vector dimension must always be set together — dimension is **not auto-detected**, and a mismatch will cause indexing errors.
+memtomem supports three embedding providers: **ONNX** (local, no server), **Ollama** (local server), and **OpenAI** (cloud). Embedding is optional — memtomem works with **BM25-only mode** (provider `none`, the default) for keyword search without any embedding setup. Embeddings add **dense** (semantic) search — finding notes by *meaning* rather than exact keywords — which memtomem fuses with BM25 keyword results into hybrid search. The provider, model, and vector dimension must always be set together — dimension is **not auto-detected**, and a mismatch will cause indexing errors.
+
+## Which provider should I choose?
+
+Embeddings are **opt-in** — out of the box memtomem runs keyword-only search with no model and no server. Pick a provider by what you need:
+
+- **Stay on the default (`none`)** — BM25 keyword search, no model download, no server. Works immediately; `mm init` recommends it for a first run.
+- **Want semantic ("by meaning") search?** → **ONNX** with `all-MiniLM-L6-v2`. Runs locally in-process, ~90 MB downloaded automatically on first use — the simplest on-ramp to dense search, and what `mm init` suggests once you opt into embeddings.
+- **Already run an Ollama server?** → **Ollama** with `nomic-embed-text`, to reuse that daemon instead of embedding in-process.
+- **Want cloud accuracy with no local compute?** → **OpenAI** with `text-embedding-3-small` (needs an API key; text is sent to OpenAI).
+- **Multilingual (Korean / Chinese / Japanese)?** → **`bge-m3`** on ONNX or Ollama (1024-dim; ~2.3 GB on ONNX).
+
+Switch any time with `mm init` (interactive) or `mm embedding-reset` (handles the dimension migration safely). Whichever you pick, set the provider, model, and dimension together — choose a row from the table below.
 
 ## Supported Models
 

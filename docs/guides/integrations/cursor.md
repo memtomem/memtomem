@@ -175,8 +175,10 @@ Agent:
 
 | Feature | Cursor Built-in | memtomem |
 |---------|----------------|---------|
-| Hybrid search (BM25 + Dense) | None | BM25 + Dense + RRF fusion |
-| Markdown indexing | None | Heading-based semantic chunker |
+| Hybrid search | None | Keyword (BM25) + semantic (vector), fused with RRF |
+| Markdown indexing | None | Heading-aware chunking (splits Markdown at headings) |
+
+*New to these terms? **BM25** is keyword search, **dense (vector)** is meaning-based search, and **RRF** (Reciprocal Rank Fusion) merges the two — see the [Reference glossary](../reference.md#glossary).*
 
 ---
 

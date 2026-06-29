@@ -5,6 +5,28 @@
 
 > **New to memtomem?** Start with [Getting Started](getting-started.md) first. This guide is a complete reference for all features.
 
+**On this page**
+
+- [Glossary](#glossary)
+- [How memtomem Works](#how-memtomem-works)
+- [MCP Tools at a Glance](#mcp-tools-at-a-glance)
+- [1. Indexing — mem_index](#1-indexing--mem_index)
+- [2. Search — mem_search, mem_recall](#2-search--mem_search-mem_recall)
+- [3. Memory CRUD — mem_add, mem_batch_add, mem_edit, mem_delete](#3-memory-crud--mem_add-mem_batch_add-mem_edit-mem_delete)
+- [4. Namespace — mem_ns_*](#4-namespace--mem_ns_)
+- [5. Maintenance — mem_dedup_*, mem_decay_*, mem_auto_tag](#5-maintenance--mem_dedup_-mem_decay_-mem_auto_tag)
+- [6. Data — mem_export, mem_import](#6-data--mem_export-mem_import)
+- [7. Config — mem_stats, mem_status, mem_config, mem_embedding_reset](#7-config--mem_stats-mem_status-mem_config-mem_embedding_reset)
+- [8. Memory Policies — mem_policy_add, mem_policy_list, mem_policy_run](#8-memory-policies--mem_policy_add-mem_policy_list-mem_policy_run)
+- [9. Scheduled jobs — mm schedule, schedule_*](#9-scheduled-jobs--mm-schedule-schedule_)
+- [Web UI](#web-ui)
+- [CLI Reference](#cli-reference)
+- [Moving artifacts between tiers and projects](#moving-artifacts-between-tiers-and-projects)
+- [Troubleshooting](#troubleshooting)
+- [STM: Proactive Memory Surfacing (Optional)](#stm-proactive-memory-surfacing-optional)
+- [Uninstalling memtomem](#uninstalling-memtomem)
+- [Next Steps](#next-steps)
+
 ---
 
 ## Glossary
@@ -92,6 +114,19 @@ In **core** tool mode (default), most features are accessed through `mem_do(acti
 - **Analytics** uses short names: `eval`, `activity`, `timeline`, `reflect`
 
 Use `mem_do(action="help")` to see all available actions, or `mem_do(action="help", params={"category": "sessions"})` for per-category details with parameter descriptions. Common aliases are supported (e.g. `health_report` → `eval`, `namespace_set` → `ns_set`).
+
+### Context tool parameters
+
+The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skills, sub-agents, commands, MCP-server definitions — across AI runtimes. See the [Context Gateway](context-gateway.md) guide for the Store → Sync → Runtime model, and [Moving artifacts between tiers and projects](#moving-artifacts-between-tiers-and-projects) for the `move`/`copy`/`migrate` transfer verbs. The parameter surface:
+
+- **All context tools** accept `include="skills,agents,commands"` to scope a canonical artifact workflow.
+- **`init`, `generate`, `sync`, `diff`, `version`, `promote`** accept `scope="project_shared|user|project_local"` — the canonical **tier** (ADR-0016 §2).
+- **`generate` / `sync`** also accept `on_drop="ignore|warn|error"` (the legacy alias `strict=True` ≡ `on_drop="error"`) to control how dropped sub-agent or command fields are reported, and `label="latest|v1|production"` to deploy from a specific version snapshot (agents/commands only).
+- **`version`** manages snapshots via `action="list"|"create"`.
+- **`promote`** moves or deletes label pointers to versions.
+- **`memory_migrate`** takes `from_scope`/`to_scope` instead of a single `scope` (it has two endpoints), plus `apply=True` to execute and `confirm_project_shared=True` when writing to the git-tracked tier. (`mem_context_migrate` is a deprecated alias for `mem_context_memory_migrate`.)
+- **`artifact_migrate`** migrates agents/commands/skills — flat→dir layout when `to_scope` is omitted, or a scope-tier move when it is set (`apply=True` to execute, `force=True` for a dirty flat→dir, `confirm_project_shared=True` for the git-tracked tier).
+- **`artifact_transfer`** moves or copies one canonical artifact between tiers and/or registered projects — `mode="move"|"copy"`, `to_project_scope_id` (from `mm context projects list`), `as_name` for a renamed copy, and `asset_type="mcp-servers"` for cross-project MCP-server definition copies (`apply=True` to execute, `confirm_project_shared=True` for the git-tracked tier, `allow_host_writes=True` for a user-tier landing).
 
 ---
 
