@@ -161,19 +161,6 @@ mem_index(path="~/notes", recursive=True)
 You can automate memtomem using Claude Code's hooks system.
 Add the following to `~/.claude/settings.json`:
 
-> **Tier** (ADR-0010 §3; ADR-0016 §2 settings special-case): for
-> settings, the `hooks.target_scope` tier selects the **runtime fan-out
-> target** under `~/.claude/` or `<project>/.claude/`, not a canonical
-> residency — settings have one canonical file at
-> `<project>/.memtomem/settings.json` regardless of tier. The three
-> values: `user` (default) → `~/.claude/settings.json`; `project_shared`
-> → `<project>/.claude/settings.json` (committed); `project_local` →
-> `<project>/.claude/settings.local.json` (gitignored). CLI
-> per-invocation override: `mm context sync --include=settings
-> --scope=project_local`. In the Web Context Gateway, the Hooks panel
-> follows the selected tier (`target_scope`) just like Skills and
-> Subagents.
-
 ```json
 {
   "hooks": {
@@ -222,6 +209,24 @@ Add the following to `~/.claude/settings.json`:
 > milliseconds) it converts the unit for you — author the canonical value in
 > seconds.
 
+<details>
+<summary>Which settings file gets written? (hook tiers)</summary>
+
+> **Tier** (ADR-0010 §3; ADR-0016 §2 settings special-case): for
+> settings, the `hooks.target_scope` tier selects the **runtime fan-out
+> target** under `~/.claude/` or `<project>/.claude/`, not a canonical
+> residency — settings have one canonical file at
+> `<project>/.memtomem/settings.json` regardless of tier. The three
+> values: `user` (default) → `~/.claude/settings.json`; `project_shared`
+> → `<project>/.claude/settings.json` (committed); `project_local` →
+> `<project>/.claude/settings.local.json` (gitignored). CLI
+> per-invocation override: `mm context sync --include=settings
+> --scope=project_local`. In the Web Context Gateway, the Hooks panel
+> follows the selected tier (`target_scope`) just like Skills and
+> Subagents.
+
+</details>
+
 ### Hook Event Summary
 
 | Hook Event | Trigger Timing | memtomem Action |
@@ -230,19 +235,6 @@ Add the following to `~/.claude/settings.json`:
 | `UserPromptSubmit` | When a prompt is submitted | `mm search` → Automatically inject relevant memory into context |
 | `PostToolUse` (Write) | After new file creation | `mm index --debounce-window 5` → Record the file in the debounce queue and drain entries silent ≥5s; rapid consecutive writes restart the window so a burst is indexed once at the end |
 | `Stop` | When the agent stops | `mm index --flush; mm session end --auto` → Synchronously flush any pending debounced files, then close the session with a structured summary |
-
-### Automation Flow
-
-```
-Claude Code starts
-  → SessionStart hook → mm session start --idempotent (resume or open)
-  → User submits prompt (>20 chars)
-  → UserPromptSubmit hook → mem_search context injection
-  → Claude creates new files
-  → PostToolUse hook → mm index --debounce-window 5 (record + drain stale)
-  → Agent stops
-  → Stop hook → mm index --flush; mm session end --auto
-```
 
 ### Important Caveats
 
@@ -272,6 +264,9 @@ mm context settings-doctor               # exits 0 if clean, 1 if duplicates
 mm context settings-doctor --json        # structured output for scripting
 mm context settings-doctor --scope=project_local   # one-shot scope override
 ```
+
+<details>
+<summary>Fixing duplicates — migrate and copy hooks across tiers and projects</summary>
 
 The match is by canonical signature (event + matcher + command shape, with
 whitespace normalized) so a hand-edited variant of a memtomem-managed entry
@@ -319,6 +314,8 @@ Re-runs are idempotent no-ops; a same-matcher rule with different content
 at the destination is skipped with the colliding entry named (never
 duplicated). When several entries share `(event, matcher)`, disambiguate
 with `--hook-command <substring>`.
+
+</details>
 
 ---
 
