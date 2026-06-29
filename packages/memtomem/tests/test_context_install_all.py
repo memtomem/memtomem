@@ -271,6 +271,90 @@ def test_yes_force_emits_destructive_warning(wiki_root: Path, tmp_path: Path, mo
     assert "destructive" in result.output.lower()
 
 
+def test_clean_install_off_dirty_wiki_survives_all_force(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: a clean row installed off a *dirty* wiki working tree must not
+    be silently swapped by ``install --all --force``.
+
+    A single install copies the wiki WORKING TREE but pins HEAD (ADR-0008's
+    accepted ``wiki_commit`` provenance imprecision), so a clean install taken
+    off a dirty wiki holds bytes the pin never described. ``--force`` used to
+    re-extract the pin over such a clean row with NO ``.bak`` — a silent
+    destructive swap. It must now leave the row untouched (the recorded digests
+    differ from the pin's bytes); ``--force`` re-extraction is reserved for
+    dirty/unprovable rows, which always get a ``.bak``.
+    """
+    _initialized_wiki(wiki_root)
+    # Commit v1, then edit the wiki WORKING TREE without committing: HEAD still
+    # points at the v1 commit, but the working tree now holds v2 (wiki dirty).
+    pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
+    # The single install copies the working tree (v2) yet pins HEAD (v1): the
+    # recorded digests describe bytes the pin's commit does not contain.
+    install_skill(tmp_path, "foo")
+    dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    assert dest.read_bytes() == b"working-tree-v2\n"
+    lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    # The installed bytes are preserved — NOT silently swapped to the pin's v1.
+    assert dest.read_bytes() == b"working-tree-v2\n"
+    # Nothing was overwritten, so no .bak was created.
+    assert not dest.with_suffix(dest.suffix + ".bak").exists()
+    # Reported as skipped (untouched), not installed.
+    assert "1 installed" not in result.output
+    assert "skipped" in result.output
+    # Pin invariance.
+    lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
+
+
+def test_clean_empty_install_off_dirty_wiki_survives_all_force(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A VALID EMPTY recorded digest map (``digests={}``) must be honored, not
+    treated as "no digests" (Codex gate).
+
+    If the wiki working tree has no copyable file at single-install time, the
+    install records ``digests={}`` (a valid empty map, not ``None``) while the
+    pin's commit still contains files. ``install --all --force`` must not fall
+    through and silently resurrect the pin's files over the recorded-empty dest
+    with no ``.bak``. The guard distinguishes ``{}`` (honor: divergence) from
+    ``None`` (pre-digest: legacy re-extract).
+    """
+    _initialized_wiki(wiki_root)
+    # The pinned commit contains SKILL.md...
+    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed\n"})
+    # ...but the dirty working tree has no copyable file (only a skip-filtered
+    # ``.bak``), so the single install copies zero files and records digests={}.
+    asset = wiki_root / "skills" / "foo"
+    (asset / "SKILL.md").unlink()
+    (asset / "SKILL.md.bak").write_bytes(b"skipped\n")
+    install_skill(tmp_path, "foo")
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+    lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["files"] == []
+    assert lock_doc["skills"]["foo"]["digests"] == {}
+    assert not (dest / "SKILL.md").exists()
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    # The pin's SKILL.md must NOT be silently resurrected over the empty dest.
+    assert not (dest / "SKILL.md").exists()
+    assert not (dest / "SKILL.md.bak").exists()
+    assert "1 installed" not in result.output
+    assert "skipped" in result.output
+
+
 # ── orphan / error paths ────────────────────────────────────────────────
 
 

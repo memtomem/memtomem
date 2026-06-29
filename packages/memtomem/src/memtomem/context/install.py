@@ -122,6 +122,14 @@ class InstallResult:
     ``files_removed`` is populated only by the ``install --all --force``
     re-extraction path, which reconciles dest-only leftovers against the
     pinned commit's file set (#1247); a fresh install never removes.
+
+    ``was_no_op=True`` is set only by ``install --all``'s
+    :func:`_apply_pinned_install` when a ``--force`` row re-classifies CLEAN
+    AND its recorded digests differ from the pin's bytes (a clean install
+    taken off a dirty wiki working tree): the row is left untouched rather
+    than silently re-extracted, so nothing is written or removed
+    (``files_written=0``). It is reachable only under ``--force`` — without
+    it the caller skips clean rows before calling this helper.
     """
 
     asset_type: Literal["skills", "agents", "commands"]
@@ -131,6 +139,7 @@ class InstallResult:
     dest: Path
     files_written: int
     files_removed: tuple[Path, ...] = ()
+    was_no_op: bool = False
 
 
 @dataclass(frozen=True)
@@ -1130,9 +1139,17 @@ class ProjectInstallClassification:
     - ``"install"`` — dest is missing. Will extract bytes at the pinned
       commit and write the lockfile entry (``installed_at`` refreshes;
       ``wiki_commit`` stays at the pin).
-    - ``"skip"`` — dest exists and is clean. Default behavior is no-op;
-      ``--force`` re-extracts at the pin (no ``.bak`` since there's
-      nothing to preserve).
+    - ``"skip"`` — dest exists and is clean (matches its recorded
+      install). Default behavior is no-op. Under ``--force``,
+      :func:`_apply_pinned_install` re-extracts the pin ONLY when the
+      recorded digests equal the pin's bytes (a true no-op that also
+      reconciles stale dest-only leftovers, #1247); if they DIFFER — a
+      clean install taken off a dirty wiki working tree, whose bytes the
+      pin never described (ADR-0008 ``wiki_commit`` provenance
+      imprecision) — the row is left untouched (``was_no_op``) rather than
+      silently swapped to the pin's bytes with no ``.bak``. (A row that
+      goes dirty between classify and apply re-classifies ``refuse``/dirty,
+      not ``skip``, so its ``.bak`` is still taken — #1247 id 13.)
     - ``"refuse"`` — the restore can't be proven safe: dest exists with
       local edits, the entry's ``installed_at`` is unusable over an
       existing dest, or a live flat-layout sibling would be shadowed
@@ -1371,6 +1388,15 @@ def _apply_pinned_install(
       preserved, ``installed_at`` refreshed).
     - ``state="skip"`` + ``force=False``: caller skips; this helper
       shouldn't be reached (defense in depth — raises if it is).
+    - ``state="skip"`` + ``force=True``: re-classified below. If still
+      CLEAN and the recorded digests DIFFER from the pin's bytes (a clean
+      install taken off a dirty wiki working tree — ADR-0008 ``wiki_commit``
+      provenance imprecision), returns a no-op :class:`InstallResult`
+      (``was_no_op=True``) WITHOUT re-extracting, so the installed bytes
+      are not silently swapped for the pin's with no ``.bak``. If the
+      recorded digests EQUAL the pin's bytes, it falls through to a normal
+      re-extraction (a content no-op that still reconciles stale dest-only
+      leftovers, #1247).
     - ``state="refuse"`` + ``force=False``: raise
       :class:`StaleInstallError` (caller already aborted batch; defense
       in depth).
@@ -1383,7 +1409,8 @@ def _apply_pinned_install(
       row). With ``force`` the FRESH at-risk set (dirty subset, or
       EVERY current file when unprovable — mirroring ``_apply_update``)
       is ``shutil.copy2``'d to ``<file>.bak`` before extraction, so a
-      clean-at-classify row edited mid-prompt still gets its ``.bak``.
+      clean-at-classify row edited mid-prompt still gets its ``.bak``;
+      a row that re-classifies clean is the ``was_no_op`` case above.
     - A dirty flat-layout sibling is re-probed the same way (design-gate
       fold): one that APPEARED during the prompt refuses without
       ``force``; with ``force`` the flat file stays on disk (shadowed,
@@ -1436,6 +1463,45 @@ def _apply_pinned_install(
             f"installed_at) — local edits cannot be ruled out; pass --force to "
             f"overwrite (every current file gets a .bak sibling)"
         )
+
+    # Data-safety no-op (ADR-0008 wiki_commit provenance imprecision): a single
+    # install/update copies the wiki WORKING TREE but pins HEAD, so a clean
+    # install taken off a *dirty* wiki holds bytes the recorded pin never
+    # described. Such a row re-classifies CLEAN here (dest == its recorded
+    # digests), and --force would then re-extract the pin over it — SILENTLY
+    # swapping the installed bytes for the pin's, with no .bak (files_to_bak is
+    # empty on a clean row). `install --all` reproduces the RECORDED install, so
+    # leave that row untouched. The check is narrow on purpose: only when the
+    # recorded digests (== the clean dest) differ from the bytes the pin would
+    # extract. When they MATCH (the dest already equals the pin), fall through
+    # so --force's re-extraction can still reconcile away stale dest-only
+    # leftovers (#1247). A pre-digest entry has no comparable digests
+    # (``digests_from_entry`` → None) and keeps its legacy re-extract behavior;
+    # a VALID EMPTY map (``{}`` — a digest-bearing install that copied zero
+    # files) is honored, so a pin that would extract files over it counts as a
+    # divergence rather than a fall-through (``is not None``, not truthiness —
+    # Codex gate). (Reachable only under --force: without it the caller skips
+    # clean rows; a row edited mid-prompt re-classifies "dirty" here, not
+    # "clean", so the #1247 id 13 .bak guarantee is preserved.)
+    if report.reason == "clean":
+        recorded_digests = digests_from_entry(classification.lock_entry or {})
+        pin_digests = {
+            rel: hashlib.sha256(
+                wiki.read_asset_file_at_commit(pin, asset_type, name, rel)
+            ).hexdigest()
+            for rel in wiki.asset_files_at_commit(pin, asset_type, name)
+            if not is_copy_skipped_rel(rel)
+        }
+        if recorded_digests is not None and recorded_digests != pin_digests:
+            return InstallResult(
+                asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
+                name=name,
+                wiki_commit=pin,
+                installed_at=cast(str, (classification.lock_entry or {}).get("installed_at", "")),
+                dest=dest,
+                files_written=0,
+                was_no_op=True,
+            )
 
     # Flat-layout re-probe (#1247 id 13 design gate): a dirty flat sibling
     # that appeared during the prompt while dest is absent would be silently

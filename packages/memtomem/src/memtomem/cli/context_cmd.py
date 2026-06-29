@@ -2624,16 +2624,26 @@ def _run_install_all(
             click.secho(f"  ✗ {c.asset_type}/{c.name}: {exc}", fg="red")
             failures += 1
         else:
-            removed_note = (
-                f" ({len(pinned.files_removed)} leftover file(s) removed)"
-                if pinned.files_removed
-                else ""
-            )
-            click.secho(
-                f"  ✓ {c.asset_type}/{c.name}: installed at pin {c.pin_commit[:12]}{removed_note}",
-                fg="green",
-            )
-            successes += 1
+            if pinned.was_no_op:
+                # Clean row re-classified clean under --force: left untouched
+                # (no silent re-extraction). Counts as skipped, not installed.
+                click.secho(
+                    f"  - {c.asset_type}/{c.name}: already installed (clean, untouched)",
+                    fg="cyan",
+                )
+                skipped += 1
+            else:
+                removed_note = (
+                    f" ({len(pinned.files_removed)} leftover file(s) removed)"
+                    if pinned.files_removed
+                    else ""
+                )
+                click.secho(
+                    f"  ✓ {c.asset_type}/{c.name}: installed at pin "
+                    f"{c.pin_commit[:12]}{removed_note}",
+                    fg="green",
+                )
+                successes += 1
 
     parts: list[str] = []
     if successes:
