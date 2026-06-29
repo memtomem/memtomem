@@ -12,6 +12,17 @@ export MEMTOMEM_LLM__PROVIDER=ollama
 # model defaults to gemma4:e2b, base_url to localhost:11434
 ```
 
+## What LLM Powers
+
+Enabling an LLM upgrades four features. Each degrades gracefully — if a call fails, the heuristic fallback (the "disabled" column) runs automatically:
+
+| Feature | LLM enabled | LLM disabled (default) |
+|---------|-------------|------------------------|
+| Query expansion (`strategy="llm"`) | LLM synonym generation | Disabled — original query used |
+| Entity extraction (`mem_entity_scan`) | LLM structured extraction | Regex + pattern matching |
+| Auto-tagging (`mem_auto_tag`) | LLM semantic tagging | Keyword frequency heuristic |
+| Consolidation (`auto_consolidate`) | LLM summary | Bullet-point extraction |
+
 ## Supported Providers
 
 ### Ollama (local, default)
@@ -112,17 +123,6 @@ Code, use `claude mcp add` instead of editing a file. See
   }
 }
 ```
-
-## What LLM Powers
-
-| Feature | LLM enabled | LLM disabled (default) |
-|---------|-------------|------------------------|
-| Query expansion (`strategy="llm"`) | LLM synonym generation | Disabled — original query used |
-| Entity extraction (`mem_entity_scan`) | LLM structured extraction | Regex + pattern matching |
-| Auto-tagging (`mem_auto_tag`) | LLM semantic tagging | Keyword frequency heuristic |
-| Consolidation (`auto_consolidate`) | LLM summary | Bullet-point extraction |
-
-All features gracefully degrade: if LLM is enabled but a call fails, the heuristic fallback runs automatically.
 
 ## Configuration Reference
 
