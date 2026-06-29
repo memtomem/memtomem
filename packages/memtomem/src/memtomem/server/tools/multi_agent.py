@@ -113,6 +113,7 @@ async def mem_agent_search(
     include_shared: bool = True,
     top_k: int = 10,
     output_format: OutputFormat = "compact",
+    shared_namespace: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Search memories with multi-agent scope awareness.
@@ -127,11 +128,27 @@ async def mem_agent_search(
     session's agent (set by ``mem_session_start``) or the legacy
     ``current_namespace`` fallback.
 
+    By default ``include_shared`` merges the single global shared bucket
+    (``SHARED_NAMESPACE`` = ``"shared"``). For per-project agent teams that
+    keep a project-scoped shared bucket — the ADR-0028 convention where the
+    project is encoded in both the ``agent_id`` (``"<project>-<role>"`` →
+    ``agent-runtime:<project>-<role>``) and the shared bucket
+    (``"shared:<project>"``) — pass ``shared_namespace="shared:<project>"``
+    so the merge stays inside that project instead of pooling every project's
+    teams into the one global ``shared``. ``shared_namespace`` is validated
+    through :func:`validate_namespace` and is ignored when
+    ``include_shared=False``. The ``agent_id`` axis remains the private
+    isolation boundary; this only re-points the *shared* leg of the merge.
+
     Args:
         query: Search query
         agent_id: Agent ID to search (omit for current agent)
         include_shared: Also search the shared namespace (default True)
         top_k: Maximum results to return
+        shared_namespace: Override the shared bucket merged when
+            ``include_shared`` is set. Defaults to the global
+            ``"shared"``; pass ``"shared:<project>"`` for a per-project
+            team's shared scope. No effect when ``include_shared=False``.
         output_format: Output format — ``"compact"`` (default,
             human-readable), ``"verbose"`` (full details with UUID), or
             ``"structured"`` (JSON for machine parsing — exposes
@@ -142,6 +159,8 @@ async def mem_agent_search(
     """
     if agent_id is not None:
         validate_agent_id(agent_id)
+    if shared_namespace is not None:
+        validate_namespace(shared_namespace)
     if output_format not in _VALID_OUTPUT_FORMATS:
         return f"Error: {INVALID_OUTPUT_FORMAT_PREFIX} '{output_format}'."
     app = await _get_app_initialized(ctx)
@@ -149,9 +168,16 @@ async def mem_agent_search(
 
     agent_ns = _resolve_agent_namespace(app, agent_id)
 
+    # The bucket merged in when include_shared is set. Defaults to the
+    # global SHARED_NAMESPACE; a per-project team passes
+    # shared_namespace="shared:<project>" so the merge stays inside that
+    # project's shared scope (ADR-0028). This only re-points the *shared*
+    # leg — the agent_ns private leg is untouched.
+    shared_ns = shared_namespace or SHARED_NAMESPACE
+
     # Build namespace filter
     if include_shared and agent_ns:
-        ns_filter = f"{agent_ns},{SHARED_NAMESPACE}"
+        ns_filter = f"{agent_ns},{shared_ns}"
     elif agent_ns:
         ns_filter = agent_ns
     else:

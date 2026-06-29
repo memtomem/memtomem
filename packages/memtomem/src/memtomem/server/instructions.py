@@ -39,6 +39,12 @@ Namespace conventions:
   shared                  cross-agent shared scope
 Pass explicit namespace= only when overriding the derived value.
 
+Per-project teams (multiple teams against one server): prefix the project
+onto the agent_id (agent_id="projA-planner") for private memory, and keep
+team-shared notes in a per-project bucket — write with
+mem_agent_share(target="shared:projA"), read with
+mem_agent_search(shared_namespace="shared:projA"). See ADR-0028.
+
 Session-bound write contract:
 - After mem_session_start(agent_id="..."), subsequent mem_add and
   mem_batch_add calls without an explicit namespace= argument

@@ -60,6 +60,8 @@ REQUIRED_TOKENS: tuple[str, ...] = (
     "agent-runtime:",
     "shared",
     "default",
+    # ADR-0028 — per-project team shared-bucket override surfaced in the workflow.
+    "shared_namespace",
 )
 
 

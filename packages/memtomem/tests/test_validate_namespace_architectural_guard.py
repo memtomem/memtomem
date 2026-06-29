@@ -55,6 +55,8 @@ VALIDATED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         # PR #499 — the original namespace-override gate.
         ("session.py", "mem_session_start", "namespace"),
         ("multi_agent.py", "mem_agent_share", "target"),
+        # ADR-0028 — per-project shared bucket override on the agent read path.
+        ("multi_agent.py", "mem_agent_search", "shared_namespace"),
         # PR #501 (issue #500) — namespace CRUD gate.
         ("namespace.py", "mem_ns_set", "namespace"),
         ("namespace.py", "mem_ns_delete", "namespace"),
@@ -130,7 +132,9 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
 
 
 _TOOLS_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "memtomem" / "server" / "tools"
-_NS_PARAM_NAMES: frozenset[str] = frozenset({"namespace", "target", "old", "new", "old_namespace"})
+_NS_PARAM_NAMES: frozenset[str] = frozenset(
+    {"namespace", "target", "old", "new", "old_namespace", "shared_namespace"}
+)
 
 
 def _iter_tool_functions() -> list[tuple[str, ast.AsyncFunctionDef | ast.FunctionDef]]:
