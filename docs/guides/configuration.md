@@ -251,6 +251,10 @@ envelope shape.
 
 ## Search
 
+Search fuses two retrievers: **BM25** (keyword/lexical matching, via SQLite FTS5)
+and **dense** (semantic vector) search, combined with **RRF** (Reciprocal Rank
+Fusion). The variables below tune each retriever and the fusion.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_SEARCH__DEFAULT_TOP_K` | `10` | Default number of search results |

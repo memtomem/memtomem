@@ -170,8 +170,11 @@ mem_search("Transformer attention mechanism")
 | Feature | Claude Desktop Built-in | memtomem |
 |---------|------------------------|---------|
 | Conversational AI | **Built-in** (Claude model) | None (complementary area) |
-| Hybrid search (BM25 + Dense) | None | BM25 + Dense + RRF fusion |
-| Markdown indexing | None | Heading-based semantic chunker |
+| Hybrid search | None | Keyword (BM25) + semantic (vector), fused with RRF |
+| Markdown indexing | None | Heading-aware chunking (splits Markdown at headings) |
+
+*New to these terms? **BM25** is keyword search, **dense (vector)** is meaning-based search, and **RRF** (Reciprocal Rank Fusion) merges the two — see the [Reference glossary](../reference.md#glossary).*
+
 ## Frequently Asked Questions
 
 **Q: Does this reduce Claude Desktop's own features?**

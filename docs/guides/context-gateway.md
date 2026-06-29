@@ -26,8 +26,8 @@ The CLI path (`mm context …`) works on any install. The Web UI path needs the
 uv tool install --reinstall 'memtomem[web]'   # or 'memtomem[all]'
 ```
 
-A BM25-only minimal install has the CLI but no `mm web`. Either path operates on
-the same Store, so you can mix them.
+A search-only minimal install (without the `web` extra) has the CLI but no
+`mm web`. Either path operates on the same Store, so you can mix them.
 
 ## The model — Store, Runtimes, Sync, Import
 

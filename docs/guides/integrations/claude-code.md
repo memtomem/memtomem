@@ -417,9 +417,11 @@ Agent:
 
 | Feature | Claude Code Built-in | memtomem |
 |---------|---------------------|---------|
-| Semantic search | None (full loading or filename-based) | BM25 + Dense + RRF hybrid search |
+| Semantic search | None (full loading or filename-based) | Hybrid search: keyword (BM25) + semantic (vector), fused with RRF |
 | Auto memory | MEMORY.md 200-line limit | Unlimited semantic search |
 | Hooks integration | Event emission only | Hooks + CLI for automation (SessionStart, UserPromptSubmit, PostToolUse, Stop) |
+
+*New to these terms? **BM25** is keyword search, **dense (vector)** is meaning-based search, and **RRF** (Reciprocal Rank Fusion) merges the two — see the [Reference glossary](../reference.md#glossary).*
 
 ---
 
