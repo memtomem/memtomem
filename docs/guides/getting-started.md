@@ -2,19 +2,39 @@
 
 This guide takes you from zero to a working memtomem setup. You'll be able to index your notes and search them from your AI editor in under 5 minutes.
 
-> **Quickstart at a glance** — the whole flow in four commands; each step is
-> detailed below.
->
-> ```bash
-> uv tool install 'memtomem[all]'    # 1. install (includes the mm CLI)
-> mm init                            # 2. configure (preset picker)
-> mm index ~/notes                   # 3. index your notes
-> mm search "deployment checklist"   # 4. search them
-> ```
->
-> Don't want the CLI? `uvx` runs the server on demand — see
-> [Install → Option A](#option-a-from-pypi-recommended-for-most-users). New to
-> the ideas behind it? Start with [What is memtomem?](#what-is-memtomem).
+**On this page**
+
+- [Quickstart](#quickstart)
+- [What is memtomem?](#what-is-memtomem)
+- [Prerequisites](#prerequisites)
+- [Install](#install)
+- [Setup wizard](#setup-wizard)
+- [Connect to your AI editor (manual)](#connect-to-your-ai-editor-manual)
+- [First use](#first-use)
+- [Optional: Sync memories across your own machines](#optional-sync-memories-across-your-own-machines)
+- [CLI reference](#cli-reference)
+- [Troubleshooting](#troubleshooting)
+- [Optional: Share rules, skills, sub-agents, and commands across editors](#optional-share-rules-skills-sub-agents-and-commands-across-editors)
+- [Optional: STM Proxy — Proactive Memory Surfacing](#optional-stm-proxy--proactive-memory-surfacing)
+- [Optional: Web UI](#optional-web-ui)
+- [Optional: LLM Provider](#optional-llm-provider)
+- [Uninstall](#uninstall)
+- [Next steps](#next-steps)
+
+## Quickstart
+
+The whole flow is four commands — each step is detailed below.
+
+```bash
+uv tool install 'memtomem[all]'    # 1. install (includes the mm CLI)
+mm init                            # 2. configure (preset picker)
+mm index ~/notes                   # 3. index your notes
+mm search "deployment checklist"   # 4. search them
+```
+
+Don't want the CLI? `uvx` runs the server on demand — see
+[Install → Option A](#option-a-from-pypi-recommended-for-most-users). New to
+the ideas behind it? Start with [What is memtomem?](#what-is-memtomem).
 
 ---
 
@@ -82,11 +102,7 @@ uv tool install memtomem            # BM25 only — dense search, Web UI, Korean
 
 You can opt in to individual features later with `uv tool install --reinstall 'memtomem[onnx,web]'` or any combination from the extras table in [Option C](#option-c-from-source-for-development-or-testing).
 
-> **Upgrading an installed memtomem**: prefer `mm upgrade` over a bare `uv tool install --reinstall memtomem`. The latter only swaps the on-disk bytes, so any `memtomem-server` already running under your MCP client keeps executing the previous version until it exits. `mm upgrade` stops the server first (SIGTERM → SIGKILL after `--grace`), clears the stale pid lock, then runs the reinstall with `--refresh` so a freshly released version isn't masked by uv's cached resolver result. Pass `--version X.Y.Z` to pin or `--dry-run` to preview the plan.
-
-> **If `mm --version` shows an older release**: `uv` caches PyPI metadata per package, and a fresh install can resolve to the cached entry for a short window after a new release. Re-run with `uv tool install 'memtomem[all]' --refresh`, or clear the cache first: `uv cache clean memtomem`. Check the [latest release](https://github.com/memtomem/memtomem/releases) for the expected version.
-
-> **If you see `mm: command not found`**: `uv tool install` writes the `mm` shim to `~/.local/bin` (macOS/Linux default), but that directory isn't on `$PATH` in a fresh shell profile. Run `uv tool update-shell` once, then open a new shell and re-run `mm --version`. (`uv` prints a one-line hint on first-ever tool install, but it's easy to miss.)
+*Hit a snag — `mm` not found, a stale `mm --version`, or upgrading later? See [Troubleshooting → Install and upgrade issues](#install-and-upgrade-issues).*
 
 Skip to [Connect to your AI editor](#connect-to-your-ai-editor-manual).
 
@@ -163,6 +179,8 @@ uv run mm init  # Project or source install
 | **Korean-optimized** | ONNX `bge-m3` (1024d, ~2.3 GB) + multilingual reranker (`jinaai/jina-reranker-v2-base-multilingual`) + `kiwipiepy` tokenizer + auto-discover | Korean content (or Korean/Chinese/Japanese mixed) |
 | **Advanced** | — (10-step wizard, full control) | Need to set every knob — custom model, separate DB path, decay, etc. |
 
+*A **reranker** is an optional second-pass model that re-orders the top search hits for higher precision — off in Minimal, on in the English and Korean presets.*
+
 Type `b` to go back or `q` to quit at any prompt.
 
 #### Non-interactive mode (CI / automation)
@@ -187,7 +205,8 @@ mm init -y --include-provider claude-memory --include-provider codex
 
 `--preset` and `--advanced` are mutually exclusive. Running without `-y` / `--preset` / `--advanced` from a non-TTY (e.g., piped stdin) exits with an error — pass one of those flags explicitly.
 
-#### Advanced (10-step wizard) step list
+<details>
+<summary><b>Advanced: the full 10-step wizard</b></summary>
 
 Selecting **Advanced** (from the picker or `--advanced`) runs all ten steps:
 
@@ -201,6 +220,8 @@ Selecting **Advanced** (from the picker or `--advanced`) runs all ten steps:
 8. **Language** — tokenizer selection: Unicode (default) or Korean (kiwipiepy)
 9. **Claude Code hooks** — optional hook integration via settings.json
 10. **Editor connection** — Claude Code auto-setup, .mcp.json generation, or manual
+
+</details>
 
 After the wizard, your MCP server is ready. Skip to [First use](#first-use) if you ran the wizard.
 
@@ -300,6 +321,9 @@ mm status
 > notebook: [`examples/notebooks/01_hello_memory.ipynb`](../../examples/notebooks/01_hello_memory.ipynb)
 > (local ONNX embeddings, no server needed).
 
+Prefer clicking to typing? `mm web` gives you a visual version of everything
+below — see [Optional: Web UI](#optional-web-ui).
+
 ### 1. Index your notes
 
 This one-shot command seeds the index with files already on disk. After
@@ -355,19 +379,17 @@ mm recall --since 2026-04-01
 
 ### 5. Organise memories with namespaces
 
-Each chunk lives in a namespace. Indexing creates them automatically — for
+Each chunk lives in a **namespace**. Indexing creates them automatically (for
 example, ingesting `~/.claude/projects/...` produces `claude-memory:<slug>`
-namespaces — and you can also pass `--namespace work-notes` to `mm index`
-to bucket on demand. Once a namespace exists, open **Settings →
-Namespaces** in the Web UI to attach a colour and a one-line description
-so it's easy to pick out in filters and result chips. Structural ops
-(rename, delete) live in `--dev` mode pending chunk-id stability work
-(see [`docs/guides/configuration.md#namespace`](configuration.md#namespace)
-for rules and ADR-0007 for the rationale).
+namespaces), and you can pass `--namespace work-notes` to `mm index` to bucket
+on demand.
+
+Want to colour-code them, add descriptions, or rename/delete a namespace? See
+[Configuration → Namespace](configuration.md#namespace).
 
 ---
 
-## Optional: Sync across your own machines
+## Optional: Sync memories across your own machines
 
 For the first multi-device setup, keep the model simple:
 
@@ -500,9 +522,32 @@ uv pip install -e "packages/memtomem[all]"  # Source
 > intended for remote deployments; see
 > [mcp-clients.md → Network transports](mcp-clients.md#11-network-transports-advanced).
 
+### Install and upgrade issues
+
+**`mm: command not found` (installed but not on `$PATH`).** `uv tool install`
+writes the `mm` shim to `~/.local/bin` (the macOS/Linux default), which isn't on
+`$PATH` in a fresh shell profile. Run `uv tool update-shell` once, then open a
+new shell and re-run `mm --version`. (`uv` prints a one-line hint on the
+first-ever tool install, but it's easy to miss.)
+
+**`mm --version` shows an older release than expected.** `uv` caches PyPI
+metadata per package, so a fresh install can resolve to the cached entry for a
+short window after a new release. Re-run with `uv tool install 'memtomem[all]'
+--refresh`, or clear the cache first: `uv cache clean memtomem`. Check the
+[latest release](https://github.com/memtomem/memtomem/releases) for the expected
+version.
+
+**Upgrading an installed memtomem.** Prefer `mm upgrade` over a bare `uv tool
+install --reinstall memtomem`. The latter only swaps the on-disk bytes, so any
+`memtomem-server` already running under your MCP client keeps executing the
+previous version until it exits. `mm upgrade` stops the server first (SIGTERM →
+SIGKILL after `--grace`), clears the stale pid lock, then runs the reinstall with
+`--refresh` so a freshly released version isn't masked by uv's cached resolver
+result. Pass `--version X.Y.Z` to pin or `--dry-run` to preview the plan.
+
 ---
 
-## Optional: Sync project rules, skills, sub-agents, and commands across editors
+## Optional: Share rules, skills, sub-agents, and commands across editors
 
 If you use multiple AI editors, keep their config files — and their agent **skills**, **sub-agents**, and **slash commands** — in sync from one source under `.memtomem/`:
 
@@ -547,19 +592,20 @@ when you want the context to follow the project checkout. Keep
 
 > Cursor, OpenAI Codex, and GitHub Copilot generators concatenate the `Rules` and `Style` sections from `context.md` into a single block — `mm context generate` warns on stderr when both are populated. `context.md` remains the source of truth; edit there, not in the generated files.
 
-> **Where do canonical files live? (3-tier model)** memtomem stores
-> canonical agents / skills / commands under one of three **tiers**: `user`
-> (`~/.memtomem/<artifact>/`), `project_shared` (`<proj>/.memtomem/<artifact>/`,
-> git-tracked, the default for these artifacts), or `project_local`
-> (`<proj>/.memtomem/<artifact>.local/`, gitignored, draft tier — no runtime
-> fan-out). Pick the tier per write with `--scope=<tier>` on `mm context
-> init` / `sync` / `generate`. To move an existing canonical between tiers,
-> `mm context migrate <kind> <name> --from <tier> --to <tier> --apply`
-> uses the explicit `--from` / `--to` pair instead of `--scope` (the verb
-> has two endpoints, not one). Tier (canonical residency) is distinct
-> from the runtime **scope** the canonical fans out to under `.claude/`
-> — ADR-0016 documents the split; ADR-0011 §1 has the per-artifact
-> table.
+**Where do canonical files live? (3-tier model)** Canonical agents / skills /
+commands live at one of three **tiers**:
+
+| Tier (`--scope`) | Where it lives | Notes |
+|---|---|---|
+| `user` | `~/.memtomem/<artifact>/` | Available to every project on this machine |
+| `project_shared` | `<proj>/.memtomem/<artifact>/` | Git-tracked; the default for these artifacts |
+| `project_local` | `<proj>/.memtomem/<artifact>.local/` | Gitignored draft — never fans out to a runtime |
+
+Pick the tier per write with `--scope=<tier>` on `mm context init` / `sync` /
+`generate`. The tier (where the canonical lives) is distinct from the runtime
+**scope** it fans out to under `.claude/`. For moving canonicals between tiers
+and the full rationale, see the [Context Gateway](context-gateway.md) guide
+(ADR-0016 documents the split).
 
 ---
 
