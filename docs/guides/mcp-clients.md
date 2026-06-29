@@ -18,6 +18,22 @@
 
 ---
 
+**Jump to your editor**
+
+- [1. Claude Code](#1-claude-code)
+- [2. Cursor](#2-cursor)
+- [3. Windsurf](#3-windsurf)
+- [4. Claude Desktop](#4-claude-desktop)
+- [5. Gemini CLI](#5-gemini-cli)
+- [6. Kimi CLI](#6-kimi-cli)
+- [7. Codex CLI](#7-codex-cli)
+- [8. Antigravity](#8-antigravity)
+- [9. Verifying Your Connection](#9-verifying-your-connection)
+- [10. Environment Variable Overrides](#10-environment-variable-overrides)
+- [11. Network transports (advanced)](#11-network-transports-advanced)
+- [Troubleshooting](#troubleshooting)
+- [Next Steps](#next-steps)
+
 ## 1. Claude Code
 
 ### Pick a scope

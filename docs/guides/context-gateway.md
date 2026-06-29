@@ -17,6 +17,20 @@ links out to [`reference.md`](reference.md#cli-reference) for the full command m
 [`configuration.md#context-gateway`](configuration.md#context-gateway) for the
 environment variables; it does not re-document those here.
 
+**On this page**
+
+- [Prerequisites](#prerequisites)
+- [The model — Store, Runtimes, Sync, Import](#the-model--store-runtimes-sync-import)
+- [Where copies live — the "Stored in" tiers](#where-copies-live--the-stored-in-tiers)
+- [The wiki — a separate global library, not the Store](#the-wiki--a-separate-global-library-not-the-store)
+- [Walkthrough — get this project's skills into your AI tools](#walkthrough--get-this-projects-skills-into-your-ai-tools)
+- [Sync vs Import — reading the status](#sync-vs-import--reading-the-status)
+- [From the Web UI — what the tab shows](#from-the-web-ui--what-the-tab-shows)
+- [From the CLI — the core loop](#from-the-cli--the-core-loop)
+- [Other artifact types and projects](#other-artifact-types-and-projects)
+- [Privacy and git safety](#privacy-and-git-safety)
+- [See also](#see-also)
+
 ## Prerequisites
 
 The CLI path (`mm context …`) works on any install. The Web UI path needs the

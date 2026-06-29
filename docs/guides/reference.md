@@ -5,6 +5,28 @@
 
 > **New to memtomem?** Start with [Getting Started](getting-started.md) first. This guide is a complete reference for all features.
 
+**On this page**
+
+- [Glossary](#glossary)
+- [How memtomem Works](#how-memtomem-works)
+- [MCP Tools at a Glance](#mcp-tools-at-a-glance)
+- [1. Indexing — mem_index](#1-indexing--mem_index)
+- [2. Search — mem_search, mem_recall](#2-search--mem_search-mem_recall)
+- [3. Memory CRUD — mem_add, mem_batch_add, mem_edit, mem_delete](#3-memory-crud--mem_add-mem_batch_add-mem_edit-mem_delete)
+- [4. Namespace — mem_ns_*](#4-namespace--mem_ns_)
+- [5. Maintenance — mem_dedup_*, mem_decay_*, mem_auto_tag](#5-maintenance--mem_dedup_-mem_decay_-mem_auto_tag)
+- [6. Data — mem_export, mem_import](#6-data--mem_export-mem_import)
+- [7. Config — mem_stats, mem_status, mem_config, mem_embedding_reset](#7-config--mem_stats-mem_status-mem_config-mem_embedding_reset)
+- [8. Memory Policies — mem_policy_add, mem_policy_list, mem_policy_run](#8-memory-policies--mem_policy_add-mem_policy_list-mem_policy_run)
+- [9. Scheduled jobs — mm schedule, schedule_*](#9-scheduled-jobs--mm-schedule-schedule_)
+- [Web UI](#web-ui)
+- [CLI Reference](#cli-reference)
+- [Moving artifacts between tiers and projects](#moving-artifacts-between-tiers-and-projects)
+- [Troubleshooting](#troubleshooting)
+- [STM: Proactive Memory Surfacing (Optional)](#stm-proactive-memory-surfacing-optional)
+- [Uninstalling memtomem](#uninstalling-memtomem)
+- [Next Steps](#next-steps)
+
 ---
 
 ## Glossary

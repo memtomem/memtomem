@@ -4,6 +4,20 @@
 **Prerequisites**: memtomem installation complete ([Quick Start](../getting-started.md)), Claude Code installed
 **Estimated Time**: About 15 minutes
 
+**On this page**
+
+- [Overview](#overview)
+- [MCP Server Setup](#mcp-server-setup)
+- [Verify Connection](#verify-connection)
+- [First Indexing](#first-indexing)
+- [Hooks Automation Setup](#hooks-automation-setup)
+- [Tool Usage Guidelines (Add to CLAUDE.md)](#tool-usage-guidelines-add-to-claudemd)
+- [Usage Scenarios](#usage-scenarios)
+- [Built-in Memory vs memtomem Comparison](#built-in-memory-vs-memtomem-comparison)
+- [Frequently Asked Questions](#frequently-asked-questions)
+- [Cross-runtime agent context with mm context](#cross-runtime-agent-context-with-mm-context)
+- [Next Steps](#next-steps)
+
 ---
 
 ## Overview

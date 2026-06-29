@@ -14,6 +14,20 @@ This guide describes the layout, what to commit (and what never to commit),
 the workflow around restarting the runtime after a pull, and `mm sync-doctor`
 — the read-only validator that catches the common footguns.
 
+**On this page**
+
+- [Easy mode — copy/paste setup](#easy-mode--copypaste-setup)
+- [When this fits](#when-this-fits)
+- [The layout — namespace-aligned directory tree](#the-layout--namespace-aligned-directory-tree)
+- [What syncs, what does not](#what-syncs-what-does-not)
+- [Post-pull workflow](#post-pull-workflow)
+- [Conflict policy](#conflict-policy)
+- [Auto-memory (Claude Code)](#auto-memory-claude-code)
+- [Obsidian as editor on top of git transport](#obsidian-as-editor-on-top-of-git-transport)
+- [mm sync-doctor — read-only validator](#mm-sync-doctor--read-only-validator)
+- [Anti-patterns](#anti-patterns)
+- [Verification — first-time setup smoke](#verification--first-time-setup-smoke)
+
 ## Easy mode — copy/paste setup
 
 Start here if you only want your personal memtomem memories to follow you
