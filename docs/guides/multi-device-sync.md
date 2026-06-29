@@ -213,22 +213,39 @@ No explicit `namespace=` argument is required at ingest time.
 
 The fragment file itself is portable — `~/` expands at load time per the
 namespace-rules semantics. **However**, memtomem's loader only reads from
-`~/.memtomem/config.d/*.json`. Storing the fragment under your synced repo
-at e.g. `~/.memtomem-private/config.d/10-namespace-rules.json` does *not*
-make it active on the destination — the rules never apply unless the file
-appears at the canonical location. Two ways to bridge:
+`~/.memtomem/config.d/*.json`, and that directory sits *outside* your synced
+`~/.memtomem/memories` repo. So config.d is replicated **separately** from your
+memories: the rules never apply on another machine unless a copy of the fragment
+reaches that canonical location. Two ways to get it there:
 
-- **Symlink (recommended).** Edits flow back to the synced repo
+- **Copy (simplest).** Keep the fragment alongside your memories and copy it
+  into place on each machine. The policy rarely changes, so a one-time copy per
+  machine is usually enough:
+
+  ```bash
+  mkdir -p ~/.memtomem/config.d
+  cp ~/.memtomem/memories/config.d/10-namespace-rules.json \
+     ~/.memtomem/config.d/10-namespace-rules.json
+  ```
+
+- **Symlink (keeps it under git).** Store the fragment inside the memories repo
+  and symlink it into the canonical location, so edits flow back to git
   automatically:
 
   ```bash
   mkdir -p ~/.memtomem/config.d
-  ln -sf ~/.memtomem-private/config.d/10-namespace-rules.json \
+  ln -sf ~/.memtomem/memories/config.d/10-namespace-rules.json \
          ~/.memtomem/config.d/10-namespace-rules.json
   ```
 
-- **Copy.** Plain `cp` after each `git pull`. Simpler but drifts if you
-  edit the canonical copy without copying back.
+  Anything under `~/.memtomem/memories/` is indexed by default — including
+  `.json` — so the tracked copy would otherwise surface as a searchable
+  "memory". Exclude it with a fragment (see
+  [`exclude_patterns`](configuration.md#exclude-patterns)):
+
+  ```json
+  { "indexing": { "exclude_patterns": ["**/config.d/**"] } }
+  ```
 
 `mm sync-doctor` (below) flags a missing bridge.
 
@@ -238,9 +255,12 @@ appears at the canonical location. Two ways to bridge:
 
 - `~/.memtomem/memories/{shared,personal,work}/**/*.md` — content. Pure
   markdown, no embedded machine state.
-- `~/.memtomem/config.d/*.json` — *selected* fragments only. Pure-policy
-  fragments (namespace rules, rerank settings, default `top_k`) are
-  portable. Avoid fragments that embed local paths.
+- `~/.memtomem/config.d/*.json` — *selected* fragments only, **replicated
+  separately** from the memories repo (config.d lives outside
+  `~/.memtomem/memories`; see
+  [The layout](#the-layout--namespace-aligned-directory-tree)). Pure-policy
+  fragments (namespace rules, rerank settings, default `top_k`) are portable.
+  Avoid fragments that embed local paths.
 
 **Never sync** — your private repo's `.gitignore`:
 
@@ -303,7 +323,7 @@ Recommended sequence:
 # 1. Quiesce the runtime (Ctrl+C the foreground mm web; or end the MCP
 #    client session; or mm upgrade if you want a forced bounce).
 # 2. Pull.
-cd ~/.memtomem-private && git pull --rebase
+cd ~/.memtomem/memories && git pull --rebase
 # 3. Restart the runtime (mm web; or relaunch the MCP client).
 ```
 
@@ -382,7 +402,7 @@ from git's and would invalidate the layout / anti-patterns above.
 Two arrangements work, depending on whether you want the vault root to *be*
 the synced repo or to *contain* it:
 
-- **(a) Vault root = synced repo root.** Open `~/.memtomem-private/` itself
+- **(a) Vault root = synced repo root.** Open `~/.memtomem/memories/` itself
   as the vault. The namespace tree (`shared/`, `personal/`, `work/`,
   `local/`) becomes the vault's top-level folders, and the existing
   `path_glob` rules from [The layout](#the-layout--namespace-aligned-directory-tree)
@@ -475,7 +495,7 @@ checks and exits non-zero on any failure (warnings don't fail the exit
 code):
 
 ```text
-$ cd ~/.memtomem-private && mm sync-doctor
+$ cd ~/.memtomem/memories && mm sync-doctor
 ✓ no *.db files staged
 ✓ config.json absent from worktree
 ✓ config.d/ fragments present (3 files)
@@ -533,11 +553,11 @@ corruption or identity leaks:
 
 End-to-end smoke when you set up sync for the first time:
 
-1. **Single-machine round-trip.** Init the private repo, copy
-   `~/.memtomem/memories/shared/` in, write
-   `config.d/10-namespace-rules.json`, `git add -A && git status` — confirm
-   zero `*.db`, `cache/`, `config.json` staged. Run `mm sync-doctor` —
-   all checks pass.
+1. **Single-machine round-trip.** Init the `~/.memtomem/memories` repo, copy
+   your `shared/` tree in, bridge `~/.memtomem/config.d/10-namespace-rules.json`
+   into place (copy or symlink, above), `git add -A && git status` — confirm
+   zero `*.db`, `cache/`, `config.json` staged. Run `mm sync-doctor` — all
+   checks pass.
 2. **Bidirectional.** `mem_add` on machine A → commit/push → pull on
    machine B → run `mm index` (or rely on `startup_backfill`) → search
    the new note. Reverse direction. Both should return the new content.
