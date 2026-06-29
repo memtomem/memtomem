@@ -33,6 +33,8 @@ pointer so a maintainer can scan due dates without opening each ADR.
 | 0027 §"Provisional decisions" D-A | in-browser wiki editor save→commit model | first dev-tier dogfooding of the now-shipped commit affordance; criteria in ADR-0027 §"Provisional decisions" | (none — tracked in ADR) | (event-driven) |
 | 0027 §"Provisional decisions" D-E | wiki editor privacy posture (soft-warn vs hard-gate) | wiki gains a configured push remote; criteria in ADR-0027 §D-E | (none — tracked in ADR) | (event-driven) |
 | 0026 §"Provisional decisions" D-B / D-C | P2 "Bold" re-frame — directional verb rename (D-B: Sync→Push↑ / Import→Pull↓) and status-merge to ahead/behind/in-sync (D-C) | The §Validation first-run user test clears the P2 gate: probe 5 overwrite-prediction ≥5/6 AND the status-merge keeps the create-vs-overwrite distinction (criteria in ADR-0026 §Validation) | [#1353](https://github.com/memtomem/memtomem/issues/1353) | (event-driven) |
+| 0028 §"Consequences" | Widen `_DEFAULT_SYSTEM_PREFIXES` to hide `shared:<project>` buckets from default `mem_search` (as `agent-runtime:` already is) | ≥ 2 reports of `shared:<project>` buckets leaking into default (`namespace=None`) search results; gated by the default-change onboarding-doc fan-out rule | (none — tracked in ADR) | (event-driven) |
+| 0028 §"Consequences" | `project=` sugar on `mem_session_start` / `mem_agent_register` (derives both the `agent_id` prefix and the `shared:<project>` bucket; optional session-bound scope) | Per-call `shared_namespace=` / explicit-bucket repetition reported as friction by a non-author, OR real usage of the flat convention accrues | (none — tracked in ADR) | (event-driven) |
 
 ## Adding a row
 

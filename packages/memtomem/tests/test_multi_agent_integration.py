@@ -824,3 +824,105 @@ class TestCaseFOutputFormat:
             f"  mem_agent_search:  {agent_hints[0]!r}\n"
             f"See feedback_hint_prose_parity_siblings.md"
         )
+
+
+# ── Case G — per-project shared bucket (ADR-0028) ───────────────────────
+
+
+class TestCaseGPerProjectSharedBucket:
+    """End-to-end: ``mem_agent_search(shared_namespace="shared:projA")``
+    merges a per-project shared bucket instead of the global ``shared``
+    (ADR-0028). Two projects' teams that each pool into their own
+    ``shared:<project>`` bucket therefore do not see each other, while the
+    default (no ``shared_namespace``) keeps merging the single global
+    ``shared`` exactly as before.
+    """
+
+    @pytest.mark.asyncio
+    async def test_shared_namespace_scopes_merge_to_project_bucket(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await mem_agent_register(agent_id="projA-planner", ctx=ctx)  # type: ignore[arg-type]
+
+        # Same topic in both buckets, so BM25 alone would surface both;
+        # only the namespace filter separates global from project-scoped.
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk(
+                    "global shared note about rate limiting",
+                    namespace=SHARED_NAMESPACE,
+                ),
+                make_chunk(
+                    "project A shared note about rate limiting",
+                    namespace="shared:projA",
+                ),
+            ]
+        )
+
+        # shared_namespace pinned to the project bucket → only project A's
+        # note surfaces; the global one is excluded.
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="rate limiting",
+            agent_id="projA-planner",
+            include_shared=True,
+            shared_namespace="shared:projA",
+            ctx=ctx,
+        )
+        assert "project A shared note" in out
+        assert "global shared note" not in out
+
+        # Default (no shared_namespace) merges the global bucket only —
+        # unchanged from pre-ADR-0028 behaviour.
+        out_global = await mem_agent_search(  # type: ignore[arg-type]
+            query="rate limiting",
+            agent_id="projA-planner",
+            include_shared=True,
+            ctx=ctx,
+        )
+        assert "global shared note" in out_global
+        assert "project A shared note" not in out_global
+
+    @pytest.mark.asyncio
+    async def test_shared_namespace_ignored_when_include_shared_false(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        await mem_agent_register(agent_id="projA-planner", ctx=ctx)  # type: ignore[arg-type]
+        await comp.storage.upsert_chunks(
+            [
+                make_chunk(
+                    "project A shared note about caching",
+                    namespace="shared:projA",
+                ),
+            ]
+        )
+
+        # include_shared=False drops the shared leg regardless of
+        # shared_namespace; the empty private namespace yields nothing.
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="caching",
+            agent_id="projA-planner",
+            include_shared=False,
+            shared_namespace="shared:projA",
+            ctx=ctx,
+        )
+        assert "No results found" in out
+
+    @pytest.mark.asyncio
+    async def test_hostile_shared_namespace_rejected(self, bm25_only_components):
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+
+        # The arity-bypass shape that mem_session_start / mem_agent_share
+        # reject (issue #496) must be rejected on this surface too.
+        out = await mem_agent_search(  # type: ignore[arg-type]
+            query="anything",
+            agent_id="projA-planner",
+            shared_namespace="agent-runtime:foo:bar",
+            ctx=ctx,
+        )
+        assert "invalid namespace" in out
