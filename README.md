@@ -151,19 +151,19 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 
 ## Documentation
 
-Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdown in this repo:
+Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdown in this repo. New to memtomem? The guides have a [suggested reading order](docs/guides/README.md). The table below follows it:
 
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/guides/getting-started.md) | Install, setup wizard, first use |
 | [Example notebooks](examples/notebooks/) | Runnable Python-API walkthrough (start with `01_hello_memory.ipynb`, local ONNX — no server) |
-| [Reference](docs/guides/reference.md) | Complete feature reference for all tools and patterns |
+| [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Configuration](docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
 | [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
 | [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
-| [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
 | [Context Gateway](docs/guides/context-gateway.md) | Share Skills, Commands, and Subagents across your AI tools from one Store |
 | [Multi-device sync](docs/guides/multi-device-sync.md) | Sync markdown memories across personal devices via a private git repo |
+| [Reference](docs/guides/reference.md) | Complete feature reference for all tools and patterns |
 | [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
 
 ---
