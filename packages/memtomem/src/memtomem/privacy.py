@@ -1,18 +1,36 @@
 """Content redaction guard at the LTM trust boundary.
 
-The pattern set is duplicated from memtomem-stm
-``proxy/privacy.py:DEFAULT_PATTERNS`` as of commit ``a98636e``,
-**secrets-only subset**. STM's full pattern set includes patterns whose
-semantic category is PII (e.g., email addresses) rather than secret-class.
-Those are excluded by design here because PII false positives on prose
-ingress would be unworkable; redaction at the LTM ingress is the trust
-boundary where blocking semantics demand a tight false-positive profile.
+The pattern set has two provenance tiers, both secret-class only:
+
+1. **STM-synced subset** — mirrored from memtomem-stm
+   ``proxy/privacy.py:CREDENTIAL_PATTERNS``, audited current as of STM
+   commit ``3e585b5`` (previously pinned at ``a98636e``; the only STM
+   change to the credential set since was splitting the email/PII
+   pattern out of its ``DEFAULT_PATTERNS`` into a separate
+   ``PII_PATTERNS`` list — correctly excluded here). STM's full set also
+   carries PII patterns (email, etc.); those are excluded by design
+   because PII false positives on prose ingress would be unworkable.
+
+2. **LTM-origin additions** (issue #1488) — secret-class provider-token
+   patterns added directly at this trust boundary, ahead of STM. LTM is
+   the authoritative gate and may legitimately be stricter than STM's
+   compression-routing signal, so a superset is fine. For routing
+   coherence these should be mirrored back into STM's
+   ``CREDENTIAL_PATTERNS`` (reverse sync, tracked separately); until then
+   LTM is a strict superset.
+
+Redaction at the LTM ingress is the trust boundary where blocking
+semantics demand a tight false-positive profile.
 
 Sync rule (asymmetric):
 
 - STM additions of secret-class patterns (provider tokens, key formats,
   PEM-style headers, etc.) require sync into this module + a SHA bump in
   this docstring.
+- LTM-origin secret-class additions (tier 2 above) flow the OTHER way:
+  they should be mirrored into STM's ``CREDENTIAL_PATTERNS`` for routing
+  coherence, but LTM does not block on that — the trust boundary tightens
+  here first.
 - STM additions of PII-class patterns (email, phone, name, address, etc.)
   do NOT auto-sync. Including any new PII-class pattern here requires a
   separate decision pass — the false-positive profile in prose ingress is
@@ -62,6 +80,70 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     # dotted identifiers.
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
     r"(?i)(BEGIN\s+(RSA|EC|OPENSSH|DSA|PGP)\s+PRIVATE\s+KEY)",
+    # --- LTM-origin secret-class additions (issue #1488) -------------------
+    # Added directly at this trust boundary, ahead of STM (see module
+    # docstring, provenance tier 2). All are case-SENSITIVE on purpose:
+    # provider prefixes are fixed-case (``sk-``, ``AIza``, ``glpat-``,
+    # ``hf_``, ``gh*_``) — do NOT wrap these under ``(?i)`` or you
+    # reintroduce false positives (``AIZA``, ``GLPAT-``). Bounded greedy
+    # segments ({20,200}), bounded digit-lookaheads ({0,33}), and exact
+    # lengths on the hyphen-inclusive tokens keep ``scan()`` linear-time:
+    # a crafted ``sk-proj-``/``glpat-`` repetition cannot drive O(n^2)
+    # backtracking (pinned by
+    # test_privacy_long_content::test_crafted_repetition_*).
+    #
+    # Modern OpenAI keys (sk-proj-/sk-svcacct-/sk-admin-): the legacy
+    # ``sk-[a-zA-Z0-9]{20,}`` rule above MISSES these — the hyphen after the
+    # class word halts the alphanumeric run before {20,}. Anchored on the
+    # embedded ``T3BlbkFJ`` marker (base64 of "OpenAI") between two
+    # base64url segments → near-zero FP. Segments bounded {20,200}
+    # (real-world pre/post-marker segments are 58 or 74 chars). The trailing
+    # segment carries a ``(?![A-Za-z0-9_-])`` terminal guard (same class as
+    # the Anthropic fix): without it the capped greedy would match the first
+    # 200 chars of a longer token-char run. The pre-marker segment needs no
+    # guard — the literal ``T3BlbkFJ`` is its terminator.
+    r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,200}T3BlbkFJ[A-Za-z0-9_-]{20,200}(?![A-Za-z0-9_-])",
+    # Anthropic keys (sk-ant-apiNN-/adminNN-): also missed by the legacy
+    # rule (hyphen after "ant"). Anchored on the exact canonical body —
+    # 93 base64url chars + the literal "AA" terminal (a bit-alignment
+    # artifact every real key carries; gitleaks + trufflehog both pin it).
+    # The exact length + AA terminal is what rejects digit-bearing kebab
+    # slugs like "sk-ant-api03-release-notes-2026-migration-guide" (a loose
+    # ``{20,}`` body matched those). The terminal guard is
+    # ``(?![A-Za-z0-9_-])``, NOT ``\b``: ``-`` is in the body charset, so a
+    # bare ``\b`` would treat ``AA-`` as a boundary and let a 93-char kebab
+    # slug ending ``...AA-more-doc`` through. The OAuth token
+    # (sk-ant-oat01-) has no canonical length and is omitted rather than
+    # matched loosely — a follow-up once a stable shape exists (gitleaks
+    # issue #2104).
+    r"\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])",
+    # GitHub token family completion: gho_ (OAuth), ghu_ (user-to-server),
+    # ghs_ (server-to-server / Actions GITHUB_TOKEN), ghr_ (refresh). Same
+    # base62 shape as the already-covered ghp_ (excluded from the class to
+    # avoid duplicating it). {36,} min — ghs_ tokens run longer than 40.
+    r"\bgh[ousr]_[A-Za-z0-9]{36,}\b",
+    # Google API key (GCP / Firebase / Maps / Gemini): fixed AIza + 35
+    # base64url chars (39 total). Trailing negative lookahead pins the exact
+    # length so it won't fire on the AIza-prefixed head of a longer blob.
+    r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+    # GitLab personal access token: unique ``glpat-`` literal + the exact
+    # classic 20-char body (gitleaks ``glpat-[\w-]{20}``) with a terminal
+    # guard. Exact length is what rejects digit-bearing kebab slugs like
+    # "glpat-form-builder-component-name-2026" — a ``{20,}`` superset
+    # matched those. Newer 17.x routable tokens (longer body + a
+    # ".<checksum>" suffix) are a separate dot-anchored follow-up.
+    r"\bglpat-[0-9A-Za-z_-]{20}(?![0-9A-Za-z_-])",
+    # Hugging Face access token (this repo loads HF models). The short
+    # ``hf_`` prefix is collision-prone (hf_hub, hf_model), so: exact
+    # 34-char alnum body (trufflehog charset — digits matter), both word
+    # boundaries, and a digit-in-body lookahead to reject letter-only
+    # identifiers.
+    r"\bhf_(?=[A-Za-z0-9]{0,33}[0-9])[A-Za-z0-9]{34}\b",
+    # PyPI / TestPyPI upload token (this repo publishes to PyPI). The
+    # macaroon header ``AgEIcHlwaS5vcmc`` / ``AgENdGVzdC5weXBpLm9yZw``
+    # (base64 of "pypi.org" / "test.pypi.org") is an exact fingerprint →
+    # lowest FP of the set.
+    r"\bpypi-Ag(?:EIcHlwaS5vcmc|ENdGVzdC5weXBpLm9yZw)[A-Za-z0-9_-]{50,}",
 )
 
 
@@ -153,7 +235,7 @@ def to_js_pattern(pat: str) -> tuple[str, str]:
     - **Inline flag negation** like ``(?-i)`` or ``(?i-m:...)`` —
       same per-segment-scope problem as mid-pattern lifts.
     - **Named groups** ``(?P<name>...)`` — JS uses ``(?<name>...)`` and
-      a rewrite is not implemented (none of the current 9 patterns use
+      a rewrite is not implemented (none of the current patterns use
       named groups).
     - **Inline comments** ``(?#comment)`` — no JS equivalent.
     - **Python-only anchors** ``\\A`` and ``\\Z`` — use ``^`` / ``$``
