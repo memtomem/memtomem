@@ -1,23 +1,24 @@
 """Content redaction guard at the LTM trust boundary.
 
-The pattern set has two provenance tiers, both secret-class only:
+The pattern set has two provenance tiers, both secret-class only. As of
+STM commit ``8c884cb`` the two sides are in sync: this module's 16
+secret-class patterns are byte-identical to memtomem-stm
+``proxy/privacy.py:CREDENTIAL_PATTERNS``.
 
-1. **STM-synced subset** — mirrored from memtomem-stm
-   ``proxy/privacy.py:CREDENTIAL_PATTERNS``, audited current as of STM
-   commit ``3e585b5`` (previously pinned at ``a98636e``; the only STM
-   change to the credential set since was splitting the email/PII
-   pattern out of its ``DEFAULT_PATTERNS`` into a separate
-   ``PII_PATTERNS`` list — correctly excluded here). STM's full set also
-   carries PII patterns (email, etc.); those are excluded by design
-   because PII false positives on prose ingress would be unworkable.
+1. **STM-synced subset** (9 patterns) — originally mirrored from
+   memtomem-stm. The SHA above tracks the STM commit this module is
+   audited-consistent with (history: ``a98636e`` -> ``3e585b5`` ->
+   ``8c884cb``). STM's full set also carries PII patterns (email, etc.);
+   those are excluded here by design because PII false positives on prose
+   ingress would be unworkable — they live in STM's separate
+   ``PII_PATTERNS`` list.
 
-2. **LTM-origin additions** (issue #1488) — secret-class provider-token
-   patterns added directly at this trust boundary, ahead of STM. LTM is
-   the authoritative gate and may legitimately be stricter than STM's
-   compression-routing signal, so a superset is fine. For routing
-   coherence these should be mirrored back into STM's
-   ``CREDENTIAL_PATTERNS`` (reverse sync, tracked separately); until then
-   LTM is a strict superset.
+2. **LTM-origin additions** (7 patterns, issue #1488) — secret-class
+   provider-token patterns added at this trust boundary first, ahead of
+   STM, then mirrored back into STM's ``CREDENTIAL_PATTERNS`` for routing
+   coherence (reverse sync, #1491 / memtomem-stm#549). The two sets now
+   match; if LTM again adds a secret-class pattern ahead of STM it is a
+   temporary strict superset until the next reverse sync lands.
 
 Redaction at the LTM ingress is the trust boundary where blocking
 semantics demand a tight false-positive profile.
@@ -81,8 +82,9 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
     r"(?i)(BEGIN\s+(RSA|EC|OPENSSH|DSA|PGP)\s+PRIVATE\s+KEY)",
     # --- LTM-origin secret-class additions (issue #1488) -------------------
-    # Added directly at this trust boundary, ahead of STM (see module
-    # docstring, provenance tier 2). All are case-SENSITIVE on purpose:
+    # Added at this trust boundary first, ahead of STM, then mirrored back
+    # into STM (#1491 / memtomem-stm#549; see module docstring, provenance
+    # tier 2). All are case-SENSITIVE on purpose:
     # provider prefixes are fixed-case (``sk-``, ``AIza``, ``glpat-``,
     # ``hf_``, ``gh*_``) — do NOT wrap these under ``(?i)`` or you
     # reintroduce false positives (``AIZA``, ``GLPAT-``). Bounded greedy
