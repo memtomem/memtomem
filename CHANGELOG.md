@@ -5,7 +5,92 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-06-30
+
+A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`
+request — closing a DNS-rebinding read exposure (GHSA-2vm9-7v7j-hq68) — and the
+import/redaction trust boundary is hardened with provenance-aware bundle import
+(#1483), Notion-import ZIP resource caps (#1489), and an expanded secret-class
+redaction pattern set (#1492). Plus a per-project agent-team search argument and
+a round of Context Gateway / namespace UI wording clarity. One behavior change to
+know up front: importing a *foreign* JSON bundle that contains a secret now fails
+by default (override with `force_unsafe` after review).
+
+### Added
+
+- **`mem_agent_search` gains a `shared_namespace=` argument for per-project agent
+  teams (ADR-0028).** With `include_shared=True` the read path still defaults to
+  merging the single global `shared` bucket; passing
+  `shared_namespace="shared:<project>"` re-points only the *shared* leg of the
+  merge to a project-scoped bucket, so multiple agent teams running against one
+  server no longer pool every project's shared notes together. The argument is
+  validated through `validate_namespace` and is ignored when
+  `include_shared=False`, and the private per-agent leg is untouched. The
+  convention (project-prefixed `agent_id` + `shared:<project>`) is documented in
+  the server instructions and the agent-memory example notebook (#1476).
+
+- **The Namespaces tab now documents the provider → namespace prefix mapping
+  in-app.** A collapsed-by-default help disclosure between the Namespaces header
+  and the list decodes the labels users see — `claude:<project>`, `codex:*`,
+  `gemini-memory:<slug>`, `agent-runtime:<id>`, and the exact, colon-less
+  `shared` and `default` names — without leaving the app, localized in en/ko
+  (#1449).
+
+### Changed
+
+- **Context Gateway section copy was standardized and the wiki-vs-Store boundary
+  made explicit.** The per-section descriptions for Skills, Commands, Subagents,
+  MCP Servers, and Hooks now follow one template (function + where it is stored +
+  what it syncs to) so they read at consistent depth; the Overview's duplicated
+  Store/Sync orientation was de-stacked (the always-on description is now
+  action-first while the dismissible primer keeps sole ownership of the
+  conceptual model); and new copy plus a help-tip distinguish the host-global
+  wiki library (`~/.memtomem-wiki`) from the per-project Store (`~/.memtomem/`) —
+  a wiki Install writes only the project `.memtomem/` Store, never
+  `~/.memtomem/config.json` or the User tier (#1451, #1452).
+
+- **Network MCP transports now surface their no-authentication posture at bind
+  time.** Starting `memtomem-server` with `--transport sse|http` prints a "no
+  first-party authentication on this transport" notice (treat as trusted-network
+  only; front it with an authenticated reverse proxy before exposing it
+  publicly), and the `--help` epilog states the same. No transport default or
+  behavior changed (#1485).
+
+### Fixed
+
+- **`mm context install --all --force` no longer silently swaps clean rows back
+  to committed-HEAD bytes.** A row installed from a dirty wiki working tree pins
+  HEAD yet holds bytes the recorded pin never described; under `--all --force`
+  such a row re-classified clean and was re-extracted from the pinned commit with
+  *no* `.bak` — a silent destructive overwrite, and the only `--force` path that
+  left no backup. A clean row whose recorded digests differ from the bytes the
+  pin would extract is now left untouched (tallied as skipped, not installed);
+  when they already match, `--force` still reconciles stale dest-only leftovers.
+  Data-safety only — ADR-0008's working-tree-install behavior is intentionally
+  unchanged (#1479).
+
+- **The project-local Context tier badge shows the de-jargoned annotation even
+  before translations load.** The badge's cold-boot fallback still rendered the
+  old "(no runtime fan-out)" literal while the localized value reads "(not synced
+  to runtimes)"; the fallback is now synced so the text is consistent whether or
+  not i18n has resolved (#1465).
+
+- **The keyboard-shortcut help reflects the "More" → "Settings" tab rename.** The
+  shortcut list still read "Home=1 … More=8"; it now reads "Settings" to match
+  the renamed 8th tab. Copy-only — the 8-tab count and digit range are unchanged
+  (#1462).
+
 ### Security
+
+- **The Web UI now validates `Host`/`Origin` on every `/api/*` request,
+  including read-only `GET`/`HEAD`.** The Host/Origin guard previously ran only
+  for unsafe methods, leaving GET read routes (`/api/export`, `/api/search`,
+  `/api/sources/content`, …) with no DNS-rebinding defense: a malicious page open
+  while `mm web` runs could read the indexed memory corpus via `GET /api/export`.
+  The check now applies to all `/api/*` requests (OPTIONS excepted — CORS owns
+  preflight); the CSRF *token* requirement stays scoped to unsafe methods. The
+  standalone `memtomem-web` console entrypoint is now loopback-only, matching
+  `mm web`'s bind policy. (GHSA-2vm9-7v7j-hq68)
 
 - **JSON bundle import now enforces the secret-redaction trust boundary
   (ADR-0006 Axis F.3).** `POST /api/export/import` and the MCP `mem_import`
@@ -22,6 +107,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   **Behavior change:** importing a foreign bundle that contains a secret now
   fails by default where it previously imported silently; the web surface
   returns HTTP 403 `redaction_blocked`. (#1483)
+
+- **Notion ZIP import now enforces resource bounds (decompression-bomb guard).**
+  `import_notion()` previously called a bare `extractall`, which enforces no
+  aggregate-size, per-member-size, file-count, or compression-ratio limit, so a
+  few-KB crafted archive could expand to gigabytes and fill the disk; the path is
+  MCP-reachable via `mem_import_notion`. A new `safe_extract_zip()` validates
+  archive metadata up front (entry count, per-member and aggregate uncompressed
+  size, compression ratio) and rejects any member whose name resolves outside the
+  extraction root, failing closed on traversal / absolute / root-entry names
+  rather than silently normalizing them. A `member_filter` lets the Notion
+  importer extract only `*.md`, so large attachments are neither extracted (the
+  bomb vector) nor cause a false rejection of the whole export (#1489).
+
+- **The secret-class redaction guard at the LTM trust boundary now covers
+  currently-issued provider-token formats.** The legacy `sk-[A-Za-z0-9]{20,}`
+  rule did not match modern OpenAI keys (`sk-proj-` / `sk-svcacct-` /
+  `sk-admin-`) or any Anthropic key (`sk-ant-`) — the hyphen after the class word
+  halts the alphanumeric run before the minimum length — so the most common keys
+  issued today slipped through. Seven prefix-anchored, near-zero-false-positive
+  patterns were added (modern OpenAI, Anthropic, the `gho`/`ghu`/`ghs`/`ghr`
+  GitHub token family, Google API keys, GitLab PATs, Hugging Face tokens, and
+  PyPI/TestPyPI upload tokens), each bounded so `scan()` stays linear-time.
+  **Behavior change:** content carrying one of these token shapes is now blocked
+  at ingress where it previously passed (#1492).
 
 ## [0.3.1] — 2026-06-24
 
