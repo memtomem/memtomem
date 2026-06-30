@@ -363,6 +363,11 @@ def test_network_banner_prints_internal_and_public_url(
     assert "Transport: http (streamable-http)" in out
     assert "Internal URL: http://127.0.0.1:8771/mcp" in out
     assert "Public URL:   https://mcp.example.test/mcp" in out
+    # The no-first-party-auth posture must fire at bind time for every network
+    # transport, mirroring the ``--help`` epilog (ADR-0029). This is
+    # unconditional — not gated on the wildcard-host hint — so a loopback bind
+    # with a public ``--url`` still surfaces it.
+    assert "no first-party authentication" in out
     # Symmetric with the stdio TTY guard test — the hint should not pollute
     # network-server output.
     assert "memtomem-server is an MCP stdio server." not in out

@@ -62,6 +62,53 @@ structured `web.csrf.observe` log record for after-the-fact auditing.
   but skip the 403. Any other value (including unset and typos) keeps
   enforcement on.
 
+### MCP server transports
+
+`memtomem-server` exposes the MCP protocol over one of two transport
+families. They have different trust models:
+
+- **`stdio` (default).** The MCP client spawns the server as a child
+  process and talks to it over stdin/stdout. There is no network socket and
+  no authentication — consistent with the MCP spec, which says `stdio`
+  servers SHOULD NOT implement transport auth and SHOULD derive identity
+  from the environment. This is the supported, locally-trusted transport.
+- **Network (`--transport sse` / `http`).** Opt-in, off by default. These
+  bind a TCP socket and ship **no first-party authentication**. memtomem
+  deliberately does not add a static bearer/API-key token; the supported way
+  to authenticate a network transport is a TLS-terminating, authenticating
+  reverse proxy. The full rationale — including the rejected static-token
+  option and its OAuth-metadata footgun, and the triggers that would revisit
+  it — is recorded in
+  [ADR-0029](docs/adr/0029-mcp-network-transport-auth-stance.md).
+
+Defense-in-depth for the network transports:
+
+- **Loopback by default.** `--host` defaults to `127.0.0.1`; reaching the
+  port from another machine is an explicit operator action.
+- **DNS-rebinding protection on by default.** Every request's `Host` and
+  `Origin` headers are validated. The allow-lists are seeded
+  asymmetrically: the `Host` list is loopback-seeded, while the `Origin` list
+  is derived from `--url` (both extendable via `--allowed-host` /
+  `--allowed-origin`). A `Host` mismatch returns HTTP 421, an `Origin`
+  mismatch 403. Turning the check off requires the explicitly dangerous
+  `--disable-dns-rebinding-protection`, documented as safe only behind an
+  authenticated reverse proxy.
+- **Bind-time warning.** Starting a network transport prints a
+  `Security: no first-party authentication ...` banner, mirroring the
+  `--help` epilog, so the no-auth posture is visible before exposure.
+
+**Operator guidance:** never expose `sse`/`http` to an untrusted network
+without an authenticating reverse proxy in front. A copy-paste nginx recipe
+(TLS + HTTP Basic, proxying to the loopback listener) is in the
+[MCP client guide → Authenticated reverse proxy](docs/guides/mcp-clients.md#authenticated-reverse-proxy-required-for-public-exposure).
+
+**Residual risk (accepted):** this is a posture, not a code-level barrier.
+One operator misstep — a network transport plus Host/Origin widening or
+disabled DNS-rebinding protection, with an untrusted client on the path — is
+unauthenticated full read + write tool access. We accept this as a Medium,
+off-by-default, misconfiguration-gated risk and rely on the defaults, the
+docs, and the bind-time banner to keep the misconfiguration probability low.
+
 ### URL Fetching (`mem_fetch`)
 
 - **SSRF protection**: Private/reserved IP ranges blocked (10.x, 172.16-31.x, 192.168.x, 169.254.x, localhost, ::1)
