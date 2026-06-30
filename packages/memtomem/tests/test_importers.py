@@ -1,12 +1,17 @@
 """Tests for Notion and Obsidian importers."""
 
+import zipfile
+
 import pytest
+from memtomem.indexing import importers
 from memtomem.indexing.importers import (
+    UnsafeArchiveError,
     _clean_notion_filename,
     _clean_notion_markdown,
     _convert_obsidian_syntax,
     import_notion,
     import_obsidian,
+    safe_extract_zip,
 )
 
 
@@ -166,3 +171,99 @@ class TestImportObsidian:
         imported = await import_obsidian(vault, output)
         assert len(imported) == 1
         assert imported[0].name == "real-note.md"
+
+
+class TestSafeExtractZip:
+    """Resource + traversal caps on ZIP extraction (decompression-bomb defense)."""
+
+    @staticmethod
+    def _make_zip(path, entries):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in entries:
+                zf.writestr(name, data)
+        return path
+
+    def test_extracts_normal_zip(self, tmp_path):
+        z = self._make_zip(tmp_path / "ok.zip", [("a.md", "hi"), ("sub/b.md", "yo")])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        safe_extract_zip(z, dest)
+        assert (dest / "a.md").read_text() == "hi"
+        assert (dest / "sub" / "b.md").read_text() == "yo"
+
+    def test_rejects_parent_traversal_member(self, tmp_path):
+        z = self._make_zip(tmp_path / "trav.zip", [("../escape.md", "x")])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(z, dest)
+        assert not (tmp_path / "escape.md").exists()
+
+    def test_rejects_absolute_member(self, tmp_path):
+        z = self._make_zip(tmp_path / "abs.zip", [("/abs_escape.md", "x")])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(z, dest)
+
+    def test_rejects_too_many_entries(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(importers, "_ZIP_MAX_ENTRIES", 1)
+        z = self._make_zip(tmp_path / "many.zip", [("a.md", "x"), ("b.md", "y")])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(z, dest)
+
+    def test_rejects_oversize_aggregate(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(importers, "_ZIP_MAX_TOTAL_BYTES", 10)
+        z = self._make_zip(tmp_path / "big.zip", [("a.md", "x" * 100)])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(z, dest)
+
+    def test_rejects_oversize_member(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 10)
+        z = self._make_zip(tmp_path / "bigm.zip", [("a.md", "x" * 100)])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(z, dest)
+
+    def test_rejects_compression_bomb_ratio(self, tmp_path, monkeypatch):
+        # Floor to 0 so the small fixture is ratio-checked; cap at 5:1. A
+        # highly repetitive payload deflates far past that.
+        monkeypatch.setattr(importers, "_ZIP_RATIO_FLOOR_BYTES", 0)
+        monkeypatch.setattr(importers, "_ZIP_MAX_RATIO", 5)
+        z = self._make_zip(tmp_path / "bomb.zip", [("a.md", "A" * 100_000)])
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(z, dest)
+
+    def test_member_filter_skips_unmatched_members(self, tmp_path, monkeypatch):
+        # A would-be-oversized attachment is neither size-checked nor written
+        # when the filter excludes it; the matched markdown still extracts.
+        # (This is how import_notion ignores large Notion attachments instead
+        # of extracting them or rejecting the whole export.)
+        monkeypatch.setattr(importers, "_ZIP_MAX_MEMBER_BYTES", 50)
+        z = self._make_zip(
+            tmp_path / "mixed.zip",
+            [("note.md", "hello"), ("big.bin", "x" * 1000)],
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        safe_extract_zip(z, dest, member_filter=lambda n: n.lower().endswith(".md"))
+        assert (dest / "note.md").read_text() == "hello"
+        assert not (dest / "big.bin").exists()  # attachment skipped, not extracted
+
+    def test_rejects_root_entry_member(self, tmp_path):
+        # A file member naming the extraction root itself (e.g. ".") is rejected
+        # as UnsafeArchiveError, not a late zipfile error.
+        zpath = tmp_path / "root.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr(zipfile.ZipInfo("."), "x")
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with pytest.raises(UnsafeArchiveError):
+            safe_extract_zip(zpath, dest)

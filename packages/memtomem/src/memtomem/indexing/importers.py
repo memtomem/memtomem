@@ -5,9 +5,106 @@ from __future__ import annotations
 import logging
 import re
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+# ── Safe ZIP extraction ──────────────────────────────────────────────────
+#
+# ``zipfile.ZipFile.extractall`` normalizes ``..`` / absolute member names on
+# supported runtimes, but enforces no aggregate-size, member-count, or
+# compression-ratio bound — so a few-KB crafted archive can expand to
+# gigabytes and fill the disk (a decompression bomb). The import path is
+# MCP-reachable via ``mem_import_notion``. These caps are generous enough for
+# real Notion / Obsidian exports and only trip on pathological archives.
+_ZIP_MAX_TOTAL_BYTES = 2 * 1024**3  # 2 GiB aggregate uncompressed
+_ZIP_MAX_MEMBER_BYTES = 512 * 1024**2  # 512 MiB single member
+_ZIP_MAX_ENTRIES = 100_000  # member count
+_ZIP_MAX_RATIO = 200  # aggregate uncompressed:compressed
+_ZIP_RATIO_FLOOR_BYTES = 10 * 1024**2  # only ratio-check archives above this
+
+
+class UnsafeArchiveError(ValueError):
+    """An archive exceeds the safe-extraction resource caps, or a member name
+    would escape the extraction root."""
+
+
+def safe_extract_zip(
+    zip_path: Path,
+    dest_dir: Path,
+    *,
+    member_filter: Callable[[str], bool] | None = None,
+) -> None:
+    """Extract ``zip_path`` into ``dest_dir`` with traversal + resource caps.
+
+    Unlike a bare ``ZipFile.extractall``, this validates archive metadata up
+    front and rejects any member whose name resolves outside ``dest_dir`` —
+    failing closed on suspicious archives rather than silently normalizing
+    them.
+
+    When ``member_filter`` is given, only members whose name satisfies it are
+    extracted and counted toward the size / ratio caps; the rest are skipped
+    and never written to disk. This lets a caller that only consumes (say)
+    markdown ignore arbitrarily large attachments without either extracting
+    them (the decompression-bomb vector) or rejecting the whole archive over
+    them. Every member is still path-containment checked and counted toward
+    the entry cap regardless of the filter.
+
+    Raises:
+        UnsafeArchiveError: a member escapes ``dest_dir`` or the extracted set
+            exceeds a configured resource cap.
+    """
+    dest_root = dest_dir.resolve()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        infos = zf.infolist()
+        if len(infos) > _ZIP_MAX_ENTRIES:
+            raise UnsafeArchiveError(f"archive has {len(infos)} entries (cap {_ZIP_MAX_ENTRIES})")
+
+        to_extract: list[zipfile.ZipInfo] = []
+        total_uncompressed = 0
+        total_compressed = 0
+        for info in infos:
+            # Containment: every member must land strictly under the root.
+            # Absolute names and ``..`` chains resolve outside it; an empty or
+            # ``.`` member name resolves to the root itself.
+            target = (dest_root / info.filename).resolve()
+            if target == dest_root:
+                if info.is_dir():
+                    continue
+                raise UnsafeArchiveError(f"member {info.filename!r} has no valid path")
+            if dest_root not in target.parents:
+                raise UnsafeArchiveError(f"member {info.filename!r} escapes the extraction root")
+            if info.is_dir():
+                continue
+            if member_filter is not None and not member_filter(info.filename):
+                continue
+            if info.file_size > _ZIP_MAX_MEMBER_BYTES:
+                raise UnsafeArchiveError(
+                    f"member {info.filename!r} is {info.file_size} bytes "
+                    f"(cap {_ZIP_MAX_MEMBER_BYTES})"
+                )
+            total_uncompressed += info.file_size
+            total_compressed += info.compress_size
+            to_extract.append(info)
+
+        if total_uncompressed > _ZIP_MAX_TOTAL_BYTES:
+            raise UnsafeArchiveError(
+                f"archive expands to {total_uncompressed} bytes (cap {_ZIP_MAX_TOTAL_BYTES})"
+            )
+        if (
+            total_compressed > 0
+            and total_uncompressed > _ZIP_RATIO_FLOOR_BYTES
+            and total_uncompressed / total_compressed > _ZIP_MAX_RATIO
+        ):
+            ratio = total_uncompressed / total_compressed
+            raise UnsafeArchiveError(
+                f"archive compression ratio {ratio:.0f}:1 exceeds cap {_ZIP_MAX_RATIO}:1"
+            )
+
+        for info in to_extract:
+            zf.extract(info, dest_root)
 
 
 async def import_notion(export_path: Path, output_dir: Path) -> list[Path]:
@@ -30,8 +127,13 @@ async def import_notion(export_path: Path, output_dir: Path) -> list[Path]:
     if export_path.suffix == ".zip":
         extract_dir = output_dir / "_notion_extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(export_path, "r") as zf:
-            zf.extractall(extract_dir)
+        # Notion exports bundle markdown + attachments (images, PDFs, …); the
+        # importer only consumes ``*.md`` (see the rglob below), so extract just
+        # those — skipping arbitrarily large attachments instead of extracting
+        # them (the bomb vector) or rejecting the whole export over them.
+        safe_extract_zip(
+            export_path, extract_dir, member_filter=lambda n: n.lower().endswith(".md")
+        )
         source_dir = extract_dir
 
     imported: list[Path] = []
