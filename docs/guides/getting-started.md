@@ -679,4 +679,4 @@ rm -rf ~/.memtomem
 - [MCP Client Setup](mcp-clients.md) — editor-specific configuration
 - [Context Gateway](context-gateway.md) — share Skills, Commands, and Subagents across your AI tools from one Store
 - [Multi-device sync](multi-device-sync.md) — keep markdown memories in sync across personal devices via a private git repo
-- [Scheduled jobs](reference.md#9-scheduled-jobs--mm-schedule-schedule_) — `mm schedule` for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
+- [Scheduled jobs](reference/automation.md#9-scheduled-jobs--mm-schedule-schedule_) — `mm schedule` for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans

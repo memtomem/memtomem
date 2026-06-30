@@ -805,7 +805,7 @@ The watchdog runs three tiers of checks at different intervals. Use `mem_watchdo
 
 Cron scheduler for memory-lifecycle jobs — compaction, importance decay,
 dead-link cleanup, and dedup scans (see
-[`mm schedule`](reference.md#9-scheduled-jobs--mm-schedule-schedule_)). Both
+[`mm schedule`](reference/automation.md#9-scheduled-jobs--mm-schedule-schedule_)). Both
 `scheduler.enabled` **and** `health_watchdog.enabled` must be true for
 schedules to fire: the dispatcher rides the watchdog loop, so the watchdog
 gate wins.

@@ -13,7 +13,7 @@ runtime's copy is overwritten on the next Sync.
 
 This guide walks through that model and the first task most people want — getting
 a project's skills into their AI tools — from both the Web UI and the CLI. It
-links out to [`reference.md`](reference.md#cli-reference) for the full command matrix and to
+links out to [`reference.md`](reference/data-config-cli.md#cli-reference) for the full command matrix and to
 [`configuration.md#context-gateway`](configuration.md#context-gateway) for the
 environment variables; it does not re-document those here.
 
@@ -120,7 +120,7 @@ runtimes like any other.
 
 In the Web UI the wiki panel is **read-only** (browse + Install); authoring
 canonical or vendor-override files is done with the `mm wiki …` CLI (or the
-in-browser editor in dev mode). See [`reference.md`](reference.md#cli-reference)
+in-browser editor in dev mode). See [`reference.md`](reference/data-config-cli.md#cli-reference)
 for the full `mm wiki` / `mm context install` command matrix.
 
 ## Walkthrough — get this project's skills into your AI tools
@@ -223,7 +223,7 @@ mm context diff        # show in-sync / out-of-sync state
 mm context sync        # send the Store out to every detected runtime
 ```
 
-Useful flags (see [`reference.md`](reference.md#cli-reference) for the full
+Useful flags (see [`reference.md`](reference/data-config-cli.md#cli-reference) for the full
 list):
 
 - `--include=<kind>` — narrow to `skills`, `agents`, `commands`, or `settings`.
@@ -252,7 +252,7 @@ mm context projects list
 
 To **move** or **copy** an artifact between tiers or projects, use the transfer
 verbs documented in
-[`reference.md#moving-artifacts-between-tiers-and-projects`](reference.md#moving-artifacts-between-tiers-and-projects)
+[`reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects`](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects)
 — this guide doesn't repeat that matrix.
 
 ## Privacy and git safety
@@ -272,8 +272,8 @@ the related environment variables.
 
 ## See also
 
-- [Reference](reference.md#cli-reference) — every `mm context` command and flag,
-  plus the [move/copy/migrate matrix](reference.md#moving-artifacts-between-tiers-and-projects).
+- [Reference](reference/data-config-cli.md#cli-reference) — every `mm context` command and flag,
+  plus the [move/copy/migrate matrix](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects).
 - [Configuration → Context Gateway](configuration.md#context-gateway) — the
   `MEMTOMEM_CONTEXT_GATEWAY__*` environment variables and the project-scan caveats.
 - [Multi-device sync](multi-device-sync.md) — committing your Project (shared)

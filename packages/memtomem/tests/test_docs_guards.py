@@ -337,6 +337,11 @@ _CLI_DOCS = (
     _README,
     _GUIDES / "getting-started.md",
     _GUIDES / "reference.md",
+    _GUIDES / "reference" / "core-memory-tools.md",
+    _GUIDES / "reference" / "organization-maintenance.md",
+    _GUIDES / "reference" / "automation.md",
+    _GUIDES / "reference" / "data-config-cli.md",
+    _GUIDES / "reference" / "operations.md",
     _GUIDES / "configuration.md",
 )
 

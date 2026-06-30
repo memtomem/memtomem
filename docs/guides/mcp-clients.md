@@ -618,7 +618,7 @@ and leaves the primary server's pid file in place. If you need both MCP
 and Web UI access concurrently, see the [Concurrent MCP + Web server]
 section in the reference guide.
 
-[Concurrent MCP + Web server]: reference.md#concurrent-mcp--web-server
+[Concurrent MCP + Web server]: reference/operations.md#concurrent-mcp--web-server
 
 ---
 

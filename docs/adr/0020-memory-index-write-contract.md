@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-01
 **Context:** `mm memory doctor` (shipped in #1170, documented in #1171,
-`docs/guides/reference.md` §5) is **read-only by design**: it reports the
+`docs/guides/reference/organization-maintenance.md` §5) is **read-only by design**: it reports the
 3-way drift between disk, the agent index/TOC file (`MEMORY.md` for a
 `claude-memory` dir), and the searchable DB, but writes nothing. Its module
 docstring and the reference guide both defer the curation `--fix` path to
@@ -143,7 +143,7 @@ contract) are **unchanged**: no flag, no write, no behavior change.
 ## Consequences
 
 - memtomem becomes a narrow, subtractive writer of `MEMORY.md`. When the Tier
-  2 `--fix` ships, `docs/guides/reference.md` §5 gains its remediation entry
+  2 `--fix` ships, `docs/guides/reference/organization-maintenance.md` §5 gains its remediation entry
   (per the doc-update-on-new-surface rule).
 - The agent and memtomem can both write the file. The fresh re-read +
   re-validate (§5) carries agent additions through and skips resurrected
@@ -189,7 +189,7 @@ contract) are **unchanged**: no flag, no write, no behavior change.
 ## References
 
 - `mm memory doctor` — `packages/memtomem/src/memtomem/cli/memory_doctor_cmd.py`
-  (report-only Tier 1, #1170); `docs/guides/reference.md` §5 (#1171).
+  (report-only Tier 1, #1170); `docs/guides/reference/organization-maintenance.md` §5 (#1171).
 - Parser round-trip primitives: `parse_memory_index`, `ParsedIndex.other_lines`,
   `IndexEntry.raw` in the same module.
 - Atomic write + sidecar lock: `memtomem.context._atomic`
