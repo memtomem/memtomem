@@ -25,13 +25,19 @@ by ``app.state.csrf_enforce`` (default ``True`` in production via
 
 Invariants:
 
-* The middleware short-circuits on safe methods (``GET``/``HEAD``/
-  ``OPTIONS``) and on non-``/api/*`` paths. The SPA bootstrap, static
-  assets, and read-only API calls are unaffected.
-* ``GET /api/session`` is exempt from the token check so the SPA can
-  bootstrap the token in the first place. It is still subject to the
-  Origin/Host checks via the same observe path so a rebound origin
-  cannot harvest the token undetected.
+* Host / Origin are validated for **every** ``/api/*`` request, including
+  safe-method reads — this is the DNS-rebinding boundary and must not
+  depend on the HTTP method. A rebound origin must not be able to read
+  ``GET /api/export`` or harvest the token from ``GET /api/session``. The
+  middleware short-circuits only on non-``/api/*`` paths (SPA bootstrap,
+  static assets) and on ``OPTIONS`` preflights, which the CORS middleware
+  owns.
+* The ``X-Memtomem-CSRF`` token is required for every unsafe method
+  (``POST``/``PUT``/``PATCH``/``DELETE``) on ``/api/*``, including the
+  bootstrap path itself. Safe methods never carry a token; ``GET
+  /api/session`` (the bootstrap) is reachable for that reason, but — like
+  every ``/api/*`` GET — it is still Origin / Host checked, so a rebound
+  origin cannot harvest the token undetected.
 """
 
 from __future__ import annotations
@@ -48,13 +54,17 @@ logger = logging.getLogger(__name__)
 
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
-# Methods that mutate state. Anything outside this set falls through the
-# middleware untouched — readers (``GET``), preflights (``OPTIONS``), and
-# cache validators (``HEAD``) do not need a CSRF token.
+# Methods that mutate state and therefore require the CSRF token. Safe
+# methods (``GET``/``HEAD``) still pass through the Host/Origin gate — they
+# only skip the token check. Only ``OPTIONS`` preflights and non-``/api/*``
+# paths bypass the middleware entirely.
 _UNSAFE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-# The SPA fetches its token here; the route itself must be reachable
-# without a token, otherwise the bootstrap is a chicken-and-egg.
+# The SPA fetches its token here via GET. The route is reachable without a
+# token only because GET is a safe method (``dispatch`` keys the token check
+# on the method, not this path) — an unsafe method to this path is still
+# token-gated. Kept as a named protocol constant (the web-invariants registry
+# note references it).
 _TOKEN_BOOTSTRAP_PATH = "/api/session"
 
 
@@ -111,11 +121,21 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         method = request.method.upper()
 
-        # Fast path for everything outside the gate's responsibility.
-        if method not in _UNSAFE_METHODS or not path.startswith("/api/"):
+        # Only ``/api/*`` is gated. Non-API paths (SPA bootstrap, static
+        # assets) and ``OPTIONS`` preflights (owned by the CORS middleware)
+        # fall through untouched.
+        if not path.startswith("/api/") or method == "OPTIONS":
             return await call_next(request)
 
-        token_required = path != _TOKEN_BOOTSTRAP_PATH
+        # Host / Origin are the DNS-rebinding boundary: validate them on
+        # every ``/api/*`` request, including safe-method reads, so a
+        # rebound origin cannot read ``GET /api/export`` or harvest the
+        # token from ``GET /api/session``. The CSRF token is required for
+        # every unsafe method — including the bootstrap path itself. The
+        # ``GET /api/session`` bootstrap is token-exempt only because GET is
+        # a safe method (no path carve-out), so an unsafe method to that path
+        # is still token-gated.
+        token_required = method in _UNSAFE_METHODS
         token_ok = self._check_token(request) if token_required else True
         origin_ok = self._check_origin(request)
         host_ok = self._check_host(request)
@@ -124,7 +144,14 @@ class CSRFGuardMiddleware(BaseHTTPMiddleware):
         # Single structured log line per gated request. Uses positional
         # ``%`` args so a logging filter that drops the formatted message
         # still sees the raw fields. Tests assert via ``caplog``.
-        logger.info(
+        #
+        # Unsafe methods and any would-block decision log at INFO (observe-mode
+        # rollback + audit trail). Passing safe-method reads (``GET``/``HEAD``)
+        # are the high-volume common case for the SPA, so they log at DEBUG to
+        # avoid flooding operator logs.
+        level = logging.INFO if (method in _UNSAFE_METHODS or would_block) else logging.DEBUG
+        logger.log(
+            level,
             "web.csrf.observe method=%s path=%s token_ok=%s origin_ok=%s host_ok=%s would_block=%s",
             method,
             path,

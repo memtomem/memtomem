@@ -88,11 +88,50 @@ def caplog_csrf(caplog):
     return caplog
 
 
-def test_get_does_not_emit_observe_event(caplog_csrf) -> None:
-    """Safe methods short-circuit the middleware entirely."""
+def test_get_api_with_hostile_host_is_gated_and_403(caplog_csrf) -> None:
+    """Safe-method reads are Host/Origin gated now (RFC #787). The default
+    TestClient sends ``Host: testserver`` (non-loopback), so a GET /api
+    read is blocked — closing the DNS-rebinding read exposure. The token
+    is not required for a GET, so the 403 is attributable to the host."""
     client = TestClient(_build_app())
     res = client.get("/api/ping")
+    assert res.status_code == 403
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["method"] == "GET"
+    assert ev["path"] == "/api/ping"
+    assert ev["token_ok"] == "True"  # token not required for safe methods
+    assert ev["host_ok"] == "False"
+    assert ev["would_block"] == "True"
+
+
+def test_get_api_with_loopback_host_passes(caplog_csrf) -> None:
+    """A GET /api read from a loopback Host/Origin passes the gate.
+
+    Passing safe-method reads log at DEBUG (the high-volume common case),
+    so capture at DEBUG to see the observe line."""
+    caplog_csrf.set_level(logging.DEBUG, logger="memtomem.web.middleware.csrf")
+    client = TestClient(_build_app())
+    res = client.get(
+        "/api/ping",
+        headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
+    )
     assert res.status_code == 200
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["host_ok"] == "True"
+    assert ev["origin_ok"] == "True"
+    assert ev["would_block"] == "False"
+
+
+def test_options_preflight_is_not_gated(caplog_csrf) -> None:
+    """``OPTIONS`` preflights are owned by the CORS middleware and skip the
+    gate entirely — no observe line, no 403 from the CSRF guard."""
+    client = TestClient(_build_app())
+    res = client.options("/api/ping", headers={"Host": "evil.example.com"})
+    assert res.status_code != 403
     assert _parse_observe(caplog_csrf.records) == []
 
 
@@ -186,24 +225,62 @@ def test_delete_without_token_returns_403(caplog_csrf) -> None:
     assert events[0]["would_block"] == "True"
 
 
-def test_session_bootstrap_get_is_uncovered(caplog_csrf) -> None:
-    """``GET /api/session`` is a safe method — middleware doesn't gate."""
+def test_session_bootstrap_get_is_host_origin_checked(caplog_csrf) -> None:
+    """``GET /api/session`` is token-exempt (the bootstrap) but is still
+    Host/Origin gated, so a rebound origin cannot harvest the token. A
+    hostile Host (default ``testserver``) 403s even though token-exempt."""
     client = TestClient(_build_app())
     res = client.get("/api/session")
+    assert res.status_code == 403
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["token_ok"] == "True"  # bootstrap is token-exempt
+    assert ev["host_ok"] == "False"
+    assert ev["would_block"] == "True"
+
+
+def test_session_bootstrap_get_loopback_returns_token(caplog_csrf) -> None:
+    """From a loopback Host the bootstrap returns the token as before.
+
+    Passing safe-method reads log at DEBUG, so capture at DEBUG."""
+    caplog_csrf.set_level(logging.DEBUG, logger="memtomem.web.middleware.csrf")
+    client = TestClient(_build_app())
+    res = client.get(
+        "/api/session",
+        headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
+    )
     assert res.status_code == 200
-    assert _parse_observe(caplog_csrf.records) == []
+    assert res.json()["csrf"] == "test-token-abc"
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    assert events[0]["would_block"] == "False"
 
 
-def test_session_bootstrap_post_is_token_exempt(caplog_csrf) -> None:
-    """The token check is skipped only for the exact bootstrap path; the
-    Origin / Host parts of the gate still apply."""
+def test_post_to_session_subpath_requires_token(caplog_csrf) -> None:
+    """A sibling of the bootstrap path (``/api/session/echo``) is a normal
+    unsafe route — it requires the token like any other write."""
     client = TestClient(_build_app())
     res = client.post(
         "/api/session/echo",
         headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
     )
-    # /api/session/echo is *not* the bootstrap path, so token is still
-    # required — and missing — so enforce mode 403s.
+    assert res.status_code == 403
+    events = _parse_observe(caplog_csrf.records)
+    assert len(events) == 1
+    assert events[0]["token_ok"] == "False"
+    assert events[0]["would_block"] == "True"
+
+
+def test_post_to_exact_bootstrap_path_requires_token(caplog_csrf) -> None:
+    """The bootstrap exemption is GET-only: an unsafe method to the *exact*
+    bootstrap path must still present the token (no path carve-out). Guards
+    against a future POST /api/session route silently bypassing CSRF."""
+    client = TestClient(_build_app())
+    res = client.post(
+        "/api/session",
+        headers={"Host": "127.0.0.1:8080", "Origin": "http://127.0.0.1:8080"},
+    )
     assert res.status_code == 403
     events = _parse_observe(caplog_csrf.records)
     assert len(events) == 1

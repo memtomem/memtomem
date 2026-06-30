@@ -29,21 +29,28 @@ memtomem is alpha (`0.x`); only the latest published minor receives security fix
 `mm web` ships an unauthenticated SPA on the loopback interface. CORS is a
 browser readability boundary, not a write boundary — a malicious tab can
 issue CORS-simple `POST` requests against `http://127.0.0.1:<port>` and the
-handler still runs even if the response is unreadable. To close that gap,
-every unsafe-method request to `/api/**` (POST / PUT / PATCH / DELETE) is
-gated by a single middleware that checks three things at once:
+handler still runs even if the response is unreadable. DNS rebinding makes
+an attacker page same-origin, so it can also *read* GET responses. To close
+both gaps, a single middleware gates **every** request to `/api/**` — reads
+included; only `OPTIONS` preflights (owned by the CORS middleware) are
+skipped:
 
-1. **CSRF token** — `X-Memtomem-CSRF` must match the per-process token in
-   `app.state.csrf_token`. The SPA fetches it via `GET /api/session`
-   lazily on the first unsafe-method request (cached for the page
-   lifetime); the token rotates on every restart and is never persisted.
+1. **Host header** — must be a loopback hostname or an operator-supplied
+   `--trusted-host` entry. Checked on **every** `/api/**` request,
+   including GET reads. Defends DNS rebinding, where the socket peer is
+   `127.0.0.1` but the browser's URL bar (and the `Host:` header) is
+   attacker-controlled — without this a rebound page could read
+   `GET /api/export`.
 2. **Origin / Referer** — when present, must resolve to a loopback host
-   or an operator-supplied `--trusted-origin` entry. Defends drive-by
-   tabs whose Origin reveals the attacker domain.
-3. **Host header** — must be a loopback hostname or an operator-supplied
-   `--trusted-host` entry. Defends DNS rebinding, where the socket peer
-   is `127.0.0.1` but the browser's URL bar (and the `Host:` header) is
-   attacker-controlled.
+   or an operator-supplied `--trusted-origin` entry. Checked on every
+   `/api/**` request. Defends drive-by tabs whose Origin reveals the
+   attacker domain.
+3. **CSRF token** — `X-Memtomem-CSRF` must match the per-process token in
+   `app.state.csrf_token`. Required for **unsafe** methods (POST / PUT /
+   PATCH / DELETE) only. The SPA fetches it via `GET /api/session` lazily
+   (cached for the page lifetime); the token rotates on every restart and
+   is never persisted. `GET /api/session` is token-exempt but still
+   Host/Origin-checked.
 
 Failures return `403` with a JSON `{"detail": "..."}` body and a
 structured `web.csrf.observe` log record for after-the-fact auditing.

@@ -446,9 +446,25 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+# Loopback bind hosts safe to expose the unauthenticated SPA on. Mirrors
+# ``cli/web.py:_LOOPBACK_BINDS`` (kept local so the ASGI entrypoint does not
+# eagerly import the CLI). ``mm web`` is the supported operational entrypoint
+# and also threads ``--trusted-host`` / ``--trusted-origin`` into the
+# CSRF/Origin/Host allow-list.
+_LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
 def main() -> None:
-    """Run the web UI server."""
+    """Run the web UI server (direct ``memtomem-web`` ASGI entrypoint).
+
+    Loopback-only by design. ``mm web`` is the supported operational
+    entrypoint for any non-loopback bind (RFC #787 / SECURITY.md): it
+    threads ``--trusted-host`` / ``--trusted-origin`` into the
+    CSRF/Origin/Host allow-list, which this thin console script — serving
+    the module-level app singleton — cannot do.
+    """
     import argparse
+    import sys
 
     import uvicorn
 
@@ -459,6 +475,23 @@ def main() -> None:
 
     host = args.host or os.environ.get("MEMTOMEM_WEB__HOST", "127.0.0.1")
     port = args.port or int(os.environ.get("MEMTOMEM_WEB__PORT", "8080"))
+
+    # ``memtomem-web`` cannot configure the CSRF/Origin/Host allow-list (it
+    # serves the module-level app singleton), so a non-loopback bind would
+    # expose the unauthenticated SPA while every ``/api/*`` request still
+    # 403s on the Host check — a broken, misleading posture. Refuse it and
+    # route remote exposure through ``mm web`` or a reverse proxy.
+    if host not in _LOOPBACK_BIND_HOSTS:
+        sys.stderr.write(
+            f"memtomem-web: refusing to bind --host {host}. This entrypoint is "
+            f"loopback-only. To expose the Web UI off-loopback use `mm web --host "
+            f"{host} --allow-remote-ui --trusted-host <h> --trusted-origin <o>` "
+            "(the supported entrypoint), which configures the CSRF/Origin/Host "
+            "allow-list, or front a loopback bind with an authenticating reverse "
+            "proxy. See https://github.com/memtomem/memtomem/issues/787 .\n"
+        )
+        raise SystemExit(2)
+
     uvicorn.run("memtomem.web.app:app", host=host, port=port, reload=False)
 
 

@@ -50,6 +50,12 @@ async def real_stack_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     comp = await create_components(cfg)
     app = create_app(lifespan=None, mode="dev")
+    # This fixture wipes all MEMTOMEM_* env above for config hermeticity, which
+    # also drops the conftest autouse ``MEMTOMEM_WEB__CSRF_ENFORCE=0``, leaving
+    # enforce on. This is a route test (the Host/Origin gate is covered in
+    # test_web_csrf_middleware.py), so disable enforcement directly rather than
+    # threading a loopback Host into every request.
+    app.state.csrf_enforce = False
     app.state.storage = comp.storage
     app.state.embedder = comp.embedder
     app.state.search_pipeline = comp.search_pipeline
