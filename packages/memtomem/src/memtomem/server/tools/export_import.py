@@ -30,6 +30,15 @@ async def mem_export(
         tag_filter: Only export chunks that carry this exact tag.
         since: ISO 8601 datetime lower bound on created_at (e.g. "2026-01-01T00:00:00Z").
         namespace: Only export chunks in this namespace.
+
+    Path policy (ADR-0006 Axis G): ``output_file`` is an unrestricted resolved
+    path by design — local-tool authority, not a traversal bug. This is
+    intentionally asymmetric with the root-bounded read surfaces
+    (``mem_add(file=)`` / ``mem_index``): backups are written *outside* the
+    indexed tree on purpose, so ``memory_dirs`` is the wrong allowlist for an
+    export target. Do not constrain it to memory/export roots without
+    revisiting that ADR — it would break the documented ``~/backup.json``
+    workflow.
     """
     from datetime import datetime, timezone
 
@@ -46,6 +55,8 @@ async def mem_export(
         except ValueError as exc:
             return f"Invalid 'since' datetime: {exc}"
 
+    # Resolved, intentionally unrestricted (ADR-0006 Axis G): local-tool
+    # authority, not a traversal bug — asymmetric with root-bounded mem_index.
     target = Path(output_file).expanduser().resolve()
     bundle = await export_chunks(
         app.storage,
@@ -91,6 +102,12 @@ async def mem_import(
             bundle (one not exported by this install) whose records contain
             secret-shaped values. Self-exports round-trip without this. The
             bypass is audit-logged (ADR-0006 Axis F.3).
+
+    Path policy (ADR-0006 Axis F/G): ``input_file`` is an unrestricted resolved
+    read by design. The import trust boundary is the provenance-aware redaction
+    gate (Axis F.3), which is *path-independent* — not the filesystem path. The
+    read-side asymmetry with the root-bounded ``mem_index`` is intentional; see
+    ADR-0006 Axis G before adding a path allowlist.
     """
     from memtomem.tools.export_import import (
         ImportPrivacyError,
@@ -107,6 +124,8 @@ async def mem_import(
     if mismatch_msg:
         return mismatch_msg
 
+    # Resolved, intentionally unrestricted (ADR-0006 Axis F/G): the import trust
+    # boundary is the F.3 redaction gate below, not this path.
     source = Path(input_file).expanduser().resolve()
 
     if not source.exists():
