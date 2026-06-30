@@ -526,10 +526,16 @@ different machine can connect to over the network.
 | Streamable HTTP | `--transport http` (alias for `streamable-http`) | Recommended for new deployments |
 | Server-Sent Events | `--transport sse` | Older transport, kept for editors that haven't moved off SSE |
 
-> **Trusted-network only.** Both network transports speak the MCP protocol
-> with **no built-in authentication**. Bind to loopback (`127.0.0.1`) and
-> put an authenticated reverse proxy in front before exposing publicly.
-> Do not expose them on the public internet without that layer.
+> **Trusted-network only — no first-party authentication.** Both network
+> transports speak the MCP protocol with **no built-in authentication**, and
+> memtomem ships none of its own by design (the stance and the rejected
+> static-token option are recorded in
+> [ADR-0029](../adr/0029-mcp-network-transport-auth-stance.md); see also the
+> [SECURITY.md](https://github.com/memtomem/memtomem/blob/main/SECURITY.md)
+> MCP-transport section). Bind to loopback (`127.0.0.1`) and put an
+> authenticated reverse proxy in front before exposing publicly — see
+> [Authenticated reverse proxy](#authenticated-reverse-proxy-required-for-public-exposure)
+> below. Do not expose them on the public internet without that layer.
 
 ### Quick start — Streamable HTTP on loopback
 
@@ -561,6 +567,89 @@ memtomem-server \
 For SSE, the URL path is split into a mount point plus the SSE endpoint
 (`https://mcp.example.com/memtomem/events` → mount `/memtomem`, endpoint
 `/events`).
+
+### Authenticated reverse proxy (required for public exposure)
+
+`memtomem-server` ships **no first-party MCP authentication** — once a
+network transport is reachable by an untrusted client, it grants full LTM
+read plus file-touching tool access with no credential check (stance:
+[ADR-0029](../adr/0029-mcp-network-transport-auth-stance.md)). Anything
+beyond a trusted LAN therefore needs an authenticating reverse proxy that
+**terminates TLS and rejects unauthenticated requests** before they reach
+the loopback listener.
+
+The recipe below uses nginx HTTP Basic auth in front of a loopback-bound
+server. Keep the server on `127.0.0.1` and pair it with a public `--url` so
+its DNS-rebinding allow-lists match the forwarded `Host` / `Origin`:
+
+```bash
+# 1. Create a credential (repeat without -c to add more users)
+htpasswd -c /etc/nginx/memtomem.htpasswd alice
+
+# 2. Run the server bound to loopback, named by its PUBLIC url
+memtomem-server \
+  --transport http \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --url https://mcp.example.com/mcp
+```
+
+```nginx
+# /etc/nginx/sites-available/memtomem-mcp
+server {
+    listen 443 ssl;
+    server_name mcp.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+
+    # The auth gate memtomem does not provide itself.
+    auth_basic           "memtomem MCP";
+    auth_basic_user_file /etc/nginx/memtomem.htpasswd;
+
+    location /mcp {
+        proxy_pass         http://127.0.0.1:8000/mcp;
+        proxy_http_version 1.1;
+
+        # Forward the public host so it matches the server's --url-derived
+        # Host/Origin allow-lists (the loopback listener still validates them).
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Forwarded-For   $remote_addr;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+
+        # nginx has already enforced auth_basic above; strip the credential so
+        # it is never forwarded to the unauthenticated backend (or its logs).
+        proxy_set_header   Authorization     "";
+
+        # Streamable HTTP and SSE hold long-lived connections — disable
+        # response buffering and raise the idle timeout so the proxy does not
+        # cut the stream with a premature 504.
+        proxy_buffering    off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+Your MCP client connects to `https://mcp.example.com/mcp` and must send the
+matching credential. Prefer an `Authorization: Basic <base64>` header if your
+client supports custom MCP headers. Some clients only accept credentials in
+the URL (`https://alice:<password>@mcp.example.com/mcp`) — avoid that where you
+can: URL userinfo leaks easily into shell history, config files, and client /
+proxy logs. If it is your only option, use a dedicated, low-privilege,
+rotatable credential rather than a shared one.
+
+> **A static Bearer token is not an upgrade.** Gating the same proxy on a
+> shared `Authorization: Bearer <token>` (via nginx `map` / `if`, or an
+> `auth_request` subrequest to your own authz service) is also fine, but a
+> shared static token has no per-client identity, revocation, or expiry — a
+> leak means full read + write access until you rotate it and restart. That
+> is exactly why memtomem does **not** bake one in (ADR-0029); the proxy is
+> the right place for whatever auth your deployment actually needs.
+
+> **Do not pair this with `--disable-dns-rebinding-protection` unless the
+> proxy validates `Origin` itself.** Disabling the built-in Host/Origin
+> check removes memtomem's last defense if a request ever reaches the
+> listener without passing through the proxy.
 
 ### DNS rebinding protection
 

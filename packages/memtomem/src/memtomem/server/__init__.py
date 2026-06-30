@@ -370,8 +370,9 @@ def _parse_server_args(argv: list[str] | None = None):
         prog="memtomem-server",
         description="Run the memtomem MCP server.",
         epilog=(
-            "Security: treat sse/http transports as trusted-network only; place an "
-            "authenticated reverse proxy in front before exposing publicly."
+            "Security: sse/http transports have no first-party authentication; "
+            "treat them as trusted-network only and place an authenticated reverse "
+            "proxy in front before exposing publicly."
         ),
     )
     parser.add_argument(
@@ -540,6 +541,15 @@ def _print_network_server_info(
         f"Transport: {transport_label}",
         f"Internal URL: {internal_url}",
         f"Public URL:   {public_url}",
+        "",
+        # Mirror the ``--help`` epilog (see ``_parse_server_args``) at bind
+        # time: network transports ship no first-party MCP authentication
+        # (stance recorded in ADR-0029). Print this unconditionally for every
+        # network bind so the no-auth posture is visible even to an operator
+        # who never reads ``--help`` before exposing the port.
+        "Security: no first-party authentication on this transport. Treat it as",
+        "          trusted-network only and put an authenticated reverse proxy in",
+        "          front before exposing it publicly (see SECURITY.md).",
         "",
         "Reverse proxy note:",
         "  Forward the public URL path unchanged to the internal URL path.",
