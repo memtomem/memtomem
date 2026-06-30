@@ -1,7 +1,7 @@
 # ADR-0006: Web UI folder/upload privacy redaction trust-boundary
 
-**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import)
-**Date:** 2026-04-30 (amended 2026-06-11)
+**Status:** Accepted (trigger fired 2026-06-11; amended to add Axis F — bundle import; amended 2026-06-30 to add Axis G — export/import path policy)
+**Date:** 2026-04-30 (amended 2026-06-11, 2026-06-30)
 **Context:** Issue #585 — PR #575 follow-up review surfaced that
 `packages/memtomem/src/memtomem/privacy.py: DEFAULT_PATTERNS` is enforced
 only on the MCP `mem_add` / `mem_batch_add` paths. The Web UI's
@@ -278,14 +278,97 @@ gate (`enforce_write_guard` per record, `force_unsafe` to override), across
 (HMAC vs. signature vs. content-hash manifest) is a follow-up-PR decision;
 this ADR fixes the *policy* (verify-or-gate), not the mechanism.
 
+### Axis G — Export/import filesystem path authority (added 2026-06-30 amendment)
+
+> Axes A–F govern *what content* may cross the write boundary (redaction). This
+> amendment adds the orthogonal *path* question for the bundle export/import
+> MCP tools: **which filesystem locations** `mem_export` may write to and
+> `mem_import` may read from. Context: #1486 (security-audit follow-up).
+
+**Current state (verified against source).**
+
+- `mem_export(output_file=…)` writes the bundle to *any* resolved path —
+  `server/tools/export_import.py:60`
+  (`Path(output_file).expanduser().resolve()`, no allow-list).
+- `mem_import(input_file=…)` reads *any* existing path —
+  `server/tools/export_import.py:129-131` (existence-checked only).
+- This is **local MCP tool authority**, not a traversal bug. The indexing read
+  surfaces are, by contrast, root-bounded: `IndexEngine` rejects paths outside
+  the configured `memory_dirs` / `project_memory_dirs` (`indexing/engine.py:719`
+  `_is_within_memory_dirs`, enforced at `:446` / `:523`), with non-disableable
+  secret excludes (`engine.py:50-56` `_BUILTIN_SECRET_PATTERNS`; dir-level
+  `.aws` / `.ssh` / `.gnupg` at `:1220-1222`), and `mem_add(file=)` validates
+  its path against the same bases (`server/tools/memory_crud.py:42-72`).
+- The **import** ingress trust boundary is the Axis F.3 provenance-aware
+  redaction gate (`tools/export_import.py:244` `enforce_write_guard` →
+  `ImportPrivacyError`), which is *path-independent*: a foreign bundle is
+  scanned and rejected on a secret hit regardless of where on disk it was read
+  from.
+- The **web** transport never accepts a server-side path: `import_memories`
+  takes an `UploadFile` into a `tempfile` (`web/routes/export.py:60-109`) and
+  `export_memories` returns a download — neither exposes an operator-named
+  filesystem path. Axis G is therefore an **MCP-tool-only** question.
+
+| Option | Behavior | Verdict |
+|--------|----------|---------|
+| **G.1 — leave unrestricted, document** | both tools keep arbitrary resolved paths; record the intentional read/write asymmetry, the accepted residual, and a reopen trigger here | ✅ **chosen** |
+| G.2 — constrain to safe roots | restrict `output_file` / `input_file` to the export dir / `memory_dirs` | ❌ rejected |
+| G.3 — warn / confirm / audit out-of-root | emit an advisory + audit-log entry when the target falls outside `all_index_roots()` | ❌ rejected |
+
+**Decision: G.1.** The trust boundary for import ingress is the F.3 redaction
+gate, not the filesystem path; import poisoning is path-independent and is
+already gated, and the web transport never accepts a server-side path. The
+read-side asymmetry with the root-bounded `mem_add(file=)` / `mem_index` is
+**intentional**: backups are deliberately written *outside* the indexed tree
+(you do not want a backup re-indexed), so `memory_dirs` is the wrong allowlist
+for an export target — which is exactly why **G.2 is rejected** (it would break
+the documented `~/backup.json` workflow). **G.3 is rejected** for the same
+boundary reason: the canonical `~/backup.json` lives in `$HOME`, outside
+`all_index_roots()`, so the advisory would fire on *every legitimate backup* —
+alert fatigue that defeats its own "observable, not silent" purpose, and it
+leans on the very `memory_dirs` boundary G.2 rejected. Import path policy: no
+change (existence-check only).
+
+**Accepted residual — core-mode export-write confused-deputy.** In the
+most-locked-down deployment (an agent wired to *only* memtomem, core-9 tools, no
+shell or generic file tool), `mem_export` is the agent's *only*
+arbitrary-destination write. Under prompt injection that is a real
+confused-deputy exfil / DoS channel: write the memory bundle to a
+server-readable path, or clobber a dotfile. It is reachable over plain local
+`stdio` in *every* deployment, and — since unauthenticated network transports
+already exist as an opt-in (`--transport sse|http`, no first-party auth; see
+ADR-0029 / #1485) — also reachable over the network whenever an operator opts
+into one and widens `Host` / `Origin` or disables DNS-rebinding protection. No
+network-auth control gates it. We **accept this as a documented residual**
+rather than ship a pre-write control now: the no-shell core deployment is the
+minority configuration, and a real fix is closer to the rejected G.2
+`export_dir` work than a trivial guard. If the risk appetite shifts, the
+follow-up is a *true* pre-write control — an opt-in, default-off `export_dir`
+allowlist with a wide default preserving `~/backup.json`, or a
+suspicious-destination pre-write gate — **not** after-the-fact audit.
+
+**Reopen trigger (mirrors the ADR-0006 `--allow-remote-ui` precedent and
+ADR-0029).** If memtomem ever blesses unauthenticated non-local MCP exposure as
+a *supported / default* posture — beyond today's opt-in trusted-LAN /
+authenticated-reverse-proxy stance (ADR-0029, #1485) — the unrestricted
+export-write / import-read blast radius widens and Axis G reopens toward the G.2
+`export_dir` control. The channel is already network-reachable today under the
+operator misconfig ADR-0029 documents, and reachable over local `stdio`
+regardless, so the accept-as-residual call stands on its own merits,
+independent of ADR-0029's outcome.
+
 ## Decision
 
 **Accepted (2026-06-11).** Axes **A.3 + B.2 + C.1 + D.2 + E.1** (bulk
 index/upload) stand as the decision; implementation is **partial** — the
 upload surface is guarded, the folder-index surfaces are not yet (see
 "Implementation status"). Adds **Axis F → F.3** (provenance-aware import gate),
-also unbuilt. Originally deferred; promoted on the public `--allow-remote-ui`
-trigger (see "Trigger record").
+**built 2026-06-30 in #1490**. Originally deferred; promoted on the public `--allow-remote-ui`
+trigger (see "Trigger record"). The 2026-06-30 amendment adds **Axis G → G.1**
+— the MCP `mem_export` / `mem_import` filesystem paths stay unrestricted
+(local-tool authority), documented rather than constrained, with an accepted
+core-mode export-write residual and a reopen trigger (no code or behavior
+change).
 
 ### Why this was originally held (historical)
 
@@ -343,11 +426,17 @@ Axes A–E are decided but only **partially built**:
   no `enforce_write_guard` call. The single-chokepoint design from A.3 / B.2 is
   still unbuilt for these surfaces; the "Implementation outline" below
   describes that pending work.
-- **Import (Axis F) — not yet built.**
+- **Import (Axis F.3) — built (#1490).** Both ingresses — MCP `mem_import` and
+  web `POST /api/export/import` — route through `tools/export_import.py`
+  `import_chunks`, which verifies the local-provenance marker and, for an
+  absent/invalid marker (a foreign bundle), runs `enforce_write_guard` per
+  record (`:244`) and rejects the whole import on a secret hit (`:257`) unless
+  `force_unsafe`. Self-exports skip the scan, preserving round-trip.
 
-So the B.2 reject behavior is live for upload only. The decision
-(A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands; the folder-index and import gates
-remain to implement.
+So the B.2 reject behavior is live for upload and import. The decision
+(A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands; the folder-index gate and the
+Web UI override toggle (Axis E.1 for the bulk/import surfaces, PR-B) remain to
+implement.
 
 ## Implementation outline (when triggered)
 
@@ -435,6 +524,15 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
     field coverage, not a new pattern set (Axis C's `DEFAULT_PATTERNS` is
     unchanged), and it never touches self-exports (their scan is skipped), so
     round-trip fidelity is unaffected.
+- **Export/import filesystem paths stay unrestricted (Axis G → G.1).** The MCP
+  `mem_export` / `mem_import` tools keep arbitrary resolved paths by design
+  (local-tool authority); the import trust boundary remains the F.3 redaction
+  gate, not the path. The read/write asymmetry with the root-bounded
+  `mem_add(file=)` / `mem_index` is intentional (backups live outside the
+  indexed tree) and is now documented — in the ADR and in a docstring + call-site
+  note on both tools — so a future reviewer does not "fix" it as a bug. The
+  core-mode export-write confused-deputy residual is accepted and carries a
+  reopen trigger (see Axis G). No code or behavior change.
 
 ## Considered & rejected upstream
 
@@ -487,8 +585,10 @@ These were considered when drafting and folded into the leaning above:
 
 ### Added by the 2026-06-11 amendment (Axis F)
 
-- Axis F (bundle import) — both ingresses reach `import_chunks` with no
-  `enforce_write_guard` call; the gap is verifiable in the sources below.
+- Axis F (bundle import) — as of the 2026-06-11 amendment both ingresses
+  reached `import_chunks` with no `enforce_write_guard` call; Axis F → F.3
+  closed that gap (built in #1490). The sources below are where it was
+  verifiable.
 - `packages/memtomem/tests/test_web_invariants_registry.py` — the
   `export.import_memories` exemption being narrowed by Axis F → F.3.
 - `packages/memtomem/src/memtomem/web/routes/export.py` — `import_memories`
@@ -496,9 +596,34 @@ These were considered when drafting and folded into the leaning above:
 - `packages/memtomem/src/memtomem/server/tools/export_import.py` — MCP
   `mem_import`, the second ingress to the shared `import_chunks` path.
 - `packages/memtomem/src/memtomem/tools/export_import.py` — `import_chunks`
-  (embed + `upsert_chunks`; no redaction gate today) and `export_chunks` (the
-  marker-stamping site for F.3).
+  (embed + `upsert_chunks`; the F.3 redaction gate now lives here —
+  `enforce_write_guard` at `:244`, atomic reject at `:257`) and `export_chunks`
+  (the marker-stamping site for F.3).
 - `packages/memtomem/src/memtomem/cli/web.py:228-244` — `_validate_bind` /
   `--allow-remote-ui` (RFC #787), the bind flag that fired trigger #3.
 - ADR-0012 §"Closest existing prior art: bundle v2" — covers *what fields* a
   bundle serializes; orthogonal to Axis F (redaction *on ingest*). Cross-ref.
+
+### Added by the 2026-06-30 amendment (Axis G)
+
+- `packages/memtomem/src/memtomem/server/tools/export_import.py:60` —
+  `mem_export` resolved `output_file` (no allow-list); `:129-131` —
+  `mem_import` resolved `input_file` (existence-checked only). Both gained a
+  docstring + call-site note recording the intentional asymmetry.
+- `packages/memtomem/src/memtomem/tools/export_import.py:244` —
+  `enforce_write_guard` (the Axis F.3 import redaction gate; the
+  path-independent ingress trust boundary).
+- `packages/memtomem/src/memtomem/indexing/engine.py:719`
+  (`_is_within_memory_dirs`, enforced `:446` / `:523`), `:50-56`
+  (`_BUILTIN_SECRET_PATTERNS`), `:1220-1222` (`_EXCLUDED_DIRS`
+  `.aws` / `.ssh` / `.gnupg`) — the root-bounded read surfaces Axis G is
+  asymmetric with.
+- `packages/memtomem/src/memtomem/server/tools/memory_crud.py:42-72` —
+  `mem_add(file=)` path validator (same root-binding).
+- `packages/memtomem/src/memtomem/web/routes/export.py:60-109` —
+  `import_memories` (`UploadFile` → `tempfile` → `import_chunks`); the web
+  transport accepts no server-side path.
+- ADR-0029 / issue #1485 — the network MCP transport stance (no first-party
+  auth; opt-in trusted-LAN / authenticated-proxy) that bounds Axis G's network
+  reachability and is named in the reopen trigger.
+- Issue #1486 — the security-audit decision this amendment records.
