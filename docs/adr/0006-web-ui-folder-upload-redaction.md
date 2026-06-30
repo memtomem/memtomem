@@ -425,6 +425,16 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
   `export.import_memories` narrows to the provenance-verified path. Importing a
   foreign bundle that contains a secret is a behavior change — telegraph it in
   the next minor's CHANGELOG.
+  - *Scan surface (follow-up-PR refinement).* Import is the one write surface
+    where **every** field — including metadata — arrives verbatim from an
+    untrusted bundle and is then embedded (`retrieval_content` = heading +
+    content), stored, and retrievable. So the foreign-bundle scan covers the
+    full retrievable surface (`content` + `heading_hierarchy` + `source_file` +
+    `tags`), a deliberate widening beyond the `content`-only scan that the
+    locally-derived-metadata surfaces (`mem_add` / `mem_batch_add`) use. This is
+    field coverage, not a new pattern set (Axis C's `DEFAULT_PATTERNS` is
+    unchanged), and it never touches self-exports (their scan is skipped), so
+    round-trip fidelity is unaffected.
 
 ## Considered & rejected upstream
 

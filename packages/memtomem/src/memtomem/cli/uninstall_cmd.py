@@ -242,6 +242,18 @@ def _collect_inventory(db_path: Path) -> _Inventory:
         if candidate.exists():
             db_paths.append(candidate)
 
+    # Per-install provenance HMAC key sidecar (ADR-0006 Axis F.3). It is a
+    # persistent secret derived from the DB stem (``<db-stem>.provenance_key``),
+    # not a ``<db-name><suffix>`` sibling, so the loop above misses it. Group it
+    # with the database so ``keep_data=False`` wipes it — otherwise a reinstall
+    # at the same path reuses the old key and keeps trusting prior self-export
+    # markers (handles custom storage paths via ``key_path_for_db``).
+    from memtomem import provenance
+
+    key_path = provenance.key_path_for_db(db_path)
+    if key_path.exists():
+        db_paths.append(key_path)
+
     config_json = state_dir / "config.json"
     config_files = [config_json] if config_json.exists() else []
 

@@ -49,6 +49,10 @@ class ExportBundle:
     exported_at: str = ""
     total_chunks: int = 0
     chunks: list[dict] = field(default_factory=list)
+    # Local-provenance marker (ADR-0006 Axis F.3). Present on self-exports;
+    # ``None`` on hand-crafted / pre-F.3 bundles, which then import as foreign.
+    # See ``memtomem.provenance``.
+    provenance: dict | None = None
 
     def to_json(self, *, indent: int = 2) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=indent)
@@ -61,6 +65,7 @@ class ExportBundle:
             exported_at=data.get("exported_at", ""),
             total_chunks=data.get("total_chunks", 0),
             chunks=data.get("chunks", []),
+            provenance=data.get("provenance"),
         )
 
 
@@ -75,6 +80,25 @@ class ImportStats:
     updated_chunks: int = 0
 
 
+class ImportPrivacyError(Exception):
+    """Raised when a foreign bundle's records hit the redaction guard.
+
+    ADR-0006 Axis F.3: bundles without a valid local-provenance marker are
+    scanned per-record on import and the whole import is rejected (atomically,
+    mirroring ``mem_batch_add``) if any record contains a secret-shaped value,
+    unless ``force_unsafe=True``. ``blocked_records`` is a *record* count (not a
+    regex-span count) so each ingress can render its native error without
+    echoing the matched bytes.
+    """
+
+    def __init__(self, blocked_records: int) -> None:
+        self.blocked_records = blocked_records
+        super().__init__(
+            f"{blocked_records} bundle record(s) match privacy pattern(s); import "
+            "rejected. Retry with force_unsafe=True to bypass (audit-logged)."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
@@ -87,8 +111,14 @@ async def export_chunks(
     tag_filter: str | None = None,
     since: datetime | None = None,
     namespace_filter: str | None = None,
+    provenance_key_path: Path | None = None,
+    stamp_provenance: bool = True,
 ) -> ExportBundle:
     """Export indexed chunks to an ExportBundle (and optionally to a JSON file).
+
+    The bundle is stamped with a local-provenance marker (ADR-0006 Axis F.3) so
+    a re-import on this same install round-trips unchanged (the redaction gate
+    is skipped for verified self-exports); see ``memtomem.provenance``.
 
     Args:
         storage: StorageBackend instance.
@@ -96,9 +126,17 @@ async def export_chunks(
         source_filter: Only include chunks whose source_file contains this substring.
         tag_filter: Only include chunks that have this exact tag.
         since: Only include chunks created at or after this datetime.
+        provenance_key_path: Override the per-install key file location (the
+            sidecar next to the DB by default). Intended for tests.
+        stamp_provenance: Sign the bundle with the per-install key (default).
+            Pass ``False`` for count-only callers (e.g. the ``/export/stats``
+            preview) so a read-shaped request neither creates the key file nor
+            fails on a key-file problem unrelated to counting.
     Returns:
-        ExportBundle with the selected chunks.
+        ExportBundle with the selected chunks; a provenance marker is attached
+        when ``stamp_provenance`` is set.
     """
+    from memtomem import provenance
     from memtomem.search.pipeline import match_source_filter_substring
 
     source_files = await storage.get_all_source_files()
@@ -119,10 +157,16 @@ async def export_chunks(
                 continue
             records.append(_chunk_to_dict(chunk))
 
+    marker: dict | None = None
+    if stamp_provenance:
+        key_path = provenance_key_path or provenance.key_path_for_db(storage.db_path)
+        marker = provenance.make_marker(records, provenance.load_or_create_key_for_export(key_path))
+
     bundle = ExportBundle(
         exported_at=datetime.now(timezone.utc).isoformat(),
         total_chunks=len(records),
         chunks=records,
+        provenance=marker,
     )
 
     if output_path is not None:
@@ -158,6 +202,72 @@ def _chunk_to_dict(chunk: Chunk) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _import_scan_text(chunk: Chunk) -> str:
+    """The retrievable surface scanned on a foreign import (ADR-0006 Axis F.3).
+
+    Import is the one write surface where *every* field — including metadata —
+    arrives verbatim from an untrusted bundle and is then embedded
+    (``retrieval_content`` = heading hierarchy + content), stored, and
+    retrievable. So the foreign-bundle redaction scan covers the full
+    retrievable surface here (content + heading + ``source_file`` + ``tags``),
+    not just ``content`` as on the locally-derived-metadata write surfaces
+    (``mem_add`` / ``mem_batch_add``). Self-exports skip this scan entirely, so
+    the wider coverage never affects round-trip fidelity — it only closes the
+    metadata-smuggling vector on genuinely foreign bundles.
+    """
+    return "\n".join(
+        [chunk.retrieval_content, str(chunk.metadata.source_file), *chunk.metadata.tags]
+    )
+
+
+def _enforce_import_redaction(
+    parsed: list[tuple[Chunk, str | None]],
+    *,
+    force_unsafe: bool,
+    surface: str,
+) -> None:
+    """Per-record redaction gate for a foreign bundle (ADR-0006 Axis F.2).
+
+    Scans the full retrievable surface of each record (see
+    :func:`_import_scan_text`). Mirrors ``mem_batch_add``'s transactional shape:
+    collect each record's decision with ``record_outcome=False``, reject the
+    whole import on any block (recording ``blocked`` per blocked record and
+    raising :class:`ImportPrivacyError`), and only commit per-record ``pass`` /
+    ``bypassed`` counters once the import is known to proceed. ``scope="user"``
+    because import upserts user-tier storage rows, never a git-tracked
+    ``project_shared`` tier — so ``blocked_project_shared`` cannot arise here.
+    """
+    from memtomem import privacy
+
+    decisions: list[tuple[str, int]] = []  # (decision, hit_count)
+    for chunk, _ in parsed:
+        guard = privacy.enforce_write_guard(
+            _import_scan_text(chunk),
+            surface=surface,
+            force_unsafe=force_unsafe,
+            scope="user",
+            record_outcome=False,
+        )
+        decisions.append((guard.decision, len(guard.hits)))
+
+    blocked = [d for d in decisions if d[0] == "blocked"]
+    if blocked:
+        for _ in blocked:
+            privacy.record("blocked", surface)
+        raise ImportPrivacyError(blocked_records=len(blocked))
+
+    for (decision, hit_count), (chunk, _) in zip(decisions, parsed):
+        if decision == "bypassed":
+            privacy.record("bypassed", surface)
+            privacy.emit_bypass_audit(
+                surface=surface,
+                content_chars=len(chunk.content),
+                hits=hit_count,
+            )
+        else:
+            privacy.record("pass", surface)
+
+
 async def import_chunks(
     storage: SqliteBackend,
     embedder: EmbeddingProvider,
@@ -165,8 +275,21 @@ async def import_chunks(
     namespace: str | None = None,
     on_conflict: OnConflict = "skip",
     preserve_ids: bool = False,
+    force_unsafe: bool = False,
+    provenance_key_path: Path | None = None,
+    surface: str = "import",
 ) -> ImportStats:
     """Import chunks from a JSON bundle file.
+
+    Trust boundary (ADR-0006 Axis F.3): a bundle this install exported carries a
+    valid local-provenance marker and round-trips unchanged. A bundle with an
+    absent or invalid marker is *foreign* — every well-formed record's full
+    retrievable surface (content + heading + ``source_file`` + ``tags``; see
+    :func:`_import_scan_text`) is scanned with ``privacy.enforce_write_guard``
+    and the whole import is rejected with :class:`ImportPrivacyError` if any
+    record matches a secret pattern, unless ``force_unsafe=True`` (bypass is
+    audit-logged). The scan runs before any embed/upsert, so rejection is atomic
+    — no partial import.
 
     Each chunk is re-embedded and upserted. Conflict resolution against the
     target DB's existing ``content_hash`` set is controlled by ``on_conflict``:
@@ -200,9 +323,18 @@ async def import_chunks(
         namespace: Override the namespace for all imported chunks.
         on_conflict: Strategy for hash collisions. See above.
         preserve_ids: Opt-in UUID preservation for new inserts (v2 bundles).
+        force_unsafe: Bypass the redaction gate for a foreign bundle whose
+            records match secret patterns (audit-logged).
+        provenance_key_path: Override the per-install key file location (the
+            sidecar next to the DB by default). Intended for tests.
+        surface: Audit/counter label for the redaction guard ("mem_import",
+            "web_api_import", …).
     Returns:
         ImportStats with total / imported / skipped / failed / conflict_skipped
         / updated counts.
+    Raises:
+        ImportPrivacyError: a foreign bundle has secret-bearing record(s) and
+            ``force_unsafe`` is not set.
     """
     if on_conflict not in _VALID_ON_CONFLICT:
         raise ValueError(
@@ -223,15 +355,31 @@ async def import_chunks(
     if not bundle.chunks:
         return ImportStats(0, 0, 0, 0)
 
+    # ADR-0006 Axis F.3: a valid local-provenance marker (verified over the raw
+    # bundle records, before any parse/mutation) means this is a self-export, so
+    # the redaction re-scan is skipped to preserve a deterministic round-trip.
+    # Any absent/invalid marker → foreign → run the per-record gate below.
+    from memtomem import provenance
+
+    key_path = provenance_key_path or provenance.key_path_for_db(storage.db_path)
+    is_self_export = provenance.verify_marker(
+        bundle.chunks, bundle.provenance, provenance.load_key_for_verify(key_path)
+    )
+
     skipped = 0
     parsed: list[tuple[Chunk, str | None]] = []  # (chunk, bundle_chunk_id_or_None)
 
-    for record in bundle.chunks:
+    for idx, record in enumerate(bundle.chunks):
         try:
             chunk, bundle_chunk_id = _dict_to_chunk(record, namespace_override=namespace)
             parsed.append((chunk, bundle_chunk_id))
         except Exception as exc:
-            logger.warning("Skipping malformed record: %s", exc)
+            # Never interpolate ``exc`` into the log: parse errors raised by
+            # ``datetime.fromisoformat`` / ``int()`` / ``ChunkType(...)`` embed
+            # the offending field value, which in a *foreign* bundle could be a
+            # secret-shaped string. Log the record index and exception class
+            # only — matched bytes must not reach the log sink.
+            logger.warning("Skipping malformed bundle record %d (%s)", idx, type(exc).__name__)
             skipped += 1
 
     if not parsed:
@@ -241,6 +389,11 @@ async def import_chunks(
             skipped_chunks=skipped,
             failed_chunks=0,
         )
+
+    # Foreign bundles run the F.2 redaction gate on every well-formed record
+    # (malformed records were already dropped above and are never scanned).
+    if not is_self_export:
+        _enforce_import_redaction(parsed, force_unsafe=force_unsafe, surface=surface)
 
     conflict_skipped = 0
     updated = 0

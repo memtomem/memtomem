@@ -67,6 +67,7 @@ async def mem_import(
     namespace: str | None = None,
     on_conflict: str = "skip",
     preserve_ids: bool = False,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Import memory chunks from a JSON bundle file (produced by mem_export).
@@ -86,8 +87,16 @@ async def mem_import(
         preserve_ids: For non-conflicting records in a v2 bundle, reuse the
             bundle's original chunk UUID (skipped if already claimed by
             unrelated content). Ignored when ``on_conflict="duplicate"``.
+        force_unsafe: Bypass the redaction gate when importing a *foreign*
+            bundle (one not exported by this install) whose records contain
+            secret-shaped values. Self-exports round-trip without this. The
+            bypass is audit-logged (ADR-0006 Axis F.3).
     """
-    from memtomem.tools.export_import import _VALID_ON_CONFLICT, import_chunks
+    from memtomem.tools.export_import import (
+        ImportPrivacyError,
+        _VALID_ON_CONFLICT,
+        import_chunks,
+    )
 
     app = await _get_app_initialized(ctx)
 
@@ -103,14 +112,23 @@ async def mem_import(
     if not source.exists():
         return f"File not found: {source}"
 
-    stats = await import_chunks(
-        app.storage,
-        app.embedder,
-        source,
-        namespace=namespace,
-        on_conflict=on_conflict,  # type: ignore[arg-type]
-        preserve_ids=preserve_ids,
-    )
+    try:
+        stats = await import_chunks(
+            app.storage,
+            app.embedder,
+            source,
+            namespace=namespace,
+            on_conflict=on_conflict,  # type: ignore[arg-type]
+            preserve_ids=preserve_ids,
+            force_unsafe=force_unsafe,
+            surface="mem_import",
+        )
+    except ImportPrivacyError as exc:
+        return (
+            f"Error: {exc.blocked_records} bundle record(s) match privacy "
+            "pattern(s); import rejected. Retry with force_unsafe=True to "
+            "bypass (audit-logged)."
+        )
 
     return (
         f"Import complete ({on_conflict=}, {preserve_ids=}):\n"

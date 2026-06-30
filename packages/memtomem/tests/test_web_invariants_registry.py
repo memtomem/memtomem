@@ -306,9 +306,18 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "system.trigger_index": "control plane; operates on existing files; "
     "redaction happens at file-ingest time inside the indexer",
     "system.reindex_all": "control plane; operates on existing files",
-    "export.import_memories": "import bypass: archived chunks already "
-    "passed redaction at original write time and re-scanning would "
-    "corrupt deterministic round-trip",
+    # Bundle import is redaction-gated in the shared ``tools/export_import.py::
+    # import_chunks`` path, not in this route handler body — so the AST walk
+    # (which inspects handler bodies only) correctly leaves it exempt here.
+    # ADR-0006 Axis F.3: a self-export carrying a valid local-provenance marker
+    # round-trips unchanged (re-scan skipped); a foreign/unverified bundle is
+    # scanned per-record (``privacy.enforce_write_guard``) and rejected on a
+    # secret hit unless ``force_unsafe`` is passed.
+    "export.import_memories": (
+        "redaction enforced in the shared import_chunks() path (ADR-0006 F.3): "
+        "self-exports with a valid provenance marker round-trip unchanged, foreign "
+        "bundles are gated per-record; the guard is not in this handler body"
+    ),
     "watchdog.watchdog_run_now": "control plane; no payload",
 }
 
