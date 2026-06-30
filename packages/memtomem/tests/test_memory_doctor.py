@@ -537,13 +537,19 @@ class TestCli:
 
 
 def _docs_check_severities() -> dict[str, str]:
-    """Parse the published check→severity table from ``reference.md``.
+    """Parse the published check→severity table from ``reference/organization-maintenance.md``.
 
     Matches table rows whose first cell is a backticked identifier and whose
     second cell is a (optionally bold) severity word, so only the checks table
     rows are picked up — not the Glossary or other tables.
     """
-    ref = Path(__file__).resolve().parents[3] / "docs" / "guides" / "reference.md"
+    ref = (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "guides"
+        / "reference"
+        / "organization-maintenance.md"
+    )
     assert ref.is_file(), f"reference guide not found at {ref}"
     row = re.compile(r"^\|\s*`(\w+)`\s*\|\s*\*{0,2}(warn|error|info)\*{0,2}\s*\|")
     table: dict[str, str] = {}
@@ -647,10 +653,16 @@ class TestDocsParity:
         assert "missing_target" in out  # the subtractive scope is documented
 
     def test_reference_documents_fix(self):
-        # reference.md §5 gains the --fix surface when Tier 2 ships (ADR-0020
+        # reference/organization-maintenance.md §5 gains the --fix surface when Tier 2 ships (ADR-0020
         # consequence). Pin the usage examples + the subtractive-scope wording
         # so docs can't silently drift from the shipped flags.
-        ref = Path(__file__).resolve().parents[3] / "docs" / "guides" / "reference.md"
+        ref = (
+            Path(__file__).resolve().parents[3]
+            / "docs"
+            / "guides"
+            / "reference"
+            / "organization-maintenance.md"
+        )
         text = ref.read_text(encoding="utf-8")
         assert "mm memory doctor --fix --apply" in text
         assert "Fixing broken links" in text  # the subsection heading

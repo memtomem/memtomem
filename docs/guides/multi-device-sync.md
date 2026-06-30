@@ -172,7 +172,7 @@ folder with the same `mem_index` workflow — the SQLite caveat below still
 applies.
 
 For *single-machine backup*, use `mem_export` / `mem_import`
-([Reference](reference.md#6-data--mem_export-mem_import)). The bundle format
+([Reference](reference/data-config-cli.md#6-data--mem_export-mem_import)). The bundle format
 embeds absolute paths and is not designed for cross-device restore.
 
 ## The layout — namespace-aligned directory tree
@@ -483,7 +483,7 @@ Day-to-day flow once the layout is in place:
 If you have an existing Obsidian vault you want to ingest *without*
 reorganising it into the synced layout — a one-time copy into
 `~/.memtomem/memories/_imported/obsidian/` — use the existing
-[Importing from Obsidian](reference.md#importing-from-obsidian) action
+[Importing from Obsidian](reference/data-config-cli.md#importing-from-obsidian) action
 (`mem_do(action="import_obsidian", …)`) instead. That's a different use
 case: one-shot ingest of a non-synced vault, rather than continuous live
 sync of the vault as your `memory_dirs[]`.
