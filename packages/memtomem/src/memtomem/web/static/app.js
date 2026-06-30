@@ -317,9 +317,11 @@ _applyAppSimpleMode();
 // token at create_app() and exposes it via GET /api/session. The api()
 // helper (and the FormData uploaders that bypass it — see ``ensureCsrfToken``
 // callsites) thread the token through every unsafe-method request via
-// ``X-Memtomem-CSRF``. Stage 1 server-side is observe-only, so a missing
-// header just produces a log line; stage 2 will enforce. We do the work now
-// so the flip is a server-side toggle, not a coordinated client release.
+// ``X-Memtomem-CSRF``. Server-side enforcement is default-on: a missing or
+// invalid token on an unsafe method is rejected (set
+// ``MEMTOMEM_WEB__CSRF_ENFORCE=0`` to fall back to observe-only logging). The
+// client threads the token unconditionally, so the server-side posture stays a
+// toggle rather than a coordinated client release.
 let _csrfToken = null;
 let _csrfTokenPromise = null;
 const _UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
