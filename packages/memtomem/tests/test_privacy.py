@@ -6,9 +6,13 @@ wire-in tests for ``mem_add`` / ``mem_batch_add`` live in
 
 Drift-prevention notes embedded as test pins:
 
-- ``test_pattern_count_pinned_at_nine`` — the parent set is intentionally
-  the secrets-only subset of STM's ``DEFAULT_PATTERNS`` (10 patterns), with
-  the email/PII pattern excluded by design.
+- ``test_pattern_count_pinned`` — the parent set is the STM-synced
+  secrets-only subset (email/PII excluded by design) plus the LTM-origin
+  secret-class additions of #1488; the exact count is pinned so a silent
+  add/drop fails loudly.
+- ``test_fixtures_cover_every_pattern`` — every DEFAULT_PATTERNS entry has
+  a paired positive/negative JS-translation fixture, so a new pattern
+  cannot be added without a parity fixture.
 - ``test_clean_inputs_have_no_hit`` — direct contract pin: well-formed
   contact-note prose (emails, phone numbers, plain text) must pass
   through untouched. Future drift toward PII inclusion would break this
@@ -35,8 +39,11 @@ def _reset_counters():
 
 
 class TestPatternSurface:
-    def test_pattern_count_pinned_at_nine(self):
-        assert len(privacy.DEFAULT_PATTERNS) == 9
+    def test_pattern_count_pinned(self):
+        # 9 STM-synced secret-class patterns + 7 LTM-origin additions
+        # (#1488). Bump deliberately when adding a pattern so a silent
+        # add/drop surfaces here.
+        assert len(privacy.DEFAULT_PATTERNS) == 16
 
     @pytest.mark.parametrize(
         "clean_input",
@@ -67,6 +74,22 @@ class TestScan:
             "AKIAIOSFODNN7EXAMPLE",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIicm9vdA.SflKxwRJSMeK",
             "-----BEGIN RSA PRIVATE KEY-----",
+            # --- #1488 LTM-origin additions (all examples are FAKE) -----
+            # Modern OpenAI key: legacy ``sk-`` rule misses these (hyphen
+            # after "proj" halts the run) — must hit via the T3BlbkFJ rule.
+            "sk-proj-FAKE0aaaa1111bbbb2222cccc3333T3Blbk" + "FJEXAMPLE0dddd4444eeee5555ffff6666",
+            # Anthropic key (FAKE) — exact 93-char body + AA terminal.
+            "sk-ant-api03-" + ("FAKEfake0123456789" * 6)[:93] + "AA",
+            # GitHub server-to-server token (gh*_ family, FAKE).
+            "ghs_FAKEfake0123456789FAKEfake0123456789",
+            # Google API key, AIza + 35 (FAKE).
+            "AIzaSy0_-BcdSy0_-BcdSy0_-BcdSy0_-BcdSy0",
+            # GitLab PAT (FAKE) — exact 20-char body.
+            "glpat-" + ("FAKEfake0123456789" * 2)[:20],
+            # Hugging Face token, hf_ + 34 (FAKE).
+            "hf" + "_FAKEfake0123456789FAKEfake01234567",
+            # PyPI upload token, macaroon header (FAKE).
+            "pypi-AgEIcHlwaS5vcmcFAKEfake0123456789FAKEfake0123456789FAKEfake0123456789",
         ],
     )
     def test_each_secret_pattern_hits(self, secret_sample):
@@ -354,6 +377,37 @@ _PATTERN_FIXTURES: tuple[tuple[str, str], ...] = (
     ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIicm9vdA.SflKxwRJSMeK", "eyJ-not-a-jwt"),
     # 8: PEM private key header
     ("-----BEGIN RSA PRIVATE KEY-----", "RSA public key"),
+    # 9: OpenAI modern (sk-proj-/svcacct-/admin-, T3BlbkFJ-anchored).
+    #    Negative: a kebab slug with the prefix but no marker.
+    (
+        "sk-proj-FAKE0aaaa1111bbbb2222cccc3333T3Blbk" + "FJEXAMPLE0dddd4444eeee5555ffff6666",
+        "sk-project-management-tool",
+    ),
+    # 10: Anthropic (sk-ant-NN-, exact 93-char body + AA). Negative: a
+    #     digit-bearing kebab slug carrying the infix (a loose body matched
+    #     it; the exact length + AA terminal rejects it).
+    (
+        "sk-ant-api03-" + ("FAKEfake0123456789" * 6)[:93] + "AA",
+        "sk-ant-api03-release-notes-2026-migration-guide",
+    ),
+    # 11: GitHub gh*_ family completion. Negative: an English word that
+    #     starts "gho" but is not a gho_ token.
+    ("ghs_FAKEfake0123456789FAKEfake0123456789", "ghost_writer_mode_enabled"),
+    # 12: Google API key (AIza + exactly 35). Negative: too short.
+    ("AIzaSy0_-BcdSy0_-BcdSy0_-BcdSy0_-BcdSy0", "AIzaShortKey"),
+    # 13: GitLab PAT (glpat-, exact 20-char body). Negative: a digit-bearing
+    #     "glpat-" kebab slug (a {20,} superset matched it; exact length
+    #     rejects it).
+    ("glpat-" + ("FAKEfake0123456789" * 2)[:20], "glpat-form-builder-component-name-2026"),
+    # 14: Hugging Face (hf_ + exactly 34, digit-guarded). Negative: a
+    #     34-char letter-only run (no digit) directly after hf_.
+    ("hf" + "_FAKEfake0123456789FAKEfake01234567", "hf" + "_abcdefghijklmnopqrstuvwxyzabcdefgh"),
+    # 15: PyPI / TestPyPI macaroon token. Negative: the prefix without the
+    #     fixed base64 header.
+    (
+        "pypi-AgEIcHlwaS5vcmcFAKEfake0123456789FAKEfake0123456789FAKEfake0123456789",
+        "pypi-package-name-here",
+    ),
 )
 
 
@@ -366,6 +420,14 @@ class TestJsPatternTranslation:
     Python ``re`` is equivalent to running the original pattern, so a
     successful Python match guarantees an identical JS match.
     """
+
+    def test_fixtures_cover_every_pattern(self):
+        # Every DEFAULT_PATTERNS entry must have a paired positive/negative
+        # fixture so the parity test below covers the whole set — a new
+        # pattern cannot be added without its parity fixture (and a
+        # contributor who appends a pattern but forgets the fixture fails
+        # here rather than shipping an untranslated/untested entry).
+        assert len(_PATTERN_FIXTURES) == len(privacy.DEFAULT_PATTERNS)
 
     @pytest.mark.parametrize(
         "idx,positive,negative",
@@ -467,3 +529,110 @@ class TestJsPatternTranslation:
             assert set(flags) <= allowed, (
                 f"Translator emitted unexpected flag in {flags!r}; allowed: {sorted(allowed)}"
             )
+
+
+# ---------------------------------------------------------------------------
+# #1488 — LTM-origin secret-class additions: per-pattern positive coverage +
+# near-miss false-positive guards. Every token example is FAKE (embedded
+# FAKE/EXAMPLE markers, never a live credential) but structurally correct
+# against the provider format. The near-misses lock the FP-defense
+# mechanisms (the T3BlbkFJ OpenAI marker, the digit-in-body lookaheads, and
+# the exact-length anchors) so a future loosening of any pattern fails loudly.
+# ---------------------------------------------------------------------------
+
+_NEW_PATTERN_POSITIVES = [
+    # OpenAI modern (T3BlbkFJ-anchored): proj / svcacct / admin.
+    "sk-proj-FAKE0aaaa1111bbbb2222cccc3333T3Blbk" + "FJEXAMPLE0dddd4444eeee5555ffff6666",
+    "sk-svcacct-FAKE_svc-0123456789aaaaaaaaaaaaaaaaaT3Blbk"
+    + "FJEXAMPLE_only-9876543210bbbbbbbbbbbbbbbbb",
+    "sk-admin-FAKE0not0real0123456789aaaaaaaaaaaaaaaaaaaaT3Blbk"
+    + "FJEXAMPLE0only0987654321bbbbbbbbbbbbbbbbbbbb",
+    # Anthropic: api03 / admin01 (exact 93-char body + AA terminal). oat01
+    # is intentionally NOT covered (no canonical shape — see privacy.py).
+    "sk-ant-api03-" + ("FAKEfake0123456789" * 6)[:93] + "AA",
+    "sk-ant-admin01-" + ("FAKEfake0123456789" * 6)[:93] + "AA",
+    # GitHub gh*_ family (gho / ghu / ghs / ghr), each 36-char base62 body.
+    "gho_FAKEfake0123456789FAKEfake0123456789",
+    "ghu_FAKEfake0123456789FAKEfake0123456789",
+    "ghs_FAKEfake0123456789FAKEfake0123456789",
+    "ghr_FAKEfake0123456789FAKEfake0123456789",
+    # Google API key: AIza + exactly 35.
+    "AIzaSy0_-BcdSy0_-BcdSy0_-BcdSy0_-BcdSy0",
+    # GitLab PAT (exact 20-char body).
+    "glpat-" + ("FAKEfake0123456789" * 2)[:20],
+    # Hugging Face: hf_ + exactly 34.
+    "hf" + "_FAKEfake0123456789FAKEfake01234567",
+    # PyPI (prod) + TestPyPI (test) macaroon tokens.
+    "pypi-AgEIcHlwaS5vcmcFAKEfake0123456789FAKEfake0123456789FAKEfake0123456789",
+    "pypi-AgENdGVzdC5weXBpLm9yZwFAKEfake0123456789FAKEfake0123456789FAKEfake0123456789",
+]
+
+_NEW_PATTERN_NEAR_MISSES = [
+    # OpenAI: the sk-<class>- prefix but no T3BlbkFJ marker (kebab slug).
+    "sk-proj-some-feature-branch-name-without-any-marker-here",
+    "sk-admin-dashboard-component-wrapper-container-element",
+    # OpenAI: the marker present but no sk-<class>- prefix.
+    "a sentence that happens to mention T3BlbkFJ as base64 of OpenAI here",
+    # OpenAI: marker present but the post-marker segment runs past the {200}
+    # cap into more token chars — the trailing terminal guard rejects the
+    # over-long run (a bare capped greedy matched its first 200 chars).
+    "sk-proj-" + "a" * 20 + "T3BlbkFJ" + "b" * 200 + "-followup-doc",
+    # Anthropic: infix shape but not the exact 93-char + AA token body
+    # (kebab slugs, with and without digits — the digit-bearing one is the
+    # case a digit-guard alone would have let through).
+    "sk-ant-colony-simulation-readme-design-notes",
+    "sk-ant-api03-readme-design-notes-only-letters-here",
+    "sk-ant-api03-release-notes-2026-migration-guide",
+    # Anthropic: a full 93-char body ending in the "AA" marker but followed
+    # by a token char (-). A bare \b terminal would accept "AA-"; the
+    # (?![A-Za-z0-9_-]) terminal rejects it.
+    "sk-ant-api03-" + "x" * 93 + "AA-followup-doc",
+    # Anthropic: 'api' not followed by two digits.
+    "sk-ant-api-gateway-architecture-doc",
+    # GitHub: a word starting with the prefix letters, not a token.
+    "ghost_writer_mode_enabled_for_the_editor",
+    "the ghs_ prefix is mentioned but not a token",
+    "gho_tooShort",
+    # Google: too short, and prefix inside an identifier (no word boundary).
+    "AIzaShort",
+    "MosaicAIzaPrefixedInsideAnIdentifierWordBoundaryFails",
+    # GitLab: 'glpat-' kebab slugs (with and without digits) and 'glpattern'
+    # (no hyphen) — none is the exact 20-char token body. The digit-bearing
+    # slugs are the cases a digit-guard alone would have let through.
+    "glpat-form-builder-component-name-no-digits",
+    "glpat-form-builder-component-name-2026",
+    "glpat-release-2026-secret-scanner-doc",
+    "glpattern-matching-utility-helper-module",
+    # Hugging Face: identifier (underscore breaks the run) + a 34-letter
+    # no-digit run directly after hf_.
+    "hf_hidden_states_from_the_transformer",
+    "hf" + "_abcdefghijklmnopqrstuvwxyzabcdefgh",
+    # PyPI: the prefix without the fixed macaroon header.
+    "pypi-package-upload-instructions-doc",
+    "pypi-AgSomethingElseEntirelyNotTheRealHeader1234567890abcdefghij",
+]
+
+
+class TestNewSecretPatterns1488:
+    @pytest.mark.parametrize("sample", _NEW_PATTERN_POSITIVES)
+    def test_new_pattern_positive_hits(self, sample):
+        assert privacy.scan(sample), f"FAKE token shape must be redacted: {sample[:40]!r}"
+
+    @pytest.mark.parametrize("text", _NEW_PATTERN_NEAR_MISSES)
+    def test_new_pattern_near_miss_does_not_hit(self, text):
+        # The contract is "no false positive from the #1488 additions"
+        # (indices >= 9). A near-miss may legitimately stay clean of the
+        # legacy 0-8 rules too, but those are pinned elsewhere; here we
+        # isolate the new set so a future loosening surfaces precisely.
+        offending = [h.pattern_index for h in privacy.scan(text) if h.pattern_index >= 9]
+        assert not offending, f"#1488 pattern(s) {offending} false-positived on {text[:50]!r}"
+
+    def test_ghp_still_covered_by_legacy_not_duplicated(self):
+        # ghp_ stays the legacy index-2 rule's job; the new gh[ousr]_
+        # pattern (index 11) deliberately excludes 'p' to avoid a
+        # duplicate hit. Locks the dedup intent + guards against the
+        # change accidentally dropping ghp_ coverage.
+        ghp = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # ghp_ + 36 base62
+        idxs = {h.pattern_index for h in privacy.scan(ghp)}
+        assert 2 in idxs, "ghp_ must still be caught by the legacy index-2 rule"
+        assert 11 not in idxs, "gh[ousr]_ (index 11) must exclude 'p' — no duplication"

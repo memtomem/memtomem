@@ -108,17 +108,51 @@ class TestLongContentScan:
         )
 
     def test_one_megabyte_scan_under_perf_ceiling(self):
-        # Soft ceiling — not a microbenchmark, just a quadratic-regression
-        # guard. The 9 current patterns are short prefix-anchored regexes
-        # and ``re.finditer`` over 1 MB completes in single-digit ms on
-        # CI hardware; 200 ms gives ample headroom for jitter while
-        # still catching an accidental O(N^2) rewrite.
+        # Soft ceiling — not a microbenchmark, just a non-linear-regression
+        # guard. ``scan()`` runs one ``re.finditer`` pass per pattern, so cost
+        # grows linearly with the pattern count: the 16 short prefix-anchored
+        # ``DEFAULT_PATTERNS`` take ~100 ms locally and ~200 ms on a loaded CI
+        # runner for a 1 MB input (#1488 grew the set 9 -> 16, each added
+        # secret class a linear pass — no single hot spot). The 500 ms ceiling
+        # — matching ``test_crafted_repetition_scans_linearly`` below — keeps
+        # ~2x headroom over that worst case while still catching a genuine
+        # non-linear rewrite (e.g. a naive overlap-window scan that re-reads
+        # large prefixes), which would run in seconds at 1 MB, not hundreds of
+        # ms. The dedicated O(N^2) backtracking guard is that sibling test.
         text = ("a" * 999_980) + _SECRET
         start = time.perf_counter()
         hits = privacy.scan(text)
         elapsed = time.perf_counter() - start
         assert hits, "Sanity check: the secret must still be detected"
-        assert elapsed < 0.2, (
-            f"1MB scan took {elapsed * 1000:.1f} ms — exceeds the 200 ms "
+        assert elapsed < 0.5, (
+            f"1MB scan took {elapsed * 1000:.1f} ms — exceeds the 500 ms "
             "ceiling, suggesting a non-linear regression"
+        )
+
+    @pytest.mark.parametrize(
+        "blob",
+        [
+            "glpat-" * 60_000,  # digit-lookahead pattern, class incl. '-'
+            "sk-proj-" * 50_000,  # greedy segment + required T3BlbkFJ marker
+            "sk-ant-api00-" * 30_000,  # digit-lookahead after a literal prefix
+            "glpat-sk-proj-AIzahf_gho_" * 40_000,  # ~1MB mixed prefixes
+        ],
+        ids=["glpat-rep", "sk-proj-rep", "sk-ant-rep", "mixed-1mb"],
+    )
+    def test_crafted_repetition_scans_linearly(self, blob: str):
+        # #1488 adds patterns with bounded greedy segments ({20,200}) and
+        # bounded digit-lookaheads ({0,128}/{0,33}). A naive UNbounded form
+        # (e.g. ``glpat-(?=[0-9A-Za-z_-]*[0-9])…`` whose class contains '-')
+        # is O(N^2) on a crafted prefix repetition: each of ~N/6 prefix
+        # positions scans the rest of the buffer for a digit that never
+        # comes. This pins linear-time behavior so a future maintainer who
+        # drops the bound regresses here loudly rather than shipping a
+        # quadratic scan past the trust boundary.
+        start = time.perf_counter()
+        privacy.scan(blob)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.5, (
+            f"crafted {len(blob)}-char repetition scanned in {elapsed * 1000:.1f} ms — "
+            "exceeds the 500 ms ceiling, indicating an O(N^2) backtracking regression "
+            "in one of the #1488 bounded patterns"
         )
