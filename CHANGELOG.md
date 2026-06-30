@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Security
+
+- **JSON bundle import now enforces the secret-redaction trust boundary
+  (ADR-0006 Axis F.3).** `POST /api/export/import` and the MCP `mem_import`
+  tool previously upserted every bundle record without the redaction scan that
+  guards all other write surfaces — the sole batch-write ingress with no gate.
+  Imports are now provenance-aware: a bundle this install exported (carrying a
+  valid local-provenance HMAC marker, written by `mem_export` / the export
+  endpoint) round-trips unchanged, while a foreign or unverifiable bundle is
+  scanned per-record — across its full retrievable surface (content, heading,
+  source path, and tags, since every field of a foreign bundle is
+  attacker-controlled) — and the whole import is rejected if any record contains
+  a secret-shaped value. Pass `force_unsafe=true` (the MCP argument or the import
+  form field) to override after review — the bypass is audit-logged.
+  **Behavior change:** importing a foreign bundle that contains a secret now
+  fails by default where it previously imported silently; the web surface
+  returns HTTP 403 `redaction_blocked`. (#1483)
+
 ## [0.3.1] — 2026-06-24
 
 A first-time-user experience pass over the web UI, plus a non-ASCII tag-storage

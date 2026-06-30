@@ -273,6 +273,16 @@ class SqliteBackend(
         self._meta.store_dimension(dim)
 
     @property
+    def db_path(self) -> Path:
+        """Filesystem path of the SQLite database file (``~`` expanded).
+
+        Mirrors how :meth:`initialize` resolves ``sqlite_path``. Used by the
+        export/import provenance marker to locate its sidecar key next to the
+        DB (``memtomem.provenance.key_path_for_db``).
+        """
+        return Path(self._config.sqlite_path).expanduser()
+
+    @property
     def stored_embedding_info(self) -> dict:
         """Return the embedding config actually stored in the DB."""
         assert self._meta is not None

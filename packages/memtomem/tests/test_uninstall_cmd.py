@@ -114,6 +114,9 @@ def _seed_state(home: Path, *, with_db: bool = True, with_fragments: bool = True
         (state / "memtomem.db").write_bytes(b"sqlite-fake")
         (state / "memtomem.db-wal").write_bytes(b"wal")
         (state / "memtomem.db-shm").write_bytes(b"shm")
+        # Per-install provenance key sidecar (ADR-0006 Axis F.3) — a secret that
+        # must be wiped with the data, not left for a same-path reinstall.
+        (state / "memtomem.provenance_key").write_text("ab" * 32, encoding="utf-8")
     (state / "memories").mkdir()
     (state / "memories" / "x.md").write_text("# hello", encoding="utf-8")
     (state / ".current_session").write_text("sess-id", encoding="utf-8")
@@ -154,8 +157,9 @@ class TestKeepConfig:
         assert (state / "config.json").exists()
         assert (state / "config.d" / "claude.json").exists()
         assert (state / "config.json.bak-2026-04-22T00-00-00").exists()
-        # data side wiped
+        # data side wiped (incl. the provenance key — it is data, not config)
         assert not (state / "memtomem.db").exists()
+        assert not (state / "memtomem.provenance_key").exists()
         assert not (state / "memories" / "x.md").exists()
 
 
@@ -169,6 +173,8 @@ class TestKeepData:
         assert result.exit_code == 0, result.output
         assert (state / "memtomem.db").exists()
         assert (state / "memtomem.db-wal").exists()
+        # keeping data keeps the provenance key, so prior self-exports still verify
+        assert (state / "memtomem.provenance_key").exists()
         assert (state / "memories" / "x.md").exists()
         # config side wiped
         assert not (state / "config.json").exists()
@@ -186,6 +192,7 @@ class TestCustomStoragePath:
         custom_db = custom_dir / "foo.db"
         custom_db.write_bytes(b"sqlite-fake")
         (custom_dir / "foo.db-wal").write_bytes(b"wal")
+        (custom_dir / "foo.provenance_key").write_text("ab" * 32, encoding="utf-8")
         (custom_dir / "unrelated.txt").write_text("user file", encoding="utf-8")
 
         # Seed config that points to the custom path
@@ -198,9 +205,10 @@ class TestCustomStoragePath:
         result = CliRunner().invoke(cli, ["uninstall", "-y"])
         assert result.exit_code == 0, result.output
         assert "custom storage path" in result.output
-        # custom DB siblings deleted
+        # custom DB siblings + provenance key deleted
         assert not custom_db.exists()
         assert not (custom_dir / "foo.db-wal").exists()
+        assert not (custom_dir / "foo.provenance_key").exists()
         # unrelated sibling left alone
         assert (custom_dir / "unrelated.txt").exists(), "non-DB siblings must NOT be deleted"
 

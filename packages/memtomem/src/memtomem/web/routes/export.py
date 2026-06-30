@@ -48,7 +48,11 @@ async def export_stats(
     """Return chunk count that would be exported (without downloading)."""
     from memtomem.tools.export_import import export_chunks
 
-    bundle = await export_chunks(storage, source_filter=source, tag_filter=tag, since=since)
+    # Count-only preview: skip provenance signing so this read endpoint neither
+    # creates the per-install key file nor fails on a key-file problem.
+    bundle = await export_chunks(
+        storage, source_filter=source, tag_filter=tag, since=since, stamp_provenance=False
+    )
     return ExportStatsResponse(total_chunks=bundle.total_chunks)
 
 
@@ -57,14 +61,24 @@ async def import_memories(
     file: UploadFile,
     on_conflict: str = Form("skip"),
     preserve_ids: bool = Form(False),
+    force_unsafe: bool = Form(False),
     storage=Depends(get_storage),
     embedder=Depends(get_embedder),
 ) -> ImportResponse:
-    """Import chunks from a previously exported JSON bundle (multipart upload)."""
+    """Import chunks from a previously exported JSON bundle (multipart upload).
+
+    Foreign bundles (not exported by this install) are scanned per-record and
+    rejected with HTTP 403 ``redaction_blocked`` if a record contains a
+    secret-shaped value, unless ``force_unsafe`` is set (ADR-0006 Axis F.3).
+    """
     import tempfile
     from pathlib import Path
 
-    from memtomem.tools.export_import import _VALID_ON_CONFLICT, import_chunks
+    from memtomem.tools.export_import import (
+        ImportPrivacyError,
+        _VALID_ON_CONFLICT,
+        import_chunks,
+    )
 
     if not file.filename or not file.filename.endswith(".json"):
         raise HTTPException(status_code=422, detail="Only .json bundle files are accepted.")
@@ -90,7 +104,21 @@ async def import_memories(
             tmp_path,
             on_conflict=on_conflict,  # type: ignore[arg-type]
             preserve_ids=preserve_ids,
+            force_unsafe=force_unsafe,
+            surface="web_api_import",
         )
+    except ImportPrivacyError as exc:
+        # Mirrors the web_api_add 403 shape (system.py); ``blocked_records`` is a
+        # record count (not a regex-span count). Matched bytes never leave the
+        # server. The SPA override toggle is the ADR-0006 PR-B follow-up.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "redaction_blocked",
+                "blocked_records": exc.blocked_records,
+                "surface": "web_api_import",
+            },
+        ) from exc
     finally:
         tmp_path.unlink(missing_ok=True)
 
