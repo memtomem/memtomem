@@ -351,7 +351,43 @@ class TestMemtomemStoreIndex:
             "total_files": 2,
             "indexed_chunks": 5,
             "duration_ms": 123.0,
+            "blocked_files": 0,
+            "blocked_paths": [],
+            "errors": [],
         }
+
+    @pytest.mark.asyncio
+    async def test_index_surfaces_blocked_files_and_errors(self, tmp_path):
+        """ADR-0006 PR-A gap: ``index()`` used to drop ``blocked_files`` /
+        ``blocked_paths`` / ``errors`` entirely, so an agent calling this
+        tool had no way to learn a secret-bearing file was skipped by the
+        redaction gate. They must now round-trip into the returned dict."""
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.models import IndexingStats
+
+        store = MemtomemStore()
+
+        mock_engine = MagicMock()
+        mock_engine.index_path = AsyncMock(
+            return_value=IndexingStats(
+                total_files=2,
+                total_chunks=1,
+                indexed_chunks=1,
+                skipped_chunks=0,
+                deleted_chunks=0,
+                duration_ms=42.0,
+                errors=("leak.md: redaction_blocked (hits=1, scope=user, decision=blocked)",),
+                blocked_files=1,
+                blocked_paths=(str(tmp_path / "leak.md"),),
+            )
+        )
+        store._components = MagicMock(index_engine=mock_engine)
+
+        result = await store.index(path=str(tmp_path))
+
+        assert result["blocked_files"] == 1
+        assert result["blocked_paths"] == [str(tmp_path / "leak.md")]
+        assert any("redaction_blocked" in e for e in result["errors"])
 
     @pytest.mark.asyncio
     async def test_index_engine_has_index_path(self):

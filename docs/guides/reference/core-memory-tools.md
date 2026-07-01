@@ -24,6 +24,7 @@ mem_index(path="~/notes")
   - Indexed: 312
   - Skipped (unchanged): 0
   - Deleted (stale): 0
+  - Blocked (redaction): 0
   - Duration: 2340ms
 ```
 
@@ -49,6 +50,7 @@ mem_index(path="~/notes")
   - Indexed: 5
   - Skipped (unchanged): 308
   - Deleted (stale): 2
+  - Blocked (redaction): 0
   - Duration: 180ms
 ```
 
@@ -82,6 +84,25 @@ recomputed. This means agents that cache chunk IDs, scheduled
 re-embedding jobs, and personalization signals all survive a force
 rebuild — previously every force pass regenerated UUIDs and silently
 zeroed access stats.
+
+### Secret-redaction gate
+
+Every indexing entrypoint scans file content for secret-shaped patterns
+(API keys, tokens, private-key headers — the same set `mem_add` / `mem_edit`
+enforce) before storing it. A hit skips that file — it is **not** indexed —
+and is reported via the `Blocked (redaction)` line above, plus a listing of
+the blocked paths when the count is nonzero. Other files in the same run are
+unaffected.
+
+`mm index --force-unsafe` bypasses the gate for a direct CLI index run
+(audit-logged). This flag is **CLI-only** — the `mem_index` MCP tool has no
+`force_unsafe` parameter, so an agent calling `mem_index` cannot bypass the
+gate; a false positive needs a human running `mm index --force-unsafe` from
+a terminal. The bypass is hard-refused for files that resolve to the
+git-tracked `project_shared` scope regardless of caller.
+
+See [ADR-0006](../../adr/0006-web-ui-folder-upload-redaction.md) for the
+full trust-boundary design.
 
 ### Namespace-scoped indexing
 
@@ -131,6 +152,21 @@ mm index --status                   # snapshot queue depth + oldest entry
   `--flush`, not status-then-flush.
 
 All three accept `--json` for one-line scripted output.
+
+`--debounce-window` and `--flush` enforce the same redaction gate as direct
+indexing — there's no way to opt out (`--force-unsafe` errors if combined
+with any of the three debounce flags, since the queue only carries
+`path` / `namespace` / `force`). A blocked file is not silently marked
+indexed: it surfaces as an `Errors` entry in the drain result and **stays
+queued**, retried on every subsequent drain. The gate re-runs on each retry
+(it fires before the content-hash skip), so the entry keeps erroring until
+the file no longer trips it — **remove or rotate the secret** and the next
+`--flush` drains it cleanly and clears the entry. A direct
+`mm index --force-unsafe <path>` indexes the content but does **not** dequeue
+the entry (the drain path never threads `--force-unsafe`), so it keeps
+reporting on flush until the file stops tripping the gate or you clear the
+queued entry yourself (it's a plain path key in
+`~/.memtomem/index_debounce_queue.json`).
 
 ---
 

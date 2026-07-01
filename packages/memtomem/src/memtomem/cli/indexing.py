@@ -272,18 +272,47 @@ def _run_debounce(
     )
 
 
+class _IndexingStatsError(RuntimeError):
+    """Raised by ``_make_indexer`` when a drained file was redaction-blocked
+    (``IndexingStats.blocked_files``) so the debounce/flush drain loop
+    (``indexing/debounce.py``) treats it as a failed indexer call — keeping the
+    queue entry for retry — instead of silently deleting it. This closes the
+    ADR-0006 observability gap for the hook path without livelocking the queue
+    on terminal, non-security skips (see ``_make_indexer``)."""
+
+
 def _make_indexer(comp):
     """Return an awaitable that indexes a single absolute path with the
     queue entry's namespace/force. Closes over the bootstrapped components
-    so the drain functions don't depend on the CLI bootstrap module."""
+    so the drain functions don't depend on the CLI bootstrap module.
+
+    ``index_path`` aggregates per-file outcomes into the returned
+    ``IndexingStats`` instead of raising, so a redaction block must be turned
+    back into an exception here — otherwise ``drain_ready`` / ``drain_all`` see
+    a normal return, mark the path ``indexed``, and drop it from the queue with
+    no retry even though the gate skipped it (the ADR-0006 hook-path gap).
+
+    The raise is scoped to ``blocked_files`` (the secret-redaction case) on
+    purpose. ``stats.errors`` also carries **terminal** non-security skips —
+    ``file too large`` and ``binary file detected`` (``engine.py`` — returned
+    before the suffix filter) — which can never succeed on retry: raising on
+    those would pin them in the queue forever, re-erroring on every subsequent
+    drain (a livelock the pre-fix silent-drop correctly avoided). A blocked file
+    self-clears once the secret is removed; a too-large/binary file never would.
+    Surfacing transient (e.g. embedding-backend) errors on the debounce path is
+    a separate call and is intentionally left as-is (silent drop, as before)."""
 
     async def _do(path_str: str, namespace: str | None, force: bool) -> None:
-        await comp.index_engine.index_path(
+        stats = await comp.index_engine.index_path(
             Path(path_str),
             recursive=False,
             force=force,
             namespace=namespace,
         )
+        if stats.blocked_files:
+            # ``stats.errors`` holds the redaction_blocked message(s) for the
+            # blocked file(s); surface them (never the matched bytes).
+            raise _IndexingStatsError("; ".join(stats.errors))
 
     return _do
 
