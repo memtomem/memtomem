@@ -762,6 +762,57 @@ class TestPrivacyPatterns:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/privacy/stats (ADR-0006 PR-B audit surface)
+# ---------------------------------------------------------------------------
+
+
+class TestPrivacyStats:
+    """GUI view of ``privacy.snapshot()`` — the process-lifetime redaction
+    counters the Settings → Redaction panel renders (same tally the MCP
+    ``mem_add_redaction_stats`` tool surfaces). Read-only metadata, no
+    ``require_configured`` gate, mirroring ``/api/privacy/patterns``."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_privacy(self):
+        from memtomem import privacy
+
+        privacy.reset_for_tests()
+        yield
+        privacy.reset_for_tests()
+
+    async def test_returns_snapshot_shape_zeroed(self, client: AsyncClient):
+        resp = await client.get("/api/privacy/stats")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert set(data.keys()) == {"outcomes", "by_tool"}
+        # All four outcome counters present and zero after reset; by_tool is a
+        # defaultdict populated only on record(), so it starts empty.
+        assert set(data["outcomes"]) == {"blocked", "pass", "bypassed", "blocked_project_shared"}
+        assert all(v == 0 for v in data["outcomes"].values())
+        assert data["by_tool"] == {}
+
+    async def test_reflects_recorded_outcomes(self, client: AsyncClient):
+        from memtomem import privacy
+
+        privacy.record("blocked", "index")
+        privacy.record("bypassed", "index")
+        privacy.record("pass", "mem_add")
+
+        resp = await client.get("/api/privacy/stats")
+        data = resp.json()
+        assert data["outcomes"]["blocked"] == 1
+        assert data["outcomes"]["bypassed"] == 1
+        assert data["outcomes"]["pass"] == 1
+        assert data["by_tool"]["index"] == {
+            "blocked": 1,
+            "pass": 0,
+            "bypassed": 1,
+            "blocked_project_shared": 0,
+        }
+        assert data["by_tool"]["mem_add"]["pass"] == 1
+
+
+# ---------------------------------------------------------------------------
 # GET /api/search
 # ---------------------------------------------------------------------------
 

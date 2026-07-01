@@ -502,6 +502,37 @@ class TestNoHardcodedStrings:
                     bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
         assert not bad_ph, "force_unsafe placeholder drift:\n" + "\n".join(bad_ph)
 
+    def test_redaction_stats_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """ADR-0006 PR-B audit surface — the Settings → Redaction panel labels
+        must route through locale keys in both locales, with the error string
+        keeping its ``{error}`` placeholder."""
+        required = {
+            "settings.nav.redaction": set(),
+            "settings.nav.redaction_sub": set(),
+            "settings.redaction.title": set(),
+            "settings.redaction.desc": set(),
+            "settings.redaction.refresh": set(),
+            "settings.redaction.by_tool_heading": set(),
+            "settings.redaction.surface_col": set(),
+            "settings.redaction.outcome.blocked": set(),
+            "settings.redaction.outcome.blocked_project_shared": set(),
+            "settings.redaction.outcome.bypassed": set(),
+            "settings.redaction.outcome.pass": set(),
+            "settings.redaction.empty": set(),
+            "settings.redaction.error": {"error"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"redaction keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"redaction keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "redaction placeholder drift:\n" + "\n".join(bad_ph)
+
     def test_decay_scan_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Decay scan status messages (#1024) must route through locale keys,
         with the scan-failed key keeping its ``{error}`` detail placeholder."""

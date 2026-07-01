@@ -773,6 +773,11 @@ def test_html_classification_matches_router_lists() -> None:
         "harness-scratch",
         "harness-procedures",
         "harness-health",
+        # ADR-0006 PR-B audit surface: the Redaction stats panel is dev-tier in
+        # the HTML, but its ``GET /api/privacy/stats`` route lives on the prod
+        # ``system`` router (the allowed "UI hides what the backend serves"
+        # direction described above) — so no router reclassification is needed.
+        "redaction",
     }
     assert dev_sections == expected_dev, (
         f"HTML dev-tier sections drifted from expected set. "

@@ -946,6 +946,13 @@
             <span class="nav-sub" data-i18n="settings.nav.health_sub">Status + watchdog</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="redaction" data-group="runtime">
+          <span class="nav-icon" aria-hidden="true">🛡</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.redaction">Redaction</span>
+            <span class="nav-sub" data-i18n="settings.nav.redaction_sub">Secret-gate stats</span>
+          </span>
+        </button>
 
         <button class="settings-nav-group" type="button" data-ui-adv="advanced" data-group="data" aria-expanded="false">
           <span class="nav-group-caret" aria-hidden="true">▸</span>
@@ -1205,6 +1212,18 @@
             <div id="health-watchdog-report">
               <div class="empty-state">Click Run Now to see watchdog status</div>
             </div>
+          </div>
+        </div>
+
+        <!-- Redaction stats section (ADR-0006 Axis E.1 audit surface) -->
+        <div class="settings-section" id="settings-redaction">
+          <p class="settings-section-desc" data-i18n="settings.redaction.desc">Process-lifetime counts from the secret-redaction gate — how many writes were passed, blocked, or bypassed (Index without privacy gate), per surface. Resets on restart.</p>
+          <div class="harness-header">
+            <h2 data-i18n="settings.redaction.title">Redaction Stats</h2>
+            <button id="redaction-stats-refresh-btn" class="btn-ghost" data-i18n="settings.redaction.refresh">Refresh</button>
+          </div>
+          <div id="redaction-stats-report" class="harness-health">
+            <div class="empty-state">Loading...</div>
           </div>
         </div>
 
@@ -1736,13 +1755,13 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=6"></script>
-  <script src="/app.js?v=145"></script>
+  <script src="/app.js?v=146"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=14"></script>
   <script src="/sources-memory-dirs.js?v=13"></script>
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=12"></script>
-  <script src="/settings-harness.js?v=4"></script>
+  <script src="/settings-harness.js?v=5"></script>
   <script src="/settings-hooks-watchdog.js?v=21"></script>
   <script src="/timeline.js?v=3"></script>
   <script src="/context-gateway.js?v=98"></script>
