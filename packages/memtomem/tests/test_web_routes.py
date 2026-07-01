@@ -3047,6 +3047,129 @@ class TestUnicodePaths:
 
 
 # ---------------------------------------------------------------------------
+# ADR-0006 PR-B — bulk-index force_unsafe route threading
+# ---------------------------------------------------------------------------
+
+
+class TestBulkIndexForceUnsafe:
+    """PR-B threads the Web UI's ``force_unsafe`` override into PR-A's engine
+    gate. The bypass is a security downgrade, so it rides only CSRF-protected
+    POSTs — the Index folder mode via ``POST /api/index`` (``trigger_index``)
+    and Sources "+ Add path" via ``POST /api/memory-dirs/add``. It is
+    deliberately **not** reachable through the token-exempt ``GET
+    /api/index/stream`` SSE surface. These pin the forwarding, the safe default,
+    the GET non-bypass, and strict boolean parsing on the raw-body POST."""
+
+    async def test_trigger_index_forwards_force_unsafe(self, app, client: AsyncClient, tmp_path):
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        app.state.index_engine.index_path.reset_mock()
+
+        resp = await client.post("/api/index", json={"path": str(tmp_path), "force_unsafe": True})
+        assert resp.status_code == 200, resp.text
+        app.state.index_engine.index_path.assert_awaited()
+        assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is True
+
+    async def test_trigger_index_defaults_force_unsafe_false(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        app.state.index_engine.index_path.reset_mock()
+
+        resp = await client.post("/api/index", json={"path": str(tmp_path)})
+        assert resp.status_code == 200, resp.text
+        app.state.index_engine.index_path.assert_awaited()
+        assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is False
+
+    @pytest.mark.parametrize("value", ["false", "true", "yes", 1, 0])
+    async def test_trigger_index_non_literal_true_stays_false(
+        self, app, client: AsyncClient, tmp_path, value
+    ):
+        """Only a JSON literal ``true`` enables the bypass. Pydantic's default
+        ``bool`` would coerce ``"true"`` / ``"yes"`` / ``1`` to True; the strict
+        validator makes every non-literal value fail closed to False so an
+        ambiguous payload can't flip the redaction override on."""
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        app.state.index_engine.index_path.reset_mock()
+
+        resp = await client.post("/api/index", json={"path": str(tmp_path), "force_unsafe": value})
+        assert resp.status_code == 200, resp.text
+        assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is False
+
+    async def test_index_stream_has_no_force_unsafe_bypass(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """The GET SSE stream is a token-exempt safe method, so it must not
+        thread a redaction bypass even if a caller appends ``force_unsafe=true``
+        to the query string — the param is not accepted and never reaches the
+        engine."""
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        calls: list[dict] = []
+
+        async def _fake_stream(resolved, **kwargs):
+            calls.append(kwargs)
+            yield {"type": "complete", "blocked_files": 0}
+
+        app.state.index_engine.index_path_stream = MagicMock(side_effect=_fake_stream)
+
+        resp = await client.get(
+            "/api/index/stream", params={"path": str(tmp_path), "force_unsafe": "true"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert calls, "index_path_stream was never called"
+        assert "force_unsafe" not in calls[0]
+
+    async def test_add_memory_dir_string_false_stays_false(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        """Raw-body POST parses ``force_unsafe`` strictly: the JSON string
+        ``"false"`` must stay False, not become truthy via ``bool("false")``."""
+        target = tmp_path / "notes"
+        target.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(target), "auto_index": True, "force_unsafe": "false"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is False
+
+    async def test_add_memory_dir_forwards_force_unsafe(self, app, client: AsyncClient, tmp_path):
+        target = tmp_path / "notes"
+        target.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(target), "auto_index": True, "force_unsafe": True},
+            )
+        assert resp.status_code == 200, resp.text
+        app.state.index_engine.index_path.assert_awaited()
+        assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is True
+
+    async def test_add_memory_dir_defaults_force_unsafe_false(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        target = tmp_path / "notes"
+        target.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.reset_mock()
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(target), "auto_index": True},
+            )
+        assert resp.status_code == 200, resp.text
+        app.state.index_engine.index_path.assert_awaited()
+        assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is False
+
+
+# ---------------------------------------------------------------------------
 # GET /api/memory-dirs/status
 # ---------------------------------------------------------------------------
 

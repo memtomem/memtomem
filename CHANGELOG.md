@@ -39,6 +39,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   calling it could never learn a file was blocked — and now returns
   `blocked_files` / `blocked_paths` / `errors` alongside the existing stats.
 
+- **The Web UI now shows secret-blocked files and can override the bulk-index
+  redaction gate (ADR-0006 PR-B).** PR-A skipped secret-bearing files during
+  bulk indexing but the web frontend never displayed the `blocked_files` count,
+  so a folder with a stray API key indexed as a green "success" with the file
+  silently dropped. Folder indexing, per-directory reindex, "Reindex all", and
+  Sources "+ Add path" now surface how many files were skipped (a result row on
+  the Index tab plus a toast). An **"Index without privacy gate"** checkbox on
+  the Index tab (folder mode) and the Sources "+ Add path" row brings flagged
+  files in anyway (audit-logged) — except git-tracked `project_shared` files,
+  which stay hard-refused; those are messaged to remove the secret or move the
+  file to a local scope. Because bypassing the redaction gate is a security
+  downgrade, the override runs through the CSRF-protected `POST /api/index` (a
+  one-shot run, no live per-file progress) rather than the token-exempt indexing
+  SSE stream. Mirrors the existing `mm index --force-unsafe` CLI escape hatch.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

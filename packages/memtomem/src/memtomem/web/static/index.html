@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=128" />
+  <link rel="stylesheet" href="/style.css?v=129" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -477,6 +477,7 @@
             <input id="memory-add-input" type="text" class="memory-dirs-add-input" data-i18n-placeholder="sources.memory_dirs.add_placeholder" placeholder="/absolute/path/to/directory" data-i18n-aria-label="sources.memory_dirs.add_placeholder" aria-label="/absolute/path/to/directory" />
             <button id="memory-add-submit" class="btn-primary btn-sm" data-i18n="sources.memory_dirs.add_submit">Add</button>
             <button id="memory-add-cancel" class="btn-ghost btn-sm" data-i18n="sources.memory_dirs.add_cancel">Cancel</button>
+            <label class="checkbox-warn memory-dirs-add-unsafe" data-i18n-title="index.force_unsafe_title" title="Index files even if they contain secrets (API keys, tokens). Audit-logged. Git-tracked project_shared files are still blocked."><input type="checkbox" id="memory-add-force-unsafe" /> <span data-i18n="sources.memory_dirs.add_force_unsafe">Index without privacy gate</span></label>
           </div>
           <div id="sources-vendor-tabs" class="sources-vendor-tabs" role="tablist" aria-label="Sources vendor">
             <button type="button" class="sources-vendor-tab active" role="tab" data-vendor="user" aria-selected="true" tabindex="0">
@@ -818,6 +819,7 @@
             <label><input type="checkbox" id="index-recursive" checked /> <span data-i18n="index.recursive">Recursive</span></label>
             <label><input type="checkbox" id="index-force" /> <span data-i18n="index.force">Force re-index</span></label>
             <label data-i18n-title="index.register_source_title" title="Add this path to memory_dirs so future changes are auto-indexed"><input type="checkbox" id="index-register-source" /> <span data-i18n="index.register_source">Register as source</span></label>
+            <label class="checkbox-warn" data-i18n-title="index.force_unsafe_title" title="Index files even if they contain secrets (API keys, tokens). Audit-logged. Git-tracked project_shared files are still blocked."><input type="checkbox" id="index-force-unsafe" /> <span data-i18n="index.force_unsafe">Index without privacy gate</span></label>
           </div>
           <button id="index-btn" class="btn-primary" data-i18n="index.index_btn">Index</button>
           <div id="index-msg" class="status-msg" hidden></div>
@@ -837,6 +839,10 @@
               <tr><td data-i18n="index.result.deleted">Deleted</td><td id="r-deleted"></td></tr>
               <tr><td data-i18n="index.result.duration">Duration</td><td id="r-duration"></td></tr>
               <tr><td data-i18n="index.result.namespace">Namespace</td><td id="r-namespace"></td></tr>
+              <tr id="r-blocked-row" hidden>
+                <td data-i18n="index.result.blocked">Blocked (secrets)</td>
+                <td id="r-blocked" class="index-result-blocked"></td>
+              </tr>
               <tr id="r-errors-row" hidden>
                 <td data-i18n="index.result.errors">Errors</td>
                 <td id="r-errors" class="index-result-errors"></td>
@@ -1730,10 +1736,10 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=6"></script>
-  <script src="/app.js?v=144"></script>
+  <script src="/app.js?v=145"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=14"></script>
-  <script src="/sources-memory-dirs.js?v=12"></script>
+  <script src="/sources-memory-dirs.js?v=13"></script>
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=12"></script>
   <script src="/settings-harness.js?v=4"></script>

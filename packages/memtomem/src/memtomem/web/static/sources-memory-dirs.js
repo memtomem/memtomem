@@ -994,15 +994,16 @@ function _mdApiErrorText(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
-async function mdAdd(path) {
+async function mdAdd(path, opts = {}) {
   const trimmed = (path || '').trim();
   if (!trimmed) return;
   try {
     // ``auto_index=true`` — see ``handleAdd`` above for rationale.
-    const resp = await api('POST', '/api/memory-dirs/add', {
-      path: trimmed,
-      auto_index: true,
-    });
+    const body = { path: trimmed, auto_index: true };
+    // ADR-0006 PR-B: opt-in secret-redaction bypass for the auto-index scan
+    // (audit-logged; ``project_shared`` stays hard-refused per ADR-0011 §5).
+    if (opts.forceUnsafe) body.force_unsafe = true;
+    const resp = await api('POST', '/api/memory-dirs/add', body);
     if (resp && Array.isArray(resp.memory_dirs)) {
       if (STATE.serverConfig?.indexing) {
         STATE.serverConfig.indexing.memory_dirs = [...resp.memory_dirs];
@@ -1021,6 +1022,11 @@ async function mdAdd(path) {
       );
     } else {
       showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
+    }
+    // ADR-0006 PR-B: surface files the redaction gate skipped during
+    // auto-index (silent before PR-B — the dir registered, some files dropped).
+    if (stats && typeof _blockedIndexToast === 'function') {
+      _blockedIndexToast(stats.blocked_files, stats.blocked_project_shared_files);
     }
     if (typeof loadSources === 'function') loadSources();
   } catch (err) {
@@ -1199,6 +1205,11 @@ async function mdReindexOne(path, btn) {
         t('toast.memory_dir.reindex_done', { path, count: indexed }),
         errs.length ? 'error' : 'success',
       );
+      // ADR-0006 PR-B: surface files skipped by the redaction gate (no toggle
+      // on per-dir reindex — surfacing only).
+      if (typeof _blockedIndexToast === 'function') {
+        _blockedIndexToast(event.blocked_files, event.blocked_project_shared_files);
+      }
       if (typeof _markDataStale === 'function') _markDataStale();
       if (typeof loadStats === 'function') loadStats();
       _cleanup();
@@ -1241,6 +1252,11 @@ async function mdReindexAll(btn) {
     } else {
       const total = (resp.results || []).reduce((s, r) => s + (r.indexed_chunks || 0), 0);
       showToast(t('toast.reindex_complete', { count: total }), 'success');
+    }
+    // ADR-0006 PR-B: surface files skipped by the redaction gate across all
+    // dirs (aggregate ``blocked_files`` on the /api/reindex response).
+    if (typeof _blockedIndexToast === 'function') {
+      _blockedIndexToast(resp.blocked_files, resp.blocked_project_shared_files);
     }
     if (typeof _markDataStale === 'function') _markDataStale();
     if (typeof loadStats === 'function') loadStats();

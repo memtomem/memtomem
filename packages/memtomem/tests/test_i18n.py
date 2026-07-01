@@ -475,6 +475,33 @@ class TestNoHardcodedStrings:
             "t('index.progress_done', {count}) instead."
         )
 
+    def test_force_unsafe_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """ADR-0006 PR-B — the bulk-index ``force_unsafe`` toggle labels and the
+        blocked-file surfacing strings must route through locale keys in both
+        locales, with the two blocked toasts keeping their ``{count}``
+        placeholder so the surfaced skip count localizes."""
+        required = {
+            "index.force_unsafe": set(),
+            "index.force_unsafe_title": set(),
+            "index.indexing": set(),
+            "index.result.blocked": set(),
+            "sources.memory_dirs.add_force_unsafe": set(),
+            "toast.index_blocked": {"count"},
+            "toast.index_blocked_project_shared": {"count"},
+            "toast.index_failed": {"error"},
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"force_unsafe keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"force_unsafe keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "force_unsafe placeholder drift:\n" + "\n".join(bad_ph)
+
     def test_decay_scan_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
         """The Decay scan status messages (#1024) must route through locale keys,
         with the scan-failed key keeping its ``{error}`` detail placeholder."""
