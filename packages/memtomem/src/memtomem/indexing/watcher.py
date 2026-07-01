@@ -178,6 +178,13 @@ class FileWatcher:
             try:
                 stats = await self._engine.index_path(d, recursive=True)
                 total_indexed += stats.indexed_chunks
+                if stats.blocked_files:
+                    # ADR-0006 PR-A: secret-bearing files skipped during backfill.
+                    logger.warning(
+                        "Startup backfill %s: %d file(s) blocked by redaction guard",
+                        d,
+                        stats.blocked_files,
+                    )
                 if stats.indexed_chunks or stats.deleted_chunks:
                     logger.info(
                         "Startup backfill %s: indexed=%d skipped=%d deleted=%d",
@@ -226,6 +233,8 @@ class FileWatcher:
                 continue
 
     async def _reindex(self, file_path: Path) -> None:
+        from memtomem.indexing.engine import PrivacyRejection
+
         try:
             stats = await self._engine.index_file(file_path)
             logger.info(
@@ -234,6 +243,14 @@ class FileWatcher:
                 stats.indexed_chunks,
                 stats.skipped_chunks,
                 stats.deleted_chunks,
+            )
+        except PrivacyRejection as exc:
+            # ADR-0006 PR-A: a watched file gained secret-class content; it is
+            # left un-indexed (not a failure — the boundary is doing its job).
+            logger.warning(
+                "Auto-reindex blocked by redaction guard for %s: %d hit(s)",
+                file_path.name,
+                exc.hit_count,
             )
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)

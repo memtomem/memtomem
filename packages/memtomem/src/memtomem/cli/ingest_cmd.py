@@ -253,8 +253,17 @@ async def _ingest_files_with_components(
     total_skipped = 0
     total_deleted = 0
     errors: list[str] = []
+    # ADR-0006 PR-A: ingested files are un-adjudicated, so the engine redaction
+    # gate is active — skip + record secret-bearing files rather than aborting
+    # the whole ingest run on the first hit.
+    from memtomem.indexing.engine import PrivacyRejection
+
     for f in files:
-        stats = await comp.index_engine.index_file(f, namespace=namespace)
+        try:
+            stats = await comp.index_engine.index_file(f, namespace=namespace)
+        except PrivacyRejection as exc:
+            errors.append(f"{f.name}: redaction_blocked (hits={exc.hit_count})")
+            continue
         total_indexed += stats.indexed_chunks
         total_skipped += stats.skipped_chunks
         total_deleted += stats.deleted_chunks

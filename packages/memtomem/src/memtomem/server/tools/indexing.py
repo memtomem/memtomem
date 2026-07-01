@@ -54,8 +54,17 @@ async def mem_index(
         f"- Indexed: {stats.indexed_chunks}\n"
         f"- Skipped (unchanged): {stats.skipped_chunks}\n"
         f"- Deleted (stale): {stats.deleted_chunks}\n"
+        f"- Blocked (redaction): {stats.blocked_files}\n"
         f"- Duration: {stats.duration_ms:.0f}ms"
     )
+    if stats.blocked_files:
+        # ADR-0006 PR-A: name the skipped files so an operator can review them.
+        result += "\n- Blocked files:\n" + "\n".join(f"    {p}" for p in stats.blocked_paths)
+        if stats.blocked_project_shared_files:
+            result += (
+                f"\n- {stats.blocked_project_shared_files} of these are project_shared"
+                " (hard-refused; force_unsafe does not apply)."
+            )
 
     if auto_tag and stats.indexed_chunks > 0:
         from memtomem.tools.auto_tag import auto_tag_storage

@@ -310,7 +310,7 @@ async def _mem_add_core(
 
     # Re-index the whole file via the standard pipeline so the watcher
     # (which also calls index_file) produces identical hashes → no duplicates.
-    stats = await app.index_engine.index_file(target, namespace=effective_ns)
+    stats = await app.index_engine.index_file(target, namespace=effective_ns, already_scanned=True)
     app.search_pipeline.invalidate_cache()
 
     display_ns = effective_ns or app.config.namespace.default_namespace
@@ -523,12 +523,14 @@ async def mem_edit(
         await asyncio.to_thread(
             replace_chunk_body, meta.source_file, meta.start_line, meta.end_line, new_content
         )
-        stats = await app.index_engine.index_file(meta.source_file, force=True)
+        stats = await app.index_engine.index_file(
+            meta.source_file, force=True, already_scanned=True
+        )
         app.search_pipeline.invalidate_cache()
     except Exception as exc:
         await asyncio.to_thread(meta.source_file.write_text, original, encoding="utf-8")
         try:
-            await app.index_engine.index_file(meta.source_file, force=True)
+            await app.index_engine.index_file(meta.source_file, force=True, already_scanned=True)
         except Exception:
             logger.warning("Rollback re-index also failed", exc_info=True)
         app.search_pipeline.invalidate_cache()
@@ -598,12 +600,16 @@ async def mem_delete(
         original = await asyncio.to_thread(meta.source_file.read_text, encoding="utf-8")
         try:
             await asyncio.to_thread(remove_lines, meta.source_file, meta.start_line, meta.end_line)
-            stats = await app.index_engine.index_file(meta.source_file, force=True)
+            stats = await app.index_engine.index_file(
+                meta.source_file, force=True, already_scanned=True
+            )
             app.search_pipeline.invalidate_cache()
         except Exception as exc:
             await asyncio.to_thread(meta.source_file.write_text, original, encoding="utf-8")
             try:
-                await app.index_engine.index_file(meta.source_file, force=True)
+                await app.index_engine.index_file(
+                    meta.source_file, force=True, already_scanned=True
+                )
             except Exception:
                 logger.warning("Rollback re-index also failed", exc_info=True)
             app.search_pipeline.invalidate_cache()
@@ -893,7 +899,7 @@ async def mem_batch_add(
         append_entry(target, value, title=key or None, tags=entry_tags)
 
     effective_ns = namespace or _resolve_agent_namespace(app, None)
-    stats = await app.index_engine.index_file(target, namespace=effective_ns)
+    stats = await app.index_engine.index_file(target, namespace=effective_ns, already_scanned=True)
     app.search_pipeline.invalidate_cache()
 
     display_ns = effective_ns or app.config.namespace.default_namespace

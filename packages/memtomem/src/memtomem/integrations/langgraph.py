@@ -298,7 +298,10 @@ class MemtomemStore:
         effective_namespace = self._resolve_add_namespace(namespace)
 
         append_entry(target, content, title=title, tags=tags)
-        stats = await comp.index_engine.index_file(target, namespace=effective_namespace)
+        # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+        stats = await comp.index_engine.index_file(
+            target, namespace=effective_namespace, already_scanned=True
+        )
 
         return {
             "file": str(target),

@@ -5,6 +5,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Security
+
+- **Bulk folder indexing now enforces the secret-redaction trust boundary
+  (ADR-0006 PR-A).** Previously `mm reindex`, the Web UI Index / Sources flows
+  (`trigger_index`, `reindex_all`, `memory-dirs/add` auto-index, `index_stream`),
+  the file watcher, `mem_index`, `mem_fetch`, and file import (`mem_import_*`) all
+  pulled files straight into the store without the secret-class redaction scan
+  that single-file upload, `mem_add` / `mem_edit`, and JSON import already ran —
+  so a stray API key in a bulk-indexed folder crossed the write boundary
+  silently. The gate now lives at the `IndexEngine._index_file` chokepoint that
+  every indexing entrypoint funnels through: secret-bearing files are skipped
+  (not indexed) and reported via a new `blocked_files` / `blocked_paths` count on
+  the index response, the SSE `complete` event, and the `mm index` summary. Bulk
+  indexing continues past a flagged file instead of aborting the whole run.
+  Pass `mm index --force-unsafe` (audit-logged) to index flagged files anyway;
+  the bypass is hard-refused for the git-tracked `project_shared` tier. Content
+  that already passed a write-ingress guard (`mem_add` / `mem_edit`, upload,
+  chunk edit, …) is not re-scanned, so no existing write path regresses.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

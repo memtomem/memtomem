@@ -72,6 +72,7 @@ async def run_with_progress(
     recursive: bool = True,
     force: bool = False,
     namespace: str | None = None,
+    force_unsafe: bool = False,
 ) -> dict[str, Any]:
     """Stream ``index_path_stream`` across ``paths`` with a click.progressbar.
 
@@ -119,6 +120,12 @@ async def run_with_progress(
         "duration_ms": 0.0,
         "errors": [],
         "bar_rendered": False,
+        # ADR-0006 PR-A: files skipped by the redaction gate (count + paths),
+        # aggregated from each stream's ``complete`` event. ``blocked_project_shared``
+        # is the subset that is hard-refused even with force_unsafe.
+        "blocked": 0,
+        "blocked_paths": [],
+        "blocked_project_shared": 0,
     }
 
     # Throttle clock for ``chunk_progress`` label refreshes. Mirrors the web
@@ -180,7 +187,11 @@ async def run_with_progress(
         async with cli_components() as comp:
             for p in paths:
                 async for evt in comp.index_engine.index_path_stream(
-                    p, recursive=recursive, force=force, namespace=namespace
+                    p,
+                    recursive=recursive,
+                    force=force,
+                    namespace=namespace,
+                    force_unsafe=force_unsafe,
                 ):
                     if evt["type"] == "discovery":
                         # Authoritative bar-length source. Engine emits this
@@ -230,6 +241,9 @@ async def run_with_progress(
                         # Single-path is the dominant case so this is a
                         # simple aggregation rather than tracking per-path.
                         agg["duration_ms"] += evt.get("duration_ms", 0.0)
+                        agg["blocked"] += evt.get("blocked_files", 0)
+                        agg["blocked_project_shared"] += evt.get("blocked_project_shared_files", 0)
+                        agg["blocked_paths"].extend(evt.get("blocked_paths") or [])
                         errs = evt.get("errors") or []
                         if errs:
                             agg["errors"].extend(errs)

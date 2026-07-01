@@ -306,7 +306,8 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         path = base / f"{date_str}.md"
         append_entry(path, chunk.content, title=title, tags=tags)
-        stats = await comp.index_engine.index_file(path, namespace=target)
+        # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+        stats = await comp.index_engine.index_file(path, namespace=target, already_scanned=True)
 
     click.echo(f"Shared to namespace '{target}'.")
     click.echo(f"- File: {path}")

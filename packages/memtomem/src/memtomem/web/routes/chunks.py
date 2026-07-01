@@ -118,7 +118,10 @@ async def edit_chunk(
         # the metadata header on disk. Prefix ``new_content`` with ``## ``
         # to override the heading explicitly.
         replace_chunk_body(meta.source_file, meta.start_line, meta.end_line, body.new_content)
-        await index_engine.index_file(meta.source_file, force=True)
+        # Guarded above (``enforce_write_guard``); skip the engine gate so the
+        # whole-file reindex doesn't re-litigate already-adjudicated content and
+        # the existing rollback contract stays intact (ADR-0006 PR-A).
+        await index_engine.index_file(meta.source_file, force=True, already_scanned=True)
     except Exception as exc:
         logger.error("Chunk edit failed for %s: %s", chunk_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Edit failed. Check server logs.") from exc
@@ -176,7 +179,10 @@ async def delete_chunk(
     if source.exists() and meta.start_line and meta.end_line:
         try:
             remove_lines(source, meta.start_line, meta.end_line)
-            await index_engine.index_file(source, force=True)
+            # Delete (removal) of an already-adjudicated file — skip the engine
+            # gate; the ``except`` fallback below still relies on real indexing
+            # failures raising (ADR-0006 PR-A).
+            await index_engine.index_file(source, force=True, already_scanned=True)
         except Exception as exc:
             logger.warning("Source file edit failed for %s: %s", chunk_id, exc)
             # Fall back to index-only delete

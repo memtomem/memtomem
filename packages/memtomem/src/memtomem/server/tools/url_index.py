@@ -47,9 +47,22 @@ async def mem_fetch(
     except Exception as exc:
         return f"Error fetching URL: {exc}"
 
-    # Index the fetched file
+    # Index the fetched file. ADR-0006 PR-A: fetched content is un-adjudicated,
+    # so the engine redaction gate is active — a secret-bearing page is saved
+    # but not indexed, and surfaced here instead of silently reporting success.
+    from memtomem.indexing.engine import PrivacyRejection
+
     effective_ns = namespace or _resolve_agent_namespace(app, None)
-    stats = await app.index_engine.index_file(file_path, namespace=effective_ns)
+    try:
+        stats = await app.index_engine.index_file(file_path, namespace=effective_ns)
+    except PrivacyRejection as exc:
+        app.search_pipeline.invalidate_cache()
+        return (
+            f"Fetched but NOT indexed — blocked by the redaction guard: {url}\n"
+            f"- Saved to: {file_path}\n"
+            f"- Secret-pattern hits: {exc.hit_count}. Review the file; re-index "
+            f"with 'mm index --force-unsafe' if it is a false positive."
+        )
 
     # Apply tags if provided
     if tags and stats.indexed_chunks > 0:

@@ -604,3 +604,34 @@ class TestSessionSummaryPhaseB:
                 continue
             link = await app.storage.get_chunk_link(c.id, link_type="summarizes")
             assert link is None, "manual summary path must not write summarizes links"
+
+
+class TestSessionSummaryRedactionGate:
+    """ADR-0006 PR-A: a secret in the session summary makes the engine redaction
+    gate raise ``PrivacyRejection``. The blocked branch of
+    ``_persist_session_summary_chunk`` must return the contracted
+    ``(status_line, chunk_id)`` tuple — a bare string would make the caller's
+    ``line, id = await …`` unpack raise ``ValueError``, which the generic
+    ``except`` swallows, so the user never sees the "written but NOT indexed"
+    message.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocked_summary_returns_tuple_with_message(self, bm25_only_components):
+        from memtomem.server.tools.session import _persist_session_summary_chunk
+
+        comp, _ = bm25_only_components
+        app = AppContext.from_components(comp)
+        secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+
+        line, chunk_id = await _persist_session_summary_chunk(
+            app,
+            session_id="redactiontest",
+            agent_id="tester",
+            summary=f"api token: {secret}",
+            event_counts={"note": 1},
+        )
+
+        assert chunk_id is None
+        assert line is not None and "NOT indexed" in line
+        assert secret not in line  # no matched bytes echoed

@@ -185,3 +185,15 @@ class TestFreshNoopIndexSubprocess:
         r = _run("search", "hello")
         assert r.returncode == 0, f"search failed:\nstdout={r.stdout}\nstderr={r.stderr}"
         assert "hello world" in r.stdout
+
+
+def test_force_unsafe_rejected_with_debounce_modes():
+    """ADR-0006 PR-A: ``--force-unsafe`` only applies to direct indexing; the
+    debounce queue does not thread it, so combining it with
+    ``--flush`` / ``--status`` / ``--debounce-window`` must error rather than
+    silently ignore the flag.
+    """
+    runner = CliRunner()
+    r = runner.invoke(cli, ["index", "--force-unsafe", "--flush"])
+    assert r.exit_code != 0
+    assert "only applies to direct indexing" in r.output

@@ -47,11 +47,20 @@ async def mem_import_notion(
     if not imported:
         return "No markdown files found in the Notion export."
 
-    # Index all imported files
+    # Index all imported files. ADR-0006 PR-A: imported content is
+    # un-adjudicated, so the engine redaction gate is active; skip + count
+    # secret-bearing files rather than aborting the whole import.
+    from memtomem.indexing.engine import PrivacyRejection
+
     effective_ns = namespace or "notion"
     total_chunks = 0
+    blocked = 0
     for f in imported:
-        stats = await app.index_engine.index_file(f, namespace=effective_ns)
+        try:
+            stats = await app.index_engine.index_file(f, namespace=effective_ns)
+        except PrivacyRejection:
+            blocked += 1
+            continue
         total_chunks += stats.indexed_chunks
 
     # Apply tags
@@ -79,6 +88,7 @@ async def mem_import_notion(
         f"Notion import complete:\n"
         f"- Files imported: {len(imported)}\n"
         f"- Chunks indexed: {total_chunks}\n"
+        f"- Blocked (redaction): {blocked}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
     )
@@ -121,11 +131,20 @@ async def mem_import_obsidian(
     if not imported:
         return "No markdown files found in the Obsidian vault."
 
-    # Index all imported files
+    # Index all imported files. ADR-0006 PR-A: imported content is
+    # un-adjudicated, so the engine redaction gate is active; skip + count
+    # secret-bearing files rather than aborting the whole import.
+    from memtomem.indexing.engine import PrivacyRejection
+
     effective_ns = namespace or "obsidian"
     total_chunks = 0
+    blocked = 0
     for f in imported:
-        stats = await app.index_engine.index_file(f, namespace=effective_ns)
+        try:
+            stats = await app.index_engine.index_file(f, namespace=effective_ns)
+        except PrivacyRejection:
+            blocked += 1
+            continue
         total_chunks += stats.indexed_chunks
 
     # Apply tags
@@ -153,6 +172,7 @@ async def mem_import_obsidian(
         f"Obsidian import complete:\n"
         f"- Files imported: {len(imported)}\n"
         f"- Chunks indexed: {total_chunks}\n"
+        f"- Blocked (redaction): {blocked}\n"
         f"- Namespace: {effective_ns}\n"
         f"- Output: {output_dir}"
     )
