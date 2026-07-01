@@ -17,6 +17,7 @@ Two variants are kept intentionally:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -197,3 +198,122 @@ def test_force_unsafe_rejected_with_debounce_modes():
     r = runner.invoke(cli, ["index", "--force-unsafe", "--flush"])
     assert r.exit_code != 0
     assert "only applies to direct indexing" in r.output
+
+
+def test_debounce_flush_surfaces_blocked_file_as_error(tmp_path, monkeypatch):
+    """A secret-bearing file enqueued via ``--debounce-window`` and drained
+    via ``--flush`` must not be reported as ``Indexed`` and silently dropped
+    from the queue — it must surface as an ``Errors`` entry and stay queued
+    for retry, matching ``mm index``'s direct-run behavior. Before the fix,
+    ``_make_indexer`` discarded the ``IndexingStats`` return value entirely,
+    so a redaction-blocked (or any other per-file-failed) file was reported
+    as indexed with no way for a hook caller to ever learn it was skipped.
+    """
+    from memtomem.cli import _bootstrap
+
+    for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
+        monkeypatch.delenv(var, raising=False)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+    # ``debounce.queue_path()`` falls back to a module-level constant bound at
+    # import time; ``set_home`` alone won't isolate it from a real
+    # ``~/.memtomem/index_debounce_queue.json``.
+    monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(tmp_path / "debounce_queue.json"))
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    # HuggingFace-token shape assembled at runtime so GitHub push-protection
+    # does not flag this file (mirrors test_index_privacy_block_surfaces.py).
+    secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+    leak = mem_dir / "leak.md"
+    leak.write_text(f"# Leak\n\napi token: {secret}\n")
+
+    runner = CliRunner()
+    r = runner.invoke(
+        cli,
+        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+    )
+    assert r.exit_code == 0, f"init failed: {r.output}"
+
+    # Enqueue only — a huge window never elapses on this call.
+    r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(leak)])
+    assert r.exit_code == 0, f"enqueue failed: {r.output}"
+
+    # Force-drain regardless of window.
+    r = runner.invoke(cli, ["index", "--flush"])
+    assert r.exit_code == 0, f"flush failed: {r.output}"
+    assert "Indexed: 0" in r.output
+    assert "Errors: 1" in r.output
+    assert "redaction_blocked" in r.output
+    assert "Remaining in queue: 1" in r.output
+
+    # ``--json`` shape: same outcome, still queued for the next retry. The
+    # redaction gate's ``logger.warning`` calls share stdout/stderr with
+    # CliRunner, so the JSON dict — the last thing ``_print_drain_result``
+    # emits — is the last line, not necessarily the whole output.
+    r = runner.invoke(cli, ["index", "--flush", "--json"])
+    assert r.exit_code == 0, f"flush --json failed: {r.output}"
+    payload = json.loads(r.output.strip().splitlines()[-1])
+    assert payload["indexed"] == []
+    assert len(payload["errors"]) == 1
+    assert "redaction_blocked" in payload["errors"][0]["message"]
+    assert payload["remaining"] == 1
+
+
+def test_debounce_flush_drains_terminal_skip_without_livelock(tmp_path, monkeypatch):
+    """A terminal, non-security skip (binary / too-large file) enqueued via the
+    hook path must still **drain** — it must not stick in the queue and
+    re-error on every subsequent flush. The redaction fix raises only on
+    ``blocked_files`` (the security case); ``stats.errors`` for a binary file —
+    which can never succeed on retry — must NOT pin the entry. This guards
+    against re-broadening the raise to ``stats.errors`` and reintroducing a
+    permanent queue livelock for un-indexable assets (the pre-fix silent-drop
+    was correct for these).
+    """
+    from memtomem.cli import _bootstrap
+
+    for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
+        monkeypatch.delenv(var, raising=False)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+    monkeypatch.setenv("MEMTOMEM_INDEX_DEBOUNCE_QUEUE", str(tmp_path / "debounce_queue.json"))
+
+    mem_dir = tmp_path / "memories"
+    mem_dir.mkdir()
+    # Null bytes → the engine flags it "binary file detected" (a terminal skip
+    # that populates stats.errors but NOT stats.blocked_files). NUL is valid
+    # UTF-8, so read_text succeeds and the binary heuristic is what trips.
+    binfile = mem_dir / "asset.md"
+    binfile.write_bytes(b"# Title\n\n\x00\x00 binary noise \x00\n")
+
+    runner = CliRunner()
+    r = runner.invoke(
+        cli,
+        ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+    )
+    assert r.exit_code == 0, f"init failed: {r.output}"
+
+    r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(binfile)])
+    assert r.exit_code == 0, f"enqueue failed: {r.output}"
+
+    r = runner.invoke(cli, ["index", "--flush"])
+    assert r.exit_code == 0, f"flush failed: {r.output}"
+    # Drained, not stuck: the terminal skip leaves nothing queued and is not
+    # reported as a retryable error. (Pre-fix-broad behavior would have raised →
+    # "Errors: 1" / "Remaining in queue: 1" and livelocked.)
+    assert "Indexed: 1" in r.output
+    assert "Remaining in queue: 0" in r.output
+
+    # And it does not re-appear on the next flush (queue is genuinely empty).
+    r = runner.invoke(cli, ["index", "--flush", "--json"])
+    assert r.exit_code == 0, f"second flush failed: {r.output}"
+    payload = json.loads(r.output.strip().splitlines()[-1])
+    assert payload["indexed"] == []
+    assert payload["errors"] == []
+    assert payload["remaining"] == 0

@@ -425,7 +425,8 @@ Axes A–E are decided but only **partially built**:
   force_unsafe=…)` and raises `PrivacyRejection` on a hit without `force_unsafe`.
   Bulk entrypoints (`index_path` / `index_path_stream` — `trigger_index`,
   `reindex_all`, `memory-dirs/add` auto_index, `index_stream`, `mm reindex`,
-  `mem_index`, the watcher) catch it per file and aggregate into
+  `mem_index`, the watcher, the `mm index --debounce-window` / `--flush`
+  hook-drain path) catch it per file and aggregate into
   `IndexingStats.blocked_files` / `blocked_paths`, so one flagged file does not
   abort the run; single-file `index_file` lets it propagate so callers roll back
   or surface it rather than silently succeeding. Callers that already ran
@@ -497,6 +498,35 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
       retry with `--force-unsafe`.
     - **PR-C's `mm index --force-unsafe` shipped with PR-A** (not deferred) so a
       false positive on bulk index has an escape hatch in the same release.
+    - **Gap found and closed same-day: the debounce/flush drain path
+      discarded `IndexingStats` entirely.** `cli/indexing.py`'s
+      `_make_indexer` (predates PR-A, from `#548`) called `index_path` and
+      never inspected the return value, so a `blocked_files` hit was reported
+      to the hook caller as a plain `Indexed` success and the queue entry was
+      deleted with no retry — silently defeating the "reject is observable"
+      rationale Axis B leans on for bulk surfaces reached via the hook path.
+      Fixed by raising when `stats.blocked_files` is nonzero so
+      `debounce.drain_ready` / `drain_all`'s existing `except Exception` retry
+      path keeps the entry for the next drain. The raise is **scoped to the
+      redaction block, not to `stats.errors` generally**: `stats.errors` also
+      carries terminal non-security skips (`file too large`, `binary file
+      detected`) that can never succeed on retry, so raising on them would pin
+      the file in the queue forever, re-erroring on every drain — a livelock
+      the pre-fix silent-drop correctly avoided. A blocked file self-clears
+      once the secret is removed; a too-large/binary file never would.
+      Surfacing transient (embedding-backend) failures on the debounce path is
+      a separate, deliberate call, left as-is. The LangGraph integration's
+      `index()` tool had the identical reporting gap (no return value at all
+      for `blocked_files` / `blocked_paths` / `errors`) and was fixed the
+      same way.
+    - **Known, lower-severity partial gap — tracked, not fixed in this
+      pass.** `cli/shell.py`'s interactive `index` command and
+      `indexing/watcher.py`'s startup backfill both log `stats.blocked_files`
+      as a count, but neither logs `blocked_paths` (which files) nor
+      inspects generic `stats.errors` (non-redaction per-file failures).
+      Some signal already exists here — unlike the debounce/flush and
+      LangGraph gaps above — so this is deferred alongside PR-B rather than
+      bundled into this fix.
 - **PR-B — Web UI override toggle + audit surface.**
   - Add an "Index without privacy gate (audit-logged)" checkbox to the
     Index tab and the Sources `+ 경로 추가` modal. On submit, pass

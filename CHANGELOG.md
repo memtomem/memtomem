@@ -24,6 +24,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   that already passed a write-ingress guard (`mem_add` / `mem_edit`, upload,
   chunk edit, …) is not re-scanned, so no existing write path regresses.
 
+- **`mm index --debounce-window` / `--flush` and the LangGraph `index()` tool
+  now surface secret-blocked files instead of silently discarding them
+  (ADR-0006 PR-A follow-up).** The debounce queue's indexer closure called
+  `IndexEngine.index_path` but never inspected the returned `IndexingStats`,
+  so a secret-bearing file correctly skipped by the redaction gate was
+  reported as `Indexed` and dropped from the queue with no retry — the file
+  was never stored, but the hook caller had no way to know. The drain result
+  now surfaces a redaction-blocked file (`IndexingStats.blocked_files`) as an
+  `Errors` entry and leaves the path queued for retry, matching `mm index`'s
+  direct-run behavior. Terminal non-security skips (too-large / binary files)
+  keep draining silently as before, so they don't accumulate in the queue. The
+  LangGraph integration's `index()` tool had the same reporting gap — an agent
+  calling it could never learn a file was blocked — and now returns
+  `blocked_files` / `blocked_paths` / `errors` alongside the existing stats.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

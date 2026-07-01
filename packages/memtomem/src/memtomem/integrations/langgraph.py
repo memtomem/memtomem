@@ -495,6 +495,9 @@ class MemtomemStore:
             "total_files": stats.total_files,
             "indexed_chunks": stats.indexed_chunks,
             "duration_ms": stats.duration_ms,
+            "blocked_files": stats.blocked_files,
+            "blocked_paths": list(stats.blocked_paths),
+            "errors": list(stats.errors),
         }
 
     # ── Context Manager ───────────────────────────────────────────────────
