@@ -456,11 +456,13 @@ not a per-file progress bar). Every bulk-index surface now *displays* the PR-A
 `blocked_files` counts (result row + toast) — which PR-A added to the responses
 but no frontend surface rendered, so a secret-bearing file dropped with a green
 "success". `project_shared` blocks are messaged as non-bypassable (ADR-0011 §5),
-mirroring the `mm index` CLI. The Axis E.1 **audit-surface panel** (a GUI view of
-`privacy.snapshot()`) is **deferred to a follow-up PR** — no such panel exists in
-the web UI (the counters are MCP-only via `mem_add_redaction_stats`), so building
-it is its own focused change (a new `GET /api/privacy/stats` endpoint + a
-Settings section).
+mirroring the `mm index` CLI. The Axis E.1 **audit-surface panel — shipped as a
+follow-up (2026-07-01):** a Settings → Redaction section renders `privacy.snapshot()`
+(the process-lifetime redaction counters the MCP `mem_add_redaction_stats` tool
+surfaces) over a new read-only `GET /api/privacy/stats` endpoint — outcome totals
+(blocked / bypassed / pass / project_shared) plus a per-write-surface breakdown.
+A persistent audit table (the open axis-E sub-question) remains a separable
+decision on top of that.
 
 ## Implementation outline (when triggered)
 
@@ -564,13 +566,15 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
     responses, but no surface displayed them, so the toggle had no visible
     trigger. `project_shared` blocks are messaged as non-bypassable (they stay
     hard-refused even with `force_unsafe`), matching the `mm index` CLI guidance.
-  - **Audit surface — deferred.** Surfacing the bypass trail as a GUI view of
-    `privacy.snapshot()` was written into this outline as "extend the existing
-    redaction-stats panel," but no such panel exists in the web UI — the counters
-    are MCP-only (`mem_add_redaction_stats`). Building it needs a new
-    `GET /api/privacy/stats` endpoint + a Settings section, so it is split into
-    its own follow-up PR. The persistent-audit-table sub-question on axis E
-    remains a separable decision on top of that.
+  - **Audit surface — shipped as a follow-up (2026-07-01).** This outline said
+    "extend the existing redaction-stats panel," but no such panel existed — the
+    counters were MCP-only (`mem_add_redaction_stats`). The follow-up adds a
+    read-only `GET /api/privacy/stats` endpoint (mirroring `/api/privacy/patterns`)
+    returning `privacy.snapshot()`, and a **Settings → Redaction** section that
+    renders the outcome totals (blocked / bypassed / pass / project_shared) plus a
+    per-write-surface breakdown table. Surface names are escaped; the section is
+    dev-tier (Runtime group) next to Health. The persistent-audit-table
+    sub-question on axis E remains a separable decision on top of that.
 - **PR-C — CLI parity. Shipped with PR-A (2026-07-01).**
   - `mm index --force-unsafe` reuses PR-A's `IndexEngine` `force_unsafe`
     parameter (threaded through `cli/_index_progress.run_with_progress`), and the

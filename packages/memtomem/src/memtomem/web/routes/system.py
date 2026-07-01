@@ -70,6 +70,7 @@ from memtomem.web.schemas.config import (
     ModelReadinessResponse,
     PrivacyPatternEntry,
     PrivacyPatternsResponse,
+    PrivacyStatsResponse,
 )
 from memtomem.web.schemas.memory import (
     AddMemoryRequest,
@@ -369,6 +370,23 @@ async def get_privacy_patterns() -> PrivacyPatternsResponse:
         patterns=[PrivacyPatternEntry(**entry) for entry in privacy.JS_PATTERNS],
         sha=privacy.JS_PATTERNS_SHA,
     )
+
+
+@router.get("/privacy/stats", response_model=PrivacyStatsResponse)
+async def get_privacy_stats() -> PrivacyStatsResponse:
+    """Return the process-lifetime redaction counters (``privacy.snapshot()``).
+
+    The GUI view (Settings → Redaction) of the same tally the
+    ``mem_add_redaction_stats`` MCP tool surfaces — how many writes the
+    secret-redaction gate passed, blocked, or bypassed (``force_unsafe``),
+    broken down per write surface. ADR-0006 Axis E.1 audit surface.
+
+    Read-only metadata; no ``require_configured`` gate (mirrors
+    ``/api/privacy/patterns``). Counters are in-memory and reset on restart.
+    """
+    from memtomem import privacy
+
+    return PrivacyStatsResponse(**privacy.snapshot())
 
 
 # ---------------------------------------------------------------------------

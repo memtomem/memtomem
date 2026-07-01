@@ -1681,6 +1681,7 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'harness-scratch') loadHarnessScratch();
   if (sectionName === 'harness-procedures') loadHarnessProcedures();
   if (sectionName === 'harness-health') { loadHarnessHealth(); loadWatchdogStatus(); }
+  if (sectionName === 'redaction' && typeof loadRedactionStats === 'function') loadRedactionStats();
   if (sectionName === 'hooks-sync') loadHooksSync();
   if (sectionName === 'ctx-overview') loadCtxOverview();
   if (sectionName === 'ctx-projects') loadCtxProjects();

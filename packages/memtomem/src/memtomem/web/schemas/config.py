@@ -66,6 +66,22 @@ class PrivacyPatternsResponse(BaseModel):
     sha: str
 
 
+class PrivacyStatsResponse(BaseModel):
+    """GUI view of ``privacy.snapshot()`` — the process-lifetime redaction
+    counters also surfaced over MCP by ``mem_add_redaction_stats`` (ADR-0006
+    Axis E.1 audit surface).
+
+    ``outcomes`` is the cumulative tally per outcome
+    (``blocked`` / ``pass`` / ``bypassed`` / ``blocked_project_shared``);
+    ``by_tool`` breaks the same tally down per write surface (``mem_add``,
+    ``index``, ``web_api_upload``, …). Both are process-lifetime and reset on
+    restart — not persisted rows.
+    """
+
+    outcomes: dict[str, int]
+    by_tool: dict[str, dict[str, int]]
+
+
 class ConfigDecayOut(BaseModel):
     enabled: bool
     half_life_days: float

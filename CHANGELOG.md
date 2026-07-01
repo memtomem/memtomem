@@ -54,6 +54,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   one-shot run, no live per-file progress) rather than the token-exempt indexing
   SSE stream. Mirrors the existing `mm index --force-unsafe` CLI escape hatch.
 
+- **New Settings → Redaction panel surfaces the secret-redaction counters in the
+  Web UI (ADR-0006 PR-B audit surface).** Previously the process-lifetime tally
+  of how many writes the redaction gate passed, blocked, or bypassed
+  (`force_unsafe`) was only reachable over MCP (`mem_add_redaction_stats`). A new
+  read-only `GET /api/privacy/stats` endpoint and a Settings → Redaction section
+  (Runtime group) now render the outcome totals plus a per-write-surface
+  breakdown, so an operator can audit redaction activity without an MCP client.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

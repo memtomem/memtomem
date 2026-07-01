@@ -335,3 +335,47 @@ async function loadHarnessHealth() {
 
 qs('health-refresh-btn')?.addEventListener('click', loadHarnessHealth);
 
+
+// ADR-0006 PR-B (Axis E.1 audit surface): the GUI view of ``privacy.snapshot()``
+// — process-lifetime redaction counters (blocked / bypassed / pass /
+// project_shared) totalled and broken down per write surface. Mirrors the MCP
+// ``mem_add_redaction_stats`` tool. Surface names are internal constants but
+// escaped defensively; outcome labels come from ``t()`` (trusted locale).
+async function loadRedactionStats() {
+  const report = qs('redaction-stats-report');
+  if (!report) return;
+  report.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
+  try {
+    const d = await api('GET', '/api/privacy/stats');
+    const outcomes = (d && d.outcomes) || {};
+    const byTool = (d && d.by_tool) || {};
+    // Fixed outcome set (privacy._VALID_OUTCOMES); ordered so the two "blocked"
+    // variants sit together and the security-relevant "bypassed" reads before
+    // the benign "pass".
+    const OUTCOMES = ['blocked', 'blocked_project_shared', 'bypassed', 'pass'];
+    const label = (k) => t(`settings.redaction.outcome.${k}`);
+    const cards = OUTCOMES.map(k => `
+      <div class="health-card card">
+        <div class="health-card-title">${label(k)}</div>
+        <div class="stat-value">${Number(outcomes[k]) || 0}</div>
+      </div>`).join('');
+    const surfaces = Object.keys(byTool).sort();
+    const table = surfaces.length ? `
+      <div class="health-section">
+        <h3>${t('settings.redaction.by_tool_heading')}</h3>
+        <table class="harness-table">
+          <thead><tr><th>${t('settings.redaction.surface_col')}</th>${
+            OUTCOMES.map(k => `<th>${label(k)}</th>`).join('')}</tr></thead>
+          <tbody>${surfaces.map(s => `<tr><td class="mono">${escapeHtml(s)}</td>${
+            OUTCOMES.map(k => `<td>${Number(byTool[s] && byTool[s][k]) || 0}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table>
+      </div>` : `<div class="empty-state">${t('settings.redaction.empty')}</div>`;
+    report.innerHTML = `<div class="health-grid">${cards}</div>${table}`;
+  } catch (e) {
+    const msg = escapeHtml((e && e.message) || String(e));
+    report.innerHTML = `<div class="empty-state">${t('settings.redaction.error', { error: msg })}</div>`;
+  }
+}
+
+qs('redaction-stats-refresh-btn')?.addEventListener('click', loadRedactionStats);
+
