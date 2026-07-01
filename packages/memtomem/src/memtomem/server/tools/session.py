@@ -420,7 +420,24 @@ async def _persist_session_summary_chunk(
     target.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(target.write_text, content, "utf-8")
 
-    stats = await app.index_engine.index_file(target, namespace=namespace)
+    # ADR-0006 PR-A: the session summary is un-adjudicated content, so the
+    # engine redaction gate is active. If it trips, the file is written but not
+    # indexed; surface that instead of reporting success.
+    from memtomem.indexing.engine import PrivacyRejection
+
+    try:
+        stats = await app.index_engine.index_file(target, namespace=namespace)
+    except PrivacyRejection as exc:
+        app.search_pipeline.invalidate_cache()
+        # Return the contracted (status_line, chunk_id) tuple — a bare string
+        # here would make the caller's ``line, id = await …`` unpack raise
+        # ValueError, swallowing this message under the generic except.
+        return (
+            f"Session summary written to {target} but NOT indexed — blocked by the "
+            f"redaction guard ({exc.hit_count} secret-pattern hit(s)). Review the "
+            f"file; re-index with 'mm index --force-unsafe' if intended.",
+            None,
+        )
     app.search_pipeline.invalidate_cache()
 
     if not stats.indexed_chunks:

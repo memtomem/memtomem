@@ -92,6 +92,31 @@ class TestMemAddRedactionGuard:
         assert target.exists()
 
     @pytest.mark.asyncio
+    async def test_force_unsafe_content_is_actually_indexed(self, bm25_only_components):
+        """ADR-0006 PR-A regression: ``mem_add(force_unsafe=True)`` writes AND
+        indexes the content. The new engine-layer redaction gate must NOT
+        silently re-block the post-write reindex — ``mem_add`` passes
+        ``already_scanned=True`` because it already adjudicated the content at
+        ingress. Without that thread the file would exist on disk but never
+        make it into the store.
+        """
+        comp, mem_dir = bm25_only_components
+        app = AppContext.from_components(comp)
+        ctx = StubCtx(app)
+        target = mem_dir / "bypass_indexed.md"
+
+        result = await mem_add(  # type: ignore[arg-type]
+            content=_SECRET_SAMPLE,
+            file=str(target),
+            force_unsafe=True,
+            ctx=ctx,
+        )
+
+        assert "Memory added" in result, f"Expected success, got: {result!r}"
+        chunks = await comp.storage.list_chunks_by_source(target)
+        assert chunks, "force-allowed content must be indexed, not silently re-blocked"
+
+    @pytest.mark.asyncio
     async def test_clean_content_records_pass(self, bm25_only_components):
         comp, mem_dir = bm25_only_components
         app = AppContext.from_components(comp)

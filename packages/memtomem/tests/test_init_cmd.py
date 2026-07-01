@@ -5203,7 +5203,9 @@ class TestInitialSeedThreshold:
         memory_dir.mkdir()
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
                     "type": "progress",
@@ -5259,7 +5261,9 @@ class TestInitialSeedThreshold:
         memory_dir.mkdir()
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
                     "type": "progress",
@@ -5461,7 +5465,9 @@ class TestInitialSeedThreshold:
         }
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
                 key = str(path)
                 counts = path_counts[key]
                 yield {"type": "discovery", "files_total": counts["total_files"]}
@@ -5560,7 +5566,9 @@ class TestInitialSeedThreshold:
         captured: dict[str, object] = {}
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
                 yield {"type": "discovery", "files_total": 1}
                 file = str(memory_dir / "big.md")
                 # Server only emits chunk_progress when the file exceeds the
@@ -5642,7 +5650,9 @@ class TestInitialSeedThreshold:
         captured: dict[str, object] = {}
 
         class _FakeEngine:
-            async def index_path_stream(self, path, recursive=True, force=False, namespace=None):
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
                 yield {"type": "discovery", "files_total": 2}
                 for name in ("a.md", "b.md"):
                     yield {

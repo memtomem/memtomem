@@ -30,6 +30,7 @@ from memtomem.config import (
     memory_dir_kind,
     provider_for_category,
 )
+from memtomem import privacy
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.models import Chunk, IndexingStats
 
@@ -344,6 +345,28 @@ async def _resolved_zero() -> int:
     return 0
 
 
+class PrivacyRejection(Exception):
+    """Raised by :meth:`IndexEngine._index_file` when a file's content trips the
+    secret-redaction guard during **un-adjudicated** indexing (ADR-0006 PR-A).
+
+    Bulk entrypoints (``index_path`` / ``index_path_stream``) catch this per file
+    and aggregate it into :attr:`IndexingStats.blocked_files`; single-file
+    ``index_file`` callers let it propagate so their own rollback / error
+    surfacing runs. Callers that already ran ``privacy.enforce_write_guard`` at
+    their ingress layer pass ``already_scanned=True`` and never trigger this.
+
+    Carries only the hit **count** and file path — never the matched bytes
+    (secret-in-log hygiene).
+    """
+
+    def __init__(self, *, path: Path, hit_count: int, scope: str, decision: str) -> None:
+        self.path = path
+        self.hit_count = hit_count
+        self.scope = scope
+        self.decision = decision
+        super().__init__(f"redaction_blocked: {path.name} (hits={hit_count}, decision={decision})")
+
+
 class _IndexFileBase(TypedDict):
     total: int
     indexed: int
@@ -354,6 +377,14 @@ class _IndexFileBase(TypedDict):
 
 class IndexFileResult(_IndexFileBase, total=False):
     new_chunk_ids: list[UUID]
+    # Set to 1 by the stream path when a file is skipped by the ADR-0006
+    # redaction gate; aggregated into ``IndexingStats.blocked_files``. The
+    # non-stream path tracks blocks via the raised ``PrivacyRejection`` instead.
+    blocked: int
+    # 1 when the blocked file was ``project_shared`` (hard-refused, not
+    # bypassable with force_unsafe) — aggregated into
+    # ``IndexingStats.blocked_project_shared_files``.
+    blocked_project_shared: int
 
 
 class IndexEngine:
@@ -425,11 +456,15 @@ class IndexEngine:
         recursive: bool = True,
         force: bool = False,
         namespace: str | None = None,
+        *,
+        force_unsafe: bool = False,
     ) -> IndexingStats:
         self._active_runs += 1
         try:
             async with self._index_lock:
-                return await self._index_path_inner(path, recursive, force, namespace)
+                return await self._index_path_inner(
+                    path, recursive, force, namespace, force_unsafe=force_unsafe
+                )
         finally:
             self._active_runs -= 1
 
@@ -439,6 +474,8 @@ class IndexEngine:
         recursive: bool = True,
         force: bool = False,
         namespace: str | None = None,
+        *,
+        force_unsafe: bool = False,
     ) -> IndexingStats:
         start = time.monotonic()
         path = path.resolve()
@@ -457,15 +494,33 @@ class IndexEngine:
 
         async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
-                return await self._index_file(fp, force, namespace=namespace)
+                return await self._index_file(
+                    fp, force, namespace=namespace, force_unsafe=force_unsafe
+                )
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
         file_results: list[IndexFileResult] = []
         all_errors: list[str] = []
+        blocked_paths: list[str] = []
+        blocked_project_shared = 0
         for i, r in enumerate(raw_results):
             if isinstance(r, dict):
                 file_results.append(r)
                 all_errors.extend(r.get("errors", []))
+            elif isinstance(r, PrivacyRejection):
+                # ADR-0006 PR-A: un-adjudicated bulk index hit a secret-bearing
+                # file. Skip it, record it as blocked, and continue the run so a
+                # single flagged file doesn't abort indexing the whole tree.
+                # Preserve scope/decision so callers give correct guidance:
+                # project_shared is hard-refused even with force_unsafe.
+                logger.warning("Indexing blocked by redaction guard for %s: %s", files[i], r)
+                blocked_paths.append(str(files[i]))
+                if r.scope == "project_shared":
+                    blocked_project_shared += 1
+                all_errors.append(
+                    f"{files[i].name}: redaction_blocked "
+                    f"(hits={r.hit_count}, scope={r.scope}, decision={r.decision})"
+                )
             elif isinstance(r, Exception):
                 logger.error("Indexing failed for %s: %s", files[i], r)
                 all_errors.append(f"{files[i].name}: {r}")
@@ -495,6 +550,9 @@ class IndexEngine:
             errors=tuple(all_errors),
             new_chunk_ids=tuple(all_new_chunk_ids),
             resolved_namespaces=tuple(resolved_ns),
+            blocked_files=len(blocked_paths),
+            blocked_paths=tuple(blocked_paths),
+            blocked_project_shared_files=blocked_project_shared,
         )
 
     def resolve_namespaces_for(
@@ -533,8 +591,19 @@ class IndexEngine:
         file_path: Path,
         force: bool = False,
         namespace: str | None = None,
+        *,
+        force_unsafe: bool = False,
+        already_scanned: bool = False,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
+
+        ``already_scanned=True`` skips the ADR-0006 redaction gate for callers
+        that already ran ``privacy.enforce_write_guard`` on the new content at
+        their own ingress layer (``mem_add`` / ``mem_edit`` / upload / chunk
+        edit, …); the whole-file reindex must not re-litigate or double-count
+        that content. Un-adjudicated single-file callers (``mem_fetch``, file
+        import, ``mm index <file>``) leave it ``False`` and must catch the
+        resulting :class:`PrivacyRejection`.
 
         ``force=True`` re-embeds every chunk in the file but preserves chunk
         identity (UUID) and per-chunk personalization (``access_count``,
@@ -582,7 +651,13 @@ class IndexEngine:
 
                 resolved_path = file_path.resolve()
                 with _file_lock(_lock_path_for(resolved_path)):
-                    result = await self._index_file(resolved_path, force, namespace=namespace)
+                    result = await self._index_file(
+                        resolved_path,
+                        force,
+                        namespace=namespace,
+                        force_unsafe=force_unsafe,
+                        already_scanned=already_scanned,
+                    )
                 duration = (time.monotonic() - start) * 1000
         finally:
             self._active_runs -= 1
@@ -744,6 +819,8 @@ class IndexEngine:
         namespace: str | None = None,
         *,
         on_chunk_progress: Callable[[int, int], None] | None = None,
+        force_unsafe: bool = False,
+        already_scanned: bool = False,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
@@ -800,6 +877,42 @@ class IndexEngine:
         if self._registry.get(file_path.suffix) is None:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
+        # ADR-0006 Axes A.3/B.2 — secret-redaction trust boundary for
+        # un-adjudicated indexing. Resolve scope first (needed both here and by
+        # ``_apply_scope`` below) so a ``force_unsafe`` bulk index of a
+        # ``project_shared`` file is hard-refused, then scan the raw content
+        # before any chunk/embed/store work. Callers that already ran
+        # ``privacy.enforce_write_guard`` at their own ingress layer pass
+        # ``already_scanned=True`` to skip this — the boundary is enforced there,
+        # and re-scanning the whole file would double-count and re-litigate
+        # already-stored content (e.g. a prior ``force_unsafe`` write elsewhere
+        # in the same file). See ADR-0006 "Implementation outline (PR-A)".
+        scope_val, project_root = self._resolve_scope(file_path)
+        if not already_scanned:
+            guard = privacy.enforce_write_guard(
+                content,
+                surface="index",
+                force_unsafe=force_unsafe,
+                scope=scope_val,
+                audit_context={"path": str(file_path)},
+            )
+            if guard.decision in ("blocked", "blocked_project_shared"):
+                # Never log the matched bytes — only the hit count.
+                logger.warning(
+                    "redaction_blocked: %s (hits=%d, scope=%s)",
+                    file_path.name,
+                    len(guard.hits),
+                    scope_val,
+                )
+                raise PrivacyRejection(
+                    path=file_path,
+                    hit_count=len(guard.hits),
+                    scope=scope_val,
+                    decision=guard.decision,
+                )
+            if guard.decision not in ("pass", "bypassed"):
+                raise RuntimeError(f"unexpected enforce_write_guard decision: {guard.decision!r}")
+
         new_chunks = self._registry.chunk_file(file_path, content)
 
         # Post-processing: merge short chunks + add overlap
@@ -837,7 +950,8 @@ class IndexEngine:
         # safe — the new chunks already carry the correct defaults).
         # The CHANGELOG ADR-0011 PR-B entry documents the
         # post-deregistration reindex requirement.
-        scope_val, project_root = self._resolve_scope(file_path)
+        # ``scope_val`` / ``project_root`` were resolved above (just before the
+        # redaction gate); reuse them here rather than re-resolving.
         if scope_val != "user" or project_root is not None:
             new_chunks = self._apply_scope(new_chunks, scope_val, project_root)
 
@@ -965,6 +1079,8 @@ class IndexEngine:
         recursive: bool = True,
         force: bool = False,
         namespace: str | None = None,
+        *,
+        force_unsafe: bool = False,
     ):
         """Like index_path(), but yields progress dicts as each file is processed.
 
@@ -1018,6 +1134,9 @@ class IndexEngine:
                     "duration_ms": 0.0,
                     "errors": [],
                     "resolved_namespaces": [],
+                    "blocked_files": 0,
+                    "blocked_paths": [],
+                    "blocked_project_shared_files": 0,
                 }
                 return
 
@@ -1033,8 +1152,16 @@ class IndexEngine:
             # what was actually applied — single render across both stream
             # and non-stream paths (see ``_index_path_inner``).
             resolved_ns_for_event = self.resolve_namespaces_for(files, namespace)
-            agg = {"total_chunks": 0, "indexed": 0, "skipped": 0, "deleted": 0}
+            agg = {
+                "total_chunks": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "blocked": 0,
+                "blocked_project_shared": 0,
+            }
             all_errors: list[str] = []
+            blocked_paths: list[str] = []
 
             for i, fp in enumerate(files, start=1):
                 # Per-file queue forwards ``chunk_progress`` ticks from the
@@ -1070,6 +1197,7 @@ class IndexEngine:
                             force,
                             namespace=namespace,
                             on_chunk_progress=cb,
+                            force_unsafe=force_unsafe,
                         )
                     finally:
                         queue.put_nowait(DONE)
@@ -1083,6 +1211,27 @@ class IndexEngine:
                         yield event
                     try:
                         result = await task
+                    except PrivacyRejection as exc:
+                        # ADR-0006 PR-A: un-adjudicated bulk index hit a
+                        # secret-bearing file. Skip it, record it blocked, and
+                        # continue the stream (mirrors the non-stream branch in
+                        # ``_index_path_inner``).
+                        logger.warning(
+                            "Stream indexing blocked by redaction guard for %s: %s", fp, exc
+                        )
+                        blocked_paths.append(str(fp))
+                        result = {
+                            "total": 0,
+                            "indexed": 0,
+                            "skipped": 0,
+                            "deleted": 0,
+                            "errors": [
+                                f"{fp.name}: redaction_blocked "
+                                f"(hits={exc.hit_count}, scope={exc.scope}, decision={exc.decision})"
+                            ],
+                            "blocked": 1,
+                            "blocked_project_shared": 1 if exc.scope == "project_shared" else 0,
+                        }
                     except Exception as exc:
                         logger.error("Stream indexing failed for %s: %s", fp, exc)
                         # Same shape as non-stream's
@@ -1111,6 +1260,8 @@ class IndexEngine:
                 agg["indexed"] += result["indexed"]
                 agg["skipped"] += result["skipped"]
                 agg["deleted"] += result["deleted"]
+                agg["blocked"] += result.get("blocked", 0)
+                agg["blocked_project_shared"] += result.get("blocked_project_shared", 0)
                 all_errors.extend(result.get("errors", []))
                 yield {
                     "type": "progress",
@@ -1132,6 +1283,9 @@ class IndexEngine:
                 "duration_ms": round(duration, 1),
                 "errors": all_errors,
                 "resolved_namespaces": resolved_ns_for_event,
+                "blocked_files": agg["blocked"],
+                "blocked_paths": blocked_paths,
+                "blocked_project_shared_files": agg["blocked_project_shared"],
             }
         finally:
             self._active_runs -= 1

@@ -216,7 +216,8 @@ async def _cmd_add(comp, args: list[str]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
 
     append_entry(target, content)
-    stats = await comp.index_engine.index_file(target)
+    # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+    stats = await comp.index_engine.index_file(target, already_scanned=True)
 
     click.secho(f"Added to {target.name} ({stats.indexed_chunks} chunks indexed)", fg="green")
 
@@ -301,3 +302,6 @@ async def _cmd_index(comp, args: list[str]) -> None:
         f"Done: {stats.total_files} files, {stats.indexed_chunks} chunks ({stats.duration_ms}ms)",
         fg="green",
     )
+    if stats.blocked_files:
+        # ADR-0006 PR-A: secret-bearing files skipped by the redaction gate.
+        click.secho(f"  {stats.blocked_files} file(s) blocked by redaction guard", fg="yellow")

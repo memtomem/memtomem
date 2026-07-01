@@ -219,7 +219,8 @@ async def _add(
 
         target.parent.mkdir(parents=True, exist_ok=True)
         append_entry(target, content, title=title, tags=tags)
-        stats = await comp.index_engine.index_file(target)
+        # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+        stats = await comp.index_engine.index_file(target, already_scanned=True)
 
         # Apply tags to indexed chunks (chunker doesn't parse tag text from content)
         if tags and stats.indexed_chunks > 0:

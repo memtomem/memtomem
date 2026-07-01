@@ -419,13 +419,19 @@ Axes A–E are decided but only **partially built**:
   are route-layer guards, **not** the engine-layer
   `IndexEngine._index_file(force_unsafe=…)` + `PrivacyRejection` seam the
   "Implementation outline" describes.
-- **Folder-index — not yet guarded.** `trigger_index` (`web/routes/system.py:1282`),
-  `reindex_all` (`:885`), and `memory-dirs/add (auto_index)` (`:664`) call
-  `IndexEngine.index_path(...)`; `index_stream` (`:1252`) calls
-  `index_path_stream(...)`. None of these guard, and `IndexEngine` itself has
-  no `enforce_write_guard` call. The single-chokepoint design from A.3 / B.2 is
-  still unbuilt for these surfaces; the "Implementation outline" below
-  describes that pending work.
+- **Folder-index — guarded (PR-A, 2026-07-01).** The single-chokepoint design
+  from A.3 / B.2 is now built: `IndexEngine._index_file()` resolves scope, then
+  calls `privacy.enforce_write_guard(content, surface="index", scope=…,
+  force_unsafe=…)` and raises `PrivacyRejection` on a hit without `force_unsafe`.
+  Bulk entrypoints (`index_path` / `index_path_stream` — `trigger_index`,
+  `reindex_all`, `memory-dirs/add` auto_index, `index_stream`, `mm reindex`,
+  `mem_index`, the watcher) catch it per file and aggregate into
+  `IndexingStats.blocked_files` / `blocked_paths`, so one flagged file does not
+  abort the run; single-file `index_file` lets it propagate so callers roll back
+  or surface it rather than silently succeeding. Callers that already ran
+  `enforce_write_guard` at their ingress layer pass `already_scanned=True` to
+  skip the gate (see the outline note below). `mm index --force-unsafe` ships the
+  bulk escape hatch.
 - **Import (Axis F.3) — built (#1490).** Both ingresses — MCP `mem_import` and
   web `POST /api/export/import` — route through `tools/export_import.py`
   `import_chunks`, which verifies the local-provenance marker and, for an
@@ -433,10 +439,9 @@ Axes A–E are decided but only **partially built**:
   record (`:244`) and rejects the whole import on a secret hit (`:257`) unless
   `force_unsafe`. Self-exports skip the scan, preserving round-trip.
 
-So the B.2 reject behavior is live for upload and import. The decision
-(A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands; the folder-index gate and the
-Web UI override toggle (Axis E.1 for the bulk/import surfaces, PR-B) remain to
-implement.
+So the B.2 reject behavior is live for upload, import, **and folder-index**
+(PR-A). The decision (A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands; only the Web UI
+override toggle (Axis E.1 for the bulk surfaces, PR-B) remains to implement.
 
 ## Implementation outline (when triggered)
 
@@ -461,6 +466,37 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
     shape — so MCP and bulk bypass land in the same `mem_add_redaction_stats`
     snapshot and the same log sink. (Whether to add a persistent audit
     table is the open sub-question called out in axis E.)
+  - **Built as (2026-07-01), with deviations from the outline above** — a Codex
+    design gate surfaced that the literal outline breaks existing contracts:
+    - The gate calls `privacy.enforce_write_guard` (which records + audits) rather
+      than raw `privacy.scan`, so bulk bypasses land in the `mem_add_redaction_stats`
+      snapshot per the axis-E intent above — no separate `record(...)` call needed.
+    - **Ingress-guarded callers skip the gate** (`_index_file(..., already_scanned=True)`)
+      instead of threading `force_unsafe` through them. `mem_edit` / web chunk
+      edit+delete re-index the *whole file* after a line-range mutation and rely on
+      `index_file()` **raising** to roll back or delete stale chunks; a gate that
+      re-scanned the whole file would (a) re-block content already adjudicated
+      elsewhere in the file, (b) double-count/-audit, and (c) on `mem_delete`
+      (which has no `force_unsafe` param) block a legitimate delete. Skipping is
+      correct: the boundary is already enforced at their ingress `enforce_write_guard`.
+      The guarded set: `mem_add` / `mem_edit` / `mem_batch_add` / `mem_delete`,
+      `upload_files`, compose/`add_memory`, web chunk edit/delete, CLI `mm mem add`,
+      CLI agent `share`, and LangGraph `add`.
+    - **Blocked files are a return-path aggregate for bulk, a raised exception for
+      single-file.** `PrivacyRejection` (path + hit count, never the matched bytes)
+      is raised in `_index_file`; `index_path` / `index_path_stream` catch it per
+      file and aggregate into `IndexingStats.blocked_files` / `blocked_paths`
+      (surfaced in `IndexResponse`, the SSE `complete` event, `reindex_all` /
+      `memory-dirs/add` JSON, `mem_index`, and the `mm index` summary); un-adjudicated
+      single-file callers (`mem_fetch`, `mem_import_*`, session summary, `mm index <file>`,
+      the watcher) catch it and surface an error instead of reporting false success.
+      A `blocked_project_shared_files` counter travels alongside `blocked_files`
+      so surfaces give scope-correct guidance — a `project_shared` block is
+      hard-refused even with `force_unsafe`, so the CLI tells the user to move
+      the file to `user`/`project_local` or remove the secret rather than to
+      retry with `--force-unsafe`.
+    - **PR-C's `mm index --force-unsafe` shipped with PR-A** (not deferred) so a
+      false positive on bulk index has an escape hatch in the same release.
 - **PR-B — Web UI override toggle + audit surface.**
   - Add an "Index without privacy gate (audit-logged)" checkbox to the
     Index tab and the Sources `+ 경로 추가` modal. On submit, pass
@@ -470,10 +506,12 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
     counters are visible alongside MCP bypass counters. If the open
     sub-question on axis E resolves to "add a persistent audit
     table," that's a follow-up PR with its own schema work.
-- **PR-C (optional, gated by separate signal) — CLI parity.**
-  - `mm index --force-unsafe` plumbing reuses PR-A's `IndexEngine`
-    parameter. Hold until a CLI user reports needing it; the bulk
-    workflow is web-driven for now.
+- **PR-C — CLI parity. Shipped with PR-A (2026-07-01).**
+  - `mm index --force-unsafe` reuses PR-A's `IndexEngine` `force_unsafe`
+    parameter (threaded through `cli/_index_progress.run_with_progress`), and the
+    `mm index` summary reports the blocked count + paths. Shipped together with
+    PR-A rather than held, so a false positive on bulk index has a documented
+    recourse in the same release.
 
 ## Consequences
 

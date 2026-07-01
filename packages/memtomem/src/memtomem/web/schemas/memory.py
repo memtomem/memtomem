@@ -115,6 +115,12 @@ class IndexResponse(BaseModel):
     duration_ms: float
     errors: list[str] = []
     resolved_namespaces: list[str | None] = []
+    # ADR-0006 PR-A: files skipped by the secret-redaction gate during bulk
+    # indexing (count + paths). Zero/empty on the common path.
+    blocked_files: int = 0
+    blocked_paths: list[str] = []
+    # Subset that is project_shared — hard-refused even with force_unsafe.
+    blocked_project_shared_files: int = 0
 
 
 class PreviewNamespaceResponse(BaseModel):

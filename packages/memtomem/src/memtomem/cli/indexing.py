@@ -52,6 +52,16 @@ import click
     is_flag=True,
     help="Emit one JSON line of the result (works with --debounce-window/--flush/--status).",
 )
+@click.option(
+    "--force-unsafe",
+    "force_unsafe",
+    is_flag=True,
+    help=(
+        "Bypass the redaction gate for this bulk index — index files that trip "
+        "secret-class patterns anyway (audit-logged). Off by default; the gate "
+        "otherwise skips secret-bearing files and reports them (ADR-0006)."
+    ),
+)
 def index(
     path: str,
     recursive: bool,
@@ -61,6 +71,7 @@ def index(
     do_flush: bool,
     do_status: bool,
     as_json: bool,
+    force_unsafe: bool,
 ) -> None:
     """Index files at PATH into the knowledge base.
 
@@ -72,6 +83,13 @@ def index(
     modes = [debounce_window is not None, do_flush, do_status]
     if sum(modes) > 1:
         raise click.UsageError("--debounce-window, --flush, and --status are mutually exclusive.")
+    if force_unsafe and any(modes):
+        # The debounce queue carries only (path, namespace, force); it does not
+        # thread force_unsafe, so accepting it there would silently ignore it.
+        raise click.UsageError(
+            "--force-unsafe only applies to direct indexing, not "
+            "--debounce-window / --flush / --status."
+        )
 
     if do_status:
         _print_status(as_json=as_json)
@@ -92,14 +110,20 @@ def index(
         return
 
     try:
-        asyncio.run(_index(path, recursive, force, namespace))
+        asyncio.run(_index(path, recursive, force, namespace, force_unsafe))
     except click.ClickException:
         raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-async def _index(path: str, recursive: bool, force: bool, namespace: str | None) -> None:
+async def _index(
+    path: str,
+    recursive: bool,
+    force: bool,
+    namespace: str | None,
+    force_unsafe: bool = False,
+) -> None:
     """Stream-index ``path`` with a live progress bar (issue #656).
 
     Uses the shared :func:`memtomem.cli._index_progress.run_with_progress`
@@ -131,6 +155,7 @@ async def _index(path: str, recursive: bool, force: bool, namespace: str | None)
             recursive=recursive,
             force=force,
             namespace=namespace,
+            force_unsafe=force_unsafe,
         )
     except KeyboardInterrupt:
         click.echo()
@@ -154,7 +179,32 @@ async def _index(path: str, recursive: bool, force: bool, namespace: str | None)
         f"{agg['indexed']} new, {agg['skipped']} unchanged, "
         f"{agg['deleted']} deleted ({agg['duration_ms']:.0f}ms)"
     )
+    if agg["blocked"]:
+        # ADR-0006 PR-A: name the secret-bearing files that were skipped. Give
+        # scope-correct guidance — project_shared is hard-refused even with
+        # --force-unsafe, so don't tell the user to retry it there.
+        ps = agg["blocked_project_shared"]
+        bypassable = agg["blocked"] - ps
+        click.secho(f"  {agg['blocked']} file(s) blocked by redaction guard:", fg="yellow")
+        for p in agg["blocked_paths"]:
+            click.secho(f"    {p}", fg="yellow")
+        if bypassable:
+            click.secho(
+                "  → re-run with --force-unsafe to index the non-project_shared "
+                "files anyway (audit-logged).",
+                fg="yellow",
+            )
+        if ps:
+            click.secho(
+                f"  → {ps} file(s) are in the project_shared tier — hard-refused; "
+                "--force-unsafe does not apply. Move them to user/project_local "
+                "or remove the secret.",
+                fg="yellow",
+            )
     for err in agg["errors"]:
+        if "redaction_blocked" in err:
+            # Already surfaced above with a clearer message + hint.
+            continue
         click.echo(click.style(f"  ERROR: {err}", fg="red"))
 
 

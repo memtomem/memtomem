@@ -670,6 +670,9 @@ async def add_memory_dir(
                 "deleted_chunks": stats.deleted_chunks,
                 "duration_ms": stats.duration_ms,
                 "errors": list(stats.errors) if stats.errors else [],
+                "blocked_files": stats.blocked_files,
+                "blocked_paths": list(stats.blocked_paths),
+                "blocked_project_shared_files": stats.blocked_project_shared_files,
             }
         except Exception as err:  # pragma: no cover — surface partial result
             indexed = {"error": str(err)}
@@ -890,12 +893,29 @@ async def reindex_all(
             "skipped_chunks": stats.skipped_chunks,
             "deleted_chunks": stats.deleted_chunks,
             "duration_ms": stats.duration_ms,
+            "blocked_files": stats.blocked_files,
+            "blocked_project_shared_files": stats.blocked_project_shared_files,
         }
+        if stats.blocked_files:
+            entry["blocked_paths"] = list(stats.blocked_paths)
         if stats.errors:
             entry["errors"] = list(stats.errors)
         results.append(entry)
     all_errors = [e for r in results for e in r.get("errors", [])]
-    return {"ok": len(all_errors) == 0, "results": results, "errors": all_errors}
+    total_blocked = 0
+    total_blocked_ps = 0
+    for r in results:
+        b = r.get("blocked_files", 0)
+        total_blocked += b if isinstance(b, int) else 0
+        bps = r.get("blocked_project_shared_files", 0)
+        total_blocked_ps += bps if isinstance(bps, int) else 0
+    return {
+        "ok": len(all_errors) == 0,
+        "results": results,
+        "errors": all_errors,
+        "blocked_files": total_blocked,
+        "blocked_project_shared_files": total_blocked_ps,
+    }
 
 
 @router.get("/embedding-status", response_model=EmbeddingStatusResponse)
@@ -1294,6 +1314,9 @@ async def trigger_index(
         duration_ms=stats.duration_ms,
         errors=list(stats.errors) if stats.errors else [],
         resolved_namespaces=list(stats.resolved_namespaces),
+        blocked_files=stats.blocked_files,
+        blocked_paths=list(stats.blocked_paths),
+        blocked_project_shared_files=stats.blocked_project_shared_files,
     )
 
 
@@ -1425,7 +1448,9 @@ async def upload_files(
                 continue
 
             dest.write_bytes(content)
-            stats = await index_engine.index_file(dest)
+            # Route-layer guard above already adjudicated this content
+            # (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+            stats = await index_engine.index_file(dest, already_scanned=True)
             results.append(
                 UploadFileResult(
                     filename=fname,
@@ -1634,7 +1659,9 @@ async def add_memory(
     target.parent.mkdir(parents=True, exist_ok=True)
     tags = req.tags or []
     append_entry(target, req.content, title=req.title, tags=tags)
-    stats = await index_engine.index_file(target, namespace=req.namespace)
+    # Compose/add route guarded this content above (``enforce_write_guard``);
+    # skip the engine gate (ADR-0006 PR-A).
+    stats = await index_engine.index_file(target, namespace=req.namespace, already_scanned=True)
 
     # Apply tags to indexed chunks (the chunker doesn't parse tag text from content)
     if tags and stats.indexed_chunks > 0:

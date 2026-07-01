@@ -241,3 +241,13 @@ class IndexingStats:
     # can echo what was *actually* applied — important when policy rules
     # split a folder into multiple namespaces.
     resolved_namespaces: tuple[str | None, ...] = ()
+    # ADR-0006 PR-A: files skipped by the secret-redaction gate during
+    # un-adjudicated bulk indexing (each such file raised ``PrivacyRejection``,
+    # was recorded here, and the run continued). ``blocked_files`` is the count;
+    # ``blocked_paths`` are the absolute paths so surfaces can list them.
+    blocked_files: int = 0
+    blocked_paths: tuple[str, ...] = ()
+    # Subset of ``blocked_files`` whose scope is ``project_shared`` — those are
+    # hard-refused even with ``force_unsafe`` (ADR-0011 §5), so surfaces must
+    # not tell the user to retry with ``--force-unsafe`` for them.
+    blocked_project_shared_files: int = 0
