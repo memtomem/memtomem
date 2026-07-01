@@ -3989,8 +3989,11 @@ document.querySelectorAll('.sources-sort-btn').forEach(btn => {
     addSubmit.addEventListener('click', async () => {
       const val = addInput.value;
       addInput.value = '';
+      const unsafeEl = qs('memory-add-force-unsafe');
+      const forceUnsafe = unsafeEl?.checked === true;
+      if (unsafeEl) unsafeEl.checked = false;
       if (addRow) addRow.hidden = true;
-      if (typeof mdAdd === 'function') await mdAdd(val);
+      if (typeof mdAdd === 'function') await mdAdd(val, { forceUnsafe });
     });
     addInput.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); addSubmit.click(); }
@@ -4000,6 +4003,8 @@ document.querySelectorAll('.sources-sort-btn').forEach(btn => {
   if (addCancel && addRow && addInput) {
     addCancel.addEventListener('click', () => {
       addInput.value = '';
+      const unsafeEl = qs('memory-add-force-unsafe');
+      if (unsafeEl) unsafeEl.checked = false;
       addRow.hidden = true;
     });
   }
@@ -6524,6 +6529,143 @@ async function runAutoTag() {
 // Index (SSE-streamed; folder-mode primary action)
 // ---------------------------------------------------------------------------
 
+// ADR-0006 PR-B: surface files the secret-redaction gate skipped during bulk
+// indexing (folder index, per-dir reindex, reindex-all, memory-dir add). PR-A
+// added the ``blocked_*`` counts to every index response, but no frontend
+// surface displayed them — so a secret-bearing file dropped silently with a
+// green "success". ``project_shared`` blocks are hard-refused even with
+// ``force_unsafe`` (ADR-0011 §5), so they get scope-correct guidance
+// (remove/move) rather than "enable the toggle". A mixed run fires one toast
+// per category. Returns true when at least one blocked-file toast was shown.
+function _blockedIndexToast(blockedFiles, blockedProjectSharedFiles) {
+  const blocked = Number(blockedFiles) || 0;
+  if (blocked <= 0) return false;
+  const ps = Math.min(Number(blockedProjectSharedFiles) || 0, blocked);
+  const bypassable = blocked - ps;
+  if (bypassable > 0) {
+    showToast(t('toast.index_blocked', { count: bypassable }), 'error');
+  }
+  if (ps > 0) {
+    showToast(t('toast.index_blocked_project_shared', { count: ps }), 'error');
+  }
+  return true;
+}
+
+// ADR-0006 PR-B: render an index result. The shape is identical whether it
+// arrives via the SSE ``complete`` event (folder stream) or the force_unsafe
+// ``POST /api/index`` response (IndexingStats either way), so both call this:
+// result table incl. the Blocked row, then the blocked / errors / success
+// toasts and the optional "register as source" follow-up.
+function _renderIndexResult(result, { registerAsSource, path }) {
+  qs('r-files').textContent   = result.total_files;
+  qs('r-chunks').textContent  = result.total_chunks;
+  qs('r-indexed').textContent = result.indexed_chunks;
+  qs('r-skipped').textContent = result.skipped_chunks;
+  qs('r-deleted').textContent = result.deleted_chunks;
+  qs('r-duration').textContent = `${(Number(result.duration_ms) || 0).toFixed(0)} ms`;
+  const nsCell = qs('r-namespace');
+  if (nsCell) {
+    nsCell.textContent = renderResolvedNamespaces(result.resolved_namespaces, { mode: 'applied' });
+  }
+
+  // Blocked (secret-redaction) row — count + up to 5 basenames + "…and N more".
+  const blockedRow = qs('r-blocked-row');
+  const blockedCount = Number(result.blocked_files) || 0;
+  if (blockedRow) {
+    if (blockedCount > 0) {
+      const blockedPaths = Array.isArray(result.blocked_paths) ? result.blocked_paths : [];
+      const shownPaths = blockedPaths.slice(0, 5).map(basename);
+      const morePaths = blockedPaths.length - shownPaths.length;
+      const pathText = (morePaths > 0 ? [...shownPaths, `…and ${morePaths} more`] : shownPaths)
+        .join('\n');
+      qs('r-blocked').textContent = pathText ? `${blockedCount}\n${pathText}` : String(blockedCount);
+      blockedRow.hidden = false;
+    } else {
+      qs('r-blocked').textContent = '';
+      blockedRow.hidden = true;
+    }
+  }
+  _blockedIndexToast(result.blocked_files, result.blocked_project_shared_files);
+
+  // #354 / #590: ``errors`` may ride along even on an HTTP-200 result — red
+  // toast + a capped error row.
+  const errList = Array.isArray(result.errors) ? result.errors : [];
+  const errRow = qs('r-errors-row');
+  if (errList.length > 0) {
+    const shown = errList.slice(0, 5);
+    const more = errList.length - shown.length;
+    qs('r-errors').textContent = (more > 0 ? [...shown, `…and ${more} more`] : shown).join('\n');
+    errRow.hidden = false;
+    showToast(
+      t('toast.index_partial', {
+        count: result.indexed_chunks,
+        errors: errList.length,
+        first: errList[0],
+      }),
+      'error',
+    );
+  } else {
+    qs('r-errors').textContent = '';
+    errRow.hidden = true;
+    if (registerAsSource) {
+      // Checkbox already opted in to persistent registration, so skip the
+      // toast's "Register as Source" action — it would duplicate what follows.
+      showToast(t('toast.indexed_count', { count: result.indexed_chunks }), 'success');
+      api('POST', '/api/memory-dirs/add', { path, auto_index: false })
+        .then(() => {
+          showToast(t('toast.index_registered_as_source', { path }), 'success');
+          loadStats();
+        })
+        .catch(err => {
+          showToast(
+            t('toast.index_register_failed', { error: err?.message || String(err) }),
+            'error',
+          );
+        });
+    } else {
+      showToast(t('toast.indexed_count', { count: result.indexed_chunks }), 'success', {
+        action: {
+          label: t('toast.action.register_persistent'),
+          onClick: goToSourcesAddPath,
+        },
+      });
+    }
+  }
+
+  show(qs('index-result'));
+  _markDataStale();
+  loadStats();
+  loadNamespaceDropdowns();
+  loadSourceFilter();
+}
+
+// ADR-0006 PR-B: the "Index without privacy gate" bypass is a security
+// downgrade, so it must carry the CSRF token. A GET SSE stream (``EventSource``,
+// no custom headers) can't, so the bypass runs through the token-protected
+// ``POST /api/index`` (via ``api()``) — trading per-file streaming for a
+// spinner. ``_indexingTryStartOrRefresh`` already ran in ``runIndexStream``.
+async function _runIndexForceUnsafe({ path, recursive, force, namespace, registerAsSource }) {
+  const btn = qs('index-btn');
+  const msgEl = qs('index-msg');
+  hide(qs('index-result'));
+  hide(qs('index-progress'));
+  setMsg(msgEl, t('index.indexing'), false);
+  btnLoading(btn, true);
+  try {
+    const body = { path, recursive, force, force_unsafe: true };
+    if (namespace) body.namespace = namespace;
+    const result = await api('POST', '/api/index', body);
+    hide(msgEl);
+    _renderIndexResult(result, { registerAsSource, path });
+  } catch (err) {
+    hide(msgEl);
+    showToast(t('toast.index_failed', { error: err?.message || String(err) }), 'error');
+  } finally {
+    btnLoading(btn, false);
+    _indexingEnd();
+  }
+}
+
 async function runIndexStream() {
   const path     = qs('index-path').value.trim();
   if (!path) { setMsg(qs('index-msg'), 'Please enter a path to index.', true); return; }
@@ -6532,6 +6674,12 @@ async function runIndexStream() {
   const force     = qs('index-force').checked;
   const namespace = qs('index-namespace').value.trim();
   const registerAsSource = qs('index-register-source')?.checked === true;
+  const forceUnsafe = qs('index-force-unsafe')?.checked === true;
+  // Bypass runs go through the CSRF-protected POST, not this GET SSE stream
+  // (a safe method the CSRF middleware does not token-gate). ADR-0006 PR-B.
+  if (forceUnsafe) {
+    return _runIndexForceUnsafe({ path, recursive, force, namespace, registerAsSource });
+  }
 
   const progressEl = qs('index-progress');
   const barEl      = qs('index-progress-bar');
@@ -6608,74 +6756,7 @@ async function runIndexStream() {
       barEl.style.width = '100%';
       labelEl.textContent = t('index.progress_done', { count: event.total_files });
       fileEl.textContent  = '';
-
-      qs('r-files').textContent   = event.total_files;
-      qs('r-chunks').textContent  = event.total_chunks;
-      qs('r-indexed').textContent = event.indexed_chunks;
-      qs('r-skipped').textContent = event.skipped_chunks;
-      qs('r-deleted').textContent = event.deleted_chunks;
-      qs('r-duration').textContent = `${event.duration_ms.toFixed(0)} ms`;
-      const nsCell = qs('r-namespace');
-      if (nsCell) {
-        nsCell.textContent = renderResolvedNamespaces(event.resolved_namespaces, { mode: 'applied' });
-      }
-
-      // #354 / #590: ``complete.errors`` may be present even on HTTP-200
-      // streams (e.g. ONNX missing on a subset of files, binary/too-large
-      // skips). Surface the same partial-failure UX as the previous
-      // non-stream POST handler — red toast + visible error row capped at
-      // 5 entries with a "+N more" tail.
-      const errList = Array.isArray(event.errors) ? event.errors : [];
-      const errRow = qs('r-errors-row');
-      if (errList.length > 0) {
-        const shown = errList.slice(0, 5);
-        const more = errList.length - shown.length;
-        qs('r-errors').textContent = (
-          more > 0 ? [...shown, `…and ${more} more`] : shown
-        ).join('\n');
-        errRow.hidden = false;
-        showToast(
-          t('toast.index_partial', {
-            count: event.indexed_chunks,
-            errors: errList.length,
-            first: errList[0],
-          }),
-          'error',
-        );
-      } else {
-        qs('r-errors').textContent = '';
-        errRow.hidden = true;
-        if (registerAsSource) {
-          // Checkbox already opted in to persistent registration, so skip
-          // the toast's "Register as Source" action — it would just be a
-          // duplicate of what we're about to do.
-          showToast(t('toast.indexed_count', { count: event.indexed_chunks }), 'success');
-          api('POST', '/api/memory-dirs/add', { path, auto_index: false })
-            .then(() => {
-              showToast(t('toast.index_registered_as_source', { path }), 'success');
-              loadStats();
-            })
-            .catch(err => {
-              showToast(
-                t('toast.index_register_failed', { error: err?.message || String(err) }),
-                'error',
-              );
-            });
-        } else {
-          showToast(t('toast.indexed_count', { count: event.indexed_chunks }), 'success', {
-            action: {
-              label: t('toast.action.register_persistent'),
-              onClick: goToSourcesAddPath,
-            },
-          });
-        }
-      }
-
-      show(resultEl);
-      _markDataStale();
-      loadStats();
-      loadNamespaceDropdowns();
-      loadSourceFilter();
+      _renderIndexResult(event, { registerAsSource, path });
       btnLoading(btn, false);
       _indexingEnd();
     }

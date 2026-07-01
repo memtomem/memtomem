@@ -613,10 +613,19 @@ async def add_memory_dir(
             default. PR #571 shipped this as opt-in
             (``default=False``); PR #576 flipped the default as a
             follow-up.
+        force_unsafe (bool, default False): ADR-0006 Axis E.1 — bypass the
+            secret-redaction gate during the ``auto_index`` scan
+            (audit-logged inside the engine). No effect when
+            ``auto_index=false``. Does **not** override the
+            ``project_shared`` hard-refusal (ADR-0011 §5).
     """
     body = await request.json()
     dir_path = body.get("path", "").strip()
     auto_index = bool(body.get("auto_index", True))
+    # Strict: only a literal JSON ``true`` bypasses the redaction gate. A plain
+    # ``bool(...)`` would make the string ``"false"`` (and any non-empty string)
+    # truthy — a silent secret-bypass footgun on a security override.
+    force_unsafe = body.get("force_unsafe", False) is True
     if not dir_path:
         raise HTTPException(status_code=400, detail="path is required")
 
@@ -661,7 +670,9 @@ async def add_memory_dir(
     indexed: dict[str, object] | None = None
     if auto_index:
         try:
-            stats = await index_engine.index_path(resolved, recursive=True, force=False)
+            stats = await index_engine.index_path(
+                resolved, recursive=True, force=False, force_unsafe=force_unsafe
+            )
             indexed = {
                 "total_files": stats.total_files,
                 "total_chunks": stats.total_chunks,
@@ -1257,7 +1268,14 @@ async def index_stream(
     index_engine=Depends(get_index_engine),
     config=Depends(get_config),
 ) -> StreamingResponse:
-    """Stream indexing progress as Server-Sent Events."""
+    """Stream indexing progress as Server-Sent Events.
+
+    No ``force_unsafe`` here by design (ADR-0006 PR-B): bypassing the
+    secret-redaction gate is a security downgrade, and a GET SSE stream is a
+    safe method the CSRF middleware does not token-gate (and ``EventSource``
+    cannot send the token header). The bypass runs through the CSRF-protected
+    ``POST /api/index`` instead — see ``trigger_index``.
+    """
     resolved = Path(path).expanduser().resolve()
     resolved_norm = Path(norm_path(resolved))
     memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.all_index_roots()]
@@ -1303,6 +1321,7 @@ async def trigger_index(
         resolved,
         recursive=req.recursive,
         force=req.force,
+        force_unsafe=req.force_unsafe,
         namespace=req.namespace,
     )
     return IndexResponse(

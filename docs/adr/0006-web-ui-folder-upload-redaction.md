@@ -441,8 +441,26 @@ Axes A–E are decided but only **partially built**:
   `force_unsafe`. Self-exports skip the scan, preserving round-trip.
 
 So the B.2 reject behavior is live for upload, import, **and folder-index**
-(PR-A). The decision (A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands; only the Web UI
-override toggle (Axis E.1 for the bulk surfaces, PR-B) remains to implement.
+(PR-A). The decision (A.3 + B.2 + C.1 + D.2 + E.1 + F.3) stands. **PR-B — the Web
+UI override toggle — shipped 2026-07-01:** the Index-tab folder mode and the
+Sources "+ Add path" flow now expose an "Index without privacy gate"
+(`force_unsafe`) checkbox. Because bypassing the redaction gate is a security
+*downgrade*, the bypass rides only CSRF-protected `POST`s — the Index folder
+mode through `POST /api/index` (`trigger_index`), Sources through
+`POST /api/memory-dirs/add` — **not** the token-exempt `GET /api/index/stream`
+SSE surface (a safe method the CSRF middleware does not token-gate, and
+`EventSource` cannot send the token header). A review flagged that threading
+`force_unsafe` onto the GET stream would let a CSRF-exempt safe method disable
+the safety boundary, so the folder bypass runs as a one-shot POST (a spinner,
+not a per-file progress bar). Every bulk-index surface now *displays* the PR-A
+`blocked_files` counts (result row + toast) — which PR-A added to the responses
+but no frontend surface rendered, so a secret-bearing file dropped with a green
+"success". `project_shared` blocks are messaged as non-bypassable (ADR-0011 §5),
+mirroring the `mm index` CLI. The Axis E.1 **audit-surface panel** (a GUI view of
+`privacy.snapshot()`) is **deferred to a follow-up PR** — no such panel exists in
+the web UI (the counters are MCP-only via `mem_add_redaction_stats`), so building
+it is its own focused change (a new `GET /api/privacy/stats` endpoint + a
+Settings section).
 
 ## Implementation outline (when triggered)
 
@@ -527,15 +545,32 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
       Some signal already exists here — unlike the debounce/flush and
       LangGraph gaps above — so this is deferred alongside PR-B rather than
       bundled into this fix.
-- **PR-B — Web UI override toggle + audit surface.**
-  - Add an "Index without privacy gate (audit-logged)" checkbox to the
-    Index tab and the Sources `+ 경로 추가` modal. On submit, pass
-    `force_unsafe=true` query/body param to the relevant endpoint.
-  - Surface the bypass trail: extend the existing redaction-stats
-    panel (the GUI view of `privacy.snapshot()`) so bulk bypass
-    counters are visible alongside MCP bypass counters. If the open
-    sub-question on axis E resolves to "add a persistent audit
-    table," that's a follow-up PR with its own schema work.
+- **PR-B — Web UI override toggle (shipped 2026-07-01) + audit surface
+  (deferred).**
+  - **Toggle — built.** An "Index without privacy gate" checkbox on the Index
+    tab (folder mode) and the Sources `+ 경로 추가` row threads `force_unsafe`
+    into PR-A's `IndexEngine` gate. The bypass is a security *downgrade*, so it
+    rides only CSRF-protected `POST`s — `POST /api/index` (`trigger_index`) for
+    the Index folder mode and `POST /api/memory-dirs/add` for Sources — **not**
+    the `GET /api/index/stream` SSE surface, which the CSRF middleware leaves
+    token-exempt (safe method) and which `EventSource` can't add a token header
+    to. A review flagged the GET-stream bypass as a CSRF hole; routing through
+    the POST closes it, at the cost of per-file streaming for a bypass run (a
+    one-shot spinner). Raw-body `force_unsafe` is parsed strictly (only a JSON
+    literal `true`), so a string `"false"` cannot silently flip the bypass on.
+    Paired with **blocked-file surfacing** (a result row + toast) across the
+    folder-index, per-dir reindex, reindex-all, and add flows — PR-A put
+    `blocked_files` / `blocked_paths` / `blocked_project_shared_files` on the
+    responses, but no surface displayed them, so the toggle had no visible
+    trigger. `project_shared` blocks are messaged as non-bypassable (they stay
+    hard-refused even with `force_unsafe`), matching the `mm index` CLI guidance.
+  - **Audit surface — deferred.** Surfacing the bypass trail as a GUI view of
+    `privacy.snapshot()` was written into this outline as "extend the existing
+    redaction-stats panel," but no such panel exists in the web UI — the counters
+    are MCP-only (`mem_add_redaction_stats`). Building it needs a new
+    `GET /api/privacy/stats` endpoint + a Settings section, so it is split into
+    its own follow-up PR. The persistent-audit-table sub-question on axis E
+    remains a separable decision on top of that.
 - **PR-C — CLI parity. Shipped with PR-A (2026-07-01).**
   - `mm index --force-unsafe` reuses PR-A's `IndexEngine` `force_unsafe`
     parameter (threaded through `cli/_index_progress.run_with_progress`), and the

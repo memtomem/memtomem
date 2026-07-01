@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from memtomem.config import TargetScope
 
@@ -103,7 +103,22 @@ class IndexRequest(BaseModel):
     path: str = "."
     recursive: bool = True
     force: bool = False
+    # ADR-0006 PR-B (Axis E.1): bypass the secret-redaction gate for this run.
+    # The Web UI routes its "Index without privacy gate" bypass through this
+    # CSRF-protected POST (not the token-exempt GET SSE stream). Audit-logged in
+    # the engine; does not override the ``project_shared`` hard-refusal.
+    force_unsafe: bool = False
     namespace: str | None = None
+
+    @field_validator("force_unsafe", mode="before")
+    @classmethod
+    def _only_literal_true(cls, v: object) -> bool:
+        # Only a JSON literal ``true`` enables the security bypass. Pydantic's
+        # default bool would coerce ``"true"`` / ``"yes"`` / ``1`` to True; for a
+        # redaction override we fail closed on any non-boolean instead, matching
+        # ``add_memory_dir``'s ``body.get(...) is True`` and the ADR's
+        # "literal true only" contract.
+        return v is True
 
 
 class IndexResponse(BaseModel):
