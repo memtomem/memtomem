@@ -69,9 +69,11 @@ from memtomem.wiki.override import (
     write_override,
 )
 from memtomem.wiki.store import (
+    WikiDetachedHeadError,
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiStore,
+    WikiUnbornHeadError,
 )
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
@@ -80,6 +82,7 @@ from memtomem.web.routes._wiki_common import (
     _require_vendor,
     _validate_name_or_error,
     _wiki_absent,
+    _wiki_unborn,
 )
 
 logger = logging.getLogger(__name__)
@@ -668,9 +671,11 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
     Responses: ``{committed: true, wiki_head, wiki_dirty, privacy_warning}`` on
     success; ``committed: false`` (200) when the saved bytes already match HEAD
     (no new history, ``.bak`` still cleaned); 409 ``stale_head`` (HEAD moved) /
-    ``stale_target`` (a file changed since Save); 503 ``busy`` on lock timeout;
-    500 ``commit_failed`` with a **fixed** message (raw git stderr — which embeds
-    ``$HOME`` — is logged server-side only, never returned).
+    ``stale_target`` (a file changed since Save) / ``detached_head`` (no branch
+    checked out — a wiki-state conflict, not a git failure); 503 ``busy`` on
+    lock timeout; 500 ``commit_failed`` with a **fixed** message (raw git
+    stderr — which embeds ``$HOME`` — is logged server-side only, never
+    returned).
 
     Privacy (§D-E): the commit *message* is new persisted user text, so it is
     scanned with the soft, scope-less ``privacy.scan`` and a non-blocking
@@ -726,11 +731,28 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
     except WikiHeadMovedError:
         try:
             fresh = store.current_commit()
-        except WikiNotFoundError:
+        except (WikiNotFoundError, WikiUnbornHeadError):
+            # The wiki vanished — or its branch was force-reset to empty —
+            # between the failed CAS and this freshness probe. The commit
+            # still failed because HEAD moved; report the conflict with an
+            # unknown fresh head rather than letting the probe's own error
+            # escape as a 500.
             fresh = ""
         return _commit_head_conflict(fresh)
     except WikiNotFoundError as exc:
         raise _wiki_absent(exc) from exc
+    except WikiDetachedHeadError as exc:
+        # Wiki-state precondition, not a git failure: a detached HEAD has no
+        # branch ref to CAS-advance, so the 500 ``commit_failed`` catch-all
+        # would misclassify it. 409 conflict like the sibling wiki-state
+        # envelopes (``override_exists``); the engine message is fixed and
+        # deliberately path-free (see WikiDetachedHeadError in wiki/store.py).
+        raise _error(409, "conflict", str(exc), reason_code="detached_head") from exc
+    except WikiUnbornHeadError as exc:
+        # Precede the broad RuntimeError arm like the detached-HEAD arm above:
+        # a commit-less wiki is a precise user-fixable state (409 + remedy),
+        # not an internal git failure (500).
+        raise _wiki_unborn(exc) from exc
     except TimeoutError as exc:
         raise _error(
             503, "busy", "wiki commit timed out — another wiki operation may be in progress"

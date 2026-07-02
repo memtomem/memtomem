@@ -24,7 +24,7 @@ from typing import Any
 
 from memtomem import privacy
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context._atomic import atomic_write_text
+from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context._runtime_targets import DiffRow
 
@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 CANONICAL_MCP_SERVER_ROOT = ".memtomem/mcp-servers"
 PROJECT_MCP_CONFIG = ".mcp.json"
 MCP_RUNTIME = "project_mcp"
+
+# Sidecar-lock acquisition budget for the ``.mcp.json`` read-merge-write
+# (the ``settings._SETTINGS_LOCK_BUDGET_S`` twin, #1145 review shape): a
+# bounded wait keeps a (possibly thread-offloaded) caller from blocking
+# indefinitely on a lock another process holds; on exhaustion the sync
+# self-aborts with a typed skip instead of hanging or orphaning a late write.
+_MCP_LOCK_BUDGET_S = 30.0
 
 
 class McpServerParseError(ValueError):
@@ -322,39 +329,85 @@ def generate_all_mcp_servers(
         definitions[parsed.name] = parsed.definition
 
     target = _project_mcp_path(project_root)
-    current_text = target.read_text(encoding="utf-8") if target.exists() else None
-    config = _parse_project_mcp_text(current_text) if current_text is not None else {}
-    mcp_servers = dict(config.get("mcpServers") or {})
-    for name, definition in definitions.items():
-        mcp_servers[name] = definition
-    config["mcpServers"] = mcp_servers
-    merged_text = json.dumps(config, indent=2, sort_keys=False) + "\n"
+    # Cross-process guard (the settings #1123 twin): ``.mcp.json`` is a SHARED
+    # file merged read-modify-write with foreign ``mcpServers`` entries
+    # preserved verbatim, so two unsynchronized writers (a CLI sync racing the
+    # web sync, or two ``mm`` processes) could silently drop each other's
+    # entries. The canonical scan/parse above stays OUTSIDE the lock (slow
+    # work out, invariant in); the sidecar lock spans read → merge → write.
+    # The ``st_mtime_ns`` recheck is kept as a second layer for writers that
+    # take no lock (a direct editor save mid-merge), matching
+    # ``generate_all_settings``.
+    try:
+        with _file_lock(_lock_path_for(target), timeout=_MCP_LOCK_BUDGET_S):
+            current_text = target.read_text(encoding="utf-8") if target.exists() else None
+            existing_mtime_ns = target.stat().st_mtime_ns if target.is_file() else 0
+            config = _parse_project_mcp_text(current_text) if current_text is not None else {}
+            mcp_servers = dict(config.get("mcpServers") or {})
+            for name, definition in definitions.items():
+                mcp_servers[name] = definition
+            config["mcpServers"] = mcp_servers
+            merged_text = json.dumps(config, indent=2, sort_keys=False) + "\n"
 
-    if merged_text == current_text:
-        # Nothing to change — rewriting anyway churned mtime, reflowed user
-        # formatting, and chmodded the file every run (#1247 id 43). Typed
-        # skip, not silent: an MCP-only project that is fully in sync must
-        # not read as "nothing to sync" in the Sync All no-op detection.
+            if merged_text == current_text:
+                # Nothing to change — rewriting anyway churned mtime, reflowed
+                # user formatting, and chmodded the file every run (#1247 id
+                # 43). Typed skip, not silent: an MCP-only project that is
+                # fully in sync must not read as "nothing to sync" in the Sync
+                # All no-op detection.
+                return McpServerSyncResult(
+                    generated=[],
+                    skipped=[
+                        (
+                            MCP_RUNTIME,
+                            f"all {len(definitions)} canonical server(s) already in sync "
+                            f"with {PROJECT_MCP_CONFIG}",
+                            skip_codes.IN_SYNC,
+                        )
+                    ],
+                )
+
+            # Concurrent-write guard, 0-sentinel form (a delete is as much an
+            # external change as an edit — the settings-copy #1382 lesson).
+            if (target.stat().st_mtime_ns if target.is_file() else 0) != existing_mtime_ns:
+                return McpServerSyncResult(
+                    generated=[],
+                    skipped=[
+                        (
+                            MCP_RUNTIME,
+                            f"{PROJECT_MCP_CONFIG} was modified by another process "
+                            f"during merge; nothing was written. Re-run "
+                            f"`mm context sync --include=mcp-servers` to retry.",
+                            skip_codes.TARGET_CONFLICT,
+                        )
+                    ],
+                )
+
+            # Mode policy (Codex design gate): a NEW file holds only
+            # Gate-A-scanned canonical content → 0o644 like every other
+            # fan-out target. A REWRITE preserves the existing mode in both
+            # directions — the merge carries foreign ``mcpServers`` entries
+            # verbatim without scanning them, so widening a user's 0600 file
+            # could expose unscanned secret env values, and forcing 0600 onto
+            # a 0644 file was the original id 43 complaint.
+            mode = 0o644 if current_text is None else stat.S_IMODE(target.stat().st_mode)
+            atomic_write_text(target, merged_text, mode=mode)
+    except TimeoutError:
+        # Another process held the lock past the budget. Abort cleanly so a
+        # (possibly thread-offloaded) caller never blocks indefinitely and
+        # never orphans a late writer (#1145 review shape).
         return McpServerSyncResult(
             generated=[],
             skipped=[
                 (
                     MCP_RUNTIME,
-                    f"all {len(definitions)} canonical server(s) already in sync "
-                    f"with {PROJECT_MCP_CONFIG}",
-                    skip_codes.IN_SYNC,
+                    f"{PROJECT_MCP_CONFIG}: another process held the lock past "
+                    f"the {_MCP_LOCK_BUDGET_S:g}s acquisition budget. Re-run "
+                    f"`mm context sync --include=mcp-servers` to retry.",
+                    skip_codes.LOCK_TIMEOUT,
                 )
             ],
         )
-
-    # Mode policy (Codex design gate): a NEW file holds only Gate-A-scanned
-    # canonical content → 0o644 like every other fan-out target. A REWRITE
-    # preserves the existing mode in both directions — the merge carries
-    # foreign ``mcpServers`` entries verbatim without scanning them, so
-    # widening a user's 0600 file could expose unscanned secret env values,
-    # and forcing 0600 onto a 0644 file was the original id 43 complaint.
-    mode = 0o644 if current_text is None else stat.S_IMODE(target.stat().st_mode)
-    atomic_write_text(target, merged_text, mode=mode)
 
     return McpServerSyncResult(
         generated=[(MCP_RUNTIME, name, target) for name in definitions],

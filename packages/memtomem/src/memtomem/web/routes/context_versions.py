@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["context-versions"])
 
+# Engine-side bound on the versions.json sidecar-lock wait, kept under the
+# routes' outer ``asyncio.timeout(60)`` so the worker thread self-aborts
+# in-window — an unbounded ``portalocker`` wait is uncancellable and would
+# keep writing after the handler already returned 503 (#1145 shape;
+# 30s < 60s mirrors context_mutations/context_transfer/wiki-commit).
+_VERSIONS_LOCK_BUDGET_S = 30.0
+
 # Artifact types eligible for versioning → (resolver, validate_name kind).
 # Skills are excluded by design (ADR-0022 invariant 7); any other type 404s.
 _Resolver = Callable[[Path, str, TargetScope], "tuple[Path, Layout] | None"]
@@ -318,9 +325,20 @@ async def create_artifact_version(
         async with asyncio.timeout(60):
             # Hold the gateway lock so a concurrent update to the working file
             # cannot tear the snapshot; create_version also takes its own
-            # non-reentrant file lock on the versions.json sidecar.
+            # non-reentrant file lock on the versions.json sidecar. The engine
+            # call is offloaded — it blocks on that cross-process lock, and
+            # running it on the loop would stall every concurrent request AND
+            # make the outer timeout unable to fire (the loop never yields).
+            # The builtin TimeoutError from an expired lock budget lands in
+            # the same 503 arm as the outer asyncio.timeout.
             async with _gateway_lock:
-                record = versioning.create_version(artifact_dir, working_file, note=note)
+                record = await asyncio.to_thread(
+                    versioning.create_version,
+                    artifact_dir,
+                    working_file,
+                    note=note,
+                    lock_timeout=_VERSIONS_LOCK_BUDGET_S,
+                )
     except TimeoutError:
         raise _error(503, "busy", "Version create timed out — another sync may be in progress")
     except VersionError as exc:
@@ -491,8 +509,19 @@ async def promote_artifact_label(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                versioning.promote_label(artifact_dir, label, body.version)
-                manifest = versioning.load_manifest(artifact_dir)
+                # Offloaded + lock-budgeted like create (the engine blocks on
+                # the cross-process sidecar lock); the follow-up manifest read
+                # rides the same worker thread.
+                def _promote_and_load() -> versioning.VersionsManifest:
+                    versioning.promote_label(
+                        artifact_dir,
+                        label,
+                        body.version,
+                        lock_timeout=_VERSIONS_LOCK_BUDGET_S,
+                    )
+                    return versioning.load_manifest(artifact_dir)
+
+                manifest = await asyncio.to_thread(_promote_and_load)
     except TimeoutError:
         raise _error(503, "busy", "Label promote timed out — another sync may be in progress")
     except VersionError as exc:
@@ -531,8 +560,14 @@ async def delete_artifact_label(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                versioning.delete_label(artifact_dir, label)
-                manifest = versioning.load_manifest(artifact_dir)
+                # Same offload + lock budget as create/promote.
+                def _delete_and_load() -> versioning.VersionsManifest:
+                    versioning.delete_label(
+                        artifact_dir, label, lock_timeout=_VERSIONS_LOCK_BUDGET_S
+                    )
+                    return versioning.load_manifest(artifact_dir)
+
+                manifest = await asyncio.to_thread(_delete_and_load)
     except TimeoutError:
         raise _error(503, "busy", "Label delete timed out — another sync may be in progress")
     except VersionError as exc:

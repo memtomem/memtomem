@@ -103,11 +103,28 @@ class WikiNothingToCommitError(RuntimeError):
 class WikiDetachedHeadError(RuntimeError):
     """Raised when a branch operation runs on a detached-HEAD wiki.
 
-    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``);
-    a detached HEAD has no branch to name, so :meth:`WikiStore.current_branch`
-    refuses rather than let git emit a cryptic refspec error. The message is
-    deliberately path- and SHA-free so it stays safe if a future web surface
-    ever reuses it (CLI surfaces it as a classified ``ClickException``).
+    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``),
+    and :meth:`WikiStore.commit_paths` CAS-advances a *branch ref*; a detached
+    HEAD has no branch to name, so :meth:`WikiStore.current_branch` and
+    :meth:`WikiStore.commit_paths` refuse rather than let git emit a cryptic
+    refspec / symbolic-ref error. The message is deliberately path- and
+    SHA-free so the web commit route can return it verbatim in its 409
+    envelope (the CLI surfaces it as a classified ``ClickException``).
+    """
+
+
+class WikiUnbornHeadError(RuntimeError):
+    """Raised when the wiki HEAD names a branch that has no commits yet.
+
+    The state a clone of an *empty* remote leaves behind (``mm wiki init
+    --from <url>`` of a just-created backup repo): ``.git`` exists, the
+    working tree may even carry files, but ``rev-parse HEAD`` has nothing
+    to resolve. Distinct from :class:`WikiNotFoundError` (no wiki at all)
+    so callers can degrade precisely — the web routes render a typed
+    envelope instead of a 500 traceback, and ``present``-style probes
+    report the wiki as not-yet-usable. The message is deliberately path-
+    and SHA-free (mirrors :class:`WikiDetachedHeadError`) so web surfaces
+    may return it verbatim.
     """
 
 
@@ -200,11 +217,12 @@ def _git(
 def _git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
     """Run ``git <args>`` in ``cwd`` returning raw *bytes* stdout.
 
-    Twin of :func:`_git` for path-carrying porcelain output (``ls-tree -z``):
-    ``text=True`` decodes with the host's preferred locale encoding, which
-    corrupts non-ASCII pathnames on non-UTF-8 hosts — the caller decodes
-    explicitly instead. Failure classification and credential redaction
-    mirror :func:`_git`.
+    Twin of :func:`_git` for byte-exact output — path-carrying porcelain
+    (``ls-tree -z``) and blob content (``show <rev>:<path>``): ``text=True``
+    decodes with the host's preferred locale encoding, which corrupts
+    non-ASCII pathnames (and any binary blob) on non-UTF-8 hosts — the
+    caller decodes explicitly instead. Failure classification and credential
+    redaction mirror :func:`_git`.
     """
     try:
         return subprocess.run(
@@ -360,7 +378,10 @@ class WikiStore:
         # remove it first so clone owns the layout.
         if self.root.exists():
             self.root.rmdir()
-        _git(["clone", url, str(self.root)], cwd=self.root.parent)
+        # ``--`` pins the user-supplied URL as positional: a ``-``-prefixed
+        # value must never be parsed as a git option (``--upload-pack=<cmd>``
+        # would run an arbitrary command). Same guard on remote add/set-url.
+        _git(["clone", "--", url, str(self.root)], cwd=self.root.parent)
 
     # ── Remote / backup (ADR-0008: "git remotes — no new sync protocol") ─────
     #
@@ -410,9 +431,9 @@ class WikiStore:
         """
         self.require_exists()
         if self.remote_url(name) is None:
-            _git(["remote", "add", name, url], cwd=self.root)
+            _git(["remote", "add", "--", name, url], cwd=self.root)
             return "added"
-        _git(["remote", "set-url", name, url], cwd=self.root)
+        _git(["remote", "set-url", "--", name, url], cwd=self.root)
         return "updated"
 
     def current_branch(self) -> str:
@@ -486,8 +507,46 @@ class WikiStore:
         the project lockfile (see ADR-0008).
         """
         self.require_exists()
-        result = _git(["rev-parse", "HEAD"], cwd=self.root)
+        try:
+            result = _git(["rev-parse", "HEAD"], cwd=self.root)
+        except RuntimeError as exc:
+            if self._head_is_unborn():
+                raise WikiUnbornHeadError(
+                    "wiki has no commits yet (a clone of an empty remote?) — make an "
+                    "initial commit in the wiki repo, or pull a populated branch with "
+                    "`mm wiki pull`"
+                ) from exc
+            raise
         return result.stdout.strip()
+
+    def _head_is_unborn(self) -> bool:
+        """``True`` when HEAD is a symbolic ref to a branch with no commits.
+
+        Called only after ``rev-parse HEAD`` failed, to classify that failure.
+        Three conditions gate the classification so a *corrupt* repo is never
+        misreported as merely unborn (any other failure re-raises the redacted
+        RuntimeError verbatim):
+
+        1. ``symbolic-ref -q HEAD`` resolves — HEAD itself is intact and names
+           a branch (a detached HEAD or a garbled HEAD file fails here);
+        2. ``show-ref --verify`` says the branch ref does not resolve (loose or
+           packed);
+        3. nothing sits at the ref's loose path — a directory (or unreadable
+           file) squatting at ``.git/refs/heads/<branch>`` also fails
+           ``show-ref``, but that is ref-store corruption, not an unborn
+           branch, and must keep the original git error.
+        """
+        sym = _git_query(["symbolic-ref", "-q", "HEAD"], self.root)
+        ref = sym.stdout.strip()
+        if sym.returncode != 0 or not ref:
+            return False
+        if _git_query(["show-ref", "--verify", "--quiet", ref], self.root).returncode == 0:
+            return False
+        ref_path = _git_query(["rev-parse", "--git-path", ref], self.root)
+        loose = ref_path.stdout.strip()
+        if ref_path.returncode != 0 or not loose:
+            return False
+        return not (self.root / loose).exists()
 
     def commit_is_reachable(self, commit: str) -> bool:
         """``True`` when *commit* resolves to an object in this wiki repo.
@@ -525,6 +584,42 @@ class WikiStore:
             capture_output=True,
             text=True,
         )
+        return result.returncode == 0
+
+    def commit_is_ancestor(self, commit: str, of: str = "HEAD") -> bool:
+        """``True`` when *commit* is an ancestor of *of* (default wiki HEAD).
+
+        Uses ``git merge-base --is-ancestor <commit> <of>``: exit 0 means
+        *commit* is reachable from *of* along the commit graph (a commit is
+        its own ancestor, so ``commit == of`` also returns ``True``), exit 1
+        means it is not. Any OTHER exit code — 128 for a bad/unknown object or
+        a broken repo, or anything git may return in future — is treated as
+        "not an ancestor" (``False``), mirroring :meth:`commit_is_reachable`'s
+        conservatism so ``mm context status`` degrades instead of crashing on
+        garbage input.
+
+        This is the forward-only guard :meth:`commit_is_reachable` does NOT
+        provide: reachability only proves the pin's object still EXISTS, not
+        that HEAD descends from it. After a wiki reset / force-pull to older
+        or divergent history the pin is newer/divergent — still reachable, but
+        not an ancestor of HEAD — and advancing the pin to HEAD would be a
+        downgrade, not an update. ``mm context status`` uses this to keep such
+        an entry out of the ``behind`` ("update available") bucket.
+
+        *commit* must be a full 40-hex object id for the same pin-contract
+        reason as :meth:`commit_is_reachable`: a symbolic ref (``main``) or an
+        abbreviated SHA must not silently satisfy the ancestry check. *of*
+        defaults to the symbolic ``HEAD`` and is passed through unvalidated —
+        it is the repo's own ref, not a stored pin.
+
+        Raises :class:`WikiNotFoundError` if the wiki itself is missing — the
+        caller decides whether that's a hard error or a graceful-degradation
+        path, exactly as :meth:`commit_is_reachable` does.
+        """
+        self.require_exists()
+        if not commit or _FULL_SHA_RE.fullmatch(commit) is None:
+            return False
+        result = _git_query(["merge-base", "--is-ancestor", commit, of], self.root)
         return result.returncode == 0
 
     def is_dirty(self) -> bool:
@@ -570,7 +665,9 @@ class WikiStore:
         2. Each target's bytes are stored byte-exact (``hash-object -w
            --no-filters``, so override Invariant 4 holds despite any repo
            ``.gitattributes`` eol/clean filters) and staged via
-           ``update-index --add --cacheinfo``.
+           ``update-index --add --cacheinfo`` under a mode resolved by
+           :meth:`_commit_blob_mode` (the exec bit is preserved, not
+           hardcoded to 100644 — see that method).
         3. ``write-tree`` + ``commit-tree`` build the commit using the wiki
            repo's own git identity (memtomem injects none).
         4. ``update-ref <branch> <new> <expected_head>`` is a compare-and-swap:
@@ -582,9 +679,11 @@ class WikiStore:
            the new HEAD — best-effort, since the commit has already landed.
 
         Raises :class:`WikiHeadMovedError` (HEAD advanced — caller → 409),
-        :class:`WikiNothingToCommitError` (bytes identical to HEAD), or
-        :class:`RuntimeError` (git failure — the caller MUST surface a fixed
-        message; the raw stderr embeds the absolute repo path).
+        :class:`WikiNothingToCommitError` (bytes identical to HEAD),
+        :class:`WikiDetachedHeadError` (no branch to CAS-advance — the message
+        is fixed and path-free, safe to surface), or :class:`RuntimeError`
+        (git failure — the caller MUST surface a fixed message; the raw stderr
+        embeds the absolute repo path).
         """
         self.require_exists()
         head = self.current_commit()
@@ -595,9 +694,22 @@ class WikiStore:
             )
 
         # Resolve the actual branch ref dynamically — never hardcode
-        # ``refs/heads/main`` (a clone may be on another branch); a detached
-        # HEAD has no symbolic ref and cannot be safely CAS-advanced.
-        branch_ref = _git(["symbolic-ref", "HEAD"], cwd=self.root).stdout.strip()
+        # ``refs/heads/main`` (a clone may be on another branch). A detached
+        # HEAD has no symbolic ref (rc != 0) and cannot be safely CAS-advanced,
+        # so classify it the way :meth:`current_branch` does for push/pull
+        # (#1419) instead of leaking git's raw "ref HEAD is not a symbolic ref"
+        # RuntimeError. This runs BEFORE the temp index is created, so there is
+        # nothing to roll back.
+        ref_result = _git_query(["symbolic-ref", "HEAD"], self.root)
+        if ref_result.returncode != 0:
+            raise WikiDetachedHeadError(
+                "wiki is in detached HEAD state; check out a branch before committing"
+            )
+        branch_ref = ref_result.stdout.strip()
+        if not branch_ref:
+            # rc 0 with empty output should never happen (mirrors the
+            # current_branch guard) — but never run ``git update-ref "" …``.
+            raise RuntimeError("could not determine the wiki's current branch")
 
         tmpdir = Path(tempfile.mkdtemp(prefix="mm-wiki-commit-"))
         try:
@@ -608,13 +720,14 @@ class WikiStore:
             blob_file = tmpdir / "blob"
             for rel, data in files.items():
                 _require_clean_rel(rel)
+                mode = self._commit_blob_mode(rel, head)
                 blob_file.write_bytes(data)
                 blob = _git(
                     ["hash-object", "-w", "--no-filters", str(blob_file)],
                     cwd=self.root,
                 ).stdout.strip()
                 _git(
-                    ["update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}"],
+                    ["update-index", "--add", "--cacheinfo", f"{mode},{blob},{rel}"],
                     cwd=self.root,
                     env=env,
                 )
@@ -647,6 +760,57 @@ class WikiStore:
             return new
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _commit_blob_mode(self, rel: str, head: str) -> str:
+        """Resolve the git blob mode to stage for *rel* — ``100644`` or ``100755``.
+
+        The temp index is seeded from HEAD, but ``update-index --cacheinfo``
+        overwrites the entry's mode, so a hardcoded ``100644`` silently strips
+        the exec bit from an executable script (e.g. ``skills/<n>/scripts/run.sh``
+        at ``100755`` in HEAD) — it extracts non-runnable on the next
+        ``mm context install`` (ADR-0027 commits the SAVED bytes of a resolved
+        target; the mode must ride along with them).
+
+        Semantics — **disk-first**, mirroring ``git add`` / ``core.filemode``:
+
+        * On POSIX, take the exec bit from the on-disk file (``self.root / rel``
+          — the exact file the caller read the saved bytes from; both callers
+          build ``rel`` as ``path.relative_to(store.root)``). This picks up a
+          ``chmod +x`` the same way ``git add`` would. ``os.access(_, X_OK)`` is
+          umask-independent and reflects the real bit.
+        * On Windows the filesystem carries no exec bit (git's ``core.filemode``
+          is false there), so fall back to HEAD's recorded mode — committing an
+          edit to a ``100755`` file from Windows must not flip it to ``100644``.
+        * A path not tracked at HEAD (brand-new file) with no usable on-disk
+          mode defaults to ``100644``.
+
+        Only regular-file blobs (``100644`` / ``100755``) are in scope. A
+        ``120000`` (symlink) or ``160000`` (gitlink) entry at HEAD is refused
+        loudly — ``commit_paths`` stages saved *regular-file* bytes (the editor
+        writes plain files; Save targets are server-resolved regular paths), so
+        committing those bytes under a symlink/gitlink mode would corrupt the
+        entry. Silent-rewrite is worse than a hard failure here.
+        """
+        head_mode = self._head_blob_mode(rel, head)
+        if head_mode is not None and head_mode not in ("100644", "100755"):
+            raise ValueError(
+                f"refusing to commit {rel!r}: HEAD mode {head_mode} is not a "
+                "regular file (only 100644/100755 blobs are committable)"
+            )
+        disk = self.root / PurePosixPath(rel)
+        if os.name != "nt" and disk.is_file() and not disk.is_symlink():
+            return "100755" if os.access(disk, os.X_OK) else "100644"
+        return head_mode or "100644"
+
+    def _head_blob_mode(self, rel: str, head: str) -> str | None:
+        """Git file mode recorded for *rel* at *head*, or ``None`` if untracked.
+
+        Parses the mode column of ``git ls-tree <head> -- <rel>`` (empty output
+        means the path is absent at that commit — a brand-new file)."""
+        out = _git(["ls-tree", head, "--", rel], cwd=self.root).stdout
+        if not out.strip():
+            return None
+        return out.split(maxsplit=1)[0]
 
     def copy_asset_at_commit(
         self,
@@ -716,13 +880,15 @@ class WikiStore:
         tree is never consulted, so the bytes are immutable for a given
         commit. Shared by :meth:`copy_asset_at_commit` (extraction) and the
         pinned-install Gate A privacy scan (#1247), which must observe
-        exactly the bytes the extractor would write.
+        exactly the bytes the extractor would write. Runs via
+        :func:`_git_bytes` so a failure (rel absent at the commit for a racy
+        caller, GC'd object, missing git binary) surfaces as a normalized
+        ``RuntimeError`` instead of a raw ``CalledProcessError`` / ``OSError``
+        escaping the callers' ``except RuntimeError`` boundaries.
         """
-        result = subprocess.run(
-            ["git", "show", f"{commit}:{asset_type}/{name}/{rel}"],
+        result = _git_bytes(
+            ["show", f"{commit}:{asset_type}/{name}/{rel}"],
             cwd=self.root,
-            check=True,
-            capture_output=True,
         )
         return result.stdout
 

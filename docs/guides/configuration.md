@@ -1,6 +1,6 @@
 # Configuration Reference
 
-memtomem reads configuration from environment variables. All variables use the `MEMTOMEM_` prefix, with nested sections separated by `__` (double underscore).
+memtomem reads configuration from environment variables. All variables use the `MEMTOMEM_` prefix, with nested sections separated by `__` (double underscore). Unprefixed names are never read, with one documented exception: the Langfuse SDK credentials described in [Session Trace](#session-trace).
 
 ```bash
 # Example: switch from Ollama to OpenAI
@@ -829,7 +829,7 @@ gate wins.
 | `MEMTOMEM_LLM__MAX_TOKENS` | `1024` | Maximum response tokens |
 | `MEMTOMEM_LLM__TIMEOUT` | `60.0` | Request timeout in seconds |
 
-The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM, OpenRouter, etc.) — set `BASE_URL` to the server's address. See [LLM Providers](llm-providers.md) for setup examples.
+The `openai` provider works with any OpenAI-compatible endpoint (LM Studio, vLLM, OpenRouter, etc.) — set `MEMTOMEM_LLM__BASE_URL` to the server's address. See [LLM Providers](llm-providers.md) for setup examples.
 
 ## Session Summary
 
@@ -857,11 +857,13 @@ Requires `MEMTOMEM_LLM__ENABLED=true` and a configured provider. Generated summa
 | `MEMTOMEM_SESSION_TRACE__LANGFUSE_PUBLIC_KEY` | _(empty)_ | Public key for your Langfuse project. |
 | `MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY` | _(empty)_ | Secret key for your Langfuse project. |
 | `MEMTOMEM_SESSION_TRACE__LANGFUSE_HOST` | _(empty)_ | Langfuse host URL (e.g. `https://cloud.langfuse.com` or self-hosted endpoint). |
-| `MEMTOMEM_SESSION_TRACE__SAMPLING_RATE` | `1.0` | Sampling rate for Langfuse spans, from `0.0` (no spans) to `1.0` (send all). Note: local JSONL logging is not affected by sampling (disable output via `ENABLED=false` or `JSONL_ENABLED=false`). |
+| `MEMTOMEM_SESSION_TRACE__SAMPLING_RATE` | `1.0` | Sampling rate for Langfuse spans, from `0.0` (no spans) to `1.0` (send all). Note: local JSONL logging is not affected by sampling (disable output via `MEMTOMEM_SESSION_TRACE__ENABLED=false` or `MEMTOMEM_SESSION_TRACE__JSONL_ENABLED=false`). |
 | `MEMTOMEM_SESSION_TRACE__PAYLOAD_MODE` | `metadata` | Payload logging mode: `metadata` (no payloads logged / None), `redacted` (replaces secret-looking fields like passwords/keys with `***` while leaving ordinary values intact), or `full` (log complete input/output). |
 | `MEMTOMEM_SESSION_TRACE__MAX_PAYLOAD_CHARS` | `10000` | Maximum character length for payload properties before truncation. |
 
 When `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` is set, both public and secret keys must be supplied, and the `langfuse` Python package must be installed (e.g., via `pip install 'memtomem[langfuse]'` or `uv tool install 'memtomem[all]'` which includes it).
+
+The keys may come either from the config surface above or from the Langfuse SDK's own standard variables — `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and optionally `LANGFUSE_HOST`. This is the only place memtomem honours env vars without the `MEMTOMEM_` prefix, and it is credentials-only: the values are read by the Langfuse SDK itself, never copied into memtomem config, and `LANGFUSE_ENABLED` alone never turns tracing on — enabling always requires the explicit `MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED=true` (or `config.json`) opt-in.
 
 ## Tool Mode
 

@@ -218,7 +218,9 @@ class TestContextVersionCliInline:
 
         r = runner.invoke(cli, ["context", "version", "create", "agents", "flat-agent"])
         assert r.exit_code != 0
-        assert "migrate" in r.output.lower()
+        # The hint must embed the runnable (plural) migrate command — the
+        # singular form trips Click's invalid-choice error when pasted.
+        assert "mm context migrate agents flat-agent" in r.output
 
     def test_version_create_blocks_secret_in_project_shared(self, tmp_path, monkeypatch):
         # Gate A: creating a version is a new git-tracked write for the default
