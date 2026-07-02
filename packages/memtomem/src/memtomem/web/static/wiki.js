@@ -270,6 +270,13 @@ async function _doWikiCommit(force) {
     if (body.reason_code === 'stale_target') {
       // An external editor changed a target since Save. Offer to commit the
       // current on-disk bytes anyway (force, WARNING-audited server-side).
+      // The confirm dialog (#confirm-modal) shares the .modal-overlay z-index
+      // and sits earlier in the DOM, so it would stack UNDER this modal
+      // (openModalA11y orders by DOM, not z-index) — hide the commit modal
+      // for the disclosure and restore it on decline (the move/copy
+      // needs_confirmation precedent in context-gateway.js).
+      const modal = qs('wiki-commit-modal');
+      if (modal) hide(modal);
       const ok = await showConfirm({
         title: t('settings.ctx.wiki_commit_target_changed_title'),
         message: t('settings.ctx.wiki_commit_target_changed_msg'),
@@ -277,7 +284,14 @@ async function _doWikiCommit(force) {
         cancelText: t('modal.cancel_btn'),
         danger: true,
       });
-      if (ok) { await _doWikiCommit(true); } else { showErr(t('settings.ctx.wiki_commit_target_changed_msg')); }
+      if (ok) {
+        // The force retry re-reads the (hidden) modal's message field and
+        // closes it properly on success via _closeWikiCommitModal.
+        await _doWikiCommit(true);
+      } else {
+        if (modal) show(modal);
+        showErr(t('settings.ctx.wiki_commit_target_changed_msg'));
+      }
       return;
     }
     // stale_head: HEAD moved under us. CLEAR the pending targets — their tokens
@@ -1038,6 +1052,16 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
     }
     if (reason === 'not_installed') {
       showToast(t('settings.ctx.wiki_not_installed', { type: _wikiTypeLabel(type), name }), 'error');
+      return;
+    }
+    if (reason === 'privacy_blocked') {
+      // Localized copy, not the envelope's detail.message — that prose is
+      // English-only server text and, being always non-empty, would shadow
+      // every translation (the #1348 class).
+      showToast(
+        t('settings.ctx.wiki_install_privacy_blocked', { type: _wikiTypeLabel(type), name }),
+        'error',
+      );
       return;
     }
     const detail = (body && body.detail && body.detail.message) || `HTTP ${res.status}`;
