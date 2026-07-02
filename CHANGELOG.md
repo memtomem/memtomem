@@ -7,6 +7,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **Quoted-JSON credential labels and the `x-amz-security-token` wire label
+  are redacted — forward-sync of memtomem-stm#562 / memtomem-stm#561.** Two
+  more STM-origin secret-class rules mirrored forward in one pass so the sets
+  move together. (1) *Quoted-label generalization* (memtomem-stm#562): the
+  generic label rules end in `\s*[:=]`, and a quoted key's closing quote sits
+  between the label and the colon, so `"password": "hunter2"`,
+  `"api_key": "sk-…"`, camelCase `"accessToken": "ya29.…"`, and dict-repr
+  `{'password': 'hunter2'}` — the exact shape of a pasted `docker inspect` /
+  `kubectl get secret -o json` / DB-config note — crossed the write boundary
+  unredacted. One general quoted-label rule reuses the #553 FP-guard shape
+  (quote directly on both sides of the label, value must open as a string, so
+  JSON-Schema object values, embedded labels, and prefixed keys never fire);
+  `pwd` is deliberately excluded — shell/file tools legitimately emit
+  `"pwd": "/home/user"` working-directory fields. (2) *AWS wire label*
+  (memtomem-stm#561): botocore DEBUG logs emit the `x-amz-security-token`
+  request header verbatim and every presigned URL generated with temporary
+  credentials carries `X-Amz-Security-Token=…`, but `session[_-]?token`
+  cannot cross the `security-token` spelling, so those notes scanned clean
+  unless an `ASIA…` key ID co-occurred. The new rule's unquoted branch
+  carries a separator-only left boundary (`(?<![_.\-])`): kebab/dotted
+  compounds that merely name the header (`forward-x-amz-security-token:
+  true`, `proxy.headers.x-amz-security-token`) stay negative, while
+  bytes-repr wire dumps — which render the newline before the header line as
+  a literal `\r\n`, putting an alphanumeric directly before the label — stay
+  positive. The two sides are byte-identical again at 19 patterns, same
+  order (STM pin memtomem-stm@`67689db`); both patterns translate cleanly to
+  the Web UI's client-side JS scan (position-0 `(?i)` lift + fixed-width
+  lookbehind, ES2018+), and each gets its paired JS-translation parity
+  fixture. A content-hash pin over the shared subset is tracked in
+  memtomem-stm#559.
 - **AWS secret material is redacted by label (`SECRET_ACCESS_KEY` /
   `SESSION_TOKEN`) — forward-sync of memtomem-stm#553.** The redaction guard
   caught AWS key **IDs** (`AKIA`/`ASIA`) but not the secret **material** those
