@@ -25,7 +25,15 @@ their distinct UX):
 Helper guarantees: bar is always closed on exit (including raise), stream
 runs serially over the supplied ``paths``, returned aggregate dict has
 stable keys ``total_files``, ``indexed``, ``skipped``, ``deleted``,
-``total_chunks``, ``duration_ms``, ``errors``, ``bar_rendered``."""
+``total_chunks``, ``duration_ms``, ``errors``, ``bar_rendered``,
+``blocked``, ``blocked_paths``, ``blocked_project_shared`` (ADR-0006 PR-A).
+
+:func:`print_blocked_summary` / :func:`print_index_errors` are the shared
+post-run reporters for those counters — every CLI bulk-index surface
+(``mm index``, the wizard seed, the interactive shell) prints the same
+blocked-files block so the trust-boundary messaging can't drift per
+surface; only the bypass hint differs (each surface names the command its
+user can actually run)."""
 
 from __future__ import annotations
 
@@ -253,6 +261,57 @@ async def run_with_progress(
     return agg
 
 
+def print_blocked_summary(
+    *,
+    blocked: int,
+    blocked_paths: Sequence[str],
+    blocked_project_shared: int,
+    bypass_hint: str,
+) -> None:
+    """Print the redaction-blocked summary shared by the CLI bulk surfaces.
+
+    ADR-0006 PR-A: name the secret-bearing files the gate skipped, with
+    scope-correct guidance — ``project_shared`` is hard-refused even with
+    ``--force-unsafe``, so the bypass hint covers only the bypassable rest.
+    ``bypass_hint`` is surface-specific (``mm index`` says "re-run with
+    --force-unsafe"; surfaces without their own flag name the command to
+    run instead) and is printed after an arrow prefix. No-op when nothing
+    was blocked.
+    """
+    if not blocked:
+        return
+    bypassable = blocked - blocked_project_shared
+    click.secho(f"  {blocked} file(s) blocked by redaction guard:", fg="yellow")
+    for p in blocked_paths:
+        click.secho(f"    {p}", fg="yellow")
+    if bypassable:
+        click.secho(f"  → {bypass_hint}", fg="yellow")
+    if blocked_project_shared:
+        click.secho(
+            f"  → {blocked_project_shared} file(s) are in the project_shared tier — "
+            "hard-refused; --force-unsafe does not apply. Move them to "
+            "user/project_local or remove the secret.",
+            fg="yellow",
+        )
+
+
+def print_index_errors(errors: Sequence[str]) -> None:
+    """Print non-redaction per-file errors from a bulk index run.
+
+    ``redaction_blocked`` entries are skipped — :func:`print_blocked_summary`
+    already surfaced those files with a clearer message and hint.
+    """
+    for err in errors:
+        if "redaction_blocked" in err:
+            continue
+        click.echo(click.style(f"  ERROR: {err}", fg="red"))
+
+
 # Re-exported asyncio.run wrapper kept thin: callers want the surface-specific
 # error handling around the await, so they manage ``asyncio.run`` themselves.
-__all__ = ["run_with_progress", "_collect_seed_scale"]
+__all__ = [
+    "print_blocked_summary",
+    "print_index_errors",
+    "run_with_progress",
+    "_collect_seed_scale",
+]

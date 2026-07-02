@@ -179,11 +179,24 @@ class FileWatcher:
                 stats = await self._engine.index_path(d, recursive=True)
                 total_indexed += stats.indexed_chunks
                 if stats.blocked_files:
-                    # ADR-0006 PR-A: secret-bearing files skipped during backfill.
+                    # ADR-0006 PR-A: secret-bearing files skipped during
+                    # backfill — name them so the log is actionable.
                     logger.warning(
-                        "Startup backfill %s: %d file(s) blocked by redaction guard",
+                        "Startup backfill %s: %d file(s) blocked by redaction guard: %s",
                         d,
                         stats.blocked_files,
+                        ", ".join(stats.blocked_paths),
+                    )
+                other_errors = [e for e in stats.errors if "redaction_blocked" not in e]
+                if other_errors:
+                    # Non-redaction per-file failures/skips (too-large, binary,
+                    # backend errors) — previously dropped. One aggregated line
+                    # per dir bounds the per-restart log noise.
+                    logger.warning(
+                        "Startup backfill %s: %d file(s) skipped or failed: %s",
+                        d,
+                        len(other_errors),
+                        "; ".join(other_errors),
                     )
                 if stats.indexed_chunks or stats.deleted_chunks:
                     logger.info(

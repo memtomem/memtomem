@@ -62,6 +62,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (Runtime group) now render the outcome totals plus a per-write-surface
   breakdown, so an operator can audit redaction activity without an MCP client.
 
+- **The interactive shell `index` command, the watcher startup backfill, and the
+  `mm init` wizard seed now name redaction-blocked files (ADR-0006 PR-A
+  follow-up).** A sweep of the remaining `IndexEngine` bulk callers found three
+  surfaces still swallowing the PR-A `blocked_files` aggregates: the shell and
+  the backfill reported only a count — no paths, no scope guidance, and
+  non-redaction per-file errors (too-large / binary / backend failures) not at
+  all — and the `mm init` seed dropped the signal entirely, so a secret-bearing
+  file in a seeded folder vanished behind the green "Seeded initial index" line
+  (or, with every file blocked, behind a misleading "check logs for upsert
+  errors" + embedding-reset hint). The shell and the seed now print the same
+  blocked-file summary `mm index` shows — paths, `--force-unsafe` guidance where
+  it applies, the `project_shared` hard-refusal note — plus the non-redaction
+  ERROR lines, via reporters shared by all three CLI surfaces
+  (`cli/_index_progress.py`) so that messaging cannot drift; the watcher
+  backfill (a log surface, not a terminal one) now names the blocked paths in
+  its warning and aggregates non-redaction errors to one line per directory.
+  `mm index` output is unchanged.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

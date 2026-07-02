@@ -144,7 +144,11 @@ async def _index(
     pre-stream implementation since scripts may grep it; the helper
     aggregates ``deleted`` and ``duration_ms`` from the stream's
     ``complete`` events so the format is preserved verbatim."""
-    from memtomem.cli._index_progress import run_with_progress
+    from memtomem.cli._index_progress import (
+        print_blocked_summary,
+        print_index_errors,
+        run_with_progress,
+    )
 
     resolved = Path(path).resolve()
 
@@ -179,33 +183,18 @@ async def _index(
         f"{agg['indexed']} new, {agg['skipped']} unchanged, "
         f"{agg['deleted']} deleted ({agg['duration_ms']:.0f}ms)"
     )
-    if agg["blocked"]:
-        # ADR-0006 PR-A: name the secret-bearing files that were skipped. Give
-        # scope-correct guidance — project_shared is hard-refused even with
-        # --force-unsafe, so don't tell the user to retry it there.
-        ps = agg["blocked_project_shared"]
-        bypassable = agg["blocked"] - ps
-        click.secho(f"  {agg['blocked']} file(s) blocked by redaction guard:", fg="yellow")
-        for p in agg["blocked_paths"]:
-            click.secho(f"    {p}", fg="yellow")
-        if bypassable:
-            click.secho(
-                "  → re-run with --force-unsafe to index the non-project_shared "
-                "files anyway (audit-logged).",
-                fg="yellow",
-            )
-        if ps:
-            click.secho(
-                f"  → {ps} file(s) are in the project_shared tier — hard-refused; "
-                "--force-unsafe does not apply. Move them to user/project_local "
-                "or remove the secret.",
-                fg="yellow",
-            )
-    for err in agg["errors"]:
-        if "redaction_blocked" in err:
-            # Already surfaced above with a clearer message + hint.
-            continue
-        click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    # ADR-0006 PR-A: shared reporters keep the blocked-files block and the
+    # non-redaction error lines byte-identical across the CLI bulk surfaces.
+    print_blocked_summary(
+        blocked=agg["blocked"],
+        blocked_paths=agg["blocked_paths"],
+        blocked_project_shared=agg["blocked_project_shared"],
+        bypass_hint=(
+            "re-run with --force-unsafe to index the non-project_shared "
+            "files anyway (audit-logged)."
+        ),
+    )
+    print_index_errors(agg["errors"])
 
 
 def _print_status(*, as_json: bool) -> None:

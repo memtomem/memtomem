@@ -2427,6 +2427,80 @@ class TestFileWatcher:
         assert first > 0
         assert first == second, f"expected backfill idempotent, got {first} -> {second}"
 
+    async def test_startup_backfill_logs_blocked_paths(self, components, memory_dir, caplog):
+        """ADR-0006 PR-A follow-up: the backfill's redaction-blocked warning
+        logged only a count — ops can't act on a count. It now names the
+        blocked file(s) (paths only, never the matched bytes)."""
+        import logging
+
+        from memtomem import privacy
+        from memtomem.indexing.watcher import FileWatcher
+
+        # Runtime-assembled token shape (mirrors test_index_privacy_block_surfaces).
+        secret = "hf" + "_FAKEfake0123456789FAKEfake01234567"
+        (memory_dir / "leak.md").write_text(f"# Leak\n\napi token: {secret}\n", encoding="utf-8")
+        components.config.indexing.startup_backfill = True
+
+        privacy.reset_for_tests()
+        try:
+            watcher = FileWatcher(
+                index_engine=components.index_engine,
+                config=components.config.indexing,
+                debounce_ms=100,
+            )
+            try:
+                with caplog.at_level(logging.WARNING, logger="memtomem.indexing.watcher"):
+                    await watcher.start()
+                    assert watcher._backfill_task is not None
+                    await watcher._backfill_task
+            finally:
+                await watcher.stop()
+        finally:
+            privacy.reset_for_tests()
+
+        # Filter to the watcher's own backfill line: caplog captures ALL
+        # loggers, and the engine emits its own per-file "Indexing blocked by
+        # redaction guard for <path>" warning that would satisfy a bare
+        # message-substring match even without the watcher change.
+        blocked = [
+            r.message
+            for r in caplog.records
+            if r.name == "memtomem.indexing.watcher"
+            and r.message.startswith("Startup backfill")
+            and "blocked by redaction guard" in r.message
+        ]
+        assert blocked, [r.message for r in caplog.records]
+        assert any("leak.md" in m for m in blocked)
+        assert all(secret not in m for m in blocked)
+
+    async def test_startup_backfill_logs_non_redaction_errors(self, components, memory_dir, caplog):
+        """Non-redaction per-file failures/skips (binary, too-large) vanished
+        from the backfill logs entirely — a walk that skipped files looked
+        identical to one that indexed everything. One aggregated warning per
+        dir now names them."""
+        import logging
+
+        from memtomem.indexing.watcher import FileWatcher
+
+        (memory_dir / "blob.md").write_bytes(b"\x00\x01binary")
+        components.config.indexing.startup_backfill = True
+
+        watcher = FileWatcher(
+            index_engine=components.index_engine,
+            config=components.config.indexing,
+            debounce_ms=100,
+        )
+        try:
+            with caplog.at_level(logging.WARNING, logger="memtomem.indexing.watcher"):
+                await watcher.start()
+                assert watcher._backfill_task is not None
+                await watcher._backfill_task
+        finally:
+            await watcher.stop()
+
+        msgs = [r.message for r in caplog.records]
+        assert any("skipped or failed" in m and "binary file detected" in m for m in msgs), msgs
+
 
 # ===========================================================================
 # 11. memory_dir_stats — per-dir index status for the web widget

@@ -21,6 +21,10 @@ from memtomem.cli._index_progress import (
     _collect_seed_scale as _collect_seed_scale,
 )
 from memtomem.cli._index_progress import (
+    print_blocked_summary,
+    print_index_errors,
+)
+from memtomem.cli._index_progress import (
     run_with_progress as _run_index_with_progress,
 )
 from memtomem.cli.init_presets import PRESETS, _VALID_PRESETS, get_preset
@@ -1773,6 +1777,29 @@ def _seed_with_progress(paths: list[Path]) -> bool:
         return False
 
     click.echo()
+    # ADR-0006 PR-A: surface the redaction-blocked files and non-redaction
+    # per-file errors the seed run aggregated — previously both were
+    # swallowed, so a secret-bearing file vanished behind a green summary
+    # (or, fully blocked, behind the wrong "upsert errors" diagnosis below).
+    if len(paths) == 1:
+        bypass_hint = (
+            f"re-run `mm index --force-unsafe {paths[0]}` after setup to "
+            "index the non-project_shared files anyway (audit-logged)."
+        )
+    else:
+        bypass_hint = (
+            "re-run `mm index --force-unsafe <dir>` on the affected dir(s) "
+            "after setup to index the non-project_shared files anyway "
+            "(audit-logged)."
+        )
+    print_blocked_summary(
+        blocked=agg["blocked"],
+        blocked_paths=agg["blocked_paths"],
+        blocked_project_shared=agg["blocked_project_shared"],
+        bypass_hint=bypass_hint,
+    )
+    print_index_errors(agg["errors"])
+
     # Defensive: if the stream processed files but landed zero chunks
     # (neither new nor skipped-as-unchanged), something went wrong
     # silently — per-file errors are logged but the `complete` event
@@ -1783,6 +1810,11 @@ def _seed_with_progress(paths: list[Path]) -> bool:
     # Next-steps step 1 stays unmarked and the user knows to investigate
     # rather than seeing a false green success.
     if agg["indexed"] == 0 and agg["skipped"] == 0:
+        if agg["blocked"] == agg["total_files"]:
+            # Fully explained by the redaction gate — the blocked summary
+            # above is the diagnosis; the upsert/embedder hints would point
+            # the wrong way.
+            return False
         click.secho(
             f"  Seeded {agg['total_files']} file(s) but 0 chunks were indexed — "
             "check logs for upsert errors.",
