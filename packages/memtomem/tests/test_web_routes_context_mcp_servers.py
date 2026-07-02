@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.config import Mem2MemConfig
 from memtomem.web.app import create_app
-from memtomem.web.routes.context_mcp_servers import _safe_rel
+from memtomem.web.routes.context_gateway import _safe_rel
 
 
 @pytest.fixture
@@ -383,6 +383,38 @@ async def test_delete_removed_entry_is_posix(client: AsyncClient, tmp_path: Path
     data = r.json()
     assert data["deleted"] == [".memtomem/mcp-servers/gone.json"]
     assert data["skipped"] == []
+
+
+@pytest.mark.anyio
+async def test_delete_skip_reason_is_path_free(
+    client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``path.unlink()`` builds a ``skipped[]`` row whose ``reason``
+    must not echo the absolute canonical path (#1412 sweep, leg b).
+
+    ``str(OSError)`` from ``unlink`` embeds ``self`` (the resolved canonical
+    ``Path``) — the disclosure the skills/commands/agents delete legs already
+    close by routing the reason through ``sanitize_diff_reason``; the mcp route
+    surfaced the raw ``str(exc)`` verbatim to the loopback dashboard.
+    """
+    path = _seed_canonical(tmp_path, "gone")
+
+    def _boom(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError(f"[Errno 13] Permission denied: '{self}'")
+
+    monkeypatch.setattr(Path, "unlink", _boom)
+    r = await client.delete("/api/context/mcp-servers/gone")
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["deleted"] == []
+    assert len(data["skipped"]) == 1, data
+    reason = data["skipped"][0]["reason"]
+    assert str(path) not in reason, data
+    assert str(path.resolve()) not in reason, data
+    # Whole-body sweep so a future shape change can't reintroduce the leak.
+    assert str(tmp_path) not in json.dumps(data), data
+    assert str(tmp_path.resolve()) not in json.dumps(data), data
 
 
 def test_safe_rel_joins_with_posix_separators() -> None:

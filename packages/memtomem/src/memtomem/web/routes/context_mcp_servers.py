@@ -30,7 +30,7 @@ from memtomem.context.mcp_servers import (
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
-from memtomem.web.routes.context_gateway import read_text_lenient, sanitize_diff_reason
+from memtomem.web.routes.context_gateway import _safe_rel, read_text_lenient, sanitize_diff_reason
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_writable_scope_root,
@@ -39,40 +39,6 @@ from memtomem.web.routes.context_projects import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["context-mcp-servers"])
-
-
-def _safe_rel(p: Path, project_root: Path) -> str:
-    """Project-relative path as a POSIX string for API payloads.
-
-    ``.as_posix()`` (not ``str``) so ``canonical_path`` / ``path`` fields come
-    back ``/``-separated on every platform — the Web UI and diff payloads pin
-    POSIX separators (#1256). Falls back to the absolute POSIX path outside
-    ``project_root``. Parity with ``context_agents`` / ``context_commands``
-    (#1264); this route was never covered by #1256's diff tests, so the
-    ``str()`` form lingered latent (#1325).
-
-    ``p`` is a ``.resolve()``'d canonical/runtime path, but the route may receive
-    an unresolved/symlinked ``project_root`` (macOS ``/tmp``→``/private/tmp``),
-    so ``relative_to`` against the bare root raises ``ValueError`` and the
-    fallback would emit the ABSOLUTE resolved path to the loopback dashboard
-    (#1412, the same disclosure as the parse-error reason). Try the resolved
-    root too before falling back. ``resolve()`` lives only on concrete ``Path``
-    objects — the cross-platform ``PureWindowsPath`` tests (#1325) drive this
-    with a pure path, so the resolved attempt is guarded and skipped there.
-    """
-    roots = [project_root]
-    try:
-        resolved_root = project_root.resolve()
-    except (AttributeError, OSError):
-        resolved_root = project_root
-    if resolved_root != project_root:
-        roots.append(resolved_root)
-    for root in roots:
-        try:
-            return p.relative_to(root).as_posix()
-        except ValueError:
-            continue
-    return p.as_posix()
 
 
 def _reject_non_shared_write(target_scope: TargetScope, action: str) -> None:
@@ -362,7 +328,16 @@ async def delete_mcp_server(
                         path.unlink()
                         removed.append(_safe_rel(path, project_root))
                     except OSError as exc:
-                        skipped.append({"path": _safe_rel(path, project_root), "reason": str(exc)})
+                        # ``str(exc)`` embeds the absolute canonical path
+                        # (``OSError`` carries ``.filename``); sanitize it like
+                        # the skills/commands/agents delete legs so the skip
+                        # reason never leaks it to the loopback dashboard (#1412).
+                        skipped.append(
+                            {
+                                "path": _safe_rel(path, project_root),
+                                "reason": sanitize_diff_reason(str(exc), project_root) or "",
+                            }
+                        )
                 if cascade:
                     mcp_path = project_root / ".mcp.json"
                     if mcp_path.is_file():

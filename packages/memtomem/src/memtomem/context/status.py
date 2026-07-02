@@ -9,7 +9,11 @@ run in cron pipes (``mm context status && mm context update --all``).
 State semantics for each lockfile entry:
 
 - ``ok`` — dest clean, lockfile pin reachable in wiki, pin == HEAD
-- ``behind`` — dest clean, pin reachable, pin != HEAD ("update available")
+- ``behind`` — dest clean, pin reachable AND an ancestor of HEAD, pin !=
+  HEAD ("update available"). Ancestry is required, not just reachability:
+  after a wiki reset / force-pull to older history the pin is reachable but
+  NEWER than (or divergent from) HEAD, so ``mm context update`` would move
+  the pin BACKWARD — that case is ``stale-pin``, not ``behind``
 - ``dirty`` — dest has local edits since ``installed_at``
 - ``missing`` — lockfile entry exists but ``<project>/.memtomem/<type>/<name>/``
   is gone (collapses :data:`memtomem.context.dirty.DirtyReport.reason`
@@ -18,7 +22,10 @@ State semantics for each lockfile entry:
   asset, the row's reason points at ``mm context migrate`` instead of
   claiming "dest missing" (#1247)
 - ``stale-pin`` — wiki absent or unusable, OR pin not reachable in the
-  wiki repo (history rewrite, force-push past the pin, etc.)
+  wiki repo (history rewrite, force-push past the pin, etc.), OR pin
+  reachable but NOT an ancestor of HEAD (wiki reset / force-pull to
+  older/divergent history — the pin is newer/divergent, so "updating"
+  would silently downgrade it)
 - ``untracked`` — project_shared canonical on disk with no lockfile entry
   (reverse-imported via ``mm context init`` or moved in via ``mm context
   migrate --to project_shared``); actively served by sync fan-out, just
@@ -144,8 +151,11 @@ def classify_status(
     well-formed entries; the corrupt case is the caller's to surface.
 
     Wiki reachability: probed once per entry via
-    :meth:`WikiStore.commit_is_reachable`. When the wiki is absent,
-    that method isn't called.
+    :meth:`WikiStore.commit_is_reachable`, then — only for a reachable pin
+    that differs from HEAD — :meth:`WikiStore.commit_is_ancestor` decides
+    ``behind`` (pin is an ancestor of HEAD, update available) vs ``stale-pin``
+    (pin reachable but diverged; "updating" would downgrade). When the wiki is
+    absent, neither method is called.
     """
     project_root_path = Path(project_root).expanduser()
     lockfile = Lockfile.at(project_root_path)
@@ -227,12 +237,25 @@ def classify_status(
                 reason = "lockfile entry missing wiki_commit"
             elif pin_commit == wiki_head:
                 state = "ok"
-            elif wiki.commit_is_reachable(pin_commit):
+            elif not wiki.commit_is_reachable(pin_commit):
+                state = "stale-pin"
+                reason = f"pin {pin_commit[:12]} not reachable"
+            elif wiki.commit_is_ancestor(pin_commit):
+                # Reachable AND an ancestor of HEAD → HEAD genuinely advanced
+                # past the pin; an update is available.
                 state = "behind"
                 reason = "wiki advanced past pin"
             else:
+                # Reachable but NOT an ancestor of HEAD: the wiki was reset or
+                # force-pulled to older/divergent history, so the pin is
+                # newer/divergent and `mm context update` would move it BACKWARD
+                # (a silent downgrade). Not "behind" — surface it as drift so
+                # the user investigates instead of "updating" into a downgrade.
+                # Folds into stale-pin ("history rewrite, force-push past the
+                # pin, etc.") rather than a new state — keeps the 7-key
+                # state-count conservation contract intact (#1280).
                 state = "stale-pin"
-                reason = f"pin {pin_commit[:12]} not reachable"
+                reason = "wiki history diverged from pin (reset or force-pull?)"
 
         rows.append(
             StatusRow(

@@ -32,8 +32,10 @@ _LEAK_PATH = "/tmp/p/.memtomem/agents/leak.md"
 _FAKE_BLOCKED = FileScan(Path(_LEAK_PATH), "blocked", 1)
 # Mirror the real engine remediation, which ends with the absolute canonical
 # path (``privacy_scan.py``). The web 422 must NOT echo it (#1385 finding 1);
-# the MCP tool surface (a different trust boundary — the result goes to the
-# calling agent, not a loopback browser) still round-trips the full message.
+# the MCP tool surface deliberately still round-trips the full message — not
+# because MCP is a weaker boundary (#1539 redacts its incidental error/reason
+# paths), but because this message IS the remediation: the caller must know
+# exactly which file to fix.
 _FAKE_MSG = (
     "Gate A: leak.md contains 1 privacy pattern hit(s); fan-out rejected. "
     f"Or remove the secret from {_LEAK_PATH} before re-running sync."
@@ -323,8 +325,9 @@ class TestMcpServersParseBranchPathFree:
 
     def test_safe_message_is_basename_only(self) -> None:
         # The core contract every web catch site relies on: ``safe_message``
-        # names only the basename while ``str(exc)`` keeps the full path the CLI
-        # / MCP surfaces want. Driven through the real parser (no hand-built
+        # names only the basename while ``str(exc)`` keeps the full path for
+        # the local-operator CLI (the MCP tool renders ``safe_message`` too
+        # since #1539). Driven through the real parser (no hand-built
         # exception) so the raise site and the twin stay in lockstep.
         from memtomem.context.mcp_servers import McpServerParseError, parse_mcp_server_text
 
@@ -332,7 +335,7 @@ class TestMcpServersParseBranchPathFree:
         with pytest.raises(McpServerParseError) as ei:
             parse_mcp_server_text(self._MALFORMED, name="x", source=src)
         exc = ei.value
-        assert str(src) in str(exc)  # CLI / MCP keep the full path
+        assert str(src) in str(exc)  # the CLI keeps the full path
         assert str(src) not in exc.safe_message  # web boundary stays path-free
         assert str(src.parent) not in exc.safe_message
         assert exc.safe_message.startswith("invalid JSON in x.json:")  # names the artifact
