@@ -524,6 +524,71 @@ class TestPrivacyAndTimeout:
         assert r.json()["detail"]["error_kind"] == "busy"
 
 
+class TestLockBudgetOffload:
+    """The three version mutators offload the engine to a worker thread with a
+    bounded sidecar-lock budget (#1145 shape) — pin the kwarg pass-through and
+    the contention → 503 mapping."""
+
+    @pytest.mark.anyio
+    async def test_create_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
+        _make_dir_agent(tmp_path, "reviewer")
+        seen: dict = {}
+
+        def _spy(artifact_dir, working_file, note="", *, source_bytes=None, lock_timeout=None):
+            seen["lock_timeout"] = lock_timeout
+            return versioning.VersionRecord(tag="v1", created_at="2026-01-01T00:00:00+00:00")
+
+        monkeypatch.setattr(versioning, "create_version", _spy)
+        r = await client.post("/api/context/agents/reviewer/versions", json={})
+        assert r.status_code == 200
+        assert seen["lock_timeout"] == 30.0
+
+    @pytest.mark.anyio
+    async def test_promote_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
+        _make_dir_agent(tmp_path, "reviewer")
+        seen: dict = {}
+
+        def _spy(artifact_dir, label, version, *, lock_timeout=None):
+            seen["lock_timeout"] = lock_timeout
+
+        monkeypatch.setattr(versioning, "promote_label", _spy)
+        r = await client.put("/api/context/agents/reviewer/labels/staging", json={"version": "v1"})
+        assert r.status_code == 200
+        assert seen["lock_timeout"] == 30.0
+
+    @pytest.mark.anyio
+    async def test_delete_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
+        _make_dir_agent(tmp_path, "reviewer")
+        seen: dict = {}
+
+        def _spy(artifact_dir, label, *, lock_timeout=None):
+            seen["lock_timeout"] = lock_timeout
+
+        monkeypatch.setattr(versioning, "delete_label", _spy)
+        r = await client.delete("/api/context/agents/reviewer/labels/staging")
+        assert r.status_code == 200
+        assert seen["lock_timeout"] == 30.0
+
+    @pytest.mark.anyio
+    async def test_held_sidecar_lock_expires_budget_to_503(self, client, tmp_path, monkeypatch):
+        """End-to-end: with the versions.json sidecar lock HELD by the test,
+        the offloaded engine call must exhaust its (shrunken) budget and map
+        the builtin ``TimeoutError`` to the same 503 as the outer timeout —
+        pre-fix, the engine ran unbudgeted ON the event loop and this request
+        would hang forever. Expiry-direction timing: runner slowness delays
+        the 503, it can never produce a false pass."""
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+        from memtomem.web.routes import context_versions as cv
+
+        adir = _make_dir_agent(tmp_path, "reviewer")
+        monkeypatch.setattr(cv, "_VERSIONS_LOCK_BUDGET_S", 0.2)
+        lock_path = _lock_path_for(versioning.versions_json_path(adir))
+        with _file_lock(lock_path):
+            r = await client.post("/api/context/agents/reviewer/versions", json={})
+        assert r.status_code == 503
+        assert r.json()["detail"]["error_kind"] == "busy"
+
+
 # ---------------------------------------------------------------------------
 # Enable versioning (adopt flat → dir, ADR-0022 rank 6)
 # ---------------------------------------------------------------------------

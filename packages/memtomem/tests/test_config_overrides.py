@@ -348,7 +348,7 @@ def test_config_d_namespace_rules_dedup_after_home_expansion(
     declare the same rule once with a leading ``~/`` and once with the expanded
     absolute path must collapse to a single rule.
 
-    ``_dedup_key`` hashes ``BaseSettings.model_dump(mode="json")`` — i.e. the
+    ``_dedup_key`` hashes ``BaseModel.model_dump(mode="json")`` — i.e. the
     *post-validator* field values. Since ``path_glob`` expands ``~/`` in its
     validator, both forms share an identity after coercion, so they dedupe.
     This test pins that contract: a future refactor that moved expansion out
@@ -714,3 +714,114 @@ def test_detect_provider_dirs_finds_claude_plans_and_codex(
     grouped = _cfg._detect_provider_dirs()
     assert grouped["claude-plans"] == [plans]
     assert grouped["codex"] == [codex]
+
+
+# ── #1522: env binding is MEMTOMEM_-prefixed only ──────────────────────────
+
+
+def test_sub_configs_ignore_bare_env_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sub-configs are plain ``BaseModel``s: generic shell exports like
+    ``API_KEY`` / ``ENABLED`` / ``MODEL`` must not bind, standalone or through
+    ``Mem2MemConfig``'s ``default_factory`` path (#1522)."""
+    monkeypatch.setenv("API_KEY", "bare-env-leak")
+    monkeypatch.setenv("ENABLED", "true")
+    monkeypatch.setenv("MODEL", "bare-model")
+
+    from memtomem.config import EmbeddingConfig, SessionTraceConfig
+
+    assert EmbeddingConfig().api_key == ""
+    assert EmbeddingConfig().model == ""
+    assert SessionTraceConfig().enabled is False
+
+    cfg = Mem2MemConfig()
+    assert cfg.embedding.api_key == ""
+    assert cfg.session_trace.enabled is False
+
+
+def test_nested_prefixed_env_still_binds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented ``MEMTOMEM_<SECTION>__<FIELD>`` surface keeps working
+    after the sub-configs stopped being ``BaseSettings`` (#1522)."""
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__API_KEY", "prefixed-ok")
+    monkeypatch.setenv("MEMTOMEM_SESSION_TRACE__JSONL_ENABLED", "false")
+
+    cfg = Mem2MemConfig()
+    assert cfg.embedding.api_key == "prefixed-ok"
+    assert cfg.session_trace.jsonl_enabled is False
+
+
+def test_only_root_config_is_base_settings() -> None:
+    """Guard: no sub-config may regrow a ``BaseSettings`` base — that would
+    re-open the undocumented bare-env surface #1522 closed. New settings
+    sections must inherit ``ConfigModel`` and hang off ``Mem2MemConfig``."""
+    import inspect
+
+    import pydantic
+    from pydantic_settings import BaseSettings
+
+    from memtomem.config import ConfigModel
+
+    model_classes = {
+        name: obj
+        for name, obj in inspect.getmembers(_cfg, inspect.isclass)
+        if issubclass(obj, pydantic.BaseModel) and obj.__module__ == _cfg.__name__
+    }
+    settings_classes = [n for n, o in model_classes.items() if issubclass(o, BaseSettings)]
+    assert settings_classes == ["Mem2MemConfig"], settings_classes
+
+    # Every other model must go through ConfigModel so it keeps the
+    # BaseSettings-era strictness (extra="forbid", validate_default=True) —
+    # a bare-BaseModel section would silently swallow config typos.
+    non_strict = [
+        n
+        for n, o in model_classes.items()
+        if n not in ("Mem2MemConfig", "ConfigModel") and not issubclass(o, ConfigModel)
+    ]
+    assert non_strict == [], non_strict
+
+
+def test_sub_configs_keep_base_settings_strictness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dropping the ``BaseSettings`` base must not relax validation: unknown
+    keys still fail loudly (``extra="forbid"``), so an env typo like
+    ``MEMTOMEM_EMBEDDING__TYPO`` or a stray key in a ``namespace.rules`` entry
+    raises instead of being silently ignored (#1522)."""
+    import pydantic
+
+    from memtomem.config import NamespacePolicyRule
+
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__TYPO", "bad")
+    with pytest.raises(pydantic.ValidationError, match="typo"):
+        Mem2MemConfig()
+    monkeypatch.delenv("MEMTOMEM_EMBEDDING__TYPO")
+
+    with pytest.raises(pydantic.ValidationError, match="bogus"):
+        NamespacePolicyRule.model_validate({"path_glob": "notes/**", "namespace": "n", "bogus": 1})
+
+
+def test_namespace_rules_survive_config_json_roundtrip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``_json_default`` must serialize ``NamespacePolicyRule`` items as dicts
+    (not ``str()`` fallback) now that rules are ``BaseModel``s — a missed
+    isinstance sweep here corrupts ``config.json`` silently (#1522)."""
+    from memtomem.config import NamespacePolicyRule, save_config_overrides
+
+    override = tmp_path / "config.json"
+    monkeypatch.setattr(_cfg, "_override_path", lambda: override)
+    monkeypatch.setattr(_cfg, "_config_d_path", lambda: tmp_path / "config.d")
+
+    cfg = Mem2MemConfig()
+    rule = NamespacePolicyRule(path_glob="**/notes/**", namespace="claude:notes")
+    cfg.namespace.rules = list(cfg.namespace.rules) + [rule]
+    save_config_overrides(cfg)
+
+    saved = json.loads(override.read_text(encoding="utf-8"))
+    dumped_rules = saved["namespace"]["rules"]
+    assert {"path_glob": "**/notes/**", "namespace": "claude:notes"} in dumped_rules
+    assert all(isinstance(r, dict) for r in dumped_rules)
+
+    fresh = Mem2MemConfig()
+    load_config_overrides(fresh)
+    assert any(
+        r.path_glob == "**/notes/**" and r.namespace == "claude:notes"
+        for r in fresh.namespace.rules
+    )

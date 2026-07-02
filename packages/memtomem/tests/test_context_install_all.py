@@ -972,11 +972,13 @@ def test_install_all_refuses_dirty_flat_sibling(wiki_root: Path, tmp_path: Path)
     [row] = rows
     assert row.state == "refuse"
     assert "flat layout" in (row.reason or "")
-    assert "migrate" in (row.reason or "")
+    assert "mm context migrate agents foo" in (row.reason or "")
     assert row.dirty_report is not None
 
 
-def test_install_all_force_extracts_dir_and_preserves_flat(wiki_root: Path, tmp_path: Path) -> None:
+def test_install_all_force_extracts_dir_and_preserves_flat(
+    wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """--force on the flat-refuse row extracts the dir; the flat file stays
     on disk with no .bak (nothing was overwritten)."""
     from memtomem.context.install import _apply_pinned_install, _classify_for_install_all
@@ -992,12 +994,17 @@ def test_install_all_force_extracts_dir_and_preserves_flat(wiki_root: Path, tmp_
     [row] = _classify_for_install_all(tmp_path, wiki=WikiStore.at_default())
     assert row.state == "refuse"
 
-    result = _apply_pinned_install(tmp_path, row, wiki=WikiStore.at_default(), force=True)
+    with caplog.at_level("WARNING", logger="memtomem.context.install"):
+        result = _apply_pinned_install(tmp_path, row, wiki=WikiStore.at_default(), force=True)
 
     assert result.files_written >= 1
     assert (tmp_path / ".memtomem" / "agents" / "foo" / "agent.md").read_bytes() == b"wiki\n"
     assert flat.read_bytes() == b"# local flat\n"
     assert not flat.with_suffix(".md.bak").exists()
+    # The shadowing warning must embed the runnable (plural) migrate command
+    # — the singular form trips Click's invalid-choice error when pasted.
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("mm context migrate agents foo" in m for m in messages)
 
 
 # ── unprovable install record (#1247 impl gate) ──────────────────────────
@@ -1108,6 +1115,6 @@ def test_cli_install_all_refuses_flat_sibling_appearing_during_confirm_prompt(
 
     assert result.exit_code == 1, result.output
     assert "flat-layout" in result.output
-    assert "migrate" in result.output
+    assert "mm context migrate agents foo" in result.output
     assert flat.read_bytes() == b"# local flat\n"
     assert not (tmp_path / ".memtomem" / "agents" / "foo").exists()

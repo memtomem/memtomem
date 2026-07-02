@@ -21,6 +21,7 @@ from memtomem.wiki import (
     WikiAlreadyExistsError,
     WikiNotFoundError,
     WikiStore,
+    WikiUnbornHeadError,
 )
 from memtomem.wiki.commit import (
     ResolvedTarget,
@@ -316,8 +317,10 @@ def _run_commit(
             "wiki commit timed out — another wiki operation may be in progress; retry shortly"
         ) from exc
     except RuntimeError as exc:
-        # git failure (e.g. missing git identity) — surface the git error the way
-        # the sibling ``mm wiki init`` does. The embedded wiki path is the user's
+        # Covers WikiDetachedHeadError (its str() IS the friendly, actionable
+        # "check out a branch" message — the push/pull precedent) and any git
+        # failure (e.g. missing git identity) — surface the error the way the
+        # sibling ``mm wiki init`` does. The embedded wiki path is the user's
         # own local path, not a secret as it would be in the web route's HTTP
         # response (which uses a fixed, path-free message instead).
         raise click.ClickException(str(exc)) from exc
@@ -385,7 +388,12 @@ def list_cmd(asset_type: str | None) -> None:
         return
 
     click.secho(f"Wiki: {store.root}", fg="cyan")
-    click.echo(f"  HEAD: {store.current_commit()[:12]}")
+    try:
+        click.echo(f"  HEAD: {store.current_commit()[:12]}")
+    except WikiUnbornHeadError:
+        # A clone of an empty remote can still carry working-tree assets —
+        # keep listing them; only the HEAD line degrades.
+        click.echo("  HEAD: (no commits yet)")
     click.echo("")
     last_type: str | None = None
     for asset in assets:

@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Literal
 
 from memtomem.context._names import InvalidNameError, override_vendors, validate_name
-from memtomem.wiki.store import WikiNotFoundError
+from memtomem.wiki.store import WikiNotFoundError, WikiUnbornHeadError
 from memtomem.web.routes._errors import _error
 
 # Literal path param → FastAPI returns 422 for any other value, so a hostile
@@ -45,3 +45,17 @@ def _wiki_absent(exc: WikiNotFoundError) -> Exception:
     # ``MEMTOMEM_WIKI_PATH`` into the HTTP envelope. The ``exc`` is still chained
     # via ``raise ... from exc`` at the call sites for server-side tracebacks.
     return _error(404, "missing", "wiki not found; run `mm wiki init`", reason_code="wiki_absent")
+
+
+def _wiki_unborn(exc: WikiUnbornHeadError) -> Exception:
+    # Fixed message like ``_wiki_absent`` — ``WikiUnbornHeadError``'s message is
+    # path-free by contract, but the fixed literal keeps this envelope immune to
+    # a future wording change in the store layer. 409: the wiki resource exists;
+    # its state (no commits yet) is what blocks the request.
+    return _error(
+        409,
+        "conflict",
+        "wiki has no commits yet — make an initial commit in the wiki repo "
+        "(or pull a populated branch), then retry",
+        reason_code="wiki_unborn",
+    )

@@ -46,6 +46,7 @@ from memtomem.web.deps import (
     get_storage,
     require_configured,
 )
+from memtomem.web.routes._errors import _redact_message
 from memtomem.web.routes._locks import _config_lock
 from memtomem.web.schemas.config import (
     BuiltinExcludePatternsResponse,
@@ -1310,7 +1311,13 @@ async def index_stream(
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
-            error_event = {"type": "error", "message": str(exc)}
+            # Engine-level failures escape to this handler (per-file errors
+            # are caught inside the engine and reported as basenames in the
+            # "complete" event). A raw ``str(exc)`` here can embed absolute
+            # paths — leaking ``$HOME``/username — or secret-shaped fragments
+            # to the client, so route it through the same redactor every
+            # other error surface at this trust boundary uses.
+            error_event = {"type": "error", "message": _redact_message(str(exc))}
             yield f"data: {json.dumps(error_event)}\n\n"
 
     return StreamingResponse(

@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memtomem.constants import default_system_prefixes
@@ -40,7 +47,21 @@ APPEND = MergeStrategy("append")
 REPLACE = MergeStrategy("replace")
 
 
-class EmbeddingConfig(BaseSettings):
+class ConfigModel(BaseModel):
+    """Base for config sections and nested config entries (#1522).
+
+    Sub-configs deliberately do not inherit ``BaseSettings`` — env binding
+    flows exclusively through ``Mem2MemConfig``'s ``MEMTOMEM_`` prefix. This
+    base preserves the strictness ``BaseSettings`` used to provide: unknown
+    keys are rejected (a typo like ``MEMTOMEM_EMBEDDING__TYPO`` or a stray
+    key in ``config.json``/``config.d`` fails loudly instead of being
+    silently dropped) and defaults run through field validators.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+
+class EmbeddingConfig(ConfigModel):
     provider: str = "none"
     model: str = ""
     dimension: int = 0
@@ -116,13 +137,13 @@ class EmbeddingConfig(BaseSettings):
         return v
 
 
-class StorageConfig(BaseSettings):
+class StorageConfig(ConfigModel):
     backend: str = "sqlite"
     sqlite_path: Path = Path("~/.memtomem/memtomem.db")
     collection_name: str = "memories"
 
 
-class SearchConfig(BaseSettings):
+class SearchConfig(ConfigModel):
     default_top_k: int = 10
     bm25_candidates: int = 50
     dense_candidates: int = 50
@@ -190,7 +211,7 @@ def _default_memory_dirs() -> list[Path]:
     return [Path("~/.memtomem/memories")]
 
 
-class IndexingConfig(BaseSettings):
+class IndexingConfig(ConfigModel):
     memory_dirs: Annotated[list[Path], APPEND] = Field(
         default_factory=lambda: _default_memory_dirs()
     )
@@ -320,7 +341,7 @@ class IndexingConfig(BaseSettings):
         return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
 
 
-class DecayConfig(BaseSettings):
+class DecayConfig(ConfigModel):
     enabled: bool = False
     half_life_days: float = 30.0
 
@@ -332,7 +353,7 @@ class DecayConfig(BaseSettings):
         return v
 
 
-class MMRConfig(BaseSettings):
+class MMRConfig(ConfigModel):
     enabled: bool = False
     lambda_param: float = 0.7  # 0.0=diversity max, 1.0=relevance max
 
@@ -344,7 +365,7 @@ class MMRConfig(BaseSettings):
         return v
 
 
-class AccessConfig(BaseSettings):
+class AccessConfig(ConfigModel):
     enabled: bool = False
     max_boost: float = 1.5  # maximum score multiplier for highly accessed chunks
 
@@ -360,7 +381,7 @@ _NAMESPACE_MAX_LEN = 128
 _ALLOWED_NS_PLACEHOLDERS: frozenset[str] = frozenset({"parent", "ancestor"})
 
 
-class NamespacePolicyRule(BaseSettings):
+class NamespacePolicyRule(ConfigModel):
     """Maps files matching a glob pattern to a namespace label.
 
     ``path_glob`` uses gitignore-style patterns (via ``pathspec.GitIgnoreSpec``).
@@ -447,13 +468,13 @@ class NamespacePolicyRule(BaseSettings):
         return v
 
 
-class NamespaceConfig(BaseSettings):
+class NamespaceConfig(ConfigModel):
     default_namespace: str = "default"
     enable_auto_ns: bool = False
     rules: Annotated[list[NamespacePolicyRule], APPEND] = Field(default_factory=list)
 
 
-class RerankConfig(BaseSettings):
+class RerankConfig(ConfigModel):
     """Cross-encoder reranker settings (Stage 3b in the search pipeline).
 
     Default is a lightweight English fastembed cross-encoder (~80 MB ONNX,
@@ -549,7 +570,7 @@ class RerankConfig(BaseSettings):
         return self
 
 
-class QueryExpansionConfig(BaseSettings):
+class QueryExpansionConfig(ConfigModel):
     enabled: bool = False
     max_terms: int = 3
     strategy: str = "tags"  # "tags" | "headings" | "both" | "llm"
@@ -562,7 +583,7 @@ class QueryExpansionConfig(BaseSettings):
         return v
 
 
-class ImportanceConfig(BaseSettings):
+class ImportanceConfig(ConfigModel):
     enabled: bool = False
     max_boost: float = 1.5
     weights: Annotated[list[float], REPLACE] = Field(default_factory=lambda: [0.3, 0.2, 0.3, 0.2])
@@ -575,7 +596,7 @@ class ImportanceConfig(BaseSettings):
         return v
 
 
-class WebhookConfig(BaseSettings):
+class WebhookConfig(ConfigModel):
     enabled: bool = False
     url: str = ""
     events: Annotated[list[str], APPEND] = Field(
@@ -585,14 +606,14 @@ class WebhookConfig(BaseSettings):
     timeout_seconds: float = 10.0
 
 
-class ConsolidationScheduleConfig(BaseSettings):
+class ConsolidationScheduleConfig(ConfigModel):
     enabled: bool = False
     interval_hours: float = 24.0
     min_group_size: int = 3
     max_groups: int = 10
 
 
-class PolicyConfig(BaseSettings):
+class PolicyConfig(ConfigModel):
     """Memory lifecycle policies."""
 
     enabled: bool = False
@@ -603,7 +624,7 @@ class PolicyConfig(BaseSettings):
 MAX_CONTEXT_WINDOW_CHUNKS = 10  # max ±N adjacent chunks around each hit
 
 
-class ContextWindowConfig(BaseSettings):
+class ContextWindowConfig(ConfigModel):
     """Context window expansion for search results (small-to-big retrieval)."""
 
     enabled: bool = False
@@ -617,7 +638,7 @@ class ContextWindowConfig(BaseSettings):
         return v
 
 
-class HealthWatchdogConfig(BaseSettings):
+class HealthWatchdogConfig(ConfigModel):
     """Periodic health monitoring and auto-maintenance."""
 
     enabled: bool = False
@@ -629,7 +650,7 @@ class HealthWatchdogConfig(BaseSettings):
     auto_maintenance: bool = True
 
 
-class SchedulerConfig(BaseSettings):
+class SchedulerConfig(ConfigModel):
     """Cron scheduler for memory lifecycle jobs (P2 Phase A).
 
     Dispatch cadence is the health watchdog loop — this config has no
@@ -663,7 +684,7 @@ class SchedulerConfig(BaseSettings):
         return v
 
 
-class LLMConfig(BaseSettings):
+class LLMConfig(ConfigModel):
     enabled: bool = False
     provider: str = "ollama"
     model: str = ""  # empty = provider-specific default resolved in factory
@@ -687,7 +708,7 @@ class LLMConfig(BaseSettings):
         return v
 
 
-class SessionSummaryConfig(BaseSettings):
+class SessionSummaryConfig(ConfigModel):
     """Auto LLM summary on ``mem_session_end`` (RFC P1 Phase B).
 
     When ``auto`` is True and the closing session has at least
@@ -751,7 +772,7 @@ class SessionSummaryConfig(BaseSettings):
 TargetScope = Literal["user", "project_shared", "project_local"]
 
 
-class HooksConfig(BaseSettings):
+class HooksConfig(ConfigModel):
     """Settings-hooks fan-out scope (ADR-0010 §3).
 
     ``target_scope`` selects where memtomem-managed Claude Code hooks land:
@@ -764,7 +785,7 @@ class HooksConfig(BaseSettings):
     target_scope: TargetScope = "user"
 
 
-class ContextGatewayConfig(BaseSettings):
+class ContextGatewayConfig(ConfigModel):
     """Settings for the multi-project context UI (skills / commands / agents).
 
     See ``memtomem-docs/memtomem/planning/multi-project-context-ui-rfc.md`` —
@@ -796,7 +817,7 @@ class ContextGatewayConfig(BaseSettings):
     user_tier_enabled: bool = False
 
 
-class SessionTraceConfig(BaseSettings):
+class SessionTraceConfig(ConfigModel):
     """Configuration for session command execution tracing."""
 
     enabled: bool = False
@@ -816,10 +837,25 @@ class SessionTraceConfig(BaseSettings):
             self.enabled
             and self.langfuse_enabled
             and not (self.langfuse_public_key and self.langfuse_secret_key)
+            # Deliberate, narrow exception to the MEMTOMEM_-only env surface
+            # (#1522): the Langfuse SDK's own documented variables count as
+            # credentials, so a standard Langfuse env setup keeps working.
+            # ``get_langfuse_client`` omits kwargs for empty fields and lets
+            # the SDK read these itself — the values are never copied into
+            # the config object, so they cannot leak into ``config.json``
+            # or any config-display surface. Credentials only: activation
+            # still requires the explicit ``langfuse_enabled`` opt-in above;
+            # ``LANGFUSE_ENABLED`` alone can never turn tracing on.
+            and not (
+                os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")
+            )
         ):
             raise ValueError(
-                "SessionTraceConfig.langfuse_enabled=true requires both langfuse_public_key and langfuse_secret_key "
-                "to be set (non-empty)."
+                "SessionTraceConfig.langfuse_enabled=true requires langfuse_public_key and "
+                "langfuse_secret_key — set them in config "
+                "(MEMTOMEM_SESSION_TRACE__LANGFUSE_PUBLIC_KEY / "
+                "MEMTOMEM_SESSION_TRACE__LANGFUSE_SECRET_KEY) or export the Langfuse SDK's "
+                "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY."
             )
         return self
 
@@ -1050,12 +1086,12 @@ def coerce_and_validate(value: object, constraint: dict | None) -> object:
     elif expected_type is list:
         item_type = constraint.get("item_type", float)
         expected_len = constraint.get("length")
-        # ``list[BaseSettings]`` (e.g. ``namespace.rules``): accept a JSON
+        # ``list[BaseModel]`` (e.g. ``namespace.rules``): accept a JSON
         # string or list of dicts/model instances and validate each entry
         # via ``model_validate``. Mirrors ``load_config_d``'s APPEND
         # coercion so mutation paths (PATCH /api/config, mm config set)
         # stay in sync with the load path.
-        if isinstance(item_type, type) and issubclass(item_type, BaseSettings):
+        if isinstance(item_type, type) and issubclass(item_type, BaseModel):
             if isinstance(value, str):
                 import json as _json
 
@@ -1237,9 +1273,9 @@ def _merge_strategy_for(section_cls: type, field_name: str) -> MergeStrategy | N
 def _list_item_type(section_cls: type, field_name: str) -> type | None:
     """Return the element type of a ``list[X]`` field, or ``None`` for scalars.
 
-    Used by the fragment loader to coerce raw JSON dicts into ``BaseSettings``
+    Used by the fragment loader to coerce raw JSON dicts into ``BaseModel``
     instances before APPEND dedup, since ``setattr`` on a non-validating
-    BaseSettings won't re-validate the assigned list.
+    model won't re-validate the assigned list.
     """
     import typing
 
@@ -1258,14 +1294,14 @@ def _list_item_type(section_cls: type, field_name: str) -> type | None:
 def _dedup_key(item: object) -> object:
     """Stable equality key for APPEND dedup.
 
-    Normalises Path to its string form and dict/BaseSettings to a recursively
-    sorted tuple form so that ``list[dict]`` and ``list[BaseSettings]`` fields
+    Normalises Path to its string form and dict/BaseModel to a recursively
+    sorted tuple form so that ``list[dict]`` and ``list[BaseModel]`` fields
     (e.g. ``NamespaceConfig.rules``) can be deduped across a native default
     list and raw JSON fragment entries.
     """
     if isinstance(item, Path):
         return str(item)
-    if isinstance(item, BaseSettings):
+    if isinstance(item, BaseModel):
         return _dedup_key(item.model_dump(mode="json"))
     if isinstance(item, dict):
         return tuple(sorted((k, _dedup_key(v)) for k, v in item.items()))
@@ -1362,7 +1398,7 @@ def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
                         item_type
                         if item_type is not None
                         and isinstance(item_type, type)
-                        and issubclass(item_type, BaseSettings)
+                        and issubclass(item_type, BaseModel)
                         else None
                     )
                     seen = {_dedup_key(x) for x in current}
@@ -1950,7 +1986,7 @@ def _relativize_config_paths_in_place(data: dict) -> None:
 def _json_default(obj: object) -> object:
     """``json.dumps`` fallback for values not natively JSON-serializable.
 
-    ``BaseSettings`` entries in fields like ``namespace.rules`` must be
+    ``BaseModel`` entries in fields like ``namespace.rules`` must be
     written as dicts (via ``model_dump(mode="json")``) so the load path
     can re-validate them on startup. ``Path`` goes through
     ``_portable_path_str`` so home-rooted paths land as ``~/...``
@@ -1958,7 +1994,7 @@ def _json_default(obj: object) -> object:
     unknown types fall back to ``str()`` to preserve the original
     default=str behaviour.
     """
-    if isinstance(obj, BaseSettings):
+    if isinstance(obj, BaseModel):
         return obj.model_dump(mode="json")
     if isinstance(obj, Path):
         return _portable_path_str(obj)
