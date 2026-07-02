@@ -11,13 +11,17 @@ Two independent locks serialize different write paths:
   interleave.
 
 * ``_gateway_lock`` — guards every context-gateway write path that touches
-  ``.memtomem/{settings,agents,commands,skills}/`` or fans out to runtime
-  targets like ``~/.claude/settings.json``. Wraps POST / PUT / DELETE
-  handlers in :mod:`memtomem.web.routes.settings_sync`,
-  :mod:`memtomem.web.routes.context_agents`,
-  :mod:`memtomem.web.routes.context_commands`, and
-  :mod:`memtomem.web.routes.context_skills` (each handler runs the engine
-  call synchronously inside ``async with _gateway_lock``).
+  ``.memtomem/{settings,agents,commands,skills,mcp-servers}/``, the wiki, or
+  fans out to runtime targets like ``~/.claude/settings.json``. Wraps
+  POST / PUT / DELETE handlers in :mod:`memtomem.web.routes.settings_sync`,
+  the four per-kind route modules (``context_agents`` / ``context_commands``
+  / ``context_skills`` / ``context_mcp_servers``), ``context_sync_all``,
+  ``context_transfer``, ``context_versions``, ``context_mutations``, and
+  ``wiki_mutations``. Handler shape varies: the per-kind CRUD handlers run
+  their engine call synchronously inside ``async with _gateway_lock``, while
+  handlers whose engines block on a cross-process file lock (install/update,
+  transfer, versions, wiki commit) offload to ``asyncio.to_thread`` inside
+  the lock with a bounded engine ``lock_timeout`` (#1145 shape).
 
   This is an **in-process** ``asyncio.Lock`` — layer 1 of a two-layer model.
   It fully serializes concurrent async mutators in *this* server process, so

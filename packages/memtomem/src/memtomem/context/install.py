@@ -214,6 +214,7 @@ def install_skill(
     *,
     wiki: WikiStore | None = None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Snapshot ``<wiki>/skills/<name>/`` into ``<project>/.memtomem/skills/<name>/``.
 
@@ -221,8 +222,15 @@ def install_skill(
     ``git pull`` in the wiki cannot make the recorded ``wiki_commit`` drift
     from the bytes that were copied. Refuses if either the lockfile entry
     or the destination directory already exists — see module docstring.
+
+    ``surface`` names the ingress in the Gate-A privacy audit log
+    (#1246/#1248 real-ingress rule): the CLI keeps the default, the web
+    route passes ``"web_context_install"`` so a browser-triggered block is
+    not misattributed to a CLI event.
     """
-    return _install_asset(project_root, "skills", name, wiki=wiki, lock_timeout=lock_timeout)
+    return _install_asset(
+        project_root, "skills", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
 
 
 def install_agent(
@@ -231,9 +239,12 @@ def install_agent(
     *,
     wiki: WikiStore | None = None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Snapshot ``<wiki>/agents/<name>/`` into ``<project>/.memtomem/agents/<name>/``."""
-    return _install_asset(project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout)
+    return _install_asset(
+        project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
 
 
 def install_command(
@@ -242,9 +253,12 @@ def install_command(
     *,
     wiki: WikiStore | None = None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Snapshot ``<wiki>/commands/<name>/`` into ``<project>/.memtomem/commands/<name>/``."""
-    return _install_asset(project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout)
+    return _install_asset(
+        project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
 
 
 def _installed_at_epoch(lock_entry: dict[str, Any]) -> float | None:
@@ -524,6 +538,7 @@ def _install_asset(
     *,
     wiki: WikiStore | None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Internal: install a single asset of any type.
 
@@ -596,7 +611,7 @@ def _install_asset(
     # no dest bytes, no lockfile entry).
     _gate_a_scan_src_tree(
         src,
-        surface="cli_context_install",
+        surface=surface,
         project_root=project_root,
         asset_type=asset_type,
         name=validated,
@@ -637,15 +652,27 @@ def update_skill(
     wiki: WikiStore | None = None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Refresh ``<wiki>/skills/<name>/`` snapshot at ``<project>/.memtomem/skills/<name>/``.
 
     No-op when wiki HEAD already matches the lockfile pin. Refuses when
     local edits would be clobbered, unless ``force=True`` (which preserves
     each dirty file as ``<file>.bak`` before overwriting).
+
+    ``surface`` names the ingress in the Gate-A privacy audit log
+    (#1246/#1248 real-ingress rule): the CLI keeps the default, the web
+    route passes ``"web_context_update"`` so a browser-triggered block is
+    not misattributed to a CLI event.
     """
     return _update_asset(
-        project_root, "skills", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+        project_root,
+        "skills",
+        name,
+        wiki=wiki,
+        force=force,
+        lock_timeout=lock_timeout,
+        surface=surface,
     )
 
 
@@ -656,10 +683,17 @@ def update_agent(
     wiki: WikiStore | None = None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Refresh ``<wiki>/agents/<name>/`` snapshot at ``<project>/.memtomem/agents/<name>/``."""
     return _update_asset(
-        project_root, "agents", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+        project_root,
+        "agents",
+        name,
+        wiki=wiki,
+        force=force,
+        lock_timeout=lock_timeout,
+        surface=surface,
     )
 
 
@@ -670,10 +704,17 @@ def update_command(
     wiki: WikiStore | None = None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Refresh ``<wiki>/commands/<name>/`` snapshot at ``<project>/.memtomem/commands/<name>/``."""
     return _update_asset(
-        project_root, "commands", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+        project_root,
+        "commands",
+        name,
+        wiki=wiki,
+        force=force,
+        lock_timeout=lock_timeout,
+        surface=surface,
     )
 
 
@@ -685,6 +726,7 @@ def _update_asset(
     wiki: WikiStore | None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Internal: refresh a single installed asset of any type.
 
@@ -766,6 +808,7 @@ def _update_asset(
         wiki_commit=new_commit,
         lock_entry=lock_entry,
         force=force,
+        surface=surface,
         lock_timeout=lock_timeout,
     )
 
@@ -869,14 +912,17 @@ def _apply_update(
     if dirty_report.reason in ("missing_dest", "never_installed"):
         flat_path, flat_dirty = _flat_layout_probe(dest, asset_type, name, lock_entry)
         if flat_path is not None:
-            kind = asset_type.removesuffix("s")
+            # The migrate CLI's asset-type argument is a plural Choice
+            # ("agents", ...) — embed the plural verbatim so the hint is
+            # runnable as-is (the singular trips Click's invalid-choice
+            # error, same shape as the #895 privacy_scan fix).
             if flat_dirty and not force:
                 raise StaleInstallError(
                     f"{asset_type}/{name}: flat-layout file {flat_path.name} has local "
                     f"edits (or no provable install time) and the dir-layout install "
-                    f"would stop it being served; run `mm context migrate {kind} {name}` "
-                    f"first, or pass --force to write the dir layout anyway (the flat "
-                    f"file is kept on disk but stops being served)"
+                    f"would stop it being served; run `mm context migrate {asset_type} "
+                    f"{name}` first, or pass --force to write the dir layout anyway "
+                    f"(the flat file is kept on disk but stops being served)"
                 )
             logger.warning(
                 "%s/%s: dir layout will shadow flat file %s (dir wins at fan-out); "
@@ -884,7 +930,7 @@ def _apply_update(
                 asset_type,
                 name,
                 flat_path,
-                kind,
+                asset_type,
                 name,
             )
 
@@ -1101,8 +1147,7 @@ def _classify_for_all_update(
             # execute phase would raise.
             state = "refuse"
             reason = (
-                f"flat layout with local edits; run "
-                f"`mm context migrate {asset_type.removesuffix('s')} {name}` first"
+                f"flat layout with local edits; run `mm context migrate {asset_type} {name}` first"
             )
         elif report.reason == "never_installed" and dest.is_dir():
             # Unprovable install record over an existing dest — preview
@@ -1315,7 +1360,7 @@ def _classify_for_install_all(
                         state="refuse",
                         reason=(
                             f"flat layout with local edits; run `mm context migrate "
-                            f"{asset_type.removesuffix('s')} {name}` first"
+                            f"{asset_type} {name}` first"
                         ),
                         lock_entry=entry,
                         dirty_report=is_asset_dirty(
@@ -1523,14 +1568,17 @@ def _apply_pinned_install(
             dest, asset_type, name, classification.lock_entry
         )
         if flat_path is not None:
-            kind = asset_type.removesuffix("s")
+            # The migrate CLI's asset-type argument is a plural Choice
+            # ("agents", ...) — embed the plural verbatim so the hint is
+            # runnable as-is (the singular trips Click's invalid-choice
+            # error, same shape as the #895 privacy_scan fix).
             if flat_dirty and not force:
                 raise StaleInstallError(
                     f"{asset_type}/{name}: flat-layout file {flat_path.name} has local "
                     f"edits (or no provable install time) and the dir-layout install "
-                    f"would stop it being served; run `mm context migrate {kind} {name}` "
-                    f"first, or pass --force to write the dir layout anyway (the flat "
-                    f"file is kept on disk but stops being served)"
+                    f"would stop it being served; run `mm context migrate {asset_type} "
+                    f"{name}` first, or pass --force to write the dir layout anyway "
+                    f"(the flat file is kept on disk but stops being served)"
                 )
             logger.warning(
                 "%s/%s: dir layout will shadow flat file %s (dir wins at fan-out); "
@@ -1538,7 +1586,7 @@ def _apply_pinned_install(
                 asset_type,
                 name,
                 flat_path,
-                kind,
+                asset_type,
                 name,
             )
 

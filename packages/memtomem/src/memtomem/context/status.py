@@ -218,9 +218,7 @@ def classify_status(
             dest = project_root_path / ".memtomem" / asset_type / name
             flat = project_root_path / ".memtomem" / asset_type / f"{name}.md"
             if asset_type in ("agents", "commands") and not dest.is_dir() and flat.is_file():
-                reason = (
-                    f"flat layout; run `mm context migrate {asset_type.removesuffix('s')} {name}`"
-                )
+                reason = f"flat layout; run `mm context migrate {asset_type} {name}`"
             elif report.reason == "never_installed" and dest.is_dir():
                 # Entry present but unusable installed_at over an existing
                 # dest — "dest missing" would be flatly wrong. Mirrors the

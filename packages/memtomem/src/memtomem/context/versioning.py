@@ -280,6 +280,7 @@ def create_version(
     note: str = "",
     *,
     source_bytes: bytes | None = None,
+    lock_timeout: float | None = None,
 ) -> VersionRecord:
     """Snapshot *working_file* into ``versions/<tag>.md`` and record it.
 
@@ -288,6 +289,12 @@ def create_version(
     so two concurrent callers cannot both allocate the same tag. The version
     file is write-once: if ``versions/<tag>.md`` already exists the call raises
     :class:`InvalidTagError` rather than overwriting.
+
+    ``lock_timeout``: bound (seconds) on the sidecar-lock wait; ``None``
+    blocks indefinitely (CLI default — Ctrl-C-able). Callers that must not
+    block forever (an async web handler offloading to a worker thread) pass a
+    budget; on expiry :func:`memtomem.context._atomic._file_lock` raises the
+    builtin ``TimeoutError`` having acquired nothing (#1145 shape).
 
     ``source_bytes``: pass the bytes the caller already read (and privacy-
     scanned) to snapshot *exactly* those, closing the scan→write TOCTOU window —
@@ -310,7 +317,7 @@ def create_version(
             raise VersionError(f"cannot read working canonical {working_file}: {exc}") from exc
 
     lock = _lock_path_for(versions_json_path(artifact_dir))
-    with _file_lock(lock):
+    with _file_lock(lock, timeout=lock_timeout):
         manifest = load_manifest(artifact_dir)
         # Allocate against BOTH the manifest and any on-disk ``vN.md`` files.
         # A crash between the version-file write and the manifest save (below)
@@ -348,18 +355,21 @@ def _next_version_tag_reconciled(artifact_dir: Path, manifest: VersionsManifest)
     return f"v{max(nums) + 1}" if nums else "v1"
 
 
-def promote_label(artifact_dir: Path, label: str, version: str) -> None:
+def promote_label(
+    artifact_dir: Path, label: str, version: str, *, lock_timeout: float | None = None
+) -> None:
     """Point *label* at *version* (create-or-move). Rollout == rollback.
 
     Raises :class:`ReservedLabelError` for ``latest``, :class:`InvalidLabelError`
     for a version-shaped label name, :class:`InvalidTagError` for a malformed
     tag, and :class:`VersionNotFoundError` if the tag is not in the manifest.
-    Holds ``_file_lock`` across ``load → validate → mutate → save``.
+    Holds ``_file_lock`` across ``load → validate → mutate → save``;
+    ``lock_timeout`` bounds the wait as in :func:`create_version`.
     """
     _validate_label_name(label)
     _validate_tag(version)
     lock = _lock_path_for(versions_json_path(artifact_dir))
-    with _file_lock(lock):
+    with _file_lock(lock, timeout=lock_timeout):
         manifest = load_manifest(artifact_dir)
         if version not in manifest.versions:
             raise VersionNotFoundError(f"version {version!r} does not exist")
@@ -367,13 +377,14 @@ def promote_label(artifact_dir: Path, label: str, version: str) -> None:
         _save_manifest(artifact_dir, manifest)
 
 
-def delete_label(artifact_dir: Path, label: str) -> None:
+def delete_label(artifact_dir: Path, label: str, *, lock_timeout: float | None = None) -> None:
     """Remove *label* from the manifest. No-op if absent. Raises
-    :class:`ReservedLabelError` for ``latest``. Holds ``_file_lock``."""
+    :class:`ReservedLabelError` for ``latest``. Holds ``_file_lock``;
+    ``lock_timeout`` bounds the wait as in :func:`create_version`."""
     if label in RESERVED_LABELS:
         raise ReservedLabelError(f"{label!r} is a reserved label and cannot be deleted")
     lock = _lock_path_for(versions_json_path(artifact_dir))
-    with _file_lock(lock):
+    with _file_lock(lock, timeout=lock_timeout):
         manifest = load_manifest(artifact_dir)
         if label in manifest.labels:
             del manifest.labels[label]
