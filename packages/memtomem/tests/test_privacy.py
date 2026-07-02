@@ -40,10 +40,11 @@ def _reset_counters():
 
 class TestPatternSurface:
     def test_pattern_count_pinned(self):
-        # 9 STM-synced secret-class patterns + 7 LTM-origin additions
-        # (#1488). Bump deliberately when adding a pattern so a silent
-        # add/drop surfaces here.
-        assert len(privacy.DEFAULT_PATTERNS) == 16
+        # 10 STM-synced secret-class patterns (incl. the memtomem-stm#553
+        # AWS-label forward-sync) + 7 LTM-origin additions (#1488). Bump
+        # deliberately when adding a pattern so a silent add/drop surfaces
+        # here.
+        assert len(privacy.DEFAULT_PATTERNS) == 17
 
     @pytest.mark.parametrize(
         "clean_input",
@@ -363,46 +364,50 @@ _PATTERN_FIXTURES: tuple[tuple[str, str], ...] = (
     ("API_KEY: abc123", "api keys are documented separately"),
     # 1: password/passwd/pwd
     ("Password = hunter2", "passport renewal next month"),
-    # 2: sk-/ghp_/xox prefix
+    # 2: AWS secret-material label (memtomem-stm#553 forward-sync).
+    #    Negative: an identifier that embeds the label — the unquoted
+    #    branch's left boundary must reject it.
+    ('"SessionToken": "FAKEFwoGZXIvYXdzFAKE"', "supports_session_token: true"),
+    # 3: sk-/ghp_/xox prefix
     ("token=sk-" + "a" * 30, "Sky color today is blue"),
-    # 3: github_pat_
+    # 4: github_pat_
     ("github_pat_" + "x" * 30, "github_user joined the org"),
-    # 4: stripe-style sk_live_, pk_test_, whsec_
+    # 5: stripe-style sk_live_, pk_test_, whsec_
     ("sk_live_" + "a" * 25, "sk_live_short"),
-    # 5: npm_
+    # 6: npm_
     ("npm_" + "a" * 30, "npm install foo"),
-    # 6: AWS access key id (AKIA/ASIA)
+    # 7: AWS access key id (AKIA/ASIA)
     ("AKIAIOSFODNN7EXAMPLE", "AKIA-no-good"),
-    # 7: JWT
+    # 8: JWT
     ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIicm9vdA.SflKxwRJSMeK", "eyJ-not-a-jwt"),
-    # 8: PEM private key header
+    # 9: PEM private key header
     ("-----BEGIN RSA PRIVATE KEY-----", "RSA public key"),
-    # 9: OpenAI modern (sk-proj-/svcacct-/admin-, T3BlbkFJ-anchored).
-    #    Negative: a kebab slug with the prefix but no marker.
+    # 10: OpenAI modern (sk-proj-/svcacct-/admin-, T3BlbkFJ-anchored).
+    #     Negative: a kebab slug with the prefix but no marker.
     (
         "sk-proj-FAKE0aaaa1111bbbb2222cccc3333T3Blbk" + "FJEXAMPLE0dddd4444eeee5555ffff6666",
         "sk-project-management-tool",
     ),
-    # 10: Anthropic (sk-ant-NN-, exact 93-char body + AA). Negative: a
+    # 11: Anthropic (sk-ant-NN-, exact 93-char body + AA). Negative: a
     #     digit-bearing kebab slug carrying the infix (a loose body matched
     #     it; the exact length + AA terminal rejects it).
     (
         "sk-ant-api03-" + ("FAKEfake0123456789" * 6)[:93] + "AA",
         "sk-ant-api03-release-notes-2026-migration-guide",
     ),
-    # 11: GitHub gh*_ family completion. Negative: an English word that
+    # 12: GitHub gh*_ family completion. Negative: an English word that
     #     starts "gho" but is not a gho_ token.
     ("ghs_FAKEfake0123456789FAKEfake0123456789", "ghost_writer_mode_enabled"),
-    # 12: Google API key (AIza + exactly 35). Negative: too short.
+    # 13: Google API key (AIza + exactly 35). Negative: too short.
     ("AIzaSy0_-BcdSy0_-BcdSy0_-BcdSy0_-BcdSy0", "AIzaShortKey"),
-    # 13: GitLab PAT (glpat-, exact 20-char body). Negative: a digit-bearing
+    # 14: GitLab PAT (glpat-, exact 20-char body). Negative: a digit-bearing
     #     "glpat-" kebab slug (a {20,} superset matched it; exact length
     #     rejects it).
     ("glpat-" + ("FAKEfake0123456789" * 2)[:20], "glpat-form-builder-component-name-2026"),
-    # 14: Hugging Face (hf_ + exactly 34, digit-guarded). Negative: a
+    # 15: Hugging Face (hf_ + exactly 34, digit-guarded). Negative: a
     #     34-char letter-only run (no digit) directly after hf_.
     ("hf" + "_FAKEfake0123456789FAKEfake01234567", "hf" + "_abcdefghijklmnopqrstuvwxyzabcdefgh"),
-    # 15: PyPI / TestPyPI macaroon token. Negative: the prefix without the
+    # 16: PyPI / TestPyPI macaroon token. Negative: the prefix without the
     #     fixed base64 header.
     (
         "pypi-AgEIcHlwaS5vcmcFAKEfake0123456789FAKEfake0123456789FAKEfake0123456789",
@@ -621,18 +626,20 @@ class TestNewSecretPatterns1488:
     @pytest.mark.parametrize("text", _NEW_PATTERN_NEAR_MISSES)
     def test_new_pattern_near_miss_does_not_hit(self, text):
         # The contract is "no false positive from the #1488 additions"
-        # (indices >= 9). A near-miss may legitimately stay clean of the
-        # legacy 0-8 rules too, but those are pinned elsewhere; here we
+        # (indices >= 10 since the memtomem-stm#553 forward-sync inserted
+        # at index 2). A near-miss may legitimately stay clean of the
+        # earlier 0-9 rules too, but those are pinned elsewhere; here we
         # isolate the new set so a future loosening surfaces precisely.
-        offending = [h.pattern_index for h in privacy.scan(text) if h.pattern_index >= 9]
+        offending = [h.pattern_index for h in privacy.scan(text) if h.pattern_index >= 10]
         assert not offending, f"#1488 pattern(s) {offending} false-positived on {text[:50]!r}"
 
     def test_ghp_still_covered_by_legacy_not_duplicated(self):
-        # ghp_ stays the legacy index-2 rule's job; the new gh[ousr]_
-        # pattern (index 11) deliberately excludes 'p' to avoid a
+        # ghp_ stays the legacy sk-/ghp_/xox rule's job (index 3 since the
+        # memtomem-stm#553 forward-sync inserted at index 2); the new
+        # gh[ousr]_ pattern (index 12) deliberately excludes 'p' to avoid a
         # duplicate hit. Locks the dedup intent + guards against the
         # change accidentally dropping ghp_ coverage.
         ghp = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # ghp_ + 36 base62
         idxs = {h.pattern_index for h in privacy.scan(ghp)}
-        assert 2 in idxs, "ghp_ must still be caught by the legacy index-2 rule"
-        assert 11 not in idxs, "gh[ousr]_ (index 11) must exclude 'p' — no duplication"
+        assert 3 in idxs, "ghp_ must still be caught by the legacy sk-/ghp_/xox rule"
+        assert 12 not in idxs, "gh[ousr]_ (index 12) must exclude 'p' — no duplication"

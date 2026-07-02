@@ -110,10 +110,11 @@ class TestLongContentScan:
     def test_one_megabyte_scan_under_perf_ceiling(self):
         # Soft ceiling — not a microbenchmark, just a non-linear-regression
         # guard. ``scan()`` runs one ``re.finditer`` pass per pattern, so cost
-        # grows linearly with the pattern count: the 16 short prefix-anchored
+        # grows linearly with the pattern count: the 17 short prefix-anchored
         # ``DEFAULT_PATTERNS`` take ~100 ms locally and ~200 ms on a loaded CI
         # runner for a 1 MB input (#1488 grew the set 9 -> 16, each added
-        # secret class a linear pass — no single hot spot). The 500 ms ceiling
+        # secret class a linear pass — no single hot spot; the
+        # memtomem-stm#553 forward-sync makes it 17). The 500 ms ceiling
         # — matching ``test_crafted_repetition_scans_linearly`` below — keeps
         # ~2x headroom over that worst case while still catching a genuine
         # non-linear rewrite (e.g. a naive overlap-window scan that re-reads

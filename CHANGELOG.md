@@ -7,6 +7,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **AWS secret material is redacted by label (`SECRET_ACCESS_KEY` /
+  `SESSION_TOKEN`) — forward-sync of memtomem-stm#553.** The redaction guard
+  caught AWS key **IDs** (`AKIA`/`ASIA`) but not the secret **material** those
+  IDs unlock: `secret[_-]?key` needs its two words adjacent
+  (`secret_access_key` splits them) and `access[_-]?token` needs the literal
+  `access` (`session_token` has neither), so an STS AssumeRole JSON or an
+  `env`-dump note could cross the write boundary unredacted. One new
+  `DEFAULT_PATTERNS` rule (STM-origin, mirrored forward — the inverse of the
+  #1488→#1491 reverse-sync) with two alternatives: a quoted-key form
+  (`"SessionToken": "…"` — STS JSON / dict repr / kebab-case serialized
+  headers; the quote must sit directly on both sides of the label and the
+  value must open as a string, so JSON-Schema properties and prefixed keys
+  never fire) and an unquoted label form (`AWS_SECRET_ACCESS_KEY=`,
+  `aws_session_token =`, TOML `aws.secret_access_key =`, namespaced
+  `TF_VAR_aws_secret_access_key=`) carrying a left boundary so identifiers
+  that merely embed the label (`get_session_token:`,
+  `supports_session_token:`, `rotateSecretAccessKey:`) don't trip the guard.
+  The two sides are byte-identical again at 17 patterns (STM pin
+  memtomem-stm@`5ab5467`); the pattern translates cleanly to the Web UI's
+  client-side JS scan (fixed-width lookbehinds, ES2018+).
+
 - **Bulk folder indexing now enforces the secret-redaction trust boundary
   (ADR-0006 PR-A).** Previously `mm reindex`, the Web UI Index / Sources flows
   (`trigger_index`, `reindex_all`, `memory-dirs/add` auto-index, `index_stream`),

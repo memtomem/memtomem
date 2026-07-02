@@ -1,17 +1,19 @@
 """Content redaction guard at the LTM trust boundary.
 
 The pattern set has two provenance tiers, both secret-class only. As of
-STM commit ``8c884cb`` the two sides are in sync: this module's 16
+STM commit ``5ab5467`` the two sides are in sync: this module's 17
 secret-class patterns are byte-identical to memtomem-stm
 ``proxy/privacy.py:CREDENTIAL_PATTERNS``.
 
-1. **STM-synced subset** (9 patterns) — originally mirrored from
-   memtomem-stm. The SHA above tracks the STM commit this module is
+1. **STM-synced subset** (10 patterns) — originally mirrored from
+   memtomem-stm; the AWS secret-material label rule (memtomem-stm#553)
+   is the first STM-origin addition forward-synced after the #1491
+   reverse mirror. The SHA above tracks the STM commit this module is
    audited-consistent with (history: ``a98636e`` -> ``3e585b5`` ->
-   ``8c884cb``). STM's full set also carries PII patterns (email, etc.);
-   those are excluded here by design because PII false positives on prose
-   ingress would be unworkable — they live in STM's separate
-   ``PII_PATTERNS`` list.
+   ``8c884cb`` -> ``5ab5467``). STM's full set also carries PII patterns
+   (email, etc.); those are excluded here by design because PII false
+   positives on prose ingress would be unworkable — they live in STM's
+   separate ``PII_PATTERNS`` list.
 
 2. **LTM-origin additions** (7 patterns, issue #1488) — secret-class
    provider-token patterns added at this trust boundary first, ahead of
@@ -69,6 +71,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
     r"(?i)(password|passwd|pwd)\s*[:=]",
+    # AWS secret material by label (STM-origin; forward-synced from
+    # memtomem-stm#553). The generic label rule above misses both spellings
+    # the AWS toolchain actually emits: ``secret[_-]?key`` needs its two
+    # words adjacent (``secret_access_key`` splits them) and
+    # ``access[_-]?token`` needs the literal ``access`` (``session_token``
+    # has neither). Two alternatives in one rule:
+    #
+    # - quoted form — ``"SessionToken": "…"`` / ``"SecretAccessKey": "…"``
+    #   (STS JSON, python-dict repr, kebab-case serialized headers). The
+    #   quote must sit DIRECTLY on both sides of the label and the value
+    #   must open as a string, so a JSON-Schema property
+    #   (``"session_token": {"type"…`` — object value) and a prefixed key
+    #   (``"aws.get_session_token": "unhealthy"``) never fire.
+    # - unquoted form — ``AWS_SECRET_ACCESS_KEY=`` / ``aws_session_token =``
+    #   (env output, ~/.aws/credentials INI, TOML dotted keys). Carries a
+    #   LEFT boundary — token start (``SESSION_TOKEN=``, namespaced
+    #   ``TF_VAR_aws_secret_access_key=``) or a directly preceding ``aws``
+    #   separator (``aws.secret_access_key =``) — so identifiers that
+    #   merely EMBED the label (``get_session_token: unhealthy``,
+    #   ``supports_session_token: true``, ``rotateSecretAccessKey: done``)
+    #   don't fire. A plain optional ``(?:aws[_-])?`` prefix instead of
+    #   the lookbehind pair would drop the namespaced env-var forms, so
+    #   don't "simplify" it that way.
+    #
+    # The AKIA/ASIA rule below catches the key *IDs*; this one catches the
+    # *material* those IDs unlock.
+    r"(?i)(?:[\"'](?:secret[_-]?access[_-]?key|session[_-]?token)[\"']\s*:\s*[\"']"
+    r"|(?:(?<![A-Za-z0-9_.-])|(?<=aws[._-]))"
+    r"(?:secret[_-]?access[_-]?key|session[_-]?token)\s*[:=])",
     # Provider-prefixed token formats. Anchored by prefix so false positives
     # on arbitrary high-entropy strings are rare.
     r"(?i)(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|xox[bps]-[0-9A-Za-z-]+)",
