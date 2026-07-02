@@ -1,16 +1,18 @@
 """Content redaction guard at the LTM trust boundary.
 
 The pattern set has two provenance tiers, both secret-class only. As of
-STM commit ``5ab5467`` the two sides are in sync: this module's 17
+STM commit ``67689db`` the two sides are in sync: this module's 19
 secret-class patterns are byte-identical to memtomem-stm
 ``proxy/privacy.py:CREDENTIAL_PATTERNS``.
 
-1. **STM-synced subset** (10 patterns) — originally mirrored from
-   memtomem-stm; the AWS secret-material label rule (memtomem-stm#553)
-   is the first STM-origin addition forward-synced after the #1491
-   reverse mirror. The SHA above tracks the STM commit this module is
+1. **STM-synced subset** (12 patterns) — originally mirrored from
+   memtomem-stm; the AWS secret-material label rule (memtomem-stm#553),
+   the general quoted-JSON label rule (memtomem-stm#562), and the
+   x-amz-security-token wire-label rule (memtomem-stm#561) are the
+   STM-origin additions forward-synced after the #1491 reverse mirror.
+   The SHA above tracks the STM commit this module is
    audited-consistent with (history: ``a98636e`` -> ``3e585b5`` ->
-   ``8c884cb`` -> ``5ab5467``). STM's full set also carries PII patterns
+   ``8c884cb`` -> ``5ab5467`` -> ``67689db``). STM's full set also carries PII patterns
    (email, etc.); those are excluded here by design because PII false
    positives on prose ingress would be unworkable — they live in STM's
    separate ``PII_PATTERNS`` list.
@@ -71,6 +73,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[:=]",
     r"(?i)(password|passwd|pwd)\s*[:=]",
+    # Quoted-JSON / dict-repr forms of the generic labels above (STM-origin;
+    # forward-synced from memtomem-stm#562). The two label rules end in
+    # ``\s*[:=]``, and a quoted key's closing quote sits between the label
+    # and the colon — ``"password": "hunter2"``, ``"api_key": "sk-…"``,
+    # ``"accessToken": "ya29.…"``, ``{'password': 'hunter2'}`` match none
+    # of them — and JSON-serialized credentials are exactly what a pasted
+    # ``docker inspect`` / ``kubectl get secret -o json`` / DB-config note
+    # carries. Same FP-guard shape as the AWS rule below: the quote must
+    # sit DIRECTLY on both sides of the label and the value must open as a
+    # string, so a JSON-Schema property (``"access_token": {"type"…`` —
+    # object value), an identifier that merely embeds a label
+    # (``"my_api_key_name": …``), and a prefixed key (``"tools.api_key": …``)
+    # never fire. The ``[_-]?`` separator is optional, so camelCase JSON
+    # keys (``"apiKey"``, ``"accessToken"``) match under ``(?i)``. ``pwd``
+    # is deliberately NOT in this vocabulary (unlike the unquoted rule
+    # above): shell/file tools legitimately emit working-directory fields
+    # (``"pwd": "/home/user"``).
+    r"(?i)[\"'](?:api[_-]?key|secret[_-]?(?:access[_-]?)?key"
+    r"|(?:access|session)[_-]?token|password|passwd)[\"']\s*:\s*[\"']",
     # AWS secret material by label (STM-origin; forward-synced from
     # memtomem-stm#553). The generic label rule above misses both spellings
     # the AWS toolchain actually emits: ``secret[_-]?key`` needs its two
@@ -100,6 +121,36 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     r"(?i)(?:[\"'](?:secret[_-]?access[_-]?key|session[_-]?token)[\"']\s*:\s*[\"']"
     r"|(?:(?<![A-Za-z0-9_.-])|(?<=aws[._-]))"
     r"(?:secret[_-]?access[_-]?key|session[_-]?token)\s*[:=])",
+    # The label AWS actually puts on the WIRE for that same session-token
+    # material (STM-origin; forward-synced from memtomem-stm#561): botocore
+    # DEBUG logs emit the ``x-amz-security-token`` request header verbatim,
+    # and every presigned URL generated with temporary credentials carries
+    # the ``X-Amz-Security-Token=…`` query parameter — both are routine
+    # paste-into-a-note shapes. No rule above reaches either:
+    # ``session[_-]?token`` cannot cross the ``security-token`` spelling,
+    # and the kebab header shape has no ``aws`` separator directly before
+    # the label, so the left-boundary form above misses it too. Two
+    # alternatives, mirroring the rule above:
+    #
+    # - quoted form — ``"x-amz-security-token": "…"`` (serialized header
+    #   dicts, JSON or python repr). Quote directly on both sides of the
+    #   label and a string-opening value, so an OpenAPI/JSON-Schema header
+    #   *definition* (``"X-Amz-Security-Token": {"type"…`` — object value)
+    #   never fires.
+    # - unquoted form — the raw header line (``x-amz-security-token: FwoG…``)
+    #   and the presigned-URL query param. The left boundary rejects only a
+    #   directly preceding SEPARATOR (``[_.-]``), not alphanumerics —
+    #   narrower than the rule above, on purpose: kebab/dotted compounds
+    #   that merely NAME the header (``forward-x-amz-security-token: true``,
+    #   ``proxy.headers.x-amz-security-token``) must not fire, but a
+    #   bytes-repr wire dump renders the newline before the label as a
+    #   LITERAL ``\r\n`` (``send: b'…\r\nx-amz-security-token: FwoG…'`` —
+    #   http.client debuglevel), putting ``n`` right before the ``x``, and
+    #   that must stay a match. Prose that merely NAMES the header
+    #   (``header: x-amz-security-token``) stays negative — the separator
+    #   must directly follow the label.
+    r"(?i)(?:[\"']x-amz-security-token[\"']\s*:\s*[\"']"
+    r"|(?<![_.\-])x-amz-security-token\s*[:=])",
     # Provider-prefixed token formats. Anchored by prefix so false positives
     # on arbitrary high-entropy strings are rare.
     r"(?i)(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|xox[bps]-[0-9A-Za-z-]+)",
