@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from memtomem import privacy
 from memtomem.config import ContextGatewayConfig, Mem2MemConfig
 from memtomem.context.lockfile import Lockfile
 from memtomem.web.app import create_app
@@ -70,6 +71,14 @@ def _advance_wiki(root: Path) -> None:
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_privacy_counters():
+    """Zeroed counters so surface-attribution asserts see only their own test."""
+    privacy.reset_for_tests()
+    yield
+    privacy.reset_for_tests()
 
 
 @pytest.fixture
@@ -401,6 +410,55 @@ async def test_install_privacy_block_is_422_no_path_leak(
     assert _SECRET not in resp.text
     # Refusal left no residue in the project tree.
     assert not (project_root / ".memtomem" / "skills" / "leaky").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_privacy_block_audits_web_surface(
+    client,
+    wiki_root: Path,  # noqa: F811 — wiki_root from conftest
+    project_root: Path,
+) -> None:
+    # Audit attribution (backlog item b, 2026-06-29): a Gate-A block triggered
+    # from the BROWSER must be recorded under the web ingress surface, not the
+    # engine's CLI default — otherwise the privacy audit log claims a CLI event
+    # that never happened. End-to-end pin of the route's ``surface=`` kwarg
+    # through the engine into the audit counters.
+    WikiStore.at_default().init()
+    secret_dir = wiki_root / "skills" / "leaky"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "SKILL.md").write_text(f"# Leaky\n\naccess key {_SECRET}\n", encoding="utf-8")
+    _commit(wiki_root, "seed leaky")
+
+    resp = await client.post("/api/context/skills/leaky/install")
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason_code"] == "privacy_blocked"
+    by_tool = privacy.snapshot()["by_tool"]
+    assert by_tool["web_context_install"]["blocked"] >= 1
+    assert "cli_context_install" not in by_tool
+
+
+@pytest.mark.asyncio
+async def test_update_privacy_block_audits_web_surface(
+    client, seeded_wiki: Path, project_root: Path
+) -> None:
+    # Update twin of the install attribution pin: install clean, poison the
+    # wiki, then a browser-triggered update block must audit as
+    # web_context_update — never the CLI default.
+    assert (await client.post("/api/context/skills/alpha/install")).status_code == 200
+    (seeded_wiki / "skills" / "alpha" / "SKILL.md").write_text(
+        f"{_SKILL_BODY}\naccess key {_SECRET}\n", encoding="utf-8"
+    )
+    _commit(seeded_wiki, "poison alpha")
+    privacy.reset_for_tests()  # drop the clean install's audit rows
+
+    resp = await client.post("/api/context/skills/alpha/update")
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason_code"] == "privacy_blocked"
+    by_tool = privacy.snapshot()["by_tool"]
+    assert by_tool["web_context_update"]["blocked"] >= 1
+    assert "cli_context_update" not in by_tool
 
 
 @pytest.mark.asyncio

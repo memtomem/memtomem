@@ -123,8 +123,17 @@ async def install_asset(
     installer = _INSTALLERS[asset_type]
 
     def _run() -> InstallResult:
+        # surface= attributes a Gate-A privacy block to THIS browser ingress in
+        # the audit log — without it the engine default logs the block as a
+        # cli_context_install event (audit misattribution). Kind-agnostic like
+        # its CLI analog (one dispatcher for all three asset types), matching
+        # the web_context_transfer / web_context_sync_all precedent.
         return installer(
-            project_root, name, wiki=WikiStore.at_default(), lock_timeout=_INSTALL_LOCK_BUDGET_S
+            project_root,
+            name,
+            wiki=WikiStore.at_default(),
+            lock_timeout=_INSTALL_LOCK_BUDGET_S,
+            surface="web_context_install",
         )
 
     try:
@@ -198,12 +207,15 @@ async def update_asset(
     updater = _UPDATERS[asset_type]
 
     def _run() -> UpdateResult:
+        # surface= — see install_asset._run: audit attribution of Gate-A
+        # blocks to the browser ingress, not the CLI default.
         return updater(
             project_root,
             name,
             wiki=WikiStore.at_default(),
             force=force,
             lock_timeout=_INSTALL_LOCK_BUDGET_S,
+            surface="web_context_update",
         )
 
     try:

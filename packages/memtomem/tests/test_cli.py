@@ -334,7 +334,7 @@ class TestCoerceAndValidate:
         """search.rrf_weights must be registered in FIELD_CONSTRAINTS."""
         assert "search.rrf_weights" in FIELD_CONSTRAINTS
 
-    # ── list[BaseSettings] coercion (namespace.rules) ──────────────
+    # ── list[BaseModel] coercion (namespace.rules) ─────────────────
 
     def test_namespace_rules_from_json_string(self) -> None:
         """CLI path: `mm config set namespace.rules '[{...}]'` passes a JSON string."""
@@ -352,7 +352,7 @@ class TestCoerceAndValidate:
         """Web UI path: PATCH /api/config sends a parsed list of dicts.
 
         Regression guard for PR #253: before this fix, ``coerce_and_validate``
-        did not handle ``list[BaseSettings]``, so PATCH /api/config and
+        did not handle ``list[BaseModel]``, so PATCH /api/config and
         ``mm config set namespace.rules ...`` stored raw dicts in
         ``cfg.namespace.rules``. That broke ``indexing/engine.py:121`` which
         accesses ``rule.path_glob`` on each entry — AttributeError on a dict.
