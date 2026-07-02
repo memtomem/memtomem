@@ -214,6 +214,7 @@ def install_skill(
     *,
     wiki: WikiStore | None = None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Snapshot ``<wiki>/skills/<name>/`` into ``<project>/.memtomem/skills/<name>/``.
 
@@ -221,8 +222,15 @@ def install_skill(
     ``git pull`` in the wiki cannot make the recorded ``wiki_commit`` drift
     from the bytes that were copied. Refuses if either the lockfile entry
     or the destination directory already exists — see module docstring.
+
+    ``surface`` names the ingress in the Gate-A privacy audit log
+    (#1246/#1248 real-ingress rule): the CLI keeps the default, the web
+    route passes ``"web_context_install"`` so a browser-triggered block is
+    not misattributed to a CLI event.
     """
-    return _install_asset(project_root, "skills", name, wiki=wiki, lock_timeout=lock_timeout)
+    return _install_asset(
+        project_root, "skills", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
 
 
 def install_agent(
@@ -231,9 +239,12 @@ def install_agent(
     *,
     wiki: WikiStore | None = None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Snapshot ``<wiki>/agents/<name>/`` into ``<project>/.memtomem/agents/<name>/``."""
-    return _install_asset(project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout)
+    return _install_asset(
+        project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
 
 
 def install_command(
@@ -242,9 +253,12 @@ def install_command(
     *,
     wiki: WikiStore | None = None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Snapshot ``<wiki>/commands/<name>/`` into ``<project>/.memtomem/commands/<name>/``."""
-    return _install_asset(project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout)
+    return _install_asset(
+        project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
 
 
 def _installed_at_epoch(lock_entry: dict[str, Any]) -> float | None:
@@ -524,6 +538,7 @@ def _install_asset(
     *,
     wiki: WikiStore | None,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_install",
 ) -> InstallResult:
     """Internal: install a single asset of any type.
 
@@ -596,7 +611,7 @@ def _install_asset(
     # no dest bytes, no lockfile entry).
     _gate_a_scan_src_tree(
         src,
-        surface="cli_context_install",
+        surface=surface,
         project_root=project_root,
         asset_type=asset_type,
         name=validated,
@@ -637,15 +652,27 @@ def update_skill(
     wiki: WikiStore | None = None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Refresh ``<wiki>/skills/<name>/`` snapshot at ``<project>/.memtomem/skills/<name>/``.
 
     No-op when wiki HEAD already matches the lockfile pin. Refuses when
     local edits would be clobbered, unless ``force=True`` (which preserves
     each dirty file as ``<file>.bak`` before overwriting).
+
+    ``surface`` names the ingress in the Gate-A privacy audit log
+    (#1246/#1248 real-ingress rule): the CLI keeps the default, the web
+    route passes ``"web_context_update"`` so a browser-triggered block is
+    not misattributed to a CLI event.
     """
     return _update_asset(
-        project_root, "skills", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+        project_root,
+        "skills",
+        name,
+        wiki=wiki,
+        force=force,
+        lock_timeout=lock_timeout,
+        surface=surface,
     )
 
 
@@ -656,10 +683,17 @@ def update_agent(
     wiki: WikiStore | None = None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Refresh ``<wiki>/agents/<name>/`` snapshot at ``<project>/.memtomem/agents/<name>/``."""
     return _update_asset(
-        project_root, "agents", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+        project_root,
+        "agents",
+        name,
+        wiki=wiki,
+        force=force,
+        lock_timeout=lock_timeout,
+        surface=surface,
     )
 
 
@@ -670,10 +704,17 @@ def update_command(
     wiki: WikiStore | None = None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Refresh ``<wiki>/commands/<name>/`` snapshot at ``<project>/.memtomem/commands/<name>/``."""
     return _update_asset(
-        project_root, "commands", name, wiki=wiki, force=force, lock_timeout=lock_timeout
+        project_root,
+        "commands",
+        name,
+        wiki=wiki,
+        force=force,
+        lock_timeout=lock_timeout,
+        surface=surface,
     )
 
 
@@ -685,6 +726,7 @@ def _update_asset(
     wiki: WikiStore | None,
     force: bool = False,
     lock_timeout: float | None = None,
+    surface: str = "cli_context_update",
 ) -> UpdateResult:
     """Internal: refresh a single installed asset of any type.
 
@@ -757,6 +799,7 @@ def _update_asset(
         wiki_commit=new_commit,
         lock_entry=lock_entry,
         force=force,
+        surface=surface,
         lock_timeout=lock_timeout,
     )
 

@@ -409,6 +409,7 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     must keep the 3-wrapper API stable for downstream Python callers."""
     seen: list[str] = []
     timeouts: list[float | None] = []
+    surfaces: list[str] = []
 
     def _fake_update_asset(
         project_root: object,
@@ -418,9 +419,14 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
         wiki: object,
         force: bool,
         lock_timeout: float | None = None,
+        # Sentinel default (NOT "cli_context_update") so a wrapper that stops
+        # forwarding surface= fails the assertions below instead of the fake's
+        # own default masking the dropped kwarg (mutation-style pin).
+        surface: str = "<surface-not-forwarded>",
     ) -> object:
         seen.append(asset_type)
         timeouts.append(lock_timeout)
+        surfaces.append(surface)
         from memtomem.context.install import UpdateResult
 
         return UpdateResult(
@@ -440,11 +446,20 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     update_agent(Path("/tmp/p"), "a")
     update_command(Path("/tmp/p"), "c")
     update_skill(Path("/tmp/p"), "s")
+    update_skill(Path("/tmp/p"), "s", surface="web_context_update")
 
-    assert seen == ["agents", "commands", "skills"]
+    assert seen == ["agents", "commands", "skills", "skills"]
     # The wrappers forward lock_timeout verbatim; callers that omit it (the
     # CLI / direct Python use) get the unbounded default (None).
-    assert timeouts == [None, None, None]
+    assert timeouts == [None, None, None, None]
+    # surface= forwards verbatim: the CLI default when omitted, the caller's
+    # audit surface (e.g. the web route's) when given.
+    assert surfaces == [
+        "cli_context_update",
+        "cli_context_update",
+        "cli_context_update",
+        "web_context_update",
+    ]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1491,6 +1506,24 @@ class TestUpdatePrivacyGate:
         assert lock_path.read_bytes() == pre_lock_bytes
         # No .bak anywhere under dest (no preservation pass ran).
         assert list(dest.rglob("*.bak")) == []
+
+    def test_update_surface_kwarg_threads_to_audit(self, wiki_root: Path, tmp_path: Path) -> None:
+        """A caller-supplied ``surface=`` reaches the Gate-A audit record —
+        the web route relies on this so a browser-triggered block is not
+        logged as a ``cli_context_update`` event (audit misattribution)."""
+        _initialized_wiki(wiki_root)
+        _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+        project = tmp_path
+        install_skill(project, "foo")
+        _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": f"v2\n{SECRET}\n".encode()})
+        privacy.reset_for_tests()  # drop the clean install's audit rows
+
+        with pytest.raises(PrivacyBlockedError):
+            update_skill(project, "foo", surface="web_context_update")
+
+        by_tool = privacy.snapshot()["by_tool"]
+        assert by_tool["web_context_update"]["blocked"] >= 1
+        assert "cli_context_update" not in by_tool
 
     def test_force_update_blocks_on_secret_in_dirty_dest_file(
         self, wiki_root: Path, tmp_path: Path

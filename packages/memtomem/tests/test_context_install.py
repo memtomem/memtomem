@@ -25,6 +25,8 @@ from memtomem.context._names import InvalidNameError
 from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
+    install_agent,
+    install_command,
     install_skill,
 )
 from memtomem.context.lockfile import LOCKFILE_VERSION, Lockfile, LockfileCorruptError
@@ -524,6 +526,38 @@ def test_install_blocks_secret_in_wiki_src_zero_residue(wiki_root: Path, tmp_pat
     by_tool = privacy.snapshot()["by_tool"]
     assert by_tool.get("cli_context_install", {}).get("blocked", 0) == 1
     assert "cli_context_sync" not in by_tool
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "verb"),
+    [("skills", install_skill), ("agents", install_agent), ("commands", install_command)],
+)
+def test_install_surface_kwarg_threads_to_audit(
+    wiki_root: Path, tmp_path: Path, asset_type: str, verb
+) -> None:
+    """A caller-supplied ``surface=`` reaches the Gate-A audit record on all
+    three install wrappers — the web route relies on this so a browser-
+    triggered block is not logged as ``cli_context_install`` (audit
+    misattribution). Parametrized because the route dispatches per asset
+    type; a wrapper that silently drops the kwarg would only misattribute
+    that one kind."""
+    _initialized_wiki(wiki_root)
+    asset_dir = wiki_root / asset_type / "leak"
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "main.md").write_bytes(b"# leak\n" + SECRET.encode() + b"\n")
+    subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "add leak"],
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(PrivacyBlockedError):
+        verb(tmp_path, "leak", surface="web_context_install")
+
+    by_tool = privacy.snapshot()["by_tool"]
+    assert by_tool["web_context_install"]["blocked"] >= 1
+    assert "cli_context_install" not in by_tool
 
 
 def test_install_no_false_block_on_wiki_shipped_bak(wiki_root: Path, tmp_path: Path) -> None:
