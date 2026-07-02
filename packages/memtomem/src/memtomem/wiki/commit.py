@@ -143,6 +143,8 @@ def commit_targets(
 
     Raises :class:`WikiTargetChangedError` (a target moved — caller → conflict),
     :class:`~memtomem.wiki.store.WikiHeadMovedError` (HEAD advanced — propagated),
+    :class:`~memtomem.wiki.store.WikiDetachedHeadError` (no branch to commit
+    onto — propagated; the message is fixed and path-free),
     :class:`TimeoutError` (the cross-process lock is held past
     ``_COMMIT_LOCK_TIMEOUT`` by a concurrent committer — the web route maps it to
     a 503, the CLI to a retry hint), or :class:`RuntimeError` (git failure — the

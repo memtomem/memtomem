@@ -13,6 +13,7 @@ from memtomem.wiki.store import (
     WIKI_ASSET_TYPES,
     CommitNotFoundError,
     WikiAlreadyExistsError,
+    WikiDetachedHeadError,
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiNothingToCommitError,
@@ -602,3 +603,18 @@ class TestCommitPaths:
         head = store.current_commit()
         with pytest.raises(ValueError):
             store.commit_paths({"../evil": b"x\n"}, message="e", expected_head=head)
+
+    def test_detached_head_raises_classified(self, wiki_root: Path) -> None:
+        # A detached HEAD has no branch ref to CAS-advance. That must surface as
+        # the friendly WikiDetachedHeadError (the current_branch / #1419 push-pull
+        # precedent), NOT the raw `git symbolic-ref HEAD failed: …` RuntimeError.
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "checkout", "--detach"],
+            check=True,
+            capture_output=True,
+        )
+        with pytest.raises(WikiDetachedHeadError, match="detached HEAD"):
+            store.commit_paths({"agents/beta/agent.md": b"v2\n"}, message="e", expected_head=head)
+        assert store.current_commit() == head  # nothing was committed

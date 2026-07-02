@@ -97,11 +97,13 @@ class WikiNothingToCommitError(RuntimeError):
 class WikiDetachedHeadError(RuntimeError):
     """Raised when a branch operation runs on a detached-HEAD wiki.
 
-    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``);
-    a detached HEAD has no branch to name, so :meth:`WikiStore.current_branch`
-    refuses rather than let git emit a cryptic refspec error. The message is
-    deliberately path- and SHA-free so it stays safe if a future web surface
-    ever reuses it (CLI surfaces it as a classified ``ClickException``).
+    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``),
+    and :meth:`WikiStore.commit_paths` CAS-advances a *branch ref*; a detached
+    HEAD has no branch to name, so :meth:`WikiStore.current_branch` and
+    :meth:`WikiStore.commit_paths` refuse rather than let git emit a cryptic
+    refspec / symbolic-ref error. The message is deliberately path- and
+    SHA-free so the web commit route can return it verbatim in its 409
+    envelope (the CLI surfaces it as a classified ``ClickException``).
     """
 
 
@@ -549,9 +551,11 @@ class WikiStore:
            the new HEAD — best-effort, since the commit has already landed.
 
         Raises :class:`WikiHeadMovedError` (HEAD advanced — caller → 409),
-        :class:`WikiNothingToCommitError` (bytes identical to HEAD), or
-        :class:`RuntimeError` (git failure — the caller MUST surface a fixed
-        message; the raw stderr embeds the absolute repo path).
+        :class:`WikiNothingToCommitError` (bytes identical to HEAD),
+        :class:`WikiDetachedHeadError` (no branch to CAS-advance — the message
+        is fixed and path-free, safe to surface), or :class:`RuntimeError`
+        (git failure — the caller MUST surface a fixed message; the raw stderr
+        embeds the absolute repo path).
         """
         self.require_exists()
         head = self.current_commit()
@@ -562,9 +566,22 @@ class WikiStore:
             )
 
         # Resolve the actual branch ref dynamically — never hardcode
-        # ``refs/heads/main`` (a clone may be on another branch); a detached
-        # HEAD has no symbolic ref and cannot be safely CAS-advanced.
-        branch_ref = _git(["symbolic-ref", "HEAD"], cwd=self.root).stdout.strip()
+        # ``refs/heads/main`` (a clone may be on another branch). A detached
+        # HEAD has no symbolic ref (rc != 0) and cannot be safely CAS-advanced,
+        # so classify it the way :meth:`current_branch` does for push/pull
+        # (#1419) instead of leaking git's raw "ref HEAD is not a symbolic ref"
+        # RuntimeError. This runs BEFORE the temp index is created, so there is
+        # nothing to roll back.
+        ref_result = _git_query(["symbolic-ref", "HEAD"], self.root)
+        if ref_result.returncode != 0:
+            raise WikiDetachedHeadError(
+                "wiki is in detached HEAD state; check out a branch before committing"
+            )
+        branch_ref = ref_result.stdout.strip()
+        if not branch_ref:
+            # rc 0 with empty output should never happen (mirrors the
+            # current_branch guard) — but never run ``git update-ref "" …``.
+            raise RuntimeError("could not determine the wiki's current branch")
 
         tmpdir = Path(tempfile.mkdtemp(prefix="mm-wiki-commit-"))
         try:
