@@ -3221,6 +3221,51 @@ class TestBulkIndexForceUnsafe:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/index/stream — SSE error-event redaction
+# ---------------------------------------------------------------------------
+
+
+class TestIndexStreamErrorRedaction:
+    """Engine-level exceptions that escape to the SSE generator must pass
+    through ``_redact_message`` before serialization. Per-file read/permission
+    errors never reach this handler — the engine catches them internally and
+    reports basenames in the ``complete`` event — but an *engine-level*
+    failure (e.g. a storage error) propagates to the route's ``except`` and a
+    raw ``str(exc)`` embedding an absolute path would leak ``$HOME`` (and the
+    OS username) to the client. Every other error surface at this trust
+    boundary routes through ``_redact_message`` or a fixed string; the SSE
+    error event must not be the exception."""
+
+    async def test_index_stream_error_event_redacts_home_path(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        # ``_errors._HOME`` is captured at import time from ``Path.home()``,
+        # so pin it to a fake home rather than patching the env.
+        fake_home = "/home/leaky-user"
+        monkeypatch.setattr("memtomem.web.routes._errors._HOME", fake_home)
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError(f"database is locked: {fake_home}/.memtomem/index.db")
+            yield  # pragma: no cover — makes this an async generator function
+
+        app.state.index_engine.index_path_stream = _boom
+
+        resp = await client.get("/api/index/stream", params={"path": str(tmp_path)})
+        assert resp.status_code == 200, resp.text
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in resp.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events, f"no error event in stream: {resp.text!r}"
+        message = error_events[0]["message"]
+        assert fake_home not in message, f"raw $HOME path leaked to the client: {message!r}"
+        assert "~/.memtomem/index.db" in message, f"expected redacted form, got: {message!r}"
+
+
+# ---------------------------------------------------------------------------
 # GET /api/memory-dirs/status
 # ---------------------------------------------------------------------------
 

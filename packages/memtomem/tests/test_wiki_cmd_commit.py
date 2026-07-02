@@ -215,6 +215,25 @@ def test_invalid_name_errors(wiki_root: Path) -> None:
     assert "invalid skill name" in result.output
 
 
+def test_detached_head_is_friendly(wiki_root: Path) -> None:
+    # A detached-HEAD wiki has no branch to commit onto. The engine's classified
+    # WikiDetachedHeadError must surface as a clean, actionable message (the
+    # push/pull precedent) — never git's raw "symbolic-ref … failed" string.
+    _init_wiki()
+    _seed_skill(wiki_root)
+    (wiki_root / "skills/demo/SKILL.md").write_bytes(b"# edited\n")
+    _git(wiki_root, "checkout", "--detach")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "commit", "demo", "-c"])
+
+    assert result.exit_code != 0
+    out = _combined(result)
+    assert "detached HEAD" in out
+    assert "check out a branch" in out
+    assert "symbolic-ref" not in out  # no raw git gibberish
+
+
 def test_busy_lock_is_classified(wiki_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A concurrent committer holding the shared cross-process wiki lock makes
     # ``_file_lock`` raise the builtin ``TimeoutError`` (an OSError, NOT a

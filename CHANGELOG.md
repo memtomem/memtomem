@@ -7,6 +7,57 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **Quoted-JSON credential labels and the `x-amz-security-token` wire label
+  are redacted — forward-sync of memtomem-stm#562 / memtomem-stm#561.** Two
+  more STM-origin secret-class rules mirrored forward in one pass so the sets
+  move together. (1) *Quoted-label generalization* (memtomem-stm#562): the
+  generic label rules end in `\s*[:=]`, and a quoted key's closing quote sits
+  between the label and the colon, so `"password": "hunter2"`,
+  `"api_key": "sk-…"`, camelCase `"accessToken": "ya29.…"`, and dict-repr
+  `{'password': 'hunter2'}` — the exact shape of a pasted `docker inspect` /
+  `kubectl get secret -o json` / DB-config note — crossed the write boundary
+  unredacted. One general quoted-label rule reuses the #553 FP-guard shape
+  (quote directly on both sides of the label, value must open as a string, so
+  JSON-Schema object values, embedded labels, and prefixed keys never fire);
+  `pwd` is deliberately excluded — shell/file tools legitimately emit
+  `"pwd": "/home/user"` working-directory fields. (2) *AWS wire label*
+  (memtomem-stm#561): botocore DEBUG logs emit the `x-amz-security-token`
+  request header verbatim and every presigned URL generated with temporary
+  credentials carries `X-Amz-Security-Token=…`, but `session[_-]?token`
+  cannot cross the `security-token` spelling, so those notes scanned clean
+  unless an `ASIA…` key ID co-occurred. The new rule's unquoted branch
+  carries a separator-only left boundary (`(?<![_.\-])`): kebab/dotted
+  compounds that merely name the header (`forward-x-amz-security-token:
+  true`, `proxy.headers.x-amz-security-token`) stay negative, while
+  bytes-repr wire dumps — which render the newline before the header line as
+  a literal `\r\n`, putting an alphanumeric directly before the label — stay
+  positive. The two sides are byte-identical again at 19 patterns, same
+  order (STM pin memtomem-stm@`67689db`); both patterns translate cleanly to
+  the Web UI's client-side JS scan (position-0 `(?i)` lift + fixed-width
+  lookbehind, ES2018+), and each gets its paired JS-translation parity
+  fixture. A content-hash pin over the shared subset is tracked in
+  memtomem-stm#559.
+- **AWS secret material is redacted by label (`SECRET_ACCESS_KEY` /
+  `SESSION_TOKEN`) — forward-sync of memtomem-stm#553.** The redaction guard
+  caught AWS key **IDs** (`AKIA`/`ASIA`) but not the secret **material** those
+  IDs unlock: `secret[_-]?key` needs its two words adjacent
+  (`secret_access_key` splits them) and `access[_-]?token` needs the literal
+  `access` (`session_token` has neither), so an STS AssumeRole JSON or an
+  `env`-dump note could cross the write boundary unredacted. One new
+  `DEFAULT_PATTERNS` rule (STM-origin, mirrored forward — the inverse of the
+  #1488→#1491 reverse-sync) with two alternatives: a quoted-key form
+  (`"SessionToken": "…"` — STS JSON / dict repr / kebab-case serialized
+  headers; the quote must sit directly on both sides of the label and the
+  value must open as a string, so JSON-Schema properties and prefixed keys
+  never fire) and an unquoted label form (`AWS_SECRET_ACCESS_KEY=`,
+  `aws_session_token =`, TOML `aws.secret_access_key =`, namespaced
+  `TF_VAR_aws_secret_access_key=`) carrying a left boundary so identifiers
+  that merely embed the label (`get_session_token:`,
+  `supports_session_token:`, `rotateSecretAccessKey:`) don't trip the guard.
+  The two sides are byte-identical again at 17 patterns (STM pin
+  memtomem-stm@`5ab5467`); the pattern translates cleanly to the Web UI's
+  client-side JS scan (fixed-width lookbehinds, ES2018+).
+
 - **Bulk folder indexing now enforces the secret-redaction trust boundary
   (ADR-0006 PR-A).** Previously `mm reindex`, the Web UI Index / Sources flows
   (`trigger_index`, `reindex_all`, `memory-dirs/add` auto-index, `index_stream`),
@@ -79,6 +130,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   backfill (a log surface, not a terminal one) now names the blocked paths in
   its warning and aggregates non-redaction errors to one line per directory.
   `mm index` output is unchanged.
+
+### Changed
+
+- **Config sections no longer bind bare, unprefixed environment variables**
+  (#1522). The 22 sub-config sections (`embedding`, `storage`, `llm`,
+  `session_trace`, …) plus `NamespacePolicyRule` were `BaseSettings` classes
+  without an `env_prefix`, so
+  generic shell exports like `API_KEY`, `ENABLED`, `MODEL`, or `HOST` silently
+  overrode memtomem configuration — including secret-bearing fields
+  (`embedding.api_key`, `session_trace.langfuse_secret_key`) and validator
+  guards — outside the documented `MEMTOMEM_` surface. They are now plain
+  pydantic models: environment binding flows exclusively through
+  `MEMTOMEM_<SECTION>__<FIELD>`. Validation strictness is unchanged — unknown
+  keys (an env typo like `MEMTOMEM_EMBEDDING__TYPO`, or a stray key in
+  `config.json`/`config.d`) still fail loudly, exactly as before.
+
+  **Migration**: if you relied on a bare name, add the documented prefix —
+  e.g. `API_KEY=sk-…` → `MEMTOMEM_EMBEDDING__API_KEY=sk-…` (or
+  `MEMTOMEM_LLM__API_KEY=sk-…`). One deliberate exception: with
+  `session_trace.langfuse_enabled=true`, the Langfuse SDK's own
+  `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (and `LANGFUSE_HOST`) still
+  count as credentials — they are read by the SDK itself and are never copied
+  into memtomem config. `LANGFUSE_ENABLED` alone never turns tracing on.
 
 ## [0.3.2] — 2026-06-30
 

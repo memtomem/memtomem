@@ -264,3 +264,69 @@ def test_runtime_only_enumeration_tolerates_broken_mcp_json(tmp_path: Path) -> N
     (tmp_path / ".mcp.json").write_text("{broken", encoding="utf-8")
     rows = diff_mcp_servers(tmp_path)
     assert [(r[0], r[1], r[2]) for r in rows] == [("project_mcp", "demo", "parse error")]
+
+
+# ── T1-5: .mcp.json read-merge-write is cross-process guarded ────────────────
+
+
+def test_sync_aborts_when_sidecar_lock_held(tmp_path: Path) -> None:
+    """A concurrent holder of the .mcp.json sidecar lock makes the merge
+    self-abort with a typed LOCK_TIMEOUT skip (bounded budget) instead of
+    blocking forever — the settings #1123 twin. Expiry-direction timing: a
+    slow runner only delays the abort, it can never produce a false pass."""
+    from memtomem.context import _skip_reasons as skip_codes
+    from memtomem.context import mcp_servers as mod
+    from memtomem.context._atomic import _file_lock, _lock_path_for
+
+    _canonical(tmp_path, "demo", {"command": "uvx"})
+    target = tmp_path / ".mcp.json"
+    monkeypatch_budget = mod._MCP_LOCK_BUDGET_S
+    try:
+        mod._MCP_LOCK_BUDGET_S = 0.2
+        with _file_lock(_lock_path_for(target)):
+            result = mod.generate_all_mcp_servers(tmp_path)
+    finally:
+        mod._MCP_LOCK_BUDGET_S = monkeypatch_budget
+
+    assert result.generated == []
+    assert [(r[0], r[2]) for r in result.skipped] == [("project_mcp", skip_codes.LOCK_TIMEOUT)]
+    # The lock protected the file: nothing was written under contention.
+    assert not target.exists()
+
+
+def test_sync_aborts_when_target_mtime_changes_mid_merge(tmp_path: Path) -> None:
+    """The st_mtime_ns recheck (second layer, for a non-locking direct editor
+    save mid-merge) aborts with a TARGET_CONFLICT skip and writes nothing."""
+    from memtomem.context import _skip_reasons as skip_codes
+    from memtomem.context import mcp_servers as mod
+
+    _canonical(tmp_path, "demo", {"command": "uvx"})
+    target = tmp_path / ".mcp.json"
+    target.write_text(
+        json.dumps({"mcpServers": {"other": {"command": "node"}}}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    real_dumps = json.dumps
+    state = {"bumped": False}
+
+    def _dumps_then_touch(*args: object, **kwargs: object) -> str:
+        # Simulate a concurrent write landing after the in-lock read but
+        # before the mtime recheck: bump the file's mtime once.
+        out = real_dumps(*args, **kwargs)
+        if not state["bumped"]:
+            state["bumped"] = True
+            st = target.stat()
+            os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+        return out
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(mod.json, "dumps", _dumps_then_touch):
+        result = mod.generate_all_mcp_servers(tmp_path)
+
+    assert result.generated == []
+    assert [(r[0], r[2]) for r in result.skipped] == [("project_mcp", skip_codes.TARGET_CONFLICT)]
+    # Untouched: still only the pre-existing entry, demo NOT merged in.
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert written["mcpServers"] == {"other": {"command": "node"}}

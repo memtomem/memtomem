@@ -14,10 +14,12 @@ from memtomem.wiki.store import (
     WIKI_ASSET_TYPES,
     CommitNotFoundError,
     WikiAlreadyExistsError,
+    WikiDetachedHeadError,
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiNothingToCommitError,
     WikiStore,
+    WikiUnbornHeadError,
     _wiki_path_from_env,
 )
 
@@ -746,3 +748,62 @@ class TestCommitPaths:
         assert self._mode_at(wiki_root, head, rel) == "120000"  # precondition
         with pytest.raises(ValueError, match="regular file"):
             store.commit_paths({rel: b"clobber\n"}, message="edit", expected_head=head)
+
+    def test_detached_head_raises_classified(self, wiki_root: Path) -> None:
+        # A detached HEAD has no branch ref to CAS-advance. That must surface as
+        # the friendly WikiDetachedHeadError (the current_branch / #1419 push-pull
+        # precedent), NOT the raw `git symbolic-ref HEAD failed: …` RuntimeError.
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "checkout", "--detach"],
+            check=True,
+            capture_output=True,
+        )
+        with pytest.raises(WikiDetachedHeadError, match="detached HEAD"):
+            store.commit_paths({"agents/beta/agent.md": b"v2\n"}, message="e", expected_head=head)
+        assert store.current_commit() == head  # nothing was committed
+
+
+class TestUnbornHead:
+    """``current_commit`` on a commit-less wiki (clone of an empty remote)."""
+
+    def test_current_commit_raises_typed_error(self, unborn_wiki) -> None:
+        with pytest.raises(WikiUnbornHeadError) as excinfo:
+            WikiStore.at_default().current_commit()
+        # Message contract: path- and SHA-free, so web surfaces may return it
+        # verbatim (mirrors WikiDetachedHeadError).
+        assert str(unborn_wiki) not in str(excinfo.value)
+        assert "no commits yet" in str(excinfo.value)
+
+    def test_is_dirty_still_works(self, unborn_wiki) -> None:
+        # The seeded working-tree skill is untracked → dirty; ``git status``
+        # itself needs no HEAD, so the probe must not raise.
+        assert WikiStore.at_default().is_dirty() is True
+
+    def test_corrupt_ref_directory_stays_plain_runtimeerror(self, wiki_root) -> None:
+        # Codex review repro: a DIRECTORY squatting at .git/refs/heads/main
+        # makes ``symbolic-ref`` succeed and ``show-ref`` fail — the unborn
+        # shape minus the "nothing at the loose ref path" condition. That is
+        # ref-store corruption and must keep the original git error, not be
+        # softened to "no commits yet".
+        store = WikiStore.at_default()
+        store.init()
+        ref = wiki_root / ".git" / "refs" / "heads" / "main"
+        ref.unlink()
+        ref.mkdir()
+        with pytest.raises(RuntimeError) as excinfo:
+            store.current_commit()
+        assert not isinstance(excinfo.value, WikiUnbornHeadError)
+
+    def test_corrupt_head_stays_plain_runtimeerror(self, wiki_root) -> None:
+        # Narrowness pin: a corrupt HEAD file (git: "not a git repository")
+        # fails BOTH rev-parse and symbolic-ref, so it must keep raising the
+        # redacted RuntimeError — only the symbolic-ref-to-unborn-branch shape
+        # classifies as WikiUnbornHeadError.
+        store = WikiStore.at_default()
+        store.init()
+        (wiki_root / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+        with pytest.raises(RuntimeError) as excinfo:
+            store.current_commit()
+        assert not isinstance(excinfo.value, WikiUnbornHeadError)
