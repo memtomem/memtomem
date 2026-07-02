@@ -138,6 +138,33 @@ async def test_wiki_status_dirty(client, seeded_wiki: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_wiki_unborn_is_409_not_500(client, unborn_wiki: Path) -> None:
+    # A clone of an EMPTY remote: .git exists, HEAD is unborn — the RuntimeError
+    # from ``rev-parse HEAD`` used to escape as a 500 traceback ("never a
+    # traceback", ADR-0008 Invariant 3).
+    resp = await client.get("/api/wiki")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "wiki_unborn"
+    # Path-free envelope: the absolute wiki root must not leak.
+    assert str(unborn_wiki) not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_wiki_status_unborn_is_present_false_not_500(
+    client,
+    unborn_wiki: Path,
+) -> None:
+    # The nav probe fires on every gateway open; a commit-less wiki cannot be
+    # installed from, so it degrades to the same hidden badge as an absent one.
+    resp = await client.get("/api/wiki/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["present"] is False
+    assert data["wiki_head"] is None
+    assert str(unborn_wiki) not in resp.text
+
+
+@pytest.mark.asyncio
 async def test_wiki_status_absent_is_present_false_not_404(
     client,
     wiki_root: Path,  # noqa: F811

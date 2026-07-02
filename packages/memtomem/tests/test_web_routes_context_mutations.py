@@ -382,6 +382,33 @@ async def test_install_wiki_absent_is_404(client, wiki_root: Path) -> None:  # n
 
 
 @pytest.mark.asyncio
+async def test_install_unborn_wiki_is_409(client, unborn_wiki: Path) -> None:
+    # Clone of an empty remote: the asset dir exists in the working tree but
+    # there is no HEAD to pin — used to escape as a 500 RuntimeError.
+    resp = await client.post("/api/context/skills/alpha/install")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "wiki_unborn"
+    assert str(unborn_wiki) not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_update_unborn_wiki_is_409(client, seeded_wiki: Path, project_root: Path) -> None:
+    # Install from a healthy wiki first, then delete the branch ref so HEAD
+    # becomes unborn again (the force-push-to-empty shape).
+    resp = await client.post("/api/context/skills/alpha/install")
+    assert resp.status_code == 200, resp.text
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "update-ref", "-d", "refs/heads/main"],
+        check=True,
+        capture_output=True,
+    )
+    resp = await client.post("/api/context/skills/alpha/update")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "wiki_unborn"
+    assert str(seeded_wiki) not in resp.text
+
+
+@pytest.mark.asyncio
 async def test_install_privacy_block_is_422_no_path_leak(
     client,
     wiki_root: Path,

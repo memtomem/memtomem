@@ -16,10 +16,10 @@ from memtomem.config import Mem2MemConfig
 from memtomem.server.component_factory import Components, create_components, close_components
 
 # Re-export wiki fixtures so any test in this directory can request
-# ``git_identity`` / ``wiki_root`` as a parameter without per-file imports.
-# Keeping the definitions in ``_wiki_fixtures.py`` avoids bloating this
-# already-heavy conftest with unrelated git-env plumbing.
-from _wiki_fixtures import git_identity, wiki_root  # noqa: F401
+# ``git_identity`` / ``wiki_root`` / ``unborn_wiki`` as a parameter without
+# per-file imports. Keeping the definitions in ``_wiki_fixtures.py`` avoids
+# bloating this already-heavy conftest with unrelated git-env plumbing.
+from _wiki_fixtures import git_identity, unborn_wiki, wiki_root  # noqa: F401
 
 
 # The Langfuse SDK's own env names. Sub-configs no longer bind bare env vars

@@ -427,6 +427,20 @@ def test_cli_install_wiki_missing_message(
     assert "wiki not found at" in result.output
 
 
+def test_cli_install_unborn_wiki_message(
+    unborn_wiki: Path,
+    project_cwd: Path,
+) -> None:
+    # Clone of an empty remote: asset dir exists in the working tree but there
+    # is no HEAD commit to pin — a clean refusal with the remedy, no traceback.
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "skill", "alpha"])
+
+    assert result.exit_code != 0
+    assert "no commits yet" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_cli_install_rejects_unknown_type(project_cwd: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(context_group, ["install", "settings", "foo"])
