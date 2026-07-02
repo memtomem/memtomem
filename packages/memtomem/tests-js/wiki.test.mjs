@@ -364,6 +364,82 @@ describe('wiki.js install/update (E-3, dev tier)', () => {
     await dom.window._onWikiInstallOrUpdate('update');
     expect(posts.map((p) => p.body.force)).toEqual([false]); // initial only, no retry
   });
+
+  it('a privacy_blocked install shows the localized copy, not the raw envelope', async () => {
+    const dom = await bootDev();
+    const toasts = [];
+    dom.window.showToast = (msg, kind) => { toasts.push({ msg, kind }); };
+    const RAW_SERVER_MSG =
+      'wiki asset blocked by the privacy scan: a secret was detected in the wiki bytes.';
+    const base = dom.window.fetch;
+    dom.window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const method = ((init && init.method) || 'GET').toUpperCase();
+      if (method === 'POST' && (url || '').split('?')[0] === '/api/context/skills/alpha/install') {
+        return {
+          ok: false, status: 422,
+          json: async () => ({
+            detail: {
+              error_kind: 'validation',
+              reason_code: 'privacy_blocked',
+              message: RAW_SERVER_MSG,
+            },
+          }),
+          text: async () => '',
+        };
+      }
+      return base(input, init);
+    };
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('install');
+    const errToast = toasts.find((x) => x.kind === 'error');
+    expect(errToast).toBeTruthy();
+    // The fully-localized key, computed the same way the code does — the
+    // envelope's English-only prose must not shadow the translation (#1348 class).
+    expect(errToast.msg).toBe(dom.window.t('settings.ctx.wiki_install_privacy_blocked', {
+      type: dom.window._wikiTypeLabel('skills'), name: 'alpha',
+    }));
+    expect(errToast.msg).not.toContain(RAW_SERVER_MSG);
+  });
+
+  it('rapid double-click on install fires exactly one POST (double-submit guard)', async () => {
+    const dom = await bootDev();
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    const btn = dom.window.document.getElementById('wiki-install-btn');
+    btn.click();
+    // Guarded for the life of the async handler; the second click lands on a
+    // disabled button and is swallowed.
+    expect(btn.disabled).toBe(true);
+    btn.click();
+    // Let the handler chain (csrf → fetch → toast) settle.
+    for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(posts.length).toBe(1);
+    expect(btn.disabled).toBe(false); // restored in finally — button usable again
+  });
+
+  it('install uses the scope the <select> DISPLAYS, not the stale cache', async () => {
+    // The active scope is not in the rendered roster (project since removed):
+    // no option is marked selected, so the control displays the first option
+    // (Server CWD) while the stale id survives in the module cache. The click
+    // must follow what the user sees — the select's value at click time.
+    const dom = await bootDev('ghost-project', [
+      { scope_id: '', label: 'Server CWD' },
+      { scope_id: 'p-1', label: 'Proj One' },
+    ]);
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki(); // caches _wikiInstallScopeId = 'ghost-project'
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    const sel = dom.window.document.getElementById('wiki-install-project');
+    expect(sel.value).toBe(''); // what the user sees: Server CWD
+    await dom.window._onWikiInstallOrUpdate('install');
+    expect(posts.length).toBe(1);
+    // Pre-fix this POSTed ?scope_id=ghost-project — a project the user was
+    // not looking at.
+    expect(posts[0].url).toBe('/api/context/skills/alpha/install');
+  });
 });
 
 describe('wiki.js override editor (ADR-0027 Editor-A, dev tier)', () => {
@@ -795,6 +871,63 @@ describe('wiki.js commit affordance (ADR-0027 §3, dev tier)', () => {
     await window.loadWiki();
     await window.loadWikiDetail('skills', 'alpha');
     expect(window.document.getElementById('wiki-commit-btn')).toBeNull();
+  });
+
+  it('a 409 stale_target hides the commit modal for the confirm, restores on decline', async () => {
+    // #confirm-modal shares the .modal-overlay z-index and sits earlier in the
+    // DOM, so without the hide it stacks UNDER the commit modal — the user
+    // sees a frozen commit dialog with the actionable confirm buried behind it
+    // (the move/copy needs_confirmation precedent).
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    let modalHiddenDuringConfirm = null;
+    window.showConfirm = async () => {
+      modalHiddenDuringConfirm = window.document.getElementById('wiki-commit-modal').hidden;
+      return false; // decline
+    };
+    const posts = await bootSavedCanonical(window, {
+      commitResponse: {
+        ok: false, status: 409,
+        json: async () => ({ reason_code: 'stale_target', error_kind: 'conflict' }),
+        text: async () => '',
+      },
+    });
+    await window._openWikiCommitModal();
+    await window._doWikiCommit(false);
+    expect(posts.length).toBe(1); // declined — no force retry
+    expect(modalHiddenDuringConfirm).toBe(true); // one overlay on screen
+    // Declined → the commit modal comes back with the inline error visible.
+    expect(window.document.getElementById('wiki-commit-modal').hidden).toBe(false);
+    const err = window.document.getElementById('wiki-commit-error');
+    expect(err.hidden).toBe(false);
+  });
+
+  it('a confirmed stale_target force-retries and closes the modal', async () => {
+    const { window } = await boot({ '/api/wiki': WIKI_LIST });
+    window.showConfirm = async () => true; // accept the force commit
+    const posts = await bootSavedCanonical(window); // default 200 responder
+    // Two-phase: the FIRST commit POST 409s stale_target; the force retry
+    // falls through to the harness's default 200 responder.
+    const inner = window.fetch;
+    let first = true;
+    window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const method = ((init && init.method) || 'GET').toUpperCase();
+      if (method === 'POST' && (url || '').split('?')[0] === '/api/wiki/skills/alpha/commit' && first) {
+        first = false;
+        posts.push({ headers: init.headers || {}, body: JSON.parse(init.body) });
+        return {
+          ok: false, status: 409,
+          json: async () => ({ reason_code: 'stale_target', error_kind: 'conflict' }),
+          text: async () => '',
+        };
+      }
+      return inner(input, init);
+    };
+    await window._openWikiCommitModal();
+    await window._doWikiCommit(false);
+    expect(posts.map((p) => p.body.force)).toEqual([false, true]);
+    expect(window.document.getElementById('wiki-commit-modal').hidden).toBe(true); // closed on success
+    expect(window.document.getElementById('wiki-head').textContent).toContain('bbbbbbbbbbbb');
   });
 });
 

@@ -931,3 +931,106 @@ class TestUnbornHead:
         with pytest.raises(RuntimeError) as excinfo:
             store.current_commit()
         assert not isinstance(excinfo.value, WikiUnbornHeadError)
+
+
+class TestBakHygiene:
+    """Editor Save / ``seed --force`` leave ``<file>.bak`` recovery siblings in
+    the working tree. Without ignore coverage they keep the wiki permanently
+    dirty between Saves and commits, and a manual ``git add .`` sweeps them
+    into history (T2-7 / 0629 wiki-audit)."""
+
+    def test_init_seeds_tracked_gitignore_covering_bak(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+
+        gitignore = wiki_root / ".gitignore"
+        assert gitignore.is_file()
+        assert "*.bak" in gitignore.read_text(encoding="utf-8")
+        # Part of the scaffold commit — the fresh wiki is clean, not
+        # carrying its own ignore file as untracked dirt.
+        assert store.is_dirty() is False
+
+        # The load-bearing effect: a stray .bak alone does not dirty the wiki.
+        skill_dir = wiki_root / "skills" / "demo"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md.bak").write_bytes(b"old\n")
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=wiki_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert ".bak" not in status
+
+    def test_ensure_bak_excluded_retrofits_legacy_wiki(self, wiki_root: Path) -> None:
+        """A wiki whose history predates the scaffold .gitignore gets the
+        local ``.git/info/exclude`` retrofit — no tracked-file write (which
+        would itself dirty the tree), idempotent on repeat calls."""
+        store = WikiStore.at_default()
+        store.init()
+        # Simulate the legacy wiki: drop the tracked .gitignore from history.
+        subprocess.run(
+            ["git", "rm", "-q", ".gitignore"], cwd=wiki_root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "drop scaffold gitignore"],
+            cwd=wiki_root,
+            check=True,
+            capture_output=True,
+        )
+
+        store.ensure_bak_excluded()
+        store.ensure_bak_excluded()  # idempotent — no duplicate lines
+
+        exclude = wiki_root / ".git" / "info" / "exclude"
+        lines = exclude.read_text(encoding="utf-8").splitlines()
+        assert lines.count("*.bak") == 1
+        # Working tree untouched: the retrofit must not dirty the wiki.
+        assert store.is_dirty() is False
+
+        (wiki_root / "skills").mkdir(exist_ok=True)
+        (wiki_root / "skills" / "SKILL.md.bak").write_bytes(b"old\n")
+        assert store.is_dirty() is False
+
+    def test_ensure_bak_excluded_defers_to_tracked_gitignore(self, wiki_root: Path) -> None:
+        """When the tracked .gitignore already covers *.bak (post-scaffold
+        wikis), the local exclude stays untouched — the durable form wins."""
+        store = WikiStore.at_default()
+        store.init()
+
+        store.ensure_bak_excluded()
+
+        exclude = wiki_root / ".git" / "info" / "exclude"
+        content = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        assert "memtomem" not in content
+
+    def test_init_from_url_retrofits_clone_without_gitignore(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        git_identity: None,
+    ) -> None:
+        """A clone of a remote whose history lacks the scaffold .gitignore
+        (created by an older memtomem) gets the local exclude at clone time."""
+        source = tmp_path / "source-wiki"
+        monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(source))
+        WikiStore.at_default().init()
+        subprocess.run(
+            ["git", "rm", "-q", ".gitignore"], cwd=source, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "drop scaffold gitignore"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+        )
+
+        target = tmp_path / "target-wiki"
+        monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(target))
+        clone = WikiStore.at_default()
+        clone.init_from_url(f"file://{source}")
+
+        (target / "skills").mkdir(exist_ok=True)
+        (target / "skills" / "SKILL.md.bak").write_bytes(b"old\n")
+        assert clone.is_dirty() is False

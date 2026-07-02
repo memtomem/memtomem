@@ -579,6 +579,37 @@ def test_mcp_dry_run_is_default_and_prints_hint(cli_projects) -> None:
     assert "mm context sync --include=mcp-servers --scope project_shared`" in result.output
 
 
+def test_dry_run_prints_engine_notes(cli_projects) -> None:
+    """Engine caveats must render in the PLAN, not only after --apply (T2-6):
+    a caveat the user first learns about post-apply is not a plan they
+    confirmed. Covers both note producers — the artifact copy-rename
+    overrides caveat and the mcp-servers destination .mcp.json disclosure."""
+    # Artifact copy-rename with overrides — engine note previews off src.
+    src_dir = _seed_agent(cli_projects, "project_shared", root_key="a")
+    override = src_dir / "overrides" / "claude.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("---\nname: foo\n---\n\no\n", encoding="utf-8")
+    result = _invoke(
+        ["copy", "agents", "foo", "--to-project", str(cli_projects["b"]), "--as", "bar"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "note: renamed copy keeps overrides/ verbatim" in result.output
+    assert "Run with --apply" in result.output
+    assert not (cli_projects["b"] / ".memtomem" / "agents" / "bar").exists()
+
+    # mcp-servers same-name overwrite disclosure — the result already carried
+    # the note in dry-run; the CLI preview branch used to drop it.
+    _seed_mcp_server(cli_projects)
+    (cli_projects["b"] / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"pg": {"command": "old", "args": []}}}),
+        encoding="utf-8",
+    )
+    result = _invoke(["copy", "mcp-servers", "pg", "--to-project", str(cli_projects["b"])])
+    assert result.exit_code == 0, result.output
+    assert "note: destination .mcp.json already defines 'pg'" in result.output
+    assert not (cli_projects["b"] / ".memtomem" / "mcp-servers").exists()
+
+
 def test_mcp_move_rejected(cli_projects) -> None:
     _seed_mcp_server(cli_projects)
     result = _invoke(["move", "mcp-servers", "pg", "--to-project", str(cli_projects["b"])])

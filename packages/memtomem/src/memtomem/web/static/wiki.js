@@ -54,6 +54,18 @@ function _wikiIsAbort(err) {
   return !!err && (err.name === 'AbortError');
 }
 
+// Double-submit guard for the wiki action buttons (seed / Save / install /
+// update): disable for the life of the async handler, restore in finally.
+// Deliberately a local one-liner rather than an app.js helper import — wiki.js
+// stays standalone-loadable, and the commit modal's okBtn already uses the
+// same disabled idiom inline. A handler that re-renders its own button leaves
+// the finally restoring a detached node, which is harmless.
+async function _wikiGuardBtn(btn, fn) {
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  try { await fn(); } finally { btn.disabled = false; }
+}
+
 async function _wikiErrDetail(res) {
   // The route layer returns the _error envelope ({detail: {message, ...}}); the
   // privacy 422 path returns a string detail. Surface either, else the status.
@@ -258,6 +270,13 @@ async function _doWikiCommit(force) {
     if (body.reason_code === 'stale_target') {
       // An external editor changed a target since Save. Offer to commit the
       // current on-disk bytes anyway (force, WARNING-audited server-side).
+      // The confirm dialog (#confirm-modal) shares the .modal-overlay z-index
+      // and sits earlier in the DOM, so it would stack UNDER this modal
+      // (openModalA11y orders by DOM, not z-index) — hide the commit modal
+      // for the disclosure and restore it on decline (the move/copy
+      // needs_confirmation precedent in context-gateway.js).
+      const modal = qs('wiki-commit-modal');
+      if (modal) hide(modal);
       const ok = await showConfirm({
         title: t('settings.ctx.wiki_commit_target_changed_title'),
         message: t('settings.ctx.wiki_commit_target_changed_msg'),
@@ -265,7 +284,14 @@ async function _doWikiCommit(force) {
         cancelText: t('modal.cancel_btn'),
         danger: true,
       });
-      if (ok) { await _doWikiCommit(true); } else { showErr(t('settings.ctx.wiki_commit_target_changed_msg')); }
+      if (ok) {
+        // The force retry re-reads the (hidden) modal's message field and
+        // closes it properly on success via _closeWikiCommitModal.
+        await _doWikiCommit(true);
+      } else {
+        if (modal) show(modal);
+        showErr(t('settings.ctx.wiki_commit_target_changed_msg'));
+      }
       return;
     }
     // stale_head: HEAD moved under us. CLEAR the pending targets — their tokens
@@ -449,7 +475,9 @@ function _renderWikiSeedAction() {
 function _bindWikiSeedAction() {
   const btn = qs('wiki-seed-btn');
   if (!btn) return;
-  btn.addEventListener('click', () => { _onWikiSeedClick(btn.dataset.exists === '1'); });
+  btn.addEventListener('click', () => {
+    _wikiGuardBtn(btn, () => _onWikiSeedClick(btn.dataset.exists === '1'));
+  });
 }
 
 async function _onWikiSeedClick(exists) {
@@ -566,7 +594,11 @@ function _bindWikiOverrideEditor() {
     });
   }
   const saveBtn = qs('wiki-override-save-btn');
-  if (saveBtn) saveBtn.addEventListener('click', () => { _onWikiOverrideSave(); });
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      _wikiGuardBtn(saveBtn, () => _onWikiOverrideSave());
+    });
+  }
 }
 
 async function _onWikiOverrideSave() {
@@ -744,7 +776,11 @@ function _bindWikiCanonicalEditor() {
     });
   }
   const saveBtn = qs('wiki-canonical-save-btn');
-  if (saveBtn) saveBtn.addEventListener('click', () => { _onWikiCanonicalSave(); });
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      _wikiGuardBtn(saveBtn, () => _onWikiCanonicalSave());
+    });
+  }
 }
 
 async function _onWikiCanonicalSave() {
@@ -947,15 +983,32 @@ function _bindWikiInstallAction() {
   const sel = qs('wiki-install-project');
   if (sel) sel.addEventListener('change', () => { _wikiInstallScopeId = sel.value || ''; });
   const installBtn = qs('wiki-install-btn');
-  if (installBtn) installBtn.addEventListener('click', () => { _onWikiInstallOrUpdate('install'); });
+  if (installBtn) {
+    installBtn.addEventListener('click', () => {
+      _wikiGuardBtn(installBtn, () => _onWikiInstallOrUpdate('install'));
+    });
+  }
   const updateBtn = qs('wiki-update-btn');
-  if (updateBtn) updateBtn.addEventListener('click', () => { _onWikiInstallOrUpdate('update'); });
+  if (updateBtn) {
+    updateBtn.addEventListener('click', () => {
+      _wikiGuardBtn(updateBtn, () => _onWikiInstallOrUpdate('update'));
+    });
+  }
 }
 
 async function _onWikiInstallOrUpdate(verb) {
   if (!_wikiActive) return;
   const { type, name } = _wikiActive;
-  await _installWikiAsset(type, name, _wikiInstallScopeId || '', false, verb);
+  // Read the <select> at click time. The cached _wikiInstallScopeId can
+  // diverge from what the control DISPLAYS: the options re-render from the
+  // roster, and a cached id absent from it marks nothing `selected`, so the
+  // browser shows the first option while the stale id survives in the
+  // variable — the click would install into a project the user isn't
+  // looking at. What you see is what you install into.
+  const sel = qs('wiki-install-project');
+  const scopeId = sel ? (sel.value || '') : (_wikiInstallScopeId || '');
+  _wikiInstallScopeId = scopeId;
+  await _installWikiAsset(type, name, scopeId, false, verb);
 }
 
 async function _installWikiAsset(type, name, scopeId, force, verb) {
@@ -999,6 +1052,16 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
     }
     if (reason === 'not_installed') {
       showToast(t('settings.ctx.wiki_not_installed', { type: _wikiTypeLabel(type), name }), 'error');
+      return;
+    }
+    if (reason === 'privacy_blocked') {
+      // Localized copy, not the envelope's detail.message — that prose is
+      // English-only server text and, being always non-empty, would shadow
+      // every translation (the #1348 class).
+      showToast(
+        t('settings.ctx.wiki_install_privacy_blocked', { type: _wikiTypeLabel(type), name }),
+        'error',
+      );
       return;
     }
     const detail = (body && body.detail && body.detail.message) || `HTTP ${res.status}`;
