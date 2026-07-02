@@ -13,7 +13,7 @@ runtime's copy is overwritten on the next Sync.
 
 This guide walks through that model and the first task most people want — getting
 a project's skills into their AI tools — from both the Web UI and the CLI. It
-links out to [`reference.md`](reference/data-config-cli.md#cli-reference) for the full command matrix and to
+links out to [the CLI reference](reference/data-config-cli.md#cli-reference) for the full command matrix and to
 [`configuration.md#context-gateway`](configuration.md#context-gateway) for the
 environment variables; it does not re-document those here.
 
@@ -120,7 +120,7 @@ runtimes like any other.
 
 In the Web UI the wiki panel is **read-only** (browse + Install); authoring
 canonical or vendor-override files is done with the `mm wiki …` CLI (or the
-in-browser editor in dev mode). See [`reference.md`](reference/data-config-cli.md#cli-reference)
+in-browser editor in dev mode). See [the CLI reference](reference/data-config-cli.md#cli-reference)
 for the full `mm wiki` / `mm context install` command matrix.
 
 ## Walkthrough — get this project's skills into your AI tools
@@ -223,7 +223,7 @@ mm context diff        # show in-sync / out-of-sync state
 mm context sync        # send the Store out to every detected runtime
 ```
 
-Useful flags (see [`reference.md`](reference/data-config-cli.md#cli-reference) for the full
+Useful flags (see [the CLI reference](reference/data-config-cli.md#cli-reference) for the full
 list):
 
 - `--include=<kind>` — narrow to `skills`, `agents`, `commands`, or `settings`.
@@ -263,9 +263,12 @@ them out:
 - **Project (shared)** writes hard-refuse on a detected secret and **cannot** be
   overridden — `--force-unsafe` is rejected for `project_shared` because git
   history is permanent. Remove the flagged line, then re-run.
-- **User** and **Project (local)** writes can be overridden with
-  `--force-unsafe` (CLI) or *Sync anyway* (Web) after you've reviewed a false
-  positive — e.g. a type annotation like `api_key: str`.
+- **User** writes can be overridden with `--force-unsafe` (CLI) or *Sync
+  anyway* (Web) after you've reviewed a false positive — e.g. a type
+  annotation like `api_key: str`.
+- **Project (local)** writes can be overridden with `--force-unsafe`, CLI
+  only — the Web UI has no Project (local) write surface (its write routes
+  reject that tier before any privacy check).
 
 See [`configuration.md#context-gateway`](configuration.md#context-gateway) for
 the related environment variables.
