@@ -1440,7 +1440,24 @@ def test_wiki_shipped_bak_never_installed_or_stranded(wiki_root: Path, tmp_path:
     it can't dodge dirty tracking, collide with the ``--force`` preservation
     namespace, or strand stale bytes when upstream later replaces it."""
     _initialized_wiki(wiki_root)
-    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "leftover.md.bak": b"wiki bak\n"})
+    _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n"})
+    # Wiki-SHIPPED bak: the scaffold .gitignore now ignores *.bak, so
+    # committing one takes a force-add — exactly how a hostile/legacy wiki
+    # would still ship it (pre-scaffold history, or a deliberate `add -f`).
+    # Once tracked, ignore rules no longer apply, so the plain `add .` in
+    # the replace-with-symlink step below keeps staging its changes.
+    src_bak = wiki_root / "skills" / "web" / "leftover.md.bak"
+    src_bak.write_bytes(b"wiki bak\n")
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "add", "-f", "skills/web/leftover.md.bak"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "ship a bak"],
+        check=True,
+        capture_output=True,
+    )
     result = install_skill(tmp_path, "web")
 
     dest = tmp_path / ".memtomem" / "skills" / "web"
