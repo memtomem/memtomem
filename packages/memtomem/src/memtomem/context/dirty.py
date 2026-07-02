@@ -48,12 +48,16 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from memtomem.context._atomic import iter_installed_files
-from memtomem.context.lockfile import Lockfile, digests_from_entry, manifest_from_entry
+from memtomem.context.lockfile import (
+    Lockfile,
+    digests_from_entry,
+    installed_at_epoch_from_entry,
+    manifest_from_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,17 +173,14 @@ def is_asset_dirty(
     # siblings — previously a malformed string returned missing_dest when
     # the dest was gone but crashed with ValueError when it existed (#1247).
     installed_at = lock_entry.get("installed_at")
-    installed_at_epoch: float | None = None
-    if isinstance(installed_at, str):
-        try:
-            installed_at_epoch = datetime.fromisoformat(installed_at).timestamp()
-        except ValueError:
-            logger.warning(
-                "%s/%s: lockfile installed_at %r is not ISO-8601; treating as never installed",
-                asset_type,
-                name,
-                installed_at,
-            )
+    installed_at_epoch = installed_at_epoch_from_entry(lock_entry)
+    if installed_at_epoch is None and isinstance(installed_at, str):
+        logger.warning(
+            "%s/%s: lockfile installed_at %r is not ISO-8601; treating as never installed",
+            asset_type,
+            name,
+            installed_at,
+        )
     if installed_at_epoch is None:
         return DirtyReport(
             reason="never_installed",

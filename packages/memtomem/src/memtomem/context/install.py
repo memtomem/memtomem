@@ -28,7 +28,6 @@ import logging
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -45,6 +44,7 @@ from memtomem.context.lockfile import (
     Lockfile,
     LockfileError,
     digests_from_entry,
+    installed_at_epoch_from_entry,
     manifest_from_entry,
 )
 from memtomem.context.privacy_scan import (
@@ -261,21 +261,6 @@ def install_command(
     )
 
 
-def _installed_at_epoch(lock_entry: dict[str, Any]) -> float | None:
-    """Parse the entry's ``installed_at`` to an epoch, or ``None``.
-
-    Tolerant on purpose: the reconcile mtime guard must degrade to "keep"
-    (never delete) when the timestamp is missing or malformed.
-    """
-    raw = lock_entry.get("installed_at")
-    if not isinstance(raw, str):
-        return None
-    try:
-        return datetime.fromisoformat(raw).timestamp()
-    except ValueError:
-        return None
-
-
 def _flat_layout_probe(
     dest: Path,
     asset_type: str,
@@ -297,7 +282,7 @@ def _flat_layout_probe(
     The dirty rule matches ``migrate._is_flat_file_dirty`` — strict
     ``mtime > installed_at_epoch`` — with one addition: an entry whose
     ``installed_at`` is missing/non-string/unparseable
-    (:func:`_installed_at_epoch` → ``None``) counts as dirty-or-unprovable.
+    (:func:`installed_at_epoch_from_entry` → ``None``) counts as dirty-or-unprovable.
     "Can't prove clean" must protect, not proceed — without this, a
     malformed timestamp (classified ``never_installed``) would skip the
     guard entirely (#1247 design gate M1). Skills have no flat layout;
@@ -308,7 +293,7 @@ def _flat_layout_probe(
     flat = dest.parent / f"{name}.md"
     if not flat.is_file():
         return None, False
-    epoch = _installed_at_epoch(lock_entry or {})
+    epoch = installed_at_epoch_from_entry(lock_entry or {})
     if epoch is None:
         return flat, True
     return flat, flat.stat().st_mtime > epoch
@@ -989,7 +974,7 @@ def _apply_update(
     files_removed = _reconcile_removed_files(
         dest,
         src_has=lambda rel: rel in digest_map,
-        old_installed_at_epoch=_installed_at_epoch(lock_entry),
+        old_installed_at_epoch=installed_at_epoch_from_entry(lock_entry),
         baked=frozenset(files_to_bak),
         manifest=manifest_from_entry(lock_entry),
         old_digests=digests_from_entry(lock_entry),
@@ -1641,7 +1626,7 @@ def _apply_pinned_install(
         files_removed = _reconcile_removed_files(
             dest,
             src_has=lambda rel: rel in expected,
-            old_installed_at_epoch=_installed_at_epoch(entry),
+            old_installed_at_epoch=installed_at_epoch_from_entry(entry),
             baked=frozenset(files_to_bak),
             manifest=manifest_from_entry(entry),
             old_digests=digests_from_entry(entry),

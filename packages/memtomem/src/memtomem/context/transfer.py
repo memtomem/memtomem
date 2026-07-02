@@ -495,11 +495,14 @@ def _stage_copy(src: Path, dst_parent: Path, name_hint: str) -> Path:
     staging = dst_parent / f".migrate-{name_hint}-{suffix}.tmp"
     if staging.exists():
         # Crashed prior run with a colliding suffix (extremely unlikely
-        # given pid+rand) — leftover is from us; safe to clear.
-        if staging.is_dir():
-            shutil.rmtree(staging)
-        else:
-            staging.unlink()
+        # given pid+rand) — leftover is from us; safe to clear. The clear
+        # must stay LOUD here (pre-copy): a survivor — e.g. a symlink
+        # rmtree refuses, or an undeletable dir — would make the
+        # file-source copy below write INTO the leftover instead of
+        # replacing the staging path.
+        _remove_staging(staging)
+        if staging.exists():
+            raise OSError(f"could not clear leftover staging entry: {staging}")
     try:
         if src.is_dir():
             shutil.copytree(src, staging, symlinks=True)
