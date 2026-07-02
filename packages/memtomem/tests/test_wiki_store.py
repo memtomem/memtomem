@@ -188,6 +188,21 @@ class TestInitFromUrl:
         with pytest.raises(RuntimeError, match="git clone"):
             store.init_from_url("file:///definitely/not/a/repo")
 
+    def test_dash_prefixed_url_is_positional(self, wiki_root: Path, tmp_path: Path) -> None:
+        """A ``-``-prefixed source must reach git AFTER ``--`` — always a repo
+        path, never an option (``--upload-pack=<cmd>`` would otherwise run an
+        arbitrary command). The bare repo sits in ``root.parent``, the clone's
+        cwd, so the dash-named relative path resolves once git treats it as
+        positional."""
+        subprocess.run(
+            ["git", "init", "--bare", str(tmp_path / "-dash-remote.git")],
+            check=True,
+            capture_output=True,
+        )
+        store = WikiStore.at_default()
+        store.init_from_url("-dash-remote.git")
+        assert store.exists()
+
 
 class TestListAssets:
     def test_list_empty_after_init(self, wiki_root: Path) -> None:
@@ -592,6 +607,49 @@ class TestCopyAssetAtCommit:
         assert sorted(digest_map) == ["SKILL.md"]  # skipped rel absent from the map too
         assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
         assert not (dest / "__pycache__").exists()
+
+
+class TestReadAssetFileAtCommit:
+    """`git show` failures must cross the :func:`_git_bytes` boundary.
+
+    The Gate A privacy scan and ``install --all`` digest reconciliation call
+    :meth:`WikiStore.read_asset_file_at_commit` directly — a raw
+    ``CalledProcessError`` / ``OSError`` escapes every CLI/web
+    ``except RuntimeError`` handler as a traceback (500 on the web routes).
+    """
+
+    def test_reads_bytes_at_commit(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "foo", {"SKILL.md": b"pinned\n"})
+        assert store.read_asset_file_at_commit(pin, "skills", "foo", "SKILL.md") == b"pinned\n"
+
+    def test_git_failure_is_normalized_runtimeerror(self, wiki_root: Path) -> None:
+        """A rel absent at the commit (racy caller, GC'd object) is a plain
+        ``git show`` failure — normalized, not a raw ``CalledProcessError``."""
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()  # initial scaffold; no skills/foo yet
+        with pytest.raises(RuntimeError, match="git show"):
+            store.read_asset_file_at_commit(head, "skills", "foo", "SKILL.md")
+
+    def test_oserror_is_normalized_runtimeerror(
+        self, wiki_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing git binary / vanished cwd → RuntimeError, mirroring
+        :func:`_git` (see ``TestRemoteUrl.test_oserror_normalized_to_runtimeerror``)."""
+        import memtomem.wiki.store as store_module
+
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "foo", {"SKILL.md": b"pinned\n"})
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError("git")
+
+        monkeypatch.setattr(store_module.subprocess, "run", _boom)
+        with pytest.raises(RuntimeError, match="git show"):
+            store.read_asset_file_at_commit(pin, "skills", "foo", "SKILL.md")
 
 
 class TestAssetFilesNonAsciiPaths:
