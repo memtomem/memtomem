@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -658,3 +659,90 @@ class TestCommitPaths:
         head = store.current_commit()
         with pytest.raises(ValueError):
             store.commit_paths({"../evil": b"x\n"}, message="e", expected_head=head)
+
+    # ── file-mode preservation (exec bit) ──────────────────────────────────
+    # commit_paths must not hardcode 100644: an edit to a script that is
+    # executable in HEAD would silently lose its +x, so ``mm context install``
+    # extracts a non-runnable script.
+
+    def _mode_at(self, wiki_root: Path, commit: str, rel: str) -> str:
+        """Git file mode recorded for *rel* at *commit* (e.g. ``100755``)."""
+        out = subprocess.run(
+            ["git", "-C", str(wiki_root), "ls-tree", commit, "--", rel],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert out.strip(), f"{rel} not tracked at {commit[:12]}"
+        return out.split(maxsplit=1)[0]
+
+    def _seed_exec_script(self, wiki_root: Path, rel: str, body: bytes) -> tuple[WikiStore, str]:
+        """Seed + commit an executable (0755) file so HEAD records 100755."""
+        store = self._seed(wiki_root)
+        path = wiki_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        path.chmod(0o755)
+        # ``--chmod=+x`` forces the 100755 index entry regardless of the repo's
+        # core.filemode, so HEAD reliably records the exec bit on any host.
+        subprocess.run(["git", "-C", str(wiki_root), "add", rel], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "update-index", "--chmod=+x", rel],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "add exec script"],
+            check=True,
+            capture_output=True,
+        )
+        return store, store.current_commit()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX exec bit is not modelled on Windows")
+    def test_edit_preserves_exec_bit(self, wiki_root: Path) -> None:
+        """Editing a file that is 100755 in HEAD keeps 100755 (regression)."""
+        rel = "skills/foo/scripts/run.sh"
+        store, head = self._seed_exec_script(wiki_root, rel, b"#!/bin/sh\necho v1\n")
+        assert self._mode_at(wiki_root, head, rel) == "100755"  # precondition
+        new = store.commit_paths({rel: b"#!/bin/sh\necho v2\n"}, message="edit", expected_head=head)
+        assert self._mode_at(wiki_root, new, rel) == "100755"
+
+    def test_new_path_defaults_to_regular_mode(self, wiki_root: Path) -> None:
+        """A brand-new (untracked-at-HEAD) path is committed as 100644."""
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        rel = "agents/beta/overrides/gemini.md"
+        (wiki_root / "agents" / "beta" / "overrides").mkdir()
+        (wiki_root / rel).write_text("ov\n", encoding="utf-8")
+        new = store.commit_paths({rel: b"ov\n"}, message="add override", expected_head=head)
+        assert self._mode_at(wiki_root, new, rel) == "100644"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX exec bit is not modelled on Windows")
+    def test_chmod_plus_x_on_disk_gains_exec_bit(self, wiki_root: Path) -> None:
+        """A 100644 file chmod'd +x on disk before commit is committed as 100755
+        (disk-first, mirroring ``git add`` / ``core.filemode``)."""
+        store = self._seed(wiki_root)  # agents/beta/agent.md is 100644 in HEAD
+        head = store.current_commit()
+        rel = "agents/beta/agent.md"
+        assert self._mode_at(wiki_root, head, rel) == "100644"  # precondition
+        (wiki_root / rel).chmod(0o755)
+        new = store.commit_paths({rel: b"v2\n"}, message="edit", expected_head=head)
+        assert self._mode_at(wiki_root, new, rel) == "100755"
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlink modes are not modelled on Windows")
+    def test_refuses_symlink_head_mode(self, wiki_root: Path) -> None:
+        """A 120000 (symlink) entry at HEAD is refused loudly, never silently
+        rewritten into a regular blob."""
+        store = self._seed(wiki_root)
+        rel = "agents/beta/link.md"
+        (wiki_root / rel).symlink_to("agent.md")
+        subprocess.run(["git", "-C", str(wiki_root), "add", rel], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "add symlink"],
+            check=True,
+            capture_output=True,
+        )
+        head = store.current_commit()
+        assert self._mode_at(wiki_root, head, rel) == "120000"  # precondition
+        with pytest.raises(ValueError, match="regular file"):
+            store.commit_paths({rel: b"clobber\n"}, message="edit", expected_head=head)

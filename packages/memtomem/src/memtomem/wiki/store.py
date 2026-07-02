@@ -570,7 +570,9 @@ class WikiStore:
         2. Each target's bytes are stored byte-exact (``hash-object -w
            --no-filters``, so override Invariant 4 holds despite any repo
            ``.gitattributes`` eol/clean filters) and staged via
-           ``update-index --add --cacheinfo``.
+           ``update-index --add --cacheinfo`` under a mode resolved by
+           :meth:`_commit_blob_mode` (the exec bit is preserved, not
+           hardcoded to 100644 — see that method).
         3. ``write-tree`` + ``commit-tree`` build the commit using the wiki
            repo's own git identity (memtomem injects none).
         4. ``update-ref <branch> <new> <expected_head>`` is a compare-and-swap:
@@ -608,13 +610,14 @@ class WikiStore:
             blob_file = tmpdir / "blob"
             for rel, data in files.items():
                 _require_clean_rel(rel)
+                mode = self._commit_blob_mode(rel, head)
                 blob_file.write_bytes(data)
                 blob = _git(
                     ["hash-object", "-w", "--no-filters", str(blob_file)],
                     cwd=self.root,
                 ).stdout.strip()
                 _git(
-                    ["update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}"],
+                    ["update-index", "--add", "--cacheinfo", f"{mode},{blob},{rel}"],
                     cwd=self.root,
                     env=env,
                 )
@@ -647,6 +650,57 @@ class WikiStore:
             return new
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _commit_blob_mode(self, rel: str, head: str) -> str:
+        """Resolve the git blob mode to stage for *rel* — ``100644`` or ``100755``.
+
+        The temp index is seeded from HEAD, but ``update-index --cacheinfo``
+        overwrites the entry's mode, so a hardcoded ``100644`` silently strips
+        the exec bit from an executable script (e.g. ``skills/<n>/scripts/run.sh``
+        at ``100755`` in HEAD) — it extracts non-runnable on the next
+        ``mm context install`` (ADR-0027 commits the SAVED bytes of a resolved
+        target; the mode must ride along with them).
+
+        Semantics — **disk-first**, mirroring ``git add`` / ``core.filemode``:
+
+        * On POSIX, take the exec bit from the on-disk file (``self.root / rel``
+          — the exact file the caller read the saved bytes from; both callers
+          build ``rel`` as ``path.relative_to(store.root)``). This picks up a
+          ``chmod +x`` the same way ``git add`` would. ``os.access(_, X_OK)`` is
+          umask-independent and reflects the real bit.
+        * On Windows the filesystem carries no exec bit (git's ``core.filemode``
+          is false there), so fall back to HEAD's recorded mode — committing an
+          edit to a ``100755`` file from Windows must not flip it to ``100644``.
+        * A path not tracked at HEAD (brand-new file) with no usable on-disk
+          mode defaults to ``100644``.
+
+        Only regular-file blobs (``100644`` / ``100755``) are in scope. A
+        ``120000`` (symlink) or ``160000`` (gitlink) entry at HEAD is refused
+        loudly — ``commit_paths`` stages saved *regular-file* bytes (the editor
+        writes plain files; Save targets are server-resolved regular paths), so
+        committing those bytes under a symlink/gitlink mode would corrupt the
+        entry. Silent-rewrite is worse than a hard failure here.
+        """
+        head_mode = self._head_blob_mode(rel, head)
+        if head_mode is not None and head_mode not in ("100644", "100755"):
+            raise ValueError(
+                f"refusing to commit {rel!r}: HEAD mode {head_mode} is not a "
+                "regular file (only 100644/100755 blobs are committable)"
+            )
+        disk = self.root / PurePosixPath(rel)
+        if os.name != "nt" and disk.is_file() and not disk.is_symlink():
+            return "100755" if os.access(disk, os.X_OK) else "100644"
+        return head_mode or "100644"
+
+    def _head_blob_mode(self, rel: str, head: str) -> str | None:
+        """Git file mode recorded for *rel* at *head*, or ``None`` if untracked.
+
+        Parses the mode column of ``git ls-tree <head> -- <rel>`` (empty output
+        means the path is absent at that commit — a brand-new file)."""
+        out = _git(["ls-tree", head, "--", rel], cwd=self.root).stdout
+        if not out.strip():
+            return None
+        return out.split(maxsplit=1)[0]
 
     def copy_asset_at_commit(
         self,
