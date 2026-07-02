@@ -316,8 +316,10 @@ def _run_commit(
             "wiki commit timed out — another wiki operation may be in progress; retry shortly"
         ) from exc
     except RuntimeError as exc:
-        # git failure (e.g. missing git identity) — surface the git error the way
-        # the sibling ``mm wiki init`` does. The embedded wiki path is the user's
+        # Covers WikiDetachedHeadError (its str() IS the friendly, actionable
+        # "check out a branch" message — the push/pull precedent) and any git
+        # failure (e.g. missing git identity) — surface the error the way the
+        # sibling ``mm wiki init`` does. The embedded wiki path is the user's
         # own local path, not a secret as it would be in the web route's HTTP
         # response (which uses a fixed, path-free message instead).
         raise click.ClickException(str(exc)) from exc

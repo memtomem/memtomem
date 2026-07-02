@@ -400,6 +400,54 @@ class TestApplyConcurrency:
         assert result.canonical_written and not result.target_written
         assert any("tier was not" in w for w in result.warnings)
 
+    def test_canonical_delete_race_aborts_and_does_not_recreate(
+        self, src_project, dst_project, monkeypatch
+    ):
+        """A concurrent DELETE of the destination canonical between read and
+        write must abort like an edit — not resurrect the deleted file with
+        its pre-delete hooks (the settings-migrate #1382 shape)."""
+        from memtomem.context import settings_copy as mod
+
+        canonical_path = dst_project / CANONICAL_SETTINGS_FILE
+        _write_doc(canonical_path, {"hooks": {}})
+        real = mod._read_with_mtime
+
+        def read_then_delete(path):
+            doc, mtime = real(path)
+            if path == canonical_path:
+                canonical_path.unlink()
+            return doc, mtime
+
+        monkeypatch.setattr(mod, "_read_with_mtime", read_then_delete)
+        result = apply_hook_copy(_plan(src_project, dst_project))
+        assert not result.canonical_written and not result.target_written
+        assert any("modified by another process" in w for w in result.warnings)
+        assert not canonical_path.exists()
+        assert not (dst_project / ".claude" / "settings.json").exists()
+
+    def test_tier_delete_race_keeps_canonical_and_does_not_recreate(
+        self, src_project, dst_project, monkeypatch
+    ):
+        """Same delete race on the tier leg: the canonical write stands, the
+        deleted tier file must NOT be recreated."""
+        from memtomem.context import settings_copy as mod
+
+        tier_path = dst_project / ".claude" / "settings.json"
+        _write_doc(tier_path, {"hooks": {}})
+        real = mod._read_with_mtime
+
+        def read_then_delete(path):
+            doc, mtime = real(path)
+            if path == tier_path:
+                tier_path.unlink()
+            return doc, mtime
+
+        monkeypatch.setattr(mod, "_read_with_mtime", read_then_delete)
+        result = apply_hook_copy(_plan(src_project, dst_project))
+        assert result.canonical_written and not result.target_written
+        assert any("tier was not" in w for w in result.warnings)
+        assert not tier_path.exists()
+
     def test_lock_budget_exhaustion_writes_nothing(self, src_project, dst_project, monkeypatch):
         import contextlib
 

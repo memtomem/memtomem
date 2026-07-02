@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,6 +13,8 @@ import pytest
 from click.testing import CliRunner
 
 from memtomem.cli import cli
+
+from .helpers import set_home
 
 
 def _mock_components(*, sessions=None, events=None, add_event=None):
@@ -51,7 +54,12 @@ def _create_session_call_args(mock: AsyncMock) -> tuple:
 
 
 @pytest.fixture
-def runner() -> CliRunner:
+def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CliRunner:
+    """CliRunner with HOME isolated. The CLI bootstrap otherwise reads the
+    developer's real ``~/.memtomem/config.json``; one that enables langfuse
+    tracing (keys expected from env) makes the client's auth warning bleed
+    into ``result.output`` and break the ``--json`` contract (#1508)."""
+    set_home(monkeypatch, tmp_path)
     return CliRunner()
 
 

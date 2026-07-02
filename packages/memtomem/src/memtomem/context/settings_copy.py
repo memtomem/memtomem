@@ -594,10 +594,18 @@ def apply_hook_copy(
             if state == "exact":
                 result.canonical_already = True
             else:
-                if (
-                    plan.dst_canonical_path.is_file()
-                    and plan.dst_canonical_path.stat().st_mtime_ns != canonical_mtime_ns
-                ):
+                # Compare against the missing-file sentinel ``0`` (the
+                # ``_read_with_mtime`` convention), NOT a bare ``is_file()``
+                # guard: a concurrent DELETE (mtime → 0) is just as much an
+                # external change as an edit, and a bare guard would skip the
+                # abort and resurrect the deleted file (settings-migrate
+                # precedent, #1382).
+                current_canonical_mtime_ns = (
+                    plan.dst_canonical_path.stat().st_mtime_ns
+                    if plan.dst_canonical_path.is_file()
+                    else 0
+                )
+                if current_canonical_mtime_ns != canonical_mtime_ns:
                     result.warnings.append(
                         f"{plan.dst_canonical_path} was modified by another "
                         f"process during apply; nothing was written. {retry_hint}"
@@ -640,10 +648,12 @@ def apply_hook_copy(
             if state == "exact":
                 result.target_already = True
                 return result
-            if (
-                plan.dst_target_path.is_file()
-                and plan.dst_target_path.stat().st_mtime_ns != target_mtime_ns
-            ):
+            # 0-sentinel compare for the same delete-race reason as the
+            # canonical leg above (#1382).
+            current_target_mtime_ns = (
+                plan.dst_target_path.stat().st_mtime_ns if plan.dst_target_path.is_file() else 0
+            )
+            if current_target_mtime_ns != target_mtime_ns:
                 result.warnings.append(
                     f"{plan.dst_target_path} was modified by another process "
                     f"during apply; the canonical entry was written but the "

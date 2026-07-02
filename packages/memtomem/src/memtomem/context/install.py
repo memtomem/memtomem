@@ -903,14 +903,17 @@ def _apply_update(
     if dirty_report.reason in ("missing_dest", "never_installed"):
         flat_path, flat_dirty = _flat_layout_probe(dest, asset_type, name, lock_entry)
         if flat_path is not None:
-            kind = asset_type.removesuffix("s")
+            # The migrate CLI's asset-type argument is a plural Choice
+            # ("agents", ...) — embed the plural verbatim so the hint is
+            # runnable as-is (the singular trips Click's invalid-choice
+            # error, same shape as the #895 privacy_scan fix).
             if flat_dirty and not force:
                 raise StaleInstallError(
                     f"{asset_type}/{name}: flat-layout file {flat_path.name} has local "
                     f"edits (or no provable install time) and the dir-layout install "
-                    f"would stop it being served; run `mm context migrate {kind} {name}` "
-                    f"first, or pass --force to write the dir layout anyway (the flat "
-                    f"file is kept on disk but stops being served)"
+                    f"would stop it being served; run `mm context migrate {asset_type} "
+                    f"{name}` first, or pass --force to write the dir layout anyway "
+                    f"(the flat file is kept on disk but stops being served)"
                 )
             logger.warning(
                 "%s/%s: dir layout will shadow flat file %s (dir wins at fan-out); "
@@ -918,7 +921,7 @@ def _apply_update(
                 asset_type,
                 name,
                 flat_path,
-                kind,
+                asset_type,
                 name,
             )
 
@@ -1135,8 +1138,7 @@ def _classify_for_all_update(
             # execute phase would raise.
             state = "refuse"
             reason = (
-                f"flat layout with local edits; run "
-                f"`mm context migrate {asset_type.removesuffix('s')} {name}` first"
+                f"flat layout with local edits; run `mm context migrate {asset_type} {name}` first"
             )
         elif report.reason == "never_installed" and dest.is_dir():
             # Unprovable install record over an existing dest — preview
@@ -1349,7 +1351,7 @@ def _classify_for_install_all(
                         state="refuse",
                         reason=(
                             f"flat layout with local edits; run `mm context migrate "
-                            f"{asset_type.removesuffix('s')} {name}` first"
+                            f"{asset_type} {name}` first"
                         ),
                         lock_entry=entry,
                         dirty_report=is_asset_dirty(
@@ -1557,14 +1559,17 @@ def _apply_pinned_install(
             dest, asset_type, name, classification.lock_entry
         )
         if flat_path is not None:
-            kind = asset_type.removesuffix("s")
+            # The migrate CLI's asset-type argument is a plural Choice
+            # ("agents", ...) — embed the plural verbatim so the hint is
+            # runnable as-is (the singular trips Click's invalid-choice
+            # error, same shape as the #895 privacy_scan fix).
             if flat_dirty and not force:
                 raise StaleInstallError(
                     f"{asset_type}/{name}: flat-layout file {flat_path.name} has local "
                     f"edits (or no provable install time) and the dir-layout install "
-                    f"would stop it being served; run `mm context migrate {kind} {name}` "
-                    f"first, or pass --force to write the dir layout anyway (the flat "
-                    f"file is kept on disk but stops being served)"
+                    f"would stop it being served; run `mm context migrate {asset_type} "
+                    f"{name}` first, or pass --force to write the dir layout anyway "
+                    f"(the flat file is kept on disk but stops being served)"
                 )
             logger.warning(
                 "%s/%s: dir layout will shadow flat file %s (dir wins at fan-out); "
@@ -1572,7 +1577,7 @@ def _apply_pinned_install(
                 asset_type,
                 name,
                 flat_path,
-                kind,
+                asset_type,
                 name,
             )
 

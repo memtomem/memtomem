@@ -1647,7 +1647,7 @@ def test_update_refuses_dirty_flat_layout(wiki_root: Path, tmp_path: Path) -> No
 
     msg = str(excinfo.value)
     assert "flat-layout" in msg
-    assert "mm context migrate agent foo" in msg
+    assert "mm context migrate agents foo" in msg
     assert "--force" in msg
     # Refusal left zero residue: no dir layout, flat bytes untouched.
     assert not (tmp_path / ".memtomem" / "agents" / "foo").exists()
@@ -1694,7 +1694,7 @@ def test_update_clean_flat_proceeds_and_warns(
     assert flat.is_file()
     messages = [rec.getMessage() for rec in caplog.records]
     assert any("shadow" in m for m in messages)
-    assert any("mm context migrate" in m for m in messages)
+    assert any("mm context migrate agents foo" in m for m in messages)
 
 
 def test_update_refuses_flat_with_unprovable_installed_at(wiki_root: Path, tmp_path: Path) -> None:
@@ -1730,7 +1730,7 @@ def test_classify_for_all_update_flat_dirty_is_refuse(wiki_root: Path, tmp_path:
     [c] = classifications
     assert c.state == "refuse"
     assert "flat layout" in (c.reason or "")
-    assert "migrate" in (c.reason or "")
+    assert "mm context migrate agents foo" in (c.reason or "")
 
 
 # ── unprovable install record (#1247 impl gate) ──────────────────────────
