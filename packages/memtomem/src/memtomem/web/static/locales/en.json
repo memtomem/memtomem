@@ -534,6 +534,7 @@
   "settings.ctx.wiki_update_unchanged": "{type} \"{name}\" is already up to date in {project}",
   "settings.ctx.wiki_already_installed": "{type} \"{name}\" is already installed — use Update to refresh",
   "settings.ctx.wiki_not_installed": "{type} \"{name}\" is not installed — use Install first",
+  "settings.ctx.wiki_install_privacy_blocked": "The privacy scan blocked this: a secret was detected in the wiki bytes of {type} \"{name}\". Remove it from the wiki, then retry.",
   "settings.ctx.wiki_install_failed": "Install/update failed: {error}",
   "settings.ctx.wiki_override_title": "Override source",
   "settings.ctx.wiki_override_edit": "Edit",

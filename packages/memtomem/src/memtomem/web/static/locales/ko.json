@@ -534,6 +534,7 @@
   "settings.ctx.wiki_update_unchanged": "{project} 의 {type} \"{name}\" 은(는) 이미 최신입니다",
   "settings.ctx.wiki_already_installed": "{type} \"{name}\" 은(는) 이미 설치됨 — 업데이트를 사용하세요",
   "settings.ctx.wiki_not_installed": "{type} \"{name}\" 은(는) 설치되지 않음 — 먼저 설치하세요",
+  "settings.ctx.wiki_install_privacy_blocked": "프라이버시 스캔이 차단했습니다: {type} \"{name}\" 의 위키 콘텐츠에서 시크릿이 감지되었습니다. 위키에서 제거한 뒤 다시 시도하세요.",
   "settings.ctx.wiki_install_failed": "설치/업데이트 실패: {error}",
   "settings.ctx.wiki_override_title": "오버라이드 원본",
   "settings.ctx.wiki_override_edit": "편집",
