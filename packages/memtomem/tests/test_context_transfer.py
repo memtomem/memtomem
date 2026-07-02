@@ -531,11 +531,15 @@ def test_partial_move_message_project_local_omits_noop_sync_hint():
     same-root (migrate wording) and cross-root (transfer wording) branches."""
     from memtomem.context.transfer import _partial_move_message
 
+    # Build the expected clause from the SAME Path object — the message embeds
+    # str(src_path), which is backslash-joined on Windows, so a literal POSIX
+    # string here fails on windows-latest only (the #1325/#838 trap class).
+    src = Path("/src/agents/foo")
     for cross_root in (False, True):
         msg = _partial_move_message(
             "agents",
             "foo",
-            Path("/src/agents/foo"),
+            src,
             Path("/dst/agents.local/foo"),
             "project_shared",
             "project_local",
@@ -545,7 +549,7 @@ def test_partial_move_message_project_local_omits_noop_sync_hint():
         )
         assert "mm context sync --scope project_local" not in msg, msg
         assert "then run" not in msg, msg
-        assert "Remove /src/agents/foo manually." in msg
+        assert f"Remove {src} manually." in msg
         assert "do NOT run `mm context sync --scope project_shared`" in msg
 
     # Fan-out-bearing destinations keep the follow-up instruction verbatim.
