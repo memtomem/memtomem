@@ -10,6 +10,7 @@ import click
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
+from memtomem.context.error_redact import redact_engine_reason
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
 from memtomem.server.context import CtxType
@@ -36,6 +37,20 @@ def _find_project_root() -> Path:
     MCP context tools, the CLI, and the web app share one definition.
     """
     return find_project_root()
+
+
+def _redact_reason(reason: str | None, *roots: Path) -> str:
+    """Strip absolute host paths from a raw engine diff/skip ``reason``.
+
+    Thin wrapper over ``context.error_redact.redact_engine_reason`` (the neutral
+    twin of the web ``sanitize_diff_reason``) that coalesces the ``None``
+    (empty-reason) return to ``""`` so a skip line renders ``skipped x: ``
+    rather than ``skipped x: None``; diff-row callers keep their ``if reason``
+    suffix guard on the returned string. The MCP tool result flows to the
+    calling agent's transcript / model provider, so it gets the same wire-
+    boundary sanitization the loopback dashboard applies.
+    """
+    return redact_engine_reason(reason, *roots) or ""
 
 
 def _resolve_mcp_scope(override: str | None = None) -> str:
@@ -631,7 +646,7 @@ async def mem_context_generate(
                 rel = path.relative_to(root) if path.is_relative_to(root) else path
                 results.append(f"  {runtime}: {rel}")
         for runtime, reason, _code in skill_result.skipped:
-            results.append(f"  skipped {runtime}: {reason}")
+            results.append(f"  skipped {runtime}: {_redact_reason(reason, root)}")
 
     if "agents" in inc:
         try:
@@ -657,7 +672,7 @@ async def mem_context_generate(
                     rel = path
                 results.append(f"  {runtime}: {rel}")
         for runtime, reason, _code in agent_result.skipped:
-            results.append(f"  skipped {runtime}: {reason}")
+            results.append(f"  skipped {runtime}: {_redact_reason(reason, root)}")
         for runtime, agent_name, dropped in agent_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{agent_name}'")
 
@@ -685,7 +700,7 @@ async def mem_context_generate(
                     rel = path
                 results.append(f"  {runtime}: {rel}")
         for runtime, reason, _code in command_result.skipped:
-            results.append(f"  skipped {runtime}: {reason}")
+            results.append(f"  skipped {runtime}: {_redact_reason(reason, root)}")
         for runtime, cmd_name, dropped in command_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
@@ -785,7 +800,7 @@ async def mem_context_diff(
             lines.append("Skills:")
             for row in rows:
                 runtime, name, status = row
-                reason = getattr(row, "reason", None)
+                reason = _redact_reason(getattr(row, "reason", None), root)
                 suffix = f" — {reason}" if reason else ""
                 lines.append(f"  {runtime}: {name} [{status}]{suffix}")
         else:
@@ -799,7 +814,7 @@ async def mem_context_diff(
             lines.append("Sub-agents:")
             for row in rows:
                 runtime, name, status = row
-                reason = getattr(row, "reason", None)
+                reason = _redact_reason(getattr(row, "reason", None), root)
                 suffix = f" — {reason}" if reason else ""
                 lines.append(f"  {runtime}: {name} [{status}]{suffix}")
         else:
@@ -813,7 +828,7 @@ async def mem_context_diff(
             lines.append("Commands:")
             for row in rows:
                 runtime, name, status = row
-                reason = getattr(row, "reason", None)
+                reason = _redact_reason(getattr(row, "reason", None), root)
                 suffix = f" — {reason}" if reason else ""
                 lines.append(f"  {runtime}: {name} [{status}]{suffix}")
         else:
@@ -970,7 +985,7 @@ async def mem_context_sync(
                 rel = path.relative_to(root) if path.is_relative_to(root) else path
                 results.append(f"  {runtime}: {rel}")
         for runtime, reason, _code in skill_result.skipped:
-            results.append(f"  skipped {runtime}: {reason}")
+            results.append(f"  skipped {runtime}: {_redact_reason(reason, root)}")
 
     if "agents" in inc:
         try:
@@ -997,7 +1012,7 @@ async def mem_context_sync(
                     rel = path
                 results.append(f"  {runtime}: {rel}")
         for runtime, reason, _code in agent_result.skipped:
-            results.append(f"  skipped {runtime}: {reason}")
+            results.append(f"  skipped {runtime}: {_redact_reason(reason, root)}")
         for runtime, agent_name, dropped in agent_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{agent_name}'")
 
@@ -1026,7 +1041,7 @@ async def mem_context_sync(
                     rel = path
                 results.append(f"  {runtime}: {rel}")
         for runtime, reason, _code in command_result.skipped:
-            results.append(f"  skipped {runtime}: {reason}")
+            results.append(f"  skipped {runtime}: {_redact_reason(reason, root)}")
         for runtime, cmd_name, dropped in command_result.dropped:
             results.append(f"  {runtime} dropped {dropped} from '{cmd_name}'")
 
@@ -1477,7 +1492,9 @@ async def mem_context_artifact_migrate(
                 surface="mcp_context_artifact_migrate",
             )
         except (FileNotFoundError, ValueError) as exc:
-            return f"error: {exc}"
+            # Engine FileNotFoundError embeds project_root / flat paths
+            # (context/migrate.py) — strip the root before it leaves the tool.
+            return f"error: {_redact_reason(str(exc), project_root)}"
         except PrivacyScanError as exc:
             return f"privacy block: {exc.message}"
         except MigratePartialError as exc:
@@ -1522,7 +1539,8 @@ async def mem_context_artifact_migrate(
     try:
         rows = await asyncio.to_thread(classify_migrate, project_root, asset, nm)
     except (FileNotFoundError, ValueError) as exc:
-        return f"error: {exc}"
+        # Same path-embedding types as the scope-tier leg above.
+        return f"error: {_redact_reason(str(exc), project_root)}"
 
     skills_section = asset is None
     if not rows:
@@ -2002,9 +2020,14 @@ async def mem_context_artifact_transfer(
     except MigratePartialError as exc:
         return f"error: {exc.message}"
     except McpServerParseError as exc:
-        return f"error: {exc}"
+        # Web twin renders ``exc.safe_message`` (basename + the JSON problem),
+        # never the resolved canonical host path (context_transfer.py). Mirror
+        # it so the path never reaches the calling agent's transcript.
+        return f"error: {exc.safe_message}"
     except (FileNotFoundError, InvalidNameError, ValueError) as exc:
-        return f"error: {exc}"
+        # ``FileNotFoundError`` from the engine embeds absolute src/dst paths
+        # (context/migrate.py) — strip both project roots + ``$HOME`` first.
+        return f"error: {_redact_reason(str(exc), src_root, dst_root)}"
     except click.ClickException as exc:
         return f"error: {exc.message}"
 
@@ -2233,7 +2256,11 @@ async def mem_context_version(
     try:
         snapshot_bytes = await asyncio.to_thread(working_file.read_bytes)
     except OSError as exc:
-        return f"error: cannot read working canonical {working_file}: {exc}"
+        # ``working_file`` and ``str(OSError)`` both embed the absolute canonical
+        # path (the web twin never echoes it). Echo the basename only and strip
+        # the errno message's path.
+        detail = _redact_reason(str(exc), root)
+        return f"error: cannot read working canonical {working_file.name}: {detail}"
     file_scan = await asyncio.to_thread(
         lambda: scan_text_content(
             snapshot_bytes.decode("utf-8", errors="replace"),
