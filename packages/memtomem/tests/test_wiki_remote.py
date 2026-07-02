@@ -365,3 +365,64 @@ class TestRedactUrlUserinfo:
         msg = str(exc.value)
         assert "secret" not in msg
         assert "host/r.git" in msg
+
+
+# ── success-path credential redaction (T2-12) ───────────────────────────
+
+
+class TestSuccessPathRedaction:
+    """The push/pull SUCCESS return value must cross ``_redact_url_userinfo``
+    before the CLI echoes it. The round-trip tests above use credential-free
+    ``file://`` origins, so git's success chatter ("To <url>" on stderr)
+    never carried a credential — dropping the redaction from those return
+    lines would have passed the whole suite. Git's transport chatter is
+    stubbed at the ``subprocess.run`` seam (the
+    ``test_git_error_redacts_credential_url`` precedent): a local remote
+    cannot put a credentialed URL in its output, and a real credentialed
+    HTTPS remote would need a network.
+    """
+
+    def _stub_git_run(self, monkeypatch: pytest.MonkeyPatch, verb: str, chatter: str) -> None:
+        import memtomem.wiki.store as store_module
+
+        def _fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "config" in args:  # remote_url probe
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="https://user:secret@host/r.git\n", stderr=""
+                )
+            if "symbolic-ref" in args:  # current_branch probe
+                return subprocess.CompletedProcess(args, 0, stdout="main\n", stderr="")
+            assert verb in args, f"unexpected git call: {args}"
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr=chatter)
+
+        monkeypatch.setattr(store_module.subprocess, "run", _fake_run)
+
+    def test_push_success_output_is_redacted(
+        self, tmp_path: Path, git_identity: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _init_wiki(tmp_path / "wiki")  # real init BEFORE the stub
+        self._stub_git_run(
+            monkeypatch,
+            "push",
+            "To https://user:secret@host/r.git\n   abc1234..def5678  main -> main\n",
+        )
+        out = store.push()
+        assert "secret" not in out
+        assert "user:" not in out
+        assert "https://host/r.git" in out  # host survives; credential gone
+        assert "main -> main" in out  # the useful chatter survives
+
+    def test_pull_success_output_is_redacted(
+        self, tmp_path: Path, git_identity: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _init_wiki(tmp_path / "wiki")
+        self._stub_git_run(
+            monkeypatch,
+            "pull",
+            "From https://user:secret@host/r\n * branch  main -> FETCH_HEAD\n",
+        )
+        out = store.pull()
+        assert "secret" not in out
+        assert "user:" not in out
+        assert "https://host/r" in out
+        assert "FETCH_HEAD" in out

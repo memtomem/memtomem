@@ -188,3 +188,43 @@ class TestPullCmd:
         result = runner.invoke(wiki, ["pull"])
         assert result.exit_code != 0
         assert "wiki not found" in result.output
+
+
+class TestPullConflictCmd:
+    def test_pull_merge_conflict_exits_nonzero_with_git_message(
+        self, wiki_root: Path, tmp_path: Path
+    ) -> None:
+        """CLI twin of the store-level conflict test (T2-12): on a divergent
+        pull that conflicts, git stops, `mm wiki pull` exits non-zero
+        surfacing git's own message — no traceback, no "Pulled." — and the
+        in-progress merge is left for the user to resolve with ordinary git.
+        """
+        runner = CliRunner()
+        assert runner.invoke(wiki, ["init"]).exit_code == 0
+        origin = _bare_origin(tmp_path / "origin.git")
+        assert runner.invoke(wiki, ["remote", str(origin)]).exit_code == 0
+        assert runner.invoke(wiki, ["push"]).exit_code == 0
+
+        clone = WikiStore.at(tmp_path / "clone")
+        clone.init_from_url(str(origin))
+        _commit_file(clone.root, "README.md", "clone line\n", "clone edit")
+        clone.push()
+
+        # Conflicting local commit + force a merge strategy so the divergent
+        # pull actually merges (mirrors the store-level fixture).
+        _commit_file(wiki_root, "README.md", "local line\n", "local edit")
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "config", "pull.rebase", "false"],
+            check=True,
+            capture_output=True,
+        )
+
+        result = runner.invoke(wiki, ["pull"])
+
+        assert result.exit_code != 0
+        low = result.output.lower()
+        assert "conflict" in low or "merge" in low
+        assert "Traceback" not in result.output
+        assert "Pulled." not in result.output
+        # memtomem owns no resolution — the conflicted merge stays in progress.
+        assert WikiStore.at(wiki_root).is_dirty() is True
