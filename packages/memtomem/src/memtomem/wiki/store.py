@@ -692,6 +692,14 @@ class WikiStore:
         if the wiki itself is missing (no ``.git`` directory) — caller
         should ``require_exists()`` first if the missing-wiki path is
         not desired.
+
+        Caveat: ``status`` honors any ``.gitattributes`` clean/eol filter the
+        wiki carries, while :meth:`commit_paths` writes blobs byte-exact
+        (``hash-object --no-filters``). A file whose committed raw bytes
+        differ from their filter-normalized form (e.g. CRLF content under
+        ``* text=auto``) therefore reads back permanently dirty. memtomem
+        ships no ``.gitattributes`` in the wiki, so this arises only when a
+        user adds a normalizing one to their own wiki clone.
         """
         self.require_exists()
         result = _git(["status", "--porcelain"], cwd=self.root)
@@ -722,7 +730,9 @@ class WikiStore:
            consulted and never swept into the commit.
         2. Each target's bytes are stored byte-exact (``hash-object -w
            --no-filters``, so override Invariant 4 holds despite any repo
-           ``.gitattributes`` eol/clean filters) and staged via
+           ``.gitattributes`` eol/clean filters; the flip side — a plain
+           ``git status`` still applies them — is the :meth:`is_dirty`
+           caveat) and staged via
            ``update-index --add --cacheinfo`` under a mode resolved by
            :meth:`_commit_blob_mode` (the exec bit is preserved, not
            hardcoded to 100644 — see that method).

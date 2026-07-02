@@ -21,6 +21,7 @@ from memtomem.context.lockfile import (
     LockfileCorruptError,
     LockfileError,
     LockfileVersionError,
+    installed_at_epoch_from_entry,
 )
 
 
@@ -433,3 +434,26 @@ def test_read_paths_raise_over_corrupt_file(tmp_path: Path) -> None:
         lock.read_entry("skills", "foo")
     with pytest.raises(LockfileCorruptError):
         list(lock.iter_entries())
+
+
+# ── installed_at_epoch_from_entry ────────────────────────────────────────
+
+
+def test_installed_at_epoch_from_entry_parses_iso() -> None:
+    assert installed_at_epoch_from_entry({"installed_at": "1970-01-01T00:00:00+00:00"}) == 0.0
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},
+        {"installed_at": None},
+        {"installed_at": 1234567890},
+        {"installed_at": "not-a-timestamp"},
+    ],
+)
+def test_installed_at_epoch_from_entry_degrades_to_none(entry: dict) -> None:
+    """Missing / non-string / malformed ``installed_at`` → ``None``, never a
+    crash — consumers (install's reconcile guard, the dirty probe) treat
+    ``None`` as their fail-safe branch."""
+    assert installed_at_epoch_from_entry(entry) is None

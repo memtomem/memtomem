@@ -131,6 +131,11 @@ def commit_targets(
     also runs on the no-op path so a save-identical-bytes-then-commit never
     leaves the wiki dirty.
 
+    Known limitation: ``mtime_ns`` is the whole staleness token, so two
+    ``os.replace`` saves landing within one mtime tick are indistinguishable —
+    negligible with nanosecond mtime resolution (APFS/ext4); a coarse-mtime
+    filesystem would need the token paired with a size/content hash (#1520).
+
     ``expected_head`` is the compare-and-swap guard threaded to
     :meth:`WikiStore.commit_paths`:
 

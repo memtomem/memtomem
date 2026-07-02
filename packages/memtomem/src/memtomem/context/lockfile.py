@@ -192,6 +192,29 @@ def digests_from_entry(entry: dict[str, Any]) -> dict[str, str] | None:
     return out
 
 
+def installed_at_epoch_from_entry(entry: dict[str, Any]) -> float | None:
+    """Parse the entry's ``installed_at`` ISO-8601 string to an epoch, or ``None``.
+
+    Tolerant on purpose: consumers use the epoch as an mtime guard and must
+    degrade to their fail-safe branch — "keep, never delete" in install's
+    reconcile, ``never_installed`` in the dirty probe — when the timestamp is
+    missing, non-string, or malformed. ``lock.json`` can be git-tracked and
+    hand-merged, so malformed shapes are an ordinary event.
+
+    ``migrate._is_flat_file_dirty`` deliberately does NOT use this helper: there
+    a malformed timestamp must crash, because degrading to "clean" would approve
+    overwriting user edits (#1247 id 1) — its callers pre-validate with
+    ``_installed_at_parseable`` instead.
+    """
+    raw = entry.get("installed_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
 class Lockfile:
     """Read / mutate ``<project>/.memtomem/lock.json``.
 
