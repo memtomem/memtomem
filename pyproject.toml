@@ -42,6 +42,7 @@ markers = [
     "multilingual: multilingual/large-corpus regression tests (runs in the test-golden-path CI job)",
     "requires_symlinks: needs a filesystem that can create symlinks (auto-skipped on Windows without Developer Mode/admin)",
     "browser: requires pytest-playwright + a Chromium install (auto-skipped when unavailable)",
+    "real_dotenv: opt out of the suite-wide _load_dotenv no-op and run the real dotenv loader (#1508)",
 ]
 
 [tool.mypy]

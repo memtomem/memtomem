@@ -321,6 +321,32 @@ class TestConcurrency:
         assert (artifact_dir / "versions" / "v2.md").is_file()
         assert set(v.load_manifest(artifact_dir).versions) == {"v1", "v2"}
 
+    def test_lock_timeout_expires_when_sidecar_lock_held(self, tmp_path):
+        """``lock_timeout`` bounds the sidecar-lock wait: with the lock held by
+        another holder, every mutator raises the builtin ``TimeoutError``
+        (the #1145 shape the web routes map to 503) instead of blocking
+        forever. Expiry-direction timing: a slow runner only makes the
+        expiry later, never a false pass."""
+        from memtomem.context._atomic import _file_lock, _lock_path_for
+
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)  # so promote has a v1 to point at
+        lock = _lock_path_for(v.versions_json_path(artifact_dir))
+        with _file_lock(lock):
+            with pytest.raises(TimeoutError):
+                v.create_version(artifact_dir, working, lock_timeout=0.1)
+            with pytest.raises(TimeoutError):
+                v.promote_label(artifact_dir, "staging", "v1", lock_timeout=0.1)
+            with pytest.raises(TimeoutError):
+                v.delete_label(artifact_dir, "staging", lock_timeout=0.1)
+
+    def test_lock_timeout_none_still_blocks_and_succeeds(self, tmp_path):
+        """Default ``lock_timeout=None`` keeps the blocking CLI semantics —
+        an uncontended call just succeeds."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        record = v.create_version(artifact_dir, working, lock_timeout=None)
+        assert record.tag == "v1"
+
 
 # ── Label-aware sync integration (generate_all_agents) ───────────────
 
