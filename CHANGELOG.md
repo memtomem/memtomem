@@ -112,7 +112,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (`embedding.api_key`, `session_trace.langfuse_secret_key`) and validator
   guards — outside the documented `MEMTOMEM_` surface. They are now plain
   pydantic models: environment binding flows exclusively through
-  `MEMTOMEM_<SECTION>__<FIELD>`.
+  `MEMTOMEM_<SECTION>__<FIELD>`. Validation strictness is unchanged — unknown
+  keys (an env typo like `MEMTOMEM_EMBEDDING__TYPO`, or a stray key in
+  `config.json`/`config.d`) still fail loudly, exactly as before.
 
   **Migration**: if you relied on a bare name, add the documented prefix —
   e.g. `API_KEY=sk-…` → `MEMTOMEM_EMBEDDING__API_KEY=sk-…` (or

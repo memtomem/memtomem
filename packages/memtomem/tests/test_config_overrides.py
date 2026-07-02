@@ -752,20 +752,49 @@ def test_nested_prefixed_env_still_binds(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_only_root_config_is_base_settings() -> None:
     """Guard: no sub-config may regrow a ``BaseSettings`` base — that would
     re-open the undocumented bare-env surface #1522 closed. New settings
-    sections must be ``pydantic.BaseModel`` and hang off ``Mem2MemConfig``."""
+    sections must inherit ``ConfigModel`` and hang off ``Mem2MemConfig``."""
     import inspect
 
     import pydantic
     from pydantic_settings import BaseSettings
 
-    settings_classes = [
-        name
+    from memtomem.config import ConfigModel
+
+    model_classes = {
+        name: obj
         for name, obj in inspect.getmembers(_cfg, inspect.isclass)
-        if issubclass(obj, pydantic.BaseModel)
-        and obj.__module__ == _cfg.__name__
-        and issubclass(obj, BaseSettings)
-    ]
+        if issubclass(obj, pydantic.BaseModel) and obj.__module__ == _cfg.__name__
+    }
+    settings_classes = [n for n, o in model_classes.items() if issubclass(o, BaseSettings)]
     assert settings_classes == ["Mem2MemConfig"], settings_classes
+
+    # Every other model must go through ConfigModel so it keeps the
+    # BaseSettings-era strictness (extra="forbid", validate_default=True) —
+    # a bare-BaseModel section would silently swallow config typos.
+    non_strict = [
+        n
+        for n, o in model_classes.items()
+        if n not in ("Mem2MemConfig", "ConfigModel") and not issubclass(o, ConfigModel)
+    ]
+    assert non_strict == [], non_strict
+
+
+def test_sub_configs_keep_base_settings_strictness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dropping the ``BaseSettings`` base must not relax validation: unknown
+    keys still fail loudly (``extra="forbid"``), so an env typo like
+    ``MEMTOMEM_EMBEDDING__TYPO`` or a stray key in a ``namespace.rules`` entry
+    raises instead of being silently ignored (#1522)."""
+    import pydantic
+
+    from memtomem.config import NamespacePolicyRule
+
+    monkeypatch.setenv("MEMTOMEM_EMBEDDING__TYPO", "bad")
+    with pytest.raises(pydantic.ValidationError, match="typo"):
+        Mem2MemConfig()
+    monkeypatch.delenv("MEMTOMEM_EMBEDDING__TYPO")
+
+    with pytest.raises(pydantic.ValidationError, match="bogus"):
+        NamespacePolicyRule.model_validate({"path_glob": "notes/**", "namespace": "n", "bogus": 1})
 
 
 def test_namespace_rules_survive_config_json_roundtrip(

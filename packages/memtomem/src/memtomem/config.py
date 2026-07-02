@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from memtomem.constants import default_system_prefixes
@@ -40,7 +47,21 @@ APPEND = MergeStrategy("append")
 REPLACE = MergeStrategy("replace")
 
 
-class EmbeddingConfig(BaseModel):
+class ConfigModel(BaseModel):
+    """Base for config sections and nested config entries (#1522).
+
+    Sub-configs deliberately do not inherit ``BaseSettings`` — env binding
+    flows exclusively through ``Mem2MemConfig``'s ``MEMTOMEM_`` prefix. This
+    base preserves the strictness ``BaseSettings`` used to provide: unknown
+    keys are rejected (a typo like ``MEMTOMEM_EMBEDDING__TYPO`` or a stray
+    key in ``config.json``/``config.d`` fails loudly instead of being
+    silently dropped) and defaults run through field validators.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+
+class EmbeddingConfig(ConfigModel):
     provider: str = "none"
     model: str = ""
     dimension: int = 0
@@ -116,13 +137,13 @@ class EmbeddingConfig(BaseModel):
         return v
 
 
-class StorageConfig(BaseModel):
+class StorageConfig(ConfigModel):
     backend: str = "sqlite"
     sqlite_path: Path = Path("~/.memtomem/memtomem.db")
     collection_name: str = "memories"
 
 
-class SearchConfig(BaseModel):
+class SearchConfig(ConfigModel):
     default_top_k: int = 10
     bm25_candidates: int = 50
     dense_candidates: int = 50
@@ -190,7 +211,7 @@ def _default_memory_dirs() -> list[Path]:
     return [Path("~/.memtomem/memories")]
 
 
-class IndexingConfig(BaseModel):
+class IndexingConfig(ConfigModel):
     memory_dirs: Annotated[list[Path], APPEND] = Field(
         default_factory=lambda: _default_memory_dirs()
     )
@@ -320,7 +341,7 @@ class IndexingConfig(BaseModel):
         return [Path(d) for d in (*self.memory_dirs, *self.project_memory_dirs)]
 
 
-class DecayConfig(BaseModel):
+class DecayConfig(ConfigModel):
     enabled: bool = False
     half_life_days: float = 30.0
 
@@ -332,7 +353,7 @@ class DecayConfig(BaseModel):
         return v
 
 
-class MMRConfig(BaseModel):
+class MMRConfig(ConfigModel):
     enabled: bool = False
     lambda_param: float = 0.7  # 0.0=diversity max, 1.0=relevance max
 
@@ -344,7 +365,7 @@ class MMRConfig(BaseModel):
         return v
 
 
-class AccessConfig(BaseModel):
+class AccessConfig(ConfigModel):
     enabled: bool = False
     max_boost: float = 1.5  # maximum score multiplier for highly accessed chunks
 
@@ -360,7 +381,7 @@ _NAMESPACE_MAX_LEN = 128
 _ALLOWED_NS_PLACEHOLDERS: frozenset[str] = frozenset({"parent", "ancestor"})
 
 
-class NamespacePolicyRule(BaseModel):
+class NamespacePolicyRule(ConfigModel):
     """Maps files matching a glob pattern to a namespace label.
 
     ``path_glob`` uses gitignore-style patterns (via ``pathspec.GitIgnoreSpec``).
@@ -447,13 +468,13 @@ class NamespacePolicyRule(BaseModel):
         return v
 
 
-class NamespaceConfig(BaseModel):
+class NamespaceConfig(ConfigModel):
     default_namespace: str = "default"
     enable_auto_ns: bool = False
     rules: Annotated[list[NamespacePolicyRule], APPEND] = Field(default_factory=list)
 
 
-class RerankConfig(BaseModel):
+class RerankConfig(ConfigModel):
     """Cross-encoder reranker settings (Stage 3b in the search pipeline).
 
     Default is a lightweight English fastembed cross-encoder (~80 MB ONNX,
@@ -549,7 +570,7 @@ class RerankConfig(BaseModel):
         return self
 
 
-class QueryExpansionConfig(BaseModel):
+class QueryExpansionConfig(ConfigModel):
     enabled: bool = False
     max_terms: int = 3
     strategy: str = "tags"  # "tags" | "headings" | "both" | "llm"
@@ -562,7 +583,7 @@ class QueryExpansionConfig(BaseModel):
         return v
 
 
-class ImportanceConfig(BaseModel):
+class ImportanceConfig(ConfigModel):
     enabled: bool = False
     max_boost: float = 1.5
     weights: Annotated[list[float], REPLACE] = Field(default_factory=lambda: [0.3, 0.2, 0.3, 0.2])
@@ -575,7 +596,7 @@ class ImportanceConfig(BaseModel):
         return v
 
 
-class WebhookConfig(BaseModel):
+class WebhookConfig(ConfigModel):
     enabled: bool = False
     url: str = ""
     events: Annotated[list[str], APPEND] = Field(
@@ -585,14 +606,14 @@ class WebhookConfig(BaseModel):
     timeout_seconds: float = 10.0
 
 
-class ConsolidationScheduleConfig(BaseModel):
+class ConsolidationScheduleConfig(ConfigModel):
     enabled: bool = False
     interval_hours: float = 24.0
     min_group_size: int = 3
     max_groups: int = 10
 
 
-class PolicyConfig(BaseModel):
+class PolicyConfig(ConfigModel):
     """Memory lifecycle policies."""
 
     enabled: bool = False
@@ -603,7 +624,7 @@ class PolicyConfig(BaseModel):
 MAX_CONTEXT_WINDOW_CHUNKS = 10  # max ±N adjacent chunks around each hit
 
 
-class ContextWindowConfig(BaseModel):
+class ContextWindowConfig(ConfigModel):
     """Context window expansion for search results (small-to-big retrieval)."""
 
     enabled: bool = False
@@ -617,7 +638,7 @@ class ContextWindowConfig(BaseModel):
         return v
 
 
-class HealthWatchdogConfig(BaseModel):
+class HealthWatchdogConfig(ConfigModel):
     """Periodic health monitoring and auto-maintenance."""
 
     enabled: bool = False
@@ -629,7 +650,7 @@ class HealthWatchdogConfig(BaseModel):
     auto_maintenance: bool = True
 
 
-class SchedulerConfig(BaseModel):
+class SchedulerConfig(ConfigModel):
     """Cron scheduler for memory lifecycle jobs (P2 Phase A).
 
     Dispatch cadence is the health watchdog loop — this config has no
@@ -663,7 +684,7 @@ class SchedulerConfig(BaseModel):
         return v
 
 
-class LLMConfig(BaseModel):
+class LLMConfig(ConfigModel):
     enabled: bool = False
     provider: str = "ollama"
     model: str = ""  # empty = provider-specific default resolved in factory
@@ -687,7 +708,7 @@ class LLMConfig(BaseModel):
         return v
 
 
-class SessionSummaryConfig(BaseModel):
+class SessionSummaryConfig(ConfigModel):
     """Auto LLM summary on ``mem_session_end`` (RFC P1 Phase B).
 
     When ``auto`` is True and the closing session has at least
@@ -751,7 +772,7 @@ class SessionSummaryConfig(BaseModel):
 TargetScope = Literal["user", "project_shared", "project_local"]
 
 
-class HooksConfig(BaseModel):
+class HooksConfig(ConfigModel):
     """Settings-hooks fan-out scope (ADR-0010 §3).
 
     ``target_scope`` selects where memtomem-managed Claude Code hooks land:
@@ -764,7 +785,7 @@ class HooksConfig(BaseModel):
     target_scope: TargetScope = "user"
 
 
-class ContextGatewayConfig(BaseModel):
+class ContextGatewayConfig(ConfigModel):
     """Settings for the multi-project context UI (skills / commands / agents).
 
     See ``memtomem-docs/memtomem/planning/multi-project-context-ui-rfc.md`` —
@@ -796,7 +817,7 @@ class ContextGatewayConfig(BaseModel):
     user_tier_enabled: bool = False
 
 
-class SessionTraceConfig(BaseModel):
+class SessionTraceConfig(ConfigModel):
     """Configuration for session command execution tracing."""
 
     enabled: bool = False
