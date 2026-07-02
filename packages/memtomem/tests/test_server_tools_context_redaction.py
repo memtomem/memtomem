@@ -132,7 +132,9 @@ async def test_diff_row_reason_redacts_absolute_path(
     _assert_no_abs_path(out, root)
     assert "parse error" in out
     assert "missing YAML frontmatter" in out  # the diagnostic survives, path-stripped
-    assert ".memtomem/agents/foo/agent.md" in out  # relative remainder
+    # ``abs_path`` renders with ``os.sep``, so the surviving remainder does too
+    # (Windows: ``.memtomem\agents\…``) — compare via ``Path`` (#838 discipline).
+    assert str(Path(".memtomem/agents/foo/agent.md")) in out  # relative remainder
 
 
 def _skip_result(reason: str):
@@ -398,7 +400,8 @@ async def test_generate_settings_reasons_and_target_redact_absolute_paths(
     out = await mem_context_generate(include="settings")
 
     _assert_no_abs_path(out, root)
-    assert "Settings: claude_settings → .claude/settings.json" in out  # target relativized
+    # The relativized target renders with ``os.sep`` — compare via ``Path``.
+    assert f"Settings: claude_settings → {Path('.claude/settings.json')}" in out
     assert "skipped codex_settings:" in out
     assert "needs confirmation kimi_settings:" in out
     assert "error gemini_settings:" in out
@@ -420,7 +423,8 @@ async def test_sync_settings_reasons_and_target_redact_absolute_paths(
     out = await mem_context_sync(include="settings")
 
     _assert_no_abs_path(out, root)
-    assert "Settings: claude_settings → .claude/settings.json" in out
+    # Same ``os.sep`` rendering as the generate twin above.
+    assert f"Settings: claude_settings → {Path('.claude/settings.json')}" in out
     assert "skipped codex_settings:" in out
     assert "needs confirmation kimi_settings:" in out
     assert "error gemini_settings:" in out
