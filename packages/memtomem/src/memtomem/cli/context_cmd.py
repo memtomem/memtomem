@@ -1187,7 +1187,11 @@ def generate_cmd(
                 click.echo(f"  {name:10s}  {gen.output_path}")
     elif not inc:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
-        return
+        # Exit non-zero so a script / CI wrapping `mm context generate` can
+        # detect the refusal — this used to `return` and still exit 0. Raise
+        # SystemExit (not ClickException) to keep the red guidance text exactly
+        # as printed, matching the `seed-validation` scan leg's convention.
+        raise SystemExit(1)
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
@@ -1359,7 +1363,16 @@ def sync_cmd(
     label: str | None,
     force_unsafe: bool,
 ) -> None:
-    """Sync context.md to all detected agent files."""
+    """Sync context.md + included artifacts to detected agent files.
+
+    Regenerates the detected project-memory files (CLAUDE.md / GEMINI.md /
+    .cursorrules / …) from ``.memtomem/context.md``. For every kind passed via
+    ``--include`` it also fans out the canonical artifacts: skills, agents,
+    commands, settings, and (opt-in) mcp-servers. ``--all-projects`` syncs
+    every enrolled/discovered project (project_shared tier only); ``--scope`` /
+    ``--label`` pick the artifact tier; ``--force-unsafe`` bypasses Gate A on a
+    reviewed false positive (user / project_local destinations only).
+    """
     # sync accepts mcp-servers on top of the shared kinds (#1311); the other
     # context commands keep the default _KNOWN_INCLUDES set.
     inc = _parse_include(include, allowed=_SYNC_INCLUDES)
@@ -1389,7 +1402,7 @@ def sync_cmd(
         return
 
     root = _find_project_root()
-    if _run_sync_legs(
+    if not _run_sync_legs(
         root,
         inc=inc,
         strict=strict,
@@ -1399,7 +1412,13 @@ def sync_cmd(
         label=label,
         force_unsafe=force_unsafe,
     ):
-        click.secho("Synced.", fg="green")
+        # _run_sync_legs returns False only on the single-project
+        # missing-context.md refusal (red note already printed, no legs ran).
+        # Exit non-zero so a script / CI wrapping `mm context sync` can detect
+        # it — this used to just skip `Synced.` and still exit 0. Mirrors
+        # generate_cmd; batch mode never reaches the False leg.
+        raise SystemExit(1)
+    click.secho("Synced.", fg="green")
 
 
 def _run_sync_legs(
@@ -1419,8 +1438,9 @@ def _run_sync_legs(
 
     Returns False only on the single-project missing-``context.md`` early
     refusal (no legs ran — the caller must not print ``Synced.``, the
-    historical behavior Codex impl review caught a regression on); True
-    on every path that ran the legs.
+    historical behavior Codex impl review caught a regression on, and now
+    exits non-zero so a script/CI can detect the refusal); True on every
+    path that ran the legs.
 
     The extracted body of ``mm context sync`` — the single-project path
     calls it once with ``batch=False`` and keeps its historical behavior
@@ -5251,7 +5271,7 @@ def projects_resume_cmd(selector: str) -> None:
     "--force",
     is_flag=True,
     default=False,
-    help="Re-seed even if DIRECTORY already contains a .memtomem/ Store.",
+    help="Seed even if DIRECTORY is non-empty (a real project is otherwise never overwritten).",
 )
 @click.option(
     "--json",

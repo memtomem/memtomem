@@ -10,6 +10,15 @@ Each test maps to one audit finding:
   (the code hard-rejects that combination).
 - B2-5: ``memory-migrate`` must reject an explicit non-``.md`` source, matching
   the glob branch's filter and the documented ``.md files`` contract.
+
+Later additions (2026-07-02 cli-surface review):
+
+- A missing ``.memtomem/context.md`` refusal in the *mutating* commands
+  (``generate`` / single-project ``sync``) must exit non-zero — it used to
+  print a red line and still exit 0, so a script/CI wrapping the command
+  could not detect the failure.
+- The ``sync`` one-line summary and the ``seed-validation --force`` help must
+  match what the code actually does (artifact fan-out; any-non-empty guard).
 """
 
 from __future__ import annotations
@@ -79,6 +88,36 @@ class TestGenerateUnknownAgentExitCode:
 
         r = runner.invoke(cli, ["context", "generate", "--agent", "all"])
         assert r.exit_code == 0, f"--agent all should succeed: {r.output}"
+
+
+class TestMissingContextRefusalExitCode:
+    """A missing ``.memtomem/context.md`` refusal in the mutating context
+    commands must exit non-zero, not exit 0 after a red line.
+
+    ``mm context generate`` / single-project ``mm context sync`` with no
+    ``context.md`` and no ``--include`` print
+    ``context.md not found. Run 'mm context init' first.`` in red and used to
+    ``return`` / ``return False`` — leaving exit code 0, so a script or CI
+    wrapping the command saw success. The fix raises ``SystemExit(1)`` after
+    the existing ``secho`` (matching the ``seed-validation`` scan leg), so the
+    exact red guidance text is preserved but the process exits non-zero.
+    """
+
+    def test_generate_missing_context_exits_nonzero(self, tmp_path, monkeypatch):
+        runner, project = _runner_in_project(tmp_path, monkeypatch)
+        # No .memtomem/context.md written (and no --include artifact leg).
+        r = runner.invoke(cli, ["context", "generate"])
+        assert r.exit_code != 0, f"expected failure, got 0: {r.output}"
+        assert "not found. Run 'mm context init' first." in r.output
+
+    def test_sync_missing_context_exits_nonzero(self, tmp_path, monkeypatch):
+        runner, project = _runner_in_project(tmp_path, monkeypatch)
+        # No .memtomem/context.md written (and no --include artifact leg).
+        r = runner.invoke(cli, ["context", "sync"])
+        assert r.exit_code != 0, f"expected failure, got 0: {r.output}"
+        assert "not found. Run 'mm context init' first." in r.output
+        # The refusal must not also print the success line.
+        assert "Synced." not in r.output
 
 
 class TestDiffSettingsHonoursScope:
@@ -171,6 +210,44 @@ class TestMigrateForceHelp:
         help_text = (force_opt.help or "").lower()
         assert "no effect" not in help_text
         assert "--to" in (force_opt.help or "")
+
+
+class TestSyncHelpDocumentsFanout:
+    def test_sync_help_mentions_artifact_kinds(self):
+        """The ``mm context sync`` help used to claim only
+        "Sync context.md to all detected agent files" — stale now that sync
+        also fans out skills / agents / commands / settings (+ opt-in
+        mcp-servers) via ``--include`` and honours --all-projects/--scope/
+        --label/--force-unsafe."""
+        from memtomem.cli.context_cmd import sync_cmd
+
+        help_text = sync_cmd.help or ""
+        assert help_text.strip() != "Sync context.md to all detected agent files."
+        low = help_text.lower()
+        for token in ("skills", "agents", "commands", "settings", "mcp-servers", "--include"):
+            assert token in low, f"sync help should mention {token!r}: {help_text!r}"
+
+    def test_sync_short_help_signals_fanout(self):
+        """The short help (first docstring line — what Click shows in the
+        ``mm context --help`` command list) must mention the artifact fan-out,
+        not just agent files."""
+        from memtomem.cli.context_cmd import sync_cmd
+
+        short = sync_cmd.get_short_help_str(limit=200).lower()
+        assert "artifact" in short, f"sync short help should signal fan-out: {short!r}"
+
+
+class TestSeedValidationForceHelp:
+    def test_force_help_matches_non_empty_guard(self):
+        """The ``seed-validation --force`` help said it re-seeds only when the
+        dir "already contains a .memtomem/ Store", but the guard refuses ANY
+        non-empty directory. The help must match the code."""
+        from memtomem.cli.context_cmd import seed_validation_cmd
+
+        force_opt = next(p for p in seed_validation_cmd.params if p.name == "force")
+        help_text = (force_opt.help or "").lower()
+        assert "already contains a .memtomem" not in help_text
+        assert "non-empty" in help_text
 
 
 class TestMemoryMigrateRejectsNonMarkdownSource:
