@@ -58,6 +58,7 @@ from memtomem.context.migrate import (
     MigrateScopeResult,
     SCOPE_MIGRATABLE_KINDS,
     _detect_source_scope,
+    adopt_flat_to_dir,
     classify_migrate,
     migrate_one,
     migrate_scope,
@@ -1709,9 +1710,17 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
         artifact_type, name, scope_flag
     )
     if not working_file.is_file():
+        # `mm context migrate` only consumes lockfile-tracked flats (a
+        # hand-authored or UI-created flat classifies skip_manual), so it was
+        # a dead end for exactly the artifacts most likely to hit this branch.
+        # Lead with `version enable` — the layout-only adopt that works for
+        # ANY flat canonical — and keep migrate for wiki-installed assets,
+        # where it also consolidates the lockfile manifest.
         raise click.ClickException(
             f"No working canonical at {working_file}. The artifact must exist in "
-            f"directory layout — run `mm context migrate {artifact_type} {name}` first."
+            f"directory layout — run `mm context version enable {artifact_type} {name}` "
+            f"to adopt a flat-layout file (wiki-installed assets: "
+            f"`mm context migrate {artifact_type} {name}`)."
         )
     # Gate A on the snapshot bytes (ADR-0011 trust boundary): creating a version
     # is a new write into a git-tracked tree for project_shared, so a privacy
@@ -1794,6 +1803,111 @@ def version_list_cmd(artifact_type: str, name: str, scope_flag: str | None) -> N
         suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
         note = f"  — {rec.note}" if rec.note else ""
         click.echo(f"  {tag:6s} {rec.created_at}{suffix}{note}")
+
+
+@version_group.command("delete-label")
+@click.argument("artifact_type")
+@click.argument("name")
+@click.argument("label")
+@_SCOPE_OPTION
+def version_delete_label_cmd(
+    artifact_type: str, name: str, label: str, scope_flag: str | None
+) -> None:
+    """Drop a label pointer from an artifact's manifest.
+
+    CLI parity for the web ``DELETE /context/{type}/{name}/labels/{label}``
+    route and ``mem_context_label(delete=True)`` — until now the pointer
+    could be created and moved from the CLI (`version promote`) but only
+    dropped from the web UI or MCP. Deleting an absent label is a no-op
+    (still exits 0, mirroring the web 200); the reserved `latest` is refused.
+
+    Example: `mm context version delete-label agents my-agent production`
+    """
+    artifact_dir, working_file, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    if not working_file.is_file():
+        # Mirror the web route's dir-layout gate: a flat artifact has no
+        # version store, so "deleted" would be a misleading no-op and an
+        # absent artifact deserves a loud miss, not silence.
+        raise click.ClickException(
+            f"No working canonical at {working_file}. A flat-layout artifact has no "
+            f"version store — run `mm context version enable {artifact_type} {name}` first."
+        )
+    try:
+        versioning.delete_label(artifact_dir, label)
+        manifest = versioning.load_manifest(artifact_dir)
+    except versioning.VersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.secho(f"Dropped label {label!r} from {artifact_type}/{name}", fg="green")
+    if manifest.labels:
+        remaining = ", ".join(f"{lbl} → {tag}" for lbl, tag in sorted(manifest.labels.items()))
+        click.echo(f"  remaining labels: {remaining}")
+    else:
+        click.echo("  no labels remain")
+
+
+@version_group.command("enable")
+@click.argument("artifact_type")
+@click.argument("name")
+@_SCOPE_OPTION
+def version_enable_cmd(artifact_type: str, name: str, scope_flag: str | None) -> None:
+    """Adopt a flat-layout artifact into directory layout so it can be versioned.
+
+    The version store is dir-layout-only (ADR-0022 invariant 3), and
+    `mm context migrate` deliberately skips flats with no lockfile entry
+    (``skip_manual``) — so a hand-authored or web-created flat canonical was
+    permanently locked out of CLI versioning. This is the explicit adopt
+    action (CLI parity for the web ``POST …/versions/enable`` route): one
+    byte-identical rename of ``<type>/<name>.md`` → ``<type>/<name>/<manifest>``,
+    after which `version create` works normally. Idempotent on an
+    already-dir artifact; refuses a flat+dir collision and an orphaned
+    version store rather than silently mishandling them.
+
+    Example: `mm context version enable agents my-agent`
+    """
+    artifact_dir, working_file, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    canonical_root = artifact_dir.parent
+    flat_path = canonical_root / f"{name}.md"
+
+    if working_file.is_file():
+        if flat_path.exists():
+            # flat+dir collision — refuse rather than report a misleading
+            # idempotent success while a stray flat lingers (web-route mirror).
+            raise click.ClickException(
+                f"{name!r} has both flat ({flat_path}) and directory layouts; "
+                f"remove the redundant flat file to resolve the collision."
+            )
+        click.secho(
+            f"{artifact_type}/{name} already uses directory layout; nothing to do.",
+            fg="cyan",
+        )
+        return
+
+    if not flat_path.is_file():
+        raise click.ClickException(
+            f"No canonical artifact to adopt: neither {working_file} nor {flat_path} exists."
+        )
+
+    # Orphaned version store — adopting into it would silently attach a prior
+    # same-named artifact's version history to this file (web-route mirror).
+    if (
+        versioning.versions_json_path(artifact_dir).exists()
+        or versioning.versions_dir(artifact_dir).is_dir()
+    ):
+        raise click.ClickException(
+            f"{name!r} cannot be adopted: an orphaned version store already exists "
+            f"at {artifact_dir}. Resolve it manually first."
+        )
+
+    # Byte-identical same-scope rename — no privacy re-scan needed here; a
+    # labeled sync still re-scans the frozen versions/vN.md at deploy time
+    # (ADR-0022 Gate A).
+    try:
+        new_working = adopt_flat_to_dir(artifact_type, flat_path, artifact_dir)
+    except (FileNotFoundError, FileExistsError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.secho(f"Adopted {artifact_type}/{name} into directory layout", fg="green")
+    click.echo(f"  → {new_working}")
+    click.echo(f"  next: mm context version create {artifact_type} {name}")
 
 
 @context.command("install")
