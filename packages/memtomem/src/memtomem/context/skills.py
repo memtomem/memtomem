@@ -472,7 +472,8 @@ def generate_all_skills(
     Args:
         project_root: project root containing ``.memtomem/skills/``.
         runtimes: list of generator names. ``None`` means all registered
-            runtimes (currently ``claude_skills`` + ``gemini_skills``).
+            runtimes (``claude_skills`` / ``gemini_skills`` / ``codex_skills``
+            / ``kimi_skills`` — a default sync fans out to all four).
         scope: ADR-0011 PR-E3 — selects canonical root and runtime
             fan-out destination. Default ``project_shared`` preserves
             pre-PR-E3 behavior.
