@@ -101,6 +101,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   its warning and aggregates non-redaction errors to one line per directory.
   `mm index` output is unchanged.
 
+### Changed
+
+- **Config sections no longer bind bare, unprefixed environment variables**
+  (#1522). The 22 sub-config sections (`embedding`, `storage`, `llm`,
+  `session_trace`, …) plus `NamespacePolicyRule` were `BaseSettings` classes
+  without an `env_prefix`, so
+  generic shell exports like `API_KEY`, `ENABLED`, `MODEL`, or `HOST` silently
+  overrode memtomem configuration — including secret-bearing fields
+  (`embedding.api_key`, `session_trace.langfuse_secret_key`) and validator
+  guards — outside the documented `MEMTOMEM_` surface. They are now plain
+  pydantic models: environment binding flows exclusively through
+  `MEMTOMEM_<SECTION>__<FIELD>`.
+
+  **Migration**: if you relied on a bare name, add the documented prefix —
+  e.g. `API_KEY=sk-…` → `MEMTOMEM_EMBEDDING__API_KEY=sk-…` (or
+  `MEMTOMEM_LLM__API_KEY=sk-…`). One deliberate exception: with
+  `session_trace.langfuse_enabled=true`, the Langfuse SDK's own
+  `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (and `LANGFUSE_HOST`) still
+  count as credentials — they are read by the SDK itself and are never copied
+  into memtomem config. `LANGFUSE_ENABLED` alone never turns tracing on.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

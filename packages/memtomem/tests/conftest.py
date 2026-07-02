@@ -22,12 +22,11 @@ from memtomem.server.component_factory import Components, create_components, clo
 from _wiki_fixtures import git_identity, wiki_root  # noqa: F401
 
 
-# Bare (unprefixed) env names that pydantic-settings binds onto
-# ``SessionTraceConfig`` fields case-insensitively — the sub-configs carry no
-# ``model_config``, so these bypass the documented ``MEMTOMEM_`` surface
-# entirely (#1522). A developer shell or a sourced repo-root ``.env``
-# exporting them defeats the langfuse keys-missing validator in any test
-# that constructs the config (#1508).
+# The Langfuse SDK's own env names. Sub-configs no longer bind bare env vars
+# (#1522), but ``SessionTraceConfig``'s keys-required validator deliberately
+# accepts LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY as SDK credentials — a
+# developer shell or a sourced repo-root ``.env`` exporting them still defeats
+# the keys-missing validator in any test that constructs the config (#1508).
 _BARE_LANGFUSE_ENV_VARS = (
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
