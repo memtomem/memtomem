@@ -34,7 +34,11 @@ from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._errors import PRIVACY_BLOCK_DETAIL, PRIVACY_BLOCK_IMPORT_DETAIL, _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
-from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
+from memtomem.web.routes.context_gateway import (
+    _safe_rel,
+    delete_skip_entry,
+    sanitize_diff_reason,
+)
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -135,22 +139,6 @@ def _user_sync_host_targets(project_root: Path) -> list[str]:
             if dst is not None:
                 targets.append(str(dst))
     return sorted(targets)
-
-
-def _safe_rel(p: Path, project_root: Path) -> str:
-    """Project-relative path as a POSIX string for API payloads.
-
-    ``.as_posix()`` (not ``str``) so canonical/runtime paths come back
-    ``/``-separated on every platform — the Web UI and diff payloads pin POSIX
-    separators (#1256). Falls back to the absolute POSIX path for user-tier
-    locations outside ``project_root``. Parity with ``context_agents`` /
-    ``context_commands`` (#1264); this route was just never covered by #1256's
-    diff tests, so the ``str()`` form lingered latent (#1325).
-    """
-    try:
-        return p.relative_to(project_root).as_posix()
-    except ValueError:
-        return p.as_posix()
 
 
 # ── List ─────────────────────────────────────────────────────────────────
