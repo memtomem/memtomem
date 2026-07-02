@@ -17,7 +17,10 @@ from memtomem.wiki.store import (
     WikiNotFoundError,
     WikiNothingToCommitError,
     WikiStore,
+    _wiki_path_from_env,
 )
+
+from .helpers import set_home
 
 
 class TestDefaultPath:
@@ -36,6 +39,19 @@ class TestDefaultPath:
         monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
         store = WikiStore.at_default()
         assert store.root == Path.home() / ".memtomem-wiki"
+
+    def test_fallback_follows_home_set_after_import(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression pin for #1506 — the fallback must re-read ``Path.home()``
+        at call time. The import-time-frozen ``DEFAULT_WIKI_PATH`` made
+        wiki-absent tests leak the real ``~/.memtomem-wiki`` on dev machines
+        despite their ``set_home`` sandbox.
+        """
+        monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
+        sandbox_home = tmp_path / "sandbox-home"
+        set_home(monkeypatch, sandbox_home)
+        assert _wiki_path_from_env() == sandbox_home / ".memtomem-wiki"
 
 
 class TestInitScratch:

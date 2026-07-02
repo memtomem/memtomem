@@ -22,7 +22,13 @@ from pathlib import Path, PurePosixPath
 logger = logging.getLogger(__name__)
 
 DEFAULT_WIKI_PATH: Path = Path.home() / ".memtomem-wiki"
-"""Default wiki location — overridable via ``MEMTOMEM_WIKI_PATH`` env."""
+"""Default wiki location — overridable via ``MEMTOMEM_WIKI_PATH`` env.
+
+Documentation-only: frozen under the importing process's home at import
+time. Runtime resolution goes through :func:`_wiki_path_from_env`, which
+re-reads ``Path.home()`` at call time so a ``HOME`` override applied after
+import (e.g. a test sandbox) is honored (#1506).
+"""
 
 WIKI_ASSET_TYPES: tuple[str, ...] = ("skills", "agents", "commands")
 """Asset directory names at the wiki root. Order is significant for listing."""
@@ -118,7 +124,9 @@ def _wiki_path_from_env() -> Path:
     env = os.environ.get("MEMTOMEM_WIKI_PATH")
     if env:
         return Path(env).expanduser()
-    return DEFAULT_WIKI_PATH
+    # Call-time Path.home(), not DEFAULT_WIKI_PATH — the constant is frozen
+    # at import and would ignore a HOME override applied afterwards (#1506).
+    return Path.home() / ".memtomem-wiki"
 
 
 # Match the ``userinfo@`` segment of a ``scheme://userinfo@host`` URL. The
