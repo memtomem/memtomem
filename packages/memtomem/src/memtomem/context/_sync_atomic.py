@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, Literal, Protocol, TypeVar
 
@@ -172,6 +172,12 @@ class AtomicSyncAdapter(Generic[T]):
     # raise the ``VersionError`` family (label/version not found, flat layout,
     # malformed manifest), which the engine isolates as per-item skips.
     resolve_canonical_bytes: Callable[[Path, Layout], tuple[bytes, Path]] | None = None
+    # #1515: per-runtime file suffix for the reverse/diff engine
+    # (:func:`memtomem.context._atomic_reverse.diff_atomic_artifact`).
+    # KEYED BY RUNTIME/VENDOR PREFIX — the part before the first ``_`` in a
+    # generator name (``"claude"``, NOT ``"claude_agents"``). Runtimes
+    # missing from the mapping fall back to ``".md"``.
+    runtime_suffixes: Mapping[str, str] = field(default_factory=dict)
 
 
 def sync_atomic_artifact(

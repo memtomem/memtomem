@@ -41,14 +41,16 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes
-from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
-from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
+from memtomem.context._atomic_reverse import (
+    canonical_artifact_name,
+    diff_atomic_artifact,
+    import_passthrough_runtime,
+    list_canonical_artifacts,
+    resolve_artifact_under_root,
+)
+from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
-    DiffRow,
-    runtime_artifact_listing,
     runtime_artifact_names,
     runtime_fanout_root,
 )
@@ -78,7 +80,7 @@ def canonical_agent_name(path: Path, layout: Layout) -> str:
     callers must pass the layout tag they got from
     :func:`list_canonical_agents` or :func:`extract_agents_to_canonical`.
     """
-    return path.parent.name if layout == "dir" else path.stem
+    return canonical_artifact_name(path, layout)
 
 
 # Reuse the same frontmatter regex used by the markdown chunker so canonical
@@ -267,28 +269,6 @@ def parse_canonical_agent(path: Path, *, layout: Layout = "flat") -> SubAgent:
     return _parse_canonical_agent_text(content, source=path, layout=layout)
 
 
-def _resolve_agent_under_root(canonical_root: Path, agent_name: str) -> tuple[Path, Layout] | None:
-    dir_target = canonical_root / agent_name / AGENT_DIR_FILENAME
-    flat_target = canonical_root / f"{agent_name}.md"
-    has_dir = dir_target.is_file()
-    has_flat = flat_target.is_file()
-    if has_dir and has_flat:
-        logger.warning(
-            "agents/%s: reverse-sync updates dir layout (%s/agent.md); the flat "
-            "file (%s.md) is now silently divergent. Remove it or run "
-            "`mm context migrate` (PR-D).",
-            agent_name,
-            agent_name,
-            agent_name,
-        )
-        return dir_target, "dir"
-    if has_dir:
-        return dir_target, "dir"
-    if has_flat:
-        return flat_target, "flat"
-    return None
-
-
 def resolve_canonical_agent(
     project_root: Path, name: str, *, scope: TargetScope = "project_shared"
 ) -> tuple[Path, Layout] | None:
@@ -301,7 +281,13 @@ def resolve_canonical_agent(
     ``scope`` selects the canonical residency tier (ADR-0016). Default
     ``project_shared`` preserves pre-#940 behavior.
     """
-    return _resolve_agent_under_root(canonical_artifact_dir("agents", scope, project_root), name)
+    return resolve_artifact_under_root(
+        canonical_artifact_dir("agents", scope, project_root),
+        name,
+        artifact_label="agents",
+        dir_filename=AGENT_DIR_FILENAME,
+        logger=logger,
+    )
 
 
 def list_canonical_agents(
@@ -321,30 +307,13 @@ def list_canonical_agents(
     :func:`canonical_artifact_dir` (default ``project_shared`` preserves
     pre-PR-E3 behavior of reading ``<project_root>/.memtomem/agents``).
     """
-    root = canonical_artifact_dir("agents", scope, project_root)
-    if not root.is_dir():
-        return []
-
-    flat: dict[str, Path] = {p.stem: p for p in sorted(root.glob("*.md")) if p.is_file()}
-    dirs: dict[str, Path] = {}
-    for entry in sorted(root.iterdir()):
-        if entry.is_dir():
-            agent_md = entry / AGENT_DIR_FILENAME
-            if agent_md.is_file():
-                dirs[entry.name] = agent_md
-
-    for name in sorted(set(flat) & set(dirs)):
-        logger.warning(
-            "agents/%s: both flat (%s.md) and dir (%s/agent.md) layouts present; "
-            "using dir. Remove the flat file or run `mm context migrate` (PR-D).",
-            name,
-            name,
-            name,
-        )
-
-    merged_paths = {**flat, **dirs}  # dir overrides flat on collision
-    layouts: dict[str, Layout] = {**dict.fromkeys(flat, "flat"), **dict.fromkeys(dirs, "dir")}
-    return [(merged_paths[k], layouts[k]) for k in sorted(merged_paths)]
+    return list_canonical_artifacts(
+        project_root,
+        artifact_label="agents",
+        dir_filename=AGENT_DIR_FILENAME,
+        logger=logger,
+        scope=scope,
+    )
 
 
 # ── Renderers ────────────────────────────────────────────────────────
@@ -697,7 +666,7 @@ class ExtractResult:
     :func:`canonical_agent_name` without re-deriving the layout from the
     path. ``layout`` is whichever form the canonical now lives in on disk
     (preserving an existing flat file or writing a new dir entry — see
-    :func:`_resolve_agent_extract_target`).
+    :func:`memtomem.context._atomic_reverse.resolve_artifact_extract_target`).
     """
 
     imported: list[tuple[Path, Layout]]
@@ -711,6 +680,19 @@ class ExtractResult:
 # into. Behavior is byte-for-byte identical (TOCTOU close on canonical and
 # override bytes, Phase 1 raise-early atomicity for ``project_shared``,
 # Phase 2 strict-drop partial-write boundary pinned by #908).
+# Per-runtime file suffix for agents fan-out. Used by ``diff_agents`` (via
+# the adapter's ``runtime_suffixes``) to delegate to
+# ``runtime_artifact_names``. Kept inline (rather than on each generator)
+# because the suffix is a property of the on-disk format, not of the
+# runtime conversion.
+_AGENT_RUNTIME_SUFFIX: dict[str, str] = {
+    "claude": ".md",
+    "gemini": ".md",
+    "codex": ".toml",
+    "kimi": ".yaml",
+}
+
+
 _AGENT_ADAPTER: AtomicSyncAdapter[SubAgent] = AtomicSyncAdapter(
     kind="agent",
     artifact_label="agents",
@@ -722,6 +704,7 @@ _AGENT_ADAPTER: AtomicSyncAdapter[SubAgent] = AtomicSyncAdapter(
     result_type=AgentSyncResult,
     strict_drop_error_type=StrictDropError,
     logger=logger,
+    runtime_suffixes=_AGENT_RUNTIME_SUFFIX,
 )
 
 
@@ -790,21 +773,6 @@ def generate_all_agents(
 
 
 # ── Reverse: runtime → canonical ────────────────────────────────────
-
-
-def _resolve_agent_extract_target(canonical_root: Path, agent_name: str) -> tuple[Path, Layout]:
-    """Decide where reverse-sync writes the canonical for ``agent_name``.
-
-    Truth table (ADR-0008 PR-C):
-      dir+flat both → dir wins, flat is silently divergent → WARN
-      dir only      → dir
-      flat only     → flat (preserve existing layout; PR-C does not migrate)
-      neither       → dir (ADR-0008 layout for new agents)
-    """
-    resolved = _resolve_agent_under_root(canonical_root, agent_name)
-    if resolved is not None:
-        return resolved
-    return canonical_root / agent_name / AGENT_DIR_FILENAME, "dir"
 
 
 def extract_agents_to_canonical(
@@ -879,108 +847,40 @@ def extract_agents_to_canonical(
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # agent_name → first runtime label
 
-    for runtime in ("claude", "gemini"):
-        try:
-            runtime_dir = runtime_fanout_root("agents", runtime, scope, project_root)
-        except KeyError:
-            # Defensive — every (agents, claude|gemini, scope) tuple is in
-            # the table at PR-E1 land time, so this only fires on a future
-            # runtime added without table churn.
-            continue
-        if runtime_dir is None or not runtime_dir.is_dir():
-            continue
-        runtime_label = f"{runtime} ({runtime_dir})"
-        for md_file in sorted(runtime_dir.glob("*.md")):
-            agent_name = md_file.stem
-            if only_name is not None and agent_name != only_name:
-                continue
-            try:
-                validate_name(agent_name, kind="agent name")
-            except InvalidNameError as exc:
-                skipped.append((agent_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
-                logger.warning(
-                    "skip %r from %s: invalid name",
-                    agent_name,
-                    runtime_label,
-                )
-                continue
-            if agent_name in seen:
-                reason = f"already imported from {seen[agent_name]}"
-                skipped.append((agent_name, reason, skip_codes.ALREADY_IMPORTED))
-                logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
-                continue
-            dst, layout = _resolve_agent_extract_target(canonical_root, agent_name)
-            if dst.exists() and not overwrite:
-                reason = "canonical exists (use --overwrite)"
-                skipped.append((agent_name, reason, skip_codes.CANONICAL_EXISTS))
-                logger.warning("skip %s from %s: %s", agent_name, runtime_label, reason)
-                seen[agent_name] = runtime_label
-                continue
+    def _audit_context(src: Path, dst: Path, agent_name: str) -> dict[str, object]:
+        return {
+            "source": str(src),
+            "target": str(dst),
+            "kind": "agents",
+            "agent_name": agent_name,
+        }
 
-            # Gate A — re-scan the source bytes before any write. Use
-            # ``errors="replace"`` so non-UTF8 bytes cannot mask an
-            # embedded ASCII secret (the replacement char `�` does
-            # not overlap with any provider-token alphanumeric pattern).
-            # Project_shared hard-abort (git-history-is-forever) is
-            # raised inside ``apply_gate_a`` — Files imported earlier in
-            # this run that passed Gate A stay (each was scanned
-            # independently).
-            try:
-                content_bytes = md_file.read_bytes()
-            except OSError as exc:
-                skipped.append((agent_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
-                continue
-            content_text = content_bytes.decode("utf-8", errors="replace")
-            outcome = apply_gate_a(
-                content_text=content_text,
-                src=md_file,
-                scope=scope,
-                force_unsafe_import=force_unsafe_import,
-                surface=surface,
-                audit_context={
-                    "source": str(md_file),
-                    "target": str(dst),
-                    "kind": "agents",
-                    "agent_name": agent_name,
-                },
-                message_kind="agent",
-                imported_so_far=len(imported),
-            )
-            if isinstance(outcome, GateABlocked):
-                skipped.append(
-                    (
-                        agent_name,
-                        f"blocked: {outcome.hits_count} privacy pattern hit(s){outcome.hint}",
-                        outcome.code,
-                    )
-                )
-                seen[agent_name] = runtime_label
-                continue
-            # outcome is GateAProceed — write. ``dry_run`` records the
-            # would-import target but skips the write so the preview never
-            # mutates disk (rank-10).
-            if not dry_run:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_bytes(dst, content_bytes)
-            imported.append((dst, layout))
-            seen[agent_name] = runtime_label
+    for runtime in ("claude", "gemini"):
+        import_passthrough_runtime(
+            runtime,
+            artifact_label="agents",
+            dir_filename=AGENT_DIR_FILENAME,
+            name_kind="agent name",
+            message_kind="agent",
+            audit_context=_audit_context,
+            canonical_root=canonical_root,
+            project_root=project_root,
+            overwrite=overwrite,
+            scope=scope,
+            force_unsafe_import=force_unsafe_import,
+            dry_run=dry_run,
+            surface=surface,
+            only_name=only_name,
+            imported=imported,
+            skipped=skipped,
+            seen=seen,
+            logger=logger,
+        )
 
     return ExtractResult(imported=imported, skipped=skipped)
 
 
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
-
-
-# Per-runtime file suffix for agents fan-out. Used by ``diff_agents`` to
-# delegate to ``runtime_artifact_names``. Kept inline (rather than on each
-# generator) because (a) the suffix is a property of the on-disk format, not
-# of the runtime conversion, and (b) it's referenced from one site only.
-_AGENT_RUNTIME_SUFFIX: dict[str, str] = {
-    "claude": ".md",
-    "gemini": ".md",
-    "codex": ".toml",
-    "kimi": ".yaml",
-}
 
 
 def _runtime_agent_names(gen_name: str, project_root: Path) -> set[str]:
@@ -1014,156 +914,7 @@ def diff_agents(
     runtime fan-out roots. Default ``project_shared`` preserves
     pre-PR-E3 behavior.
     """
-    results: list[tuple[str, str, str]] = []
-    # Key canonicals by the parsed frontmatter ``name:`` — the identity sync
-    # targets (``_sync_atomic`` Phase 1: bytes → decode errors="replace" →
-    # parse → ``name_of``). Keying by file stem reported permanent phantom
-    # drift after a successful sync whenever stem and frontmatter name
-    # disagree: ('<stem>', 'missing target') + ('<name>', 'missing
-    # canonical') on every runtime, forever (#1229). The lenient decode also
-    # keeps a stray non-UTF-8 byte from aborting the whole diff with an
-    # uncaught UnicodeDecodeError while sync handles the same file fine.
-    # Unreadable / unparseable canonicals keep the stem / dir-name key
-    # (``None`` value) so their "parse error" row still names the file.
-    canonical_index: dict[str, SubAgent | None] = {}
-    # Parse failures keep the exception text (it embeds the source path) so
-    # the "parse error" row can carry a diagnostic reason — pre-#1229 the
-    # exception was swallowed here without even a log line.
-    parse_failures: dict[str, str] = {}
-    for path, layout in list_canonical_agents(project_root, scope=scope):
-        fallback_name = path.parent.name if layout == "dir" else path.stem
-        try:
-            text = path.read_bytes().decode("utf-8", errors="replace")
-            parsed = _parse_canonical_agent_text(text, source=path, layout=layout)
-        except OSError as exc:
-            # Same first-parsed-wins precedence as below (#1247 Codex impl
-            # round): a fallback-name entry must not SHADOW an earlier
-            # successfully parsed canonical that claimed the same effective
-            # name — sync writes that name fine (the unreadable file never
-            # claims a name there), so a None overwrite here would report
-            # permanent phantom "parse error" drift no sync can clear. The
-            # warning below still fires, so the broken file stays loud.
-            if canonical_index.get(fallback_name) is None:
-                canonical_index[fallback_name] = None
-                parse_failures[fallback_name] = f"unreadable: {exc}"
-            logger.warning("canonical agent %s unreadable: %s", path, exc)
-        except AgentParseError as exc:
-            if canonical_index.get(fallback_name) is None:
-                canonical_index[fallback_name] = None
-                parse_failures[fallback_name] = str(exc)
-            logger.warning("canonical agent %s failed to parse: %s", path, exc)
-        else:
-            # First-parsed-wins on a frontmatter-name collision, matching the
-            # sync engine's duplicate-name dedupe (#1247) — last-wins here
-            # would diff the runtime file against the canonical sync never
-            # wrote, reporting permanent phantom drift. The loser surfaces in
-            # the sync result as a ``duplicate_name`` skip, not as a diff row
-            # (flat-vs-dir precedent: log-only in diff). A ``None`` entry
-            # (parse-failure fallback name) stays overwritable — pre-existing
-            # interplay, unchanged.
-            if canonical_index.get(parsed.name) is not None:
-                logger.warning(
-                    "duplicate agent name %r: keeping first-seen canonical, ignoring %s",
-                    parsed.name,
-                    path,
-                )
-            else:
-                canonical_index[parsed.name] = parsed
-    canonical_names = set(canonical_index)
-
-    for gen_name, gen in AGENT_GENERATORS.items():
-        # ADR-0011 PR-E3 cleanup item #1: query the table directly via
-        # ``runtime_fanout_root``. Earlier code probed with a fixed agent
-        # name (``__probe_891__``) which leaked the table-shape assumption
-        # into the call shape — call-shape fragility, not name-independence.
-        runtime = gen_name.split("_", 1)[0]
-        if runtime_fanout_root("agents", runtime, scope, project_root) is None:
-            continue
-        suffix = _AGENT_RUNTIME_SUFFIX.get(runtime, ".md")
-        runtime_names, invalid_runtime_names = runtime_artifact_listing(
-            "agents", runtime, project_root, scope, file_suffix=suffix
-        )
-        # Invalid-named runtime files used to vanish from diff entirely
-        # (log-only) — the dashboard read fully in-sync while an unmanaged
-        # runtime artifact existed (#1229). Surface them as a dedicated row;
-        # a canonical "parse error" row of the same fallback name wins
-        # (only possible when the canonical stem itself is invalid).
-        for raw_name, invalid_reason in invalid_runtime_names:
-            if raw_name not in canonical_names:
-                results.append(DiffRow(gen_name, raw_name, "invalid name", invalid_reason))
-        for name in sorted(canonical_names | runtime_names):
-            # Unparseable canonical (including an invalid *effective* name —
-            # frontmatter name, or stem fallback) checked BEFORE the
-            # missing-target branch: "missing target" implied sync would
-            # create the runtime file, which it never can — the row showed
-            # a permanent drift no sync clears (#1229).
-            if name in canonical_names and canonical_index[name] is None:
-                results.append(DiffRow(gen_name, name, "parse error", parse_failures.get(name)))
-                continue
-            if name in canonical_names and name not in runtime_names:
-                results.append((gen_name, name, "missing target"))
-                continue
-            if name in runtime_names and name not in canonical_names:
-                results.append((gen_name, name, "missing canonical"))
-                continue
-
-            agent = canonical_index[name]
-            assert agent is not None  # consumed by the parse-error branch above
-            # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
-            # above guarantees this runtime+scope has a fan-out root, so
-            # ``gen.target_file`` cannot return ``None`` for any name.
-            # Earlier defensive ``if target is None: continue`` removed.
-            target = gen.target_file(project_root, name, scope=scope)
-            assert target is not None  # narrowed by upstream NO_FANOUT guard
-
-            # A per-vendor override replaces the rendered runtime file at sync
-            # time (``_sync_atomic`` Phase 2 / ADR-0008 Invariant 4) via
-            # ``atomic_write_bytes`` — raw bytes, no strip. Compare byte-exact
-            # against the same source so an override-carrying agent isn't
-            # reported permanently "out of sync"; decoding as text would crash
-            # on a non-UTF-8 override and would mask whitespace-only byte drift.
-            vendor = GENERATOR_VENDOR.get(gen_name)
-            override_path = (
-                _override.resolve(project_root, "agents", name, vendor, scope=scope)
-                if vendor is not None
-                else None
-            )
-            if override_path is not None:
-                try:
-                    expected_bytes = override_path.read_bytes()
-                except OSError:
-                    # Sync skips an unreadable override (no effective fan-out),
-                    # so we can't assert parity — report drift, never mask it.
-                    results.append((gen_name, name, "out of sync"))
-                    continue
-                try:
-                    actual_bytes = target.read_bytes() if target.is_file() else b""
-                except OSError:
-                    # Unreadable runtime file — same contract as above.
-                    results.append((gen_name, name, "out of sync"))
-                    continue
-                status = "in sync" if expected_bytes == actual_bytes else "out of sync"
-                results.append((gen_name, name, status))
-                continue
-
-            expected, _ = gen.render(agent)
-            # Byte-exact compare against what sync would write (Phase 2
-            # ``atomic_write_bytes`` of ``content.encode("utf-8")`` verbatim)
-            # — a ``.strip()`` compare reported whitespace-padded runtime
-            # files "in sync" while sync would rewrite them (#1229), and a
-            # lenient text decode collapses distinct invalid byte sequences
-            # to the same U+FFFD. Bytes cannot raise UnicodeDecodeError. An
-            # unreadable runtime file can't assert parity — report drift,
-            # never mask it.
-            try:
-                actual_bytes = target.read_bytes() if target.is_file() else b""
-            except OSError:
-                results.append((gen_name, name, "out of sync"))
-                continue
-            status = "in sync" if expected.encode("utf-8") == actual_bytes else "out of sync"
-            results.append((gen_name, name, status))
-
-    return results
+    return diff_atomic_artifact(_AGENT_ADAPTER, project_root, scope=scope)
 
 
 __all__ = [

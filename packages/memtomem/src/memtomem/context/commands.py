@@ -39,16 +39,19 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._atomic import atomic_write_text
+from memtomem.context._atomic_reverse import (
+    canonical_artifact_name,
+    diff_atomic_artifact,
+    import_passthrough_runtime,
+    list_canonical_artifacts,
+    resolve_artifact_extract_target,
+    resolve_artifact_under_root,
+)
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
-from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import (
-    DiffRow,
-    runtime_artifact_listing,
-    runtime_fanout_root,
-)
+from memtomem.context._names import InvalidNameError, Layout, validate_name
+from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context._sync_atomic import (
     ON_DROP_LEVELS,
     AtomicSyncAdapter,
@@ -78,7 +81,7 @@ def canonical_command_name(path: Path, layout: Layout) -> str:
     pass the layout tag from :func:`list_canonical_commands` or
     :func:`extract_commands_to_canonical`.
     """
-    return path.parent.name if layout == "dir" else path.stem
+    return canonical_artifact_name(path, layout)
 
 
 # ── Canonical dataclass ──────────────────────────────────────────────
@@ -183,28 +186,6 @@ def parse_canonical_command(path: Path, *, layout: Layout = "flat") -> SlashComm
     return _parse_canonical_command_text(content, source=path, layout=layout)
 
 
-def _resolve_command_under_root(canonical_root: Path, cmd_name: str) -> tuple[Path, Layout] | None:
-    dir_target = canonical_root / cmd_name / COMMAND_DIR_FILENAME
-    flat_target = canonical_root / f"{cmd_name}.md"
-    has_dir = dir_target.is_file()
-    has_flat = flat_target.is_file()
-    if has_dir and has_flat:
-        logger.warning(
-            "commands/%s: reverse-sync updates dir layout (%s/command.md); the "
-            "flat file (%s.md) is now silently divergent. Remove it or run "
-            "`mm context migrate` (PR-D).",
-            cmd_name,
-            cmd_name,
-            cmd_name,
-        )
-        return dir_target, "dir"
-    if has_dir:
-        return dir_target, "dir"
-    if has_flat:
-        return flat_target, "flat"
-    return None
-
-
 def resolve_canonical_command(
     project_root: Path, name: str, *, scope: TargetScope = "project_shared"
 ) -> tuple[Path, Layout] | None:
@@ -217,8 +198,12 @@ def resolve_canonical_command(
     ``scope`` selects the canonical residency tier (ADR-0016). Default
     ``project_shared`` preserves pre-#940 behavior.
     """
-    return _resolve_command_under_root(
-        canonical_artifact_dir("commands", scope, project_root), name
+    return resolve_artifact_under_root(
+        canonical_artifact_dir("commands", scope, project_root),
+        name,
+        artifact_label="commands",
+        dir_filename=COMMAND_DIR_FILENAME,
+        logger=logger,
     )
 
 
@@ -238,31 +223,13 @@ def list_canonical_commands(
     :func:`canonical_artifact_dir` (default ``project_shared`` preserves
     pre-PR-E3 behavior).
     """
-    root = canonical_artifact_dir("commands", scope, project_root)
-    if not root.is_dir():
-        return []
-
-    flat: dict[str, Path] = {p.stem: p for p in sorted(root.glob("*.md")) if p.is_file()}
-    dirs: dict[str, Path] = {}
-    for entry in sorted(root.iterdir()):
-        if entry.is_dir():
-            cmd_md = entry / COMMAND_DIR_FILENAME
-            if cmd_md.is_file():
-                dirs[entry.name] = cmd_md
-
-    for name in sorted(set(flat) & set(dirs)):
-        logger.warning(
-            "commands/%s: both flat (%s.md) and dir (%s/command.md) layouts "
-            "present; using dir. Remove the flat file or run "
-            "`mm context migrate` (PR-D).",
-            name,
-            name,
-            name,
-        )
-
-    merged_paths = {**flat, **dirs}  # dir overrides flat on collision
-    layouts: dict[str, Layout] = {**dict.fromkeys(flat, "flat"), **dict.fromkeys(dirs, "dir")}
-    return [(merged_paths[k], layouts[k]) for k in sorted(merged_paths)]
+    return list_canonical_artifacts(
+        project_root,
+        artifact_label="commands",
+        dir_filename=COMMAND_DIR_FILENAME,
+        logger=logger,
+        scope=scope,
+    )
 
 
 # ── Placeholder rewriting ────────────────────────────────────────────
@@ -436,6 +403,18 @@ class ExtractResult:
 
 # Issue #900 extraction — see the matching adapter in
 # :mod:`memtomem.context.agents` for the design rationale.
+# Per-runtime file suffix for commands fan-out. Used by ``diff_commands``
+# (via the adapter's ``runtime_suffixes``) to delegate to
+# ``runtime_artifact_names``.
+_COMMAND_RUNTIME_SUFFIX: dict[str, str] = {
+    "claude": ".md",
+    "gemini": ".toml",
+    # Codex: project-tier has no fan-out (RUNTIME_FANOUT_TABLE returns None);
+    # user-tier prompts use ``.md`` per Codex docs.
+    "codex": ".md",
+}
+
+
 _COMMAND_ADAPTER: AtomicSyncAdapter[SlashCommand] = AtomicSyncAdapter(
     kind="command",
     artifact_label="commands",
@@ -447,6 +426,7 @@ _COMMAND_ADAPTER: AtomicSyncAdapter[SlashCommand] = AtomicSyncAdapter(
     result_type=CommandSyncResult,
     strict_drop_error_type=StrictDropError,
     logger=logger,
+    runtime_suffixes=_COMMAND_RUNTIME_SUFFIX,
 )
 
 
@@ -540,19 +520,6 @@ def _gemini_toml_to_canonical(toml_path: Path) -> str:
     return body
 
 
-def _resolve_command_extract_target(canonical_root: Path, cmd_name: str) -> tuple[Path, Layout]:
-    """Decide where reverse-sync writes the canonical for ``cmd_name``.
-
-    Truth table mirrors :func:`memtomem.context.agents._resolve_agent_extract_target`:
-    dir+flat both → dir wins (silent flat divergence WARNed);
-    dir only → dir; flat only → flat (preserve); neither → dir (ADR layout).
-    """
-    resolved = _resolve_command_under_root(canonical_root, cmd_name)
-    if resolved is not None:
-        return resolved
-    return canonical_root / cmd_name / COMMAND_DIR_FILENAME, "dir"
-
-
 def extract_commands_to_canonical(
     project_root: Path,
     overwrite: bool = False,
@@ -618,78 +585,39 @@ def extract_commands_to_canonical(
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # cmd_name → first runtime label
 
+    def _claude_audit_context(src: Path, dst: Path, cmd_name: str) -> dict[str, object]:
+        # Mirror agents.py audit_context shape — SOC pipelines grep both
+        # ``source=`` and ``target=`` for incident triage; commands' earlier
+        # omission was a sibling-parity gap (PR #889 review D1).
+        return {
+            "source": str(src),
+            "target": str(dst),
+            "kind": "commands",
+            "runtime": "claude",
+            "command_name": cmd_name,
+        }
+
     # ── Claude branch — byte-level passthrough (Markdown + YAML) ──
-    try:
-        claude_dir = runtime_fanout_root("commands", "claude", scope, project_root)
-    except KeyError:
-        claude_dir = None
-    if claude_dir is not None and claude_dir.is_dir():
-        claude_label = f"claude ({claude_dir})"
-        for md_file in sorted(claude_dir.glob("*.md")):
-            cmd_name = md_file.stem
-            if only_name is not None and cmd_name != only_name:
-                continue
-            try:
-                validate_name(cmd_name, kind="command name")
-            except InvalidNameError as exc:
-                skipped.append((cmd_name, f"invalid name: {exc}", skip_codes.INVALID_NAME))
-                logger.warning("skip %r from %s: invalid name", cmd_name, claude_label)
-                continue
-            if cmd_name in seen:
-                reason = f"already imported from {seen[cmd_name]}"
-                skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
-                logger.warning("skip %s from %s: %s", cmd_name, claude_label, reason)
-                continue
-            dst, layout = _resolve_command_extract_target(canonical_root, cmd_name)
-            if dst.exists() and not overwrite:
-                reason = "canonical exists (use --overwrite)"
-                skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
-                logger.warning("skip %s from %s: %s", cmd_name, claude_label, reason)
-                seen[cmd_name] = claude_label
-                continue
-            try:
-                content_bytes = md_file.read_bytes()
-            except OSError as exc:
-                skipped.append((cmd_name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
-                continue
-            content_text = content_bytes.decode("utf-8", errors="replace")
-            outcome = apply_gate_a(
-                content_text=content_text,
-                src=md_file,
-                scope=scope,
-                force_unsafe_import=force_unsafe_import,
-                surface=surface,
-                # Mirror agents.py audit_context shape — SOC pipelines grep
-                # both ``source=`` and ``target=`` for incident triage;
-                # commands' earlier omission was a sibling-parity gap
-                # (PR #889 review D1).
-                audit_context={
-                    "source": str(md_file),
-                    "target": str(dst),
-                    "kind": "commands",
-                    "runtime": "claude",
-                    "command_name": cmd_name,
-                },
-                message_kind="command",
-                imported_so_far=len(imported),
-            )
-            if isinstance(outcome, GateABlocked):
-                skipped.append(
-                    (
-                        cmd_name,
-                        f"blocked: {outcome.hits_count} privacy pattern hit(s){outcome.hint}",
-                        outcome.code,
-                    )
-                )
-                seen[cmd_name] = claude_label
-                continue
-            # ``dry_run`` records the would-import target but skips the write
-            # so the preview never mutates disk (rank-10).
-            if not dry_run:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_bytes(dst, content_bytes)
-            imported.append((dst, layout))
-            seen[cmd_name] = claude_label
+    import_passthrough_runtime(
+        "claude",
+        artifact_label="commands",
+        dir_filename=COMMAND_DIR_FILENAME,
+        name_kind="command name",
+        message_kind="command",
+        audit_context=_claude_audit_context,
+        canonical_root=canonical_root,
+        project_root=project_root,
+        overwrite=overwrite,
+        scope=scope,
+        force_unsafe_import=force_unsafe_import,
+        dry_run=dry_run,
+        surface=surface,
+        only_name=only_name,
+        imported=imported,
+        skipped=skipped,
+        seen=seen,
+        logger=logger,
+    )
 
     # ── Gemini branch — TOML → canonical Markdown conversion ──
     try:
@@ -713,7 +641,13 @@ def extract_commands_to_canonical(
                 skipped.append((cmd_name, reason, skip_codes.ALREADY_IMPORTED))
                 logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 continue
-            dst, layout = _resolve_command_extract_target(canonical_root, cmd_name)
+            dst, layout = resolve_artifact_extract_target(
+                canonical_root,
+                cmd_name,
+                artifact_label="commands",
+                dir_filename=COMMAND_DIR_FILENAME,
+                logger=logger,
+            )
             if dst.exists() and not overwrite:
                 reason = "canonical exists (use --overwrite)"
                 skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
@@ -770,17 +704,6 @@ def extract_commands_to_canonical(
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────
 
 
-# Per-runtime file suffix for commands fan-out. Used by ``diff_commands``
-# to delegate to ``runtime_artifact_names``.
-_COMMAND_RUNTIME_SUFFIX: dict[str, str] = {
-    "claude": ".md",
-    "gemini": ".toml",
-    # Codex: project-tier has no fan-out (RUNTIME_FANOUT_TABLE returns None);
-    # user-tier prompts use ``.md`` per Codex docs.
-    "codex": ".md",
-}
-
-
 def diff_commands(
     project_root: Path,
     *,
@@ -796,136 +719,7 @@ def diff_commands(
     runtime fan-out roots. Default ``project_shared`` preserves
     pre-PR-E3 behavior.
     """
-    results: list[tuple[str, str, str]] = []
-    # Key canonicals by the parsed frontmatter ``name:`` with a lenient
-    # decode — mirrors diff_agents; see the comment there for the phantom
-    # drift + UnicodeDecodeError rationale (#1229).
-    canonical_index: dict[str, SlashCommand | None] = {}
-    # Mirrors diff_agents: keep the exception text for the "parse error"
-    # row's diagnostic reason (#1229; previously swallowed without logging).
-    parse_failures: dict[str, str] = {}
-    for path, layout in list_canonical_commands(project_root, scope=scope):
-        fallback_name = path.parent.name if layout == "dir" else path.stem
-        try:
-            text = path.read_bytes().decode("utf-8", errors="replace")
-            parsed = _parse_canonical_command_text(text, source=path, layout=layout)
-        except OSError as exc:
-            # First-parsed-wins guard — see diff_agents (#1247 Codex impl
-            # round): a fallback-name entry must not shadow an earlier
-            # successfully parsed canonical claiming the same name.
-            if canonical_index.get(fallback_name) is None:
-                canonical_index[fallback_name] = None
-                parse_failures[fallback_name] = f"unreadable: {exc}"
-            logger.warning("canonical command %s unreadable: %s", path, exc)
-        except CommandParseError as exc:
-            if canonical_index.get(fallback_name) is None:
-                canonical_index[fallback_name] = None
-                parse_failures[fallback_name] = str(exc)
-            logger.warning("canonical command %s failed to parse: %s", path, exc)
-        else:
-            # First-parsed-wins on a frontmatter-name collision, matching the
-            # sync engine's duplicate-name dedupe (#1247) — see diff_agents.
-            if canonical_index.get(parsed.name) is not None:
-                logger.warning(
-                    "duplicate command name %r: keeping first-seen canonical, ignoring %s",
-                    parsed.name,
-                    path,
-                )
-            else:
-                canonical_index[parsed.name] = parsed
-    canonical_names = set(canonical_index)
-
-    for gen_name, gen in COMMAND_GENERATORS.items():
-        # ADR-0011 PR-E3 cleanup item #1: query the table directly via
-        # ``runtime_fanout_root``. Earlier code probed with a fixed command
-        # name (``__probe_891__``) which leaked the table-shape assumption
-        # into the call shape — call-shape fragility, not name-independence.
-        runtime = gen_name.split("_", 1)[0]
-        if runtime_fanout_root("commands", runtime, scope, project_root) is None:
-            continue
-        suffix = _COMMAND_RUNTIME_SUFFIX.get(runtime, ".md")
-        runtime_names, invalid_runtime_names = runtime_artifact_listing(
-            "commands", runtime, project_root, scope, file_suffix=suffix
-        )
-        # Invalid-named runtime files used to vanish from diff entirely
-        # (log-only) — surface them as a dedicated row; a canonical "parse
-        # error" row of the same fallback name wins (#1229, mirrors
-        # diff_agents).
-        for raw_name, invalid_reason in invalid_runtime_names:
-            if raw_name not in canonical_names:
-                results.append(DiffRow(gen_name, raw_name, "invalid name", invalid_reason))
-
-        for name in sorted(canonical_names | runtime_names):
-            # Unparseable canonical checked BEFORE missing-target — the
-            # "missing target" label implied sync would create the file,
-            # which it never can (#1229, mirrors diff_agents).
-            if name in canonical_names and canonical_index[name] is None:
-                results.append(DiffRow(gen_name, name, "parse error", parse_failures.get(name)))
-                continue
-            if name in canonical_names and name not in runtime_names:
-                results.append((gen_name, name, "missing target"))
-                continue
-            if name in runtime_names and name not in canonical_names:
-                results.append((gen_name, name, "missing canonical"))
-                continue
-
-            cmd = canonical_index[name]
-            assert cmd is not None  # consumed by the parse-error branch above
-            # Cleanup item #2: the upstream ``runtime_fanout_root`` guard
-            # above guarantees this runtime+scope has a fan-out root, so
-            # ``gen.target_file`` cannot return ``None`` for any name.
-            # Earlier defensive ``if target is None: continue`` removed.
-            target = gen.target_file(project_root, name, scope=scope)
-            assert target is not None  # narrowed by upstream NO_FANOUT guard
-
-            # A per-vendor override replaces the rendered runtime file at sync
-            # time (``_sync_atomic`` Phase 2 / ADR-0008 Invariant 4) via
-            # ``atomic_write_bytes`` — raw bytes, no strip. Compare byte-exact
-            # against the same source so an override-carrying command isn't
-            # reported permanently "out of sync"; decoding as text would crash
-            # on a non-UTF-8 override and would mask whitespace-only byte drift.
-            vendor = GENERATOR_VENDOR.get(gen_name)
-            override_path = (
-                _override.resolve(project_root, "commands", name, vendor, scope=scope)
-                if vendor is not None
-                else None
-            )
-            if override_path is not None:
-                try:
-                    expected_bytes = override_path.read_bytes()
-                except OSError:
-                    # Sync skips an unreadable override (no effective fan-out),
-                    # so we can't assert parity — report drift, never mask it.
-                    results.append((gen_name, name, "out of sync"))
-                    continue
-                try:
-                    actual_bytes = target.read_bytes() if target.is_file() else b""
-                except OSError:
-                    # Unreadable runtime file — same contract as above.
-                    results.append((gen_name, name, "out of sync"))
-                    continue
-                status = "in sync" if expected_bytes == actual_bytes else "out of sync"
-                results.append((gen_name, name, status))
-                continue
-
-            expected, _ = gen.render(cmd)
-            # Byte-exact compare against what sync would write (Phase 2
-            # ``atomic_write_bytes`` of ``content.encode("utf-8")`` verbatim)
-            # — a ``.strip()`` compare reported whitespace-padded runtime
-            # files "in sync" while sync would rewrite them (#1229), and a
-            # lenient text decode collapses distinct invalid byte sequences
-            # to the same U+FFFD. Bytes cannot raise UnicodeDecodeError. An
-            # unreadable runtime file can't assert parity — report drift,
-            # never mask it.
-            try:
-                actual_bytes = target.read_bytes() if target.is_file() else b""
-            except OSError:
-                results.append((gen_name, name, "out of sync"))
-                continue
-            status = "in sync" if expected.encode("utf-8") == actual_bytes else "out of sync"
-            results.append((gen_name, name, status))
-
-    return results
+    return diff_atomic_artifact(_COMMAND_ADAPTER, project_root, scope=scope)
 
 
 __all__ = [
