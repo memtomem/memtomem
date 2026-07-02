@@ -30,9 +30,11 @@ for `memtomem` and both resolve to `memtomem.cli:cli`.
   `import memtomem_stm` from `packages/memtomem/src/`, and don't hand-roll an
   in-process STM client — cross-repo coupling is explicitly forbidden.
 - **`memtomem/privacy.py` syncs from STM, asymmetrically.** The redaction
-  patterns in `packages/memtomem/src/memtomem/privacy.py` are copied from
-  `memtomem-stm/proxy/privacy.py:DEFAULT_PATTERNS` (the SHA pin lives in the
-  module docstring). The trust boundary is here, not there — STM-bypass must
+  patterns in `packages/memtomem/src/memtomem/privacy.py` are kept in sync with
+  memtomem-stm's `src/memtomem_stm/proxy/privacy.py:CREDENTIAL_PATTERNS` —
+  secret-class only; do **not** sync from STM's `DEFAULT_PATTERNS`, which folds
+  in `PII_PATTERNS` (the SHA pin lives in the module docstring). The trust
+  boundary is here, not there — STM-bypass must
   not be safety-bypass. When STM adds a **secret-class** pattern, sync it
   here in the same release window and bump the SHA. **PII-class** patterns
   (email, phone, name, address, etc.) do not auto-sync — they would force
