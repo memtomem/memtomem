@@ -122,3 +122,44 @@ def test_render_seed_bytes_rejects_traversal_name(wiki_root: Path) -> None:
         render_seed_bytes(store, "commands", "../../escape", "claude")
     with pytest.raises(InvalidNameError):
         render_seed_bytes(store, "skills", "../../escape", "claude")
+
+
+def test_save_bak_on_legacy_wiki_stays_out_of_git_status(wiki_root: Path) -> None:
+    """Editor Save on a wiki whose history lacks the scaffold .gitignore:
+    the edited canonical shows in status (uncommitted edit — correct), but
+    the ``.bak`` recovery sibling must not (T2-7 retrofit via the write-path
+    ``ensure_bak_excluded`` hook)."""
+    import subprocess
+
+    from memtomem.wiki.override import write_canonical
+
+    store = _initialized_wiki()
+    subprocess.run(
+        ["git", "rm", "-q", ".gitignore"], cwd=wiki_root, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-qm", "drop scaffold gitignore"],
+        cwd=wiki_root,
+        check=True,
+        capture_output=True,
+    )
+    agent_dir = wiki_root / "agents" / "bar"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "agent.md").write_text(_AGENT_CANONICAL, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=wiki_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "add bar"], cwd=wiki_root, check=True, capture_output=True
+    )
+
+    write_canonical(store, "agents", "bar", b"---\nname: bar\ndescription: d2\n---\n\nv2\n")
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=wiki_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "agents/bar/agent.md" in status  # the real uncommitted edit
+    assert ".bak" not in status  # the recovery sibling is excluded
+    assert (agent_dir / "agent.md.bak").read_text(encoding="utf-8") == _AGENT_CANONICAL

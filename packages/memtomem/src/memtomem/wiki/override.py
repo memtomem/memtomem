@@ -176,6 +176,9 @@ def seed_override(
     seed_bytes, dropped = render_seed_bytes(store, asset_type, name, vendor)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and force:
+        # Pre-scaffold-.gitignore wikis: keep the backup out of git status
+        # (best-effort local exclude; see WikiStore.ensure_bak_excluded).
+        store.ensure_bak_excluded()
         backup = target.with_suffix(target.suffix + ".bak")
         atomic_write_bytes(backup, target.read_bytes())
     atomic_write_bytes(target, seed_bytes)
@@ -224,6 +227,9 @@ def write_override(
     target = store.root / asset_type / name / "overrides" / f"{vendor}.{ext}"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
+        # Pre-scaffold-.gitignore wikis: keep the backup out of git status
+        # (best-effort local exclude; see WikiStore.ensure_bak_excluded).
+        store.ensure_bak_excluded()
         backup = target.with_suffix(target.suffix + ".bak")
         atomic_write_bytes(backup, target.read_bytes())
     atomic_write_bytes(target, content)
@@ -267,6 +273,9 @@ def write_canonical(
             f"wiki has no {asset_type}/{name} canonical at {target}; "
             "the editor edits an existing asset, it does not create one"
         )
+    # Pre-scaffold-.gitignore wikis: keep the backup out of git status
+    # (best-effort local exclude; see WikiStore.ensure_bak_excluded).
+    store.ensure_bak_excluded()
     backup = target.with_suffix(target.suffix + ".bak")
     atomic_write_bytes(backup, target.read_bytes())
     atomic_write_bytes(target, content)

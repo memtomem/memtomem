@@ -402,6 +402,44 @@ describe('wiki.js install/update (E-3, dev tier)', () => {
     }));
     expect(errToast.msg).not.toContain(RAW_SERVER_MSG);
   });
+
+  it('rapid double-click on install fires exactly one POST (double-submit guard)', async () => {
+    const dom = await bootDev();
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    const btn = dom.window.document.getElementById('wiki-install-btn');
+    btn.click();
+    // Guarded for the life of the async handler; the second click lands on a
+    // disabled button and is swallowed.
+    expect(btn.disabled).toBe(true);
+    btn.click();
+    // Let the handler chain (csrf → fetch → toast) settle.
+    for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(posts.length).toBe(1);
+    expect(btn.disabled).toBe(false); // restored in finally — button usable again
+  });
+
+  it('install uses the scope the <select> DISPLAYS, not the stale cache', async () => {
+    // The active scope is not in the rendered roster (project since removed):
+    // no option is marked selected, so the control displays the first option
+    // (Server CWD) while the stale id survives in the module cache. The click
+    // must follow what the user sees — the select's value at click time.
+    const dom = await bootDev('ghost-project', [
+      { scope_id: '', label: 'Server CWD' },
+      { scope_id: 'p-1', label: 'Proj One' },
+    ]);
+    const posts = recordingCtxFetch(dom.window);
+    await dom.window.loadWiki(); // caches _wikiInstallScopeId = 'ghost-project'
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    const sel = dom.window.document.getElementById('wiki-install-project');
+    expect(sel.value).toBe(''); // what the user sees: Server CWD
+    await dom.window._onWikiInstallOrUpdate('install');
+    expect(posts.length).toBe(1);
+    // Pre-fix this POSTed ?scope_id=ghost-project — a project the user was
+    // not looking at.
+    expect(posts[0].url).toBe('/api/context/skills/alpha/install');
+  });
 });
 
 describe('wiki.js override editor (ADR-0027 Editor-A, dev tier)', () => {

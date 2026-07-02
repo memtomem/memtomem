@@ -1970,6 +1970,24 @@ function _renderCtxOverview(data) {
       </div>`;
   }
 
+  // Wiki update-available badge — the lockfile↔wiki staleness axis from the
+  // overview payload's ``wiki_installs`` block. Renders only when actionable
+  // (behind > 0); an absent/null block (older cached payloads replaying
+  // through langchange, or a degraded backend classifier) reads as no badge —
+  // the same defensive-reader posture as ``detected_runtimes`` above. Plain
+  // flex child of the header, no wrapper: the ``badge`` primitives already
+  // carry the styling (no style.css change needed).
+  const wikiInstalls = (data.wiki_installs && typeof data.wiki_installs === 'object')
+    ? data.wiki_installs : null;
+  const wikiBehind = (wikiInstalls && typeof wikiInstalls.behind === 'number')
+    ? wikiInstalls.behind : 0;
+  let wikiBehindHtml = '';
+  if (wikiBehind > 0) {
+    const behindTip = escapeHtml(t('settings.ctx.wiki_behind_tip', { n: wikiBehind }));
+    const behindLabel = escapeHtml(t('settings.ctx.wiki_behind_badge', { n: wikiBehind }));
+    wikiBehindHtml = `<span class="badge badge-warning ctx-overview-wiki-behind" title="${behindTip}">${behindLabel}</span>`;
+  }
+
   // Inline ``t()`` text rather than ``data-i18n`` attrs: the langchange
   // listener applies ``I18N.applyDOM`` first and then re-renders this
   // panel, so any ``data-i18n`` attr written *during* the re-render would
@@ -1991,6 +2009,7 @@ function _renderCtxOverview(data) {
         ${chips}
       </div>
       ${lastSyncHtml}
+      ${wikiBehindHtml}
     </div>`;
   // ADR-0026 P1a (#1353): in Simple mode, render a one-line verdict + per-type
   // rows ABOVE the grid; ``.ctx-simple`` CSS hides the grid so the Advanced
