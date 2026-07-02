@@ -3547,6 +3547,11 @@ def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, appl
                 f"lands untracked: {result.provenance_reason}",
                 fg="yellow",
             )
+        # Engine caveats (copy-rename overrides, mcp .mcp.json disclosure)
+        # render in the PLAN too — a caveat the user only learns about
+        # after --apply is not a plan they confirmed.
+        for note in result.notes:
+            click.secho(f"  note: {note}", fg="yellow")
         confirm_note = " --confirm-project-shared" if result.to_scope == "project_shared" else ""
         click.echo(f"\nRun with --apply{confirm_note} to execute.")
         if result.needs_sync and result.sync_command:

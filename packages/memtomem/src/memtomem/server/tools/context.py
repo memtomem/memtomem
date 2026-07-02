@@ -1618,6 +1618,10 @@ def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, app
                 f"  install provenance will not be carried — the artifact "
                 f"lands untracked: {result.provenance_reason}"
             )
+        # Engine caveats render in the PLAN too (CLI _print_transfer_result
+        # mirror) — a caveat the agent only learns post-apply is not a plan
+        # it confirmed.
+        lines.extend(f"  note: {note}" for note in result.notes)
         confirm_note = ""
         if result.to_scope == "project_shared":
             confirm_note = " and confirm_project_shared=True"
