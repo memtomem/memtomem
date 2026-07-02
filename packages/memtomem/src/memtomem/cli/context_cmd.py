@@ -1711,7 +1711,7 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
     if not working_file.is_file():
         raise click.ClickException(
             f"No working canonical at {working_file}. The artifact must exist in "
-            f"directory layout — run `mm context migrate {artifact_type[:-1]} {name}` first."
+            f"directory layout — run `mm context migrate {artifact_type} {name}` first."
         )
     # Gate A on the snapshot bytes (ADR-0011 trust boundary): creating a version
     # is a new write into a git-tracked tree for project_shared, so a privacy
