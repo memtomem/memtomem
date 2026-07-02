@@ -256,6 +256,67 @@ def test_stale_pin_when_history_rewritten(wiki_root: Path, tmp_path: Path) -> No
     assert "not reachable" in (rows[0].reason or "")
 
 
+def test_diverged_pin_reachable_but_not_ancestor_is_not_behind(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Pin reachable but NOT an ancestor of HEAD → NOT ``behind``.
+
+    After a wiki reset / force-pull to older (or divergent) history the pin
+    is newer than HEAD and no longer an ancestor of it. ``commit_is_reachable``
+    still finds the object, so the pre-fix classifier labelled the row
+    ``behind`` ("update available") — but ``mm context update`` would move the
+    pin BACKWARD to HEAD, a silent downgrade. Status must instead flag it as
+    an attention state (``stale-pin``, history diverged), never ``behind``.
+    """
+    _initialized_wiki(wiki_root)
+    # Baseline commit becomes HEAD after the reset below (== pin~1).
+    base_pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    # Advance the wiki and install pinned at the NEWER commit.
+    pin = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"v2\n"}, pin)
+
+    # Wiki reset/force-pull BACKWARD: HEAD is now an ancestor of the pin, so
+    # the pin is NOT an ancestor of HEAD. No gc → the pin object is still
+    # reachable (this is the reachable-but-diverged case, distinct from the
+    # unreachable force-push-past case above).
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "reset", "--hard", base_pin],
+        check=True,
+        capture_output=True,
+    )
+    wiki = WikiStore.at_default()
+    assert wiki.current_commit() == base_pin
+    assert wiki.commit_is_reachable(pin) is True  # object still present
+
+    head, rows = classify_status(tmp_path)
+
+    assert head == base_pin
+    assert len(rows) == 1
+    assert rows[0].pin_commit == pin
+    assert rows[0].state != "behind"  # RED pre-fix: labelled "behind"
+    assert rows[0].state == "stale-pin"
+    assert "diverg" in (rows[0].reason or "").lower()
+
+
+def test_behind_requires_pin_ancestor_of_head(wiki_root: Path, tmp_path: Path) -> None:
+    """Companion to the divergence test: a normal forward advance (pin IS an
+    ancestor of HEAD) still classifies ``behind`` (update available)."""
+    _initialized_wiki(wiki_root)
+    old_pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    _setup_installed_at_pin(tmp_path, "skills", "foo", {"SKILL.md": b"v1\n"}, old_pin)
+    new_head = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    wiki = WikiStore.at_default()
+    assert wiki.commit_is_ancestor(old_pin) is True  # pin is behind HEAD
+
+    head, rows = classify_status(tmp_path)
+
+    assert head == new_head
+    assert len(rows) == 1
+    assert rows[0].state == "behind"
+    assert rows[0].pin_commit == old_pin
+
+
 def test_dirty_takes_priority_over_behind(wiki_root: Path, tmp_path: Path) -> None:
     """If both dirty and pin != HEAD, dirty wins (single state per row)."""
     _initialized_wiki(wiki_root)
