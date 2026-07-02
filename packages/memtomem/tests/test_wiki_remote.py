@@ -108,6 +108,16 @@ class TestSetRemote:
         with pytest.raises(WikiNotFoundError):
             store.set_remote("file:///x")
 
+    def test_dash_prefixed_url_is_positional(self, tmp_path: Path, git_identity: None) -> None:
+        """Both legs (``remote add`` / ``remote set-url``) must pass the user
+        URL after ``--`` so a ``-``-prefixed value is stored verbatim, never
+        parsed as a git option (argument-injection guard)."""
+        store = _init_wiki(tmp_path / "wiki")
+        assert store.set_remote("-dash-added") == "added"
+        assert store.remote_url() == "-dash-added"
+        assert store.set_remote("-dash-set-url") == "updated"
+        assert store.remote_url() == "-dash-set-url"
+
 
 # ── current_branch ──────────────────────────────────────────────────────
 

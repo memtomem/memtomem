@@ -217,11 +217,12 @@ def _git(
 def _git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
     """Run ``git <args>`` in ``cwd`` returning raw *bytes* stdout.
 
-    Twin of :func:`_git` for path-carrying porcelain output (``ls-tree -z``):
-    ``text=True`` decodes with the host's preferred locale encoding, which
-    corrupts non-ASCII pathnames on non-UTF-8 hosts — the caller decodes
-    explicitly instead. Failure classification and credential redaction
-    mirror :func:`_git`.
+    Twin of :func:`_git` for byte-exact output — path-carrying porcelain
+    (``ls-tree -z``) and blob content (``show <rev>:<path>``): ``text=True``
+    decodes with the host's preferred locale encoding, which corrupts
+    non-ASCII pathnames (and any binary blob) on non-UTF-8 hosts — the
+    caller decodes explicitly instead. Failure classification and credential
+    redaction mirror :func:`_git`.
     """
     try:
         return subprocess.run(
@@ -377,7 +378,10 @@ class WikiStore:
         # remove it first so clone owns the layout.
         if self.root.exists():
             self.root.rmdir()
-        _git(["clone", url, str(self.root)], cwd=self.root.parent)
+        # ``--`` pins the user-supplied URL as positional: a ``-``-prefixed
+        # value must never be parsed as a git option (``--upload-pack=<cmd>``
+        # would run an arbitrary command). Same guard on remote add/set-url.
+        _git(["clone", "--", url, str(self.root)], cwd=self.root.parent)
 
     # ── Remote / backup (ADR-0008: "git remotes — no new sync protocol") ─────
     #
@@ -427,9 +431,9 @@ class WikiStore:
         """
         self.require_exists()
         if self.remote_url(name) is None:
-            _git(["remote", "add", name, url], cwd=self.root)
+            _git(["remote", "add", "--", name, url], cwd=self.root)
             return "added"
-        _git(["remote", "set-url", name, url], cwd=self.root)
+        _git(["remote", "set-url", "--", name, url], cwd=self.root)
         return "updated"
 
     def current_branch(self) -> str:
@@ -786,13 +790,15 @@ class WikiStore:
         tree is never consulted, so the bytes are immutable for a given
         commit. Shared by :meth:`copy_asset_at_commit` (extraction) and the
         pinned-install Gate A privacy scan (#1247), which must observe
-        exactly the bytes the extractor would write.
+        exactly the bytes the extractor would write. Runs via
+        :func:`_git_bytes` so a failure (rel absent at the commit for a racy
+        caller, GC'd object, missing git binary) surfaces as a normalized
+        ``RuntimeError`` instead of a raw ``CalledProcessError`` / ``OSError``
+        escaping the callers' ``except RuntimeError`` boundaries.
         """
-        result = subprocess.run(
-            ["git", "show", f"{commit}:{asset_type}/{name}/{rel}"],
+        result = _git_bytes(
+            ["show", f"{commit}:{asset_type}/{name}/{rel}"],
             cwd=self.root,
-            check=True,
-            capture_output=True,
         )
         return result.stdout
 
