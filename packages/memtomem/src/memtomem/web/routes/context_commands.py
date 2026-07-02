@@ -37,6 +37,7 @@ from memtomem.context.commands import (
 from memtomem.context.detector import COMMAND_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.web.routes.context_gateway import (
+    _safe_rel,
     delete_skip_entry,
     expected_vs_runtime_row,
     read_text_lenient,
@@ -98,20 +99,6 @@ def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
             ),
             reason_code="project_local_unsupported",
         )
-
-
-def _safe_rel(p: Path, project_root: Path) -> str:
-    """Project-relative path as a POSIX string for API payloads.
-
-    ``.as_posix()`` (not ``str``) so canonical/runtime paths come back
-    ``/``-separated on every platform — the Web UI and diff payloads pin POSIX
-    separators (#1256). Falls back to the absolute POSIX path for user-tier
-    locations outside ``project_root``.
-    """
-    try:
-        return p.relative_to(project_root).as_posix()
-    except ValueError:
-        return p.as_posix()
 
 
 def _user_scan_dirs() -> list[str]:
@@ -307,9 +294,14 @@ async def rendered_command(
     try:
         parsed = parse_canonical_command(cmd_path, layout=layout)
     except CommandParseError as exc:
+        # ``str(exc)`` embeds the absolute canonical source path (the parser
+        # raises ``... (source: {path})``); route it through the shared
+        # display-sanitize boundary so the loopback 422 detail stays path-free
+        # — the #1412 fix class the mcp-servers parse-422 already applies.
+        detail = sanitize_diff_reason(str(exc), project_root) or ""
         return JSONResponse(
             status_code=422,
-            content={"detail": {"error_kind": "parse", "message": f"Parse error: {exc}"}},
+            content={"detail": {"error_kind": "parse", "message": f"Parse error: {detail}"}},
         )
 
     runtimes = []

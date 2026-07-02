@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 
@@ -13,10 +14,12 @@ from memtomem.wiki.store import (
     WIKI_ASSET_TYPES,
     CommitNotFoundError,
     WikiAlreadyExistsError,
+    WikiDetachedHeadError,
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiNothingToCommitError,
     WikiStore,
+    WikiUnbornHeadError,
     _wiki_path_from_env,
 )
 
@@ -184,6 +187,21 @@ class TestInitFromUrl:
         store = WikiStore.at_default()
         with pytest.raises(RuntimeError, match="git clone"):
             store.init_from_url("file:///definitely/not/a/repo")
+
+    def test_dash_prefixed_url_is_positional(self, wiki_root: Path, tmp_path: Path) -> None:
+        """A ``-``-prefixed source must reach git AFTER ``--`` — always a repo
+        path, never an option (``--upload-pack=<cmd>`` would otherwise run an
+        arbitrary command). The bare repo sits in ``root.parent``, the clone's
+        cwd, so the dash-named relative path resolves once git treats it as
+        positional."""
+        subprocess.run(
+            ["git", "init", "--bare", str(tmp_path / "-dash-remote.git")],
+            check=True,
+            capture_output=True,
+        )
+        store = WikiStore.at_default()
+        store.init_from_url("-dash-remote.git")
+        assert store.exists()
 
 
 class TestListAssets:
@@ -373,6 +391,72 @@ class TestCommitIsReachable:
             store.commit_is_reachable("0" * 40)
 
 
+class TestCommitIsAncestor:
+    """``commit_is_ancestor`` — the forward-only guard that distinguishes a
+    genuinely-behind pin (ancestor of HEAD → an update is available) from a
+    pin that is reachable but NOT an ancestor (wiki reset / force-pull to
+    older or divergent history → moving the pin to HEAD would downgrade)."""
+
+    @staticmethod
+    def _commit(root: Path, marker: str) -> str:
+        (root / "marker.txt").write_text(marker, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "-m", marker],
+            check=True,
+            capture_output=True,
+        )
+        return WikiStore.at_default().current_commit()
+
+    def test_ancestor_of_head_is_true(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        old = self._commit(wiki_root, "c1")
+        self._commit(wiki_root, "c2")  # HEAD advances
+        assert store.commit_is_ancestor(old) is True
+
+    def test_head_is_its_own_ancestor(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        head = self._commit(wiki_root, "c1")
+        # git treats a commit as its own ancestor (rc 0).
+        assert store.commit_is_ancestor(head) is True
+
+    def test_descendant_is_not_ancestor(self, wiki_root: Path) -> None:
+        """The downgrade case: a newer commit is NOT an ancestor of an older
+        ``of`` — moving the pin there would move it backward."""
+        store = WikiStore.at_default()
+        store.init()
+        old = self._commit(wiki_root, "c1")
+        new = self._commit(wiki_root, "c2")
+        assert store.commit_is_ancestor(new, of=old) is False
+
+    def test_unknown_sha_is_not_ancestor(self, wiki_root: Path) -> None:
+        """Bad/unknown object → git exits 128; we degrade to False, not crash."""
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_ancestor("0" * 40) is False
+
+    def test_empty_string_is_not_ancestor(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_ancestor("") is False
+
+    def test_symbolic_ref_is_not_ancestor(self, wiki_root: Path) -> None:
+        """A symbolic ref / abbreviation must not silently satisfy the pin
+        contract — same conservatism as ``commit_is_reachable``."""
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()
+        assert store.commit_is_ancestor("main") is False
+        assert store.commit_is_ancestor(head[:12]) is False
+
+    def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        with pytest.raises(WikiNotFoundError):
+            store.commit_is_ancestor("0" * 40)
+
+
 class TestCopyAssetAtCommit:
     def test_copies_files_at_pin(self, wiki_root: Path, tmp_path: Path) -> None:
         """Bytes at the pin land in dest, even after wiki HEAD advances."""
@@ -525,6 +609,49 @@ class TestCopyAssetAtCommit:
         assert not (dest / "__pycache__").exists()
 
 
+class TestReadAssetFileAtCommit:
+    """`git show` failures must cross the :func:`_git_bytes` boundary.
+
+    The Gate A privacy scan and ``install --all`` digest reconciliation call
+    :meth:`WikiStore.read_asset_file_at_commit` directly — a raw
+    ``CalledProcessError`` / ``OSError`` escapes every CLI/web
+    ``except RuntimeError`` handler as a traceback (500 on the web routes).
+    """
+
+    def test_reads_bytes_at_commit(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "foo", {"SKILL.md": b"pinned\n"})
+        assert store.read_asset_file_at_commit(pin, "skills", "foo", "SKILL.md") == b"pinned\n"
+
+    def test_git_failure_is_normalized_runtimeerror(self, wiki_root: Path) -> None:
+        """A rel absent at the commit (racy caller, GC'd object) is a plain
+        ``git show`` failure — normalized, not a raw ``CalledProcessError``."""
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()  # initial scaffold; no skills/foo yet
+        with pytest.raises(RuntimeError, match="git show"):
+            store.read_asset_file_at_commit(head, "skills", "foo", "SKILL.md")
+
+    def test_oserror_is_normalized_runtimeerror(
+        self, wiki_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing git binary / vanished cwd → RuntimeError, mirroring
+        :func:`_git` (see ``TestRemoteUrl.test_oserror_normalized_to_runtimeerror``)."""
+        import memtomem.wiki.store as store_module
+
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "foo", {"SKILL.md": b"pinned\n"})
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise FileNotFoundError("git")
+
+        monkeypatch.setattr(store_module.subprocess, "run", _boom)
+        with pytest.raises(RuntimeError, match="git show"):
+            store.read_asset_file_at_commit(pin, "skills", "foo", "SKILL.md")
+
+
 class TestAssetFilesNonAsciiPaths:
     """Non-ASCII (e.g. Korean) pathnames must survive ``ls-tree`` parsing.
 
@@ -658,3 +785,149 @@ class TestCommitPaths:
         head = store.current_commit()
         with pytest.raises(ValueError):
             store.commit_paths({"../evil": b"x\n"}, message="e", expected_head=head)
+
+    # ── file-mode preservation (exec bit) ──────────────────────────────────
+    # commit_paths must not hardcode 100644: an edit to a script that is
+    # executable in HEAD would silently lose its +x, so ``mm context install``
+    # extracts a non-runnable script.
+
+    def _mode_at(self, wiki_root: Path, commit: str, rel: str) -> str:
+        """Git file mode recorded for *rel* at *commit* (e.g. ``100755``)."""
+        out = subprocess.run(
+            ["git", "-C", str(wiki_root), "ls-tree", commit, "--", rel],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert out.strip(), f"{rel} not tracked at {commit[:12]}"
+        return out.split(maxsplit=1)[0]
+
+    def _seed_exec_script(self, wiki_root: Path, rel: str, body: bytes) -> tuple[WikiStore, str]:
+        """Seed + commit an executable (0755) file so HEAD records 100755."""
+        store = self._seed(wiki_root)
+        path = wiki_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        path.chmod(0o755)
+        # ``--chmod=+x`` forces the 100755 index entry regardless of the repo's
+        # core.filemode, so HEAD reliably records the exec bit on any host.
+        subprocess.run(["git", "-C", str(wiki_root), "add", rel], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "update-index", "--chmod=+x", rel],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "add exec script"],
+            check=True,
+            capture_output=True,
+        )
+        return store, store.current_commit()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX exec bit is not modelled on Windows")
+    def test_edit_preserves_exec_bit(self, wiki_root: Path) -> None:
+        """Editing a file that is 100755 in HEAD keeps 100755 (regression)."""
+        rel = "skills/foo/scripts/run.sh"
+        store, head = self._seed_exec_script(wiki_root, rel, b"#!/bin/sh\necho v1\n")
+        assert self._mode_at(wiki_root, head, rel) == "100755"  # precondition
+        new = store.commit_paths({rel: b"#!/bin/sh\necho v2\n"}, message="edit", expected_head=head)
+        assert self._mode_at(wiki_root, new, rel) == "100755"
+
+    def test_new_path_defaults_to_regular_mode(self, wiki_root: Path) -> None:
+        """A brand-new (untracked-at-HEAD) path is committed as 100644."""
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        rel = "agents/beta/overrides/gemini.md"
+        (wiki_root / "agents" / "beta" / "overrides").mkdir()
+        (wiki_root / rel).write_text("ov\n", encoding="utf-8")
+        new = store.commit_paths({rel: b"ov\n"}, message="add override", expected_head=head)
+        assert self._mode_at(wiki_root, new, rel) == "100644"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX exec bit is not modelled on Windows")
+    def test_chmod_plus_x_on_disk_gains_exec_bit(self, wiki_root: Path) -> None:
+        """A 100644 file chmod'd +x on disk before commit is committed as 100755
+        (disk-first, mirroring ``git add`` / ``core.filemode``)."""
+        store = self._seed(wiki_root)  # agents/beta/agent.md is 100644 in HEAD
+        head = store.current_commit()
+        rel = "agents/beta/agent.md"
+        assert self._mode_at(wiki_root, head, rel) == "100644"  # precondition
+        (wiki_root / rel).chmod(0o755)
+        new = store.commit_paths({rel: b"v2\n"}, message="edit", expected_head=head)
+        assert self._mode_at(wiki_root, new, rel) == "100755"
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlink modes are not modelled on Windows")
+    def test_refuses_symlink_head_mode(self, wiki_root: Path) -> None:
+        """A 120000 (symlink) entry at HEAD is refused loudly, never silently
+        rewritten into a regular blob."""
+        store = self._seed(wiki_root)
+        rel = "agents/beta/link.md"
+        (wiki_root / rel).symlink_to("agent.md")
+        subprocess.run(["git", "-C", str(wiki_root), "add", rel], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "add symlink"],
+            check=True,
+            capture_output=True,
+        )
+        head = store.current_commit()
+        assert self._mode_at(wiki_root, head, rel) == "120000"  # precondition
+        with pytest.raises(ValueError, match="regular file"):
+            store.commit_paths({rel: b"clobber\n"}, message="edit", expected_head=head)
+
+    def test_detached_head_raises_classified(self, wiki_root: Path) -> None:
+        # A detached HEAD has no branch ref to CAS-advance. That must surface as
+        # the friendly WikiDetachedHeadError (the current_branch / #1419 push-pull
+        # precedent), NOT the raw `git symbolic-ref HEAD failed: …` RuntimeError.
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "checkout", "--detach"],
+            check=True,
+            capture_output=True,
+        )
+        with pytest.raises(WikiDetachedHeadError, match="detached HEAD"):
+            store.commit_paths({"agents/beta/agent.md": b"v2\n"}, message="e", expected_head=head)
+        assert store.current_commit() == head  # nothing was committed
+
+
+class TestUnbornHead:
+    """``current_commit`` on a commit-less wiki (clone of an empty remote)."""
+
+    def test_current_commit_raises_typed_error(self, unborn_wiki) -> None:
+        with pytest.raises(WikiUnbornHeadError) as excinfo:
+            WikiStore.at_default().current_commit()
+        # Message contract: path- and SHA-free, so web surfaces may return it
+        # verbatim (mirrors WikiDetachedHeadError).
+        assert str(unborn_wiki) not in str(excinfo.value)
+        assert "no commits yet" in str(excinfo.value)
+
+    def test_is_dirty_still_works(self, unborn_wiki) -> None:
+        # The seeded working-tree skill is untracked → dirty; ``git status``
+        # itself needs no HEAD, so the probe must not raise.
+        assert WikiStore.at_default().is_dirty() is True
+
+    def test_corrupt_ref_directory_stays_plain_runtimeerror(self, wiki_root) -> None:
+        # Codex review repro: a DIRECTORY squatting at .git/refs/heads/main
+        # makes ``symbolic-ref`` succeed and ``show-ref`` fail — the unborn
+        # shape minus the "nothing at the loose ref path" condition. That is
+        # ref-store corruption and must keep the original git error, not be
+        # softened to "no commits yet".
+        store = WikiStore.at_default()
+        store.init()
+        ref = wiki_root / ".git" / "refs" / "heads" / "main"
+        ref.unlink()
+        ref.mkdir()
+        with pytest.raises(RuntimeError) as excinfo:
+            store.current_commit()
+        assert not isinstance(excinfo.value, WikiUnbornHeadError)
+
+    def test_corrupt_head_stays_plain_runtimeerror(self, wiki_root) -> None:
+        # Narrowness pin: a corrupt HEAD file (git: "not a git repository")
+        # fails BOTH rev-parse and symbolic-ref, so it must keep raising the
+        # redacted RuntimeError — only the symbolic-ref-to-unborn-branch shape
+        # classifies as WikiUnbornHeadError.
+        store = WikiStore.at_default()
+        store.init()
+        (wiki_root / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+        with pytest.raises(RuntimeError) as excinfo:
+            store.current_commit()
+        assert not isinstance(excinfo.value, WikiUnbornHeadError)

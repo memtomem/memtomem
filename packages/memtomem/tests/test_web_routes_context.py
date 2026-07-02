@@ -2,10 +2,11 @@
 
 Diff-payload contract pinned by ``TestDiffCommand`` / ``TestDiffAgent`` (#1256):
 
-- **Paths** are normalized to POSIX separators on every platform. The route
-  helpers ``_safe_rel`` in ``context_commands`` / ``context_agents`` /
-  ``context_skills`` return ``.as_posix()`` so the Web UI receives stable
-  ``/``-separated paths; the diff tests assert literal POSIX strings (e.g.
+- **Paths** are normalized to POSIX separators on every platform. The shared
+  ``_safe_rel`` helper in ``context_gateway`` (imported by
+  ``context_commands`` / ``context_agents`` / ``context_skills`` /
+  ``context_mcp_servers``) returns ``.as_posix()`` so the Web UI receives
+  stable ``/``-separated paths; the diff tests assert literal POSIX strings (e.g.
   ``.claude/commands/ghost.md``) rather than ``str(Path(...))``, which would be
   backslash-joined on Windows. The literal-POSIX route assertions only fail on
   ``windows-latest`` (``str(PosixPath)`` already ``/``-joins on macOS/Linux);
@@ -107,7 +108,7 @@ def test_safe_rel_joins_with_posix_separators() -> None:
     every host) makes the assertion fail on any platform if ``.as_posix()``
     reverts to ``str()`` — the exact gap that let this bug slip past #1256.
     """
-    from memtomem.web.routes.context_skills import _safe_rel
+    from memtomem.web.routes.context_gateway import _safe_rel
 
     root = PureWindowsPath(r"C:\proj")
     nested = PureWindowsPath(r"C:\proj\.memtomem\skills\demo\SKILL.md")

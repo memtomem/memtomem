@@ -921,6 +921,24 @@ async def test_commit_isolates_unrelated_staged_index(dev_client, seeded_wiki: P
 
 
 @pytest.mark.asyncio
+async def test_commit_unborn_wiki_is_409_not_500(dev_client, unborn_wiki: Path) -> None:
+    # Clone of an EMPTY remote: the canonical exists in the working tree, but
+    # there is no HEAD for the CAS — a precise 409 with the remedy, not the
+    # fixed commit_failed 500 the broad RuntimeError arm returns.
+    skill_md = unborn_wiki / "skills" / "alpha" / "SKILL.md"
+    resp = await dev_client.post(
+        "/api/wiki/skills/alpha/commit",
+        json={
+            "expected_head": "0" * 40,
+            "targets": [{"kind": "canonical", "mtime_ns": str(skill_md.stat().st_mtime_ns)}],
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["reason_code"] == "wiki_unborn"
+    assert str(unborn_wiki) not in resp.text
+
+
+@pytest.mark.asyncio
 async def test_commit_stale_expected_head_is_409(dev_client, seeded_wiki: Path) -> None:
     mtime = await _save_canonical(dev_client, _EDITED)
     head = await _wiki_head(dev_client)
@@ -1086,6 +1104,31 @@ async def test_commit_git_failure_is_fixed_message_no_path_leak(
     assert resp.status_code == 500
     assert resp.json()["detail"]["reason_code"] == "commit_failed"
     assert str(seeded_wiki) not in resp.text  # no absolute-path / $HOME leak
+
+
+@pytest.mark.asyncio
+async def test_commit_detached_head_is_409_not_500(dev_client, seeded_wiki: Path) -> None:
+    # A detached-HEAD wiki has no branch ref to CAS-advance — a wiki-state
+    # precondition, not a git failure. It must map to a 409 conflict envelope
+    # (reason_code=detached_head) with the engine's fixed path-free message,
+    # never the generic 500 commit_failed.
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "checkout", "--detach"],
+        check=True,
+        capture_output=True,
+    )
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "detached_head"
+    assert "detached HEAD" in detail["message"]
+    assert str(seeded_wiki) not in resp.text  # fixed, path-free message
 
 
 @pytest.mark.asyncio
