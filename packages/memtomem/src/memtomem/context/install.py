@@ -776,6 +776,15 @@ def _update_asset(
     new_commit = wiki.current_commit()
     dest = project_root / ".memtomem" / asset_type / validated
 
+    # RESIDUAL (follow-up): update moves the pin to HEAD whenever it differs
+    # from the recorded pin, WITHOUT checking that HEAD descends from it. After
+    # a wiki reset / force-pull to older-or-divergent history HEAD is behind (or
+    # off to the side of) the pin, so this would move the pin BACKWARD — a
+    # silent downgrade, the same forward-only gap `classify_status` now guards
+    # against via `WikiStore.commit_is_ancestor`. Fixing it here (and in
+    # `_classify_for_all_update`'s preview parity) needs a new refuse verdict
+    # threaded through both the single-asset and `--all` state machines, so it
+    # is deliberately left out of the status-classification change.
     if lock_entry.get("wiki_commit") == new_commit:
         # True no-op: lockfile bytes untouched, installed_at echoed.
         return UpdateResult(

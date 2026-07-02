@@ -402,13 +402,19 @@ def test_single_sync_missing_context_prints_no_false_success(
     """Codex impl-review regression: plain ``mm context sync`` in a project
     with no ``context.md`` and no ``--include`` refuses with the init hint
     and must NOT also print ``Synced.`` — the extracted ``_run_sync_legs``
-    early-return has to keep suppressing the caller's success line."""
+    early-return has to keep suppressing the caller's success line.
+
+    The refusal now also exits non-zero (2026-07-02 cli-surface fix): the
+    single-project ``sync`` used to print the red line and still exit 0, so a
+    script/CI wrapping it could not detect the failure. ``_run_sync_legs``
+    still returns False on this leg; ``sync_cmd`` turns that into
+    ``SystemExit(1)``."""
     a = _project(tmp_path, "proj-a")  # .memtomem exists, no context.md
     _seed_known_projects(known_projects_path, [])
     monkeypatch.chdir(a)
 
     result = CliRunner().invoke(context_group, ["sync"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert "not found. Run 'mm context init' first." in result.output
     assert "Synced." not in result.output
 
