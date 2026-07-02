@@ -391,6 +391,72 @@ class TestCommitIsReachable:
             store.commit_is_reachable("0" * 40)
 
 
+class TestCommitIsAncestor:
+    """``commit_is_ancestor`` — the forward-only guard that distinguishes a
+    genuinely-behind pin (ancestor of HEAD → an update is available) from a
+    pin that is reachable but NOT an ancestor (wiki reset / force-pull to
+    older or divergent history → moving the pin to HEAD would downgrade)."""
+
+    @staticmethod
+    def _commit(root: Path, marker: str) -> str:
+        (root / "marker.txt").write_text(marker, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(root), "commit", "-m", marker],
+            check=True,
+            capture_output=True,
+        )
+        return WikiStore.at_default().current_commit()
+
+    def test_ancestor_of_head_is_true(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        old = self._commit(wiki_root, "c1")
+        self._commit(wiki_root, "c2")  # HEAD advances
+        assert store.commit_is_ancestor(old) is True
+
+    def test_head_is_its_own_ancestor(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        head = self._commit(wiki_root, "c1")
+        # git treats a commit as its own ancestor (rc 0).
+        assert store.commit_is_ancestor(head) is True
+
+    def test_descendant_is_not_ancestor(self, wiki_root: Path) -> None:
+        """The downgrade case: a newer commit is NOT an ancestor of an older
+        ``of`` — moving the pin there would move it backward."""
+        store = WikiStore.at_default()
+        store.init()
+        old = self._commit(wiki_root, "c1")
+        new = self._commit(wiki_root, "c2")
+        assert store.commit_is_ancestor(new, of=old) is False
+
+    def test_unknown_sha_is_not_ancestor(self, wiki_root: Path) -> None:
+        """Bad/unknown object → git exits 128; we degrade to False, not crash."""
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_ancestor("0" * 40) is False
+
+    def test_empty_string_is_not_ancestor(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        assert store.commit_is_ancestor("") is False
+
+    def test_symbolic_ref_is_not_ancestor(self, wiki_root: Path) -> None:
+        """A symbolic ref / abbreviation must not silently satisfy the pin
+        contract — same conservatism as ``commit_is_reachable``."""
+        store = WikiStore.at_default()
+        store.init()
+        head = store.current_commit()
+        assert store.commit_is_ancestor("main") is False
+        assert store.commit_is_ancestor(head[:12]) is False
+
+    def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        with pytest.raises(WikiNotFoundError):
+            store.commit_is_ancestor("0" * 40)
+
+
 class TestCopyAssetAtCommit:
     def test_copies_files_at_pin(self, wiki_root: Path, tmp_path: Path) -> None:
         """Bytes at the pin land in dest, even after wiki HEAD advances."""

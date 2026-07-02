@@ -75,6 +75,43 @@ def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
     return _redact_message(cleaned)
 
 
+def _safe_rel(p: Path, project_root: Path) -> str:
+    """Project-relative path as a POSIX string for API payloads.
+
+    ``.as_posix()`` (not ``str``) so ``canonical_path`` / ``path`` fields come
+    back ``/``-separated on every platform — the Web UI and diff payloads pin
+    POSIX separators (#1256; the ``PureWindowsPath`` guard is #1325). Falls back
+    to the absolute POSIX path for user-tier locations outside ``project_root``.
+    Shared by the skills / commands / agents / mcp-servers routes so the
+    path-sanitization boundary cannot drift per kind (same rationale as
+    ``sanitize_diff_reason``) — the per-kind copies DID drift: #1412 hardened
+    only the mcp-servers variant, leaving the others latent (#1264 parity).
+
+    ``p`` is a ``.resolve()``'d canonical/runtime path (``canonical_artifact_dir``
+    resolves), but the route may receive an unresolved/symlinked ``project_root``
+    (macOS ``/tmp``→``/private/tmp``, a symlinked home, a case-variant mount),
+    so ``relative_to`` against the bare root raises ``ValueError`` and the
+    fallback would emit the ABSOLUTE resolved path to the loopback dashboard
+    (#1412, the same disclosure as the parse-error reason). Try the resolved
+    root too before falling back. ``resolve()`` lives only on concrete ``Path``
+    objects — the cross-platform ``PureWindowsPath`` tests (#1325) drive this
+    with a pure path, so the resolved attempt is guarded and skipped there.
+    """
+    roots = [project_root]
+    try:
+        resolved_root = project_root.resolve()
+    except (AttributeError, OSError):
+        resolved_root = project_root
+    if resolved_root != project_root:
+        roots.append(resolved_root)
+    for root in roots:
+        try:
+            return p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return p.as_posix()
+
+
 def read_text_lenient(path: Path) -> str | None:
     """Best-effort text read for diff payload previews (#1229 U7).
 
