@@ -1089,6 +1089,31 @@ async def test_commit_git_failure_is_fixed_message_no_path_leak(
 
 
 @pytest.mark.asyncio
+async def test_commit_detached_head_is_409_not_500(dev_client, seeded_wiki: Path) -> None:
+    # A detached-HEAD wiki has no branch ref to CAS-advance — a wiki-state
+    # precondition, not a git failure. It must map to a 409 conflict envelope
+    # (reason_code=detached_head) with the engine's fixed path-free message,
+    # never the generic 500 commit_failed.
+    mtime = await _save_canonical(dev_client, _EDITED)
+    head = await _wiki_head(dev_client)
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "checkout", "--detach"],
+        check=True,
+        capture_output=True,
+    )
+    resp = await dev_client.post(
+        "/api/wiki/agents/beta/commit",
+        json={"expected_head": head, "targets": [{"kind": "canonical", "mtime_ns": mtime}]},
+    )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error_kind"] == "conflict"
+    assert detail["reason_code"] == "detached_head"
+    assert "detached HEAD" in detail["message"]
+    assert str(seeded_wiki) not in resp.text  # fixed, path-free message
+
+
+@pytest.mark.asyncio
 async def test_commit_is_dev_tier_only(prod_client, seeded_wiki: Path) -> None:
     resp = await prod_client.post(
         "/api/wiki/agents/beta/commit",

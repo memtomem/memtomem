@@ -69,6 +69,7 @@ from memtomem.wiki.override import (
     write_override,
 )
 from memtomem.wiki.store import (
+    WikiDetachedHeadError,
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiStore,
@@ -668,9 +669,11 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
     Responses: ``{committed: true, wiki_head, wiki_dirty, privacy_warning}`` on
     success; ``committed: false`` (200) when the saved bytes already match HEAD
     (no new history, ``.bak`` still cleaned); 409 ``stale_head`` (HEAD moved) /
-    ``stale_target`` (a file changed since Save); 503 ``busy`` on lock timeout;
-    500 ``commit_failed`` with a **fixed** message (raw git stderr — which embeds
-    ``$HOME`` — is logged server-side only, never returned).
+    ``stale_target`` (a file changed since Save) / ``detached_head`` (no branch
+    checked out — a wiki-state conflict, not a git failure); 503 ``busy`` on
+    lock timeout; 500 ``commit_failed`` with a **fixed** message (raw git
+    stderr — which embeds ``$HOME`` — is logged server-side only, never
+    returned).
 
     Privacy (§D-E): the commit *message* is new persisted user text, so it is
     scanned with the soft, scope-less ``privacy.scan`` and a non-blocking
@@ -731,6 +734,13 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
         return _commit_head_conflict(fresh)
     except WikiNotFoundError as exc:
         raise _wiki_absent(exc) from exc
+    except WikiDetachedHeadError as exc:
+        # Wiki-state precondition, not a git failure: a detached HEAD has no
+        # branch ref to CAS-advance, so the 500 ``commit_failed`` catch-all
+        # would misclassify it. 409 conflict like the sibling wiki-state
+        # envelopes (``override_exists``); the engine message is fixed and
+        # deliberately path-free (see WikiDetachedHeadError in wiki/store.py).
+        raise _error(409, "conflict", str(exc), reason_code="detached_head") from exc
     except TimeoutError as exc:
         raise _error(
             503, "busy", "wiki commit timed out — another wiki operation may be in progress"
