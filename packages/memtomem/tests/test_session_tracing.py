@@ -99,6 +99,57 @@ class TestConfigConstraints:
                 )
             assert "package is not installed" in str(excinfo.value)
 
+    def test_langfuse_validator_accepts_sdk_env_credentials(self, monkeypatch):
+        # Deliberate exception to the MEMTOMEM_-only env surface (#1522): the
+        # Langfuse SDK's own documented variables satisfy the keys-required
+        # validator, but are never copied into the config object —
+        # ``get_langfuse_client`` lets the SDK read them itself.
+        from memtomem.config import SessionTraceConfig
+
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
+        cfg = SessionTraceConfig(enabled=True, langfuse_enabled=True)
+        assert cfg.langfuse_public_key == ""
+        assert cfg.langfuse_secret_key == ""
+
+    def test_langfuse_validator_rejects_partial_sdk_env_credentials(self, monkeypatch):
+        from memtomem.config import SessionTraceConfig
+
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+        with pytest.raises(ValueError, match="langfuse_secret_key"):
+            SessionTraceConfig(enabled=True, langfuse_enabled=True)
+
+    def test_startup_path_prefixed_optin_with_sdk_env_credentials(self, monkeypatch):
+        # The real startup combination: tracing opted in through the documented
+        # MEMTOMEM_ surface, credentials supplied only through the SDK's env.
+        monkeypatch.setenv("MEMTOMEM_SESSION_TRACE__ENABLED", "true")
+        monkeypatch.setenv("MEMTOMEM_SESSION_TRACE__LANGFUSE_ENABLED", "true")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
+        cfg = Mem2MemConfig()
+        assert cfg.session_trace.enabled is True
+        assert cfg.session_trace.langfuse_enabled is True
+        assert cfg.session_trace.langfuse_public_key == ""
+        assert cfg.session_trace.langfuse_secret_key == ""
+
+    def test_sdk_env_credentials_never_persisted(self, override_path: Path, monkeypatch):
+        # End-to-end pin for the no-copy contract: enabling langfuse with only
+        # SDK env credentials must not write any credential into config.json.
+        import memtomem.config as _cfg
+        from memtomem.config import Mem2MemConfig, save_config_overrides
+
+        monkeypatch.setattr(_cfg, "_config_d_path", lambda: override_path.parent / "config.d")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
+        cfg = Mem2MemConfig()
+        cfg.session_trace.enabled = True
+        cfg.session_trace.langfuse_enabled = True
+        save_config_overrides(cfg)
+        saved = json.loads(override_path.read_text(encoding="utf-8"))
+        assert "pk-env" not in override_path.read_text(encoding="utf-8")
+        assert saved.get("session_trace", {}).get("langfuse_public_key", "") == ""
+        assert saved.get("session_trace", {}).get("langfuse_secret_key", "") == ""
+
 
 class TestPayloadSanitization:
     def test_metadata_mode(self):
@@ -657,7 +708,7 @@ class TestConfigSaveValidationAndRollback:
         from memtomem.config import save_config_overrides
 
         with pytest.raises(
-            ValueError, match="requires both langfuse_public_key and langfuse_secret_key"
+            ValueError, match="requires langfuse_public_key and langfuse_secret_key"
         ):
             save_config_overrides(cfg)
 
@@ -673,7 +724,7 @@ class TestConfigSaveValidationAndRollback:
 
         result = runner.invoke(cli, ["config", "set", "session_trace.langfuse_enabled", "true"])
         assert result.exit_code != 0
-        assert "requires both langfuse_public_key and langfuse_secret_key" in result.output
+        assert "requires langfuse_public_key and langfuse_secret_key" in result.output
 
         with open(override_path, "r", encoding="utf-8") as f:
             saved = json.load(f)
@@ -716,9 +767,7 @@ class TestConfigSaveValidationAndRollback:
                 search_pipeline=MagicMock(),
             )
         assert excinfo.value.status_code == 400
-        assert "requires both langfuse_public_key and langfuse_secret_key" in str(
-            excinfo.value.detail
-        )
+        assert "requires langfuse_public_key and langfuse_secret_key" in str(excinfo.value.detail)
 
         assert app_mock.state.config.session_trace.langfuse_enabled is False
 
@@ -746,7 +795,7 @@ class TestConfigSaveValidationAndRollback:
         )
 
         assert "Failed to persist config" in res
-        assert "requires both langfuse_public_key and langfuse_secret_key" in res
+        assert "requires langfuse_public_key and langfuse_secret_key" in res
 
         assert app_mock.config.session_trace.langfuse_enabled is False
 

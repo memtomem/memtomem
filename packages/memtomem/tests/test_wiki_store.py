@@ -18,7 +18,10 @@ from memtomem.wiki.store import (
     WikiNotFoundError,
     WikiNothingToCommitError,
     WikiStore,
+    _wiki_path_from_env,
 )
+
+from .helpers import set_home
 
 
 class TestDefaultPath:
@@ -37,6 +40,19 @@ class TestDefaultPath:
         monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
         store = WikiStore.at_default()
         assert store.root == Path.home() / ".memtomem-wiki"
+
+    def test_fallback_follows_home_set_after_import(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression pin for #1506 — the fallback must re-read ``Path.home()``
+        at call time. The import-time-frozen ``DEFAULT_WIKI_PATH`` made
+        wiki-absent tests leak the real ``~/.memtomem-wiki`` on dev machines
+        despite their ``set_home`` sandbox.
+        """
+        monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
+        sandbox_home = tmp_path / "sandbox-home"
+        set_home(monkeypatch, sandbox_home)
+        assert _wiki_path_from_env() == sandbox_home / ".memtomem-wiki"
 
 
 class TestInitScratch:
@@ -508,6 +524,46 @@ class TestCopyAssetAtCommit:
         assert sorted(digest_map) == ["SKILL.md"]  # skipped rel absent from the map too
         assert (dest / "SKILL.md").read_bytes() == b"# foo\n"
         assert not (dest / "__pycache__").exists()
+
+
+class TestAssetFilesNonAsciiPaths:
+    """Non-ASCII (e.g. Korean) pathnames must survive ``ls-tree`` parsing.
+
+    git's default ``core.quotePath=true`` C-quotes non-ASCII pathnames in
+    line-oriented porcelain output (``"skills/\\355\\225\\234…"`` wrapped in
+    double quotes), so a plain ``--name-only`` line parse fails the
+    ``startswith`` prefix match and the file silently vanishes from
+    extraction and the digest map — data loss on ``mm context install``."""
+
+    def test_non_ascii_file_survives_extraction(self, wiki_root: Path, tmp_path: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(
+            wiki_root,
+            "foo",
+            {
+                "SKILL.md": b"# foo\n",
+                "references/설명.md": "# 설명\n".encode(),
+            },
+        )
+
+        rels = store.asset_files_at_commit(pin, "skills", "foo")
+        assert sorted(rels) == ["SKILL.md", "references/설명.md"]
+
+        dest = tmp_path / "out" / "foo"
+        digest_map = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+        assert sorted(digest_map) == ["SKILL.md", "references/설명.md"]
+        assert (dest / "references" / "설명.md").read_bytes() == "# 설명\n".encode()
+
+    def test_non_ascii_asset_name_is_found(self, wiki_root: Path) -> None:
+        """An asset whose NAME is non-ASCII must not raise a spurious
+        ``AssetNotFoundError`` (every quoted ls-tree line failed the prefix
+        match, so the old parse saw zero files)."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "한글스킬", {"SKILL.md": b"# ko\n"})
+
+        assert store.asset_files_at_commit(pin, "skills", "한글스킬") == ["SKILL.md"]
 
 
 class TestCommitPaths:
