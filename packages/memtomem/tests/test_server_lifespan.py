@@ -16,6 +16,7 @@ are covered in ``test_server_app_context.py``.
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -217,3 +218,65 @@ async def test_lifespan_cleans_up_webhook_when_appcontext_init_fails(
             pytest.fail("yield should not be reached")
 
     assert closed, "webhook must be closed when AppContext construction fails"
+
+
+# ── dotenv loading (#1508) ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_lifespan_invokes_dotenv_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup must call ``_load_dotenv()`` exactly once. The suite-wide
+    conftest fixture no-ops the loader (#1508), so this spy — layered on
+    top of that no-op — is the only remaining coverage that the production
+    startup path still wires it."""
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
+
+    calls: list[None] = []
+    monkeypatch.setattr(lifespan_mod, "_load_dotenv", lambda: calls.append(None))
+
+    async with lifespan_mod.app_lifespan(MagicMock()):
+        pass
+
+    assert len(calls) == 1, f"_load_dotenv must run once at startup; ran {len(calls)}×"
+
+
+@pytest.mark.asyncio
+async def test_lifespan_under_test_does_not_source_repo_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end wiring pin for #1508: with the conftest hermeticity
+    fixture active, entering the *real* lifespan must leave the bare
+    langfuse env absent — even on a dev machine whose repo-root ``.env``
+    defines it. Before the fix, this test polluted ``os.environ`` for
+    every later test in the run (the four ``test_session_tracing``
+    validator failures)."""
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__ENABLED", raising=False)
+    monkeypatch.delenv("MEMTOMEM_WEBHOOK__URL", raising=False)
+
+    async with lifespan_mod.app_lifespan(MagicMock()):
+        pass
+
+    assert "LANGFUSE_PUBLIC_KEY" not in os.environ
+    assert "LANGFUSE_SECRET_KEY" not in os.environ
+
+
+@pytest.mark.real_dotenv
+def test_load_dotenv_does_not_override_existing_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real loader must keep already-exported env vars (python-dotenv's
+    ``override=False`` default): a repo-root ``.env`` may *add* to the
+    environment but never replace explicit configuration. Marked
+    ``real_dotenv`` to opt out of the conftest no-op; the loader resolves
+    ``.env`` upward from the source tree, so on a dev machine it may add
+    that file's other keys — the snapshot/restore keeps this test from
+    becoming the very polluter #1508 fixed."""
+    snapshot = dict(os.environ)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "sentinel-keep-me")
+    try:
+        lifespan_mod._load_dotenv()
+        assert os.environ["LANGFUSE_PUBLIC_KEY"] == "sentinel-keep-me"
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)

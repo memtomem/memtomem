@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,52 @@ from memtomem.server.component_factory import Components, create_components, clo
 # Keeping the definitions in ``_wiki_fixtures.py`` avoids bloating this
 # already-heavy conftest with unrelated git-env plumbing.
 from _wiki_fixtures import git_identity, wiki_root  # noqa: F401
+
+
+# Bare (unprefixed) env names that pydantic-settings binds onto
+# ``SessionTraceConfig`` fields case-insensitively — the sub-configs carry no
+# ``model_config``, so these bypass the documented ``MEMTOMEM_`` surface
+# entirely (#1522). A developer shell or a sourced repo-root ``.env``
+# exporting them defeats the langfuse keys-missing validator in any test
+# that constructs the config (#1508).
+_BARE_LANGFUSE_ENV_VARS = (
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+    "LANGFUSE_HOST",
+    "LANGFUSE_ENABLED",
+)
+
+# The documented nested surface for the same fields. Scrubbed by prefix, not a
+# hand-list, so future SessionTraceConfig fields are covered automatically.
+_SESSION_TRACE_ENV_PREFIX = "MEMTOMEM_SESSION_TRACE__"
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_dotenv(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's shell and repo-root ``.env`` out of every test.
+
+    ``app_lifespan`` sources ``.env`` via ``_load_dotenv()``; python-dotenv
+    resolves the file from the *calling frame's* location (walking up from
+    ``server/lifespan.py`` to the repo root), so neither ``monkeypatch`` nor
+    ``chdir`` contains it — one lifespan-driving test loads the developer's
+    real credentials into ``os.environ`` for the rest of the pytest process
+    (#1508). Tests that need the real loader opt out with
+    ``@pytest.mark.real_dotenv``; the env scrub always applies.
+
+    The scrub is case-insensitive (pydantic-settings binds env names
+    case-insensitively, so lowercase ``langfuse_public_key`` leaks the same
+    way) and also covers the documented ``MEMTOMEM_SESSION_TRACE__*`` surface
+    a developer shell may export. Tests that need any of these set them via
+    ``monkeypatch.setenv`` in their own body, which runs after this fixture.
+    """
+    for key in list(os.environ):
+        upper = key.upper()
+        if upper in _BARE_LANGFUSE_ENV_VARS or upper.startswith(_SESSION_TRACE_ENV_PREFIX):
+            monkeypatch.delenv(key, raising=False)
+    if request.node.get_closest_marker("real_dotenv") is None:
+        from memtomem.server import lifespan as lifespan_mod
+
+        monkeypatch.setattr(lifespan_mod, "_load_dotenv", lambda: None)
 
 
 def _ollama_available() -> bool:
