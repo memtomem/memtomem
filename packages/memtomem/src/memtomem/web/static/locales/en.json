@@ -403,7 +403,7 @@
   "settings.nav.ctx_wiki": "Wiki",
   "settings.nav.ctx_wiki_sub": "Reuse across your own projects",
   "settings.nav.ctx_wiki_tip": "Your personal git library of canonical skills, subagents, and commands — canonical = the one authoritative copy each project pulls a pinned snapshot from via `mm context install` (it never renders into a project on its own). It lives at ~/.memtomem-wiki; to move it to another machine, push and pull it yourself with ordinary git. The wiki is optional — your projects keep working without it.",
-  "settings.nav.ctx_wiki_dirty_tip": "Uncommitted wiki edits — not yet reachable by `mm context install` (it installs committed git objects only). Commit them in the Wiki section to let projects pull them.",
+  "settings.nav.ctx_wiki_dirty_tip": "Uncommitted wiki edits — not yet reachable by `mm context install` (it installs committed git objects only). Commit them with `mm wiki commit` — or, in dev mode, the Wiki section's Commit button — to let projects pull them.",
   "settings.nav.dedup": "Deduplicate",
   "settings.nav.dedup_sub": "Remove near-duplicates",
   "settings.nav.decay": "Age-out",
