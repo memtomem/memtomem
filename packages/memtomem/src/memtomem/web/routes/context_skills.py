@@ -34,7 +34,12 @@ from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._errors import PRIVACY_BLOCK_DETAIL, PRIVACY_BLOCK_IMPORT_DETAIL, _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
-from memtomem.web.routes.context_gateway import delete_skip_entry, sanitize_diff_reason
+from memtomem.web.routes.context_gateway import (
+    _safe_rel,
+    delete_skip_entry,
+    read_text_lenient,
+    sanitize_diff_reason,
+)
 from memtomem.web.routes.context_projects import (
     resolve_scope_root,
     resolve_scope_root_cascade_gated,
@@ -135,22 +140,6 @@ def _user_sync_host_targets(project_root: Path) -> list[str]:
             if dst is not None:
                 targets.append(str(dst))
     return sorted(targets)
-
-
-def _safe_rel(p: Path, project_root: Path) -> str:
-    """Project-relative path as a POSIX string for API payloads.
-
-    ``.as_posix()`` (not ``str``) so canonical/runtime paths come back
-    ``/``-separated on every platform — the Web UI and diff payloads pin POSIX
-    separators (#1256). Falls back to the absolute POSIX path for user-tier
-    locations outside ``project_root``. Parity with ``context_agents`` /
-    ``context_commands`` (#1264); this route was just never covered by #1256's
-    diff tests, so the ``str()`` form lingered latent (#1325).
-    """
-    try:
-        return p.relative_to(project_root).as_posix()
-    except ValueError:
-        return p.as_posix()
 
 
 # ── List ─────────────────────────────────────────────────────────────────
@@ -371,9 +360,30 @@ async def create_skill(
                         f"Skill '{body.name}' already exists",
                         reason_code="already_exists",
                     )
+                # Validate the submitted content encodes as UTF-8 before
+                # anything touches disk. A lone-surrogate body can't be UTF-8
+                # encoded, so ``atomic_write_text`` (which does ``text.encode``)
+                # would raise UnicodeEncodeError AFTER ``mkdir``, leaving an
+                # orphan directory that wedges every retry on the 409 above.
+                # Mirrors create_command / create_agent, which pre-encode for
+                # the same reason (they reuse the bytes as create_version's
+                # source_bytes; skills have no versioning layer, so the encoded
+                # bytes are discarded and only the validation matters here).
+                try:
+                    body.content.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise _error(400, "validation", "Skill content is not valid UTF-8") from exc
                 skill_dir.mkdir(parents=True)
                 manifest = skill_dir / SKILL_MANIFEST
-                atomic_write_text(manifest, body.content)
+                try:
+                    atomic_write_text(manifest, body.content)
+                except BaseException:
+                    # Roll back the partial skill dir so a transient failure
+                    # doesn't leave an empty directory that wedges every future
+                    # create of this name on the orphan-dir 409 above. Mirrors
+                    # create_command / create_agent.
+                    shutil.rmtree(skill_dir, ignore_errors=True)
+                    raise
     except TimeoutError:
         raise _error(503, "busy", "Skill create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": _safe_rel(skill_dir, project_root)}
@@ -573,9 +583,19 @@ async def diff_skill(
     canonical_manifest = skill_dir / SKILL_MANIFEST
     canonical_content = None
     if canonical_manifest.is_file():
-        canonical_content = canonical_manifest.read_text(encoding="utf-8")
+        # Lenient read for the display pane — a stray non-UTF-8 byte in the
+        # canonical SKILL.md must not abort the whole diff with an uncaught
+        # UnicodeDecodeError (the app maps it to a 400, not a diff). The engine
+        # ``diff_skills`` reads bytes with errors="replace" and stays the
+        # byte-wise authority for the list badge; this pane just mirrors it so
+        # the detail panel diagnoses instead of erroring (parity with
+        # diff_command / diff_agent — this route never got #1229/#1233's
+        # lenient read). ``None`` here means missing OR unreadable canonical.
+        canonical_content = read_text_lenient(canonical_manifest)
 
-    runtimes = []
+    # ``object`` values (not ``str``) — ``runtime_content`` may be ``None`` when
+    # the lenient read hits an OSError; mirrors context_commands / context_agents.
+    runtimes: list[dict[str, object]] = []
     for gen_name, gen in SKILL_GENERATORS.items():
         # Resolve the runtime side at the same tier as the canonical side —
         # the engine diff (diff_skills) already does; without scope= this
@@ -595,11 +615,13 @@ async def diff_skill(
                 {
                     "runtime": gen_name,
                     "status": "missing canonical",
-                    "runtime_content": target_manifest.read_text(encoding="utf-8"),
+                    # Lenient read — see the canonical read above; a non-UTF-8
+                    # runtime copy is drift to display, not a diff-wide abort.
+                    "runtime_content": read_text_lenient(target_manifest),
                 }
             )
         else:
-            runtime_content = target_manifest.read_text(encoding="utf-8")
+            runtime_content = read_text_lenient(target_manifest)
             if runtime_content == canonical_content:
                 runtimes.append({"runtime": gen_name, "status": "in sync"})
             else:

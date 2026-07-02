@@ -586,6 +586,42 @@ class WikiStore:
         )
         return result.returncode == 0
 
+    def commit_is_ancestor(self, commit: str, of: str = "HEAD") -> bool:
+        """``True`` when *commit* is an ancestor of *of* (default wiki HEAD).
+
+        Uses ``git merge-base --is-ancestor <commit> <of>``: exit 0 means
+        *commit* is reachable from *of* along the commit graph (a commit is
+        its own ancestor, so ``commit == of`` also returns ``True``), exit 1
+        means it is not. Any OTHER exit code — 128 for a bad/unknown object or
+        a broken repo, or anything git may return in future — is treated as
+        "not an ancestor" (``False``), mirroring :meth:`commit_is_reachable`'s
+        conservatism so ``mm context status`` degrades instead of crashing on
+        garbage input.
+
+        This is the forward-only guard :meth:`commit_is_reachable` does NOT
+        provide: reachability only proves the pin's object still EXISTS, not
+        that HEAD descends from it. After a wiki reset / force-pull to older
+        or divergent history the pin is newer/divergent — still reachable, but
+        not an ancestor of HEAD — and advancing the pin to HEAD would be a
+        downgrade, not an update. ``mm context status`` uses this to keep such
+        an entry out of the ``behind`` ("update available") bucket.
+
+        *commit* must be a full 40-hex object id for the same pin-contract
+        reason as :meth:`commit_is_reachable`: a symbolic ref (``main``) or an
+        abbreviated SHA must not silently satisfy the ancestry check. *of*
+        defaults to the symbolic ``HEAD`` and is passed through unvalidated —
+        it is the repo's own ref, not a stored pin.
+
+        Raises :class:`WikiNotFoundError` if the wiki itself is missing — the
+        caller decides whether that's a hard error or a graceful-degradation
+        path, exactly as :meth:`commit_is_reachable` does.
+        """
+        self.require_exists()
+        if not commit or _FULL_SHA_RE.fullmatch(commit) is None:
+            return False
+        result = _git_query(["merge-base", "--is-ancestor", commit, of], self.root)
+        return result.returncode == 0
+
     def is_dirty(self) -> bool:
         """``True`` when the wiki working tree has uncommitted modifications.
 

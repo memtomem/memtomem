@@ -438,6 +438,8 @@
   "settings.ctx.runtimes_glossary": "memtomem 이 동기화하는 AI 도구 — Claude Code, Codex, Kimi 등 이 컴퓨터에서 감지된 도구.",
   "settings.ctx.last_synced_label": "저장소 갱신",
   "settings.ctx.last_synced_tooltip": "기록된 동기화 이벤트가 아니라 저장소에서 가장 최근에 바뀐 파일의 수정 시각 기준입니다. 전체 동기화 없이 저장된 파일을 편집해도 이 값이 갱신됩니다.",
+  "settings.ctx.wiki_behind_badge": "위키 업데이트 가능: {n}",
+  "settings.ctx.wiki_behind_tip": "이 프로젝트에 설치된 자산 {n}개보다 위키에 더 새로운 커밋이 있습니다. 위키 섹션에서 업데이트하거나 `mm context update --all` 을 실행하세요.",
   "settings.ctx.runtime_undetected_tooltip": "이 프로젝트에서 감지되지 않음",
   "settings.ctx.refresh": "새로고침",
   "settings.ctx.sync_all": "전체 동기화",

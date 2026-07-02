@@ -17,6 +17,7 @@ from memtomem.context._names import GENERATOR_VENDOR
 from memtomem.context.projects import sync_skip_reason
 from memtomem.context.status import (
     ProjectStatus,
+    classify_status,
     collect_project_status,
     summarize_diff_with_canonical,
     summarize_settings_statuses,
@@ -72,6 +73,43 @@ def sanitize_diff_reason(message: str | None, project_root: Path) -> str | None:
     for root in sorted(roots, key=len, reverse=True):
         cleaned = cleaned.replace(root + os.sep, "").replace(root, ".")
     return _redact_message(cleaned)
+
+
+def _safe_rel(p: Path, project_root: Path) -> str:
+    """Project-relative path as a POSIX string for API payloads.
+
+    ``.as_posix()`` (not ``str``) so ``canonical_path`` / ``path`` fields come
+    back ``/``-separated on every platform — the Web UI and diff payloads pin
+    POSIX separators (#1256; the ``PureWindowsPath`` guard is #1325). Falls back
+    to the absolute POSIX path for user-tier locations outside ``project_root``.
+    Shared by the skills / commands / agents / mcp-servers routes so the
+    path-sanitization boundary cannot drift per kind (same rationale as
+    ``sanitize_diff_reason``) — the per-kind copies DID drift: #1412 hardened
+    only the mcp-servers variant, leaving the others latent (#1264 parity).
+
+    ``p`` is a ``.resolve()``'d canonical/runtime path (``canonical_artifact_dir``
+    resolves), but the route may receive an unresolved/symlinked ``project_root``
+    (macOS ``/tmp``→``/private/tmp``, a symlinked home, a case-variant mount),
+    so ``relative_to`` against the bare root raises ``ValueError`` and the
+    fallback would emit the ABSOLUTE resolved path to the loopback dashboard
+    (#1412, the same disclosure as the parse-error reason). Try the resolved
+    root too before falling back. ``resolve()`` lives only on concrete ``Path``
+    objects — the cross-platform ``PureWindowsPath`` tests (#1325) drive this
+    with a pure path, so the resolved attempt is guarded and skipped there.
+    """
+    roots = [project_root]
+    try:
+        resolved_root = project_root.resolve()
+    except (AttributeError, OSError):
+        resolved_root = project_root
+    if resolved_root != project_root:
+        roots.append(resolved_root)
+    for root in roots:
+        try:
+            return p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return p.as_posix()
 
 
 def read_text_lenient(path: Path) -> str | None:
@@ -351,6 +389,38 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
+    # Wiki-install staleness axis (0629 backlog c/d): the count of installed
+    # assets whose lockfile pin sits behind wiki HEAD ("update available").
+    # This is the lockfile↔wiki axis — none of the canonical→runtime tiles
+    # above carry it, and the cross-project /context/status-all route that
+    # does has zero web consumers by design. ``None`` (not zeros) on failure:
+    # the badge is a pure header enhancement, but "0 behind" is a clean-state
+    # claim we can't back when the classifier itself raised.
+    wiki_installs: dict[str, int] | None
+    try:
+        if target_scope == "project_shared":
+            # classify_status shells out to git per lockfile entry
+            # (HEAD probe + per-pin reachability), so it runs off the event
+            # loop (#1145 discipline); the diff blocks above are filesystem
+            # reads only.
+            _wiki_head, status_rows = await asyncio.to_thread(classify_status, project_root)
+            tracked = [
+                row
+                for row in status_rows
+                if row.tier == "project_shared" and row.state != "untracked"
+            ]
+            wiki_installs = {
+                "total": len(tracked),
+                "behind": sum(1 for row in tracked if row.state == "behind"),
+            }
+        else:
+            # Wiki installs are lockfile-tracked project_shared snapshots
+            # only — mirror the mcp_servers single-tier placeholder.
+            wiki_installs = {"total": 0, "behind": 0}
+    except Exception:
+        logger.exception("classify_status failed")
+        wiki_installs = None
+
     try:
         detected_runtimes = _compute_detected_runtimes(project_root)
     except Exception:
@@ -368,6 +438,7 @@ async def context_overview(
         "project_root": str(project_root),
         "detected_runtimes": detected_runtimes,
         "last_synced_at": last_synced_at,
+        "wiki_installs": wiki_installs,
         **result,
     }
 

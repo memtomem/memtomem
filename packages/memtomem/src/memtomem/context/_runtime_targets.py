@@ -188,8 +188,11 @@ class DiffRow(tuple):
     field with the ``validate_name`` message).
 
     ``reason`` is raw, unsanitized engine text (exception messages embed
-    absolute source paths) — web routes sanitize at the wire boundary,
-    CLI/MCP print it for the local operator verbatim.
+    absolute source paths) — the web routes AND the MCP context tools sanitize
+    it at their wire boundary (``web/routes/context_gateway.sanitize_diff_reason``
+    / ``context.error_redact.redact_engine_reason``), since both surface the
+    reason beyond the host; only the CLI prints it for the local operator
+    verbatim.
     """
 
     reason: str | None

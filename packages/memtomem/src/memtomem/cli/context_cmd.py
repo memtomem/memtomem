@@ -1187,7 +1187,11 @@ def generate_cmd(
                 click.echo(f"  {name:10s}  {gen.output_path}")
     elif not inc:
         click.secho(f"{CONTEXT_FILENAME} not found. Run 'mm context init' first.", fg="red")
-        return
+        # Exit non-zero so a script / CI wrapping `mm context generate` can
+        # detect the refusal — this used to `return` and still exit 0. Raise
+        # SystemExit (not ClickException) to keep the red guidance text exactly
+        # as printed, matching the `seed-validation` scan leg's convention.
+        raise SystemExit(1)
     else:
         click.secho(f"  ({CONTEXT_FILENAME} missing — skipping project memory)", fg="yellow")
 
@@ -1359,7 +1363,16 @@ def sync_cmd(
     label: str | None,
     force_unsafe: bool,
 ) -> None:
-    """Sync context.md to all detected agent files."""
+    """Sync context.md + included artifacts to detected agent files.
+
+    Regenerates the detected project-memory files (CLAUDE.md / GEMINI.md /
+    .cursorrules / …) from ``.memtomem/context.md``. For every kind passed via
+    ``--include`` it also fans out the canonical artifacts: skills, agents,
+    commands, settings, and (opt-in) mcp-servers. ``--all-projects`` syncs
+    every enrolled/discovered project (project_shared tier only); ``--scope`` /
+    ``--label`` pick the artifact tier; ``--force-unsafe`` bypasses Gate A on a
+    reviewed false positive (user / project_local destinations only).
+    """
     # sync accepts mcp-servers on top of the shared kinds (#1311); the other
     # context commands keep the default _KNOWN_INCLUDES set.
     inc = _parse_include(include, allowed=_SYNC_INCLUDES)
@@ -1389,7 +1402,7 @@ def sync_cmd(
         return
 
     root = _find_project_root()
-    if _run_sync_legs(
+    if not _run_sync_legs(
         root,
         inc=inc,
         strict=strict,
@@ -1399,7 +1412,13 @@ def sync_cmd(
         label=label,
         force_unsafe=force_unsafe,
     ):
-        click.secho("Synced.", fg="green")
+        # _run_sync_legs returns False only on the single-project
+        # missing-context.md refusal (red note already printed, no legs ran).
+        # Exit non-zero so a script / CI wrapping `mm context sync` can detect
+        # it — this used to just skip `Synced.` and still exit 0. Mirrors
+        # generate_cmd; batch mode never reaches the False leg.
+        raise SystemExit(1)
+    click.secho("Synced.", fg="green")
 
 
 def _run_sync_legs(
@@ -1419,8 +1438,9 @@ def _run_sync_legs(
 
     Returns False only on the single-project missing-``context.md`` early
     refusal (no legs ran — the caller must not print ``Synced.``, the
-    historical behavior Codex impl review caught a regression on); True
-    on every path that ran the legs.
+    historical behavior Codex impl review caught a regression on, and now
+    exits non-zero so a script/CI can detect the refusal); True on every
+    path that ran the legs.
 
     The extracted body of ``mm context sync`` — the single-project path
     calls it once with ``batch=False`` and keeps its historical behavior
@@ -1906,12 +1926,22 @@ _WIKI_DIRTY_WARN = "warning: wiki has uncommitted changes; using HEAD which does
     is_flag=True,
     help="Overwrite local edits; each dirty file is preserved as <file>.bak.",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Classify and print the preview only — nothing is written and no "
+        "prompt is shown. Exits 0 whenever the preview was computable, "
+        "including rows the real run would refuse."
+    ),
+)
 def update_cmd(
     asset_type: str,
     name: str,
     all_projects: bool,
     yes: bool,
     force: bool,
+    dry_run: bool,
 ) -> None:
     """Refresh an installed wiki asset from the wiki HEAD.
 
@@ -1928,6 +1958,11 @@ def update_cmd(
     skips the prompt for automation. ``--yes --force`` is the
     automation invariant — destructive batch with WARNING on stderr,
     no prompt.
+
+    With ``--dry-run``: print the same 4-state preview and stop — no
+    writes, no prompt. Works with and without ``--all``; a not-installed
+    asset still exits non-zero with the install hint (a dry run of an
+    impossible update fails the way the real run would).
     """
     root = _find_project_root()
 
@@ -1943,7 +1978,11 @@ def update_cmd(
         click.secho(_WIKI_DIRTY_WARN, fg="yellow", err=True)
 
     if all_projects:
-        _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force)
+        _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force, dry_run=dry_run)
+        return
+
+    if dry_run:
+        _run_update_dry_run_single(asset_type, name, root, wiki=wiki)
         return
 
     try:
@@ -2000,6 +2039,65 @@ def update_cmd(
         )
 
 
+def _run_update_dry_run_single(
+    asset_type: str,
+    name: str,
+    root: Path,
+    *,
+    wiki: WikiStore,
+) -> None:
+    """Read-only preview for the single-project ``update --dry-run`` path.
+
+    Reuses :func:`_classify_for_all_update` with a one-project list so the
+    preview carries the exact gate parity the ``--all`` table already has
+    (dirty / flat-layout / unprovable-record, #1247 id 13 family): what
+    this prints as ``refuse`` is what the real run would raise as
+    ``StaleInstallError`` — no duplicated gate logic to drift.
+    """
+    asset_type_plural = f"{asset_type}s"
+    try:
+        new_commit, classifications = _classify_for_all_update(
+            asset_type_plural,
+            name,
+            wiki=wiki,
+            projects=[root],
+        )
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AssetNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except WikiUnbornHeadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not classifications:
+        # Not-installed parity: the classifier silently skips entry-less
+        # projects (right for the batch table, wrong for a targeted single
+        # asset) — fail with the same hint shape the real run's
+        # NotInstalledError carries, so `--dry-run` never reports an
+        # impossible update as previewable.
+        raise click.ClickException(
+            f"{asset_type_plural}/{name}: no lockfile entry; "
+            f"run `mm context install {asset_type} {name}` first"
+        )
+
+    _print_classification_table(classifications, asset_type_plural, name, new_commit)
+
+    row = classifications[0]
+    if row.state == "update":
+        old = (row.lock_entry or {}).get("wiki_commit", "")
+        old_abbr = old[:12] if isinstance(old, str) and old else "(unpinned)"
+        click.echo(f"\nDry run — nothing written; would update {old_abbr} → {new_commit[:12]}.")
+    elif row.state == "unchanged":
+        click.echo("\nDry run — nothing written; already up to date.")
+    elif row.state == "refuse":
+        click.echo(
+            "\nDry run — nothing written; the real run would refuse "
+            "(see reason above; --force overwrites with .bak siblings)."
+        )
+    else:  # "error"
+        click.echo("\nDry run — nothing written; lockfile error (see reason above).")
+
+
 def _run_update_all(
     asset_type: str,
     name: str,
@@ -2008,6 +2106,7 @@ def _run_update_all(
     wiki: WikiStore,
     yes: bool,
     force: bool,
+    dry_run: bool = False,
 ) -> None:
     """Orchestrate ``mm context update <type> <name> --all``.
 
@@ -2090,6 +2189,18 @@ def _run_update_all(
 
     if not needs_update and not needs_force and not has_errors:
         click.echo("\nAll projects are up to date.")
+        return
+
+    if dry_run:
+        # Preview verb: report what the wet run would do and stop — exit 0
+        # even with refuse/error rows (the table already shows them; the
+        # refusal exit belongs to the run that actually intends to write).
+        parts = [f"{len(needs_update)} would update"]
+        if needs_force:
+            parts.append(f"{len(needs_force)} would refuse without --force")
+        if has_errors:
+            parts.append(f"{len(has_errors)} in error")
+        click.echo(f"\nDry run — nothing written; {', '.join(parts)}.")
         return
 
     if needs_force and not force:
@@ -5251,7 +5362,7 @@ def projects_resume_cmd(selector: str) -> None:
     "--force",
     is_flag=True,
     default=False,
-    help="Re-seed even if DIRECTORY already contains a .memtomem/ Store.",
+    help="Seed even if DIRECTORY is non-empty (a real project is otherwise never overwritten).",
 )
 @click.option(
     "--json",
