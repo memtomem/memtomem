@@ -60,6 +60,15 @@ installed version. See <https://github.com/memtomem/memtomem> for the
 project README and ADR-0008 (the wiki layer design document).
 """
 
+#: Seeded (and committed) by :meth:`WikiStore.init`. Editor Saves and
+#: ``seed --force`` leave ``<file>.bak`` recovery siblings in the working
+#: tree; without this they keep the wiki permanently dirty between Saves
+#: and commits, and a manual ``git add .`` sweeps them into history.
+_GITIGNORE_TEMPLATE = """# Save/seed recovery backups (mm wiki editor, seed --force) — local-only,
+# cleaned up by the isolated commit flow; never meant for history.
+*.bak
+"""
+
 
 class WikiNotFoundError(RuntimeError):
     """Raised when a wiki operation runs on a path that is not a wiki."""
@@ -343,6 +352,7 @@ class WikiStore:
                 (asset_dir / ".gitkeep").write_text("", encoding="utf-8")
 
             (self.root / "README.md").write_text(_README_TEMPLATE, encoding="utf-8")
+            (self.root / ".gitignore").write_text(_GITIGNORE_TEMPLATE, encoding="utf-8")
 
             _git(["init", "-b", "main"], cwd=self.root)
             _git(["add", "."], cwd=self.root)
@@ -362,6 +372,7 @@ class WikiStore:
                 for asset_type in WIKI_ASSET_TYPES:
                     _force_rmtree(self.root / asset_type)
                 (self.root / "README.md").unlink(missing_ok=True)
+                (self.root / ".gitignore").unlink(missing_ok=True)
             else:
                 _force_rmtree(self.root)
             raise
@@ -382,6 +393,53 @@ class WikiStore:
         # value must never be parsed as a git option (``--upload-pack=<cmd>``
         # would run an arbitrary command). Same guard on remote add/set-url.
         _git(["clone", "--", url, str(self.root)], cwd=self.root.parent)
+        # The cloned history may predate the scaffold ``.gitignore`` — make
+        # Save backups invisible to status in this clone right away.
+        self.ensure_bak_excluded()
+
+    def ensure_bak_excluded(self) -> None:
+        """Make Save backups (``*.bak``) invisible to git status in THIS clone.
+
+        New wikis get a tracked ``.gitignore`` from the :meth:`init` scaffold;
+        wikis created before it existed (or cloned from a remote whose history
+        lacks one) turn permanently dirty on the first editor Save / ``seed
+        --force`` and sweep the backups into history on a manual ``git add .``.
+        The retrofit cannot be a tracked file: writing an untracked
+        ``.gitignore`` would itself dirty the tree, and auto-committing one
+        mutates the user's history. So the exclusion lands in
+        ``.git/info/exclude`` — local-only, invisible to status, idempotent.
+
+        Best-effort by design: the ``.bak`` writers call this inline, and a
+        Save must never fail because the exclusion could not be recorded
+        (read-only ``.git``, exotic gitdir) — failures log at warning level
+        and the Save proceeds.
+        """
+        try:
+            if not self.exists():
+                return
+            gitignore = self.root / ".gitignore"
+            if gitignore.is_file() and "*.bak" in gitignore.read_text(
+                encoding="utf-8", errors="replace"
+            ):
+                return  # the durable, tracked form already covers it
+            # Resolve the real gitdir instead of assuming ``root/.git`` is a
+            # directory (a repo with a separate/linked gitdir has a file there).
+            result = _git(["rev-parse", "--git-dir"], cwd=self.root)
+            git_dir = Path(result.stdout.strip())
+            if not git_dir.is_absolute():
+                git_dir = self.root / git_dir
+            exclude = git_dir / "info" / "exclude"
+            existing = (
+                exclude.read_text(encoding="utf-8", errors="replace") if exclude.is_file() else ""
+            )
+            if "*.bak" in existing.splitlines():
+                return
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            prefix = "" if not existing or existing.endswith("\n") else "\n"
+            with exclude.open("a", encoding="utf-8") as fh:
+                fh.write(f"{prefix}# memtomem: editor Save / seed --force backups\n*.bak\n")
+        except (OSError, RuntimeError) as exc:
+            logger.warning("wiki: could not record *.bak exclusion: %s", exc)
 
     # ── Remote / backup (ADR-0008: "git remotes — no new sync protocol") ─────
     #

@@ -473,6 +473,100 @@ def test_copy_as_rename_with_overrides_emits_note(two_projects):
     assert dst_override.read_text(encoding="utf-8") == override_bytes
 
 
+def test_copy_as_rename_dry_run_previews_overrides_note(two_projects):
+    """The plan the user confirms must carry the same overrides caveat the
+    apply prints — notes used to be computed on the apply path only, so the
+    dry-run stayed silent about exactly the review work the user was about
+    to sign up for (T2-6)."""
+    src_manifest = _write_canonical(
+        two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
+    )
+    override = src_manifest.parent / "overrides" / "claude.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("---\nname: foo\n---\n\noverride body\n", encoding="utf-8")
+
+    result = transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="copy",
+        apply_=False,
+        new_name="bar",
+    )
+
+    assert result.transferred is False
+    assert len(result.notes) == 1 and "overrides" in result.notes[0]
+    # Dry-run wrote nothing.
+    assert not (_canonical_root(two_projects, "agents", "project_shared", "b") / "bar").exists()
+
+
+def test_copy_as_rename_dry_run_without_overrides_has_no_note(two_projects):
+    """Apply-parity in the other direction: no overrides → the preview must
+    not invent a caveat."""
+    _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
+
+    result = transfer_artifact(
+        "agents",
+        "foo",
+        src_project_root=two_projects["a"],
+        from_scope="project_shared",
+        dst_project_root=two_projects["b"],
+        to_scope="project_shared",
+        mode="copy",
+        apply_=False,
+        new_name="bar",
+    )
+
+    assert result.notes == ()
+
+
+def test_partial_move_message_project_local_omits_noop_sync_hint():
+    """A ``project_local`` destination has no runtime fan-out (ADR-0011 §3),
+    so the partial-move remediation must not tell the user to run the
+    NO_FANOUT no-op ``mm context sync --scope project_local`` — while the
+    real warning (stale-source fan-out) stays intact. Covers both the
+    same-root (migrate wording) and cross-root (transfer wording) branches."""
+    from memtomem.context.transfer import _partial_move_message
+
+    # Build the expected clause from the SAME Path object — the message embeds
+    # str(src_path), which is backslash-joined on Windows, so a literal POSIX
+    # string here fails on windows-latest only (the #1325/#838 trap class).
+    src = Path("/src/agents/foo")
+    for cross_root in (False, True):
+        msg = _partial_move_message(
+            "agents",
+            "foo",
+            src,
+            Path("/dst/agents.local/foo"),
+            "project_shared",
+            "project_local",
+            18,
+            cross_root,
+            None,
+        )
+        assert "mm context sync --scope project_local" not in msg, msg
+        assert "then run" not in msg, msg
+        assert f"Remove {src} manually." in msg
+        assert "do NOT run `mm context sync --scope project_shared`" in msg
+
+    # Fan-out-bearing destinations keep the follow-up instruction verbatim.
+    kept = _partial_move_message(
+        "agents",
+        "foo",
+        Path("/src/agents/foo"),
+        Path("/dst/agents/foo"),
+        "project_shared",
+        "user",
+        18,
+        True,
+        "mm context sync --scope user",
+    )
+    assert "then run `mm context sync --scope user`" in kept
+
+
 def test_copy_flat_layout_cross_project_as_rename(two_projects):
     """Flat-layout canonical copies as a flat file; rename rewrites its frontmatter."""
     src_root = _canonical_root(two_projects, "agents", "project_shared", "a")

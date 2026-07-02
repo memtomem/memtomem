@@ -218,8 +218,11 @@ class TestContextVersionCliInline:
 
         r = runner.invoke(cli, ["context", "version", "create", "agents", "flat-agent"])
         assert r.exit_code != 0
-        # The hint must embed the runnable (plural) migrate command — the
+        # The hint leads with `version enable` (works for ANY flat canonical —
+        # migrate skips a non-lockfile flat as skip_manual) and keeps the
+        # runnable (plural) migrate command for wiki-installed assets; the
         # singular form trips Click's invalid-choice error when pasted.
+        assert "mm context version enable agents flat-agent" in r.output
         assert "mm context migrate agents flat-agent" in r.output
 
     def test_version_create_blocks_secret_in_project_shared(self, tmp_path, monkeypatch):
@@ -292,6 +295,135 @@ class TestContextVersionCliInline:
         assert r.exit_code == 0, r.output
         out = (project / ".claude/commands/my-cmd.md").read_text(encoding="utf-8")
         assert "M:A" in out and "M:B" not in out
+
+    def _cli_project(self, tmp_path, monkeypatch) -> tuple[Path, CliRunner]:
+        from memtomem.cli import _bootstrap
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        set_home(monkeypatch, home)
+        monkeypatch.setattr(_bootstrap, "_CONFIG_PATH", home / ".memtomem" / "config.json")
+        monkeypatch.chdir(project)
+        return project, CliRunner()
+
+    def test_version_delete_label_roundtrip(self, tmp_path, monkeypatch):
+        """CLI parity for the web DELETE label route / mem_context_label
+        (delete=True): promote from the CLI, drop from the CLI. Absent-label
+        delete is a no-op success; the reserved ``latest`` refuses."""
+        project, runner = self._cli_project(tmp_path, monkeypatch)
+        self._dir_agent(project, marker="A")
+
+        r = runner.invoke(cli, ["context", "version", "create", "agents", "my-agent"])
+        assert r.exit_code == 0, r.output
+        r = runner.invoke(
+            cli,
+            [
+                "context",
+                "version",
+                "promote",
+                "agents",
+                "my-agent",
+                "--to",
+                "production",
+                "--version",
+                "v1",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        r = runner.invoke(
+            cli, ["context", "version", "delete-label", "agents", "my-agent", "production"]
+        )
+        assert r.exit_code == 0, r.output
+        assert "Dropped label 'production'" in r.output
+        r = runner.invoke(cli, ["context", "version", "list", "agents", "my-agent"])
+        assert "production" not in r.output
+
+        # Absent label — no-op, still exit 0 (web 200 mirror).
+        r = runner.invoke(
+            cli, ["context", "version", "delete-label", "agents", "my-agent", "production"]
+        )
+        assert r.exit_code == 0, r.output
+
+        # Reserved label — refused.
+        r = runner.invoke(
+            cli, ["context", "version", "delete-label", "agents", "my-agent", "latest"]
+        )
+        assert r.exit_code != 0
+        assert "reserved" in r.output
+
+    def test_version_delete_label_flat_layout_refuses(self, tmp_path, monkeypatch):
+        """A flat artifact has no version store — deleting must not report a
+        misleading no-op success (mirror of the web dir-layout gate)."""
+        project, runner = self._cli_project(tmp_path, monkeypatch)
+        flat_root = project / ".memtomem" / "agents"
+        flat_root.mkdir(parents=True, exist_ok=True)
+        (flat_root / "flat-agent.md").write_text(self._AGENT.format(m="A"), encoding="utf-8")
+
+        r = runner.invoke(
+            cli, ["context", "version", "delete-label", "agents", "flat-agent", "production"]
+        )
+        assert r.exit_code != 0
+        assert "mm context version enable agents flat-agent" in r.output
+
+    def test_version_enable_adopts_flat_then_create_works(self, tmp_path, monkeypatch):
+        """The rank-6 lockout, CLI edition: a hand-authored flat canonical is
+        skip_manual for migrate, so `version enable` is the adopt path —
+        byte-identical rename, after which `version create` works."""
+        project, runner = self._cli_project(tmp_path, monkeypatch)
+        flat_root = project / ".memtomem" / "agents"
+        flat_root.mkdir(parents=True, exist_ok=True)
+        flat = flat_root / "hand-made.md"
+        body = self._AGENT.replace("my-agent", "hand-made").format(m="A")
+        flat.write_text(body, encoding="utf-8")
+
+        r = runner.invoke(cli, ["context", "version", "enable", "agents", "hand-made"])
+        assert r.exit_code == 0, r.output
+        assert not flat.exists()
+        adopted = flat_root / "hand-made" / "agent.md"
+        assert adopted.read_text(encoding="utf-8") == body  # byte-identical
+
+        # Idempotent second call — no-op success.
+        r = runner.invoke(cli, ["context", "version", "enable", "agents", "hand-made"])
+        assert r.exit_code == 0, r.output
+        assert "nothing to do" in r.output
+
+        # The previously-locked-out verb now works.
+        r = runner.invoke(cli, ["context", "version", "create", "agents", "hand-made"])
+        assert r.exit_code == 0, r.output
+        assert (flat_root / "hand-made" / "versions" / "v1.md").is_file()
+
+    def test_version_enable_refuses_collision_and_orphan_store(self, tmp_path, monkeypatch):
+        """Web-route conflict parity: flat+dir collision and an orphaned
+        version store both refuse instead of silently mishandling."""
+        project, runner = self._cli_project(tmp_path, monkeypatch)
+        flat_root = project / ".memtomem" / "agents"
+
+        # flat+dir collision.
+        both = flat_root / "both"
+        both.mkdir(parents=True)
+        (both / "agent.md").write_text(self._AGENT.format(m="A"), encoding="utf-8")
+        (flat_root / "both.md").write_text(self._AGENT.format(m="A"), encoding="utf-8")
+        r = runner.invoke(cli, ["context", "version", "enable", "agents", "both"])
+        assert r.exit_code != 0
+        assert "both flat" in r.output
+
+        # Orphaned version store under the target dir.
+        (flat_root / "orphaned.md").write_text(self._AGENT.format(m="A"), encoding="utf-8")
+        orphan_dir = flat_root / "orphaned"
+        (orphan_dir / "versions").mkdir(parents=True)
+        r = runner.invoke(cli, ["context", "version", "enable", "agents", "orphaned"])
+        assert r.exit_code != 0
+        assert "orphaned version store" in r.output
+        assert (flat_root / "orphaned.md").is_file()  # untouched
+
+        # Nothing to adopt at all.
+        r = runner.invoke(cli, ["context", "version", "enable", "agents", "ghost"])
+        assert r.exit_code != 0
+        assert "No canonical artifact to adopt" in r.output
 
 
 class TestContextInitGenerateSubprocess:
