@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -225,327 +228,183 @@ _SYNC_INCLUDE_OPTION = click.option(
 )
 
 
-# ── Skill sub-handlers (shared by the commands below) ───────────────
+# ── Sub-artifact print handlers (skills / agents / commands) ────────
+#
+# The three include-kinds share verb-identical CLI rendering (detect /
+# init / generate / diff); the per-kind differences live in
+# ``_ArtifactPrintSpec`` so each printer exists once (#1516). Stdout is
+# pinned by the CLI tests — keep it byte-identical when editing here.
 
 
-def _print_skills_detect(root: Path) -> None:
-    skills = detect_skill_dirs(root)
-    if not skills:
-        click.echo("  (no skill directories)")
+def _skip_color(code: skip_codes.SkipCode) -> str:
+    """Privacy-refusal skips (Gate A hard refusals) render red; every
+    other skip reason is informational yellow."""
+    if code in (skip_codes.PRIVACY_BLOCKED, skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED):
+        return "red"
+    return "yellow"
+
+
+@dataclass(frozen=True)
+class _ArtifactPrintSpec:
+    """Per-kind wiring for the shared print handlers below (#1516)."""
+
+    kind: ArtifactKind  # --include key AND canonical dir name
+    width: int  # runtime column width in detect/generate/diff rows
+    detect_fn: Callable[[Path], Any]
+    detect_empty: str  # "(no <detect_empty>)" when nothing is detected
+    detect_noun: str  # "<N> <detect_noun>:" header over detected rows
+    extract_fn: Callable[..., Any]
+    import_noun: str  # "Imported <N> <import_noun> → <dest>"
+    import_plural: str  # "(no runtime <import_plural> imported into <scope>)"
+    render_imported: Callable[[Any], str]  # one ``result.imported`` element → display name
+    generate_fn: Callable[..., Any]
+    generate_label: str  # "<generate_label> fan-out: <N>"
+    generate_takes_strict: bool  # generate_fn accepts strict/on_drop/label kwargs
+    diff_fn: Callable[..., Any]
+    diff_plural: str  # "(no <diff_plural> to compare in <scope>)"
+
+
+_ARTIFACT_PRINT_SPECS: tuple[_ArtifactPrintSpec, ...] = (
+    _ArtifactPrintSpec(
+        kind="skills",
+        width=15,
+        detect_fn=detect_skill_dirs,
+        detect_empty="no skill directories",
+        detect_noun="skill(s)",
+        extract_fn=extract_skills_to_canonical,
+        import_noun="skill(s)",
+        import_plural="skills",
+        render_imported=lambda item: item.name,
+        generate_fn=generate_all_skills,
+        generate_label="Skills",
+        generate_takes_strict=False,
+        diff_fn=diff_skills,
+        diff_plural="skills",
+    ),
+    _ArtifactPrintSpec(
+        kind="agents",
+        width=15,
+        detect_fn=detect_agent_dirs,
+        detect_empty="no sub-agent files",
+        detect_noun="sub-agent file(s)",
+        extract_fn=extract_agents_to_canonical,
+        import_noun="sub-agent(s)",
+        import_plural="sub-agents",
+        render_imported=lambda item: canonical_agent_name(item[0], item[1]),
+        generate_fn=generate_all_agents,
+        generate_label="Sub-agent",
+        generate_takes_strict=True,
+        diff_fn=diff_agents,
+        diff_plural="sub-agents",
+    ),
+    _ArtifactPrintSpec(
+        kind="commands",
+        width=17,
+        detect_fn=detect_command_dirs,
+        detect_empty="no slash command files",
+        detect_noun="command file(s)",
+        extract_fn=extract_commands_to_canonical,
+        import_noun="command(s)",
+        import_plural="commands",
+        render_imported=lambda item: item[0].parent.name if item[1] == "dir" else item[0].stem,
+        generate_fn=generate_all_commands,
+        generate_label="Command",
+        generate_takes_strict=True,
+        diff_fn=diff_commands,
+        diff_plural="commands",
+    ),
+)
+
+
+def _print_artifact_detect(spec: _ArtifactPrintSpec, root: Path) -> None:
+    items = spec.detect_fn(root)
+    if not items:
+        click.echo(f"  ({spec.detect_empty})")
         return
-    click.secho(f"  {len(skills)} skill(s):", fg="cyan")
-    for s in skills:
-        rel = s.path.relative_to(root) if s.path.is_relative_to(root) else s.path
-        click.echo(f"    {s.agent:15s}  {rel}  ({s.size} bytes)")
+    click.secho(f"  {len(items)} {spec.detect_noun}:", fg="cyan")
+    for item in items:
+        rel = item.path.relative_to(root) if item.path.is_relative_to(root) else item.path
+        click.echo(f"    {item.agent:{spec.width}s}  {rel}  ({item.size} bytes)")
 
 
-def _print_skills_init(
+def _print_artifact_init(
+    spec: _ArtifactPrintSpec,
     root: Path,
     overwrite: bool,
     *,
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
 ) -> None:
-    result = extract_skills_to_canonical(
+    result = spec.extract_fn(
         root,
         overwrite=overwrite,
         scope=scope,
         force_unsafe_import=force_unsafe_import,
     )
     dest_label = (
-        canonical_artifact_dir("skills", scope, root)
+        canonical_artifact_dir(spec.kind, scope, root)
         if scope != "project_local"
         else "(skipped — project_local has no runtime fan-out)"
     )
     if result.imported:
-        click.secho(f"  Imported {len(result.imported)} skill(s) → {dest_label}", fg="green")
-        for p in result.imported:
-            click.echo(f"    {p.name}")
-    else:
-        click.echo(f"  (no runtime skills imported into {scope})")
-    for name, reason, code in result.skipped:
-        color = (
-            "red"
-            if code
-            in (
-                skip_codes.PRIVACY_BLOCKED,
-                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
-            )
-            else "yellow"
-        )
-        click.secho(f"    skipped {name}: {reason}", fg=color)
-
-
-def _print_skills_generate(
-    root: Path,
-    *,
-    scope: TargetScope = "project_shared",
-    surface: str = "cli_context_sync",
-    force_unsafe: bool = False,
-) -> None:
-    try:
-        result = generate_all_skills(root, scope=scope, surface=surface, force_unsafe=force_unsafe)
-    except PrivacyScanError as exc:
-        raise click.ClickException(exc.message) from exc
-    if result.generated:
-        click.secho(f"  Skills fan-out: {len(result.generated)}", fg="green")
-        for runtime, path in result.generated:
-            rel = path.relative_to(root) if path.is_relative_to(root) else path
-            click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason, code in result.skipped:
-        color = (
-            "red"
-            if code
-            in (
-                skip_codes.PRIVACY_BLOCKED,
-                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
-            )
-            else "yellow"
-        )
-        click.secho(f"  skipped {runtime}: {reason}", fg=color)
-
-
-def _print_skills_diff(root: Path, *, scope: TargetScope = "project_shared") -> None:
-    rows = diff_skills(root, scope=scope)
-    if not rows:
-        click.echo(f"  (no skills to compare in {scope})")
-        return
-    for row in rows:
-        runtime, name, status = row
-        color = "green" if status == "in sync" else "yellow"
-        # Diagnostic reason (parse error / invalid name rows, #1229 U7) —
-        # raw engine text is fine for the local operator.
-        reason = getattr(row, "reason", None)
-        suffix = f"  — {reason}" if reason else ""
-        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}{suffix}", fg=color)
-
-
-# ── Sub-agent sub-handlers (Phase 2) ─────────────────────────────────
-
-
-def _print_agents_detect(root: Path) -> None:
-    agents = detect_agent_dirs(root)
-    if not agents:
-        click.echo("  (no sub-agent files)")
-        return
-    click.secho(f"  {len(agents)} sub-agent file(s):", fg="cyan")
-    for a in agents:
-        rel = a.path.relative_to(root) if a.path.is_relative_to(root) else a.path
-        click.echo(f"    {a.agent:15s}  {rel}  ({a.size} bytes)")
-
-
-def _print_agents_init(
-    root: Path,
-    overwrite: bool,
-    *,
-    scope: TargetScope = "project_shared",
-    force_unsafe_import: bool = False,
-) -> None:
-    result = extract_agents_to_canonical(
-        root,
-        overwrite=overwrite,
-        scope=scope,
-        force_unsafe_import=force_unsafe_import,
-    )
-    dest_label = (
-        canonical_artifact_dir("agents", scope, root)
-        if scope != "project_local"
-        else "(skipped — project_local has no runtime fan-out)"
-    )
-    if result.imported:
-        click.secho(f"  Imported {len(result.imported)} sub-agent(s) → {dest_label}", fg="green")
-        for path, layout in result.imported:
-            click.echo(f"    {canonical_agent_name(path, layout)}")
-    else:
-        click.echo(f"  (no runtime sub-agents imported into {scope})")
-    for name, reason, code in result.skipped:
-        color = (
-            "red"
-            if code
-            in (
-                skip_codes.PRIVACY_BLOCKED,
-                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
-            )
-            else "yellow"
-        )
-        click.secho(f"    skipped {name}: {reason}", fg=color)
-
-
-def _print_agents_generate(
-    root: Path,
-    strict: bool,
-    on_drop: str = "ignore",
-    *,
-    scope: TargetScope = "project_shared",
-    label: str | None = None,
-    surface: str = "cli_context_sync",
-    force_unsafe: bool = False,
-) -> None:
-    try:
-        result = generate_all_agents(
-            root,
-            strict=strict,
-            on_drop=on_drop,
-            scope=scope,
-            label=label,
-            surface=surface,
-            force_unsafe=force_unsafe,
-        )
-    except StrictDropError as exc:
-        click.secho(f"  [strict] {exc}", fg="red")
-        raise click.Abort()
-    except PrivacyScanError as exc:
-        raise click.ClickException(exc.message) from exc
-
-    if result.generated:
-        click.secho(f"  Sub-agent fan-out: {len(result.generated)}", fg="green")
-        for runtime, path in result.generated:
-            try:
-                rel = path.relative_to(root) if path.is_relative_to(root) else path
-            except ValueError:
-                rel = path
-            click.echo(f"    {runtime:15s}  {rel}")
-    for runtime, reason, code in result.skipped:
-        color = (
-            "red"
-            if code
-            in (
-                skip_codes.PRIVACY_BLOCKED,
-                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
-            )
-            else "yellow"
-        )
-        click.secho(f"  skipped {runtime}: {reason}", fg=color)
-    for runtime, agent_name, dropped in result.dropped:
         click.secho(
-            f"  {runtime} dropped {dropped} from '{agent_name}'",
-            fg="yellow",
+            f"  Imported {len(result.imported)} {spec.import_noun} → {dest_label}", fg="green"
         )
-
-
-def _print_agents_diff(root: Path, *, scope: TargetScope = "project_shared") -> None:
-    rows = diff_agents(root, scope=scope)
-    if not rows:
-        click.echo(f"  (no sub-agents to compare in {scope})")
-        return
-    for row in rows:
-        runtime, name, status = row
-        color = "green" if status == "in sync" else "yellow"
-        # Diagnostic reason (parse error / invalid name rows, #1229 U7) —
-        # raw engine text is fine for the local operator.
-        reason = getattr(row, "reason", None)
-        suffix = f"  — {reason}" if reason else ""
-        click.secho(f"  {runtime:15s}  {name}  [{status}]  scope={scope}{suffix}", fg=color)
-
-
-# ── Slash-command sub-handlers (Phase 3) ─────────────────────────────
-
-
-def _print_commands_detect(root: Path) -> None:
-    cmds = detect_command_dirs(root)
-    if not cmds:
-        click.echo("  (no slash command files)")
-        return
-    click.secho(f"  {len(cmds)} command file(s):", fg="cyan")
-    for c in cmds:
-        rel = c.path.relative_to(root) if c.path.is_relative_to(root) else c.path
-        click.echo(f"    {c.agent:17s}  {rel}  ({c.size} bytes)")
-
-
-def _print_commands_init(
-    root: Path,
-    overwrite: bool,
-    *,
-    scope: TargetScope = "project_shared",
-    force_unsafe_import: bool = False,
-) -> None:
-    result = extract_commands_to_canonical(
-        root,
-        overwrite=overwrite,
-        scope=scope,
-        force_unsafe_import=force_unsafe_import,
-    )
-    dest_label = (
-        canonical_artifact_dir("commands", scope, root)
-        if scope != "project_local"
-        else "(skipped — project_local has no runtime fan-out)"
-    )
-    if result.imported:
-        click.secho(f"  Imported {len(result.imported)} command(s) → {dest_label}", fg="green")
-        for path, layout in result.imported:
-            display = path.parent.name if layout == "dir" else path.stem
-            click.echo(f"    {display}")
+        for item in result.imported:
+            click.echo(f"    {spec.render_imported(item)}")
     else:
-        click.echo(f"  (no runtime commands imported into {scope})")
+        click.echo(f"  (no runtime {spec.import_plural} imported into {scope})")
     for name, reason, code in result.skipped:
-        color = (
-            "red"
-            if code
-            in (
-                skip_codes.PRIVACY_BLOCKED,
-                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
-            )
-            else "yellow"
-        )
-        click.secho(f"    skipped {name}: {reason}", fg=color)
+        click.secho(f"    skipped {name}: {reason}", fg=_skip_color(code))
 
 
-def _print_commands_generate(
+def _print_artifact_generate(
+    spec: _ArtifactPrintSpec,
     root: Path,
-    strict: bool,
-    on_drop: str = "ignore",
     *,
     scope: TargetScope = "project_shared",
+    strict: bool = False,
+    on_drop: str = "ignore",
     label: str | None = None,
     surface: str = "cli_context_sync",
     force_unsafe: bool = False,
 ) -> None:
+    kwargs: dict[str, Any] = {"scope": scope, "surface": surface, "force_unsafe": force_unsafe}
+    if spec.generate_takes_strict:
+        kwargs.update(strict=strict, on_drop=on_drop, label=label)
     try:
-        result = generate_all_commands(
-            root,
-            strict=strict,
-            on_drop=on_drop,
-            scope=scope,
-            label=label,
-            surface=surface,
-            force_unsafe=force_unsafe,
-        )
-    except CommandStrictDropError as exc:
+        result = spec.generate_fn(root, **kwargs)
+    except (StrictDropError, CommandStrictDropError) as exc:
         click.secho(f"  [strict] {exc}", fg="red")
         raise click.Abort() from exc
     except PrivacyScanError as exc:
         raise click.ClickException(exc.message) from exc
 
     if result.generated:
-        click.secho(f"  Command fan-out: {len(result.generated)}", fg="green")
+        click.secho(f"  {spec.generate_label} fan-out: {len(result.generated)}", fg="green")
         for runtime, path in result.generated:
             try:
                 rel = path.relative_to(root) if path.is_relative_to(root) else path
             except ValueError:
                 rel = path
-            click.echo(f"    {runtime:17s}  {rel}")
+            click.echo(f"    {runtime:{spec.width}s}  {rel}")
     for runtime, reason, code in result.skipped:
-        color = (
-            "red"
-            if code
-            in (
-                skip_codes.PRIVACY_BLOCKED,
-                skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED,
-            )
-            else "yellow"
-        )
-        click.secho(f"  skipped {runtime}: {reason}", fg=color)
-    for runtime, cmd_name, dropped in result.dropped:
+        click.secho(f"  skipped {runtime}: {reason}", fg=_skip_color(code))
+    # Skills results carry no ``dropped`` (field-drop is an atomic-sync
+    # concept — agents/commands only).
+    for runtime, item_name, dropped in getattr(result, "dropped", ()):
         click.secho(
-            f"  {runtime} dropped {dropped} from '{cmd_name}'",
+            f"  {runtime} dropped {dropped} from '{item_name}'",
             fg="yellow",
         )
 
 
-def _print_commands_diff(root: Path, *, scope: TargetScope = "project_shared") -> None:
-    rows = diff_commands(root, scope=scope)
+def _print_artifact_diff(
+    spec: _ArtifactPrintSpec, root: Path, *, scope: TargetScope = "project_shared"
+) -> None:
+    rows = spec.diff_fn(root, scope=scope)
     if not rows:
-        click.echo(f"  (no commands to compare in {scope})")
+        click.echo(f"  (no {spec.diff_plural} to compare in {scope})")
         return
     for row in rows:
         runtime, name, status = row
@@ -554,7 +413,29 @@ def _print_commands_diff(root: Path, *, scope: TargetScope = "project_shared") -
         # raw engine text is fine for the local operator.
         reason = getattr(row, "reason", None)
         suffix = f"  — {reason}" if reason else ""
-        click.secho(f"  {runtime:17s}  {name}  [{status}]  scope={scope}{suffix}", fg=color)
+        click.secho(
+            f"  {runtime:{spec.width}s}  {name}  [{status}]  scope={scope}{suffix}", fg=color
+        )
+
+
+@contextmanager
+def _translate_to_click(*error_types: type[Exception]) -> Iterator[None]:
+    """Collapse an engine-error ``except`` ladder into one arm (#1516).
+
+    Every listed error type exits 1 as a one-line ``ClickException``
+    instead of a raw traceback. ``PrivacyScanError`` /
+    ``MigratePartialError`` surface their pre-formatted ``exc.message``
+    (the secret-free remediation text — ADR-0011 §5 for Gate A
+    refusals); everything else surfaces ``str(exc)``.
+    """
+    try:
+        yield
+    except error_types as exc:
+        if isinstance(exc, (PrivacyScanError, MigratePartialError)):
+            message = exc.message
+        else:
+            message = str(exc)
+        raise click.ClickException(message) from exc
 
 
 # ── Settings sub-handlers (Phase D) ─────────────────────────────────
@@ -884,17 +765,10 @@ def detect_cmd(include: tuple[str, ...]) -> None:
             rel = f.path.relative_to(root) if f.path.is_relative_to(root) else f.path
             click.echo(f"  {f.agent:10s}  {rel}  ({f.size} bytes)")
 
-    if "skills" in inc:
-        click.echo("")
-        _print_skills_detect(root)
-
-    if "agents" in inc:
-        click.echo("")
-        _print_agents_detect(root)
-
-    if "commands" in inc:
-        click.echo("")
-        _print_commands_detect(root)
+    for spec in _ARTIFACT_PRINT_SPECS:
+        if spec.kind in inc:
+            click.echo("")
+            _print_artifact_detect(spec, root)
 
     if "settings" in inc:
         click.echo("")
@@ -1085,32 +959,16 @@ def init_cmd(
     # --include runtime-import path. Gate A is applied inside each
     # extract_*_to_canonical helper (per-file for agents/commands;
     # tree walk for skills).
-    if "skills" in inc:
-        click.echo("")
-        _print_skills_init(
-            root,
-            overwrite=overwrite,
-            scope=scope,
-            force_unsafe_import=force_unsafe_import,
-        )
-
-    if "agents" in inc:
-        click.echo("")
-        _print_agents_init(
-            root,
-            overwrite=overwrite,
-            scope=scope,
-            force_unsafe_import=force_unsafe_import,
-        )
-
-    if "commands" in inc:
-        click.echo("")
-        _print_commands_init(
-            root,
-            overwrite=overwrite,
-            scope=scope,
-            force_unsafe_import=force_unsafe_import,
-        )
+    for spec in _ARTIFACT_PRINT_SPECS:
+        if spec.kind in inc:
+            click.echo("")
+            _print_artifact_init(
+                spec,
+                root,
+                overwrite=overwrite,
+                scope=scope,
+                force_unsafe_import=force_unsafe_import,
+            )
 
 
 def _read_agent_file(path: Path) -> str:
@@ -1204,21 +1062,12 @@ def generate_cmd(
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
     _warn_label_ineligible_kinds(label, inc)
 
-    if "skills" in inc:
-        click.echo("")
-        _print_skills_generate(root, scope=artifact_scope)
-
-    if "agents" in inc:
-        click.echo("")
-        _print_agents_generate(
-            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
-        )
-
-    if "commands" in inc:
-        click.echo("")
-        _print_commands_generate(
-            root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
-        )
+    for spec in _ARTIFACT_PRINT_SPECS:
+        if spec.kind in inc:
+            click.echo("")
+            _print_artifact_generate(
+                spec, root, strict=strict, on_drop=on_drop, scope=artifact_scope, label=label
+            )
 
     if "settings" in inc:
         click.echo("")
@@ -1291,17 +1140,10 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     # generate/sync wrote (#1123 B2-2).
     artifact_scope = _resolve_artifact_cli_scope(scope_flag)
 
-    if "skills" in inc:
-        click.echo("")
-        _print_skills_diff(root, scope=artifact_scope)
-
-    if "agents" in inc:
-        click.echo("")
-        _print_agents_diff(root, scope=artifact_scope)
-
-    if "commands" in inc:
-        click.echo("")
-        _print_commands_diff(root, scope=artifact_scope)
+    for spec in _ARTIFACT_PRINT_SPECS:
+        if spec.kind in inc:
+            click.echo("")
+            _print_artifact_diff(spec, root, scope=artifact_scope)
 
     if "settings" in inc:
         click.echo("")
@@ -1511,35 +1353,19 @@ def _run_sync_legs(
     if not batch:
         _warn_label_ineligible_kinds(label, inc)
 
-    if "skills" in inc:
-        click.echo("")
-        _print_skills_generate(
-            root, scope=artifact_scope, surface=surface, force_unsafe=force_unsafe
-        )
-
-    if "agents" in inc:
-        click.echo("")
-        _print_agents_generate(
-            root,
-            strict=strict,
-            on_drop=on_drop,
-            scope=artifact_scope,
-            label=label,
-            surface=surface,
-            force_unsafe=force_unsafe,
-        )
-
-    if "commands" in inc:
-        click.echo("")
-        _print_commands_generate(
-            root,
-            strict=strict,
-            on_drop=on_drop,
-            scope=artifact_scope,
-            label=label,
-            surface=surface,
-            force_unsafe=force_unsafe,
-        )
+    for spec in _ARTIFACT_PRINT_SPECS:
+        if spec.kind in inc:
+            click.echo("")
+            _print_artifact_generate(
+                spec,
+                root,
+                strict=strict,
+                on_drop=on_drop,
+                scope=artifact_scope,
+                label=label,
+                surface=surface,
+                force_unsafe=force_unsafe,
+            )
 
     if "settings" in inc:
         click.echo("")
@@ -1982,7 +1808,16 @@ def install_cmd(
         raise click.UsageError("--yes / --force only valid with --all")
 
     root = _find_project_root()
-    try:
+    # PrivacyScanError here is a Gate A refusal (ADR-0011 §5, #1247).
+    with _translate_to_click(
+        WikiNotFoundError,
+        WikiUnbornHeadError,
+        AssetNotFoundError,
+        AlreadyInstalledError,
+        InvalidNameError,
+        LockfileError,
+        PrivacyScanError,
+    ):
         if asset_type == "skill":
             result = install_skill(root, name)
         elif asset_type == "agent":
@@ -1991,23 +1826,6 @@ def install_cmd(
             result = install_command(root, name)
         else:  # pragma: no cover — guarded by click.Choice
             raise click.ClickException(f"unknown asset type: {asset_type}")
-    except WikiNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except WikiUnbornHeadError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AssetNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AlreadyInstalledError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except InvalidNameError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except LockfileError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except PrivacyScanError as exc:
-        # Gate A refusal (ADR-0011 §5, #1247) — exc.message carries the
-        # remediation hint; ClickException keeps the secret-free message
-        # and exits 1 without a traceback.
-        raise click.ClickException(exc.message) from exc
 
     click.secho(
         f"Installed {result.asset_type}/{result.name} (wiki {result.wiki_commit[:12]})",
@@ -2099,7 +1917,17 @@ def update_cmd(
         _run_update_dry_run_single(asset_type, name, root, wiki=wiki)
         return
 
-    try:
+    # PrivacyScanError here is a Gate A refusal (ADR-0011 §5, #1247).
+    with _translate_to_click(
+        WikiNotFoundError,
+        WikiUnbornHeadError,
+        AssetNotFoundError,
+        NotInstalledError,
+        StaleInstallError,
+        InvalidNameError,
+        LockfileError,
+        PrivacyScanError,
+    ):
         if asset_type == "skill":
             result = update_skill(root, name, wiki=wiki, force=force)
         elif asset_type == "agent":
@@ -2108,23 +1936,6 @@ def update_cmd(
             result = update_command(root, name, wiki=wiki, force=force)
         else:  # pragma: no cover — guarded by click.Choice
             raise click.ClickException(f"unknown asset type: {asset_type}")
-    except WikiNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except WikiUnbornHeadError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AssetNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except NotInstalledError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except StaleInstallError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except InvalidNameError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except LockfileError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except PrivacyScanError as exc:
-        # Gate A refusal (ADR-0011 §5, #1247) — see install_cmd's arm.
-        raise click.ClickException(exc.message) from exc
 
     if result.was_no_op:
         click.secho(
@@ -2169,19 +1980,13 @@ def _run_update_dry_run_single(
     ``StaleInstallError`` — no duplicated gate logic to drift.
     """
     asset_type_plural = f"{asset_type}s"
-    try:
+    with _translate_to_click(InvalidNameError, AssetNotFoundError, WikiUnbornHeadError):
         new_commit, classifications = _classify_for_all_update(
             asset_type_plural,
             name,
             wiki=wiki,
             projects=[root],
         )
-    except InvalidNameError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except AssetNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except WikiUnbornHeadError as exc:
-        raise click.ClickException(str(exc)) from exc
 
     if not classifications:
         # Not-installed parity: the classifier silently skips entry-less
@@ -2270,23 +2075,18 @@ def _run_update_all(
 
     asset_type_plural = f"{asset_type}s"
 
-    try:
+    # InvalidNameError: the validation gate fires before any per-project
+    # loop runs — the message names the rejected input verbatim.
+    # WikiUnbornHeadError: ``current_commit`` fires once at classification
+    # entry — a commit-less wiki (clone of an empty remote) has no HEAD to
+    # update to.
+    with _translate_to_click(InvalidNameError, AssetNotFoundError, WikiUnbornHeadError):
         new_commit, classifications = _classify_for_all_update(
             asset_type_plural,
             name,
             wiki=wiki,
             projects=project_roots,
         )
-    except InvalidNameError as exc:
-        # Validation gate fires before any per-project loop runs; surface
-        # the message verbatim so the user knows which name was rejected.
-        raise click.ClickException(str(exc)) from exc
-    except AssetNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except WikiUnbornHeadError as exc:
-        # ``current_commit`` fires once at classification entry — a commit-less
-        # wiki (clone of an empty remote) has no HEAD to update to.
-        raise click.ClickException(str(exc)) from exc
 
     if not classifications:
         click.echo(
@@ -3006,7 +2806,14 @@ def _migrate_scope_dispatch(
         ):
             raise click.Abort()
 
-    try:
+    # On MigratePartialError the fan-out cleanup never ran (raise
+    # short-circuited), and the "Next: run sync ..." hint at the bottom
+    # of _print_migrate_scope_result is skipped because we exit before
+    # the result rendering — the user sees only the recovery hint
+    # embedded in exc.message.
+    with _translate_to_click(
+        FileNotFoundError, ValueError, InvalidNameError, PrivacyScanError, MigratePartialError
+    ):
         result = migrate_scope(
             asset_type,  # type: ignore[arg-type]
             name,
@@ -3015,17 +2822,6 @@ def _migrate_scope_dispatch(
             project_root=project_root,
             apply_=apply_,
         )
-    except (FileNotFoundError, ValueError, InvalidNameError) as exc:
-        raise click.ClickException(str(exc)) from exc
-    except PrivacyScanError as exc:
-        raise click.ClickException(exc.message) from exc
-    except MigratePartialError as exc:
-        # Fan-out cleanup never ran (raise short-circuited), and the
-        # "Next: run sync ..." hint at the bottom of
-        # _print_migrate_scope_result is skipped because we exit before
-        # the result rendering — the user sees only the recovery hint
-        # embedded in exc.message.
-        raise click.ClickException(exc.message) from exc
 
     _print_migrate_scope_result(result, apply_=apply_)
 
@@ -3680,11 +3476,18 @@ def _transfer_dispatch(
             raise click.Abort()
 
     result: TransferResult | McpServerCopyResult
-    try:
+    # Same translation set as _migrate_scope_dispatch — the engine's
+    # validate_name raises InvalidNameError (not ClickException), and
+    # deep filesystem paths can surface OS errors; without this the
+    # CLI dies with a traceback instead of a one-line error.
+    with _translate_to_click(
+        FileNotFoundError, ValueError, InvalidNameError, PrivacyScanError, MigratePartialError
+    ):
         if is_mcp:
             # Cross-project-only, copy-only; the adapter re-raises the
             # engine's typed collision/not-found errors and the standard
-            # Gate A envelope, so the translation set below is shared.
+            # Gate A envelope, so the translation set is shared with
+            # transfer_artifact.
             result = copy_mcp_server(
                 name,
                 src_project_root=src_root,
@@ -3705,16 +3508,6 @@ def _transfer_dispatch(
                 surface=f"cli_context_{mode}",
                 new_name=new_name,
             )
-    except (FileNotFoundError, ValueError, InvalidNameError) as exc:
-        # Same translation set as _migrate_scope_dispatch — the engine's
-        # validate_name raises InvalidNameError (not ClickException), and
-        # deep filesystem paths can surface OS errors; without this the
-        # CLI dies with a traceback instead of a one-line error.
-        raise click.ClickException(str(exc)) from exc
-    except PrivacyScanError as exc:
-        raise click.ClickException(exc.message) from exc
-    except MigratePartialError as exc:
-        raise click.ClickException(exc.message) from exc
 
     _print_transfer_result(result, apply_=apply_)
 
