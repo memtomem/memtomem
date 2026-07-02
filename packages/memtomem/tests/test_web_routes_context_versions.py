@@ -717,3 +717,32 @@ class TestEnableVersioning:
         assert sorted([r1.json()["migrated"], r2.json()["migrated"]]) == [False, True]
         assert (tmp_path / ".memtomem" / "agents" / "racer" / "agent.md").is_file()
         assert not (tmp_path / ".memtomem" / "agents" / "racer.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Invalid-name envelope parity across the five version/label routes (#1519)
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidNameEnvelopeParity:
+    @pytest.mark.anyio
+    async def test_invalid_name_same_envelope_across_all_five_routes(self, client, tmp_path):
+        """All five version/label routes reject an invalid artifact name with the
+        SAME wire shape: ``InvalidNameError`` propagates to the app-level
+        ValueError handler's legacy string detail. ``enable`` resolves under the
+        gateway lock (inside its try), so without an explicit re-raise its
+        generic ValueError arm would re-shape the error into the ``_error``
+        object envelope — same input, same 400, different body (#1519)."""
+        expected = {"detail": "invalid agent '-bad': leading dash"}
+        responses = {
+            "list": await client.get("/api/context/agents/-bad/versions"),
+            "create": await client.post("/api/context/agents/-bad/versions", json={}),
+            "enable": await client.post("/api/context/agents/-bad/versions/enable", json={}),
+            "promote": await client.put(
+                "/api/context/agents/-bad/labels/production", json={"version": "v1"}
+            ),
+            "delete": await client.delete("/api/context/agents/-bad/labels/production"),
+        }
+        for route, r in responses.items():
+            assert r.status_code == 400, f"{route}: unexpected status {r.status_code}"
+            assert r.json() == expected, f"{route}: {r.json()}"

@@ -41,7 +41,7 @@ from pydantic import BaseModel
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
-from memtomem.context._names import Layout, validate_name
+from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context.agents import resolve_canonical_agent
 from memtomem.context.commands import resolve_canonical_command
 from memtomem.context.migrate import adopt_flat_to_dir
@@ -474,6 +474,13 @@ async def enable_artifact_versioning(
         raise _error(
             409, "conflict", _PATH_RE.sub("<path>", str(exc)), reason_code="destination_exists"
         )
+    except InvalidNameError:
+        # The sibling version routes resolve the name outside any try, so an
+        # invalid name reaches the app-level ValueError handler (string
+        # ``detail``). Resolution here must stay under the gateway lock — so
+        # re-raise instead of letting the generic ValueError arm below
+        # re-shape the same input into the ``_error`` object envelope (#1519).
+        raise
     except (OSError, ValueError) as exc:
         raise _error(400, "validation", _PATH_RE.sub("<path>", str(exc)))
 
