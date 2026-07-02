@@ -189,6 +189,31 @@ def _git(
         raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {exc}")) from exc
 
 
+def _git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
+    """Run ``git <args>`` in ``cwd`` returning raw *bytes* stdout.
+
+    Twin of :func:`_git` for path-carrying porcelain output (``ls-tree -z``):
+    ``text=True`` decodes with the host's preferred locale encoding, which
+    corrupts non-ASCII pathnames on non-UTF-8 hosts — the caller decodes
+    explicitly instead. Failure classification and credential redaction
+    mirror :func:`_git`.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {detail}")) from exc
+    except OSError as exc:
+        # Same classification as _git: a raw OSError never escapes a caller's
+        # (or the CLI's) RuntimeError handler.
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {exc}")) from exc
+
+
 def _git_query(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` allowing a non-zero exit; normalize only ``OSError``.
 
@@ -628,7 +653,7 @@ class WikiStore:
 
         1. ``commit_is_reachable`` precheck — :class:`CommitNotFoundError`
            if the SHA is not in the object database.
-        2. ``git ls-tree -r --name-only <commit> -- <asset_type>/<name>/``
+        2. ``git ls-tree -r -z --name-only <commit> -- <asset_type>/<name>/``
            enumerates the files at that commit. An empty result means
            the asset path didn't exist at that revision — raises
            :class:`memtomem.context.install.AssetNotFoundError` (deferred
@@ -696,8 +721,9 @@ class WikiStore:
     def asset_files_at_commit(self, commit: str, asset_type: str, name: str) -> list[str]:
         """List the asset's file relpaths (relative to the asset dir) at *commit*.
 
-        ``git ls-tree -r --name-only`` against the commit's objects — the
-        wiki working tree is never consulted. Raises
+        ``git ls-tree -r -z --name-only`` (NUL-terminated bytes, so non-ASCII
+        pathnames survive ``core.quotePath``) against the commit's objects —
+        the wiki working tree is never consulted. Raises
         :class:`CommitNotFoundError` for an unreachable SHA and
         :class:`memtomem.context.install.AssetNotFoundError` when the asset
         path has no files at that revision. Used by
@@ -712,18 +738,33 @@ class WikiStore:
             raise CommitNotFoundError(f"commit {commit[:12]} is not reachable in {self.root}")
 
         src_prefix = f"{asset_type}/{name}/"
-        ls_result = _git(
-            ["ls-tree", "-r", "--name-only", commit, "--", src_prefix],
+        # ``-z`` (NUL-terminated, verbatim pathnames) via the bytes runner:
+        # with git's default ``core.quotePath=true``, line-oriented porcelain
+        # output C-quotes any non-ASCII pathname (``"skills/\354…"`` wrapped
+        # in double quotes), which fails the prefix match below — a
+        # Korean-named file silently vanished from extraction and the digest
+        # map. NUL-terminated bytes round-trip every pathname exactly.
+        ls_result = _git_bytes(
+            ["ls-tree", "-r", "-z", "--name-only", commit, "--", src_prefix],
             cwd=self.root,
         )
-        inner_relpaths = [
-            line[len(src_prefix) :]
-            for line in ls_result.stdout.splitlines()
-            # The startswith filter guards against odd git path output; the
-            # truthiness check drops a bare prefix row (ls-tree -r shouldn't
-            # yield one, but guard against odd git versions).
-            if line.startswith(src_prefix) and line[len(src_prefix) :]
-        ]
+        prefix_bytes = src_prefix.encode("utf-8")
+        try:
+            inner_relpaths = [
+                entry[len(prefix_bytes) :].decode("utf-8")
+                for entry in ls_result.stdout.split(b"\0")
+                # The startswith filter guards against odd git path output;
+                # the truthiness check drops the empty tail after the final
+                # NUL (and a bare prefix row, which ls-tree -r shouldn't
+                # yield, but guard against odd git versions).
+                if entry.startswith(prefix_bytes) and entry[len(prefix_bytes) :]
+            ]
+        except UnicodeDecodeError as exc:
+            # Path-free by design: the web routes render RuntimeError as a
+            # clean envelope; the raw bytes stay in the chained exception.
+            raise RuntimeError(
+                f"non-UTF-8 pathname under {asset_type}/{name} at commit {commit[:12]}"
+            ) from exc
         if not inner_relpaths:
             raise AssetNotFoundError(
                 f"{asset_type}/{name} not present at commit {commit[:12]} in {self.root}"
