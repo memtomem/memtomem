@@ -620,6 +620,23 @@ def _offending_file_hint(blocked_path: Path, staging: Path, src_path: Path) -> s
     )
 
 
+def _rename_overrides_note(probe_dir: Path, dst_path: Path, name: str) -> tuple[str, ...]:
+    """The copy-rename overrides caveat, or ``()`` when it doesn't apply.
+
+    One derivation for BOTH the dry-run preview (probing the source tree)
+    and the apply path (probing the staged tree, which mirrors the source
+    byte-for-byte) — so the preview can never stay silent about a caveat
+    the apply would print.
+    """
+    if not (probe_dir / "overrides").is_dir():
+        return ()
+    return (
+        f"renamed copy keeps overrides/ verbatim — review "
+        f"{dst_path / 'overrides'} for content still referring "
+        f"to '{name}'",
+    )
+
+
 def _partial_move_message(
     kind: ArtifactKind,
     name: str,
@@ -631,24 +648,44 @@ def _partial_move_message(
     cross_root: bool,
     sync_command: str | None,
 ) -> str:
-    """EXDEV partial-move message; byte-identical to migrate_scope's when same-root."""
+    """EXDEV partial-move message; byte-identical to migrate_scope's when same-root.
+
+    A ``project_local`` destination gets no "then run sync" instruction:
+    that tier has no runtime fan-out (ADR-0011 §3), so ``mm context sync
+    --scope project_local`` is a NO_FANOUT no-op and telling the user to
+    run it undermines the (real) warning that follows. The stale-source
+    warning stays — the SOURCE tier's fan-out hazard is what matters.
+    """
     if not cross_root:
+        if to_scope == "project_local":
+            remove_clause = f"Remove {src_path} manually. "
+        else:
+            remove_clause = (
+                f"Remove {src_path} manually, "
+                f"then run `mm context sync --scope {to_scope}` to refresh "
+                f"runtime fan-out at the new tier. "
+            )
         return (
             f"Migrate {kind}/{name}: canonical copied to {dst_path} but "
             f"failed to remove stale source at {src_path} (errno={errno_}). "
-            f"Both canonicals now exist on disk. Remove {src_path} manually, "
-            f"then run `mm context sync --scope {to_scope}` to refresh "
-            f"runtime fan-out at the new tier. Until then, do NOT run "
+            f"Both canonicals now exist on disk. {remove_clause}"
+            f"Until then, do NOT run "
             f"`mm context sync --scope {src_scope}` — it would recreate "
             f"runtime fan-out from the stale source."
         )
-    followup = sync_command or f"mm context sync --scope {to_scope}"
+    if to_scope == "project_local":
+        remove_clause = f"Remove {src_path} manually. "
+    else:
+        followup = sync_command or f"mm context sync --scope {to_scope}"
+        remove_clause = (
+            f"Remove {src_path} manually, "
+            f"then run `{followup}` to refresh runtime fan-out at the destination. "
+        )
     return (
         f"Transfer {kind}/{name}: canonical copied to {dst_path} but "
         f"failed to remove stale source at {src_path} (errno={errno_}). "
-        f"Both canonicals now exist on disk. Remove {src_path} manually, "
-        f"then run `{followup}` to refresh runtime fan-out at the "
-        f"destination. Until then, do NOT run `mm context sync --scope "
+        f"Both canonicals now exist on disk. {remove_clause}"
+        f"Until then, do NOT run `mm context sync --scope "
         f"{src_scope}` in the source project — it would recreate runtime "
         f"fan-out from the stale source."
     )
@@ -860,6 +897,15 @@ def transfer_artifact(
             provenance=provenance,
             provenance_reason=provenance_reason,
             provenance_reason_code=provenance_reason_code,
+            # Preview the copy-rename overrides caveat off the SOURCE tree —
+            # the same derivation the apply path runs against its staged
+            # mirror, so the plan the user confirms shows every caveat the
+            # apply would print (this used to be apply-only).
+            notes=(
+                _rename_overrides_note(src_path, dst_path, name)
+                if mode == "copy" and new_name is not None and layout == "dir"
+                else ()
+            ),
         )
 
     # ── apply path ───────────────────────────────────────────────────
@@ -884,12 +930,10 @@ def transfer_artifact(
             try:
                 if new_name is not None:
                     _rewrite_staged_manifest_name(staging, kind, layout, new_name)
-                    if layout == "dir" and (staging / "overrides").is_dir():
-                        notes = (
-                            f"renamed copy keeps overrides/ verbatim — review "
-                            f"{dst_path / 'overrides'} for content still referring "
-                            f"to '{name}'",
-                        )
+                    if layout == "dir":
+                        # Shared derivation with the dry-run preview (probed
+                        # off src there) — see _rename_overrides_note.
+                        notes = _rename_overrides_note(staging, dst_path, name)
                 if to_scope == "project_shared":
                     scan = scan_artifact_tree(
                         staging,

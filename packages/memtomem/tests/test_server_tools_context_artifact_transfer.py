@@ -226,6 +226,24 @@ async def test_dry_run_default_does_not_mutate(projects) -> None:
 
 
 @pytest.mark.anyio
+async def test_dry_run_previews_engine_notes(projects) -> None:
+    """Engine caveats render in the MCP PLAN too (CLI preview mirror, T2-6):
+    a copy-rename whose overrides/ travel verbatim must disclose the review
+    work up front, not after apply=True already ran."""
+    src = _seed_agent(projects, "user")
+    override = src / "overrides" / "claude.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("---\nname: foo\n---\n\no\n", encoding="utf-8")
+
+    out = await mem_context_artifact_transfer(
+        asset_type="agents", name="foo", mode="copy", to_scope="project_local", as_name="bar"
+    )
+    assert out.startswith("Plan: copy agents/foo as bar")
+    assert "note: renamed copy keeps overrides/ verbatim" in out
+    assert not (projects["a"] / ".memtomem" / "agents.local" / "bar").exists()
+
+
+@pytest.mark.anyio
 async def test_copy_apply_keeps_source_and_appends_marker(projects) -> None:
     src = _seed_agent(projects, "user")
     out = await mem_context_artifact_transfer(
