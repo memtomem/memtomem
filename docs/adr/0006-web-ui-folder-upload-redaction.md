@@ -541,14 +541,23 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
       `index()` tool had the identical reporting gap (no return value at all
       for `blocked_files` / `blocked_paths` / `errors`) and was fixed the
       same way.
-    - **Known, lower-severity partial gap — tracked, not fixed in this
-      pass.** `cli/shell.py`'s interactive `index` command and
-      `indexing/watcher.py`'s startup backfill both log `stats.blocked_files`
-      as a count, but neither logs `blocked_paths` (which files) nor
-      inspects generic `stats.errors` (non-redaction per-file failures).
-      Some signal already exists here — unlike the debounce/flush and
-      LangGraph gaps above — so this is deferred alongside PR-B rather than
-      bundled into this fix.
+    - **Known, lower-severity partial gap — closed in the follow-up sweep
+      (#1505).** `cli/shell.py`'s interactive `index` command and
+      `indexing/watcher.py`'s startup backfill logged `stats.blocked_files`
+      only as a count — no `blocked_paths` (which files), no generic
+      `stats.errors` (non-redaction per-file failures). The close-out sweep
+      also found a third, fully-silent caller the original enumeration
+      missed: the `mm init` wizard seed read only total/indexed/skipped
+      from the stream aggregate, so blocked files vanished behind the green
+      "Seeded initial index" line (and a fully-blocked seed printed the
+      unrelated upsert/embedder diagnosis). The shell and the seed now print
+      the blocked summary (paths, bypass hint, `project_shared` hard-refuse
+      note) plus non-redaction ERROR lines via reporters extracted into
+      `cli/_index_progress.py` (`print_blocked_summary` /
+      `print_index_errors`; `mm index` calls the same reporters, output
+      byte-identical), so the CLI messaging cannot drift per surface. The
+      backfill — a log surface — names the blocked paths in its warning and
+      aggregates non-redaction errors to one line per dir.
 - **PR-B — Web UI override toggle + audit surface (both shipped
   2026-07-01).**
   - **Toggle — built.** An "Index without privacy gate" checkbox on the Index

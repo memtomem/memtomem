@@ -5300,6 +5300,127 @@ class TestInitialSeedThreshold:
         assert "0 chunks were indexed" not in out
         assert "embedding-reset" not in out
 
+    def test_seed_with_progress_surfaces_blocked_files(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """ADR-0006 PR-A follow-up: the seed read only total/indexed/skipped
+        from the aggregate, so a secret-bearing file skipped by the redaction
+        gate vanished behind the green "Seeded initial index" line. A partial
+        block now prints the shared blocked summary (paths + bypass hint)
+        while the clean rest still seeds successfully."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        leak = memory_dir / "leak.md"
+
+        class _FakeEngine:
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
+                yield {"type": "discovery", "files_total": 2}
+                yield {
+                    "type": "progress",
+                    "file": str(memory_dir / "a.md"),
+                    "files_done": 1,
+                    "files_total": 2,
+                    "indexed": 3,
+                    "skipped": 0,
+                }
+                yield {
+                    "type": "complete",
+                    "total_files": 2,
+                    "total_chunks": 3,
+                    "indexed_chunks": 3,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                    "blocked_files": 1,
+                    "blocked_paths": [str(leak)],
+                    "blocked_project_shared_files": 0,
+                    "errors": ["leak.md: redaction_blocked (hits=1, scope=user, decision=blocked)"],
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress([memory_dir]) is True
+        out = capsys.readouterr().out
+        assert "1 file(s) blocked by redaction guard:" in out
+        assert str(leak) in out
+        assert f"mm index --force-unsafe {memory_dir}" in out
+        assert "Seeded initial index" in out
+        # The redaction_blocked errors entry is folded into the blocked
+        # summary, not double-printed as a raw ERROR line.
+        assert "ERROR:" not in out
+
+    def test_seed_with_progress_fully_blocked_skips_upsert_misdiagnosis(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When every seeded file is redaction-blocked, indexed==skipped==0
+        used to fall into the zero-chunks branch and print "check logs for
+        upsert errors" + the embedding-reset hint — the wrong diagnosis for
+        a redaction block. The blocked summary is the diagnosis now; the
+        seed still returns False so Next-steps step 1 stays unmarked."""
+        from contextlib import asynccontextmanager
+
+        from memtomem.cli import init_cmd
+
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        leak = memory_dir / "leak.md"
+
+        class _FakeEngine:
+            async def index_path_stream(
+                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+            ):
+                yield {"type": "discovery", "files_total": 1}
+                yield {
+                    "type": "complete",
+                    "total_files": 1,
+                    "total_chunks": 0,
+                    "indexed_chunks": 0,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 1.0,
+                    "blocked_files": 1,
+                    "blocked_paths": [str(leak)],
+                    "blocked_project_shared_files": 0,
+                    "errors": ["leak.md: redaction_blocked (hits=1, scope=user, decision=blocked)"],
+                }
+
+        class _FakeComp:
+            index_engine = _FakeEngine()
+
+        @asynccontextmanager  # type: ignore[misc]
+        async def _fake_components():
+            yield _FakeComp()
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _fake_components)
+
+        assert init_cmd._seed_with_progress([memory_dir]) is False
+        out = capsys.readouterr().out
+        assert "1 file(s) blocked by redaction guard:" in out
+        assert str(leak) in out
+        # The misdiagnosis hints must NOT fire when the block explains it.
+        assert "0 chunks were indexed" not in out
+        assert "embedding-reset" not in out
+        assert "Seeded initial index" not in out
+
     def test_seed_with_progress_keyboard_interrupt_is_graceful(
         self,
         tmp_path: Path,

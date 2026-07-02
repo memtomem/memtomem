@@ -159,3 +159,64 @@ class TestBulkIndexRedactionGate:
         assert complete["blocked_files"] == 1
         assert complete["blocked_project_shared_files"] == 1
         assert any("blocked_project_shared" in e for e in complete["errors"])
+
+
+class TestShellIndexBlockedSurfacing:
+    """The interactive shell's ``index`` command (``cli/shell.py:_cmd_index``)
+    previously printed only a blocked-files count — no paths, no scope
+    guidance, and ``stats.errors`` not at all (the ADR-0006 "known,
+    lower-severity partial gap"). It now prints the shared blocked summary
+    and the non-redaction error lines, mirroring ``mm index``."""
+
+    async def test_blocked_paths_and_bypass_hint_printed(self, bm25_only_components, capsys):
+        from memtomem.cli.shell import _cmd_index
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "clean.md").write_text(_CLEAN)
+        (mem_dir / "leak.md").write_text(_LEAK)
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "1 file(s) blocked by redaction guard:" in out
+        assert "leak.md" in out
+        # The shell has no inline force-unsafe syntax (mirrors _cmd_add) —
+        # the hint names the CLI command the user can actually run.
+        assert "mm index --force-unsafe" in out
+        # The matched secret bytes never echo to the terminal.
+        assert _SECRET not in out
+        # The redaction_blocked stats.errors entry is folded into the blocked
+        # summary, not double-printed as a raw ERROR line.
+        assert "ERROR:" not in out
+
+    async def test_project_shared_block_messaged_as_hard_refused(
+        self, bm25_only_components, capsys, monkeypatch
+    ):
+        from memtomem.cli.shell import _cmd_index
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "leak.md").write_text(_LEAK)
+        monkeypatch.setattr(
+            comp.index_engine, "_resolve_scope", lambda p: ("project_shared", mem_dir)
+        )
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "project_shared tier" in out
+        assert "hard-refused" in out
+        # Scope-correct guidance: no bypass hint — force_unsafe never
+        # applies to the git-tracked tier (ADR-0011 §5).
+        assert "mm index --force-unsafe" not in out
+
+    async def test_non_redaction_errors_printed(self, bm25_only_components, capsys):
+        from memtomem.cli.shell import _cmd_index
+
+        comp, mem_dir = bm25_only_components
+        (mem_dir / "note.md").write_text(_CLEAN)
+        (mem_dir / "blob.md").write_bytes(b"\x00\x01binary")
+
+        await _cmd_index(comp, [str(mem_dir)])
+
+        out = capsys.readouterr().out
+        assert "ERROR: blob.md: binary file detected, skipping" in out
