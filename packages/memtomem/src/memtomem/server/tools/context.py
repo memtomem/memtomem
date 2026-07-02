@@ -260,9 +260,11 @@ async def mem_context_init(
     results: list[str] = []
 
     if not scope_explicit and not has_project_signal:
+        # No absolute root echo — the MCP result crosses the wire (the caller
+        # already knows its own cwd; the path only adds ``$HOME``/username).
         results.append(
-            f"warning: no .git or pyproject.toml in {root} — creating .memtomem/ here. "
-            "Use scope='user' for cross-project artifacts."
+            "warning: no .git or pyproject.toml at the project root — creating "
+            ".memtomem/ here. Use scope='user' for cross-project artifacts."
         )
 
     artifact_only_scope = scope_explicit and artifact_scope in ("user", "project_local")
@@ -322,7 +324,9 @@ async def mem_context_init(
     for kind in ("agents", "skills", "commands"):
         d = canonical_artifact_dir(kind, artifact_scope, root)
         d.mkdir(parents=True, exist_ok=True)
-        results.append(f"Created {d}")
+        # Project-relative for project scopes, ``~``-collapsed for user scope —
+        # the absolute canonical dir embeds ``$HOME``/username on the MCP wire.
+        results.append(f"Created {_redact_reason(str(d), root)}")
 
     if artifact_scope == "project_local":
         wrote, msg = _append_gitignore_marker(root)
@@ -348,7 +352,13 @@ async def mem_context_init(
             )
             else "skipped"
         )
-        return f"  {prefix} {name}: {reason}"
+        # Import-engine skip reasons carry raw ``OSError`` text with the
+        # absolute source path (agents/commands/skills importers) — same MCP
+        # wire boundary as the generate/sync skip lines. The remediation
+        # full-path channel stays the ``privacy block:`` exception returns;
+        # a redacted reason keeps the project-relative remainder, so blocked
+        # rows stay actionable.
+        return f"  {prefix} {name}: {_redact_reason(reason, root)}"
 
     if "skills" in inc:
         try:
@@ -718,17 +728,22 @@ async def mem_context_generate(
         settings_results = generate_all_settings(
             root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
+        # Settings reasons embed absolute ``canonical_path`` / ``target_path``
+        # values (context/settings.py f-strings), and the ok-row target is an
+        # absolute path (``$HOME`` for user scope) — same MCP wire boundary as
+        # the artifact skip lines above. Warnings are label/event prose, no
+        # paths.
         for sname, sr in settings_results.items():
             if sr.status == "ok":
-                results.append(f"\nSettings: {sname} → {sr.target}")
+                results.append(f"\nSettings: {sname} → {_redact_reason(str(sr.target), root)}")
                 for w in sr.warnings:
                     results.append(f"  warning: {w}")
             elif sr.status == "skipped":
-                results.append(f"  skipped {sname}: {sr.reason}")
+                results.append(f"  skipped {sname}: {_redact_reason(sr.reason, root)}")
             elif sr.status == "needs_confirmation":
-                results.append(f"  needs confirmation {sname}: {sr.reason}")
+                results.append(f"  needs confirmation {sname}: {_redact_reason(sr.reason, root)}")
             elif sr.status in ("error", "aborted"):
-                results.append(f"  {sr.status} {sname}: {sr.reason}")
+                results.append(f"  {sr.status} {sname}: {_redact_reason(sr.reason, root)}")
 
     return "Generated:\n" + "\n".join(results)
 
@@ -853,15 +868,17 @@ async def mem_context_diff(
                 lines.append("")
             lines.append("Settings:")
             lines.extend(dup_warnings)
+            # Same MCP wire-boundary redaction as the generate/sync settings
+            # loops — reasons embed absolute canonical/target paths.
             for sname, sr in settings_results.items():
                 if sr.status in ("in sync", "out of sync", "missing target"):
                     lines.append(f"  {sname} [{sr.status}]")
                     for w in sr.warnings:
                         lines.append(f"    warning: {w}")
                 elif sr.status == "skipped":
-                    lines.append(f"  skipped {sname}: {sr.reason}")
+                    lines.append(f"  skipped {sname}: {_redact_reason(sr.reason, root)}")
                 elif sr.status == "error":
-                    lines.append(f"  error {sname}: {sr.reason}")
+                    lines.append(f"  error {sname}: {_redact_reason(sr.reason, root)}")
 
     return "\n".join(lines) if lines else "Nothing to compare."
 
@@ -1059,21 +1076,24 @@ async def mem_context_sync(
         settings_results = generate_all_settings(
             root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
+        # Same MCP wire-boundary redaction as the generate settings loop —
+        # reasons embed absolute canonical/target paths, the ok-row target is
+        # absolute (``$HOME`` for user scope).
         for sname, sr in settings_results.items():
             if sr.status == "ok":
                 if results:
                     results.append("")
-                results.append(f"Settings: {sname} → {sr.target}")
+                results.append(f"Settings: {sname} → {_redact_reason(str(sr.target), root)}")
                 for w in sr.warnings:
                     results.append(f"  warning: {w}")
             elif sr.status == "skipped":
-                results.append(f"  skipped {sname}: {sr.reason}")
+                results.append(f"  skipped {sname}: {_redact_reason(sr.reason, root)}")
             elif sr.status == "needs_confirmation":
                 if results:
                     results.append("")
-                results.append(f"  needs confirmation {sname}: {sr.reason}")
+                results.append(f"  needs confirmation {sname}: {_redact_reason(sr.reason, root)}")
             elif sr.status in ("error", "aborted"):
-                results.append(f"  {sr.status} {sname}: {sr.reason}")
+                results.append(f"  {sr.status} {sname}: {_redact_reason(sr.reason, root)}")
 
     return "Synced:\n" + "\n".join(results) if results else "Nothing to sync."
 

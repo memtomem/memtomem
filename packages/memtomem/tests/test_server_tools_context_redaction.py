@@ -19,6 +19,21 @@ audit found unredacted:
 4. ``mem_context_version`` create — the working-canonical read ``OSError`` echoes
    only the basename with a path-stripped errno message.
 
+The #1539 review round (Codex gate) found two more legs the audit's four-leg
+list missed, pinned here as well:
+
+5. ``mem_context_init`` — the import-engine ``_skip_line`` rows echo raw
+   ``OSError`` reasons with the absolute source path;
+6. the settings loops in ``mem_context_generate`` / ``mem_context_diff`` /
+   ``mem_context_sync`` — ``SettingsSyncResult.reason`` embeds absolute
+   canonical/target paths (``context/settings.py`` f-strings) and the ok-row
+   ``target`` echo is an absolute path (``$HOME`` for user scope).
+
+A parity guard (``TestWebParityGuard``) additionally pins the neutral
+``context.error_redact`` twins against the web originals on representative
+inputs so the two copies of this security boundary cannot silently drift
+before the planned delegation refactor.
+
 The remediation-critical ``privacy block: …`` message is intentionally left
 round-tripping the full path (``test_sync_privacy_block_surfaces``) and is not
 exercised here.
@@ -293,3 +308,208 @@ async def test_version_create_oserror_echoes_basename_only(
     _assert_no_abs_path(out, root)
     assert out.startswith("error: cannot read working canonical agent.md:")
     assert "Permission denied" in out
+
+
+# ── leg 5 (#1539 review round): init import-engine skip lines ────────────────
+
+
+@pytest.mark.anyio
+async def test_init_skipped_reason_redacts_absolute_path(
+    layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.context import agents as ctx_agents
+    from memtomem.context.agents import ExtractResult
+    from memtomem.server.tools.context import mem_context_init
+
+    root = layout["project_root"]
+    reason = f"unreadable: [Errno 13] Permission denied: '{root}/.claude/agents/foo.md'"
+    result = ExtractResult(imported=[], skipped=[("foo", reason, "parse_error")])
+    monkeypatch.setattr(ctx_agents, "extract_agents_to_canonical", lambda *a, **k: result)
+
+    out = await mem_context_init(include="agents")
+
+    _assert_no_abs_path(out, root)
+    assert "skipped foo:" in out
+    assert "Permission denied" in out  # errno text survives, path-stripped
+
+
+@pytest.mark.anyio
+async def test_init_privacy_blocked_skip_keeps_relative_remainder(
+    layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocked rows redact like skips — the remediation full-path channel is
+    the ``privacy block:`` exception return, not the per-item row."""
+    from memtomem.context import _skip_reasons as skip_codes
+    from memtomem.context import agents as ctx_agents
+    from memtomem.context.agents import ExtractResult
+    from memtomem.server.tools.context import mem_context_init
+
+    root = layout["project_root"]
+    reason = f"privacy hits in {root}/.claude/agents/foo.md (1 finding)"
+    result = ExtractResult(imported=[], skipped=[("foo", reason, skip_codes.PRIVACY_BLOCKED)])
+    monkeypatch.setattr(ctx_agents, "extract_agents_to_canonical", lambda *a, **k: result)
+
+    out = await mem_context_init(include="agents")
+
+    _assert_no_abs_path(out, root)
+    assert "blocked foo:" in out
+    assert ".claude/agents/foo.md" in out  # relative remainder stays actionable
+
+
+# ── leg 6 (#1539 review round): settings reasons + ok-row target ─────────────
+
+
+def _settings_results(root: Path) -> dict[str, object]:
+    """One result per settings branch that renders a reason or a target."""
+    from memtomem.context.settings import SettingsSyncResult
+
+    return {
+        "claude_settings": SettingsSyncResult(
+            status="ok", target=root / ".claude" / "settings.json"
+        ),
+        "codex_settings": SettingsSyncResult(
+            status="skipped",
+            reason=f"{root}/.memtomem/settings.json is not valid JSON (or not a JSON object).",
+        ),
+        "kimi_settings": SettingsSyncResult(
+            status="needs_confirmation",
+            reason=f"{root}/.kimi/settings.json is outside the project root; pass "
+            "allow_host_writes=True.",
+        ),
+        "gemini_settings": SettingsSyncResult(
+            status="error",
+            reason=f"{root}/.gemini/settings.json: boom. Fix the file manually.",
+        ),
+    }
+
+
+@pytest.mark.anyio
+async def test_generate_settings_reasons_and_target_redact_absolute_paths(
+    layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.context import settings as ctx_settings
+    from memtomem.server.tools.context import mem_context_generate
+
+    root = layout["project_root"]
+    monkeypatch.setattr(
+        ctx_settings, "generate_all_settings", lambda *a, **k: _settings_results(root)
+    )
+
+    out = await mem_context_generate(include="settings")
+
+    _assert_no_abs_path(out, root)
+    assert "Settings: claude_settings → .claude/settings.json" in out  # target relativized
+    assert "skipped codex_settings:" in out
+    assert "needs confirmation kimi_settings:" in out
+    assert "error gemini_settings:" in out
+    assert "is not valid JSON" in out  # diagnostics survive, path-stripped
+
+
+@pytest.mark.anyio
+async def test_sync_settings_reasons_and_target_redact_absolute_paths(
+    layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.context import settings as ctx_settings
+    from memtomem.server.tools.context import mem_context_sync
+
+    root = layout["project_root"]
+    monkeypatch.setattr(
+        ctx_settings, "generate_all_settings", lambda *a, **k: _settings_results(root)
+    )
+
+    out = await mem_context_sync(include="settings")
+
+    _assert_no_abs_path(out, root)
+    assert "Settings: claude_settings → .claude/settings.json" in out
+    assert "skipped codex_settings:" in out
+    assert "needs confirmation kimi_settings:" in out
+    assert "error gemini_settings:" in out
+
+
+@pytest.mark.anyio
+async def test_diff_settings_reasons_redact_absolute_paths(
+    layout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memtomem.context import settings as ctx_settings
+    from memtomem.context.settings import SettingsSyncResult
+    from memtomem.server.tools.context import mem_context_diff
+
+    root = layout["project_root"]
+    results = {
+        "claude_settings": SettingsSyncResult(
+            status="skipped",
+            reason=f"{root}/.memtomem/settings.json is not valid JSON (or not a JSON object).",
+        ),
+        "codex_settings": SettingsSyncResult(
+            status="error",
+            reason=f"{root}/.codex/settings.json: boom. Fix the file manually.",
+        ),
+    }
+    monkeypatch.setattr(ctx_settings, "diff_settings", lambda *a, **k: results)
+
+    out = await mem_context_diff(include="settings")
+
+    _assert_no_abs_path(out, root)
+    assert "skipped claude_settings:" in out
+    assert "error codex_settings:" in out
+
+
+# ── parity guard: the neutral leaf must not drift from the web twins ─────────
+
+
+class TestWebParityGuard:
+    """Pin ``context.error_redact`` byte-for-byte against the web originals.
+
+    The neutral leaf duplicates ``web/routes/_errors._redact_message`` and
+    ``context_gateway.sanitize_diff_reason`` (the MCP layer may not import
+    ``memtomem.web.*``). This is a security boundary — a silent drift between
+    the twins reopens the leak on whichever surface got the stale copy — so
+    representative inputs are compared against BOTH implementations until the
+    planned delegation refactor collapses them.
+    """
+
+    def test_frozen_constants_match_web(self) -> None:
+        from memtomem.context import error_redact
+        from memtomem.web.routes import _errors as web_errors
+
+        assert error_redact._HOME == web_errors._HOME
+        assert error_redact._ERROR_MESSAGE_LIMIT == web_errors._ERROR_MESSAGE_LIMIT
+        assert error_redact._SECRET_REDACTED_MARKER == web_errors._SECRET_REDACTED_MARKER
+
+    def test_redact_message_matches_web(self) -> None:
+        from memtomem.context import error_redact
+        from memtomem.web.routes._errors import _redact_message as web_redact
+
+        home = error_redact._HOME
+        cases = [
+            "plain diagnostic, no path",
+            f"unreadable: [Errno 13] Permission denied: '{home}/proj/agent.md'",
+            "x" * 500,  # truncation
+            "token AKIA1234567890ABCDEF leaked",  # secret-shape → whole-replace
+            "",
+        ]
+        for msg in cases:
+            assert error_redact.redact_message(msg) == web_redact(msg), msg
+
+    def test_engine_reason_matches_web_single_root(self, tmp_path: Path) -> None:
+        from memtomem.context.error_redact import redact_engine_reason
+        from memtomem.web.routes.context_gateway import sanitize_diff_reason
+
+        real = (tmp_path / "real").resolve()
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        cases = [
+            None,
+            "",
+            "no path at all",
+            f"missing YAML frontmatter: {real}/.memtomem/agents/foo/agent.md",
+            f"{real}: [Errno 2] No such file or directory",
+            f"{real}{real}/nested repeat",
+        ]
+        for root in (real, link, tmp_path):
+            for msg in cases:
+                assert redact_engine_reason(msg, root) == sanitize_diff_reason(msg, root), (
+                    msg,
+                    root,
+                )
