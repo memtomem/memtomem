@@ -1805,3 +1805,163 @@ def test_classify_for_all_update_unusable_record_is_refuse(wiki_root: Path, tmp_
     [c] = classifications
     assert c.state == "refuse"
     assert "install record unusable" in (c.reason or "")
+
+
+# ── CLI --dry-run: read-only preview (single + --all) ────────────────────
+
+
+def test_cli_update_dry_run_would_update_writes_nothing(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """``--dry-run`` on a behind install prints the ``update`` row plus the
+    old→new pin line, and mutates neither the dest tree nor the lockfile."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    old_pin = json.loads((project_cwd / ".memtomem" / "lock.json").read_text())["skills"]["foo"][
+        "wiki_commit"
+    ]
+    new_head = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "update" in result.output
+    assert "Dry run — nothing written" in result.output
+    assert f"would update {old_pin[:12]} → {new_head[:12]}" in result.output
+    # No-write invariant: dest bytes and lockfile pin are untouched.
+    assert (project_cwd / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
+    lock_doc = json.loads((project_cwd / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == old_pin
+
+
+def test_cli_update_dry_run_unchanged(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """Pin already at wiki HEAD → ``unchanged`` row, exit 0."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "unchanged" in result.output
+    assert "already up to date" in result.output
+
+
+def test_cli_update_dry_run_dirty_previews_refusal_without_bak(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """A dirty dest previews as ``refuse`` with the reason — exit 0, and
+    crucially no ``.bak`` sibling appears (the wet-run --force side effect
+    must not leak into the preview)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    edited = project_cwd / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local\n")
+    _bump_mtime(edited)
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "refuse" in result.output
+    assert "modified" in result.output
+    assert "would refuse" in result.output
+    assert edited.read_bytes() == b"local\n"
+    assert not edited.with_suffix(edited.suffix + ".bak").exists()
+
+
+def test_cli_update_dry_run_not_installed_exits_nonzero(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """A dry run of an impossible update fails the way the real run would:
+    non-zero exit with the ``mm context install`` hint."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run"])
+
+    assert result.exit_code != 0
+    assert "no lockfile entry" in result.output
+    assert "mm context install skill foo" in result.output
+
+
+def test_cli_update_all_dry_run_previews_and_skips_prompt(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all --dry-run`` prints the 4-state table and exits 0 without a
+    confirm prompt (no input is supplied — a surviving prompt would abort
+    with a non-zero exit) and without writing any project. Refuse rows do
+    not flip the exit code the way the wet batch's refusal gate does."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_clean = tmp_path / "clean"
+    proj_clean.mkdir()
+    install_skill(proj_clean, "foo")
+
+    proj_dirty = tmp_path / "dirty"
+    proj_dirty.mkdir()
+    install_skill(proj_dirty, "foo")
+    edited = proj_dirty / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local\n")
+    _bump_mtime(edited)
+
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_clean, proj_dirty])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Dry run — nothing written" in result.output
+    assert "1 would update" in result.output
+    assert "1 would refuse without --force" in result.output
+    # Neither project was written: clean keeps v1 bytes + old pin, dirty
+    # keeps the local edit with no .bak.
+    assert (proj_clean / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
+    assert edited.read_bytes() == b"local\n"
+    assert not edited.with_suffix(edited.suffix + ".bak").exists()
+    lock_doc = json.loads((proj_clean / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] != WikiStore.at_default().current_commit()
+
+
+def test_cli_update_all_dry_run_all_up_to_date(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all --dry-run`` with every pin at HEAD reports up-to-date; the
+    dry-run summary line is not printed (nothing would change)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj = tmp_path / "p"
+    proj.mkdir()
+    install_skill(proj, "foo")
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "All projects are up to date." in result.output
