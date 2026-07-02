@@ -509,6 +509,46 @@ class TestCopyAssetAtCommit:
         assert not (dest / "__pycache__").exists()
 
 
+class TestAssetFilesNonAsciiPaths:
+    """Non-ASCII (e.g. Korean) pathnames must survive ``ls-tree`` parsing.
+
+    git's default ``core.quotePath=true`` C-quotes non-ASCII pathnames in
+    line-oriented porcelain output (``"skills/\\355\\225\\234…"`` wrapped in
+    double quotes), so a plain ``--name-only`` line parse fails the
+    ``startswith`` prefix match and the file silently vanishes from
+    extraction and the digest map — data loss on ``mm context install``."""
+
+    def test_non_ascii_file_survives_extraction(self, wiki_root: Path, tmp_path: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(
+            wiki_root,
+            "foo",
+            {
+                "SKILL.md": b"# foo\n",
+                "references/설명.md": "# 설명\n".encode(),
+            },
+        )
+
+        rels = store.asset_files_at_commit(pin, "skills", "foo")
+        assert sorted(rels) == ["SKILL.md", "references/설명.md"]
+
+        dest = tmp_path / "out" / "foo"
+        digest_map = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+        assert sorted(digest_map) == ["SKILL.md", "references/설명.md"]
+        assert (dest / "references" / "설명.md").read_bytes() == "# 설명\n".encode()
+
+    def test_non_ascii_asset_name_is_found(self, wiki_root: Path) -> None:
+        """An asset whose NAME is non-ASCII must not raise a spurious
+        ``AssetNotFoundError`` (every quoted ls-tree line failed the prefix
+        match, so the old parse saw zero files)."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "한글스킬", {"SKILL.md": b"# ko\n"})
+
+        assert store.asset_files_at_commit(pin, "skills", "한글스킬") == ["SKILL.md"]
+
+
 class TestCommitPaths:
     """``WikiStore.commit_paths`` — the isolated commit primitive (ADR-0027 §3)."""
 
