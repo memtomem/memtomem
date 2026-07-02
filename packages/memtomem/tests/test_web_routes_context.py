@@ -22,6 +22,7 @@ Diff-payload contract pinned by ``TestDiffCommand`` / ``TestDiffAgent`` (#1256):
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path, PureWindowsPath
 from unittest.mock import AsyncMock
@@ -76,7 +77,7 @@ def _make_skill(tmp_path: Path, name: str, content: str = "# Test skill\n") -> P
     """Create a canonical skill directory with SKILL.md."""
     skill_dir = tmp_path / ".memtomem" / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+    _write_text_lf(skill_dir / SKILL_MANIFEST, content)
     return skill_dir
 
 
@@ -89,7 +90,7 @@ def _make_runtime_skill(
     """Create a runtime skill directory."""
     skill_dir = tmp_path / runtime_dir / name
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+    _write_text_lf(skill_dir / SKILL_MANIFEST, content)
     return skill_dir
 
 
@@ -176,7 +177,7 @@ class TestOverview:
         # .gemini/skills/foo/SKILL.md → gemini detected via skill dir
         gem_skill = tmp_path / ".gemini" / "skills" / "foo"
         gem_skill.mkdir(parents=True)
-        (gem_skill / SKILL_MANIFEST).write_text("# g\n", encoding="utf-8")
+        _write_text_lf(gem_skill / SKILL_MANIFEST, "# g\n")
 
         r = await client.get("/api/context/overview")
         runtimes = {r["name"]: r["available"] for r in r.json()["detected_runtimes"]}
@@ -205,7 +206,7 @@ class TestOverview:
     ):
         local = tmp_path / ".memtomem" / "skills.local" / "draft"
         local.mkdir(parents=True)
-        (local / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+        _write_text_lf(local / SKILL_MANIFEST, "# Draft\n")
 
         default = await client.get("/api/context/overview")
         assert default.json()["target_scope"] == "project_shared"
@@ -715,7 +716,7 @@ class TestListSkills:
     ):
         local = tmp_path / ".memtomem" / "skills.local" / "draft"
         local.mkdir(parents=True)
-        (local / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+        _write_text_lf(local / SKILL_MANIFEST, "# Draft\n")
 
         default = await client.get("/api/context/skills")
         assert all(s["name"] != "draft" for s in default.json()["skills"])
@@ -836,6 +837,40 @@ class TestCreateSkill:
             json={"name": "../escape", "content": "bad"},
         )
         assert r.status_code == 400
+
+    @pytest.mark.anyio
+    async def test_create_lone_surrogate_no_orphan_dir_wedge(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """A lone-surrogate body can't be UTF-8 encoded, so ``atomic_write_text``
+        raises ``UnicodeEncodeError`` *after* ``skill_dir.mkdir()`` — pre-fix
+        that left an orphan directory behind, wedging every retry on the 409
+        "already exists" conflict. ``create_command`` / ``create_agent``
+        pre-encode the body (clean 400 before mkdir) and roll the partial dir
+        back on any failure; this route now mirrors that shape.
+
+        httpx 0.28 encodes ``json=`` with ``ensure_ascii=False`` and would raise
+        on the lone surrogate client-side, so the escaped ASCII JSON body is
+        sent directly (stdlib json decodes the escape back to a lone surrogate
+        server-side).
+        """
+        skill_dir = tmp_path / ".memtomem" / "skills" / "surrogate"
+        body = json.dumps({"name": "surrogate", "content": "# bad \ud800\n"})
+        r = await client.post(
+            "/api/context/skills",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400, r.text
+        # No orphan directory left behind — the wedge source.
+        assert not skill_dir.exists()
+        # Wedge regression: a retry with valid content must succeed, not 409.
+        r2 = await client.post(
+            "/api/context/skills",
+            json={"name": "surrogate", "content": "# good\n"},
+        )
+        assert r2.status_code == 200, r2.text
+        assert (skill_dir / SKILL_MANIFEST).is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -963,10 +998,10 @@ class TestDiffSkill:
         content = "# User skill\n"
         skill_dir = home / ".memtomem" / "skills" / "scoped"
         skill_dir.mkdir(parents=True)
-        (skill_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+        _write_text_lf(skill_dir / SKILL_MANIFEST, content)
         rt_dir = home / ".claude" / "skills" / "scoped"
         rt_dir.mkdir(parents=True)
-        (rt_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+        _write_text_lf(rt_dir / SKILL_MANIFEST, content)
 
         r = await client.get("/api/context/skills/scoped/diff", params={"target_scope": "user"})
         assert r.status_code == 200
@@ -982,7 +1017,7 @@ class TestDiffSkill:
         must not fabricate runtime rows against project_shared paths (#1229)."""
         local_dir = tmp_path / ".memtomem" / "skills.local" / "draft"
         local_dir.mkdir(parents=True)
-        (local_dir / SKILL_MANIFEST).write_text("# Draft\n", encoding="utf-8")
+        _write_text_lf(local_dir / SKILL_MANIFEST, "# Draft\n")
 
         r = await client.get(
             "/api/context/skills/draft/diff", params={"target_scope": "project_local"}
@@ -991,6 +1026,61 @@ class TestDiffSkill:
         data = r.json()
         assert data["canonical_content"] == "# Draft\n"
         assert data["runtimes"] == []
+
+    @pytest.mark.anyio
+    async def test_diff_non_utf8_canonical_does_not_abort(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """A stray non-UTF-8 byte in the canonical SKILL.md must not abort the
+        per-name diff (pre-fix ``read_text(encoding="utf-8")`` raised
+        ``UnicodeDecodeError`` → the app's ValueError handler turned it into a
+        400 error, not a diff). The engine ``diff_skills`` reads bytes with
+        ``errors="replace"``, so the detail pane must read leniently too —
+        parity with ``diff_command`` / ``diff_agent`` (#1229/#1233), which this
+        route never received."""
+        skill_dir = tmp_path / ".memtomem" / "skills" / "cafe"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / SKILL_MANIFEST).write_bytes(b"# caf\xe9 skill\n")
+        r = await client.get("/api/context/skills/cafe/diff")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["canonical_content"] is not None
+        assert "�" in data["canonical_content"]  # U+FFFD replacement
+
+    @pytest.mark.anyio
+    async def test_diff_non_utf8_runtime_reports_drift_not_abort(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """A non-UTF-8 byte in a *runtime* copy is drift to display, not a
+        diff-wide abort — the ``out of sync`` runtime read must go through the
+        lenient reader (#1229/#1233)."""
+        _make_skill(tmp_path, "diverged", "# clean\n")
+        rt_dir = tmp_path / ".claude" / "skills" / "diverged"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / SKILL_MANIFEST).write_bytes(b"# caf\xe9 drift\n")
+        r = await client.get("/api/context/skills/diverged/diff")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        claude_rt = [rt for rt in data["runtimes"] if rt["runtime"] == "claude_skills"][0]
+        assert claude_rt["status"] == "out of sync"
+        assert "�" in claude_rt["runtime_content"]
+
+    @pytest.mark.anyio
+    async def test_diff_non_utf8_runtime_missing_canonical_does_not_abort(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """A runtime-only skill whose SKILL.md carries a non-UTF-8 byte surfaces
+        as ``missing canonical`` with a lenient runtime preview, not an abort
+        (the third read site in ``diff_skill``)."""
+        rt_dir = tmp_path / ".claude" / "skills" / "runtime-only"
+        rt_dir.mkdir(parents=True)
+        (rt_dir / SKILL_MANIFEST).write_bytes(b"# caf\xe9 only\n")
+        r = await client.get("/api/context/skills/runtime-only/diff")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        claude_rt = [rt for rt in data["runtimes"] if rt["runtime"] == "claude_skills"][0]
+        assert claude_rt["status"] == "missing canonical"
+        assert "�" in claude_rt["runtime_content"]
 
 
 # ---------------------------------------------------------------------------
@@ -2024,7 +2114,7 @@ class TestImportOneAgent:
 def _make_local_skill(tmp_path: Path, name: str, content: str = "# Local\n") -> Path:
     skill_dir = tmp_path / ".memtomem" / "skills.local" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / SKILL_MANIFEST).write_text(content, encoding="utf-8")
+    _write_text_lf(skill_dir / SKILL_MANIFEST, content)
     return skill_dir
 
 
