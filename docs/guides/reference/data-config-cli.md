@@ -332,7 +332,9 @@ mm context diff --include=settings     # check hook sync status
 # Context Versioning (ADR-0022)
 mm context version create agents my-agent --note "stable"          # snapshot the current working canonical as a new immutable version
 mm context version promote agents my-agent --to production --version v1 # move a label pointer (e.g. production) to a specific version (e.g. v1)
+mm context version delete-label agents my-agent production         # drop a label pointer (absent label = no-op; 'latest' is reserved)
 mm context version list agents my-agent                            # list all versions and label pointers for an artifact
+mm context version enable agents my-agent                          # adopt a flat-layout artifact into directory layout so it can be versioned
 
 # Multi-project registry (same registry the web portal manages)
 mm context projects list               # discovered scopes: scope_id, health, enrollment

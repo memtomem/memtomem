@@ -110,7 +110,9 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
   the Web UI's Wiki section) snapshots one canonical asset from the wiki into the
   **current project's** `.memtomem/` Store, pinned to the wiki's HEAD commit.
 - **Update** — `mm context update <type> <name>` refreshes an installed snapshot
-  to the wiki's latest HEAD.
+  to the wiki's latest HEAD. Add `--dry-run` to print the would-update /
+  unchanged / refuse preview without writing anything (also works with
+  `--all`, where it prints the batch table and skips the confirm prompt).
 
 Install and Update only ever write the **project** Store. They do **not** edit
 `~/.memtomem/config.json` or the `~/.memtomem/<artifact>/` User tier — so a wiki

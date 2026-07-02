@@ -109,6 +109,21 @@ class TestLocaleFiles:
             empty = [k for k, v in data.items() if not v.strip()]
             assert not empty, f"Empty values in {name}.json: {empty}"
 
+    def test_wiki_dirty_tip_remediation_is_tier_portable(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The nav dirty-dot tooltip must lead with ``mm wiki commit`` —
+        the remediation that works on every tier. The web Commit button is
+        dev-mode-only (wiki write routes mount in dev), so a wording that
+        ONLY points at the Wiki section sends prod users to an affordance
+        that does not exist (0629 wiki-audit backlog f)."""
+        for name, data in [("en", en), ("ko", ko)]:
+            tip = data["settings.nav.ctx_wiki_dirty_tip"]
+            assert "mm wiki commit" in tip, (
+                f"{name}.json settings.nav.ctx_wiki_dirty_tip must name the "
+                f"tier-portable `mm wiki commit` remediation; got: {tip!r}"
+            )
+
 
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 

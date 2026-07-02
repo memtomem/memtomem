@@ -58,6 +58,7 @@ from memtomem.context.migrate import (
     MigrateScopeResult,
     SCOPE_MIGRATABLE_KINDS,
     _detect_source_scope,
+    adopt_flat_to_dir,
     classify_migrate,
     migrate_one,
     migrate_scope,
@@ -1729,9 +1730,17 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
         artifact_type, name, scope_flag
     )
     if not working_file.is_file():
+        # `mm context migrate` only consumes lockfile-tracked flats (a
+        # hand-authored or UI-created flat classifies skip_manual), so it was
+        # a dead end for exactly the artifacts most likely to hit this branch.
+        # Lead with `version enable` — the layout-only adopt that works for
+        # ANY flat canonical — and keep migrate for wiki-installed assets,
+        # where it also consolidates the lockfile manifest.
         raise click.ClickException(
             f"No working canonical at {working_file}. The artifact must exist in "
-            f"directory layout — run `mm context migrate {artifact_type} {name}` first."
+            f"directory layout — run `mm context version enable {artifact_type} {name}` "
+            f"to adopt a flat-layout file (wiki-installed assets: "
+            f"`mm context migrate {artifact_type} {name}`)."
         )
     # Gate A on the snapshot bytes (ADR-0011 trust boundary): creating a version
     # is a new write into a git-tracked tree for project_shared, so a privacy
@@ -1814,6 +1823,111 @@ def version_list_cmd(artifact_type: str, name: str, scope_flag: str | None) -> N
         suffix = f"  [{', '.join(sorted(pointers))}]" if pointers else ""
         note = f"  — {rec.note}" if rec.note else ""
         click.echo(f"  {tag:6s} {rec.created_at}{suffix}{note}")
+
+
+@version_group.command("delete-label")
+@click.argument("artifact_type")
+@click.argument("name")
+@click.argument("label")
+@_SCOPE_OPTION
+def version_delete_label_cmd(
+    artifact_type: str, name: str, label: str, scope_flag: str | None
+) -> None:
+    """Drop a label pointer from an artifact's manifest.
+
+    CLI parity for the web ``DELETE /context/{type}/{name}/labels/{label}``
+    route and ``mem_context_label(delete=True)`` — until now the pointer
+    could be created and moved from the CLI (`version promote`) but only
+    dropped from the web UI or MCP. Deleting an absent label is a no-op
+    (still exits 0, mirroring the web 200); the reserved `latest` is refused.
+
+    Example: `mm context version delete-label agents my-agent production`
+    """
+    artifact_dir, working_file, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    if not working_file.is_file():
+        # Mirror the web route's dir-layout gate: a flat artifact has no
+        # version store, so "deleted" would be a misleading no-op and an
+        # absent artifact deserves a loud miss, not silence.
+        raise click.ClickException(
+            f"No working canonical at {working_file}. A flat-layout artifact has no "
+            f"version store — run `mm context version enable {artifact_type} {name}` first."
+        )
+    try:
+        versioning.delete_label(artifact_dir, label)
+        manifest = versioning.load_manifest(artifact_dir)
+    except versioning.VersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.secho(f"Dropped label {label!r} from {artifact_type}/{name}", fg="green")
+    if manifest.labels:
+        remaining = ", ".join(f"{lbl} → {tag}" for lbl, tag in sorted(manifest.labels.items()))
+        click.echo(f"  remaining labels: {remaining}")
+    else:
+        click.echo("  no labels remain")
+
+
+@version_group.command("enable")
+@click.argument("artifact_type")
+@click.argument("name")
+@_SCOPE_OPTION
+def version_enable_cmd(artifact_type: str, name: str, scope_flag: str | None) -> None:
+    """Adopt a flat-layout artifact into directory layout so it can be versioned.
+
+    The version store is dir-layout-only (ADR-0022 invariant 3), and
+    `mm context migrate` deliberately skips flats with no lockfile entry
+    (``skip_manual``) — so a hand-authored or web-created flat canonical was
+    permanently locked out of CLI versioning. This is the explicit adopt
+    action (CLI parity for the web ``POST …/versions/enable`` route): one
+    byte-identical rename of ``<type>/<name>.md`` → ``<type>/<name>/<manifest>``,
+    after which `version create` works normally. Idempotent on an
+    already-dir artifact; refuses a flat+dir collision and an orphaned
+    version store rather than silently mishandling them.
+
+    Example: `mm context version enable agents my-agent`
+    """
+    artifact_dir, working_file, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
+    canonical_root = artifact_dir.parent
+    flat_path = canonical_root / f"{name}.md"
+
+    if working_file.is_file():
+        if flat_path.exists():
+            # flat+dir collision — refuse rather than report a misleading
+            # idempotent success while a stray flat lingers (web-route mirror).
+            raise click.ClickException(
+                f"{name!r} has both flat ({flat_path}) and directory layouts; "
+                f"remove the redundant flat file to resolve the collision."
+            )
+        click.secho(
+            f"{artifact_type}/{name} already uses directory layout; nothing to do.",
+            fg="cyan",
+        )
+        return
+
+    if not flat_path.is_file():
+        raise click.ClickException(
+            f"No canonical artifact to adopt: neither {working_file} nor {flat_path} exists."
+        )
+
+    # Orphaned version store — adopting into it would silently attach a prior
+    # same-named artifact's version history to this file (web-route mirror).
+    if (
+        versioning.versions_json_path(artifact_dir).exists()
+        or versioning.versions_dir(artifact_dir).is_dir()
+    ):
+        raise click.ClickException(
+            f"{name!r} cannot be adopted: an orphaned version store already exists "
+            f"at {artifact_dir}. Resolve it manually first."
+        )
+
+    # Byte-identical same-scope rename — no privacy re-scan needed here; a
+    # labeled sync still re-scans the frozen versions/vN.md at deploy time
+    # (ADR-0022 Gate A).
+    try:
+        new_working = adopt_flat_to_dir(artifact_type, flat_path, artifact_dir)
+    except (FileNotFoundError, FileExistsError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.secho(f"Adopted {artifact_type}/{name} into directory layout", fg="green")
+    click.echo(f"  → {new_working}")
+    click.echo(f"  next: mm context version create {artifact_type} {name}")
 
 
 @context.command("install")
@@ -1926,12 +2040,22 @@ _WIKI_DIRTY_WARN = "warning: wiki has uncommitted changes; using HEAD which does
     is_flag=True,
     help="Overwrite local edits; each dirty file is preserved as <file>.bak.",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Classify and print the preview only — nothing is written and no "
+        "prompt is shown. Exits 0 whenever the preview was computable, "
+        "including rows the real run would refuse."
+    ),
+)
 def update_cmd(
     asset_type: str,
     name: str,
     all_projects: bool,
     yes: bool,
     force: bool,
+    dry_run: bool,
 ) -> None:
     """Refresh an installed wiki asset from the wiki HEAD.
 
@@ -1948,6 +2072,11 @@ def update_cmd(
     skips the prompt for automation. ``--yes --force`` is the
     automation invariant — destructive batch with WARNING on stderr,
     no prompt.
+
+    With ``--dry-run``: print the same 4-state preview and stop — no
+    writes, no prompt. Works with and without ``--all``; a not-installed
+    asset still exits non-zero with the install hint (a dry run of an
+    impossible update fails the way the real run would).
     """
     root = _find_project_root()
 
@@ -1963,7 +2092,11 @@ def update_cmd(
         click.secho(_WIKI_DIRTY_WARN, fg="yellow", err=True)
 
     if all_projects:
-        _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force)
+        _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force, dry_run=dry_run)
+        return
+
+    if dry_run:
+        _run_update_dry_run_single(asset_type, name, root, wiki=wiki)
         return
 
     try:
@@ -2020,6 +2153,65 @@ def update_cmd(
         )
 
 
+def _run_update_dry_run_single(
+    asset_type: str,
+    name: str,
+    root: Path,
+    *,
+    wiki: WikiStore,
+) -> None:
+    """Read-only preview for the single-project ``update --dry-run`` path.
+
+    Reuses :func:`_classify_for_all_update` with a one-project list so the
+    preview carries the exact gate parity the ``--all`` table already has
+    (dirty / flat-layout / unprovable-record, #1247 id 13 family): what
+    this prints as ``refuse`` is what the real run would raise as
+    ``StaleInstallError`` — no duplicated gate logic to drift.
+    """
+    asset_type_plural = f"{asset_type}s"
+    try:
+        new_commit, classifications = _classify_for_all_update(
+            asset_type_plural,
+            name,
+            wiki=wiki,
+            projects=[root],
+        )
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except AssetNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except WikiUnbornHeadError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not classifications:
+        # Not-installed parity: the classifier silently skips entry-less
+        # projects (right for the batch table, wrong for a targeted single
+        # asset) — fail with the same hint shape the real run's
+        # NotInstalledError carries, so `--dry-run` never reports an
+        # impossible update as previewable.
+        raise click.ClickException(
+            f"{asset_type_plural}/{name}: no lockfile entry; "
+            f"run `mm context install {asset_type} {name}` first"
+        )
+
+    _print_classification_table(classifications, asset_type_plural, name, new_commit)
+
+    row = classifications[0]
+    if row.state == "update":
+        old = (row.lock_entry or {}).get("wiki_commit", "")
+        old_abbr = old[:12] if isinstance(old, str) and old else "(unpinned)"
+        click.echo(f"\nDry run — nothing written; would update {old_abbr} → {new_commit[:12]}.")
+    elif row.state == "unchanged":
+        click.echo("\nDry run — nothing written; already up to date.")
+    elif row.state == "refuse":
+        click.echo(
+            "\nDry run — nothing written; the real run would refuse "
+            "(see reason above; --force overwrites with .bak siblings)."
+        )
+    else:  # "error"
+        click.echo("\nDry run — nothing written; lockfile error (see reason above).")
+
+
 def _run_update_all(
     asset_type: str,
     name: str,
@@ -2028,6 +2220,7 @@ def _run_update_all(
     wiki: WikiStore,
     yes: bool,
     force: bool,
+    dry_run: bool = False,
 ) -> None:
     """Orchestrate ``mm context update <type> <name> --all``.
 
@@ -2110,6 +2303,18 @@ def _run_update_all(
 
     if not needs_update and not needs_force and not has_errors:
         click.echo("\nAll projects are up to date.")
+        return
+
+    if dry_run:
+        # Preview verb: report what the wet run would do and stop — exit 0
+        # even with refuse/error rows (the table already shows them; the
+        # refusal exit belongs to the run that actually intends to write).
+        parts = [f"{len(needs_update)} would update"]
+        if needs_force:
+            parts.append(f"{len(needs_force)} would refuse without --force")
+        if has_errors:
+            parts.append(f"{len(has_errors)} in error")
+        click.echo(f"\nDry run — nothing written; {', '.join(parts)}.")
         return
 
     if needs_force and not force:
@@ -3567,6 +3772,11 @@ def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, appl
                 f"lands untracked: {result.provenance_reason}",
                 fg="yellow",
             )
+        # Engine caveats (copy-rename overrides, mcp .mcp.json disclosure)
+        # render in the PLAN too — a caveat the user only learns about
+        # after --apply is not a plan they confirmed.
+        for note in result.notes:
+            click.secho(f"  note: {note}", fg="yellow")
         confirm_note = " --confirm-project-shared" if result.to_scope == "project_shared" else ""
         click.echo(f"\nRun with --apply{confirm_note} to execute.")
         if result.needs_sync and result.sync_command:
