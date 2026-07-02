@@ -113,6 +113,21 @@ class WikiDetachedHeadError(RuntimeError):
     """
 
 
+class WikiUnbornHeadError(RuntimeError):
+    """Raised when the wiki HEAD names a branch that has no commits yet.
+
+    The state a clone of an *empty* remote leaves behind (``mm wiki init
+    --from <url>`` of a just-created backup repo): ``.git`` exists, the
+    working tree may even carry files, but ``rev-parse HEAD`` has nothing
+    to resolve. Distinct from :class:`WikiNotFoundError` (no wiki at all)
+    so callers can degrade precisely — the web routes render a typed
+    envelope instead of a 500 traceback, and ``present``-style probes
+    report the wiki as not-yet-usable. The message is deliberately path-
+    and SHA-free (mirrors :class:`WikiDetachedHeadError`) so web surfaces
+    may return it verbatim.
+    """
+
+
 @dataclass(frozen=True)
 class WikiAsset:
     """An entry in the wiki — a skill, agent, or command directory."""
@@ -488,8 +503,46 @@ class WikiStore:
         the project lockfile (see ADR-0008).
         """
         self.require_exists()
-        result = _git(["rev-parse", "HEAD"], cwd=self.root)
+        try:
+            result = _git(["rev-parse", "HEAD"], cwd=self.root)
+        except RuntimeError as exc:
+            if self._head_is_unborn():
+                raise WikiUnbornHeadError(
+                    "wiki has no commits yet (a clone of an empty remote?) — make an "
+                    "initial commit in the wiki repo, or pull a populated branch with "
+                    "`mm wiki pull`"
+                ) from exc
+            raise
         return result.stdout.strip()
+
+    def _head_is_unborn(self) -> bool:
+        """``True`` when HEAD is a symbolic ref to a branch with no commits.
+
+        Called only after ``rev-parse HEAD`` failed, to classify that failure.
+        Three conditions gate the classification so a *corrupt* repo is never
+        misreported as merely unborn (any other failure re-raises the redacted
+        RuntimeError verbatim):
+
+        1. ``symbolic-ref -q HEAD`` resolves — HEAD itself is intact and names
+           a branch (a detached HEAD or a garbled HEAD file fails here);
+        2. ``show-ref --verify`` says the branch ref does not resolve (loose or
+           packed);
+        3. nothing sits at the ref's loose path — a directory (or unreadable
+           file) squatting at ``.git/refs/heads/<branch>`` also fails
+           ``show-ref``, but that is ref-store corruption, not an unborn
+           branch, and must keep the original git error.
+        """
+        sym = _git_query(["symbolic-ref", "-q", "HEAD"], self.root)
+        ref = sym.stdout.strip()
+        if sym.returncode != 0 or not ref:
+            return False
+        if _git_query(["show-ref", "--verify", "--quiet", ref], self.root).returncode == 0:
+            return False
+        ref_path = _git_query(["rev-parse", "--git-path", ref], self.root)
+        loose = ref_path.stdout.strip()
+        if ref_path.returncode != 0 or not loose:
+            return False
+        return not (self.root / loose).exists()
 
     def commit_is_reachable(self, commit: str) -> bool:
         """``True`` when *commit* resolves to an object in this wiki repo.

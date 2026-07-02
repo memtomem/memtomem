@@ -69,6 +69,15 @@ class TestListCmd:
         assert result.exit_code == 0
         assert "no assets" in result.output
 
+    def test_list_unborn_wiki_degrades_head_line(self, unborn_wiki: Path) -> None:
+        # A clone of an empty remote still carries working-tree assets — the
+        # listing must survive; only the HEAD line degrades (no traceback).
+        runner = CliRunner()
+        result = runner.invoke(wiki, ["list"])
+        assert result.exit_code == 0, result.output
+        assert "HEAD: (no commits yet)" in result.output
+        assert "alpha" in result.output
+
     def test_list_shows_assets(self, isolated_wiki: Path) -> None:
         runner = CliRunner()
         runner.invoke(wiki, ["init"])

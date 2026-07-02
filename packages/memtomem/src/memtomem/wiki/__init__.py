@@ -17,6 +17,7 @@ from memtomem.wiki.store import (
     WikiDetachedHeadError,
     WikiNotFoundError,
     WikiStore,
+    WikiUnbornHeadError,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "WikiDetachedHeadError",
     "WikiNotFoundError",
     "WikiStore",
+    "WikiUnbornHeadError",
 ]

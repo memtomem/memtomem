@@ -73,6 +73,7 @@ from memtomem.wiki.store import (
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiStore,
+    WikiUnbornHeadError,
 )
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
@@ -81,6 +82,7 @@ from memtomem.web.routes._wiki_common import (
     _require_vendor,
     _validate_name_or_error,
     _wiki_absent,
+    _wiki_unborn,
 )
 
 logger = logging.getLogger(__name__)
@@ -729,7 +731,12 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
     except WikiHeadMovedError:
         try:
             fresh = store.current_commit()
-        except WikiNotFoundError:
+        except (WikiNotFoundError, WikiUnbornHeadError):
+            # The wiki vanished — or its branch was force-reset to empty —
+            # between the failed CAS and this freshness probe. The commit
+            # still failed because HEAD moved; report the conflict with an
+            # unknown fresh head rather than letting the probe's own error
+            # escape as a 500.
             fresh = ""
         return _commit_head_conflict(fresh)
     except WikiNotFoundError as exc:
@@ -741,6 +748,11 @@ async def commit_wiki(asset_type: AssetType, name: str, body: WikiCommitRequest)
         # envelopes (``override_exists``); the engine message is fixed and
         # deliberately path-free (see WikiDetachedHeadError in wiki/store.py).
         raise _error(409, "conflict", str(exc), reason_code="detached_head") from exc
+    except WikiUnbornHeadError as exc:
+        # Precede the broad RuntimeError arm like the detached-HEAD arm above:
+        # a commit-less wiki is a precise user-fixable state (409 + remedy),
+        # not an internal git failure (500).
+        raise _wiki_unborn(exc) from exc
     except TimeoutError as exc:
         raise _error(
             503, "busy", "wiki commit timed out — another wiki operation may be in progress"
