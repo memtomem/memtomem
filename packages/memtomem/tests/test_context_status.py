@@ -859,7 +859,7 @@ def test_status_flat_layout_row_points_at_migrate(wiki_root: Path, tmp_path: Pat
     [row] = [r for r in rows if r.asset_type == "agents" and r.name == "foo"]
     assert row.state == "missing"
     assert row.tier == "project_shared"
-    assert "migrate agent foo" in (row.reason or "")
+    assert "mm context migrate agents foo" in (row.reason or "")
     assert "dest missing" not in (row.reason or "")
 
 

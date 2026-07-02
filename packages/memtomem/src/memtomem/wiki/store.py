@@ -22,7 +22,13 @@ from pathlib import Path, PurePosixPath
 logger = logging.getLogger(__name__)
 
 DEFAULT_WIKI_PATH: Path = Path.home() / ".memtomem-wiki"
-"""Default wiki location — overridable via ``MEMTOMEM_WIKI_PATH`` env."""
+"""Default wiki location — overridable via ``MEMTOMEM_WIKI_PATH`` env.
+
+Documentation-only: frozen under the importing process's home at import
+time. Runtime resolution goes through :func:`_wiki_path_from_env`, which
+re-reads ``Path.home()`` at call time so a ``HOME`` override applied after
+import (e.g. a test sandbox) is honored (#1506).
+"""
 
 WIKI_ASSET_TYPES: tuple[str, ...] = ("skills", "agents", "commands")
 """Asset directory names at the wiki root. Order is significant for listing."""
@@ -97,11 +103,28 @@ class WikiNothingToCommitError(RuntimeError):
 class WikiDetachedHeadError(RuntimeError):
     """Raised when a branch operation runs on a detached-HEAD wiki.
 
-    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``);
-    a detached HEAD has no branch to name, so :meth:`WikiStore.current_branch`
-    refuses rather than let git emit a cryptic refspec error. The message is
-    deliberately path- and SHA-free so it stays safe if a future web surface
-    ever reuses it (CLI surfaces it as a classified ``ClickException``).
+    ``mm wiki push`` / ``pull`` push or pull a *branch* (``origin <branch>``),
+    and :meth:`WikiStore.commit_paths` CAS-advances a *branch ref*; a detached
+    HEAD has no branch to name, so :meth:`WikiStore.current_branch` and
+    :meth:`WikiStore.commit_paths` refuse rather than let git emit a cryptic
+    refspec / symbolic-ref error. The message is deliberately path- and
+    SHA-free so the web commit route can return it verbatim in its 409
+    envelope (the CLI surfaces it as a classified ``ClickException``).
+    """
+
+
+class WikiUnbornHeadError(RuntimeError):
+    """Raised when the wiki HEAD names a branch that has no commits yet.
+
+    The state a clone of an *empty* remote leaves behind (``mm wiki init
+    --from <url>`` of a just-created backup repo): ``.git`` exists, the
+    working tree may even carry files, but ``rev-parse HEAD`` has nothing
+    to resolve. Distinct from :class:`WikiNotFoundError` (no wiki at all)
+    so callers can degrade precisely — the web routes render a typed
+    envelope instead of a 500 traceback, and ``present``-style probes
+    report the wiki as not-yet-usable. The message is deliberately path-
+    and SHA-free (mirrors :class:`WikiDetachedHeadError`) so web surfaces
+    may return it verbatim.
     """
 
 
@@ -118,7 +141,9 @@ def _wiki_path_from_env() -> Path:
     env = os.environ.get("MEMTOMEM_WIKI_PATH")
     if env:
         return Path(env).expanduser()
-    return DEFAULT_WIKI_PATH
+    # Call-time Path.home(), not DEFAULT_WIKI_PATH — the constant is frozen
+    # at import and would ignore a HOME override applied afterwards (#1506).
+    return Path.home() / ".memtomem-wiki"
 
 
 # Match the ``userinfo@`` segment of a ``scheme://userinfo@host`` URL. The
@@ -186,6 +211,31 @@ def _git(
         # git binary missing / cwd vanished mid-call. Classify as RuntimeError so
         # a raw OSError never escapes a caller's (or the CLI's) RuntimeError
         # handler; redact in case the message carries a URL.
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {exc}")) from exc
+
+
+def _git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
+    """Run ``git <args>`` in ``cwd`` returning raw *bytes* stdout.
+
+    Twin of :func:`_git` for path-carrying porcelain output (``ls-tree -z``):
+    ``text=True`` decodes with the host's preferred locale encoding, which
+    corrupts non-ASCII pathnames on non-UTF-8 hosts — the caller decodes
+    explicitly instead. Failure classification and credential redaction
+    mirror :func:`_git`.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {detail}")) from exc
+    except OSError as exc:
+        # Same classification as _git: a raw OSError never escapes a caller's
+        # (or the CLI's) RuntimeError handler.
         raise RuntimeError(_redact_url_userinfo(f"git {' '.join(args)} failed: {exc}")) from exc
 
 
@@ -453,8 +503,46 @@ class WikiStore:
         the project lockfile (see ADR-0008).
         """
         self.require_exists()
-        result = _git(["rev-parse", "HEAD"], cwd=self.root)
+        try:
+            result = _git(["rev-parse", "HEAD"], cwd=self.root)
+        except RuntimeError as exc:
+            if self._head_is_unborn():
+                raise WikiUnbornHeadError(
+                    "wiki has no commits yet (a clone of an empty remote?) — make an "
+                    "initial commit in the wiki repo, or pull a populated branch with "
+                    "`mm wiki pull`"
+                ) from exc
+            raise
         return result.stdout.strip()
+
+    def _head_is_unborn(self) -> bool:
+        """``True`` when HEAD is a symbolic ref to a branch with no commits.
+
+        Called only after ``rev-parse HEAD`` failed, to classify that failure.
+        Three conditions gate the classification so a *corrupt* repo is never
+        misreported as merely unborn (any other failure re-raises the redacted
+        RuntimeError verbatim):
+
+        1. ``symbolic-ref -q HEAD`` resolves — HEAD itself is intact and names
+           a branch (a detached HEAD or a garbled HEAD file fails here);
+        2. ``show-ref --verify`` says the branch ref does not resolve (loose or
+           packed);
+        3. nothing sits at the ref's loose path — a directory (or unreadable
+           file) squatting at ``.git/refs/heads/<branch>`` also fails
+           ``show-ref``, but that is ref-store corruption, not an unborn
+           branch, and must keep the original git error.
+        """
+        sym = _git_query(["symbolic-ref", "-q", "HEAD"], self.root)
+        ref = sym.stdout.strip()
+        if sym.returncode != 0 or not ref:
+            return False
+        if _git_query(["show-ref", "--verify", "--quiet", ref], self.root).returncode == 0:
+            return False
+        ref_path = _git_query(["rev-parse", "--git-path", ref], self.root)
+        loose = ref_path.stdout.strip()
+        if ref_path.returncode != 0 or not loose:
+            return False
+        return not (self.root / loose).exists()
 
     def commit_is_reachable(self, commit: str) -> bool:
         """``True`` when *commit* resolves to an object in this wiki repo.
@@ -549,9 +637,11 @@ class WikiStore:
            the new HEAD — best-effort, since the commit has already landed.
 
         Raises :class:`WikiHeadMovedError` (HEAD advanced — caller → 409),
-        :class:`WikiNothingToCommitError` (bytes identical to HEAD), or
-        :class:`RuntimeError` (git failure — the caller MUST surface a fixed
-        message; the raw stderr embeds the absolute repo path).
+        :class:`WikiNothingToCommitError` (bytes identical to HEAD),
+        :class:`WikiDetachedHeadError` (no branch to CAS-advance — the message
+        is fixed and path-free, safe to surface), or :class:`RuntimeError`
+        (git failure — the caller MUST surface a fixed message; the raw stderr
+        embeds the absolute repo path).
         """
         self.require_exists()
         head = self.current_commit()
@@ -562,9 +652,22 @@ class WikiStore:
             )
 
         # Resolve the actual branch ref dynamically — never hardcode
-        # ``refs/heads/main`` (a clone may be on another branch); a detached
-        # HEAD has no symbolic ref and cannot be safely CAS-advanced.
-        branch_ref = _git(["symbolic-ref", "HEAD"], cwd=self.root).stdout.strip()
+        # ``refs/heads/main`` (a clone may be on another branch). A detached
+        # HEAD has no symbolic ref (rc != 0) and cannot be safely CAS-advanced,
+        # so classify it the way :meth:`current_branch` does for push/pull
+        # (#1419) instead of leaking git's raw "ref HEAD is not a symbolic ref"
+        # RuntimeError. This runs BEFORE the temp index is created, so there is
+        # nothing to roll back.
+        ref_result = _git_query(["symbolic-ref", "HEAD"], self.root)
+        if ref_result.returncode != 0:
+            raise WikiDetachedHeadError(
+                "wiki is in detached HEAD state; check out a branch before committing"
+            )
+        branch_ref = ref_result.stdout.strip()
+        if not branch_ref:
+            # rc 0 with empty output should never happen (mirrors the
+            # current_branch guard) — but never run ``git update-ref "" …``.
+            raise RuntimeError("could not determine the wiki's current branch")
 
         tmpdir = Path(tempfile.mkdtemp(prefix="mm-wiki-commit-"))
         try:
@@ -628,7 +731,7 @@ class WikiStore:
 
         1. ``commit_is_reachable`` precheck — :class:`CommitNotFoundError`
            if the SHA is not in the object database.
-        2. ``git ls-tree -r --name-only <commit> -- <asset_type>/<name>/``
+        2. ``git ls-tree -r -z --name-only <commit> -- <asset_type>/<name>/``
            enumerates the files at that commit. An empty result means
            the asset path didn't exist at that revision — raises
            :class:`memtomem.context.install.AssetNotFoundError` (deferred
@@ -696,8 +799,9 @@ class WikiStore:
     def asset_files_at_commit(self, commit: str, asset_type: str, name: str) -> list[str]:
         """List the asset's file relpaths (relative to the asset dir) at *commit*.
 
-        ``git ls-tree -r --name-only`` against the commit's objects — the
-        wiki working tree is never consulted. Raises
+        ``git ls-tree -r -z --name-only`` (NUL-terminated bytes, so non-ASCII
+        pathnames survive ``core.quotePath``) against the commit's objects —
+        the wiki working tree is never consulted. Raises
         :class:`CommitNotFoundError` for an unreachable SHA and
         :class:`memtomem.context.install.AssetNotFoundError` when the asset
         path has no files at that revision. Used by
@@ -712,18 +816,33 @@ class WikiStore:
             raise CommitNotFoundError(f"commit {commit[:12]} is not reachable in {self.root}")
 
         src_prefix = f"{asset_type}/{name}/"
-        ls_result = _git(
-            ["ls-tree", "-r", "--name-only", commit, "--", src_prefix],
+        # ``-z`` (NUL-terminated, verbatim pathnames) via the bytes runner:
+        # with git's default ``core.quotePath=true``, line-oriented porcelain
+        # output C-quotes any non-ASCII pathname (``"skills/\354…"`` wrapped
+        # in double quotes), which fails the prefix match below — a
+        # Korean-named file silently vanished from extraction and the digest
+        # map. NUL-terminated bytes round-trip every pathname exactly.
+        ls_result = _git_bytes(
+            ["ls-tree", "-r", "-z", "--name-only", commit, "--", src_prefix],
             cwd=self.root,
         )
-        inner_relpaths = [
-            line[len(src_prefix) :]
-            for line in ls_result.stdout.splitlines()
-            # The startswith filter guards against odd git path output; the
-            # truthiness check drops a bare prefix row (ls-tree -r shouldn't
-            # yield one, but guard against odd git versions).
-            if line.startswith(src_prefix) and line[len(src_prefix) :]
-        ]
+        prefix_bytes = src_prefix.encode("utf-8")
+        try:
+            inner_relpaths = [
+                entry[len(prefix_bytes) :].decode("utf-8")
+                for entry in ls_result.stdout.split(b"\0")
+                # The startswith filter guards against odd git path output;
+                # the truthiness check drops the empty tail after the final
+                # NUL (and a bare prefix row, which ls-tree -r shouldn't
+                # yield, but guard against odd git versions).
+                if entry.startswith(prefix_bytes) and entry[len(prefix_bytes) :]
+            ]
+        except UnicodeDecodeError as exc:
+            # Path-free by design: the web routes render RuntimeError as a
+            # clean envelope; the raw bytes stay in the chained exception.
+            raise RuntimeError(
+                f"non-UTF-8 pathname under {asset_type}/{name} at commit {commit[:12]}"
+            ) from exc
         if not inner_relpaths:
             raise AssetNotFoundError(
                 f"{asset_type}/{name} not present at commit {commit[:12]} in {self.root}"

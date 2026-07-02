@@ -127,6 +127,9 @@ a single mental group of "manipulate this artifact":
 ```
 mm wiki init [--from <git-url>]
 mm wiki list
+mm wiki remote [<url>]
+mm wiki push
+mm wiki pull
 
 mm wiki skill   {override, diff, lint, commit} <name> [--vendor <vendor>]
 mm wiki agent   {override, diff, lint, commit} <name> [--vendor <vendor>]
@@ -326,6 +329,15 @@ override slots. They can be added in v2 if their runtime surface grows.
 - **Cursor / Copilot override slots.** Deferred — runtime surface too
   thin in v1.
 - **Settings in wiki.** Rejected — host-scope mutation trust boundary.
+- **Project→wiki "contribute back" verb.** Rejected: the layer is
+  intentionally one-way — the project is the authoritative, git-tracked
+  copy (Invariant 3), and every wiki-write primitive sources bytes from
+  the wiki's own canonical or an editor, never a project file.
+  Project→project reuse is `mm context {move, copy}` (ADR-0023), which
+  deliberately refuses to bless locally-edited bytes as pristine wiki
+  state; and promoting `project_shared` content into host-global git
+  would be the highest-stakes privacy ingress (ADR-0011 Gate A guards
+  only the wiki→project direction).
 
 ## References
 

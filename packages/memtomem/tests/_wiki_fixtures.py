@@ -35,3 +35,25 @@ def wiki_root(
     target = tmp_path / "wiki"
     monkeypatch.setenv("MEMTOMEM_WIKI_PATH", str(target))
     return target
+
+
+@pytest.fixture
+def unborn_wiki(wiki_root: Path, tmp_path: Path) -> Path:
+    """A clone of an EMPTY bare remote: ``.git`` exists but HEAD is unborn.
+
+    The state ``mm wiki init --from <url>`` leaves behind when the backup
+    remote has no commits yet. One working-tree skill is seeded so listing
+    surfaces have rows to render — the asset dirs exist, only HEAD is
+    missing (``rev-parse HEAD`` has nothing to resolve).
+    """
+    import subprocess
+
+    from memtomem.wiki.store import WikiStore
+
+    remote = tmp_path / "empty-remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    WikiStore.at_default().init_from_url(str(remote))
+    skill = wiki_root / "skills" / "alpha"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_bytes(b"# Alpha\n")
+    return wiki_root

@@ -134,7 +134,7 @@ from memtomem.context.skills import (
     generate_all_skills,
 )
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.wiki.store import WikiNotFoundError, WikiStore
+from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError
 from typing import Any, Literal, cast, get_args
 
 from memtomem.config import (
@@ -1711,7 +1711,7 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
     if not working_file.is_file():
         raise click.ClickException(
             f"No working canonical at {working_file}. The artifact must exist in "
-            f"directory layout — run `mm context migrate {artifact_type[:-1]} {name}` first."
+            f"directory layout — run `mm context migrate {artifact_type} {name}` first."
         )
     # Gate A on the snapshot bytes (ADR-0011 trust boundary): creating a version
     # is a new write into a git-tracked tree for project_shared, so a privacy
@@ -1859,6 +1859,8 @@ def install_cmd(
             raise click.ClickException(f"unknown asset type: {asset_type}")
     except WikiNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
+    except WikiUnbornHeadError as exc:
+        raise click.ClickException(str(exc)) from exc
     except AssetNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
     except AlreadyInstalledError as exc:
@@ -1954,6 +1956,8 @@ def update_cmd(
         else:  # pragma: no cover — guarded by click.Choice
             raise click.ClickException(f"unknown asset type: {asset_type}")
     except WikiNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except WikiUnbornHeadError as exc:
         raise click.ClickException(str(exc)) from exc
     except AssetNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2065,6 +2069,10 @@ def _run_update_all(
         # the message verbatim so the user knows which name was rejected.
         raise click.ClickException(str(exc)) from exc
     except AssetNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except WikiUnbornHeadError as exc:
+        # ``current_commit`` fires once at classification entry — a commit-less
+        # wiki (clone of an empty remote) has no HEAD to update to.
         raise click.ClickException(str(exc)) from exc
 
     if not classifications:

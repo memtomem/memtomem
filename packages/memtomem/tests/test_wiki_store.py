@@ -13,11 +13,16 @@ from memtomem.wiki.store import (
     WIKI_ASSET_TYPES,
     CommitNotFoundError,
     WikiAlreadyExistsError,
+    WikiDetachedHeadError,
     WikiHeadMovedError,
     WikiNotFoundError,
     WikiNothingToCommitError,
     WikiStore,
+    WikiUnbornHeadError,
+    _wiki_path_from_env,
 )
+
+from .helpers import set_home
 
 
 class TestDefaultPath:
@@ -36,6 +41,19 @@ class TestDefaultPath:
         monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
         store = WikiStore.at_default()
         assert store.root == Path.home() / ".memtomem-wiki"
+
+    def test_fallback_follows_home_set_after_import(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression pin for #1506 — the fallback must re-read ``Path.home()``
+        at call time. The import-time-frozen ``DEFAULT_WIKI_PATH`` made
+        wiki-absent tests leak the real ``~/.memtomem-wiki`` on dev machines
+        despite their ``set_home`` sandbox.
+        """
+        monkeypatch.delenv("MEMTOMEM_WIKI_PATH", raising=False)
+        sandbox_home = tmp_path / "sandbox-home"
+        set_home(monkeypatch, sandbox_home)
+        assert _wiki_path_from_env() == sandbox_home / ".memtomem-wiki"
 
 
 class TestInitScratch:
@@ -509,6 +527,46 @@ class TestCopyAssetAtCommit:
         assert not (dest / "__pycache__").exists()
 
 
+class TestAssetFilesNonAsciiPaths:
+    """Non-ASCII (e.g. Korean) pathnames must survive ``ls-tree`` parsing.
+
+    git's default ``core.quotePath=true`` C-quotes non-ASCII pathnames in
+    line-oriented porcelain output (``"skills/\\355\\225\\234…"`` wrapped in
+    double quotes), so a plain ``--name-only`` line parse fails the
+    ``startswith`` prefix match and the file silently vanishes from
+    extraction and the digest map — data loss on ``mm context install``."""
+
+    def test_non_ascii_file_survives_extraction(self, wiki_root: Path, tmp_path: Path) -> None:
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(
+            wiki_root,
+            "foo",
+            {
+                "SKILL.md": b"# foo\n",
+                "references/설명.md": "# 설명\n".encode(),
+            },
+        )
+
+        rels = store.asset_files_at_commit(pin, "skills", "foo")
+        assert sorted(rels) == ["SKILL.md", "references/설명.md"]
+
+        dest = tmp_path / "out" / "foo"
+        digest_map = store.copy_asset_at_commit(pin, "skills", "foo", dest)
+        assert sorted(digest_map) == ["SKILL.md", "references/설명.md"]
+        assert (dest / "references" / "설명.md").read_bytes() == "# 설명\n".encode()
+
+    def test_non_ascii_asset_name_is_found(self, wiki_root: Path) -> None:
+        """An asset whose NAME is non-ASCII must not raise a spurious
+        ``AssetNotFoundError`` (every quoted ls-tree line failed the prefix
+        match, so the old parse saw zero files)."""
+        store = WikiStore.at_default()
+        store.init()
+        pin = _seed_skill(wiki_root, "한글스킬", {"SKILL.md": b"# ko\n"})
+
+        assert store.asset_files_at_commit(pin, "skills", "한글스킬") == ["SKILL.md"]
+
+
 class TestCommitPaths:
     """``WikiStore.commit_paths`` — the isolated commit primitive (ADR-0027 §3)."""
 
@@ -602,3 +660,62 @@ class TestCommitPaths:
         head = store.current_commit()
         with pytest.raises(ValueError):
             store.commit_paths({"../evil": b"x\n"}, message="e", expected_head=head)
+
+    def test_detached_head_raises_classified(self, wiki_root: Path) -> None:
+        # A detached HEAD has no branch ref to CAS-advance. That must surface as
+        # the friendly WikiDetachedHeadError (the current_branch / #1419 push-pull
+        # precedent), NOT the raw `git symbolic-ref HEAD failed: …` RuntimeError.
+        store = self._seed(wiki_root)
+        head = store.current_commit()
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "checkout", "--detach"],
+            check=True,
+            capture_output=True,
+        )
+        with pytest.raises(WikiDetachedHeadError, match="detached HEAD"):
+            store.commit_paths({"agents/beta/agent.md": b"v2\n"}, message="e", expected_head=head)
+        assert store.current_commit() == head  # nothing was committed
+
+
+class TestUnbornHead:
+    """``current_commit`` on a commit-less wiki (clone of an empty remote)."""
+
+    def test_current_commit_raises_typed_error(self, unborn_wiki) -> None:
+        with pytest.raises(WikiUnbornHeadError) as excinfo:
+            WikiStore.at_default().current_commit()
+        # Message contract: path- and SHA-free, so web surfaces may return it
+        # verbatim (mirrors WikiDetachedHeadError).
+        assert str(unborn_wiki) not in str(excinfo.value)
+        assert "no commits yet" in str(excinfo.value)
+
+    def test_is_dirty_still_works(self, unborn_wiki) -> None:
+        # The seeded working-tree skill is untracked → dirty; ``git status``
+        # itself needs no HEAD, so the probe must not raise.
+        assert WikiStore.at_default().is_dirty() is True
+
+    def test_corrupt_ref_directory_stays_plain_runtimeerror(self, wiki_root) -> None:
+        # Codex review repro: a DIRECTORY squatting at .git/refs/heads/main
+        # makes ``symbolic-ref`` succeed and ``show-ref`` fail — the unborn
+        # shape minus the "nothing at the loose ref path" condition. That is
+        # ref-store corruption and must keep the original git error, not be
+        # softened to "no commits yet".
+        store = WikiStore.at_default()
+        store.init()
+        ref = wiki_root / ".git" / "refs" / "heads" / "main"
+        ref.unlink()
+        ref.mkdir()
+        with pytest.raises(RuntimeError) as excinfo:
+            store.current_commit()
+        assert not isinstance(excinfo.value, WikiUnbornHeadError)
+
+    def test_corrupt_head_stays_plain_runtimeerror(self, wiki_root) -> None:
+        # Narrowness pin: a corrupt HEAD file (git: "not a git repository")
+        # fails BOTH rev-parse and symbolic-ref, so it must keep raising the
+        # redacted RuntimeError — only the symbolic-ref-to-unborn-branch shape
+        # classifies as WikiUnbornHeadError.
+        store = WikiStore.at_default()
+        store.init()
+        (wiki_root / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+        with pytest.raises(RuntimeError) as excinfo:
+            store.current_commit()
+        assert not isinstance(excinfo.value, WikiUnbornHeadError)
