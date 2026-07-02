@@ -18,9 +18,14 @@ Pin-and-invert + mutation-validation rationale:
 - Each negative case asserts ``hits == []`` so a future false-positive
   drift on benign long prose surfaces immediately.
 
-The perf pin is a soft ceiling — generous enough that platform-jitter
-won't flake but tight enough to catch a quadratic regression (e.g. a
-naive overlap-window rewrite that re-scans large prefixes).
+The perf pins are RELATIVE (small-input vs full-input ratio, #1545): a
+fixed wall-clock ceiling flaked on shared macOS runners once the
+forward-synced pattern set grew past the headroom (500.9 ms / 625.7 ms
+vs the old 500 ms cap, on PRs that touched no privacy code). The pin's
+job was never "scan 1 MB in under half a second" — it was "cost grows
+linearly with input size" — and a ratio tests that directly, immune to
+runner speed and to future pattern-set growth (each added pattern
+scales both measurements equally).
 """
 
 from __future__ import annotations
@@ -41,6 +46,28 @@ from memtomem import privacy
 # ``sk-`` shape removes that ambiguity: the only way to miss this
 # secret is to not scan its position.
 _SECRET = "sk-" + "a" * 30
+
+# Linear scaling predicts the full/small time ratio ≈ the 10× size ratio;
+# an O(N^2) regression predicts ≈ 100×. 20 sits 2× above linear (shared-runner
+# jitter headroom; measured 9.7–10.1 locally across all fixtures) and 5× below
+# quadratic, so it cannot flake on a slow runner yet still fails loudly on the
+# #1488 backtracking class.
+_LINEAR_RATIO_CEILING = 20
+
+
+def _min_scan_time(text: str, repeats: int = 3) -> float:
+    """Best-of-N wall time for one ``privacy.scan`` call.
+
+    ``min`` is the standard low-noise timing estimator: a loaded runner can
+    only ever ADD time to a run, so the minimum approaches the true cost, and
+    taking it on BOTH sides of the ratio keeps the comparison stable.
+    """
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.perf_counter()
+        privacy.scan(text)
+        best = min(best, time.perf_counter() - start)
+    return best
 
 
 # Sizes straddle the former 10K cap. 12K is just past it; 100K and 1MB
@@ -107,27 +134,26 @@ class TestLongContentScan:
             f"got spans {[h.span for h in hits]}"
         )
 
-    def test_one_megabyte_scan_under_perf_ceiling(self):
-        # Soft ceiling — not a microbenchmark, just a non-linear-regression
+    def test_one_megabyte_scan_stays_linear(self):
+        # Relative pin (#1545) — not a microbenchmark, a non-linear-regression
         # guard. ``scan()`` runs one ``re.finditer`` pass per pattern, so cost
-        # grows linearly with the pattern count: the 19 short prefix-anchored
-        # ``DEFAULT_PATTERNS`` take ~100 ms locally and ~200 ms on a loaded CI
-        # runner for a 1 MB input (#1488 grew the set 9 -> 16, each added
-        # secret class a linear pass — no single hot spot; the
-        # memtomem-stm#553/#562/#561 forward-syncs make it 19). The 500 ms
-        # ceiling — matching ``test_crafted_repetition_scans_linearly`` below
-        # — keeps ~2x headroom over that worst case while still catching a genuine
-        # non-linear rewrite (e.g. a naive overlap-window scan that re-reads
-        # large prefixes), which would run in seconds at 1 MB, not hundreds of
-        # ms. The dedicated O(N^2) backtracking guard is that sibling test.
-        text = ("a" * 999_980) + _SECRET
-        start = time.perf_counter()
-        hits = privacy.scan(text)
-        elapsed = time.perf_counter() - start
-        assert hits, "Sanity check: the secret must still be detected"
-        assert elapsed < 0.5, (
-            f"1MB scan took {elapsed * 1000:.1f} ms — exceeds the 500 ms "
-            "ceiling, suggesting a non-linear regression"
+        # grows linearly with input size; a naive overlap-window rewrite that
+        # re-reads large prefixes would scale quadratically instead. The old
+        # absolute 500 ms ceiling flaked on shared macOS runners as the
+        # forward-synced pattern set grew (memtomem-stm#553/#562/#561 → 19
+        # patterns); the ratio is immune to both runner speed and pattern
+        # count. Same-shape inputs at both sizes so per-position cost matches.
+        small = ("a" * 99_980) + _SECRET
+        full = ("a" * 999_980) + _SECRET
+        assert privacy.scan(full), "Sanity check: the secret must still be detected"
+        small_elapsed = _min_scan_time(small)
+        full_elapsed = _min_scan_time(full)
+        ratio = full_elapsed / max(small_elapsed, 0.001)
+        assert ratio < _LINEAR_RATIO_CEILING, (
+            f"1MB scan took {ratio:.1f}x the 100KB scan "
+            f"({small_elapsed * 1000:.1f} ms → {full_elapsed * 1000:.1f} ms) — "
+            f"a 10x input should stay near 10x (ceiling {_LINEAR_RATIO_CEILING}x); "
+            "a quadratic rewrite would land near 100x"
         )
 
     @pytest.mark.parametrize(
@@ -148,12 +174,18 @@ class TestLongContentScan:
         # positions scans the rest of the buffer for a digit that never
         # comes. This pins linear-time behavior so a future maintainer who
         # drops the bound regresses here loudly rather than shipping a
-        # quadratic scan past the trust boundary.
-        start = time.perf_counter()
-        privacy.scan(blob)
-        elapsed = time.perf_counter() - start
-        assert elapsed < 0.5, (
-            f"crafted {len(blob)}-char repetition scanned in {elapsed * 1000:.1f} ms — "
-            "exceeds the 500 ms ceiling, indicating an O(N^2) backtracking regression "
-            "in one of the #1488 bounded patterns"
+        # quadratic scan past the trust boundary. Relative form (#1545): a
+        # 1/10 slice of the SAME repetition keeps the adversarial shape, so
+        # linear stays ≈10x while the unbounded form lands ≈100x.
+        privacy.scan(blob[:1000])  # warm-up: pattern compile out of the timing
+        small_elapsed = _min_scan_time(blob[: len(blob) // 10])
+        full_elapsed = _min_scan_time(blob)
+        ratio = full_elapsed / max(small_elapsed, 0.001)
+        assert ratio < _LINEAR_RATIO_CEILING, (
+            f"crafted {len(blob)}-char repetition scanned in {ratio:.1f}x its "
+            f"{len(blob) // 10}-char slice "
+            f"({small_elapsed * 1000:.1f} ms → {full_elapsed * 1000:.1f} ms) — "
+            f"a 10x input should stay near 10x (ceiling {_LINEAR_RATIO_CEILING}x), "
+            "indicating an O(N^2) backtracking regression in one of the #1488 "
+            "bounded patterns"
         )
