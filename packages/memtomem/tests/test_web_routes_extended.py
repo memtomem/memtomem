@@ -1751,8 +1751,15 @@ class TestConfigPatch:
         assert any("nonexistent" in r for r in data["rejected"])
 
     async def test_save_config(self, client: AsyncClient):
-        """POST /api/config/save persists config."""
-        with patch("memtomem.config.save_config_overrides"):
+        """POST /api/config/save persists config.
+
+        Patch the *route module's* binding, like ``test_patch_namespace_rules``
+        below — patching ``memtomem.config.save_config_overrides`` misses the
+        ``from memtomem.config import ...`` binding in ``routes/system.py``, so
+        the real saver ran against the developer's ``~/.memtomem/config.json``
+        (masked while leaked langfuse env kept its validation green, #1508).
+        """
+        with patch("memtomem.web.routes.system.save_config_overrides"):
             resp = await client.post("/api/config/save")
             assert resp.status_code == 200
             data = resp.json()

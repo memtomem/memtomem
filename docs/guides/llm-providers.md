@@ -54,7 +54,7 @@ export MEMTOMEM_LLM__API_KEY=sk-ant-...
 
 ## OpenAI-Compatible Endpoints
 
-The `openai` provider works with **any server** that implements `/v1/chat/completions` — not just OpenAI's cloud API. Set `PROVIDER=openai` and point `BASE_URL` at your server.
+The `openai` provider works with **any server** that implements `/v1/chat/completions` — not just OpenAI's cloud API. Set `MEMTOMEM_LLM__PROVIDER=openai` and point `MEMTOMEM_LLM__BASE_URL` at your server.
 
 ### LM Studio
 
@@ -91,8 +91,8 @@ export MEMTOMEM_LLM__MODEL=meta-llama/llama-3.1-8b-instruct
 
 Any server implementing `/v1/chat/completions` works:
 
-- **text-generation-webui**: enable `--api`, `BASE_URL=http://localhost:5000`
-- **LocalAI**: `BASE_URL=http://localhost:8080`
+- **text-generation-webui**: enable `--api`, `MEMTOMEM_LLM__BASE_URL=http://localhost:5000`
+- **LocalAI**: `MEMTOMEM_LLM__BASE_URL=http://localhost:8080`
 
 ### MCP Config Example
 
@@ -126,12 +126,12 @@ Code, use `claude mcp add` instead of editing a file. See
 
 ## Configuration Reference
 
-See [`configuration.md#llm`](configuration.md#llm) for the complete `MEMTOMEM_LLM__*` environment variable reference. Provider defaults when `MODEL` is empty: ollama → `gemma4:e2b`, openai → `gpt-4.1-mini`, anthropic → `claude-haiku-4-5-20251001`.
+See [`configuration.md#llm`](configuration.md#llm) for the complete `MEMTOMEM_LLM__*` environment variable reference. Provider defaults when `MEMTOMEM_LLM__MODEL` is empty: ollama → `gemma4:e2b`, openai → `gpt-4.1-mini`, anthropic → `claude-haiku-4-5-20251001`.
 
 ## Troubleshooting
 
-- **"Cannot connect to …"** — check `BASE_URL` and that the server is running
-- **"Authentication failed"** — verify `API_KEY`
+- **"Cannot connect to …"** — check `MEMTOMEM_LLM__BASE_URL` and that the server is running
+- **"Authentication failed"** — verify `MEMTOMEM_LLM__API_KEY`
 - **"Model not found" (Ollama)** — run `ollama pull <model>`
 - **Consolidation falls back to heuristic** — LLM error is logged; check provider health
 - **Query expansion adds latency** — expansion has a 3-second hard timeout; consider switching to `strategy="tags"` if LLM is consistently slow
