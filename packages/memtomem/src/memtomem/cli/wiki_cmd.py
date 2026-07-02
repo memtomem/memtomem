@@ -21,6 +21,7 @@ from memtomem.wiki import (
     WikiAlreadyExistsError,
     WikiNotFoundError,
     WikiStore,
+    WikiUnbornHeadError,
 )
 from memtomem.wiki.commit import (
     ResolvedTarget,
@@ -387,7 +388,12 @@ def list_cmd(asset_type: str | None) -> None:
         return
 
     click.secho(f"Wiki: {store.root}", fg="cyan")
-    click.echo(f"  HEAD: {store.current_commit()[:12]}")
+    try:
+        click.echo(f"  HEAD: {store.current_commit()[:12]}")
+    except WikiUnbornHeadError:
+        # A clone of an empty remote can still carry working-tree assets —
+        # keep listing them; only the HEAD line degrades.
+        click.echo("  HEAD: (no commits yet)")
     click.echo("")
     last_type: str | None = None
     for asset in assets:

@@ -24,13 +24,14 @@ from fastapi import APIRouter, Query
 
 from memtomem.context._names import override_vendors, renderable_vendors
 from memtomem.wiki import inspect as wiki_inspect
-from memtomem.wiki.store import WikiNotFoundError, WikiStore
+from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._wiki_common import (
     AssetType,
     _require_vendor,
     _validate_name_or_error,
     _wiki_absent,
+    _wiki_unborn,
 )
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
@@ -72,6 +73,8 @@ async def list_wiki() -> dict:
         return await asyncio.to_thread(_collect)
     except WikiNotFoundError as exc:
         raise _wiki_absent(exc) from exc
+    except WikiUnbornHeadError as exc:
+        raise _wiki_unborn(exc) from exc
 
 
 @router.get("/status")
@@ -101,6 +104,11 @@ async def wiki_status() -> dict:
     try:
         return await asyncio.to_thread(_probe)
     except WikiNotFoundError:
+        return {"present": False, "wiki_head": None, "is_dirty": False}
+    except WikiUnbornHeadError:
+        # A commit-less wiki (clone of an empty remote) cannot be installed
+        # from, so for the glance badge it is the same onboarding state as an
+        # absent wiki — hidden, never an error toast.
         return {"present": False, "wiki_head": None, "is_dirty": False}
 
 
