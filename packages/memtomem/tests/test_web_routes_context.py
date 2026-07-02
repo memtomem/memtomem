@@ -296,6 +296,98 @@ class TestOverview:
             f"last_synced_at must be max(skill_mtime, agent_mtime); got {ts!r}"
         )
 
+    # ── wiki_installs — the lockfile↔wiki staleness axis (0629 backlog c/d) ──
+
+    def _install_pinned_skill(self, project: Path, wiki_root: Path, name: str) -> str:
+        """Seed ``skills/<name>`` in the wiki, mirror it into *project*'s
+        dest tree, and pin the lockfile at the seeding commit. Returns the
+        pin SHA — advance the wiki afterwards to produce a ``behind`` row.
+        """
+        import subprocess
+
+        from memtomem.context._atomic import installed_at_from_dest
+        from memtomem.context.lockfile import Lockfile
+        from memtomem.wiki.store import WikiStore
+
+        store = WikiStore.at_default()
+        if not (wiki_root / ".git").exists():
+            store.init()
+        skill_dir = wiki_root / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / SKILL_MANIFEST).write_bytes(b"v1\n")
+        subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", f"add {name}"],
+            check=True,
+            capture_output=True,
+        )
+        pin = store.current_commit()
+
+        dest = project / ".memtomem" / "skills" / name
+        dest.mkdir(parents=True)
+        (dest / SKILL_MANIFEST).write_bytes(b"v1\n")
+        Lockfile.at(project).upsert_entry(
+            "skills", name, wiki_commit=pin, installed_at=installed_at_from_dest(dest)
+        )
+        return pin
+
+    @pytest.mark.anyio
+    async def test_overview_wiki_installs_reports_behind_count(
+        self, client: AsyncClient, tmp_path: Path, wiki_root: Path
+    ):
+        """An install pinned below wiki HEAD surfaces as ``behind`` in the
+        overview's ``wiki_installs`` block — the count the header badge
+        renders. Before the wiki advances the same install reads clean.
+        """
+        import subprocess
+
+        self._install_pinned_skill(tmp_path, wiki_root, "pinned")
+
+        r = await client.get("/api/context/overview")
+        assert r.status_code == 200
+        assert r.json()["wiki_installs"] == {"total": 1, "behind": 0}
+
+        # Advance the wiki past the pin — the dest stays clean, so the
+        # entry flips to ``behind`` ("update available").
+        (wiki_root / "skills" / "pinned" / SKILL_MANIFEST).write_bytes(b"v2\n")
+        subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "advance"],
+            check=True,
+            capture_output=True,
+        )
+
+        r = await client.get("/api/context/overview")
+        assert r.json()["wiki_installs"] == {"total": 1, "behind": 1}
+
+    @pytest.mark.anyio
+    async def test_overview_wiki_installs_excludes_untracked_canonicals(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        """Canonical artifacts with no lockfile entry (reverse-imported /
+        migrated-in) have no wiki pin to fall behind — they must not
+        inflate ``wiki_installs.total`` the way they join the skills tile.
+        """
+        _make_skill(tmp_path, "untracked-only")
+        r = await client.get("/api/context/overview")
+        data = r.json()
+        assert data["skills"]["total"] >= 1
+        assert data["wiki_installs"] == {"total": 0, "behind": 0}
+
+    @pytest.mark.anyio
+    async def test_overview_wiki_installs_placeholder_on_other_tiers(
+        self, client: AsyncClient, tmp_path: Path, wiki_root: Path
+    ):
+        """Wiki installs are lockfile-tracked project_shared snapshots only;
+        the user / project_local overviews carry the zero placeholder
+        (mirror of the ``mcp_servers`` single-tier convention).
+        """
+        self._install_pinned_skill(tmp_path, wiki_root, "pinned")
+        for tier in ("user", "project_local"):
+            r = await client.get("/api/context/overview", params={"target_scope": tier})
+            assert r.status_code == 200
+            assert r.json()["wiki_installs"] == {"total": 0, "behind": 0}, tier
+
 
 class TestSettingsCountShape:
     """Q-PR3 Visual-1 pins for the new ``settings`` count envelope.

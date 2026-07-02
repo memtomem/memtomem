@@ -17,6 +17,7 @@ from memtomem.context._names import GENERATOR_VENDOR
 from memtomem.context.projects import sync_skip_reason
 from memtomem.context.status import (
     ProjectStatus,
+    classify_status,
     collect_project_status,
     summarize_diff_with_canonical,
     summarize_settings_statuses,
@@ -351,6 +352,38 @@ async def context_overview(
         logger.exception("diff_settings failed")
         result["settings"] = _error_payload(exc, shape="status")
 
+    # Wiki-install staleness axis (0629 backlog c/d): the count of installed
+    # assets whose lockfile pin sits behind wiki HEAD ("update available").
+    # This is the lockfile↔wiki axis — none of the canonical→runtime tiles
+    # above carry it, and the cross-project /context/status-all route that
+    # does has zero web consumers by design. ``None`` (not zeros) on failure:
+    # the badge is a pure header enhancement, but "0 behind" is a clean-state
+    # claim we can't back when the classifier itself raised.
+    wiki_installs: dict[str, int] | None
+    try:
+        if target_scope == "project_shared":
+            # classify_status shells out to git per lockfile entry
+            # (HEAD probe + per-pin reachability), so it runs off the event
+            # loop (#1145 discipline); the diff blocks above are filesystem
+            # reads only.
+            _wiki_head, status_rows = await asyncio.to_thread(classify_status, project_root)
+            tracked = [
+                row
+                for row in status_rows
+                if row.tier == "project_shared" and row.state != "untracked"
+            ]
+            wiki_installs = {
+                "total": len(tracked),
+                "behind": sum(1 for row in tracked if row.state == "behind"),
+            }
+        else:
+            # Wiki installs are lockfile-tracked project_shared snapshots
+            # only — mirror the mcp_servers single-tier placeholder.
+            wiki_installs = {"total": 0, "behind": 0}
+    except Exception:
+        logger.exception("classify_status failed")
+        wiki_installs = None
+
     try:
         detected_runtimes = _compute_detected_runtimes(project_root)
     except Exception:
@@ -368,6 +401,7 @@ async def context_overview(
         "project_root": str(project_root),
         "detected_runtimes": detected_runtimes,
         "last_synced_at": last_synced_at,
+        "wiki_installs": wiki_installs,
         **result,
     }
 
