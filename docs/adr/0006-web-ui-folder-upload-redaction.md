@@ -258,8 +258,8 @@ self-export round-trips that happen to carry a (rotated, intentional) secret.
 **Caveat — what the marker proves.** A bundle-level marker proves *local
 provenance* (this install exported it), **not** that every chunk passed
 redaction. Legacy pre-guard rows, prior `force_unsafe` writes, and content
-from the still-unguarded folder-index path can all sit in the DB and thus
-appear in a self-export. F.3 is therefore an explicit **local-provenance
+the folder-index path ingested before its own gate landed (PR-A, #1499) can
+all sit in the DB and thus appear in a self-export. F.3 is therefore an explicit **local-provenance
 round-trip exemption**: we re-import our own export as-is, trusting the local
 user's earlier storage decisions, rather than re-proving redaction on data
 that already lives in this install. The stronger alternative — per-chunk
@@ -267,16 +267,18 @@ redaction provenance before skipping a scan — is heavier and deferred; if
 same-install round-trip of `force_unsafe` / legacy content is judged
 unacceptable, fall back to F.2 (gate everything).
 
-**Provenance marker (implementation detail, deferred to the follow-up PR).**
+**Provenance marker (implementation detail — built in the follow-up PR, #1490).**
 `export_chunks` stamps the bundle with a marker proving **local provenance**
 (this install's export produced it) — e.g. an HMAC over the chunk content
 keyed by a per-install secret, or a signed `exported_by` + `redaction_version`
 header. (Per the caveat above, this attests origin, not per-chunk redaction.) Import verifies it: valid → skip re-scan
 (round-trip preserved); absent or invalid → treat as foreign and run the F.2
 gate (`enforce_write_guard` per record, `force_unsafe` to override), across
-**both** `POST /api/export/import` and MCP `mem_import`. The exact marker
-(HMAC vs. signature vs. content-hash manifest) is a follow-up-PR decision;
-this ADR fixes the *policy* (verify-or-gate), not the mechanism.
+**both** `POST /api/export/import` and MCP `mem_import`. The exact marker was
+decided in the build (#1490): HMAC-SHA256 over the canonical `chunks` payload,
+keyed by a per-install sidecar secret (`<db-stem>.provenance_key`) — see
+`memtomem/provenance.py`. This ADR fixes the *policy* (verify-or-gate); the
+mechanism lives with the code.
 
 ### Axis G — Export/import filesystem path authority (added 2026-06-30 amendment)
 
@@ -547,8 +549,8 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
       Some signal already exists here — unlike the debounce/flush and
       LangGraph gaps above — so this is deferred alongside PR-B rather than
       bundled into this fix.
-- **PR-B — Web UI override toggle (shipped 2026-07-01) + audit surface
-  (deferred).**
+- **PR-B — Web UI override toggle + audit surface (both shipped
+  2026-07-01).**
   - **Toggle — built.** An "Index without privacy gate" checkbox on the Index
     tab (folder mode) and the Sources `+ 경로 추가` row threads `force_unsafe`
     into PR-A's `IndexEngine` gate. The bypass is a security *downgrade*, so it
@@ -596,14 +598,13 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
   scoped, not persistent rows — promotion to a real audit table is the
   open sub-question in axis E and would carry its own storage
   implications (eviction policy etc.) only if taken.
-- **`IndexEngine` API *will* gain a parameter (folder-index work, pending).**
-  The outline's `force_unsafe` keyword belongs on the private
-  `IndexEngine._index_file()` (the per-file method that `index_path` /
-  `index_file` / `index_path_stream` all funnel through) and is **not yet
-  built** — upload guards at the route layer instead (see "Implementation
-  status"). When the folder-index gate lands,
-  external callers (the engine is part of the public Python API) get the new
-  keyword; default `False` preserves existing behavior.
+- **`IndexEngine` API gained a parameter (built in PR-A, #1499).**
+  The `force_unsafe` keyword landed on the public `index_path` /
+  `index_file` / `index_path_stream` entrypoints, enforced at the private
+  `IndexEngine._index_file()` they all funnel through. External callers
+  (the engine is part of the public Python API) see the new keyword;
+  default `False` preserves existing behavior. Upload continues to guard
+  at the route layer (see "Implementation status").
 - **Cross-repo sync invariant gets a hook.** STM's secret-class pattern
   additions now have a documented reason to ramp the LTM gap-close in
   the same release window — the asymmetric-sync rule in CLAUDE.md

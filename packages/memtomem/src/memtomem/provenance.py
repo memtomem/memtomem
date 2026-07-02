@@ -12,8 +12,8 @@ What the marker proves — and does not
 -------------------------------------
 It proves **local provenance** (this install's storage produced the bundle),
 NOT that every chunk passed redaction. Legacy pre-guard rows, prior
-``force_unsafe`` writes, and content from the still-unguarded folder-index path
-can all appear in a self-export. F.3 is therefore an explicit
+``force_unsafe`` writes, and content the folder-index path ingested before its
+own gate landed (ADR-0006 PR-A, #1499) can all appear in a self-export. F.3 is therefore an explicit
 *local-provenance round-trip exemption* (ADR-0006 Axis F): we re-import our own
 export as-is, trusting the local user's earlier storage decisions, rather than
 re-proving redaction on data that already lives in this install. The stronger
