@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
-from memtomem.context.privacy_scan import PrivacyScanError
+from memtomem.context.privacy_scan import PrivacyScanError, scan_text_content
 from memtomem.context.skills import (
     CANONICAL_SKILL_ROOT,
     SKILL_GENERATORS,
@@ -34,6 +34,7 @@ from memtomem.web.routes._artifact_common import (
     HostWriteSyncRequest,
     ImportRequest,
     mtime_conflict_response,
+    raise_if_privacy_blocked,
     reject_project_local_write,
     scanned_dirs_for,
 )
@@ -282,6 +283,21 @@ async def create_skill(
     """Create a new canonical skill."""
     reject_project_local_write(target_scope, "Create skill")
     skill_dir = _canonical_skill_dir(project_root, body.name, scope=target_scope)
+    if target_scope == "project_shared":
+        # #1509 write-time Gate A — scan the exact in-memory string that
+        # atomic_write_text will write (no TOCTOU). user-tier saves are not
+        # scanned: not git-tracked, gated by allow_host_writes, and keep the
+        # sync-time force valve (ADR-0011 §5 asymmetry). source_path is the
+        # skill dir (never opened here) so path.name is the artifact name,
+        # not the useless constant SKILL.md.
+        scan = scan_text_content(
+            body.content,
+            source_path=skill_dir,
+            surface="web_context_skills_create",
+            scope="project_shared",
+            project_root=project_root,
+        )
+        raise_if_privacy_blocked(scan, kind="skill", artifact_name=body.name)
 
     # Unlocked pre-checks so a request that cannot succeed is refused
     # (409) rather than confirmed, and a no-op never prompts. The locked
@@ -366,6 +382,19 @@ async def update_skill(
     reject_project_local_write(target_scope, "Update skill")
     skill_dir = _canonical_skill_dir(project_root, name, scope=target_scope)
     manifest = skill_dir / SKILL_MANIFEST
+    if target_scope == "project_shared":
+        # #1509 write-time Gate A — see create_skill. Runs before the 404
+        # check so privacy refusal wins over existence, matching the
+        # commands/agents editors; force=True only bypasses the mtime
+        # guard, never this scan.
+        scan = scan_text_content(
+            body.content,
+            source_path=skill_dir,
+            surface="web_context_skills_update",
+            scope="project_shared",
+            project_root=project_root,
+        )
+        raise_if_privacy_blocked(scan, kind="skill", artifact_name=name)
     if not manifest.is_file():
         raise _error(404, "missing", f"skill {name!r} not found")
 

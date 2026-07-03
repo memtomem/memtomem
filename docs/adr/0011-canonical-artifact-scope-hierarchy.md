@@ -247,6 +247,17 @@ project_shared, the sync write is blocked regardless of `--force-unsafe`.
 > command itself carries the surface intent; only the scan half was
 > missing.
 
+> **2026-07 (#1509):** Gate A also fires at write time in the web
+> canonical create/update editors (skills / commands / agents),
+> matching the mcp-servers editor: the handlers scan `body.content`
+> before `atomic_write_text`, so a pasted secret is refused (path-free
+> 422) instead of landing in the git-tracked canonical and only being
+> caught at the next sync/import. The sync/import backstop is
+> unchanged. This closes the gap that falsified the "every first-party
+> byte path scans before landing" claim above. User-tier editor saves
+> stay unscanned by design: not git-tracked, gated by
+> `allow_host_writes`, and still subject to the sync-time valve.
+
 **Gate B (surface).** Explicit `--scope project_shared` flag plus
 confirm prompt at the CLI/MCP write surface (`mm mem add`,
 `mm context init`, `mm context migrate --to project_shared`). The flag must be passed

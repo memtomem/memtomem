@@ -12,8 +12,9 @@ Pins two cross-cutting invariants per RFC #787 stage 1:
    acknowledge the new surface.
 
 2. **Redaction guard coverage.** Every web-route handler that writes
-   user-supplied content to LTM must call
-   ``privacy.enforce_write_guard(...)`` somewhere in its body, or be in
+   user-supplied content to LTM must scan it (``enforce_write_guard``
+   directly, or the ``scan_text_content`` wrapper *and* a refusal on the
+   result — see ``_function_scans_and_refuses``), or be in
    ``_REDACTION_EXEMPT``. The list of handlers requiring redaction is
    explicit (``_REDACTION_PROTECTED``) — drift is caught by the
    classification test, which fails when an unsafe-method route is
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -143,14 +145,25 @@ _CSRF_EXEMPT: dict[str, str] = {
 # --- Redaction registry ----------------------------------------------------
 #
 # Handlers that ingest user-supplied content and persist it to LTM. Each
-# *must* call ``privacy.enforce_write_guard(...)`` in its body. New
-# content-writing handlers either join this list (and the body must
-# include the guard call) or join ``_REDACTION_EXEMPT`` with a
-# justification.
+# *must* both scan (``enforce_write_guard`` / ``scan_text_content``) and
+# refuse on a hit (``raise_if_privacy_blocked`` / ``raise_or_collect`` /
+# an inline ``.decision`` check that raises) in its body — see
+# ``_function_scans_and_refuses``. New content-writing handlers either
+# join this list (and the body must scan-and-refuse) or join
+# ``_REDACTION_EXEMPT`` with a justification.
 
 _REDACTION_PROTECTED: frozenset[str] = frozenset(
     {
         "chunks.edit_chunk",
+        # The canonical editors write free-form user bytes into the
+        # git-tracked project_shared canonical — write-time Gate A scan
+        # in-route, before atomic_write_text (#1509).
+        "context_agents.create_agent",
+        "context_agents.update_agent",
+        "context_commands.create_command",
+        "context_commands.update_command",
+        "context_skills.create_skill",
+        "context_skills.update_skill",
         "scratch.promote_scratch",
         # Promote appends a private-tier hook rule (free-form command
         # strings + a free-string event key) into the git-tracked shared
@@ -175,23 +188,31 @@ _REDACTION_EXEMPT: dict[str, str] = {
         "rewrites cached LLM summaries from chunks already validated "
         "at index time"
     ),
-    # Structured artifacts (skills/commands/agents) — separate redaction
-    # policy lives in ``memtomem.context`` ingest path; the HTTP layer
-    # validates the schema only.
-    "context_agents.create_agent": "structured artifact; redaction at context-ingest layer",
-    "context_agents.update_agent": "structured artifact; see above",
+    # Structured artifact import/sync (skills/commands/agents) — redaction
+    # lives in the ``memtomem.context`` ingest path (import Gate A / sync
+    # tree scan); the HTTP layer validates the schema only. The create/update
+    # editors moved to ``_REDACTION_PROTECTED`` with an in-route Gate A scan
+    # (#1509).
     "context_agents.import_agent": "structured artifact import; redaction at context-ingest layer",
     "context_agents.import_agents": "bulk structured artifact import; see above",
     "context_agents.sync_agents": "filesystem-driven sync; redaction "
     "happens at file-write time inside the indexer",
-    "context_commands.create_command": "structured artifact; see above",
-    "context_commands.update_command": "structured artifact; see above",
     "context_commands.import_command": "structured artifact import; see above",
     "context_commands.import_commands": "bulk structured artifact import",
     "context_commands.sync_commands": "filesystem-driven sync; see above",
-    "context_mcp_servers.create_mcp_server": "structured artifact; redaction at context-ingest layer",
-    "context_mcp_servers.update_mcp_server": "structured artifact; see above",
-    "context_mcp_servers.patch_mcp_server": "structured artifact; see above",
+    # The mcp-servers editors DO scan in-route (Gate A before the write) via
+    # ``scan_mcp_server_text``, an engine wrapper around enforce_write_guard.
+    # They stay EXEMPT only because the AST guard does not recognize the
+    # wrapper name (and update/patch delegate to _update_mcp_server_impl);
+    # migrating them to _REDACTION_PROTECTED needs a guard extension — a
+    # tracked follow-up to #1509.
+    "context_mcp_servers.create_mcp_server": (
+        "scans in-route via scan_mcp_server_text; wrapper name not recognized by the AST guard"
+    ),
+    "context_mcp_servers.update_mcp_server": (
+        "scans in-route via scan_mcp_server_text inside _update_mcp_server_impl; see above"
+    ),
+    "context_mcp_servers.patch_mcp_server": "same _update_mcp_server_impl delegate; see above",
     "context_mcp_servers.delete_mcp_server": "delete-only, no payload",
     "context_mcp_servers.sync_mcp_servers": "filesystem-driven sync; see above",
     # Wiki install/update (ADR-0008 PR-E E-3): snapshots existing wiki canonical
@@ -205,8 +226,6 @@ _REDACTION_EXEMPT: dict[str, str] = {
         "no free-form content payload (body is just ``force``) — refreshes the "
         "project snapshot from wiki canonical; Gate A runs in-engine pre-copy"
     ),
-    "context_skills.create_skill": "structured artifact; see above",
-    "context_skills.update_skill": "structured artifact; see above",
     "context_skills.import_skill": "structured artifact import",
     "context_skills.import_skill_to_user": "structured artifact import (project runtime → user library)",
     "context_skills.import_skills": "bulk structured artifact import",
@@ -363,44 +382,201 @@ def _iter_unsafe_route_handlers() -> list[tuple[str, str, str]]:
     return handlers
 
 
-def _function_calls_write_guard(module: str, function_name: str) -> bool:
-    """True iff ``function_name`` in ``module`` calls the privacy chokepoint.
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
-    Accepts ``privacy.enforce_write_guard(...)`` (direct chokepoint) and
-    ``scan_text_content(...)`` (the ``context.privacy_scan`` Gate A wrapper,
-    which calls ``enforce_write_guard`` internally — used by route handlers
-    that scan an in-memory fragment before a ``project_shared`` write,
-    e.g. ``settings_sync.promote_target_rule``, #1247).
+
+def _walk_own_scope(node: ast.AST):
+    """Yield descendants of ``node`` in its OWN lexical scope.
+
+    Unlike ``ast.walk``, this does not descend into nested
+    function / lambda / class bodies — code inside an uncalled nested
+    ``def`` must not count as the handler's scan or refusal (#1509
+    re-review — Codex, dead nested-function reconstruction).
     """
-    path = ROUTES_DIR / f"{module}.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for child in ast.iter_child_nodes(node):
+        yield child
+        if not isinstance(child, _NESTED_SCOPES):
+            yield from _walk_own_scope(child)
+
+
+def _call_name(call: ast.Call) -> str | None:
+    """The called function's bare or attribute name, or None."""
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    return None
+
+
+def _arg_names(call: ast.Call) -> set[str]:
+    """Names passed as positional or keyword-value args of ``call``."""
+    names: set[str] = set()
+    for arg in call.args:
+        if isinstance(arg, ast.Name):
+            names.add(arg.id)
+    for kw in call.keywords:
+        if isinstance(kw.value, ast.Name):
+            names.add(kw.value.id)
+    return names
+
+
+# The decision strings that mean "blocked" — the ``if`` test of an inline
+# refusal must compare the scan's ``.decision`` against one of these, so an
+# inverted ``if scan.decision == "allowed": raise`` is not mistaken for a
+# refusal (#1509 re-review — Codex).
+_BLOCKED_DECISIONS = frozenset({"blocked", "blocked_project_shared"})
+
+
+def _is_scan_decision(node: ast.AST, scan_vars: set[str]) -> bool:
+    """True iff ``node`` is ``<scan_var>.decision`` for a tracked scan var."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "decision"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in scan_vars
+    )
+
+
+def _is_blocked_const(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value in _BLOCKED_DECISIONS
+
+
+def _test_checks_blocked_decision(test: ast.AST, scan_vars: set[str]) -> bool:
+    """True iff ``test`` is a *positive* blocked-decision comparison whose
+    truthiness means "the scan is blocked".
+
+    Only ``<scan_var>.decision == <blocked literal>`` (``Eq``) or
+    ``<scan_var>.decision in (<...blocked...>)`` (``In``) qualify. Negated
+    polarity (``!=`` / ``not in`` / ``not (...)``) is rejected: those raise on
+    the *allowed* case and let blocked content fall through to the write
+    (#1509 re-review — Codex). Matches the single real inline handler,
+    ``settings_sync.promote_target_rule``; any fancier shape fails closed.
+    """
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1:
+        return False
+    if not _is_scan_decision(test.left, scan_vars):
+        return False
+    op, comparator = test.ops[0], test.comparators[0]
+    if isinstance(op, ast.Eq):
+        return _is_blocked_const(comparator)
+    if isinstance(op, ast.In):
+        return isinstance(comparator, ast.Tuple | ast.List | ast.Set) and any(
+            _is_blocked_const(elt) for elt in comparator.elts
+        )
+    return False
+
+
+def _contains_own_scope_raise(body: list[ast.stmt]) -> bool:
+    """True iff ``body`` raises in its own scope (not inside a nested def)."""
+    for stmt in body:
+        if isinstance(stmt, ast.Raise):
+            return True
+        if not isinstance(stmt, _NESTED_SCOPES):
+            if any(isinstance(s, ast.Raise) for s in _walk_own_scope(stmt)):
+                return True
+    return False
+
+
+def _wrapper_scan_refused(func: ast.AST, scan_vars: set[str]) -> bool:
+    """True iff ``func`` refuses on a ``scan_text_content`` result, in its own
+    scope.
+
+    The refusal must be *tied to the scan variable* AND reachable in the
+    handler's own scope — an unrelated ``.decision`` check, an unrelated
+    validation ``raise``, a refusal buried in an uncalled nested ``def``, or
+    an inverted/else-branch shape does not count (#1509 re-review — Codex).
+    Accepts either:
+
+    * a call to ``raise_if_privacy_blocked`` / ``raise_or_collect`` whose
+      args include a tracked scan var; or
+    * an ``if`` whose test compares ``<scan_var>.decision`` against a blocked
+      decision literal and whose *true branch* raises in its own scope — the
+      ``settings_sync.promote_target_rule`` shape. (The blocked-literal and
+      true-branch requirements reject ``if scan.decision == "allowed": raise``
+      and a ``raise`` that only lives in the ``else``.)
+    """
+    for sub in _walk_own_scope(func):
+        if isinstance(sub, ast.Call):
+            if _call_name(sub) in ("raise_if_privacy_blocked", "raise_or_collect"):
+                if _arg_names(sub) & scan_vars:
+                    return True
+        elif isinstance(sub, ast.If) and _test_checks_blocked_decision(sub.test, scan_vars):
+            if _contains_own_scope_raise(sub.body):
+                return True
+    return False
+
+
+def _function_scans_and_refuses(module: str, function_name: str) -> bool:
+    """Wrapper over :func:`_source_scans_and_refuses` reading a route module."""
+    source = (ROUTES_DIR / f"{module}.py").read_text(encoding="utf-8")
+    return _source_scans_and_refuses(source, function_name)
+
+
+def _source_scans_and_refuses(source: str, function_name: str) -> bool:
+    """True iff ``function_name`` in ``source`` scans user content — and, when
+    it scans through the thin ``scan_text_content`` wrapper, refuses on the
+    result *bound to that scan*.
+
+    Two accepted scan shapes with different strengths:
+
+    * ``privacy.enforce_write_guard(...)`` — the audited chokepoint. The call
+      itself records the blocked outcome (``record_outcome=True``), so its
+      presence is the meaningful boundary event; the handler's own refusal
+      may legitimately be a non-raising skip (``system.upload_files`` records
+      a per-file error and ``continue``s past the write). We do not second-
+      guess the refusal shape for direct chokepoint callers.
+    * ``scan_text_content(...)`` — a thin ``context.privacy_scan`` wrapper that
+      only *returns* a ``FileScan``. Dropping the paired refusal keeps the scan
+      but writes the blocked bytes anyway. So a wrapper-scanning handler must
+      also refuse *on the scan variable* (``_wrapper_scan_refused``); an
+      unrelated ``.decision`` / ``raise`` no longer satisfies the invariant
+      (#1509 re-review — Codex).
+
+    Scan detection, scan-variable tracking, and the refusal check all walk the
+    handler's OWN scope only (``_walk_own_scope``) so an uncalled nested
+    ``def`` cannot supply a phantom scan or refusal. **Enforced convention:**
+    the scan result must be bound by a plain ``scan = scan_text_content(...)``
+    assignment — tuple-unpacking / annotated / walrus targets are deliberately
+    not tracked (no handler uses them; a future one that does fails this test
+    closed, which forces either the simple-assignment convention or a guard
+    update).
+    """
+    tree = ast.parse(source)
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
             continue
         if node.name != function_name:
             continue
-        for sub in ast.walk(node):
-            if not isinstance(sub, ast.Call):
-                continue
-            f = sub.func
-            # Match ``privacy.enforce_write_guard(...)``.
-            if (
-                isinstance(f, ast.Attribute)
-                and f.attr == "enforce_write_guard"
-                and isinstance(f.value, ast.Name)
-                and f.value.id == "privacy"
-            ):
-                return True
-            # Match bare ``enforce_write_guard(...)`` after
-            # ``from memtomem.privacy import enforce_write_guard``.
-            if isinstance(f, ast.Name) and f.id == "enforce_write_guard":
-                return True
-            # Match ``scan_text_content(...)`` (qualified or bare) — the
-            # Gate A wrapper around enforce_write_guard.
-            if isinstance(f, ast.Name) and f.id == "scan_text_content":
-                return True
-            if isinstance(f, ast.Attribute) and f.attr == "scan_text_content":
-                return True
+        has_chokepoint = False
+        scan_vars: set[str] = set()
+        for sub in _walk_own_scope(node):
+            if isinstance(sub, ast.Call):
+                name = _call_name(sub)
+                f = sub.func
+                # ``privacy.enforce_write_guard(...)`` (qualified) or bare
+                # ``enforce_write_guard(...)`` — the audited chokepoint.
+                if name == "enforce_write_guard" and (
+                    isinstance(f, ast.Name)
+                    or (
+                        isinstance(f, ast.Attribute)
+                        and isinstance(f.value, ast.Name)
+                        and f.value.id == "privacy"
+                    )
+                ):
+                    has_chokepoint = True
+            elif isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
+                # Track ``scan = scan_text_content(...)`` target names (plain
+                # Name targets only — see the convention note above).
+                if _call_name(sub.value) == "scan_text_content":
+                    for target in sub.targets:
+                        if isinstance(target, ast.Name):
+                            scan_vars.add(target.id)
+        if has_chokepoint:
+            return True
+        if scan_vars:
+            return _wrapper_scan_refused(node, scan_vars)
+        return False
     return False
 
 
@@ -433,21 +609,204 @@ def test_csrf_classification_covers_every_unsafe_route() -> None:
         pytest.fail("\n\n".join(msg))
 
 
-def test_redaction_protected_handlers_call_enforce_write_guard() -> None:
-    """Each ``_REDACTION_PROTECTED`` handler calls ``enforce_write_guard``."""
+def test_redaction_protected_handlers_scan_and_refuse() -> None:
+    """Each ``_REDACTION_PROTECTED`` handler scans user content — and, for the
+    thin ``scan_text_content`` wrapper, also refuses on the result (not merely
+    "a scan ran" — see ``_function_scans_and_refuses``)."""
     missing: list[str] = []
     for qualname in sorted(_REDACTION_PROTECTED):
         module, _, function = qualname.partition(".")
-        if not _function_calls_write_guard(module, function):
+        if not _function_scans_and_refuses(module, function):
             missing.append(qualname)
     if missing:
         pytest.fail(
-            "Handlers classified as _REDACTION_PROTECTED but lacking a "
-            "``privacy.enforce_write_guard(...)`` call in their body:\n  - "
+            "Handlers classified as _REDACTION_PROTECTED but not scanning "
+            "(and, for ``scan_text_content`` wrapper handlers, not refusing "
+            "on the result via ``raise_if_privacy_blocked`` / "
+            "``raise_or_collect`` / an inline ``.decision`` check that "
+            "raises):\n  - "
             + "\n  - ".join(missing)
-            + "\n\nEither add the guard call or move the handler to "
-            "_REDACTION_EXEMPT with a justification."
+            + "\n\nAdd the scan (+ refusal for wrapper handlers), or move the "
+            "handler to _REDACTION_EXEMPT with a justification. A wrapper scan "
+            "whose FileScan is dropped still writes the blocked content."
         )
+
+
+# --- Unit tests for the scan-and-refuse AST detector -----------------------
+#
+# These pin the exact false-pass the #1509 re-review (Codex) flagged: a
+# wrapper scan whose FileScan is dropped must NOT satisfy the invariant even
+# when an unrelated ``.decision`` check and a validation ``raise`` are present.
+
+
+def _one_handler(body: str) -> str:
+    return "async def handler():\n" + textwrap.indent(textwrap.dedent(body), "    ")
+
+
+def test_detector_rejects_wrapper_scan_without_any_refusal() -> None:
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_wrapper_scan_with_unrelated_decision_and_raise() -> None:
+    # The exact adversarial shape: scan result ignored, but an UNRELATED
+    # ``.decision`` check and an UNRELATED validation raise are present.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if other.decision == "x":
+            raise ValueError("unrelated validation")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_accepts_wrapper_scan_with_helper_refusal() -> None:
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        raise_if_privacy_blocked(scan, kind="command", artifact_name=name)
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_accepts_wrapper_scan_with_inline_decision_raise() -> None:
+    # The ``settings_sync.promote_target_rule`` shape.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if scan.decision in ("blocked", "blocked_project_shared"):
+            raise HTTPException(422, "blocked")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_accepts_direct_chokepoint_without_raise() -> None:
+    # Direct enforce_write_guard callers keep the old contract — a non-raising
+    # skip (``system.upload_files``) is a valid refusal we do not second-guess.
+    src = _one_handler(
+        """
+        guard = privacy.enforce_write_guard(text, surface="s")
+        if guard.decision == "blocked":
+            results.append(error)
+            return
+        dest.write_bytes(content)
+        """
+    )
+    assert _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_refusal_in_uncalled_nested_def() -> None:
+    # #1509 re-review Blocker: a refusal buried in an uncalled nested def must
+    # not count — the write still happens in the handler's own scope.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+
+        async def refuse():
+            raise_if_privacy_blocked(scan, kind="command", artifact_name=name)
+
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_inline_raise_in_nested_def_under_if() -> None:
+    # #1509 re-review Nit: an ``if <scan>.decision`` whose raise lives inside a
+    # nested def in its body is not a real refusal.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if scan.decision in ("blocked", "blocked_project_shared"):
+            def _later():
+                raise HTTPException(422, "blocked")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_inverted_decision_condition() -> None:
+    # #1509 re-review Blocker: the ``if`` test must compare against a BLOCKED
+    # decision. ``if scan.decision == "allowed": raise`` raises on the allowed
+    # case and writes blocked content — not a refusal.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if scan.decision == "allowed":
+            raise HTTPException(422, "nope")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_raise_only_in_else_branch() -> None:
+    # #1509 re-review Blocker: the raise must be in the TRUE (blocked) branch.
+    # A raise only in ``else`` means the blocked branch falls through to write.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if scan.decision in ("blocked", "blocked_project_shared"):
+            atomic_write_text(path, body.content)
+        else:
+            raise HTTPException(422, "wrong branch")
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_negated_not_equal_decision() -> None:
+    # #1509 re-review Blocker: ``!= "blocked"`` raises on the ALLOWED case and
+    # writes blocked content — negated polarity is not a refusal.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if scan.decision != "blocked":
+            raise HTTPException(422, "inverted")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_negated_not_in_decision() -> None:
+    # #1509 re-review Blocker: ``not in (...)`` is the same inverted trap.
+    src = _one_handler(
+        """
+        scan = scan_text_content(body.content, scope="project_shared")
+        if scan.decision not in ("blocked", "blocked_project_shared"):
+            raise HTTPException(422, "inverted")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_walrus_bound_scan() -> None:
+    # #1509 re-review Major: only plain ``scan = scan_text_content(...)`` is
+    # tracked. A walrus-bound scan is intentionally NOT tracked, so this
+    # fails closed — pinning the simple-assignment convention rather than
+    # silently accepting an untracked shape.
+    src = _one_handler(
+        """
+        if (scan := scan_text_content(body.content, scope="project_shared")):
+            raise_if_privacy_blocked(scan, kind="command", artifact_name=name)
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
 
 
 def test_redaction_classification_covers_every_unsafe_route() -> None:

@@ -37,12 +37,14 @@ from memtomem.context.commands import (
 # module to pin the shared singleton.
 from memtomem.context.commands import ExtractResult as ExtractResult
 from memtomem.context.detector import COMMAND_DIRS
+from memtomem.context.privacy_scan import scan_text_content
 from memtomem.web.routes import _atomic_kind
 from memtomem.web.routes._artifact_common import (
     ArtifactCreateRequest,
     ArtifactUpdateRequest,
     AtomicSyncRequest,
     ImportRequest,
+    raise_if_privacy_blocked,
 )
 from memtomem.web.routes._locks import _gateway_lock as _gateway_lock
 from memtomem.web.routes.context_projects import (
@@ -177,6 +179,21 @@ async def create_command(
         ),
     ),
 ) -> dict:
+    if target_scope == "project_shared":
+        # #1509 write-time Gate A — scan the exact in-memory string that
+        # atomic_write_text will write (no TOCTOU). user-tier saves are not
+        # scanned: not git-tracked, gated by allow_host_writes, and keep the
+        # sync-time force valve (ADR-0011 §5 asymmetry). source_path is the
+        # intended canonical location (never opened — safe for a
+        # not-yet-validated create name) so path.name is the artifact name.
+        scan = scan_text_content(
+            body.content,
+            source_path=project_root / _SPEC.canonical_root / body.name,
+            surface="web_context_commands_create",
+            scope="project_shared",
+            project_root=project_root,
+        )
+        raise_if_privacy_blocked(scan, kind="command", artifact_name=body.name)
     return await _atomic_kind.create_artifact(_SPEC, body, project_root, target_scope)
 
 
@@ -200,6 +217,17 @@ async def update_command(
         ),
     ),
 ) -> JSONResponse:
+    if target_scope == "project_shared":
+        # #1509 write-time Gate A — see create_command. force=True only
+        # bypasses the mtime guard, never this scan.
+        scan = scan_text_content(
+            body.content,
+            source_path=project_root / _SPEC.canonical_root / name,
+            surface="web_context_commands_update",
+            scope="project_shared",
+            project_root=project_root,
+        )
+        raise_if_privacy_blocked(scan, kind="command", artifact_name=name)
     return await _atomic_kind.update_artifact(_SPEC, name, body, project_root, target_scope)
 
 

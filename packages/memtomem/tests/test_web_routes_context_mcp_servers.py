@@ -179,6 +179,26 @@ def _seed_canonical(tmp_path: Path, name: str) -> Path:
 
 
 @pytest.mark.anyio
+async def test_update_rejects_secret_shaped_content(client: AsyncClient, tmp_path: Path) -> None:
+    """Update-side twin of test_create_rejects_secret_shaped_content — the
+    scan in _update_mcp_server_impl was previously untested (#1509)."""
+    secret = "sk-" + "a" * 30
+    path = _seed_canonical(tmp_path, "leaky")
+    before_bytes = path.read_bytes()
+    r = await client.put(
+        "/api/context/mcp-servers/leaky",
+        json={
+            "content": json.dumps({"command": "env", "env": {"OPENAI_API_KEY": secret}}),
+            "mtime_ns": str(path.stat().st_mtime_ns),
+        },
+    )
+    assert r.status_code == 422
+    assert "privacy pattern" in r.json()["detail"]
+    assert secret not in r.text
+    assert path.read_bytes() == before_bytes
+
+
+@pytest.mark.anyio
 async def test_PUT_force_bypasses_mtime_and_logs_warning(
     client: AsyncClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
