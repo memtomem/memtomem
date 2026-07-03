@@ -118,11 +118,8 @@ async def seed_wiki_override(asset_type: AssetType, name: str, body: OverrideSee
     _require_vendor(asset_type, body.vendor)
     store = WikiStore.at_default()
 
-    def _seed() -> tuple[SeedResult, bool]:
-        result = seed_override(store, asset_type, name, body.vendor, force=body.force)
-        # Seeding always leaves the working tree dirty (new/changed file); read
-        # it back rather than assume so an identical-bytes re-seed reports clean.
-        return result, store.is_dirty()
+    def _seed() -> SeedResult:
+        return seed_override(store, asset_type, name, body.vendor, force=body.force)
 
     try:
         # Force-seed mutates ``overrides/<vendor>.<ext>`` (and a ``.bak`` on
@@ -139,7 +136,14 @@ async def seed_wiki_override(asset_type: AssetType, name: str, body: OverrideSee
         # can only fire while CONTENDING for the lock — never mid-write.
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                result, wiki_dirty = _seed()
+                result = _seed()
+        # Seeding always leaves the working tree dirty (new/changed file); read
+        # it back rather than assume so an identical-bytes re-seed reports
+        # clean. The git-status subprocess runs off the event loop AFTER the
+        # lock releases (#1518) — the flag is advisory, so a concurrent mutator
+        # sneaking in between the write and this read is acceptable (the value
+        # still reflects a real repo state).
+        wiki_dirty = await asyncio.to_thread(store.is_dirty)
     except WikiNotFoundError as exc:
         raise _wiki_absent(exc) from exc
     except OverrideExistsError as exc:
@@ -342,7 +346,10 @@ async def edit_wiki_override(
                         reason_code="canonical_absent",
                     ) from exc
                 new_mtime_ns = target.stat().st_mtime_ns
-                wiki_dirty = store.is_dirty()
+        # Trailing dirty-read: a git-status subprocess, so it runs off the
+        # event loop after the lock releases (#1518). Advisory flag — a
+        # concurrent mutator between the write and this read is acceptable.
+        wiki_dirty = await asyncio.to_thread(store.is_dirty)
     except TimeoutError as exc:
         raise _error(
             503, "busy", "wiki override save timed out — another sync may be in progress"
@@ -515,7 +522,10 @@ async def edit_wiki_canonical(
                         reason_code="canonical_absent",
                     ) from exc
                 new_mtime_ns = target.stat().st_mtime_ns
-                wiki_dirty = store.is_dirty()
+        # Trailing dirty-read: a git-status subprocess, so it runs off the
+        # event loop after the lock releases (#1518). Advisory flag — a
+        # concurrent mutator between the write and this read is acceptable.
+        wiki_dirty = await asyncio.to_thread(store.is_dirty)
     except TimeoutError as exc:
         raise _error(
             503, "busy", "wiki canonical save timed out — another sync may be in progress"

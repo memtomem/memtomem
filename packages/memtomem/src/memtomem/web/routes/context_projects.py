@@ -20,6 +20,7 @@ exactly one implementation.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -431,9 +432,9 @@ async def list_projects(
     with_counts = "counts" in include_tokens
     with_coverage = "runtime_coverage" in include_tokens
     scopes = _discover_for(request)
-    return {
-        "target_scope": target_scope,
-        "scopes": [
+
+    def _build() -> list[dict]:
+        return [
             _scope_to_dict(
                 s,
                 with_counts=with_counts,
@@ -441,7 +442,17 @@ async def list_projects(
                 target_scope=target_scope,
             )
             for s in scopes
-        ],
+        ]
+
+    # counts/runtime_coverage cost N-scope artifact scans / config probes
+    # (see _counts_for), so the opt-in path runs off the event loop like
+    # status-all (#1280, #1518); the default path is pure dict shaping and
+    # stays inline ("cheap by default", ADR-0021 PR2). Per-kind failures are
+    # already handled inside _counts_for.
+    scope_dicts = await asyncio.to_thread(_build) if (with_counts or with_coverage) else _build()
+    return {
+        "target_scope": target_scope,
+        "scopes": scope_dicts,
     }
 
 

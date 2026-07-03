@@ -256,6 +256,32 @@ async def test_seed_runs_synchronously_inside_lock(
     assert ran_on_main.get("value") is True  # synchronous, inside the lock
 
 
+@pytest.mark.asyncio
+async def test_seed_dirty_read_runs_off_the_event_loop(
+    dev_client, seeded_wiki: Path, monkeypatch
+) -> None:
+    # #1518: the inverse pin of test_seed_runs_synchronously_inside_lock. The
+    # trailing is_dirty() is a git-status subprocess and must run via
+    # asyncio.to_thread AFTER the lock releases — i.e. on a pool worker, not
+    # the event loop's (main) thread. The write above it stays main-thread
+    # (previous test); only the advisory dirty-read moves off-loop.
+    import threading
+
+    real_is_dirty = WikiStore.is_dirty
+    ran_on_main: dict[str, bool] = {}
+
+    def _record_thread(self):
+        ran_on_main["value"] = threading.current_thread() is threading.main_thread()
+        return real_is_dirty(self)
+
+    monkeypatch.setattr(WikiStore, "is_dirty", _record_thread)
+    resp = await dev_client.post("/api/wiki/skills/alpha/override", json={"vendor": "claude"})
+
+    assert resp.status_code == 200, resp.text
+    assert ran_on_main.get("value") is False  # offloaded, post-lock
+    assert resp.json()["wiki_dirty"] is True  # value contract unchanged
+
+
 # ── tier gating ────────────────────────────────────────────────────────────
 
 
@@ -345,6 +371,35 @@ async def test_edit_override_happy_path(dev_client, seeded_wiki: Path) -> None:
     assert target.read_text(encoding="utf-8") == new
     # Editing an existing override keeps the prior bytes as a .bak sibling.
     assert target.with_suffix(".md.bak").read_text(encoding="utf-8") == _SKILL_BODY
+
+
+@pytest.mark.asyncio
+async def test_edit_dirty_read_runs_off_the_event_loop(
+    dev_client, seeded_wiki: Path, monkeypatch
+) -> None:
+    # #1518: same pin as test_seed_dirty_read_runs_off_the_event_loop for the
+    # editor PUT — the trailing git-status dirty-read runs on a pool worker
+    # after _gateway_lock releases; the write itself stays in-lock/main-thread.
+    import threading
+
+    real_is_dirty = WikiStore.is_dirty
+    ran_on_main: dict[str, bool] = {}
+
+    def _record_thread(self):
+        ran_on_main["value"] = threading.current_thread() is threading.main_thread()
+        return real_is_dirty(self)
+
+    monkeypatch.setattr(WikiStore, "is_dirty", _record_thread)
+    m = await _seed_and_commit(dev_client, seeded_wiki)
+    ran_on_main.clear()  # ignore the seed route's own dirty-read
+    resp = await dev_client.put(
+        "/api/wiki/skills/alpha/override",
+        json={"vendor": "claude", "content": "# edited\n", "mtime_ns": m},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert ran_on_main.get("value") is False  # offloaded, post-lock
+    assert resp.json()["wiki_dirty"] is True
 
 
 @pytest.mark.asyncio

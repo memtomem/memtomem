@@ -327,120 +327,128 @@ async def context_overview(
     from memtomem.context.mcp_servers import diff_mcp_servers, list_canonical_mcp_servers
     from memtomem.context.skills import diff_skills, list_canonical_skills
 
-    result: dict[str, dict[str, int | bool | str]] = {}
+    def _collect() -> dict:
+        result: dict[str, dict[str, int | bool | str]] = {}
 
-    try:
-        result["skills"] = summarize_diff_with_canonical(
-            diff_skills(project_root, scope=target_scope),
-            {p.name for p in list_canonical_skills(project_root, scope=target_scope)},
-        )
-    except Exception as exc:
-        logger.exception("diff_skills failed")
-        result["skills"] = _error_payload(exc, shape="total")
-
-    try:
-        result["commands"] = summarize_diff_with_canonical(
-            diff_commands(project_root, scope=target_scope),
-            {
-                canonical_command_name(p, layout)
-                for p, layout in list_canonical_commands(project_root, scope=target_scope)
-            },
-        )
-    except Exception as exc:
-        logger.exception("diff_commands failed")
-        result["commands"] = _error_payload(exc, shape="total")
-
-    try:
-        result["agents"] = summarize_diff_with_canonical(
-            diff_agents(project_root, scope=target_scope),
-            {
-                canonical_agent_name(p, layout)
-                for p, layout in list_canonical_agents(project_root, scope=target_scope)
-            },
-        )
-    except Exception as exc:
-        logger.exception("diff_agents failed")
-        result["agents"] = _error_payload(exc, shape="total")
-
-    try:
-        if target_scope == "project_shared":
-            result["mcp_servers"] = summarize_diff_with_canonical(
-                diff_mcp_servers(project_root),
-                {p.stem for p in list_canonical_mcp_servers(project_root)},
+        try:
+            result["skills"] = summarize_diff_with_canonical(
+                diff_skills(project_root, scope=target_scope),
+                {p.name for p in list_canonical_skills(project_root, scope=target_scope)},
             )
-        else:
-            result["mcp_servers"] = {"total": 0, "local_draft": 0}
-    except Exception as exc:
-        logger.exception("diff_mcp_servers failed")
-        result["mcp_servers"] = _error_payload(exc, shape="total")
+        except Exception as exc:
+            logger.exception("diff_skills failed")
+            result["skills"] = _error_payload(exc, shape="total")
 
-    try:
-        settings_diff = diff_settings(project_root, scope=target_scope)
-        # In-band `error` is a COUNT (per-file failures already classified by
-        # diff_settings — no error_kind, which would conflate distinct per-file
-        # causes), NOT the bool flag `_error_payload(shape="status")` emits
-        # when the whole call raises. The two shapes are on disjoint code
-        # paths. The frontend uses truthiness on `d.error` (any positive int
-        # OR the bool `true` reaches the danger render at
-        # context-gateway.js:136-145), so `error: 0` correctly skips the
-        # danger branch and `error: >=1` reaches it — both shapes work.
-        result["settings"] = summarize_settings_statuses([r.status for r in settings_diff.values()])
-    except Exception as exc:
-        logger.exception("diff_settings failed")
-        result["settings"] = _error_payload(exc, shape="status")
+        try:
+            result["commands"] = summarize_diff_with_canonical(
+                diff_commands(project_root, scope=target_scope),
+                {
+                    canonical_command_name(p, layout)
+                    for p, layout in list_canonical_commands(project_root, scope=target_scope)
+                },
+            )
+        except Exception as exc:
+            logger.exception("diff_commands failed")
+            result["commands"] = _error_payload(exc, shape="total")
 
-    # Wiki-install staleness axis (0629 backlog c/d): the count of installed
-    # assets whose lockfile pin sits behind wiki HEAD ("update available").
-    # This is the lockfile↔wiki axis — none of the canonical→runtime tiles
-    # above carry it, and the cross-project /context/status-all route that
-    # does has zero web consumers by design. ``None`` (not zeros) on failure:
-    # the badge is a pure header enhancement, but "0 behind" is a clean-state
-    # claim we can't back when the classifier itself raised.
-    wiki_installs: dict[str, int] | None
-    try:
-        if target_scope == "project_shared":
-            # classify_status shells out to git per lockfile entry
-            # (HEAD probe + per-pin reachability), so it runs off the event
-            # loop (#1145 discipline); the diff blocks above are filesystem
-            # reads only.
-            _wiki_head, status_rows = await asyncio.to_thread(classify_status, project_root)
-            tracked = [
-                row
-                for row in status_rows
-                if row.tier == "project_shared" and row.state != "untracked"
-            ]
-            wiki_installs = {
-                "total": len(tracked),
-                "behind": sum(1 for row in tracked if row.state == "behind"),
-            }
-        else:
-            # Wiki installs are lockfile-tracked project_shared snapshots
-            # only — mirror the mcp_servers single-tier placeholder.
-            wiki_installs = {"total": 0, "behind": 0}
-    except Exception:
-        logger.exception("classify_status failed")
-        wiki_installs = None
+        try:
+            result["agents"] = summarize_diff_with_canonical(
+                diff_agents(project_root, scope=target_scope),
+                {
+                    canonical_agent_name(p, layout)
+                    for p, layout in list_canonical_agents(project_root, scope=target_scope)
+                },
+            )
+        except Exception as exc:
+            logger.exception("diff_agents failed")
+            result["agents"] = _error_payload(exc, shape="total")
 
-    try:
-        detected_runtimes = _compute_detected_runtimes(project_root)
-    except Exception:
-        logger.exception("_compute_detected_runtimes failed")
-        detected_runtimes = []
+        try:
+            if target_scope == "project_shared":
+                result["mcp_servers"] = summarize_diff_with_canonical(
+                    diff_mcp_servers(project_root),
+                    {p.stem for p in list_canonical_mcp_servers(project_root)},
+                )
+            else:
+                result["mcp_servers"] = {"total": 0, "local_draft": 0}
+        except Exception as exc:
+            logger.exception("diff_mcp_servers failed")
+            result["mcp_servers"] = _error_payload(exc, shape="total")
 
-    try:
-        last_synced_at = _compute_last_synced_at(project_root, target_scope)
-    except Exception:
-        logger.exception("_compute_last_synced_at failed")
-        last_synced_at = None
+        try:
+            settings_diff = diff_settings(project_root, scope=target_scope)
+            # In-band `error` is a COUNT (per-file failures already classified
+            # by diff_settings — no error_kind, which would conflate distinct
+            # per-file causes), NOT the bool flag `_error_payload(shape="status")`
+            # emits when the whole call raises. The two shapes are on disjoint
+            # code paths. The frontend uses truthiness on `d.error` (any
+            # positive int OR the bool `true` reaches the danger render at
+            # context-gateway.js:136-145), so `error: 0` correctly skips the
+            # danger branch and `error: >=1` reaches it — both shapes work.
+            result["settings"] = summarize_settings_statuses(
+                [r.status for r in settings_diff.values()]
+            )
+        except Exception as exc:
+            logger.exception("diff_settings failed")
+            result["settings"] = _error_payload(exc, shape="status")
 
-    return {
-        "target_scope": target_scope,
-        "project_root": str(project_root),
-        "detected_runtimes": detected_runtimes,
-        "last_synced_at": last_synced_at,
-        "wiki_installs": wiki_installs,
-        **result,
-    }
+        # Wiki-install staleness axis (0629 backlog c/d): the count of
+        # installed assets whose lockfile pin sits behind wiki HEAD ("update
+        # available"). This is the lockfile↔wiki axis — none of the
+        # canonical→runtime tiles above carry it, and the cross-project
+        # /context/status-all route that does has zero web consumers by
+        # design. ``None`` (not zeros) on failure: the badge is a pure header
+        # enhancement, but "0 behind" is a clean-state claim we can't back
+        # when the classifier itself raised.
+        wiki_installs: dict[str, int] | None
+        try:
+            if target_scope == "project_shared":
+                _wiki_head, status_rows = classify_status(project_root)
+                tracked = [
+                    row
+                    for row in status_rows
+                    if row.tier == "project_shared" and row.state != "untracked"
+                ]
+                wiki_installs = {
+                    "total": len(tracked),
+                    "behind": sum(1 for row in tracked if row.state == "behind"),
+                }
+            else:
+                # Wiki installs are lockfile-tracked project_shared snapshots
+                # only — mirror the mcp_servers single-tier placeholder.
+                wiki_installs = {"total": 0, "behind": 0}
+        except Exception:
+            logger.exception("classify_status failed")
+            wiki_installs = None
+
+        try:
+            detected_runtimes = _compute_detected_runtimes(project_root)
+        except Exception:
+            logger.exception("_compute_detected_runtimes failed")
+            detected_runtimes = []
+
+        try:
+            last_synced_at = _compute_last_synced_at(project_root, target_scope)
+        except Exception:
+            logger.exception("_compute_last_synced_at failed")
+            last_synced_at = None
+
+        return {
+            "target_scope": target_scope,
+            "project_root": str(project_root),
+            "detected_runtimes": detected_runtimes,
+            "last_synced_at": last_synced_at,
+            "wiki_installs": wiki_installs,
+            **result,
+        }
+
+    # The whole aggregation — per-kind diffs (filesystem scans), the
+    # classify_status git probes (#1145 discipline), and the runtime/mtime
+    # sweeps — runs off the event loop in one hop, mirroring status-all
+    # (#1280). Per-kind failures are converted to error payloads inside the
+    # closure, so this await only raises on a defect in the shaping itself.
+    # No gateway lock: read-only path (#1518).
+    return await asyncio.to_thread(_collect)
 
 
 @router.get("/context/runtimes")

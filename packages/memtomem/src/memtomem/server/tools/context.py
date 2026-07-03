@@ -397,7 +397,10 @@ async def mem_context_init(
 
     if "agents" in inc:
         try:
-            agent_result = extract_agents_to_canonical(
+            # Same offload as skills above (#1518 uniformity): the engine
+            # scans runtime dirs and writes canonical files synchronously.
+            agent_result = await asyncio.to_thread(
+                extract_agents_to_canonical,
                 root,
                 overwrite=overwrite,
                 scope=artifact_scope,
@@ -416,7 +419,8 @@ async def mem_context_init(
 
     if "commands" in inc:
         try:
-            command_result = extract_commands_to_canonical(
+            command_result = await asyncio.to_thread(
+                extract_commands_to_canonical,
                 root,
                 overwrite=overwrite,
                 scope=artifact_scope,
@@ -669,7 +673,10 @@ async def mem_context_generate(
 
     if "agents" in inc:
         try:
-            agent_result = generate_all_agents(
+            # Same offload as skills above (#1518 uniformity): the engine
+            # scans canonical dirs and writes runtime fan-out synchronously.
+            agent_result = await asyncio.to_thread(
+                generate_all_agents,
                 root,
                 strict=strict,
                 on_drop=on_drop,
@@ -697,7 +704,8 @@ async def mem_context_generate(
 
     if "commands" in inc:
         try:
-            command_result = generate_all_commands(
+            command_result = await asyncio.to_thread(
+                generate_all_commands,
                 root,
                 strict=strict,
                 on_drop=on_drop,
@@ -734,8 +742,8 @@ async def mem_context_generate(
         # Surface cross-tier duplicate-hook warnings, matching the CLI
         # ``_print_settings_generate`` which prints them before the results.
         results.extend(_settings_dup_tier_warnings(root, settings_scope))
-        settings_results = generate_all_settings(
-            root, scope=settings_scope, allow_host_writes=allow_host_writes
+        settings_results = await asyncio.to_thread(
+            generate_all_settings, root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
         # Settings reasons embed absolute ``canonical_path`` / ``target_path``
         # values (context/settings.py f-strings), and the ok-row target is an
@@ -817,7 +825,9 @@ async def mem_context_diff(
         lines.append(f"({CONTEXT_FILENAME} missing — skipping project memory)")
 
     if "skills" in inc:
-        rows = diff_skills(root, scope=artifact_scope)
+        # Diff engines scan canonical + N runtime dirs per kind — off the
+        # event loop like the per-file reads above (#1518 uniformity).
+        rows = await asyncio.to_thread(diff_skills, root, scope=artifact_scope)
         if rows:
             if lines:
                 lines.append("")
@@ -831,7 +841,7 @@ async def mem_context_diff(
             lines.append("No skills to compare.")
 
     if "agents" in inc:
-        rows = diff_agents(root, scope=artifact_scope)
+        rows = await asyncio.to_thread(diff_agents, root, scope=artifact_scope)
         if rows:
             if lines:
                 lines.append("")
@@ -845,7 +855,7 @@ async def mem_context_diff(
             lines.append("No sub-agents to compare.")
 
     if "commands" in inc:
-        rows = diff_commands(root, scope=artifact_scope)
+        rows = await asyncio.to_thread(diff_commands, root, scope=artifact_scope)
         if rows:
             if lines:
                 lines.append("")
@@ -871,7 +881,7 @@ async def mem_context_diff(
         # Cross-tier duplicate-hook warnings, matching the CLI
         # ``_print_settings_diff`` which prints them before the rows.
         dup_warnings = _settings_dup_tier_warnings(root, settings_scope)
-        settings_results = _diff_settings(root, scope=settings_scope)
+        settings_results = await asyncio.to_thread(_diff_settings, root, scope=settings_scope)
         if settings_results or dup_warnings:
             if lines:
                 lines.append("")
@@ -1015,7 +1025,9 @@ async def mem_context_sync(
 
     if "agents" in inc:
         try:
-            agent_result = generate_all_agents(
+            # Same offload as skills above (#1518 uniformity).
+            agent_result = await asyncio.to_thread(
+                generate_all_agents,
                 root,
                 strict=strict,
                 on_drop=on_drop,
@@ -1044,7 +1056,8 @@ async def mem_context_sync(
 
     if "commands" in inc:
         try:
-            command_result = generate_all_commands(
+            command_result = await asyncio.to_thread(
+                generate_all_commands,
                 root,
                 strict=strict,
                 on_drop=on_drop,
@@ -1082,8 +1095,8 @@ async def mem_context_sync(
         # Surface cross-tier duplicate-hook warnings, matching the CLI
         # ``_print_settings_generate`` which prints them before the results.
         results.extend(_settings_dup_tier_warnings(root, settings_scope))
-        settings_results = generate_all_settings(
-            root, scope=settings_scope, allow_host_writes=allow_host_writes
+        settings_results = await asyncio.to_thread(
+            generate_all_settings, root, scope=settings_scope, allow_host_writes=allow_host_writes
         )
         # Same MCP wire-boundary redaction as the generate settings loop —
         # reasons embed absolute canonical/target paths, the ok-row target is

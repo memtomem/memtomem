@@ -150,6 +150,27 @@ class TestOverview:
         assert data["project_root"] == str(tmp_path)
 
     @pytest.mark.anyio
+    async def test_overview_scans_run_off_the_event_loop(self, client: AsyncClient, monkeypatch):
+        # #1518: the whole per-kind scan aggregation runs via asyncio.to_thread
+        # (mirroring status-all, #1280) — pinned deterministically by the
+        # executing thread of one representative diff engine.
+        import threading
+
+        from memtomem.context import skills as skills_mod
+
+        real_diff = skills_mod.diff_skills
+        ran_on_main: dict[str, bool] = {}
+
+        def _record_thread(*args, **kwargs):
+            ran_on_main["value"] = threading.current_thread() is threading.main_thread()
+            return real_diff(*args, **kwargs)
+
+        monkeypatch.setattr(skills_mod, "diff_skills", _record_thread)
+        r = await client.get("/api/context/overview")
+        assert r.status_code == 200
+        assert ran_on_main.get("value") is False  # offloaded (#1518)
+
+    @pytest.mark.anyio
     async def test_overview_detected_runtimes_shape(self, client: AsyncClient):
         r = await client.get("/api/context/overview")
         data = r.json()
