@@ -580,12 +580,33 @@ _ = pytest
 # ── B1: pinned re-extraction reconciles dest-only files (#1247) ──────────
 
 
-def test_force_reextraction_removes_stale_dest_only_file(
+def _strip_to_legacy_entry(project_root: Path, asset_type: str, name: str) -> Path:
+    """Strip the manifest + digest keys from a lockfile entry, simulating a
+    pre-#1268 (pre-digest, pre-manifest) legacy install record."""
+    lock_path = project_root / ".memtomem" / "lock.json"
+    doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    doc[asset_type][name].pop("files", None)
+    doc[asset_type][name].pop("files_commit", None)
+    doc[asset_type][name].pop("digests", None)
+    doc[asset_type][name].pop("digests_installed_at", None)
+    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+    return lock_path
+
+
+def test_legacy_row_with_stale_dest_only_file_noops_under_force(
     wiki_root: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """``install --all --force`` re-extracts at the pin; a dest-only file
-    whose mtime predates ``installed_at`` (a pre-B1 additive-update leftover)
-    must be reconciled away, not carried forever."""
+    """Re-pin (#1512, was the pre-B1 reconcile pin): a legacy clean row whose
+    dest carries a dest-only file now NO-OPS under ``install --all --force``
+    instead of re-extracting.
+
+    A pre-digest entry has no recorded map to prove which dest bytes the
+    install wrote, so the clean-dest hash stands in for it; the dest-only
+    ``leftover.md`` makes dest != pin, and re-extracting would silently drop
+    a file the pin never described with no ``.bak`` — the #1512 hole. The
+    stale-leftover reconcile (#1247 B1) is thereby reserved for rows that can
+    prove dest == pin; legacy remediation is a fresh ``install``/``update``,
+    which writes a digest-bearing entry."""
     _initialized_wiki(wiki_root)
     pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"pinned\n"})
     install_skill(tmp_path, "foo")
@@ -593,34 +614,88 @@ def test_force_reextraction_removes_stale_dest_only_file(
     dest = tmp_path / ".memtomem" / "skills" / "foo"
     stale = dest / "leftover.md"
     stale.write_bytes(b"stale wiki bytes\n")
-    # Backdate so the file reads as old wiki bytes (mtime <= installed_at):
-    # the legacy-entry deletion rule, not the user-added keep rule.
+    # Backdate so the legacy mtime rule still classifies the row clean.
     past = datetime.now(timezone.utc).timestamp() - 3600
     os.utime(stale, (past, past))
-    # Pre-B1 entries carry no manifest and no digests — simulate one by
-    # stripping all four keys (with a valid digest pairing left in place,
-    # the unrecorded leftover would correctly classify user-added → keep;
-    # that digest-branch behavior is pinned in test_dirty_digest.py).
-    lock_path = tmp_path / ".memtomem" / "lock.json"
-    doc = json.loads(lock_path.read_text(encoding="utf-8"))
-    doc["skills"]["foo"].pop("files", None)
-    doc["skills"]["foo"].pop("files_commit", None)
-    doc["skills"]["foo"].pop("digests", None)
-    doc["skills"]["foo"].pop("digests_installed_at", None)
-    lock_path.write_text(json.dumps(doc), encoding="utf-8")
+    lock_path = _strip_to_legacy_entry(tmp_path, "skills", "foo")
 
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     result = runner.invoke(context_group, ["install", "--all", "--yes", "--force"])
 
     assert result.exit_code == 0, result.output
-    assert not stale.exists()
+    # The row is left untouched: dest-only file survives, no .bak anywhere.
+    assert stale.exists()
+    assert stale.read_bytes() == b"stale wiki bytes\n"
+    assert (dest / "SKILL.md").read_bytes() == b"pinned\n"
+    assert not list(dest.rglob("*.bak"))
+    assert "1 installed" not in result.output
+    assert "skipped" in result.output
+    lock_doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
+    # No re-extraction → the legacy entry stays legacy (no manifest upsert).
+    assert "files" not in lock_doc["skills"]["foo"]
+    assert "digests" not in lock_doc["skills"]["foo"]
+
+
+def test_legacy_clean_install_off_dirty_wiki_survives_all_force(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The #1512 harmful case: a PRE-DIGEST legacy clean row installed off a
+    dirty wiki working tree must not be silently swapped by
+    ``install --all --force``.
+
+    Same shape as ``test_clean_install_off_dirty_wiki_survives_all_force``,
+    but with the digest keys stripped: before #1512 the ``recorded_digests is
+    not None`` gate let exactly this row fall through to a silent, ``.bak``-less
+    re-extract. The clean-dest hash now stands in for the missing recorded map."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
+    install_skill(tmp_path, "foo")
+    dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    assert dest.read_bytes() == b"working-tree-v2\n"
+    lock_path = _strip_to_legacy_entry(tmp_path, "skills", "foo")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    # The installed bytes are preserved — NOT silently swapped to the pin's v1.
+    assert dest.read_bytes() == b"working-tree-v2\n"
+    assert not dest.with_suffix(dest.suffix + ".bak").exists()
+    assert "1 installed" not in result.output
+    assert "skipped" in result.output
+    lock_doc = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
+
+
+def test_legacy_row_matching_pin_reextracts_and_upgrades_entry(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """A legacy clean row whose dest already equals the pin falls through
+    (#1512): the re-extraction writes identical bytes and the lockfile upsert
+    upgrades the entry to a digest-bearing one, so the row leaves the legacy
+    class entirely."""
+    _initialized_wiki(wiki_root)
+    pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"pinned\n"})
+    install_skill(tmp_path, "foo")
+    lock_path = _strip_to_legacy_entry(tmp_path, "skills", "foo")
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 0, result.output
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
     assert (dest / "SKILL.md").read_bytes() == b"pinned\n"
     lock_doc = json.loads(lock_path.read_text(encoding="utf-8"))
     assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
-    # Manifest recorded against the pin on re-extraction.
+    # Manifest + digests recorded against the pin on re-extraction.
     assert lock_doc["skills"]["foo"]["files"] == ["SKILL.md"]
     assert lock_doc["skills"]["foo"]["files_commit"] == pin
+    assert set(lock_doc["skills"]["foo"]["digests"]) == {"SKILL.md"}
 
 
 def test_classify_install_all_missing_only_dirty_reason(wiki_root: Path, tmp_path: Path) -> None:

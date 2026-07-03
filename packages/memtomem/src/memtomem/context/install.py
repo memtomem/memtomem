@@ -1514,9 +1514,14 @@ def _apply_pinned_install(
     # recorded digests (== the clean dest) differ from the bytes the pin would
     # extract. When they MATCH (the dest already equals the pin), fall through
     # so --force's re-extraction can still reconcile away stale dest-only
-    # leftovers (#1247). A pre-digest entry has no comparable digests
-    # (``digests_from_entry`` → None) and keeps its legacy re-extract behavior;
-    # a VALID EMPTY map (``{}`` — a digest-bearing install that copied zero
+    # leftovers (#1247). A pre-digest entry (``digests_from_entry`` → None) has
+    # no recorded map, so the CLEAN DEST is hashed in its place (#1512): the
+    # row just classified clean, so the dest bytes ARE the bytes the install
+    # wrote — the same identity a recorded map would carry — and a legacy row
+    # gains the same no-op-on-divergence protection instead of the pre-#1479
+    # silent, .bak-less re-extract. (Its dest==pin fall-through then re-extracts
+    # identical bytes and upserts a digest-bearing entry, upgrading the row.)
+    # A VALID EMPTY map (``{}`` — a digest-bearing install that copied zero
     # files) is honored, so a pin that would extract files over it counts as a
     # divergence rather than a fall-through (``is not None``, not truthiness —
     # Codex gate). (Reachable only under --force: without it the caller skips
@@ -1531,7 +1536,26 @@ def _apply_pinned_install(
             for rel in wiki.asset_files_at_commit(pin, asset_type, name)
             if not is_copy_skipped_rel(rel)
         }
-        if recorded_digests is not None and recorded_digests != pin_digests:
+        if recorded_digests is not None:
+            effective_digests = recorded_digests
+        else:
+            try:
+                effective_digests = {
+                    f.relative_to(dest).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
+                    for f in iter_installed_files(dest)
+                }
+            except OSError as exc:
+                # Fail-closed like the walk_failed gate above: an unhashable
+                # dest cannot be proven equal to the pin, and a wrong guess
+                # either destroys bytes (fall through) or silently masks a
+                # permissions problem (no-op) — refuse loud instead (the
+                # --all CLI loop degrades this to a red row, file intact).
+                raise StaleInstallError(
+                    f"{asset_type}/{name}: cannot hash installed files under "
+                    f"{dest} ({exc}) to compare against the pin — refusing to "
+                    f"re-extract even with --force; fix permissions and retry"
+                ) from exc
+        if effective_digests != pin_digests:
             return InstallResult(
                 asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
                 name=name,
