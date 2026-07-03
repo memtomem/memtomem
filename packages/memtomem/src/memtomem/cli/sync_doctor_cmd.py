@@ -128,6 +128,15 @@ def _git_ls_files(start: Path) -> list[str] | None:
     Plain ``git ls-files`` from a nested dir only yields paths *under* that
     dir, which would let the doctor miss a tracked root-level
     ``config.json`` or ``*.db``.
+
+    ``-z`` + NUL-split bytes (#1520 quotePath fold-in, mirroring
+    ``wiki/store.py:asset_files_at_commit``): git's default
+    ``core.quotePath=true`` C-quotes non-ASCII pathnames in line-oriented
+    porcelain (a Korean-named ``스냅샷.db`` renders ``"\\354\\212\\244…"``
+    with a trailing ``"``), which evades the callers' ``endswith`` checks.
+    Undecodable names decode with ``errors="replace"`` rather than being
+    skipped — the suffix checks are ASCII, so replacement never breaks
+    detection, while skipping would false-pass a staged db.
     """
     git = shutil.which("git")
     if git is None:
@@ -137,17 +146,16 @@ def _git_ls_files(start: Path) -> list[str] | None:
         return None
     try:
         proc = subprocess.run(
-            [git, "ls-files"],
+            [git, "ls-files", "-z"],
             cwd=str(repo_root),
             capture_output=True,
-            text=True,
             check=False,
         )
     except OSError:
         return None
     if proc.returncode != 0:
         return None
-    return [line for line in proc.stdout.splitlines() if line]
+    return [entry.decode("utf-8", errors="replace") for entry in proc.stdout.split(b"\0") if entry]
 
 
 def check_no_db_staged(cwd: Path) -> CheckResult:

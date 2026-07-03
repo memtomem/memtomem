@@ -894,7 +894,8 @@ project root the gateway knows about — the server's current working
 directory, any roots registered via the Web UI, and (opt-in) decoded paths
 from `~/.claude/projects/`. These project roots populate `project_shared`
 and `project_local` tier entries; the `user` tier (per ADR-0011 §1) is a
-separate axis gated by `USER_TIER_ENABLED` below.
+separate, always-visible axis whose canonical lives under
+`~/.memtomem/<artifact>/`.
 
 > For a task-first walkthrough of the Store → Sync → Runtime model, see the
 > [Context Gateway](context-gateway.md) guide. This section is the
@@ -926,7 +927,6 @@ registry and stores local absolute paths.
 |----------|---------|-------------|
 | `MEMTOMEM_CONTEXT_GATEWAY__KNOWN_PROJECTS_PATH` | `~/.memtomem/known_projects.json` | Where the Web UI persists "Add Project" registrations. The Sources, Skills, Custom Commands, and Subagents tabs render one collapsible group per registered project root. |
 | `MEMTOMEM_CONTEXT_GATEWAY__EXPERIMENTAL_CLAUDE_PROJECTS_SCAN` | `false` | When `true`, the gateway also reverse-decodes `~/.claude/projects/<encoded>` directory names into project roots and surfaces them as discovered roots. Off by default — the encoding is fragile around dash-containing paths, so this stays gated behind explicit consent. |
-| `MEMTOMEM_CONTEXT_GATEWAY__USER_TIER_ENABLED` | `false` | Forward-compat flag for the `user`-tier canonical artifact surface (ADR-0011 §1; canonical lives under `~/.memtomem/<artifact>/`). While `false`, `user`-tier entries are hidden from discovery responses entirely. |
 | `MEMTOMEM_CONTEXT_GATEWAY__AUTO_DISPLAY_CONFIGURED_PROJECTS` | `true` | Auto-surface `~/.claude/projects/` scan candidates that already carry a runtime marker, without an explicit Add Project step |
 
 ## Hooks
