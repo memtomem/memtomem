@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, get_args
 from uuid import UUID, uuid4
 
+from memtomem.errors import EmbeddingError
 from memtomem.models import Chunk, ChunkMetadata, ChunkType
 
 if TYPE_CHECKING:
@@ -447,6 +448,18 @@ async def import_chunks(
         contents = [c.retrieval_content for c in to_upsert]
         try:
             embeddings = await embedder.embed_texts(contents)
+            if len(embeddings) != len(contents):
+                # Same truncation class as the index engine (issue #1563): a
+                # short array would ``zip``-drop the trailing chunks' vectors
+                # while ``upsert_chunks`` still commits their content_hash,
+                # leaving hash-poisoned BM25-only rows that never re-embed.
+                # Fail loud so the ``except`` below returns the zero-import
+                # failure path before any upsert.
+                raise EmbeddingError(
+                    f"Embedder returned {len(embeddings)} vectors for "
+                    f"{len(contents)} chunks during import; refusing to store "
+                    "a truncated result."
+                )
             for chunk, emb in zip(to_upsert, embeddings):
                 chunk.embedding = emb
         except Exception as exc:

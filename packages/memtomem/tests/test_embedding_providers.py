@@ -244,6 +244,25 @@ class TestOllamaEmbedder:
         with pytest.raises(EmbeddingError, match="missing 'embeddings' key"):
             await embedder.embed_texts(["test"])
 
+    async def test_short_embedding_array_raises(self):
+        """A batch returning fewer vectors than inputs raises (issue #1563).
+
+        Silent ``zip`` truncation would land BM25-only chunks whose
+        content_hash is still committed, poisoning the re-index skip forever.
+        """
+        config = _ollama_config(dimension=2)
+        embedder = OllamaEmbedder(config)
+        # Three inputs, only two vectors back.
+        short_resp = _make_httpx_response(
+            json_data={"embeddings": [[1.0, 2.0], [3.0, 4.0]]},
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=short_resp)
+        embedder._client = mock_client
+
+        with pytest.raises(EmbeddingError, match="refusing to truncate"):
+            await embedder.embed_texts(["a", "b", "c"])
+
     async def test_close_clears_client(self):
         """close() calls aclose() on the httpx client and sets it to None."""
         config = _ollama_config()
@@ -363,6 +382,25 @@ class TestOpenAIEmbedder:
 
         with pytest.raises(EmbeddingError, match="Cannot connect to OpenAI"):
             await embedder.embed_texts(["test"])
+
+    async def test_short_data_array_raises(self):
+        """A response dropping a ``data`` item raises rather than truncating.
+
+        Same failure class as OllamaEmbedder (issue #1563): a short array must
+        not silently drop trailing chunks' vectors downstream.
+        """
+        config = _openai_config(dimension=3)
+        embedder = OpenAIEmbedder(config)
+        # Two inputs, only one vector back.
+        short_resp = _make_httpx_response(
+            json_data={"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]},
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=short_resp)
+        embedder._client = mock_client
+
+        with pytest.raises(EmbeddingError, match="refusing to truncate"):
+            await embedder.embed_texts(["hello", "world"])
 
     async def test_close_clears_client(self):
         config = _openai_config()

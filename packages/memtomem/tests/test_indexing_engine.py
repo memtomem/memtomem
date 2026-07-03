@@ -721,6 +721,72 @@ class TestChunkProgressStream:
         assert engine.is_active is False
 
 
+class _ShortArrayEmbedder(_FakeProgressEmbedder):
+    """Returns one fewer vector than inputs — the exact partial-failure shape
+    a flaky HTTP endpoint produces. Bypasses the per-provider count guard so
+    it reaches the engine's zip-site defense-in-depth check directly.
+    """
+
+    async def embed_texts(self, texts, *, on_progress=None):
+        return [[0.0] * self._dim for _ in texts][:-1]
+
+
+class TestShortEmbeddingArrayGuard:
+    """Issue #1563: a short embedding array must abort the file with zero DB
+    writes — never silently ``zip``-truncate into BM25-only chunks whose
+    content_hash is nonetheless committed, which would classify them
+    ``unchanged`` on every later pass and never re-embed them (a permanent,
+    silent semantic-search hole).
+    """
+
+    async def test_short_array_surfaces_error_and_writes_nothing(self, components, memory_dir):
+        notes = memory_dir / "big.md"
+        notes.write_text(_many_chunk_md(20))
+        engine = components.index_engine
+        # Match the DB's configured vector dimension (the live embedder is
+        # lazy and reports 0 until loaded) so a healthy pass would upsert
+        # cleanly — isolating the short-array failure from any dim skew.
+        dim = components.config.embedding.dimension
+        engine._embedder = _ShortArrayEmbedder(dim)
+
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        complete = next(e for e in events if e.get("type") == "complete")
+        assert complete["errors"], "short embedding array must surface an error"
+        assert any("Embedding failed" in err for err in complete["errors"])
+        # The distinguishing pin vs. the bug: the buggy ``zip`` would have
+        # committed N-1 chunks here. With the guard, the file stays un-hashed
+        # and nothing lands.
+        chunks = await components.storage.list_chunks_by_source(notes)
+        assert chunks == [], "no chunks may be committed when embedding truncates"
+
+    async def test_reindex_recovers_after_short_array(self, components, memory_dir):
+        """The crux of #1563: because the failed pass wrote nothing (and thus
+        recorded no content_hash), a later pass with a healthy embedder
+        re-embeds the file cleanly instead of skipping it as ``unchanged``.
+        """
+        notes = memory_dir / "big.md"
+        notes.write_text(_many_chunk_md(20))
+        engine = components.index_engine
+        dim = components.config.embedding.dimension
+
+        engine._embedder = _ShortArrayEmbedder(dim)
+        _ = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        assert await components.storage.list_chunks_by_source(notes) == []
+
+        # Healthy embedder on the next trigger — a poisoned content_hash would
+        # have made ``compute_diff`` see the file as ``unchanged`` and skip it.
+        engine._embedder = _FakeProgressEmbedder(dim)
+        events = [ev async for ev in engine.index_path_stream(memory_dir, recursive=True)]
+        complete = next(e for e in events if e.get("type") == "complete")
+        assert complete["indexed_chunks"] >= 1, (
+            "file must re-embed cleanly on recovery; a poisoned content_hash "
+            "would have skipped it as unchanged (issue #1563)"
+        )
+        assert await components.storage.list_chunks_by_source(notes), (
+            "chunks must land on the recovery pass"
+        )
+
+
 # ===========================================================================
 # 1.b _active_runs / is_active counter
 # ===========================================================================

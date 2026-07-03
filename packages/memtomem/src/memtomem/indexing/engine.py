@@ -31,6 +31,7 @@ from memtomem.config import (
     provider_for_category,
 )
 from memtomem import privacy
+from memtomem.errors import EmbeddingError
 from memtomem.indexing.differ import DiffResult, compute_diff
 from memtomem.models import Chunk, IndexingStats
 
@@ -1025,6 +1026,21 @@ class IndexEngine:
                     texts,
                     on_progress=on_chunk_progress if emit_progress else None,
                 )
+                if len(embeddings) != len(texts):
+                    # Defense in depth against a short embedding array (issue
+                    # #1563). The HTTP providers now assert per-batch, but a
+                    # bare ``zip`` here would silently drop the trailing chunks'
+                    # vectors while still committing their content_hash — the
+                    # diff logic would then classify them ``unchanged`` forever
+                    # and never re-embed, a permanent semantic-search hole with
+                    # no audit trail. Fail loud; the ``except`` below turns this
+                    # into a zero-write early return so the file stays un-hashed
+                    # and re-indexes cleanly on the next trigger.
+                    raise EmbeddingError(
+                        f"Embedder returned {len(embeddings)} vectors for "
+                        f"{len(texts)} chunks in {file_path}; refusing to index "
+                        "a truncated result."
+                    )
                 for chunk, emb in zip(diff_result.to_upsert, embeddings):
                     chunk.embedding = emb
             except Exception as exc:

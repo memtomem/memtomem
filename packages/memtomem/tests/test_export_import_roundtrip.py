@@ -683,3 +683,44 @@ class TestOnConflictModes:
         finally:
             await close_components(comp_a)
             await close_components(comp_b)
+
+
+class TestImportShortEmbeddingArray:
+    """Issue #1563, reproduced outside the index engine: the import path must
+    not silently ``zip``-truncate a short embedding array into hash-poisoned
+    BM25-only rows. Export/import preserves ``content_hash``, so a truncated
+    import would commit chunks that never re-embed on any later pass.
+    """
+
+    async def test_short_array_aborts_import_with_no_writes(self, tmp_path):
+        comp_a, mem_a = await _make_components(tmp_path, "short_a")
+        comp_b, _ = await _make_components(tmp_path, "short_b")
+        try:
+            await _index_corpus(comp_a, mem_a)
+            bundle_path = tmp_path / "bundle.json"
+            await export_chunks(comp_a.storage, output_path=bundle_path)
+
+            class _ShortEmbedder(_DeterministicEmbedder):
+                """Drops the last vector — the partial-failure shape a flaky
+                HTTP endpoint produces, injected straight into the import call.
+                """
+
+                async def embed_texts(self, texts, *, on_progress=None):
+                    vectors = await super().embed_texts(texts, on_progress=on_progress)
+                    return vectors[:-1]
+
+            assert await comp_b.storage.recall_chunks(limit=10_000) == []
+
+            stats = await import_chunks(comp_b.storage, _ShortEmbedder(384), bundle_path)
+
+            assert stats.imported_chunks == 0
+            assert stats.failed_chunks > 0
+            # The distinguishing pin vs. the bug: the buggy ``zip`` would have
+            # committed the non-truncated chunks (BM25-only) here. With the
+            # guard, nothing lands and no content_hash is recorded.
+            assert await comp_b.storage.recall_chunks(limit=10_000) == [], (
+                "no chunks may be committed when import embedding truncates"
+            )
+        finally:
+            await close_components(comp_a)
+            await close_components(comp_b)

@@ -55,6 +55,17 @@ class OllamaEmbedder:
             raise EmbeddingError(
                 f"Ollama API returned unexpected response (missing 'embeddings' key): {list(data.keys())}"
             )
+        if len(embeddings) != len(batch):
+            # A short array (flaky/OOM-pressured server) must be a hard error,
+            # not silent truncation: the index engine ``zip``s these vectors
+            # against chunks, so a dropped tail would land BM25-only rows whose
+            # content_hash is still committed — poisoning the re-index skip
+            # forever (issue #1563). EmbeddingError is non-retryable and aborts
+            # the whole index pass with zero DB writes.
+            raise EmbeddingError(
+                f"Ollama returned {len(embeddings)} embeddings for {len(batch)} inputs "
+                f"(model={self._config.model!r}); refusing to truncate."
+            )
         return embeddings
 
     async def embed_texts(

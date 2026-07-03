@@ -64,6 +64,15 @@ class OpenAIEmbedder:
         resp.raise_for_status()
         data = resp.json()["data"]
         data.sort(key=lambda x: x["index"])
+        if len(data) != len(batch):
+            # A short ``data`` array (endpoint dropping items under load) must
+            # fail loudly rather than truncate the zip in the index engine and
+            # poison the content-hash skip forever (issue #1563, same failure
+            # class as OllamaEmbedder). Non-retryable by design.
+            raise EmbeddingError(
+                f"OpenAI endpoint returned {len(data)} embeddings for {len(batch)} inputs "
+                f"(model={self._config.model!r}); refusing to truncate."
+            )
         return [item["embedding"] for item in data]
 
     async def embed_texts(
