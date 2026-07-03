@@ -341,6 +341,10 @@ def test_server_and_web_both_stopped(monkeypatch, tmp_path, fake_uv, force_tty):
     assert "Stopped pids 12345, 4242." in result.output
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Asserts the POSIX would_kill payload; Windows skips the kill stage so the arrays are empty (covered by test_windows_dry_run_json_reports_no_kills)",
+)
 def test_dry_run_json_includes_web(monkeypatch, tmp_path, fake_uv, force_tty):
     calls, _configure = fake_uv
     web_pid_file = tmp_path / "web.pid"
