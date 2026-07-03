@@ -223,6 +223,136 @@ class TestDrainAll:
         assert result.remaining == 0
 
 
+class TestPoisonEntryCap:
+    """A deterministically-failing entry is retried up to
+    ``_MAX_DRAIN_ATTEMPTS`` and then dropped loudly — logged, removed from
+    the queue, and reported via ``DrainResult.dropped`` (#1574 item 3).
+    Without the cap, every hook fire and every Stop-hook ``--flush`` retries
+    the poison entry forever."""
+
+    @staticmethod
+    def _failing_indexer():
+        async def indexer(p: str, ns: str | None, force: bool) -> None:
+            raise RuntimeError("synthetic permanent failure")
+
+        return indexer
+
+    def test_entry_dropped_after_max_attempts(self, queue_file: Path, caplog) -> None:
+        debounce.enqueue("/tmp/poison.py", now=100.0, queue_file=queue_file)
+        indexer = self._failing_indexer()
+
+        for attempt in range(1, debounce._MAX_DRAIN_ATTEMPTS):
+            result = asyncio.run(
+                debounce.drain_ready(
+                    window_seconds=5.0, indexer=indexer, now=110.0, queue_file=queue_file
+                )
+            )
+            assert result.dropped == []
+            assert result.remaining == 1
+            # ``attempts`` persists on disk between drains (survives process
+            # restarts — the queue outlives any one hook invocation).
+            assert _read_raw(queue_file)["entries"]["/tmp/poison.py"]["attempts"] == attempt
+
+        with caplog.at_level("ERROR", logger="memtomem.indexing.debounce"):
+            result = asyncio.run(
+                debounce.drain_ready(
+                    window_seconds=5.0, indexer=indexer, now=110.0, queue_file=queue_file
+                )
+            )
+        assert result.indexed == []
+        assert result.errors == []
+        assert len(result.dropped) == 1
+        assert result.dropped[0][0] == "/tmp/poison.py"
+        assert result.remaining == 0
+        assert "/tmp/poison.py" not in _read_raw(queue_file)["entries"]
+        dropped_logs = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("mm index /tmp/poison.py" in m for m in dropped_logs), (
+            "the drop must be loud and name the remediation command"
+        )
+
+    def test_drain_all_applies_the_same_cap(self, queue_file: Path) -> None:
+        """``drain_all`` backs the Stop-hook ``mm index --flush`` — the
+        highest-frequency automated drain — so it must not bypass the cap."""
+        debounce.enqueue("/tmp/poison.py", now=100.0, queue_file=queue_file)
+        indexer = self._failing_indexer()
+
+        for _ in range(debounce._MAX_DRAIN_ATTEMPTS - 1):
+            result = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
+            assert result.dropped == []
+        result = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
+        assert [p for p, _ in result.dropped] == ["/tmp/poison.py"]
+        assert result.remaining == 0
+        assert _read_raw(queue_file)["entries"] == {}
+
+    def test_reenqueue_resets_attempts(self, queue_file: Path) -> None:
+        """A re-enqueue is a real new write (the only enqueue caller is the
+        PostToolUse[Write] hook), so the entry gets a fresh retry budget —
+        the write may have fixed the failure."""
+        debounce.enqueue("/tmp/flaky.py", now=100.0, queue_file=queue_file)
+        indexer = self._failing_indexer()
+        for _ in range(debounce._MAX_DRAIN_ATTEMPTS - 1):
+            asyncio.run(
+                debounce.drain_ready(
+                    window_seconds=5.0, indexer=indexer, now=110.0, queue_file=queue_file
+                )
+            )
+        entries = _read_raw(queue_file)["entries"]
+        assert entries["/tmp/flaky.py"]["attempts"] == debounce._MAX_DRAIN_ATTEMPTS - 1
+
+        debounce.enqueue("/tmp/flaky.py", now=120.0, queue_file=queue_file)
+        assert _read_raw(queue_file)["entries"]["/tmp/flaky.py"]["attempts"] == 0
+
+    def test_success_after_failures_clears_entry(self, queue_file: Path) -> None:
+        """An entry that eventually succeeds is drained normally — the cap
+        only ever drops entries that fail on their final attempt."""
+        debounce.enqueue("/tmp/flaky.py", now=100.0, queue_file=queue_file)
+        calls = {"n": 0}
+
+        async def indexer(p: str, ns: str | None, force: bool) -> None:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("transient")
+
+        for _ in range(3):
+            result = asyncio.run(
+                debounce.drain_ready(
+                    window_seconds=5.0, indexer=indexer, now=110.0, queue_file=queue_file
+                )
+            )
+        assert result.indexed == ["/tmp/flaky.py"]
+        assert result.dropped == []
+        assert _read_raw(queue_file)["entries"] == {}
+
+    def test_legacy_queue_file_without_attempts_loads_as_zero(self, queue_file: Path) -> None:
+        """Queue files written before the ``attempts`` field must round-trip:
+        missing key loads as 0 and the first failure counts from there."""
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        "/tmp/legacy.py": {
+                            "first_seen": 100.0,
+                            "last_seen": 100.0,
+                            "namespace": None,
+                            "force": False,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        indexer = self._failing_indexer()
+        result = asyncio.run(
+            debounce.drain_ready(
+                window_seconds=5.0, indexer=indexer, now=110.0, queue_file=queue_file
+            )
+        )
+        assert result.dropped == []
+        assert _read_raw(queue_file)["entries"]["/tmp/legacy.py"]["attempts"] == 1
+
+
 class TestStatusSnapshot:
     """``status_snapshot`` is read-without-lock. Concurrent enqueues may
     race the read; the docstring on :func:`status_snapshot` flags this so
