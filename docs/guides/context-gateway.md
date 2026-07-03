@@ -114,6 +114,15 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
   unchanged / refuse preview without writing anything (also works with
   `--all`, where it prints the batch table and skips the confirm prompt).
 
+> **`--all` means different axes on `install` vs `update`.** They are not the
+> same batch. `mm context install --all` fixes the **project** and restores
+> *every asset* in this project's `lock.json` at its pinned commit — the
+> "fresh-machine restore" verb (it takes no `<type> <name>`). `mm context
+> update --all` fixes the **asset** (`<type> <name>` still required) and applies
+> that one asset across *every known project* that has it installed, advancing
+> each to wiki HEAD. Pick by what you're holding constant: one project (install)
+> or one asset (update).
+
 Install and Update only ever write the **project** Store. They do **not** edit
 `~/.memtomem/config.json` or the `~/.memtomem/<artifact>/` User tier — so a wiki
 install never changes your machine-wide settings or User-tier copies. Once

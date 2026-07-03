@@ -1763,7 +1763,11 @@ def version_enable_cmd(artifact_type: str, name: str, scope_flag: str | None) ->
     "--all",
     "all_assets",
     is_flag=True,
-    help="Re-install every entry from <project>/.memtomem/lock.json at its pinned commit.",
+    help=(
+        "Re-install every ASSET in THIS project's .memtomem/lock.json at its "
+        "pinned commit (fresh-machine restore). Note: `update --all` means a "
+        "different axis — ONE asset across every known PROJECT."
+    ),
 )
 @click.option(
     "--yes",
@@ -1846,7 +1850,11 @@ _WIKI_DIRTY_WARN = "warning: wiki has uncommitted changes; using HEAD which does
     "--all",
     "all_projects",
     is_flag=True,
-    help="Apply across every known project that has this asset installed.",
+    help=(
+        "Apply this ONE asset across every known PROJECT that has it installed. "
+        "Note: `install --all` means a different axis — every asset in a SINGLE "
+        "project, restored at its pin."
+    ),
 )
 @click.option(
     "--yes",
