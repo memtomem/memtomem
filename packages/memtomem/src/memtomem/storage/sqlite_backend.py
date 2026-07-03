@@ -48,6 +48,7 @@ from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
     HistoryMixin,
+    IdempotencyMixin,
     PolicyMixin,
     RelationMixin,
     ScheduleMixin,
@@ -94,6 +95,7 @@ def _rebuild_fts_retrieval(content: str, hierarchy_json: str) -> str:
 class SqliteBackend(
     SessionMixin,
     ScratchMixin,
+    IdempotencyMixin,
     RelationMixin,
     ShareLinkMixin,
     AnalyticsMixin,

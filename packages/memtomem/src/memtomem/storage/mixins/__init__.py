@@ -2,6 +2,7 @@
 
 from memtomem.storage.mixins.sessions import SessionMixin
 from memtomem.storage.mixins.scratch import ScratchMixin
+from memtomem.storage.mixins.idempotency import IdempotencyMixin
 from memtomem.storage.mixins.relations import RelationMixin
 from memtomem.storage.mixins.share_links import ShareLinkMixin
 from memtomem.storage.mixins.analytics import AnalyticsMixin
@@ -13,6 +14,7 @@ from memtomem.storage.mixins.schedules import ScheduleMixin
 __all__ = [
     "SessionMixin",
     "ScratchMixin",
+    "IdempotencyMixin",
     "RelationMixin",
     "ShareLinkMixin",
     "AnalyticsMixin",

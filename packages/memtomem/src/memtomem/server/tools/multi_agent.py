@@ -277,6 +277,7 @@ def _build_shared_tags(source_tags: tuple[str, ...] | list[str], source_chunk_id
 async def mem_agent_share(
     chunk_id: str,
     target: str = SHARED_NAMESPACE,
+    idempotency_key: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Copy a memory chunk's content into another namespace.
@@ -306,25 +307,86 @@ async def mem_agent_share(
     Args:
         chunk_id: UUID of the chunk to copy
         target: Target namespace — ``'shared'`` or ``'agent-runtime:{agent_id}'``
+        idempotency_key: Optional client-chosen key (max 256 chars) making this
+                         share idempotent for 24h: a retried call with the same
+                         key returns the original result and does not create a
+                         second content copy. A concurrent same-key call gets an
+                         "in progress" error and can retry. Only a successful
+                         share is recorded — a failed call may be retried with
+                         the same key. Note the structured provenance link stays
+                         best-effort (as without a key): if the copy succeeds but
+                         the ``chunk_links`` write fails, the share is still
+                         recorded, so a replay will not repair a missing link.
     """
     from uuid import UUID
 
     validate_namespace(target)
     app = await _get_app_initialized(ctx)
 
+    # Idempotency claim first (issue #1573): the share's claim covers the copy
+    # as one unit and must precede ``_mem_add_core`` (on replay
+    # ``stats.new_chunk_ids`` is unavailable anyway). Unlike mem_add, a share
+    # has no target-file lock, so this global (tool, key) claim is its *only*
+    # concurrency guard — a second same-key caller gets "pending" and does not
+    # copy. Helpers are imported lazily — ``memory_crud`` imports from this
+    # module, so a top-level import would be circular (mirrors the lazy
+    # ``_mem_add_core`` import below).
+    from memtomem.server.tools.memory_crud import (
+        _REPLAY_MARKER,
+        _idempotency_in_progress_error,
+        _release_idempotency_claim,
+        _validate_idempotency_key,
+    )
+
+    if idempotency_key is not None:
+        key_err = _validate_idempotency_key(idempotency_key)
+        if key_err:
+            return key_err
+        state, stored = await app.storage.idempotency_claim("mem_agent_share", idempotency_key)
+        if state == "completed":
+            assert stored is not None  # completed rows always carry a result
+            return stored + _REPLAY_MARKER
+        if state == "pending":
+            return _idempotency_in_progress_error(idempotency_key)
+        # state == "won": we own the share. Every early error return *before*
+        # the copy (below) releases the claim (nothing landed → re-runnable).
+        # But a *raise* from ``_mem_add_core`` may come after its internal
+        # append is durable, so we deliberately do NOT release there — the
+        # claim is left pending (retry blocks until TTL) rather than risk a
+        # duplicate copy.
+
+    async def _fail(msg: str) -> str:
+        if idempotency_key is not None:
+            await _release_idempotency_claim(app, "mem_agent_share", idempotency_key)
+        return msg
+
+    # Pre-copy prep (UUID parse, chunk fetch, tag build) — all *before* any
+    # durable write, so a failure here (a handled ``_fail`` return OR a raised
+    # exception, e.g. a storage error from ``get_chunk``) releases the claim so
+    # the key stays re-runnable. ``_mem_add_core`` is deliberately outside this
+    # guard — a raise there may be post-append.
     try:
-        uid = UUID(chunk_id)
-    except (ValueError, TypeError):
-        return f"Error: invalid chunk ID format: {chunk_id}"
+        try:
+            uid = UUID(chunk_id)
+        except (ValueError, TypeError):
+            return await _fail(f"Error: invalid chunk ID format: {chunk_id}")
 
-    chunk = await app.storage.get_chunk(uid)
-    if chunk is None:
-        return f"Chunk {chunk_id} not found."
+        chunk = await app.storage.get_chunk(uid)
+        if chunk is None:
+            return await _fail(f"Chunk {chunk_id} not found.")
 
-    inherited_tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
+        inherited_tags = _build_shared_tags(chunk.metadata.tags, chunk_id)
+    except Exception:
+        if idempotency_key is not None:
+            await _release_idempotency_claim(app, "mem_agent_share", idempotency_key)
+        raise
 
     from memtomem.server.tools.memory_crud import _mem_add_core
 
+    # No release-on-raise wrapper here on purpose (see the "won" note above):
+    # if ``_mem_add_core`` raises after its append lands, releasing would let a
+    # retry duplicate the copy. ``stats is None`` (a handled error *return*)
+    # means nothing landed and is released below.
     result, stats = await _mem_add_core(
         content=chunk.content,
         title=_build_shared_title(chunk.metadata.heading_hierarchy),
@@ -381,4 +443,26 @@ async def mem_agent_share(
             "skipping chunk_links writer (content_hash collision?)"
         )
 
-    return f"Shared to namespace '{target}'.\n{result}"
+    final = f"Shared to namespace '{target}'.\n{result}"
+
+    # Complete the claim only on a successful copy. ``stats is None`` ⇒
+    # ``_mem_add_core`` errored and ``result`` is its error string ⇒ nothing
+    # durable landed, so release the claim and keep the key re-runnable. (The
+    # best-effort chunk_links write above does not gate this — the copy is the
+    # durable artifact; see the idempotency_key note in the docstring.)
+    if idempotency_key is not None:
+        if stats is None:
+            await _release_idempotency_claim(app, "mem_agent_share", idempotency_key)
+        else:
+            try:
+                await app.storage.idempotency_complete("mem_agent_share", idempotency_key, final)
+            except Exception:
+                # Leave the row pending on a (rare) complete failure — the copy
+                # is durable, so releasing could let a retry duplicate it.
+                logger.warning(
+                    "idempotency ledger complete failed; mem_agent_share key left "
+                    "pending (retry blocks until TTL)",
+                    exc_info=True,
+                )
+
+    return final

@@ -44,6 +44,17 @@ class TestToolRegistry:
         for name, info in ACTIONS.items():
             assert callable(info.fn), f"Action '{name}' fn is not callable"
 
+    def test_idempotency_key_param_documented(self):
+        """The idempotency_key param (issue #1573) surfaces in mem_do detail
+        for the @register-ed write tools — the registry parses per-param docs
+        from the Args: docstring, so a missing/undocumented param would drop
+        it from the meta-tool help."""
+        for name in ("batch_add", "agent_share"):
+            info = ACTIONS.get(name)
+            assert info is not None, f"expected '{name}' registered"
+            doc = info.param_docs.get("idempotency_key")
+            assert doc, f"'{name}' missing idempotency_key param doc"
+
     def test_no_core_tools_registered(self):
         """Core tools should NOT be in the registry."""
         core_names = {"search", "add", "index", "recall", "status", "stats", "list", "read"}

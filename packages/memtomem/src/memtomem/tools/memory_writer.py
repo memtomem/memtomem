@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,13 +12,17 @@ from pathlib import Path
 _FRONT_MATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 
-def append_entry(
-    file_path: Path,
+def format_entry_block(
     content: str,
     title: str | None = None,
     tags: list[str] | None = None,
-) -> None:
-    """Append a new entry to a markdown file, creating it if needed.
+) -> str:
+    """Return the markdown block ``append_entry`` writes for one entry.
+
+    The block always begins with a leading ``\\n``, so joining several
+    blocks with ``"".join(...)`` reproduces exactly what sequential
+    ``append_entry`` calls would write — this is what lets
+    ``mem_batch_add`` do one atomic append instead of a per-entry loop.
 
     The per-entry metadata (``> created: ...`` and optional
     ``> tags: [...]``) is emitted as a single explicit blockquote group
@@ -32,21 +37,39 @@ def append_entry(
     parser does not JSON-decode the array element-by-element, so escaped
     text would otherwise survive verbatim into the stored tag.
     """
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     tag_line = f"\n> tags: {json.dumps(list(tags), ensure_ascii=False)}" if tags else ""
 
     # Skip heading if content already starts with one (e.g., from a template)
     stripped = content.strip()
     if stripped.startswith("## "):
-        block = f"\n> created: {now}{tag_line}\n\n{stripped}\n"
-    else:
-        heading = f"## {title}" if title else f"## Entry {now}"
-        block = f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
+        return f"\n> created: {now}{tag_line}\n\n{stripped}\n"
+    heading = f"## {title}" if title else f"## Entry {now}"
+    return f"\n{heading}\n\n> created: {now}{tag_line}\n\n{stripped}\n"
 
+
+def append_blocks(file_path: Path, blocks: Sequence[str]) -> None:
+    """Append pre-formatted entry blocks to a markdown file in ONE write.
+
+    All-or-nothing (issue #1573): a batch of entries is composed into a
+    single ``write`` so a mid-batch failure can't leave a partial run of
+    entries on disk. A no-op when ``blocks`` is empty (no file touched).
+    """
+    if not blocks:
+        return
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     with open(file_path, "a", encoding="utf-8") as f:
-        f.write(block)
+        f.write("".join(blocks))
+
+
+def append_entry(
+    file_path: Path,
+    content: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+) -> None:
+    """Append a single new entry to a markdown file, creating it if needed."""
+    append_blocks(file_path, [format_entry_block(content, title=title, tags=tags)])
 
 
 def _find_body_start_index(chunk_lines: list[str]) -> int:
