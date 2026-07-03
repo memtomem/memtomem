@@ -153,13 +153,18 @@ async def mem_session_end(
     Resets both ``current_session_id`` and ``current_agent_id`` so the
     next ``mem_agent_search`` falls back to ``current_namespace``.
 
-    The active-session handle is *claimed* (read and cleared) atomically
-    under ``_session_lock`` at entry, so a concurrent or client-retried
-    ``mem_session_end`` returns ``"No active session."`` instead of
-    re-running the effectful phase. The summarize/persist work therefore
-    runs **at most once** per session; the handle is not restored if that
-    phase fails part-way (a retry must not risk a duplicate billable
-    summary). An active DB row orphaned by a mid-phase crash is reaped by
+    The session is *claimed* atomically under ``_session_lock`` at entry by
+    recording its id in ``_ending_session_ids``, so a concurrent or
+    client-retried ``mem_session_end`` returns ``"No active session."``
+    instead of re-running the effectful phase — the summarize/persist work
+    runs **at most once** per session. The public ``current_session_id`` /
+    ``current_agent_id`` handles stay set through the phase and are cleared
+    only when it completes, so concurrent session-bound writes
+    (``mem_add`` agent-namespace routing, ``mem_scratch_set`` binding) still
+    resolve to the active session during teardown instead of silently
+    falling back to the default scope. The claim is not released on
+    mid-phase failure (a retry must not risk a duplicate billable summary);
+    an active DB row orphaned by a mid-phase crash is reaped by
     the stale-session path (``find_stale_active_sessions``).
 
     When ``summary`` is provided, the text is also promoted to a
@@ -187,108 +192,127 @@ async def mem_session_end(
     """
     app = await _get_app_initialized(ctx)
 
-    # Claim-then-work (issue #1571): atomically read AND null the active
-    # session handle under _session_lock so a retried or concurrent
+    # Claim-then-work (issue #1571): under _session_lock, record the active
+    # session id in _ending_session_ids so a retried or concurrent
     # mem_session_end cannot double-run the effectful phase (billable LLM
     # auto-summary, archive-chunk write + index, end_session UPDATE). The
-    # loser sees no active session and returns early. At-most-once: the
-    # handle is NOT restored on mid-phase failure — a retry after a partial
-    # failure must not risk a duplicate summary. Same contract as
-    # schedule_try_claim (issue #1564). agent_id is captured here too: the
-    # archive helper needs the tag after the handle has been cleared.
+    # loser (session already claimed) sees no active session and returns
+    # early. At-most-once: the finally below clears the public handle on
+    # both success and failure, so a retry after a partial failure sees no
+    # active session and does not re-run the phase — the summary is never
+    # duplicated. Same contract as schedule_try_claim (issue #1564).
+    #
+    # The public handle is deliberately left set here (unlike a naive
+    # null-at-entry): it is cleared only after the phase, in the finally, so
+    # concurrent session-bound writes during the multi-second phase still
+    # route to this session's scope (agent-namespace / scratch binding)
+    # instead of the default. agent_id is captured for the archive helper.
     async with app._session_lock:
         session_id = app.current_session_id
-        if not session_id:
+        if not session_id or session_id in app._ending_session_ids:
             return "No active session."
+        app._ending_session_ids.add(session_id)
         agent_id = app.current_agent_id
-        app.current_session_id = None
-        app.current_agent_id = None
 
-    # Gather session stats
-    events = await app.storage.get_session_events(session_id)
-    event_counts: dict[str, int] = {}
-    for e in events:
-        event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
+    try:
+        # Gather session stats
+        events = await app.storage.get_session_events(session_id)
+        event_counts: dict[str, int] = {}
+        for e in events:
+            event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
 
-    # Read the session row before end_session writes ended_at — we need
-    # ``started_at`` and ``namespace`` for the Phase B auto-summary
-    # chunk lookup. Tolerate missing rows defensively (the row was
-    # created in mem_session_start, so absence indicates external
-    # tampering or a backend bug; either way, fall back to skipping
-    # auto-summary rather than crashing the close path).
-    session_row = await app.storage.get_session(session_id)
+        # Read the session row before end_session writes ended_at — we need
+        # ``started_at`` and ``namespace`` for the Phase B auto-summary
+        # chunk lookup. Tolerate missing rows defensively (the row was
+        # created in mem_session_start, so absence indicates external
+        # tampering or a backend bug; either way, fall back to skipping
+        # auto-summary rather than crashing the close path).
+        session_row = await app.storage.get_session(session_id)
 
-    await app.storage.end_session(session_id, summary, {"event_counts": event_counts})
+        await app.storage.end_session(session_id, summary, {"event_counts": event_counts})
 
-    effective_summary = summary
-    auto_summary_skip_reason: str | None = None
-    auto_source_chunks: list = []
-    if not summary:
-        (
-            effective_summary,
-            auto_summary_skip_reason,
-            auto_source_chunks,
-        ) = await _maybe_auto_summarize(
-            app,
-            session_id=session_id,
-            session_row=session_row,
-        )
-
-    summary_chunk_line: str | None = None
-    summary_chunk_id = None
-    if effective_summary:
-        try:
-            summary_chunk_line, summary_chunk_id = await _persist_session_summary_chunk(
+        effective_summary = summary
+        auto_summary_skip_reason: str | None = None
+        auto_source_chunks: list = []
+        if not summary:
+            (
+                effective_summary,
+                auto_summary_skip_reason,
+                auto_source_chunks,
+            ) = await _maybe_auto_summarize(
                 app,
                 session_id=session_id,
-                agent_id=agent_id,
-                summary=effective_summary,
-                event_counts=event_counts,
-            )
-        except Exception:
-            logger.warning(
-                "session_summary_chunk_persist_failed session_id=%s",
-                session_id,
-                exc_info=True,
+                session_row=session_row,
             )
 
-    # Phase B-2: link the summary chunk back to the source chunks it
-    # summarized. Only runs on the auto path (manual ``summary=`` did
-    # not collect source chunks). Failures are best-effort: a broken
-    # link writer must not roll back the session-end DB write or the
-    # archive chunk that already landed.
-    if summary_chunk_id is not None and auto_source_chunks:
-        try:
-            await _write_summary_links(
-                app,
-                summary_chunk_id=summary_chunk_id,
-                source_chunks=auto_source_chunks,
-                cap=app.config.session_summary.max_summary_links,
-            )
-        except Exception:
-            logger.warning(
-                "session_summary_links_failed session_id=%s",
-                session_id,
-                exc_info=True,
-            )
+        summary_chunk_line: str | None = None
+        summary_chunk_id = None
+        if effective_summary:
+            try:
+                summary_chunk_line, summary_chunk_id = await _persist_session_summary_chunk(
+                    app,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    summary=effective_summary,
+                    event_counts=event_counts,
+                )
+            except Exception:
+                logger.warning(
+                    "session_summary_chunk_persist_failed session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
 
-    # Cleanup session-bound working memory
-    cleaned = await app.storage.scratch_cleanup(session_id)
+        # Phase B-2: link the summary chunk back to the source chunks it
+        # summarized. Only runs on the auto path (manual ``summary=`` did
+        # not collect source chunks). Failures are best-effort: a broken
+        # link writer must not roll back the session-end DB write or the
+        # archive chunk that already landed.
+        if summary_chunk_id is not None and auto_source_chunks:
+            try:
+                await _write_summary_links(
+                    app,
+                    summary_chunk_id=summary_chunk_id,
+                    source_chunks=auto_source_chunks,
+                    cap=app.config.session_summary.max_summary_links,
+                )
+            except Exception:
+                logger.warning(
+                    "session_summary_links_failed session_id=%s",
+                    session_id,
+                    exc_info=True,
+                )
 
-    lines = [
-        f"Session ended: {session_id}",
-        f"- Events: {len(events)} ({', '.join(f'{k}:{v}' for k, v in event_counts.items())})",
-    ]
-    if effective_summary:
-        prefix = "Summary" if summary else "Auto summary"
-        lines.append(f"- {prefix}: {effective_summary[:100]}...")
-    elif auto_summary_skip_reason:
-        lines.append(f"- Auto summary: skipped ({auto_summary_skip_reason})")
-    if summary_chunk_line:
-        lines.append(summary_chunk_line)
-    if cleaned:
-        lines.append(f"- Working memory cleaned: {cleaned} entries")
-    return "\n".join(lines)
+        # Cleanup session-bound working memory
+        cleaned = await app.storage.scratch_cleanup(session_id)
+
+        lines = [
+            f"Session ended: {session_id}",
+            f"- Events: {len(events)} ({', '.join(f'{k}:{v}' for k, v in event_counts.items())})",
+        ]
+        if effective_summary:
+            prefix = "Summary" if summary else "Auto summary"
+            lines.append(f"- {prefix}: {effective_summary[:100]}...")
+        elif auto_summary_skip_reason:
+            lines.append(f"- Auto summary: skipped ({auto_summary_skip_reason})")
+        if summary_chunk_line:
+            lines.append(summary_chunk_line)
+        if cleaned:
+            lines.append(f"- Working memory cleaned: {cleaned} entries")
+        return "\n".join(lines)
+    finally:
+        # Release the claim and clear the public handle now that the phase
+        # is over — on success OR failure. Running on failure too means a
+        # dead session is not left active for routing, and a retry then
+        # sees no active session and does not re-run the effectful phase
+        # (at-most-once). The identity guard leaves a *newer* session
+        # untouched: if a mem_session_start supervened during the phase it
+        # overwrote current_session_id with a fresh id.
+        async with app._session_lock:
+            app._ending_session_ids.discard(session_id)
+            if app.current_session_id == session_id:
+                app.current_session_id = None
+                app.current_agent_id = None
 
 
 async def _maybe_auto_summarize(

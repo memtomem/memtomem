@@ -284,6 +284,108 @@ class TestSessionEndClaim:
         assert "Session ended" in out1
         assert out2 == "No active session."
 
+    @pytest.mark.asyncio
+    async def test_handle_stays_live_during_teardown_for_agent_routing(self, components):
+        """The claim must not deactivate the session for *other* concurrent
+        tools: while ``mem_session_end``'s effectful phase runs, the public
+        ``current_agent_id`` must stay set so a concurrent session-bound write
+        still routes to ``agent-runtime:<id>`` instead of the default scope.
+        Regression pin for the claim-vs-handle separation (#1571 review): a
+        naive null-at-entry leaves this None for the whole multi-second phase.
+        """
+        from memtomem.server.tools.multi_agent import _resolve_agent_namespace
+
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_events = app.storage.get_session_events
+        first = True
+
+        async def gated(session_id):
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            return await real_events(session_id)
+
+        app.storage.get_session_events = gated  # type: ignore[method-assign]
+
+        t_end = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await entered.wait()  # end is parked mid-phase
+        # A write racing the teardown must still resolve to the agent scope.
+        assert app.current_agent_id == "planner"
+        assert _resolve_agent_namespace(app, None) == "agent-runtime:planner"
+        release.set()
+        await t_end
+
+        assert app.current_agent_id is None  # cleared only after the phase
+
+    @pytest.mark.asyncio
+    async def test_scratch_set_during_teardown_is_cleaned_not_leaked(self, components):
+        """A ``mem_scratch_set`` racing the teardown must bind to the ending
+        session so the same call's ``scratch_cleanup(session_id)`` reaps it.
+        Regression pin: a null-at-entry claim would bind it to the global
+        (``session_id=None``) scope, escaping cleanup and leaking past close.
+        """
+        from memtomem.server.tools.scratch import mem_scratch_set
+
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_events = app.storage.get_session_events
+        first = True
+
+        async def gated(session_id):
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            return await real_events(session_id)
+
+        app.storage.get_session_events = gated  # type: ignore[method-assign]
+
+        t_end = asyncio.create_task(mem_session_end(ctx=ctx))  # type: ignore[arg-type]
+        await entered.wait()  # parked before the phase's scratch_cleanup
+        await mem_scratch_set(key="leaky", value="v", ctx=ctx)  # type: ignore[arg-type]
+        release.set()
+        await t_end
+
+        # Bound to the ending session → cleaned by scratch_cleanup, not leaked.
+        assert await app.storage.scratch_get("leaky") is None
+
+    @pytest.mark.asyncio
+    async def test_midphase_failure_clears_handle_and_is_at_most_once(self, components):
+        """If the effectful phase raises, the finally still releases the claim
+        and clears the handle, so the dead session isn't left active and a
+        retry returns "No active session." (at-most-once — the phase does not
+        re-run). Pins the failure path of the claim/handle separation.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        async def boom(_session_id):
+            raise RuntimeError("boom")
+
+        app.storage.get_session_events = boom  # type: ignore[method-assign]
+
+        out1 = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert "Error" in out1
+        assert app.current_session_id is None
+        assert app.current_agent_id is None
+        assert not app._ending_session_ids  # claim released even on failure
+
+        out2 = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        assert out2 == "No active session."
+
 
 class TestSessionNamespaceDerivation:
     """``mem_session_start`` derives the session record's namespace from

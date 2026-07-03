@@ -131,7 +131,8 @@ class AppContext:
     _dim_mismatch_announced: bool = False
     _config_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Guards mutations of ``current_session_id`` + ``current_agent_id``.
+    # Guards mutations of ``current_session_id`` + ``current_agent_id`` and
+    # ``_ending_session_ids``.
     # Kept distinct from ``_config_lock`` so a long-running config write
     # cannot block a session start, and vice versa.
     _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -160,6 +161,17 @@ class AppContext:
     _memory_file_locks: dict[str, asyncio.Lock] = field(
         default_factory=dict, init=False, repr=False
     )
+    # Sessions whose ``mem_session_end`` effectful phase (billable LLM
+    # auto-summary, archive-chunk write) is in flight (issue #1571). This is
+    # the at-most-once *claim* — a second/retried end whose session id is
+    # already here returns "No active session." and does not re-run the
+    # phase. Kept separate from ``current_session_id`` so the claim does NOT
+    # null the public session handle at entry: nulling it early would make
+    # concurrent session-bound writes (``mem_add`` agent-namespace routing,
+    # ``mem_scratch_set`` binding) see no active session for the whole
+    # multi-second phase. The handle is nulled only when the phase completes.
+    # Guarded by ``_session_lock``.
+    _ending_session_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     # ── current_namespace (validated) ─────────────────────────────────────
     # Property + setter pair so every write — whether via ``mem_ns_set``,

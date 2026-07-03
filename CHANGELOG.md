@@ -199,12 +199,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `_session_lock`; the effectful phase — `end_session`, the billable
   auto-summary LLM call, and the archive summary-chunk write+index — ran
   unlocked before it, so a client retry (or two agents sharing the session)
-  re-read the same `current_session_id` and re-ran the whole phase. The active
-  handle is now *claimed* — read and nulled atomically under `_session_lock` at
-  entry — so the effectful phase runs at most once and the loser returns "No
-  active session." (matching the claim-then-run contract from #1564). The handle
-  is not restored on mid-phase failure; an orphaned active row is reaped by the
-  existing stale-session path.
+  re-read the same `current_session_id` and re-ran the whole phase. The session
+  is now *claimed* under `_session_lock` at entry (its id recorded in
+  `_ending_session_ids`), so a second/retried end returns "No active session."
+  and the effectful phase runs at most once (matching the claim-then-run
+  contract from #1564); the claim is not released on mid-phase failure, and an
+  orphaned active row is reaped by the existing stale-session path. The public
+  `current_session_id` / `current_agent_id` handles stay set through the phase
+  and are cleared only when it completes — separating the claim from the handle
+  so a concurrent session-bound write during the multi-second teardown still
+  routes to `agent-runtime:<id>` and a concurrent `mem_scratch_set` still binds
+  to the ending session (and is reaped by its `scratch_cleanup`) instead of
+  silently falling back to the default/global scope.
 - **Deleting or renaming a watched markdown file now removes its chunks from
   the index immediately** (#1566). The file watcher had no `on_deleted`
   handler and `on_moved` enqueued only the new path, so a deleted or
