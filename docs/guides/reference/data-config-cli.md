@@ -255,8 +255,10 @@ mm config show                         # view all settings
 mm config set search.default_top_k 20  # change a setting
 mm config unset mmr.enabled            # drop a pinned override
 mm embedding-reset                     # check/resolve embedding model mismatch
-mm reset                               # delete all data and reinitialize the DB
-mm reset --yes                         # skip confirmation prompt
+mm reset                               # delete all data and reinitialize the DB (refuses while the server or web UI is running)
+mm reset --yes                         # skip confirmation prompt (safety gates still apply)
+mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.bak before wiping
+mm reset --force                       # bypass the liveness/write-lock gates (stale-pid recovery)
 mm upgrade                             # stop the running server, clear the stale pid, reinstall with --refresh
 mm upgrade --version 0.3.1 --dry-run   # preview a pinned upgrade (also: --grace, --extras, -y/--yes, --json)
 

@@ -146,6 +146,30 @@ class TestDefaultDeletion:
         assert not state.exists(), f"state dir should be pruned, found: {list(state.iterdir())}"
 
 
+class TestPreResetBackupInventory:
+    """``mm reset --backup`` snapshots (``<db>.pre-reset-<ts>.bak``, #1574
+    item 7) are DB-stem siblings the suffix loop misses — they must be
+    registered in the database group or they silently survive uninstall
+    and keep the state dir non-empty (blocking the final prune)."""
+
+    def test_backup_wiped_by_default_and_dir_pruned(self, home):
+        state = _seed_state(home)
+        bak = state / "memtomem.db.pre-reset-20260703T120000.bak"
+        bak.write_bytes(b"sqlite-fake-backup")
+        result = CliRunner().invoke(cli, ["uninstall", "-y"])
+        assert result.exit_code == 0, result.output
+        assert not bak.exists(), "pre-reset backup survived a default uninstall"
+        assert not state.exists(), f"state dir not pruned, found: {list(state.iterdir())}"
+
+    def test_keep_data_preserves_backup(self, home):
+        state = _seed_state(home)
+        bak = state / "memtomem.db.pre-reset-20260703T120000.bak"
+        bak.write_bytes(b"sqlite-fake-backup")
+        result = CliRunner().invoke(cli, ["uninstall", "-y", "--keep-data"])
+        assert result.exit_code == 0, result.output
+        assert bak.exists(), "backup is user data — --keep-data must preserve it"
+
+
 # -------------------------------------------------------------------- 3
 
 
