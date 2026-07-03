@@ -11,15 +11,20 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimitError(Exception):
-    """Raised on HTTP 429 to trigger retry via with_retry decorator.
+    """Raised on a transient HTTP status (429, 5xx) to trigger retry via
+    the with_retry decorator.
 
     The optional retry_after attribute is honored by with_retry when set:
-    the loop sleeps for max(exponential_delay, retry_after).
+    the loop sleeps for max(exponential_delay, retry_after). ``message``
+    lets a provider describe the actual condition (e.g. "Ollama returned
+    HTTP 503") instead of the default rate-limit wording, so retry logs
+    and the final wrapped error don't mislabel a server reload as
+    rate limiting.
     """
 
-    def __init__(self, retry_after: float | None = None) -> None:
+    def __init__(self, retry_after: float | None = None, message: str | None = None) -> None:
         self.retry_after = retry_after
-        super().__init__(f"Rate limited (retry_after={retry_after})")
+        super().__init__(message or f"Rate limited (retry_after={retry_after})")
 
 
 def parse_retry_after(value: str | None) -> float | None:

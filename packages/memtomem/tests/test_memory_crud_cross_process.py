@@ -228,6 +228,77 @@ async def test_index_file_parent_gone_skips_sidecar_without_mkdir(
     assert not (tmp_path / "gone").exists(), "sidecar acquire resurrected the deleted parent dir"
 
 
+@pytest.mark.asyncio
+async def test_stream_acquires_sidecar_while_index_lock_free(bm25_only_components, monkeypatch):
+    """``index_path_stream`` uses the same L2 → L3 order as ``index_file``
+    (via ``_index_file_locked``): the sidecar acquire happens while
+    ``_index_lock`` is free (#1574 item 6). Before that fix the stream
+    bypassed both locks entirely — ``calls`` would be empty."""
+    comp, mem_dir = bm25_only_components
+    src = mem_dir / "rule.md"
+    src.write_text("## Rule\n\nbody.\n", encoding="utf-8")
+
+    engine = comp.index_engine
+    index_lock_held_at_acquire: list[bool] = []
+    real = atomic_mod.async_file_lock
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def spy(lock_path, *, timeout):
+        index_lock_held_at_acquire.append(engine._index_lock.locked())
+        async with real(lock_path, timeout=timeout):
+            yield
+
+    monkeypatch.setattr(atomic_mod, "async_file_lock", spy)
+    async for _event in engine.index_path_stream(src, recursive=False):
+        pass
+
+    assert index_lock_held_at_acquire == [False], (
+        "the stream must take the sidecar (L2) before _index_lock (L3), once per file"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_sidecar_timeout_folds_into_errors_and_continues(
+    bm25_only_components, monkeypatch
+):
+    """A held sidecar on one file must not abort the stream: that file's
+    ``TimeoutError`` lands in ``complete.errors`` (no new event type) and
+    the remaining files still index (#1574 item 6)."""
+    comp, mem_dir = bm25_only_components
+    stuck = mem_dir / "a-stuck.md"
+    ok = mem_dir / "b-ok.md"
+    stuck.write_text("## Stuck\n\nheld.\n", encoding="utf-8")
+    ok.write_text("## Ok\n\nfree.\n", encoding="utf-8")
+
+    monkeypatch.setattr(atomic_mod, "_MEMORY_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+    held = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        async with async_file_lock(_lock_path_for(stuck.resolve()), timeout=5.0):
+            held.set()
+            await release.wait()
+
+    holder_task = asyncio.create_task(holder())
+    await held.wait()
+    try:
+        events = [e async for e in comp.index_engine.index_path_stream(mem_dir, recursive=True)]
+    finally:
+        release.set()
+        await holder_task
+
+    complete = next(e for e in events if e["type"] == "complete")
+    assert len(complete["errors"]) == 1, f"expected 1 timeout error, got {complete['errors']}"
+    assert "a-stuck.md" in complete["errors"][0]
+    # The other file still indexed — the stream continued past the timeout.
+    sources = {p.name for p in await comp.storage.get_all_source_files()}
+    assert "b-ok.md" in sources
+    assert "a-stuck.md" not in sources
+
+
 # ============================================================ C. timeout surface
 
 

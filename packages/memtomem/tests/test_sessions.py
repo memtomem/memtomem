@@ -52,11 +52,62 @@ class TestSessions:
     @pytest.mark.asyncio
     async def test_duplicate_session_ignored(self, storage):
         await storage.create_session("dup", "agent", "ns1")
-        await storage.create_session("dup", "other", "ns2")  # INSERT OR IGNORE
+        await storage.create_session("dup", "other", "ns2")  # ON CONFLICT DO NOTHING
         sessions = await storage.list_sessions()
         dup = [s for s in sessions if s["id"] == "dup"]
         assert len(dup) == 1
         assert dup[0]["agent_id"] == "agent"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_session_leaves_no_open_transaction(self, storage):
+        """The swallowed id collision must close its transaction — the old
+        try/except path left the failed INSERT's transaction open on the
+        shared writer connection, so the next writer hit "database is
+        locked" (#1574 item 5, Codex review)."""
+        await storage.create_session("dup-txn", "agent", "ns1")
+        await storage.create_session("dup-txn", "other", "ns2")
+        assert storage._get_db().in_transaction is False
+        # And a follow-up write on the same connection succeeds cleanly.
+        await storage.create_session("after-dup", "agent", "ns1")
+        assert any(s["id"] == "after-dup" for s in await storage.list_sessions())
+
+    @pytest.mark.asyncio
+    async def test_non_integrity_error_mentioning_unique_propagates(self, storage, monkeypatch):
+        """The swallow is scoped to ``sqlite3.IntegrityError`` — an unrelated
+        exception whose message happens to contain "UNIQUE constraint" must
+        propagate. The pre-fix ``except Exception`` + substring match silently
+        discarded it, and the caller believed a fresh row was created
+        (#1574 item 5)."""
+        import sqlite3
+
+        class _BoomDB:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.OperationalError("UNIQUE constraint mentioned in unrelated error")
+
+            def rollback(self):
+                pass
+
+        monkeypatch.setattr(storage, "_get_db", lambda: _BoomDB())
+        with pytest.raises(sqlite3.OperationalError):
+            await storage.create_session("s-op-err", "agent", "default")
+
+    @pytest.mark.asyncio
+    async def test_unique_violation_on_other_surface_propagates(self, storage, monkeypatch):
+        """Only the ``sessions.id`` collision is the expected idempotent-retry
+        case. A UNIQUE violation on any other (future) surface must surface,
+        not masquerade as a successful create (#1574 item 5)."""
+        import sqlite3
+
+        class _BoomDB:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.IntegrityError("UNIQUE constraint failed: sessions.agent_id")
+
+            def rollback(self):
+                pass
+
+        monkeypatch.setattr(storage, "_get_db", lambda: _BoomDB())
+        with pytest.raises(sqlite3.IntegrityError):
+            await storage.create_session("s-other-unique", "agent", "default")
 
     @pytest.mark.asyncio
     async def test_list_with_since(self, storage):

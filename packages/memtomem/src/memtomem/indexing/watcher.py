@@ -45,10 +45,19 @@ class _MarkdownEventHandler(FileSystemEventHandler):
     def _enqueue(self, path: str) -> None:
         p = Path(path)
         if p.suffix in self._supported:
-            try:
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, p)
-            except asyncio.QueueFull:
-                logger.warning("File watcher queue full, dropping event for %s", p.name)
+            # ``call_soon_threadsafe`` only *schedules* the put — a full queue
+            # raises ``QueueFull`` later, inside the event loop's callback
+            # runner, so the try/except must live in the callback itself
+            # (catching it here is dead code and drops surface as unhandled
+            # "Exception in callback" tracebacks instead of the warning).
+            self._loop.call_soon_threadsafe(self._put_or_warn, p)
+
+    def _put_or_warn(self, p: Path) -> None:
+        """Runs on the event loop thread; drop loudly when the queue is full."""
+        try:
+            self._queue.put_nowait(p)
+        except asyncio.QueueFull:
+            logger.warning("File watcher queue full, dropping event for %s", p.name)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
