@@ -9,7 +9,7 @@ from typing import Sequence
 import httpx
 
 from memtomem.config import EmbeddingConfig
-from memtomem.embedding.retry import with_retry
+from memtomem.embedding.retry import RateLimitError, parse_retry_after, with_retry
 from memtomem.errors import EmbeddingError
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class OllamaEmbedder:
     @with_retry(
         max_attempts=3,
         base_delay=1.0,
-        retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException),
+        retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException, RateLimitError),
     )
     async def _embed_batch_with_retry(self, batch: list[str]) -> list[list[float]]:
         """Send a single batch to Ollama with retry on transient errors."""
@@ -48,6 +48,18 @@ class OllamaEmbedder:
             "/api/embed",
             json={"model": self._config.model, "input": batch},
         )
+        if resp.status_code == 429 or resp.status_code >= 500:
+            # Ollama commonly returns 503 while a model is (re)loading — a
+            # transient state the backoff is meant for, same as the OpenAI
+            # provider's 429 handling. ``raise_for_status`` alone would raise
+            # ``HTTPStatusError``, which is not in the retry tuple, so the
+            # first embed after an ``ollama serve`` restart aborted instead of
+            # using the 3-attempt backoff (#1574 item 2). 4xx (e.g. 404
+            # unknown model) stays terminal below.
+            raise RateLimitError(
+                retry_after=parse_retry_after(resp.headers.get("retry-after")),
+                message=f"Ollama returned transient HTTP {resp.status_code}",
+            )
         resp.raise_for_status()
         data = resp.json()
         embeddings = data.get("embeddings")
@@ -111,6 +123,13 @@ class OllamaEmbedder:
         except httpx.TimeoutException as e:
             raise EmbeddingError(
                 f"Ollama embedding request timed out. "
+                f"The model '{self._config.model}' may still be loading. Error: {e}"
+            ) from e
+        except RateLimitError as e:
+            # Retries exhausted on 429/5xx — most commonly Ollama returning
+            # 503 for the whole backoff window while a large model loads.
+            raise EmbeddingError(
+                f"Ollama kept returning a transient HTTP error after retries. "
                 f"The model '{self._config.model}' may still be loading. Error: {e}"
             ) from e
         except httpx.HTTPStatusError as e:
