@@ -76,6 +76,35 @@ def test_config_json_applies_when_no_env(
     assert str(cfg.storage.sqlite_path) == "/from/config.db"
 
 
+def test_config_json_stale_removed_field_skipped_not_fatal(
+    override_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale key for a since-removed field loads clean (skipped, not fatal).
+
+    Regression for #1520 item 3: ``context_gateway.user_tier_enabled`` was
+    removed without ever gaining a read site. A persisted config.json that
+    still carries it must not break startup — the ``hasattr`` guard in
+    ``load_config_overrides`` skips unknown field names within a known
+    section, and sibling valid fields still apply.
+    """
+    _clear_all_memtomem_env(monkeypatch)
+    override_path.write_text(
+        json.dumps(
+            {
+                "context_gateway": {
+                    "user_tier_enabled": True,
+                    "experimental_claude_projects_scan": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = Mem2MemConfig()
+    load_config_overrides(cfg)
+    assert not hasattr(cfg.context_gateway, "user_tier_enabled")
+    assert cfg.context_gateway.experimental_claude_projects_scan is True
+
+
 def test_env_var_wins_over_config_json_scalar(
     override_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -164,6 +164,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   count as credentials — they are read by the SDK itself and are never copied
   into memtomem config. `LANGFUSE_ENABLED` alone never turns tracing on.
 
+### Removed
+
+- **The reserved config flag `context_gateway.user_tier_enabled` is gone**
+  (#1520 item 3). It was declared forward-compat for the multi-project
+  context UI RFC's PR3, which never shipped — the flag had zero read sites,
+  so it never gated anything. A stale key left in `~/.memtomem/config.json`
+  or a `config.d` fragment is skipped silently (both loaders guard unknown
+  field names); the one breaking edge is the env var
+  `MEMTOMEM_CONTEXT_GATEWAY__USER_TIER_ENABLED`, which now fails startup
+  validation — unset it. If PR3 lands, the flag returns wired to real
+  read sites.
+
 ### Fixed
 
 - **`mm upgrade` now stops a running `mm web` too, not just the MCP server**
