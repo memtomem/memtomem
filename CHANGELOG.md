@@ -164,6 +164,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   count as credentials — they are read by the SDK itself and are never copied
   into memtomem config. `LANGFUSE_ENABLED` alone never turns tracing on.
 
+### Fixed
+
+- **Deleting or renaming a watched markdown file now removes its chunks from
+  the index immediately** (#1566). The file watcher had no `on_deleted`
+  handler and `on_moved` enqueued only the new path, so a deleted or
+  renamed-away file's chunks lingered in `chunks`/`chunks_fts`/`chunks_vec`
+  and stayed searchable until the opt-in orphan-compaction pass ran — with the
+  scheduler disabled (the default), effectively forever. This has a privacy
+  edge: "I deleted the file" did not mean "it left the memory index". The
+  watcher now enqueues deletes and both sides of a move; `IndexEngine.index_file`
+  treats a path that no longer exists — deleted, renamed away, or replaced by a
+  directory — as delete-by-source, reusing the same primitive as the
+  orphan-cleanup backstops. Cleanup is deliberately *not* blocked by exclude
+  patterns (the orphan sweep already purges excluded orphans, so the live path
+  matches — otherwise a deleted-and-newly-excluded file's content would persist
+  forever). Safety brakes: the delete fires only on a genuine missing-file
+  error, never a transient `EACCES`/`EIO` blip; a wholesale loss of a watched
+  root/volume is left to the periodic two-pass mass-orphan brake rather than
+  mass-deleted per event; and the delete pass never resurrects a removed parent
+  directory via the sidecar lock. Orphan compaction remains the backstop for
+  events missed while the watcher is down.
+
 ## [0.3.2] — 2026-06-30
 
 A security release. The Web UI now validates `Host`/`Origin` on every `/api/*`

@@ -58,8 +58,23 @@ class _MarkdownEventHandler(FileSystemEventHandler):
         if not event.is_directory:
             self._enqueue(str(event.src_path))
 
-    def on_moved(self, event: FileSystemEvent) -> None:
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        # #1566: a deleted .md is enqueued like any other path — the consumer
+        # sees it no longer exists on disk and ``index_file`` purges its stale
+        # chunks (delete-by-source). Without this a deleted file's content
+        # stayed searchable until the opt-in orphan-compaction pass ran.
         if not event.is_directory:
+            self._enqueue(str(event.src_path))
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        # #1566: enqueue BOTH paths. The old path no longer exists → its chunks
+        # are deleted-by-source; the new path is indexed. The suffix filter in
+        # ``_enqueue`` still admits a .md ``src`` even when the file was renamed
+        # away to a non-.md ``dest`` (rename-away), so the stale chunks are
+        # cleaned in that case too. Previously only ``dest`` was enqueued,
+        # orphaning the old path's chunks on every rename/move.
+        if not event.is_directory:
+            self._enqueue(str(event.src_path))
             self._enqueue(str(event.dest_path))
 
 
@@ -250,13 +265,23 @@ class FileWatcher:
 
         try:
             stats = await self._engine.index_file(file_path)
-            logger.info(
-                "Auto-reindexed %s: indexed=%d skipped=%d deleted=%d",
-                file_path.name,
-                stats.indexed_chunks,
-                stats.skipped_chunks,
-                stats.deleted_chunks,
-            )
+            if stats.deleted_chunks and not stats.indexed_chunks and not file_path.exists():
+                # #1566: pure delete pass (file gone from disk) — "Auto-reindexed
+                # ... indexed=0 ... deleted=N" reads as a no-op in logs a user
+                # greps during a privacy check. Name it for what it is.
+                logger.info(
+                    "Removed deleted file from index: %s (%d stale chunk(s))",
+                    file_path.name,
+                    stats.deleted_chunks,
+                )
+            else:
+                logger.info(
+                    "Auto-reindexed %s: indexed=%d skipped=%d deleted=%d",
+                    file_path.name,
+                    stats.indexed_chunks,
+                    stats.skipped_chunks,
+                    stats.deleted_chunks,
+                )
         except PrivacyRejection as exc:
             # ADR-0006 PR-A: a watched file gained secret-class content; it is
             # left un-indexed (not a failure — the boundary is doing its job).
