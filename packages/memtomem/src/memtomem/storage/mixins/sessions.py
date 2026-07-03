@@ -16,17 +16,26 @@ class SessionMixin:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         meta_json = json.dumps(metadata) if metadata else "{}"
         try:
+            # ON CONFLICT(id) DO NOTHING: ignore ONLY the id collision (an
+            # idempotent retry of a caller-minted uuid4) inside the statement
+            # itself; any other integrity error still raises. The previous
+            # ``except Exception`` + bare "UNIQUE constraint" substring both
+            # masked every future UNIQUE surface (#1574 item 5) and left the
+            # failed INSERT's transaction open on the shared writer
+            # connection — the next writer hit "database is locked".
             db.execute(
                 "INSERT INTO sessions (id, agent_id, started_at, namespace, metadata)"
-                " VALUES (?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
                 (session_id, agent_id, now, namespace, meta_json),
             )
-            db.commit()
-        except Exception as exc:
-            if "UNIQUE constraint" in str(exc):
-                pass  # duplicate session ID — expected
-            else:
-                raise
+            if not self._in_transaction:
+                db.commit()
+        except Exception:
+            # Close the failed transaction instead of leaving it to be
+            # flushed by the next unrelated commit (#1572 idiom).
+            if not self._in_transaction:
+                db.rollback()
+            raise
 
     async def end_session(self, session_id: str, summary: str | None, metadata: dict) -> None:
         db = self._get_db()
