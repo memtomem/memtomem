@@ -3,6 +3,8 @@
 import pytest
 from helpers import make_chunk
 
+from memtomem.errors import StorageError
+
 
 class TestEntityMixin:
     @pytest.mark.asyncio
@@ -49,6 +51,56 @@ class TestEntityMixin:
     async def test_upsert_empty(self, storage):
         count = await storage.upsert_entities("nonexistent", [])
         assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_upsert_rolls_back_on_insert_failure(self, storage):
+        chunk = make_chunk("Alice met Bob")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [
+                {"entity_type": "person", "entity_value": "Alice"},
+                {"entity_type": "person", "entity_value": "Bob"},
+            ],
+        )
+
+        # A second upsert whose INSERT fails on an unbindable value, AFTER the
+        # DELETE has run. The pending DELETE must be rolled back — not left for a
+        # later unrelated commit on the shared writer connection to flush (#1572).
+        with pytest.raises(StorageError):
+            await storage.upsert_entities(
+                str(chunk.id),
+                [{"entity_type": "person", "entity_value": object()}],
+            )
+
+        # Unrelated commit on the shared writer connection: would flush an
+        # orphaned DELETE if one were left pending.
+        await storage.increment_access([chunk.id])
+
+        result = await storage.get_entities_for_chunk(str(chunk.id))
+        assert {r["entity_value"] for r in result} == {"Alice", "Bob"}
+
+    @pytest.mark.asyncio
+    async def test_upsert_malformed_entity_preserves_existing(self, storage):
+        chunk = make_chunk("keep me")
+        await storage.upsert_chunks([chunk])
+        await storage.upsert_entities(
+            str(chunk.id),
+            [{"entity_type": "person", "entity_value": "Keep"}],
+        )
+
+        # A batch with a missing required key is rejected before the DELETE, so
+        # the existing entity is preserved rather than silently wiped (#1572).
+        with pytest.raises(KeyError):
+            await storage.upsert_entities(
+                str(chunk.id),
+                [{"entity_type": "person"}],  # no entity_value
+            )
+
+        await storage.increment_access([chunk.id])
+
+        result = await storage.get_entities_for_chunk(str(chunk.id))
+        assert [r["entity_value"] for r in result] == ["Keep"]
 
     @pytest.mark.asyncio
     async def test_delete_entities(self, storage):

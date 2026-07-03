@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from memtomem.errors import StorageError
+
 
 class EntityMixin:
-    """Mixin providing entity extraction storage methods. Requires self._get_db()."""
+    """Mixin providing entity extraction storage methods.
+
+    Requires ``self._get_db()`` and ``self._in_transaction`` from the backend:
+    the write methods gate their commit/rollback on ``_in_transaction`` so they
+    compose under the backend's ``transaction()`` context manager.
+    """
 
     async def upsert_entities(self, chunk_id: str, entities: list[dict]) -> int:
         """Insert entities for a chunk. Replaces existing entities if any."""
@@ -15,31 +22,50 @@ class EntityMixin:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-        # Delete existing entities for this chunk (overwrite mode)
-        db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
+        # Build params before touching the DB: a malformed entity dict (missing a
+        # required key) must raise BEFORE the DELETE, never mid-transaction (#1572).
+        rows = [
+            (
+                chunk_id,
+                e["entity_type"],
+                e["entity_value"],
+                e.get("confidence", 1.0),
+                e.get("position", 0),
+                now,
+            )
+            for e in entities
+        ]
 
-        db.executemany(
-            "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, confidence, position, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    chunk_id,
-                    e["entity_type"],
-                    e["entity_value"],
-                    e.get("confidence", 1.0),
-                    e.get("position", 0),
-                    now,
-                )
-                for e in entities
-            ],
-        )
-        db.commit()
+        try:
+            # Overwrite mode: replace this chunk's entities atomically.
+            db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
+            db.executemany(
+                "INSERT INTO chunk_entities (chunk_id, entity_type, entity_value, "
+                "confidence, position, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            if not self._in_transaction:
+                db.commit()
+        except Exception as exc:
+            # Roll back the pending DELETE instead of leaving it to be flushed by
+            # the next unrelated commit on the shared writer connection (#1572).
+            if not self._in_transaction:
+                db.rollback()
+            raise StorageError(f"upsert_entities failed, transaction rolled back: {exc}") from exc
         return len(entities)
 
     async def delete_entities_for_chunk(self, chunk_id: str) -> int:
         db = self._get_db()
-        cur = db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
-        db.commit()
+        try:
+            cur = db.execute("DELETE FROM chunk_entities WHERE chunk_id = ?", (chunk_id,))
+            if not self._in_transaction:
+                db.commit()
+        except Exception as exc:
+            if not self._in_transaction:
+                db.rollback()
+            raise StorageError(
+                f"delete_entities_for_chunk failed, transaction rolled back: {exc}"
+            ) from exc
         return cur.rowcount
 
     async def search_entities(
