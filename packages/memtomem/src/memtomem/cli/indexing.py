@@ -313,6 +313,7 @@ def _print_drain_result(result, *, as_json: bool, label: str) -> None:
                 {
                     "indexed": result.indexed,
                     "errors": [{"path": p, "message": m} for p, m in result.errors],
+                    "dropped": [{"path": p, "message": m} for p, m in result.dropped],
                     "remaining": result.remaining,
                 }
             )
@@ -324,4 +325,10 @@ def _print_drain_result(result, *, as_json: bool, label: str) -> None:
         click.echo(f"  Errors: {len(result.errors)}")
         for p, m in result.errors:
             click.echo(click.style(f"    {p}: {m}", fg="red"))
+    if result.dropped:
+        from memtomem.indexing.debounce import _MAX_DRAIN_ATTEMPTS
+
+        click.echo(f"  Dropped after {_MAX_DRAIN_ATTEMPTS} failed attempts:")
+        for p, m in result.dropped:
+            click.echo(click.style(f"    {p}: {m} — fix the cause, then: mm index {p}", fg="red"))
     click.echo(f"  Remaining in queue: {result.remaining}")

@@ -52,6 +52,16 @@ logger = logging.getLogger(__name__)
 _DEFAULT_QUEUE_PATH = Path("~/.memtomem/index_debounce_queue.json").expanduser()
 _QUEUE_VERSION = 1
 
+# A deterministically-failing entry (permission error, parser bug, redaction
+# block) must not be retried forever — drain runs on every hook fire and every
+# ``Stop``-hook ``--flush``, so a poison entry turns each of those into a
+# guaranteed failure. After this many failed drain attempts the entry is
+# dropped loudly (logger.error + ``DrainResult.dropped``). A later re-enqueue
+# (i.e. a real new write to the file) resets the counter. This cap applies to
+# redaction-blocked files too — exempting them would reintroduce the
+# unbounded-retry class this exists to remove (#1574 item 3).
+_MAX_DRAIN_ATTEMPTS = 5
+
 
 @dataclass
 class QueueEntry:
@@ -62,6 +72,7 @@ class QueueEntry:
     last_seen: float
     namespace: str | None = None
     force: bool = False
+    attempts: int = 0  # failed drain attempts so far (see _MAX_DRAIN_ATTEMPTS)
 
     @classmethod
     def from_dict(cls, d: dict) -> "QueueEntry":
@@ -70,6 +81,7 @@ class QueueEntry:
             last_seen=float(d["last_seen"]),
             namespace=d.get("namespace"),
             force=bool(d.get("force", False)),
+            attempts=int(d.get("attempts", 0)),
         )
 
 
@@ -79,6 +91,7 @@ class DrainResult:
 
     indexed: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
+    dropped: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
     remaining: int = 0
 
 
@@ -250,11 +263,41 @@ def enqueue(
             existing.last_seen = ts
             existing.namespace = namespace
             existing.force = force
+            # A re-enqueue is a real new write (the only caller is the
+            # PostToolUse[Write] hook), so give the entry a fresh retry
+            # budget — the failure may have been fixed by this write.
+            existing.attempts = 0
         _save(qp, entries)
 
 
 def _ready(entry: QueueEntry, window_seconds: float, now: float) -> bool:
     return (now - entry.last_seen) >= window_seconds
+
+
+def _record_failure(
+    entries: dict[str, QueueEntry],
+    path_str: str,
+    entry: QueueEntry,
+    exc: Exception,
+    result: DrainResult,
+) -> None:
+    """Count one failed drain attempt; keep the entry for retry until the
+    attempt cap is hit, then drop it loudly (log + ``result.dropped``)."""
+    message = repr(exc)
+    entry.attempts += 1
+    if entry.attempts < _MAX_DRAIN_ATTEMPTS:
+        result.errors.append((path_str, message))
+        return
+    del entries[path_str]
+    result.dropped.append((path_str, message))
+    logger.error(
+        "debounce queue: dropping %s after %d failed indexing attempts (%s); "
+        "fix the underlying cause and re-run: mm index %s",
+        path_str,
+        entry.attempts,
+        message,
+        path_str,
+    )
 
 
 async def drain_ready(
@@ -284,8 +327,9 @@ async def drain_ready(
                 result.indexed.append(p)
                 del entries[p]
             except Exception as e:
-                result.errors.append((p, repr(e)))
-                # Keep the entry so the next hook call retries.
+                # Keep the entry so the next hook call retries — until the
+                # attempt cap drops it (poison-entry guard, #1574 item 3).
+                _record_failure(entries, p, entry, e, result)
         result.remaining = len(entries)
         _save(qp, entries)
     return result
@@ -320,7 +364,10 @@ async def drain_all(
                 result.indexed.append(p)
                 del entries[p]
             except Exception as e:
-                result.errors.append((p, repr(e)))
+                # Same poison-entry cap as drain_ready — this path runs on
+                # every Stop-hook ``--flush``, the highest-frequency
+                # automated drain, so it must not bypass the cap.
+                _record_failure(entries, p, entry, e, result)
         result.remaining = len(entries)
         _save(qp, entries)
     return result
