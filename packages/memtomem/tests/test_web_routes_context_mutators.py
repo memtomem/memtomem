@@ -392,18 +392,19 @@ async def test_PUT_holds_gateway_lock(
     mtime_ns = read.json()["mtime_ns"]
 
     from memtomem.web.routes._locks import _gateway_lock
-    import memtomem.web.routes.context_agents as _ca
-    import memtomem.web.routes.context_commands as _cc
+    import memtomem.web.routes._atomic_kind as _ak
     import memtomem.web.routes.context_skills as _cs
 
     observed = {"locked": False}
-    real = _ca.atomic_write_text  # same symbol, all three route modules
+    real = _cs.atomic_write_text  # same symbol at both write sites
 
     def probe(path, text, **kw):
         observed["locked"] = _gateway_lock.locked()
         return real(path, text, **kw)
 
-    for mod in (_ca, _cc, _cs):
+    # Patch where the write actually runs: the shared ``_atomic_kind``
+    # bodies serve commands/agents (#1514); skills keeps its own handler.
+    for mod in (_ak, _cs):
         monkeypatch.setattr(mod, "atomic_write_text", probe)
 
     r = await client.put(
