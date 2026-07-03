@@ -232,6 +232,60 @@ class TestOllamaEmbedder:
         with pytest.raises(EmbeddingError, match="not found"):
             await embedder.embed_texts(["test"])
 
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_transient_503_is_retried_then_succeeds(self, mock_sleep):
+        """A 503 (model still loading after ``ollama serve`` restart) uses the
+        retry backoff instead of aborting on the first attempt (#1574 item 2).
+        """
+        config = _ollama_config(dimension=2)
+        embedder = OllamaEmbedder(config)
+        ok_resp = _make_httpx_response(json_data={"embeddings": [[1.0, 2.0]]})
+        resp_503 = _make_httpx_response(status_code=503, json_data={})
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(side_effect=[resp_503, resp_503, ok_resp])
+        embedder._client = mock_client
+
+        result = await embedder.embed_texts(["test"])
+
+        assert result == [[1.0, 2.0]]
+        assert mock_client.post.await_count == 3
+
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_persistent_503_exhausts_retries_as_embedding_error(self, mock_sleep):
+        """503 on every attempt exhausts the backoff and surfaces as a
+        terminal EmbeddingError (never a raw RateLimitError/HTTPStatusError)."""
+        config = _ollama_config()
+        embedder = OllamaEmbedder(config)
+        resp_503 = _make_httpx_response(status_code=503, json_data={})
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=resp_503)
+        embedder._client = mock_client
+
+        with pytest.raises(EmbeddingError, match="transient HTTP error after retries") as ei:
+            await embedder.embed_texts(["test"])
+        assert mock_client.post.await_count == 3  # max_attempts, not 1
+        # The status-aware sentinel message surfaces — not "Rate limited",
+        # which would mislabel a server reload as rate limiting.
+        assert "HTTP 503" in str(ei.value)
+        assert "Rate limited" not in str(ei.value)
+
+    @patch("memtomem.embedding.retry.asyncio.sleep", new_callable=AsyncMock)
+    async def test_503_honors_retry_after_header(self, mock_sleep):
+        """A Retry-After header on the transient response drives the sleep,
+        matching the OpenAI provider's 429 handling."""
+        config = _ollama_config(dimension=2)
+        embedder = OllamaEmbedder(config)
+        resp_503 = _make_httpx_response(status_code=503, json_data={}, headers={"retry-after": "7"})
+        ok_resp = _make_httpx_response(json_data={"embeddings": [[1.0, 2.0]]})
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(side_effect=[resp_503, ok_resp])
+        embedder._client = mock_client
+
+        result = await embedder.embed_texts(["test"])
+
+        assert result == [[1.0, 2.0]]
+        mock_sleep.assert_awaited_once_with(7.0)
+
     async def test_missing_embeddings_key_raises(self):
         """Unexpected API response (no 'embeddings' key) raises EmbeddingError."""
         config = _ollama_config()
