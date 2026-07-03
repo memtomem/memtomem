@@ -22,6 +22,7 @@ from unittest import mock
 from watchdog.events import (
     DirDeletedEvent,
     FileDeletedEvent,
+    FileModifiedEvent,
     FileMovedEvent,
 )
 
@@ -102,6 +103,41 @@ class TestMarkdownEventHandlerDeleteMove:
         handler.on_moved(FileMovedEvent("/mem/old.txt", "/mem/new.md"))
         await asyncio.sleep(0)
         assert self._drain(queue) == {Path("/mem/new.md")}
+
+
+class TestQueueFullDrop:
+    """A full queue must drop the event via the one-line warning, not an
+    unhandled "Exception in callback" traceback (#1574 item 1).
+
+    ``call_soon_threadsafe`` only *schedules* the put, so a ``QueueFull``
+    fires later, inside the event loop's callback runner — the try/except
+    has to live in the callback itself for the warning path to be live.
+    """
+
+    async def test_full_queue_warns_instead_of_unhandled_callback_error(self, caplog):
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=1)
+        queue.put_nowait(Path("/mem/occupied.md"))
+        handler = _MarkdownEventHandler(queue, loop, frozenset({".md"}))
+
+        unhandled: list[dict] = []
+        prev_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+        try:
+            with caplog.at_level(logging.WARNING, logger="memtomem.indexing.watcher"):
+                handler.on_modified(FileModifiedEvent("/mem/dropped.md"))
+                await asyncio.sleep(0)  # run the scheduled callback on the loop
+        finally:
+            loop.set_exception_handler(prev_handler)
+
+        assert unhandled == [], (
+            "queue-full must be caught in the loop-side callback, not routed to "
+            "the loop exception handler as an unhandled callback error"
+        )
+        assert any("queue full" in r.getMessage().lower() for r in caplog.records)
+        # The event was dropped; the occupied slot is untouched.
+        assert queue.get_nowait() == Path("/mem/occupied.md")
+        assert queue.empty()
 
 
 # ===========================================================================
