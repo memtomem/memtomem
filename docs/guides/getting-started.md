@@ -423,7 +423,7 @@ mm config set key value    # change a setting
 mm config unset key        # drop a pinned override (e.g., mmr.enabled)
 mm status                  # show indexing stats + config (terminal mirror of mem_status)
 mm embedding-reset         # check/resolve embedding model mismatch
-mm reset                   # delete all data and reinitialize the DB
+mm reset                   # delete all data and reinitialize the DB (--backup snapshots first)
 mm context detect          # find agent config files
 mm context init            # create .memtomem/context.md from existing files
 mm context generate        # generate CLAUDE.md, .cursorrules, GEMINI.md, etc.

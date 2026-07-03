@@ -29,7 +29,6 @@ import errno
 import json
 import os
 import shutil
-import sqlite3
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -39,6 +38,8 @@ from typing import Iterable
 import click
 
 from memtomem._runtime_paths import runtime_dir, server_pid_path
+from memtomem.cli._db_lock import DbLockState as _DbLockState  # noqa: F401  (test seam)
+from memtomem.cli._db_lock import check_db_lock as _check_db_lock
 from memtomem.cli._liveness import check_server_liveness as _check_server_liveness
 from memtomem.cli._liveness import probe_pid_file as _probe_pid_file  # noqa: F401  (test seam)
 from memtomem.cli.init_cmd import RuntimeProfile, _runtime_profile
@@ -87,20 +88,6 @@ class _Inventory:
 
 
 @dataclass(frozen=True)
-class _DbLockState:
-    """Result of probing the SQLite DB for an active writer.
-
-    ``locked`` is True only when another connection holds a RESERVED /
-    PENDING / EXCLUSIVE lock at probe time — i.e. an active writer.
-    Pure readers (SHARED locks only) are not detected; that's an
-    accepted tradeoff (see ``_check_db_lock``).
-    """
-
-    locked: bool
-    probe_error: str | None
-
-
-@dataclass(frozen=True)
 class _External:
     path: Path
     reason: str
@@ -133,85 +120,14 @@ def _load_config_safely() -> tuple[Path, str | None]:
         return _DEFAULT_STATE_DIR / _DEFAULT_DB_NAME, f"{type(exc).__name__}: {exc}"
 
 
-# ---- server liveness probe -----------------------------------------------
+# ---- server liveness + DB-lock probes -------------------------------------
 #
 # Liveness helpers live in ``memtomem.cli._liveness`` so ``mm upgrade`` can
-# share them. They're re-imported above as ``_check_server_liveness`` and
-# ``_probe_pid_file`` to keep the existing test seams; the ``ServerState``
-# dataclass is consumed via duck-typing so no alias is needed.
-
-
-def _check_db_lock(db_path: Path) -> _DbLockState:
-    """Probe whether another connection holds a write lock on ``db_path``.
-
-    Motivation: the ``.server.pid`` check only catches the MCP
-    ``memtomem-server`` entrypoint. ``mm web``, ``mm watchdog``, and any
-    user-run sqlite3 connection are invisible to that scheme, so
-    uninstall could silently proceed while a live writer was holding the
-    WAL (observed in issue #384).
-
-    Mechanism: open a short-timeout connection and attempt
-    ``BEGIN IMMEDIATE`` — that tries to acquire a RESERVED lock and
-    raises ``SQLITE_BUSY`` (``sqlite3.OperationalError`` whose message
-    contains "locked"/"busy") if any other connection holds
-    RESERVED/PENDING/EXCLUSIVE. On success we ``ROLLBACK`` immediately;
-    the probe never modifies data.
-
-    Tradeoff: a process that only reads (SHARED lock) does NOT block
-    ``BEGIN IMMEDIATE`` in WAL mode, so a quiet-at-probe-time reader
-    slips through. That's an accepted tradeoff here — the WAL-corruption
-    path (active writer) is the severe case and is what this probe is
-    meant to guard. Complete reader-detection would need an ``lsof``
-    fallback or an extended pid-file scheme (see issue #384 discussion).
-
-    Error handling: if the probe can't run (file missing, corrupt,
-    permission denied, sqlite unavailable), returns ``locked=False`` with
-    ``probe_error`` set. Uninstall is itself a recovery path and must not
-    be blocked by unrelated DB integrity issues.
-    """
-    if not db_path.exists():
-        return _DbLockState(locked=False, probe_error=None)
-
-    # Header gate: only probe real SQLite files. Opening a corrupt /
-    # non-SQLite file with ``mode=rw`` can still trigger side effects on
-    # sibling ``-wal`` / ``-shm`` files (observed: a fake-content WAL
-    # got unlinked when SQLite tried to verify it). Stay out of that
-    # code path unless the file is actually a SQLite database.
-    try:
-        with db_path.open("rb") as fh:
-            header = fh.read(16)
-    except OSError as exc:
-        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
-    if header != b"SQLite format 3\x00":
-        return _DbLockState(locked=False, probe_error="not a SQLite database")
-
-    conn: sqlite3.Connection | None = None
-    try:
-        # mode=rw: don't auto-create if the file vanishes between stat
-        # and connect (paranoia for concurrent deletions).
-        conn = sqlite3.connect(
-            f"file:{db_path}?mode=rw",
-            uri=True,
-            timeout=0.25,
-        )
-        conn.execute("BEGIN IMMEDIATE")
-        conn.rollback()
-        return _DbLockState(locked=False, probe_error=None)
-    except sqlite3.OperationalError as exc:
-        msg = str(exc).lower()
-        if "locked" in msg or "busy" in msg:
-            return _DbLockState(locked=True, probe_error=None)
-        # Other OperationalError (not-a-database, read-only, etc.) — skip
-        # probe, let uninstall proceed.
-        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
-    except (sqlite3.Error, OSError) as exc:
-        return _DbLockState(locked=False, probe_error=f"{type(exc).__name__}: {exc}")
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except sqlite3.Error:
-                pass
+# share them, and the ``BEGIN IMMEDIATE`` write-lock probe lives in
+# ``memtomem.cli._db_lock`` so ``mm reset`` can share it (#1574 item 7).
+# They're re-imported above as ``_check_server_liveness`` / ``_probe_pid_file``
+# / ``_check_db_lock`` / ``_DbLockState`` to keep the existing test seams; the
+# ``ServerState`` dataclass is consumed via duck-typing so no alias is needed.
 
 
 # ---- inventory -----------------------------------------------------------
@@ -257,6 +173,13 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     key_path = provenance.key_path_for_db(db_path)
     if key_path.exists():
         db_paths.append(key_path)
+
+    # ``mm reset --backup`` snapshots (``<db-name>.pre-reset-<ts>.bak``,
+    # #1574 item 7). Like the provenance key they are DB-stem siblings the
+    # suffix loop above misses; group them with the database so they're
+    # data-gated (``--keep-data`` preserves, default wipes) and don't
+    # silently survive uninstall keeping the state dir non-empty.
+    db_paths.extend(sorted(db_path.parent.glob(db_path.name + ".pre-reset-*.bak")))
 
     config_json = state_dir / "config.json"
     config_files = [config_json] if config_json.exists() else []

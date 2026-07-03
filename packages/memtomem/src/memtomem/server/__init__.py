@@ -212,6 +212,22 @@ def _install_sigterm_handler(*pid_files: Path) -> None:
     file another primary owns. ``atexit`` still handles the normal
     stdin-EOF shutdown path.
 
+    What ``os._exit(0)`` intentionally abandons (#1574 item 8): the
+    ``app_lifespan`` ``finally`` (``server/lifespan.py``) never runs on
+    SIGTERM, so the webhook drain, the watcher / scheduler / policy /
+    health-watchdog stops, and ``AppContext.close()``'s DB teardown —
+    including the ``PRAGMA wal_checkpoint(TRUNCATE)`` in
+    ``SqliteBackend.close()`` — are all skipped. That is deliberate:
+    every one of those is an async teardown that must run on the event
+    loop, and a signal handler cannot safely enter the loop it is
+    interrupting. The consequences are bounded and self-healing — SQLite
+    recovers the WAL on the next open (committed transactions are
+    durable; the ``-wal``/``-shm`` files just persist until then),
+    watchdog observer threads die with the process, and undelivered
+    webhooks are already best-effort. Only the pid-file unlink above is
+    performed. If a synchronous best-effort DB close is ever added here,
+    it must not touch asyncio state.
+
     Windows note (#817): Python's ``signal.SIGTERM`` is a no-op on
     Windows — the OS has no equivalent of POSIX SIGTERM that the C
     runtime delivers to the Python signal layer. We skip registration
