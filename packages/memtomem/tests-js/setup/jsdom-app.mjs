@@ -29,7 +29,15 @@ function readStatic(rel) {
 // arrays to mean "the whole gateway module"; ``bootApp`` expands it to these
 // real files in index.html load order. Order MUST match the <script> tags in
 // index.html and CTX_GATEWAY_JS_FILES in tests/helpers.py.
-export const CTX_GATEWAY_SCRIPTS = ['context-gateway.js'];
+export const CTX_GATEWAY_SCRIPTS = [
+  'context-gateway-core.js',
+  'context-gateway-controls.js',
+  'context-gateway-overview.js',
+  'context-gateway-list.js',
+  'context-gateway-conflict.js',
+  'context-gateway-detail.js',
+  'context-gateway-actions.js',
+];
 
 // Concatenate the fragments in load order for the rare suite that greps the
 // gateway source as one blob (vs. booting it).

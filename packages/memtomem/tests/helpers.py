@@ -35,7 +35,15 @@ _WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "we
 # preceding the conflict fragment (langchange #2), which alphabetical order
 # would invert. Keep in sync with the ``<script>`` order in index.html and with
 # ``CTX_GATEWAY_SCRIPTS`` in tests-js/setup/jsdom-app.mjs.
-CTX_GATEWAY_JS_FILES = ("context-gateway.js",)
+CTX_GATEWAY_JS_FILES = (
+    "context-gateway-core.js",
+    "context-gateway-controls.js",
+    "context-gateway-overview.js",
+    "context-gateway-list.js",
+    "context-gateway-conflict.js",
+    "context-gateway-detail.js",
+    "context-gateway-actions.js",
+)
 
 
 def ctx_gateway_js_text() -> str:

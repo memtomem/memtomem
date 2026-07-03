@@ -36,6 +36,8 @@ from pathlib import Path
 
 import pytest
 
+from .helpers import CTX_GATEWAY_JS_FILES
+
 ROUTES_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "routes"
 STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
 
@@ -1565,3 +1567,31 @@ def test_spa_api_fetch_threads_csrf_token() -> None:
             "  C. Safe-method (GET/HEAD/OPTIONS) — no threading required.\n\n"
             "Offending sites:\n  - " + "\n  - ".join(failures)
         )
+
+
+def test_context_gateway_fragment_list_matches_disk_and_index_html() -> None:
+    """The #1517 gateway-fragment manifest must stay honest against the real
+    files and the index.html load order.
+
+    ``CTX_GATEWAY_JS_FILES`` (tests/helpers.py) is the single source the
+    whole-file test readers and the vitest bootApp expansion trust. If a new
+    ``context-gateway-*.js`` fragment is added but not registered — or the tuple
+    order drifts from the ``<script>`` order — the concat readers would silently
+    miss content and the ``_langchange_listener_body`` sentinel slice could
+    anchor on the wrong listener. Pin both here.
+    """
+    on_disk = {p.name for p in STATIC_DIR.glob("context-gateway-*.js")}
+    assert set(CTX_GATEWAY_JS_FILES) == on_disk, (
+        "CTX_GATEWAY_JS_FILES is out of sync with the context-gateway-*.js "
+        f"files on disk. registered={sorted(CTX_GATEWAY_JS_FILES)} "
+        f"on_disk={sorted(on_disk)}"
+    )
+
+    index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    tag_order = re.findall(r'src="/(context-gateway-[a-z]+\.js)\?v=\d+"', index_html)
+    assert tag_order == list(CTX_GATEWAY_JS_FILES), (
+        "index.html <script> order for the gateway fragments must match "
+        "CTX_GATEWAY_JS_FILES (the concat load order the langchange sentinel "
+        f"slice depends on). index.html={tag_order} "
+        f"tuple={list(CTX_GATEWAY_JS_FILES)}"
+    )
