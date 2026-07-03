@@ -528,6 +528,7 @@
   "settings.ctx.wiki_update": "Update",
   "settings.ctx.wiki_install_project": "Project",
   "settings.ctx.wiki_install_hint": "Wiki edits change ~/.memtomem-wiki, a separate git library shared across projects. Install snapshots this asset into the current project's .memtomem/ store; it does not edit ~/.memtomem/config.json or the user-level ~/.memtomem/<artifact>/ store. Update refreshes an installed one to wiki HEAD.",
+  "settings.ctx.wiki_install_prod_note": "Installing into a project is available only when the server runs in dev mode. Restart it with `mm web --dev` to install or update this asset, or use `mm context install` from the CLI.",
   "settings.ctx.wiki_force_confirm_title": "Overwrite local edits?",
   "settings.ctx.wiki_force_confirm_msg": "{type} \"{name}\" has local edits in {project}. Force-update overwrites them — each edited file is kept as a .bak sibling.",
   "settings.ctx.wiki_force_confirm_ok": "Overwrite",

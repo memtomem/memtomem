@@ -528,6 +528,7 @@
   "settings.ctx.wiki_update": "업데이트",
   "settings.ctx.wiki_install_project": "프로젝트",
   "settings.ctx.wiki_install_hint": "위키 편집은 모든 프로젝트가 참조할 수 있는 별도 git 라이브러리 ~/.memtomem-wiki 를 바꿉니다. 설치는 이 자산을 현재 프로젝트의 .memtomem/ 으로 스냅샷하며, ~/.memtomem/config.json 설정이나 사용자 레벨 ~/.memtomem/<artifact>/ 저장소는 수정하지 않습니다. 업데이트는 설치된 자산을 위키 HEAD 로 갱신합니다.",
+  "settings.ctx.wiki_install_prod_note": "프로젝트로의 설치는 서버가 dev 모드로 실행 중일 때만 가능합니다. 이 자산을 설치하거나 업데이트하려면 `mm web --dev` 로 서버를 다시 시작하거나, CLI 에서 `mm context install` 을 사용하세요.",
   "settings.ctx.wiki_force_confirm_title": "로컬 수정을 덮어쓸까요?",
   "settings.ctx.wiki_force_confirm_msg": "{project} 의 {type} \"{name}\" 에 로컬 수정이 있습니다. 강제 업데이트는 이를 덮어씁니다 — 수정된 각 파일은 .bak 으로 보존됩니다.",
   "settings.ctx.wiki_force_confirm_ok": "덮어쓰기",

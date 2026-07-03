@@ -950,11 +950,36 @@ async function _wikiEnsureProjects() {
   }
 }
 
+function _renderWikiInstallProdNote() {
+  // Prod tier (#1511): the install/update POST routes mount only in dev
+  // (context_mutations.py, ADR-0008 E-3), so in prod the browse-only wiki
+  // would otherwise be a silent dead-end — a user reads the asset with no
+  // hint that installing it needs a differently-started server. Render an
+  // INERT affordance (disabled buttons + a note naming the `--dev`
+  // remediation) instead of nothing. Deliberately carries NO `wiki-install-btn`
+  // id and binds no handler: _bindWikiInstallAction stays a no-op here, so the
+  // "no functional install in prod" contract is unchanged — the buttons only
+  // make the missing capability discoverable.
+  return '<div class="wiki-section wiki-install-action wiki-install-action-prod">'
+    + '<div class="wiki-install-buttons">'
+    + `<button type="button" class="btn-ghost" disabled>`
+    + `${escapeHtml(t('settings.ctx.wiki_install'))}</button>`
+    + `<button type="button" class="btn-ghost" disabled>`
+    + `${escapeHtml(t('settings.ctx.wiki_update'))}</button>`
+    + '</div>'
+    + `<p class="wiki-seed-hint" id="wiki-install-prod-note" role="note">`
+    + `${escapeHtml(t('settings.ctx.wiki_install_prod_note'))}</p>`
+    + '</div>';
+}
+
 function _renderWikiInstallAction() {
-  // Dev-tier only: install/update writes into a project's git-tracked tree (the
-  // POST routes only mount in dev). Asset-level (vendor-independent), so this
-  // renders in the detail head, NOT the per-vendor view.
-  if (!_wikiDevMode() || !_wikiActive) return '';
+  // Asset-level (vendor-independent), so this renders in the detail head, NOT
+  // the per-vendor view.
+  if (!_wikiActive) return '';
+  // Install/update writes into a project's git-tracked tree; the POST routes
+  // only mount in dev. In prod, show the discoverability note (#1511) instead
+  // of an empty string.
+  if (!_wikiDevMode()) return _renderWikiInstallProdNote();
   let scopes = _wikiScopeList().filter((s) => !s.missing);
   if (!scopes.some((s) => (s.scope_id || '') === '')) {
     // Always offer Server-CWD (the CLI default target) even with an empty roster.
