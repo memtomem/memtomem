@@ -73,6 +73,17 @@ class OpenAIEmbedder:
                 f"OpenAI endpoint returned {len(data)} embeddings for {len(batch)} inputs "
                 f"(model={self._config.model!r}); refusing to truncate."
             )
+        if [item["index"] for item in data] != list(range(len(batch))):
+            # Right count, wrong indices — duplicate or non-contiguous ``index``
+            # values (e.g. two records for index=0 and none for index=1). Since
+            # we extract positionally after sorting, this silently maps the
+            # wrong vector to a chunk, a mis-embedding the content-hash skip
+            # would preserve permanently (issue #1563, alignment variant).
+            raise EmbeddingError(
+                f"OpenAI endpoint returned malformed embedding indices for "
+                f"{len(batch)} inputs (model={self._config.model!r}); refusing "
+                "a misaligned result."
+            )
         return [item["embedding"] for item in data]
 
     async def embed_texts(

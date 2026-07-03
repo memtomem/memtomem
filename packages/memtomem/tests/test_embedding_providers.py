@@ -402,6 +402,32 @@ class TestOpenAIEmbedder:
         with pytest.raises(EmbeddingError, match="refusing to truncate"):
             await embedder.embed_texts(["hello", "world"])
 
+    async def test_malformed_indices_raise(self):
+        """Right count, wrong indices (duplicate/non-contiguous) must raise.
+
+        Issue #1563 alignment variant: two records for index=0 and none for
+        index=1 pass the length guard, but positional extraction would map the
+        wrong vector to a chunk — a silent mis-embedding the content-hash skip
+        preserves permanently.
+        """
+        config = _openai_config(dimension=3)
+        embedder = OpenAIEmbedder(config)
+        # Two records, correct count, but index=1 is missing (index=0 dupes).
+        malformed_resp = _make_httpx_response(
+            json_data={
+                "data": [
+                    {"index": 0, "embedding": [0.1, 0.2, 0.3]},
+                    {"index": 0, "embedding": [0.4, 0.5, 0.6]},
+                ],
+            },
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=malformed_resp)
+        embedder._client = mock_client
+
+        with pytest.raises(EmbeddingError, match="malformed embedding indices"):
+            await embedder.embed_texts(["hello", "world"])
+
     async def test_close_clears_client(self):
         config = _openai_config()
         embedder = OpenAIEmbedder(config)
