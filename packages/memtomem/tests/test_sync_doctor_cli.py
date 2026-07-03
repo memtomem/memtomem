@@ -124,6 +124,19 @@ class TestCheckNoDbStaged:
         assert r.status == "fail"
         assert "snapshot.db" in (r.detail or "")
 
+    def test_non_ascii_name_staged_fails_under_quotepath(self, tmp_path: Path) -> None:
+        # Under git's default ``core.quotePath=true`` a non-ASCII pathname is
+        # C-quoted in line-oriented porcelain (``"\354\212\244…"`` with a
+        # trailing ``"``), which evaded the pre-#1520 ``splitlines`` parse's
+        # ``endswith(".db")`` check. ``ls-files -z`` round-trips it exactly.
+        _git_init(tmp_path)
+        subprocess.run(["git", "config", "core.quotepath", "true"], cwd=tmp_path, check=True)
+        (tmp_path / "스냅샷.db").write_bytes(b"")
+        _git_add(tmp_path, "스냅샷.db")
+        r = check_no_db_staged(tmp_path)
+        assert r.status == "fail"
+        assert "스냅샷.db" in (r.detail or "")
+
 
 # ---- check_config_json_absent ----------------------------------------------
 
@@ -147,6 +160,19 @@ class TestCheckConfigJsonAbsent:
         sub.mkdir()
         (sub / "config.json").write_text("{}")
         _git_add(tmp_path, "sub/config.json")
+        r = check_config_json_absent(tmp_path)
+        assert r.status == "fail"
+
+    def test_staged_under_non_ascii_dir_fails_under_quotepath(self, tmp_path: Path) -> None:
+        # A config.json under a non-ASCII directory is C-quoted whole under
+        # ``core.quotePath=true`` (trailing ``"`` defeats ``endswith``) —
+        # pinned against the ``-z`` parse (#1520 quotePath fold-in).
+        _git_init(tmp_path)
+        subprocess.run(["git", "config", "core.quotepath", "true"], cwd=tmp_path, check=True)
+        sub = tmp_path / "설정"
+        sub.mkdir()
+        (sub / "config.json").write_text("{}")
+        _git_add(tmp_path, "설정/config.json")
         r = check_config_json_absent(tmp_path)
         assert r.status == "fail"
 
