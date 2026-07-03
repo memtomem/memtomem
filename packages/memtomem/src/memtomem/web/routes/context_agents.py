@@ -10,18 +10,15 @@ from pathlib import Path
 import click
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, field_validator
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
-from memtomem.context._runtime_targets import KNOWN_RUNTIMES, runtime_fanout_root
 from memtomem.context.agents import (
     AGENT_DIR_FILENAME,
     AGENT_GENERATORS,
     CANONICAL_AGENT_ROOT,
-    ON_DROP_LEVELS,
     AgentParseError,
     ExtractResult,
     StrictDropError,
@@ -50,6 +47,15 @@ from memtomem.web.routes.context_projects import (
     resolve_writable_scope_root,
 )
 from memtomem.web.routes.context_versions import include_has, version_summary
+from memtomem.web.routes._artifact_common import (
+    ArtifactCreateRequest,
+    ArtifactUpdateRequest,
+    AtomicSyncRequest,
+    ImportRequest,
+    mtime_conflict_response,
+    reject_project_local_write,
+    scanned_dirs_for,
+)
 from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._errors import PRIVACY_BLOCK_DETAIL, PRIVACY_BLOCK_IMPORT_DETAIL, _error
 from memtomem.web.routes._locks import _gateway_lock
@@ -82,45 +88,6 @@ def _resolve_existing_agent(
 ):
     name = validate_name(raw_name, kind="agent")
     return name, resolve_canonical_agent(project_root, name, scope=scope)
-
-
-def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
-    """Reject writes on the ``project_local`` tier with HTTP 400.
-
-    See context_skills.py:_reject_project_local_write for the rationale
-    (user accepted behind the #1263 host-write confirm; project_local
-    deferred per ADR-0011 §3). Mirrored here so each route file stays
-    self-contained.
-    """
-    if target_scope == "project_local":
-        raise _error(
-            400,
-            "validation",
-            (
-                f"{action} is supported on the project_shared and user tiers; "
-                f"project_local is a draft tier with no runtime fan-out "
-                f"(ADR-0011 §3)."
-            ),
-            reason_code="project_local_unsupported",
-        )
-
-
-def _user_scan_dirs() -> list[str]:
-    """User-tier runtime roots the import scan reads (absolute, expanded).
-
-    Mirrors context_skills._user_scan_dirs — the project-relative
-    ``_AGENT_SCAN_DIRS`` hint would lie on ``target_scope=user``.
-    """
-    dirs: list[str] = []
-    for runtime in KNOWN_RUNTIMES:
-        root = runtime_fanout_root("agents", runtime, "user", None)
-        if root is not None:
-            dirs.append(str(root))
-    return sorted(set(dirs))
-
-
-def _scanned_dirs_for(target_scope: TargetScope) -> list[str]:
-    return _user_scan_dirs() if target_scope == "user" else _AGENT_SCAN_DIRS
 
 
 def _user_sync_host_targets(project_root: Path) -> list[str]:
@@ -348,13 +315,8 @@ async def rendered_agent(
 # ── Create ───────────────────────────────────────────────────────────────
 
 
-class AgentCreateRequest(BaseModel):
-    name: str
-    content: str
-    # #1263 host-write opt-in: required true for target_scope=user (the
-    # canonical lands under ~/.memtomem/, outside any project root). The
-    # first POST without it returns the needs_confirmation envelope.
-    allow_host_writes: bool = False
+class AgentCreateRequest(ArtifactCreateRequest):
+    pass
 
 
 @router.post("/context/agents")
@@ -369,7 +331,7 @@ async def create_agent(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Create agent")
+    reject_project_local_write(target_scope, "Create agent")
     name = validate_name(body.name, kind="agent")
 
     # Unlocked pre-checks so a duplicate is refused (409) rather than
@@ -453,33 +415,8 @@ async def create_agent(
 # ── Update ───────────────────────────────────────────────────────────────
 
 
-class AgentUpdateRequest(BaseModel):
-    content: str
-    # mtime_ns is transported as a string (JS bigint-unsafe); parsed to int in handler.
-    mtime_ns: str
-    # Bypass the mtime guard. The Web UI sets this only after the user
-    # explicitly chose "Force save" in the conflict resolution dialog
-    # (see issue #763); every force-save emits a WARNING with both mtime
-    # values for the audit trail.
-    force: bool = False
-    # #1263 host-write opt-in for target_scope=user (see AgentCreateRequest).
-    allow_host_writes: bool = False
-
-
-_MTIME_CONFLICT_REASON = "File was modified by another process. Reload and retry."
-
-
-def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
-    return JSONResponse(
-        status_code=409,
-        content={
-            "status": "aborted",
-            "reason": _MTIME_CONFLICT_REASON,
-            "mtime_ns": str(current_mtime_ns),
-            "error_kind": "conflict",
-            "reason_code": "stale_mtime",
-        },
-    )
+class AgentUpdateRequest(ArtifactUpdateRequest):
+    pass
 
 
 @router.put("/context/agents/{name}")
@@ -495,7 +432,7 @@ async def update_agent(
         ),
     ),
 ) -> JSONResponse:
-    _reject_project_local_write(target_scope, "Update agent")
+    reject_project_local_write(target_scope, "Update agent")
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
     if resolved is None:
         raise _error(404, "missing", f"agent {name!r} not found")
@@ -510,7 +447,7 @@ async def update_agent(
     # refused, never confirmed (see context_skills.update_skill).
     pre_mtime_ns = agent_path.stat().st_mtime_ns
     if pre_mtime_ns != body_mtime_ns and not body.force:
-        return _mtime_conflict_response(pre_mtime_ns)
+        return mtime_conflict_response(pre_mtime_ns)
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes,
@@ -526,7 +463,7 @@ async def update_agent(
                 current_mtime_ns = agent_path.stat().st_mtime_ns
                 if current_mtime_ns != body_mtime_ns:
                     if not body.force:
-                        return _mtime_conflict_response(current_mtime_ns)
+                        return mtime_conflict_response(current_mtime_ns)
                     logger.warning(
                         "force-save bypassed mtime check on %s "
                         "(client_mtime_ns=%s server_mtime_ns=%s)",
@@ -565,7 +502,7 @@ async def delete_agent(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Delete agent")
+    reject_project_local_write(target_scope, "Delete agent")
     name, resolved = _resolve_existing_agent(project_root, name, scope=target_scope)
 
     # Pending deletions, computed unlocked (see delete_skill): cascade
@@ -719,28 +656,8 @@ async def diff_agent(
 # ── Sync ─────────────────────────────────────────────────────────────────
 
 
-class SyncRequest(BaseModel):
-    on_drop: str = "warn"
-    # #1263 host-write opt-in for target_scope=user (see AgentCreateRequest).
-    allow_host_writes: bool = False
-    # Gate A bypass valve for fan-out — the sync-side mirror of
-    # ImportRequest.force_unsafe_import (#1379). user-tier only;
-    # project_shared hard-refuses regardless (ADR-0011 §5). See
-    # context_skills.SyncRequest.
-    force_unsafe_sync: bool = False
-
-    # An out-of-vocabulary value used to slip through to the engine, where it
-    # silently behaved as "ignore" (#1247 id 47) — reject at the boundary
-    # instead (FastAPI renders the ValueError as a native 422). Validates
-    # against the engine's ON_DROP_LEVELS so the vocabulary has one owner
-    # (no Literal duplication; CLI click.Choice and MCP _validate_on_drop
-    # already gate the same way).
-    @field_validator("on_drop")
-    @classmethod
-    def _check_on_drop(cls, value: str) -> str:
-        if value not in ON_DROP_LEVELS:
-            raise ValueError(f"on_drop must be one of {ON_DROP_LEVELS}, got {value!r}")
-        return value
+class SyncRequest(AtomicSyncRequest):
+    pass
 
 
 async def _sync_agents_core(
@@ -834,7 +751,7 @@ async def sync_agents(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Sync agents")
+    reject_project_local_write(target_scope, "Sync agents")
     on_drop = body.on_drop if body else "warn"
     gate = host_write_gate(
         target_scope,
@@ -856,20 +773,6 @@ async def sync_agents(
 
 
 # ── Import ───────────────────────────────────────────────────────────────
-
-
-class ImportRequest(BaseModel):
-    overwrite: bool = False
-    # #1263 host-write opt-in for target_scope=user (the canonical
-    # destination is ~/.memtomem/agents/, outside any project root).
-    allow_host_writes: bool = False
-    # Gate A bypass valve — mirrors the CLI's --force-unsafe-import and the
-    # ``force_unsafe`` field the upload/memory/chunk web write surfaces already
-    # expose. Lets a reviewed false positive proceed on the only bypassable web
-    # import tier: ``user``. ``project_local`` is rejected outright and
-    # ``project_shared`` hard-refuses regardless of this flag (ADR-0011 §5),
-    # enforced in the import engine. See context_skills.ImportRequest.
-    force_unsafe_import: bool = False
 
 
 def _import_payload(
@@ -896,7 +799,9 @@ def _import_payload(
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
-        "scanned_dirs": _scanned_dirs_for(target_scope),
+        "scanned_dirs": scanned_dirs_for(
+            target_scope, kind="agents", project_scan_dirs=_AGENT_SCAN_DIRS
+        ),
     }
     if dry_run is not None:
         payload["dry_run"] = dry_run
@@ -924,7 +829,7 @@ async def import_agents(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Import agents")
+    reject_project_local_write(target_scope, "Import agents")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
     force_unsafe_import = body.force_unsafe_import if body else False
@@ -985,7 +890,7 @@ async def import_agent(
     feedback for "you clicked a specific item that doesn't exist") — pinned
     on the gate's dry-run preview too.
     """
-    _reject_project_local_write(target_scope, "Import agent")
+    reject_project_local_write(target_scope, "Import agent")
     try:
         validate_name(name, kind="agent name")
     except InvalidNameError as exc:

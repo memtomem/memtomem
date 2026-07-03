@@ -27,6 +27,7 @@ from memtomem.context.mcp_servers import (
     parse_mcp_server_text,
     scan_mcp_server_text,
 )
+from memtomem.web.routes._artifact_common import mtime_conflict_response
 from memtomem.web.routes._errors import _error
 from memtomem.web.routes._locks import _gateway_lock
 from memtomem.web.routes._sync_phase import SyncPhaseError
@@ -248,18 +249,7 @@ async def _update_mcp_server_impl(
                 current_mtime_ns = path.stat().st_mtime_ns
                 if current_mtime_ns != body_mtime_ns:
                     if not body.force:
-                        return JSONResponse(
-                            status_code=409,
-                            content={
-                                "status": "aborted",
-                                "reason": (
-                                    "File was modified by another process. Reload and retry."
-                                ),
-                                "mtime_ns": str(current_mtime_ns),
-                                "error_kind": "conflict",
-                                "reason_code": "stale_mtime",
-                            },
-                        )
+                        return mtime_conflict_response(current_mtime_ns)
                     logger.warning(
                         "force-save bypassed mtime check on %s "
                         "(client_mtime_ns=%s server_mtime_ns=%s)",

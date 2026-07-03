@@ -10,19 +10,16 @@ from pathlib import Path
 import click
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, field_validator
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context._names import InvalidNameError, validate_name
-from memtomem.context._runtime_targets import KNOWN_RUNTIMES, runtime_fanout_root
 from memtomem.context.commands import (
     _parse_canonical_command_text,
     CANONICAL_COMMAND_ROOT,
     COMMAND_DIR_FILENAME,
     COMMAND_GENERATORS,
-    ON_DROP_LEVELS,
     CommandParseError,
     ExtractResult,
     StrictDropError,
@@ -49,6 +46,15 @@ from memtomem.web.routes.context_projects import (
     resolve_writable_scope_root,
 )
 from memtomem.web.routes.context_versions import include_has, version_summary
+from memtomem.web.routes._artifact_common import (
+    ArtifactCreateRequest,
+    ArtifactUpdateRequest,
+    AtomicSyncRequest,
+    ImportRequest,
+    mtime_conflict_response,
+    reject_project_local_write,
+    scanned_dirs_for,
+)
 from memtomem.web.routes._confirm import host_write_gate
 from memtomem.web.routes._errors import PRIVACY_BLOCK_DETAIL, PRIVACY_BLOCK_IMPORT_DETAIL, _error
 from memtomem.web.routes._locks import _gateway_lock
@@ -78,45 +84,6 @@ def _resolve_existing_command(
 ):
     name = validate_name(raw_name, kind="command")
     return name, resolve_canonical_command(project_root, name, scope=scope)
-
-
-def _reject_project_local_write(target_scope: TargetScope, action: str) -> None:
-    """Reject writes on the ``project_local`` tier with HTTP 400.
-
-    See context_skills.py:_reject_project_local_write for the rationale
-    (user accepted behind the #1263 host-write confirm; project_local
-    deferred per ADR-0011 §3). Mirrored here so each route file stays
-    self-contained.
-    """
-    if target_scope == "project_local":
-        raise _error(
-            400,
-            "validation",
-            (
-                f"{action} is supported on the project_shared and user tiers; "
-                f"project_local is a draft tier with no runtime fan-out "
-                f"(ADR-0011 §3)."
-            ),
-            reason_code="project_local_unsupported",
-        )
-
-
-def _user_scan_dirs() -> list[str]:
-    """User-tier runtime roots the import scan reads (absolute, expanded).
-
-    Mirrors context_skills._user_scan_dirs — the project-relative
-    ``_COMMAND_SCAN_DIRS`` hint would lie on ``target_scope=user``.
-    """
-    dirs: list[str] = []
-    for runtime in KNOWN_RUNTIMES:
-        root = runtime_fanout_root("commands", runtime, "user", None)
-        if root is not None:
-            dirs.append(str(root))
-    return sorted(set(dirs))
-
-
-def _scanned_dirs_for(target_scope: TargetScope) -> list[str]:
-    return _user_scan_dirs() if target_scope == "user" else _COMMAND_SCAN_DIRS
 
 
 def _user_sync_host_targets(project_root: Path) -> list[str]:
@@ -340,13 +307,8 @@ async def rendered_command(
 # ── Create ───────────────────────────────────────────────────────────────
 
 
-class CommandCreateRequest(BaseModel):
-    name: str
-    content: str
-    # #1263 host-write opt-in: required true for target_scope=user (the
-    # canonical lands under ~/.memtomem/, outside any project root). The
-    # first POST without it returns the needs_confirmation envelope.
-    allow_host_writes: bool = False
+class CommandCreateRequest(ArtifactCreateRequest):
+    pass
 
 
 @router.post("/context/commands")
@@ -361,7 +323,7 @@ async def create_command(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Create command")
+    reject_project_local_write(target_scope, "Create command")
     name = validate_name(body.name, kind="command")
 
     # Unlocked pre-checks so a duplicate is refused (409) rather than
@@ -445,33 +407,8 @@ async def create_command(
 # ── Update ───────────────────────────────────────────────────────────────
 
 
-class CommandUpdateRequest(BaseModel):
-    content: str
-    # mtime_ns is transported as a string (JS bigint-unsafe); parsed to int in handler.
-    mtime_ns: str
-    # Bypass the mtime guard. The Web UI sets this only after the user
-    # explicitly chose "Force save" in the conflict resolution dialog
-    # (see issue #763); every force-save emits a WARNING with both mtime
-    # values for the audit trail.
-    force: bool = False
-    # #1263 host-write opt-in for target_scope=user (see CommandCreateRequest).
-    allow_host_writes: bool = False
-
-
-_MTIME_CONFLICT_REASON = "File was modified by another process. Reload and retry."
-
-
-def _mtime_conflict_response(current_mtime_ns: int) -> JSONResponse:
-    return JSONResponse(
-        status_code=409,
-        content={
-            "status": "aborted",
-            "reason": _MTIME_CONFLICT_REASON,
-            "mtime_ns": str(current_mtime_ns),
-            "error_kind": "conflict",
-            "reason_code": "stale_mtime",
-        },
-    )
+class CommandUpdateRequest(ArtifactUpdateRequest):
+    pass
 
 
 @router.put("/context/commands/{name}")
@@ -487,7 +424,7 @@ async def update_command(
         ),
     ),
 ) -> JSONResponse:
-    _reject_project_local_write(target_scope, "Update command")
+    reject_project_local_write(target_scope, "Update command")
     name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
     if resolved is None:
         raise _error(404, "missing", f"command {name!r} not found")
@@ -502,7 +439,7 @@ async def update_command(
     # refused, never confirmed (see context_skills.update_skill).
     pre_mtime_ns = cmd_path.stat().st_mtime_ns
     if pre_mtime_ns != body_mtime_ns and not body.force:
-        return _mtime_conflict_response(pre_mtime_ns)
+        return mtime_conflict_response(pre_mtime_ns)
     gate = host_write_gate(
         target_scope,
         body.allow_host_writes,
@@ -518,7 +455,7 @@ async def update_command(
                 current_mtime_ns = cmd_path.stat().st_mtime_ns
                 if current_mtime_ns != body_mtime_ns:
                     if not body.force:
-                        return _mtime_conflict_response(current_mtime_ns)
+                        return mtime_conflict_response(current_mtime_ns)
                     logger.warning(
                         "force-save bypassed mtime check on %s "
                         "(client_mtime_ns=%s server_mtime_ns=%s)",
@@ -557,7 +494,7 @@ async def delete_command(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Delete command")
+    reject_project_local_write(target_scope, "Delete command")
     name, resolved = _resolve_existing_command(project_root, name, scope=target_scope)
 
     # Pending deletions, computed unlocked (see delete_skill): cascade
@@ -713,28 +650,8 @@ async def diff_command(
 # ── Sync ─────────────────────────────────────────────────────────────────
 
 
-class SyncRequest(BaseModel):
-    on_drop: str = "warn"
-    # #1263 host-write opt-in for target_scope=user (see CommandCreateRequest).
-    allow_host_writes: bool = False
-    # Gate A bypass valve for fan-out — the sync-side mirror of
-    # ImportRequest.force_unsafe_import (#1379). user-tier only;
-    # project_shared hard-refuses regardless (ADR-0011 §5). See
-    # context_skills.SyncRequest.
-    force_unsafe_sync: bool = False
-
-    # An out-of-vocabulary value used to slip through to the engine, where it
-    # silently behaved as "ignore" (#1247 id 47) — reject at the boundary
-    # instead (FastAPI renders the ValueError as a native 422). Validates
-    # against the engine's ON_DROP_LEVELS so the vocabulary has one owner
-    # (no Literal duplication; CLI click.Choice and MCP _validate_on_drop
-    # already gate the same way).
-    @field_validator("on_drop")
-    @classmethod
-    def _check_on_drop(cls, value: str) -> str:
-        if value not in ON_DROP_LEVELS:
-            raise ValueError(f"on_drop must be one of {ON_DROP_LEVELS}, got {value!r}")
-        return value
+class SyncRequest(AtomicSyncRequest):
+    pass
 
 
 async def _sync_commands_core(
@@ -823,7 +740,7 @@ async def sync_commands(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Sync commands")
+    reject_project_local_write(target_scope, "Sync commands")
     on_drop = body.on_drop if body else "warn"
     gate = host_write_gate(
         target_scope,
@@ -845,20 +762,6 @@ async def sync_commands(
 
 
 # ── Import ───────────────────────────────────────────────────────────────
-
-
-class ImportRequest(BaseModel):
-    overwrite: bool = False
-    # #1263 host-write opt-in for target_scope=user (the canonical
-    # destination is ~/.memtomem/commands/, outside any project root).
-    allow_host_writes: bool = False
-    # Gate A bypass valve — mirrors the CLI's --force-unsafe-import and the
-    # ``force_unsafe`` field the upload/memory/chunk web write surfaces already
-    # expose. Lets a reviewed false positive proceed on the only bypassable web
-    # import tier: ``user``. ``project_local`` is rejected outright and
-    # ``project_shared`` hard-refuses regardless of this flag (ADR-0011 §5),
-    # enforced in the import engine. See context_skills.ImportRequest.
-    force_unsafe_import: bool = False
 
 
 def _import_payload(
@@ -885,7 +788,9 @@ def _import_payload(
             for name, reason, code in result.skipped
         ],
         "project_root": str(project_root),
-        "scanned_dirs": _scanned_dirs_for(target_scope),
+        "scanned_dirs": scanned_dirs_for(
+            target_scope, kind="commands", project_scan_dirs=_COMMAND_SCAN_DIRS
+        ),
     }
     if dry_run is not None:
         payload["dry_run"] = dry_run
@@ -913,7 +818,7 @@ async def import_commands(
         ),
     ),
 ) -> dict:
-    _reject_project_local_write(target_scope, "Import commands")
+    reject_project_local_write(target_scope, "Import commands")
     overwrite = body.overwrite if body else False
     allow_host_writes = body.allow_host_writes if body else False
     force_unsafe_import = body.force_unsafe_import if body else False
@@ -974,7 +879,7 @@ async def import_command(
     feedback for "you clicked a specific item that doesn't exist") — pinned
     on the gate's dry-run preview too.
     """
-    _reject_project_local_write(target_scope, "Import command")
+    reject_project_local_write(target_scope, "Import command")
     try:
         validate_name(name, kind="command name")
     except InvalidNameError as exc:
