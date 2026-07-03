@@ -151,6 +151,15 @@ _CSRF_EXEMPT: dict[str, str] = {
 _REDACTION_PROTECTED: frozenset[str] = frozenset(
     {
         "chunks.edit_chunk",
+        # The canonical editors write free-form user bytes into the
+        # git-tracked project_shared canonical — write-time Gate A scan
+        # in-route, before atomic_write_text (#1509).
+        "context_agents.create_agent",
+        "context_agents.update_agent",
+        "context_commands.create_command",
+        "context_commands.update_command",
+        "context_skills.create_skill",
+        "context_skills.update_skill",
         "scratch.promote_scratch",
         # Promote appends a private-tier hook rule (free-form command
         # strings + a free-string event key) into the git-tracked shared
@@ -175,23 +184,31 @@ _REDACTION_EXEMPT: dict[str, str] = {
         "rewrites cached LLM summaries from chunks already validated "
         "at index time"
     ),
-    # Structured artifacts (skills/commands/agents) — separate redaction
-    # policy lives in ``memtomem.context`` ingest path; the HTTP layer
-    # validates the schema only.
-    "context_agents.create_agent": "structured artifact; redaction at context-ingest layer",
-    "context_agents.update_agent": "structured artifact; see above",
+    # Structured artifact import/sync (skills/commands/agents) — redaction
+    # lives in the ``memtomem.context`` ingest path (import Gate A / sync
+    # tree scan); the HTTP layer validates the schema only. The create/update
+    # editors moved to ``_REDACTION_PROTECTED`` with an in-route Gate A scan
+    # (#1509).
     "context_agents.import_agent": "structured artifact import; redaction at context-ingest layer",
     "context_agents.import_agents": "bulk structured artifact import; see above",
     "context_agents.sync_agents": "filesystem-driven sync; redaction "
     "happens at file-write time inside the indexer",
-    "context_commands.create_command": "structured artifact; see above",
-    "context_commands.update_command": "structured artifact; see above",
     "context_commands.import_command": "structured artifact import; see above",
     "context_commands.import_commands": "bulk structured artifact import",
     "context_commands.sync_commands": "filesystem-driven sync; see above",
-    "context_mcp_servers.create_mcp_server": "structured artifact; redaction at context-ingest layer",
-    "context_mcp_servers.update_mcp_server": "structured artifact; see above",
-    "context_mcp_servers.patch_mcp_server": "structured artifact; see above",
+    # The mcp-servers editors DO scan in-route (Gate A before the write) via
+    # ``scan_mcp_server_text``, an engine wrapper around enforce_write_guard.
+    # They stay EXEMPT only because the AST guard does not recognize the
+    # wrapper name (and update/patch delegate to _update_mcp_server_impl);
+    # migrating them to _REDACTION_PROTECTED needs a guard extension — a
+    # tracked follow-up to #1509.
+    "context_mcp_servers.create_mcp_server": (
+        "scans in-route via scan_mcp_server_text; wrapper name not recognized by the AST guard"
+    ),
+    "context_mcp_servers.update_mcp_server": (
+        "scans in-route via scan_mcp_server_text inside _update_mcp_server_impl; see above"
+    ),
+    "context_mcp_servers.patch_mcp_server": "same _update_mcp_server_impl delegate; see above",
     "context_mcp_servers.delete_mcp_server": "delete-only, no payload",
     "context_mcp_servers.sync_mcp_servers": "filesystem-driven sync; see above",
     # Wiki install/update (ADR-0008 PR-E E-3): snapshots existing wiki canonical
@@ -205,8 +222,6 @@ _REDACTION_EXEMPT: dict[str, str] = {
         "no free-form content payload (body is just ``force``) — refreshes the "
         "project snapshot from wiki canonical; Gate A runs in-engine pre-copy"
     ),
-    "context_skills.create_skill": "structured artifact; see above",
-    "context_skills.update_skill": "structured artifact; see above",
     "context_skills.import_skill": "structured artifact import",
     "context_skills.import_skill_to_user": "structured artifact import (project runtime → user library)",
     "context_skills.import_skills": "bulk structured artifact import",

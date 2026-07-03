@@ -795,3 +795,90 @@ async def test_both_layouts_detail_prefers_dir_and_warns(
     assert "DIR BODY" in r.json()["content"]
     assert "FLAT BODY" not in r.json()["content"]
     assert adapter["warn_fragment"] in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Write-time Gate A (#1509) — secret-shaped content refused before any write
+# ---------------------------------------------------------------------------
+
+
+def _secret() -> str:
+    # Assembled at runtime so the test file itself never carries a
+    # committable token shape (GitHub push protection).
+    return "sk-" + "a" * 30
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_POST_rejects_secret_shaped_content(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """A secret typed into the create editor is refused with the path-free
+    privacy 422 BEFORE any byte lands in the git-tracked canonical (#1509);
+    previously it was only caught at the next sync/import, after the damage."""
+    secret = _secret()
+    body = adapter["create_body"]("leaky")
+    body["content"] += f"\nOPENAI_API_KEY={secret}\n"
+    r = await client.post(adapter["list_url"], json=body)
+    assert r.status_code == 422, (adapter["type"], r.text)
+    detail = r.json()["detail"]
+    # Privacy-422 string-detail convention: count-only, never the matched
+    # bytes or an absolute path.
+    assert isinstance(detail, str), detail
+    assert "privacy pattern" in detail
+    assert secret not in r.text
+    assert str(gateway_root) not in detail
+    # Nothing landed: no working file and no artifact dir — which also
+    # proves the ADR-0022 create_version snapshot never fired.
+    assert not adapter["created_working"](gateway_root, "leaky").exists()
+    assert not (gateway_root / ".memtomem" / adapter["type"] / "leaky").exists()
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_PUT_rejects_secret_shaped_content_even_with_force(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """The update editor refuses secret-shaped content with the same 422.
+    ``force: true`` only bypasses the mtime guard, never Gate A — and the
+    canonical bytes and mtime stay untouched after the refusal."""
+    secret = _secret()
+    manifest = adapter["make_canonical"](gateway_root, "hold-the-line")
+    before_bytes = manifest.read_bytes()
+    before_mtime_ns = manifest.stat().st_mtime_ns
+    r = await client.put(
+        adapter["detail"]("hold-the-line"),
+        json={
+            "content": f"updated\nOPENAI_API_KEY={secret}\n",
+            "mtime_ns": str(before_mtime_ns),
+            "force": True,
+        },
+    )
+    assert r.status_code == 422, (adapter["type"], r.text)
+    assert "privacy pattern" in r.json()["detail"]
+    assert secret not in r.text
+    assert manifest.read_bytes() == before_bytes
+    assert manifest.stat().st_mtime_ns == before_mtime_ns
+
+
+@pytest.mark.parametrize("adapter", TYPE_MATRIX)
+@pytest.mark.anyio
+async def test_POST_user_tier_secret_not_privacy_gated(
+    adapter: dict,
+    client: AsyncClient,
+    gateway_root: Path,
+):
+    """Deliberate asymmetry pin (#1509): the write-time Gate A guards only the
+    git-tracked project_shared tier. The same secret-shaped content on a
+    user-tier save proceeds through the allow_host_writes flow — that tier is
+    not git-tracked and keeps its reviewed sync-time force valve (ADR-0011 §5).
+    A later refactor must not silently universalize the block."""
+    body = adapter["create_body"]("private-ok")
+    body["content"] += f"\nOPENAI_API_KEY={_secret()}\n"
+    body["allow_host_writes"] = True
+    r = await client.post(adapter["list_url"], params={"target_scope": "user"}, json=body)
+    assert r.status_code == 200, (adapter["type"], r.text)

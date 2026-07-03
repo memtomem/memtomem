@@ -18,12 +18,14 @@ them into one ``ImportRequest`` component; sharing the class keeps that name.
 
 from __future__ import annotations
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 from memtomem.config import TargetScope
 from memtomem.context._runtime_targets import KNOWN_RUNTIMES, runtime_fanout_root
 from memtomem.context._sync_atomic import ON_DROP_LEVELS
+from memtomem.context.privacy_scan import FileScan, format_scan_block_message
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.web.routes._errors import _error
 
@@ -75,6 +77,37 @@ def reject_project_local_write(target_scope: TargetScope, action: str) -> None:
             ),
             reason_code="project_local_unsupported",
         )
+
+
+# ── Write-time Gate A (#1509) ────────────────────────────────────────────
+
+
+def raise_if_privacy_blocked(scan: FileScan, *, kind: str, artifact_name: str) -> None:
+    """Map a blocked canonical-editor content scan to the privacy 422.
+
+    The create/update editors scan ``body.content`` via
+    :func:`memtomem.context.privacy_scan.scan_text_content` before any
+    bytes reach the git-tracked project_shared canonical (#1509); this
+    helper owns the shared refusal so the wording cannot drift between
+    the six call sites. The detail is a *string* (privacy-422 convention,
+    see ``_errors``) and stays path-free: count + artifact basename only,
+    never the matched bytes or an absolute path (#1385/#1412).
+    """
+    if scan.decision not in ("blocked", "blocked_project_shared"):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail=format_scan_block_message(
+            scan,
+            scope="project_shared",
+            kind=kind,
+            artifact_name=artifact_name,
+            remediation_hint=(
+                f"Remove the secret from the editor content, or keep the {kind} "
+                f"in your private user tier (target_scope=user)."
+            ),
+        ),
+    )
 
 
 # ── Scan-dir hints ───────────────────────────────────────────────────────

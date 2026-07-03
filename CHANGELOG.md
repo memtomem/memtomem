@@ -7,6 +7,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Security
 
+- **The web canonical create/update editors for skills / commands / agents
+  now run the write-time Gate A privacy scan** before any byte reaches the
+  git-tracked `project_shared` canonical, matching the mcp-servers editor: a
+  secret typed or pasted into the editor is refused with the path-free
+  privacy 422 (count + artifact name only) instead of landing in git and
+  only being caught at the next sync/import. `force: true` still bypasses
+  only the mtime guard, never the scan; user-tier saves are unscanned by
+  design (not git-tracked, `allow_host_writes`-gated, sync-time valve
+  intact — ADR-0011 §5). The six handlers moved to `_REDACTION_PROTECTED`
+  in the web invariants registry. (#1509)
 - **Quoted-JSON credential labels and the `x-amz-security-token` wire label
   are redacted — forward-sync of memtomem-stm#562 / memtomem-stm#561.** Two
   more STM-origin secret-class rules mirrored forward in one pass so the sets
