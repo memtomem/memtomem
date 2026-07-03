@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import logging
 import os
+import stat as stat_module
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -615,13 +616,29 @@ class IndexEngine:
         for the contract and rationale. Callers that go through
         ``mem_edit`` / ``mem_delete`` / CLI ``mm index --force`` / web
         ``POST /reindex`` all use this path.
+
+        If ``file_path`` no longer exists on disk (deleted, renamed away, or
+        replaced by a directory), this removes that source's stale chunks via
+        ``delete_by_source``, regardless of exclude patterns (cleanup is never
+        blocked by exclude). The delete is skipped when the whole containing
+        index root has vanished, so a single missing file is purged but a
+        wholesale root/volume loss is left to the periodic mass-orphan brake
+        (#1565) instead of being mass-deleted per-event (#1566).
         """
         # Defense-in-depth: the primary guard lives at the top of
         # ``_index_file`` (covers every caller — watcher, stream endpoint,
-        # CLI, MCP tools). This public-entry check is kept so the call
-        # returns early with zeroed stats without entering the lock.
+        # CLI, MCP tools). This public-entry check is kept so an excluded,
+        # still-present *file* returns early with zeroed stats without entering
+        # the lock. A path that is no longer a regular file — missing, or
+        # replaced by a directory — falls through even when excluded, so its
+        # stale chunks are purged: exclude blocks indexing, not cleanup (see the
+        # missing-source branch in ``_index_file``). ``is_file`` (not
+        # ``exists``) is the right predicate — a same-named directory ``exists``
+        # but is not indexable, and its old chunks must still be cleaned. (#1566)
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
-        if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec):
+        if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec) and (
+            file_path.is_file()
+        ):
             logger.debug("Skipping excluded file %s", file_path)
             return IndexingStats(
                 total_files=0,
@@ -651,7 +668,25 @@ class IndexEngine:
                 from memtomem.context._atomic import _file_lock, _lock_path_for
 
                 resolved_path = file_path.resolve()
-                with _file_lock(_lock_path_for(resolved_path)):
+                if resolved_path.parent.is_dir():
+                    with _file_lock(_lock_path_for(resolved_path)):
+                        result = await self._index_file(
+                            resolved_path,
+                            force,
+                            namespace=namespace,
+                            force_unsafe=force_unsafe,
+                            already_scanned=already_scanned,
+                        )
+                else:
+                    # #1566: the parent dir is gone (deleted subtree / unmounted
+                    # volume), so this is a delete-by-source pass for a vanished
+                    # file. Taking the sidecar lock would ``mkdir`` the deleted
+                    # parent back into existence (``_file_lock`` recreates
+                    # ``lock_path.parent``) just to hold a lock over a delete —
+                    # resurrecting the directory the user removed. ``_index_lock``
+                    # still serializes in-process; migrate's sidecar lock for this
+                    # path lives in the same missing parent, so no live pair-op
+                    # can be mid-flight on it.
                     result = await self._index_file(
                         resolved_path,
                         force,
@@ -792,26 +827,71 @@ class IndexEngine:
             parts.append(name)
         return "".join(parts)
 
-    def _is_within_memory_dirs(self, path: Path) -> bool:
-        """Check that *path* is within at least one configured index root.
+    def _containing_index_root(self, path: Path) -> Path | None:
+        """Return the *most-specific* resolved index root containing *path*.
 
         Covers user-tier ``memory_dirs`` and project-tier
-        ``project_memory_dirs`` (ADR-0011). Method name kept for
-        backward compatibility with callers; the semantic is
-        "any registered index root".
+        ``project_memory_dirs`` (ADR-0011). When roots are nested
+        (``~/mem`` and ``~/mem/project``), the longest-prefix match wins —
+        so the unmount brake in :meth:`_delete_missing_source` checks the
+        nested root that actually vanished rather than a surviving parent
+        that would mask it. Returns ``None`` when *path* is outside every
+        root.
         """
+        best: Path | None = None
         for d in self._config.all_index_roots():
             root = Path(d).expanduser().resolve()
             try:
-                if path.is_relative_to(root):
-                    return True
+                within = path.is_relative_to(root)
             except TypeError:
                 try:
                     path.relative_to(root)
-                    return True
+                    within = True
                 except ValueError:
-                    continue
-        return False
+                    within = False
+            if within and (best is None or len(root.parts) > len(best.parts)):
+                best = root
+        return best
+
+    def _is_within_memory_dirs(self, path: Path) -> bool:
+        """Check that *path* is within at least one configured index root.
+
+        Method name kept for backward compatibility with callers; the
+        semantic is "any registered index root".
+        """
+        return self._containing_index_root(path) is not None
+
+    async def _delete_missing_source(self, file_path: Path) -> IndexFileResult:
+        """Remove stale chunks for a source file that is gone from disk.
+
+        Reached when ``stat``/``read_text`` raise ``FileNotFoundError`` /
+        ``NotADirectoryError`` / ``IsADirectoryError`` (the file was deleted,
+        renamed away, or replaced by a directory).
+
+        Deletion is skipped when the most-specific containing index root has
+        itself disappeared: when a whole watched root/volume is unmounted or
+        removed, every path under it reports missing at once, and a per-event
+        purge of the entire tree is exactly the mass-delete we must not do.
+        Root gone → no-op; the two-pass mass-orphan brake (#1565, run by the
+        scheduler / health watchdog / ``mem_cleanup_orphans``) owns that bulk
+        case with a ratio check the per-event path can't replicate. This brake
+        catches whole-root loss; a mountpoint that survives *empty* still
+        passes ``is_dir()`` here, so that bulk case is deliberately left to the
+        periodic mass-orphan scan rather than guessed at per-event. Reuses the
+        same ``delete_by_source`` primitive as those backstops. (#1566)
+        """
+        root = self._containing_index_root(file_path)
+        if root is None or not root.is_dir():
+            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+        deleted = await self._storage.delete_by_source(file_path)
+        if deleted:
+            # Path + count only — never log file content on the delete path.
+            logger.info(
+                "Source file gone; removed %d stale chunk(s) from index: %s",
+                deleted,
+                file_path,
+            )
+        return {"total": 0, "indexed": 0, "skipped": 0, "deleted": deleted, "errors": []}
 
     async def _index_file(
         self,
@@ -827,22 +907,46 @@ class IndexEngine:
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
         # new_chunk_ids — consumers must tolerate missing keys.
 
+        # Existence check FIRST — before the exclude guard. A file that is gone
+        # from disk is a delete-by-source, and cleanup must never be blocked by
+        # an exclude pattern: the orphan sweep (#1565) already purges excluded
+        # orphans unconditionally, so the live path must match, else a deleted
+        # + newly-excluded file's chunks stay searchable forever. ``stat`` reads
+        # only metadata (no content), so statting an excluded file first is
+        # safe — its content is still never read below. (#1566)
+        try:
+            stat_result = file_path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            # File deleted/renamed away (NotADirectoryError: a parent component
+            # was replaced by a file, so the path cannot exist) — purge its
+            # stale chunks instead of a silent no-op.
+            return await self._delete_missing_source(file_path)
+        except OSError:
+            # Transient I/O (EACCES/EIO/ESTALE) — never delete on a blip.
+            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
+
+        # The path exists but is no longer a regular file (replaced by a
+        # directory or special file) — gone *as an indexable source*, so purge
+        # its stale chunks. Checked from the stat result (no extra syscall, no
+        # content read) and BEFORE the exclude guard, so an excluded file that
+        # was swapped for a same-named directory is still cleaned up. (#1566)
+        if not stat_module.S_ISREG(stat_result.st_mode):
+            return await self._delete_missing_source(file_path)
+
         # Primary exclude guard — every caller (index_file, _index_path_inner
         # after _discover_files, index_path_stream single-file branch) funnels
         # through here, so a single check closes all entry points including
         # ones added later. ``_discover_files`` still filters upstream for
         # directory walks, but this guard ensures single-file callers like
-        # ``index_path_stream(file)`` cannot smuggle credentials or noise.
+        # ``index_path_stream(file)`` cannot smuggle credentials or noise. Only
+        # *indexing* (adding content) is gated here; the missing-file delete
+        # above runs regardless.
         user_spec = _build_exclude_spec(self._config.exclude_patterns)
         if _path_is_excluded(file_path, self._config.all_index_roots(), user_spec):
             logger.debug("Skipping excluded file %s", file_path)
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
-        try:
-            file_size = file_path.stat().st_size
-        except OSError:
-            return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
-
+        file_size = stat_result.st_size
         if file_size > _MAX_INDEX_FILE_BYTES:
             logger.warning("Skipping %s: file too large (%d bytes)", file_path.name, file_size)
             return {
@@ -861,6 +965,12 @@ class IndexEngine:
         except UnicodeDecodeError:
             logger.warning("Non-UTF-8 content in %s, replacing invalid bytes", file_path.name)
             content = file_path.read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            # File is gone as a *file*: unlinked between stat and read (TOCTOU),
+            # or the leaf path was replaced by a directory (``IsADirectoryError``
+            # — ``stat`` succeeds on the dir, the read fails). Either way the old
+            # source no longer exists, so purge its stale chunks. (#1566)
+            return await self._delete_missing_source(file_path)
         except OSError:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
