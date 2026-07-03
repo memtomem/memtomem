@@ -5,6 +5,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm context init --only NAME`** (#1520 item 4) imports a single named
+  runtime artifact — the CLI twin of the web's per-artifact Import action.
+  Requires exactly one `--include` kind (skills, agents, or commands) and
+  runs import-only: `context.md`, sibling directory seeding, and the
+  `.gitignore` append are skipped. Exits 1 with a clear message when no
+  runtime artifact matches; `--scope=project_local` is rejected (the draft
+  tier has no runtime fan-out to import from); Gate A/B apply unchanged. The
+  engine already supported single-name narrowing (`only_name=`) for the
+  web routes — this wires it into the CLI.
+
 ### Security
 
 - **The web canonical create/update editors for skills / commands / agents
@@ -142,6 +154,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `mm index` output is unchanged.
 
 ### Changed
+
+- **Claude-plugin skill `/memtomem:context` is now `/memtomem:recall`**
+  (#1520 item 6). The skill injects relevant memories as context for the
+  current task; its old name collided with the context-gateway subsystem
+  (Skills / Commands / Agents / `mm context …`), which the plugin does not
+  drive — `recall` says what it actually does. Invoke `/memtomem:recall
+  [topic]` after updating the plugin; no gateway-driving plugin skill is
+  planned for now.
 
 - **Config sections no longer bind bare, unprefixed environment variables**
   (#1522). The 22 sub-config sections (`embedding`, `storage`, `llm`,

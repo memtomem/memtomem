@@ -822,6 +822,12 @@ def extract_agents_to_canonical(
     single-item import route) can detect "no such runtime artifact" by
     inspecting an empty ``imported`` + ``skipped``.
 
+    No ``source_scope`` parameter by design (#1520 item 5): the decoupled
+    project-runtime → user-library import (the web ``/import-to-user``
+    route) is skills-only — see ``extract_skills_to_canonical``'s
+    ``source_scope`` docstring. Here the runtime source root always
+    follows ``scope``.
+
     Layout policy: new agents (no existing canonical) land in directory
     layout per ADR-0008. Existing flat-layout entries are preserved by
     PR-C — migration to directory layout is a separate command (PR-D).

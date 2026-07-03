@@ -912,6 +912,10 @@ async def import_skill_to_user(
     Writes land outside any project root (``~/.memtomem/``), so the user-tier
     host-write disclosure (``allow_host_writes`` round-trip) applies — same as
     the user-tier ``/import``. 404 when no PROJECT runtime skill matches.
+
+    Skills-only by design (#1520 item 5): the agents/commands extract
+    engines have no ``source_scope`` variant, so there is no
+    ``import-to-user`` route for those kinds until one exists.
     """
     try:
         validate_name(name, kind="skill name")

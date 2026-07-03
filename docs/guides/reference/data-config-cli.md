@@ -317,6 +317,7 @@ mm context init --scope user           # seed user-tier canonical (~/.memtomem/{
 mm context init --scope project_local  # seed gitignored draft tier + auto-append .gitignore
 mm context init --scope project_shared --confirm-project-shared       # Gate B: explicit opt-in
 mm context init --include=agents --scope user --force-unsafe-import   # bypass Gate A on existing leaks
+mm context init --include=skills --only my-skill   # import ONE named runtime artifact (skips context.md + dir seeding)
 mm context generate --agent all        # generate all agent files
 mm context generate --include=agents --label production # generate files using the 'production' labeled snapshot (agents/commands only)
 mm context diff                        # check sync status
