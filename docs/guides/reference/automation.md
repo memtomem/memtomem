@@ -209,6 +209,12 @@ loop that powers `mem_watchdog` — set
 `MEMTOMEM_SCHEDULER__ENABLED=true` on top of the watchdog config to
 enable dispatch.
 
+Dispatch is **at-most-once per cron slot**: each due schedule is claimed
+with an atomic compare-and-set before it runs, so two MCP servers sharing
+one database (e.g. Claude Code and Claude Desktop connected at the same
+time) cannot both fire the same slot, and a run interrupted by a crash is
+not re-fired on restart — it resumes at the next slot.
+
 > **Dispatch requires the MCP server, not `mm web`.** The watchdog (and
 > therefore the schedule dispatcher) is wired into the MCP server
 > lifespan only — it is not started by `mm web`. Schedules registered

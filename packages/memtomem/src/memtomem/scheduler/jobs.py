@@ -32,8 +32,15 @@ if TYPE_CHECKING:
     from memtomem.server.context import AppContext
 
 
-JobRunStatus = Literal["ok", "error", "timeout"]
-"""Status enum for ``ScheduleMixin.schedule_mark_run``."""
+JobRunStatus = Literal["ok", "error", "timeout", "running"]
+"""Status enum for schedule run outcomes.
+
+``ok``/``error``/``timeout`` are terminal, written by
+``ScheduleMixin.schedule_mark_run``. ``running`` is the transient claim
+state written by ``schedule_try_claim`` (issue #1564) — overwritten by a
+terminal status when the run completes, or left as a diagnostic breadcrumb
+if the process crashes mid-run (dispatch never gates on status, so a stuck
+``running`` doesn't starve the schedule)."""
 
 JobResult = dict[str, Any]
 """Runner return shape — small JSON-serializable summary."""

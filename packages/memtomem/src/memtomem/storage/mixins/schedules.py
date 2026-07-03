@@ -5,6 +5,14 @@ interpreted in UTC; ``created_at`` and ``last_run_at`` are stored as
 UTC ISO strings. ``schedule_list_due`` returns at-most-once catch-up
 semantics — if multiple cron slots elapsed since ``last_run_at``, the
 schedule fires exactly once on the next dispatcher tick (no backfill).
+
+Dispatch is also at-most-once **per slot** across processes and crashes:
+``schedule_try_claim`` does a compare-and-set on ``last_run_at`` so a
+second dispatcher (a concurrent MCP-server process on the same DB) or a
+post-crash restart that reads the same due row loses the claim and skips
+it. A crash between the claim and the terminal ``schedule_mark_run``
+skips the slot rather than re-running it — deliberate, because job
+bodies aren't all idempotent. See issue #1564.
 """
 
 from __future__ import annotations
@@ -146,6 +154,38 @@ class ScheduleMixin:
         cur = db.execute("DELETE FROM schedules WHERE id=?", (sched_id,))
         db.commit()
         return cur.rowcount > 0
+
+    async def schedule_try_claim(
+        self,
+        sched_id: str,
+        prev_last_run_at: str | None,
+        when: datetime | None = None,
+    ) -> bool:
+        """Atomically claim a due schedule for this dispatcher.
+
+        Compare-and-set on ``last_run_at``: advance it to ``when`` (now)
+        and set status='running' only if the row's ``last_run_at`` still
+        equals the value the caller read in ``schedule_list_due``
+        (``prev_last_run_at`` — possibly None on first run, hence ``IS``
+        not ``=``). Returns True iff this call won the claim
+        (``rowcount == 1``). See issue #1564.
+
+        ``last_run_error`` is cleared here so a stale error from the prior
+        run doesn't linger while the new run is in flight; the terminal
+        ``schedule_mark_run`` repopulates it on failure. WAL +
+        ``busy_timeout`` on the write connection serializes the racing
+        UPDATEs, so a single conditional statement is self-atomic — no
+        explicit transaction needed.
+        """
+        ts = (when or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        db = self._get_db()
+        cur = db.execute(
+            "UPDATE schedules SET last_run_at=?, last_run_status='running', "
+            "last_run_error=NULL WHERE id=? AND last_run_at IS ?",
+            (ts.isoformat(timespec="seconds"), sched_id, prev_last_run_at),
+        )
+        db.commit()
+        return cur.rowcount == 1
 
     async def schedule_mark_run(
         self,

@@ -136,6 +136,20 @@ class HealthWatchdog:
             await self._run_schedule(sched, timeout)
 
     async def _run_schedule(self, sched: dict, timeout: float) -> None:
+        # Atomic run-claim before any work: a concurrent dispatcher (a
+        # second MCP-server process on the same DB) or a post-crash restart
+        # that reads the same due row loses the CAS and skips. At-most-once
+        # per slot — a crash between here and the terminal mark_run skips
+        # the slot rather than re-running it (job bodies aren't all
+        # idempotent). Claim before the JOB_KINDS lookup so unknown-kind /
+        # invalid-params error marks are single-fire too. Known limit: this
+        # guards a *slot*, not job-kind mutual exclusion — a job that runs
+        # past its next cron slot can overlap a fresh claim from another
+        # process (pre-existing Phase A behavior). See issue #1564.
+        if not await self._app.storage.schedule_try_claim(sched["id"], sched["last_run_at"]):
+            logger.debug("schedule %s already claimed by another dispatcher; skipping", sched["id"])
+            return
+
         spec = JOB_KINDS.get(sched["job_kind"])
         if spec is None:
             logger.warning(
