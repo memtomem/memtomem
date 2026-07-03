@@ -154,9 +154,10 @@ class AppContext:
     # correct because an ``AppContext`` never outlives one event loop —
     # ``from_components`` builds a fresh context per test/run, and
     # ``asyncio.Lock`` binds its loop at first acquire on py312. Keys are
-    # resolved memory-file paths, bounded by the file count, so the dict is
-    # not evicted (pruning would race a waiter that already holds a ref).
-    _memory_file_locks: dict[Path, asyncio.Lock] = field(
+    # canonicalized paths (``memory_file_lock_key``), bounded by the file
+    # count, so the dict is not evicted (pruning would race a waiter that
+    # already holds a ref).
+    _memory_file_locks: dict[str, asyncio.Lock] = field(
         default_factory=dict, init=False, repr=False
     )
 
@@ -186,15 +187,30 @@ class AppContext:
             validate_namespace(value)
         self._current_namespace = value
 
-    def get_memory_file_lock(self, path: Path) -> asyncio.Lock:
+    @staticmethod
+    def memory_file_lock_key(path: Path) -> str:
+        """Canonical lock key for a memory file: resolved, then case-folded.
+
+        Case-folding is unconditional: on case-insensitive filesystems
+        (macOS APFS default, Windows NTFS) ``Notes.md`` and ``notes.md``
+        are the *same* file and must share one lock or the #1570
+        corruption recurs across the two spellings. On case-sensitive
+        filesystems the fold merely makes two genuinely distinct files
+        share a lock — needless serialization, never corruption.
+        """
+        return str(path.expanduser().resolve()).casefold()
+
+    def get_memory_file_lock(self, path: Path | str) -> asyncio.Lock:
         """Return the per-file ``asyncio.Lock`` for ``path`` (issue #1570).
 
         Callers hold this across a memory file's whole
         read → rewrite → re-index → rollback span so concurrent MCP CRUD
-        tools cannot lose updates or splice over a stale line range. The
-        key is the resolved path, so two spellings of the same file share
-        one lock. Get-or-create is race-free: a single event loop never
-        suspends between the ``dict`` read and write below.
+        tools cannot lose updates or splice over a stale line range.
+        ``path`` may be a ``Path`` (canonicalized here) or a ``str`` that
+        MUST already come from :meth:`memory_file_lock_key` — passing a raw
+        string path would silently key a second lock for the same file.
+        Get-or-create is race-free: a single event loop never suspends
+        between the ``dict`` read and write below.
 
         Do NOT additionally hold the engine's sidecar ``_file_lock`` for
         the same path across a span that calls ``index_file`` — that lock
@@ -204,7 +220,7 @@ class AppContext:
         the tool layer takes; cross-process safety is out of scope (see the
         ``_memory_file_locks`` field comment).
         """
-        key = path.expanduser().resolve()
+        key = path if isinstance(path, str) else self.memory_file_lock_key(path)
         lock = self._memory_file_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()

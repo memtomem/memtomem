@@ -175,9 +175,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   count — spliced over a *different* entry; a failing re-index then rolled the
   file back to the caller's own pre-image, reverting a concurrent committed
   edit. Each markdown-mutating tool (`mem_edit`, `mem_delete`, `mem_add`,
-  `mem_batch_add`) now holds a per-resolved-file `asyncio.Lock`
-  (`AppContext.get_memory_file_lock`) across its whole span, and the edit/delete
-  paths re-fetch the chunk *under* the lock so the line range is never stale.
+  `mem_batch_add`) now holds a per-file `asyncio.Lock`
+  (`AppContext.get_memory_file_lock`, keyed on the resolved *case-folded* path
+  so two spellings of one file on a case-insensitive filesystem share one
+  lock) across its whole span, and the edit/delete paths re-fetch the chunk
+  *under* the lock so the line range is never stale. The bulk
+  `mem_delete(source_file=)` / `mem_delete(namespace=)` branches take the same
+  lock(s) — sorted acquisition across the namespace's file set — so an
+  in-flight locked span's re-index can no longer resurrect the rows a bulk
+  delete just removed; and the session-derived namespace for
+  `mem_add`/`mem_batch_add` is resolved inside the lock, so an entry lands
+  under the namespace active at write time rather than one captured before
+  the lock wait.
   This serializes concurrent CRUD **within one MCP server process** — the
   issue's realistic vector (several agents sharing one server). The tool layer
   deliberately does not also take the engine's sidecar `_file_lock`: that lock

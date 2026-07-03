@@ -818,6 +818,20 @@ class SqliteBackend(
         ).fetchall()
         return {str(row[0] or "user") for row in rows}
 
+    async def list_sources_by_namespace(self, namespace: str) -> list[Path]:
+        """Return the distinct source files holding chunks in ``namespace``.
+
+        Issue #1570: ``mem_delete(namespace=...)`` locks each of these files
+        before the bulk delete so a concurrent per-file CRUD span cannot
+        re-index one of them afterwards and resurrect the deleted rows.
+        """
+        db = self._get_read_db()
+        rows = db.execute(
+            "SELECT DISTINCT source_file FROM chunks WHERE namespace=?",
+            (namespace,),
+        ).fetchall()
+        return [Path(str(row[0])) for row in rows]
+
     async def iter_chunks_for_audit(
         self,
         *,
