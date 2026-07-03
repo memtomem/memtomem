@@ -1,5 +1,6 @@
 """Tests for episodic memory (sessions)."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -201,6 +202,87 @@ class TestSessionAgentInheritance:
         """
         app = AppContext.from_components(components)
         assert app._session_lock is not app._config_lock
+
+
+class TestSessionEndClaim:
+    """``mem_session_end`` claims the active-session handle atomically at
+    entry (issue #1571), so a retried or concurrent end runs the effectful
+    phase (end_session UPDATE, billable auto-summary, archive-chunk write)
+    **at most once**. Before the fix the guard/read of ``current_session_id``
+    ran unlocked and only the final reset held ``_session_lock``, so a second
+    caller entering before the first reached the reset re-ran the whole
+    phase and double-wrote the summary.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_end_runs_effects_once(self, components):
+        """Two overlapping ``mem_session_end`` calls: the winner runs the
+        effectful phase, the loser returns "No active session." exactly
+        once. Regression pin — MUST fail before the claim-then-work fix.
+
+        The gate parks the first call inside ``get_session_events`` — the
+        first suspension point after the old unlocked guard — so the second
+        call provably reaches the entry check while the first is mid-phase.
+        ``end_session`` is wrapped to count how many times the effectful
+        phase actually ran.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_events = app.storage.get_session_events
+        first = True
+
+        async def gated_events(session_id):
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            return await real_events(session_id)
+
+        end_calls: list[str] = []
+        real_end = app.storage.end_session
+
+        async def counting_end(session_id, summary, metadata):
+            end_calls.append(session_id)
+            return await real_end(session_id, summary, metadata)
+
+        # Instance attributes shadow the bound methods; ``components`` is
+        # function-scoped so no teardown/restore is needed.
+        app.storage.get_session_events = gated_events  # type: ignore[method-assign]
+        app.storage.end_session = counting_end  # type: ignore[method-assign]
+
+        t1 = asyncio.create_task(mem_session_end(summary="s", ctx=ctx))  # type: ignore[arg-type]
+        await entered.wait()  # t1 is now parked inside the effectful phase
+        out2 = await mem_session_end(summary="s", ctx=ctx)  # type: ignore[arg-type]
+        release.set()
+        out1 = await t1
+
+        assert out2 == "No active session."
+        assert "Session ended" in out1
+        assert len(end_calls) == 1  # effectful phase ran exactly once
+        assert app.current_session_id is None
+        assert app.current_agent_id is None
+
+    @pytest.mark.asyncio
+    async def test_sequential_retry_second_is_noop(self, components):
+        """Calling ``mem_session_end`` twice in a row: the second returns
+        exactly "No active session." This already held before the fix (the
+        old code reset the ids before returning) — it pins the retry
+        contract, it is not the concurrency regression above.
+        """
+        app = AppContext.from_components(components)
+        ctx = _StubCtx(app)
+        await mem_session_start(agent_id="planner", ctx=ctx)  # type: ignore[arg-type]
+
+        out1 = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+        out2 = await mem_session_end(ctx=ctx)  # type: ignore[arg-type]
+
+        assert "Session ended" in out1
+        assert out2 == "No active session."
 
 
 class TestSessionNamespaceDerivation:

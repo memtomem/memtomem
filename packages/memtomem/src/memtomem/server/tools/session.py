@@ -153,6 +153,15 @@ async def mem_session_end(
     Resets both ``current_session_id`` and ``current_agent_id`` so the
     next ``mem_agent_search`` falls back to ``current_namespace``.
 
+    The active-session handle is *claimed* (read and cleared) atomically
+    under ``_session_lock`` at entry, so a concurrent or client-retried
+    ``mem_session_end`` returns ``"No active session."`` instead of
+    re-running the effectful phase. The summarize/persist work therefore
+    runs **at most once** per session; the handle is not restored if that
+    phase fails part-way (a retry must not risk a duplicate billable
+    summary). An active DB row orphaned by a mid-phase crash is reaped by
+    the stale-session path (``find_stale_active_sessions``).
+
     When ``summary`` is provided, the text is also promoted to a
     first-class chunk under ``archive:session:<session_id>`` (Phase A
     of the episodic-session-summary RFC). The chunk is hidden from
@@ -178,14 +187,22 @@ async def mem_session_end(
     """
     app = await _get_app_initialized(ctx)
 
-    if not app.current_session_id:
-        return "No active session."
-
-    session_id = app.current_session_id
-    # Capture before end_session and the lock-guarded reset below; the
-    # archive helper runs after end_session, so any later state
-    # mutation could clobber the tag we want to record.
-    agent_id = app.current_agent_id
+    # Claim-then-work (issue #1571): atomically read AND null the active
+    # session handle under _session_lock so a retried or concurrent
+    # mem_session_end cannot double-run the effectful phase (billable LLM
+    # auto-summary, archive-chunk write + index, end_session UPDATE). The
+    # loser sees no active session and returns early. At-most-once: the
+    # handle is NOT restored on mid-phase failure — a retry after a partial
+    # failure must not risk a duplicate summary. Same contract as
+    # schedule_try_claim (issue #1564). agent_id is captured here too: the
+    # archive helper needs the tag after the handle has been cleared.
+    async with app._session_lock:
+        session_id = app.current_session_id
+        if not session_id:
+            return "No active session."
+        agent_id = app.current_agent_id
+        app.current_session_id = None
+        app.current_agent_id = None
 
     # Gather session stats
     events = await app.storage.get_session_events(session_id)
@@ -257,10 +274,6 @@ async def mem_session_end(
 
     # Cleanup session-bound working memory
     cleaned = await app.storage.scratch_cleanup(session_id)
-
-    async with app._session_lock:
-        app.current_session_id = None
-        app.current_agent_id = None
 
     lines = [
         f"Session ended: {session_id}",
