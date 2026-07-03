@@ -217,27 +217,50 @@ async def _add(
             if not _prompt_project_shared_confirm(target):
                 raise click.Abort()
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        append_entry(target, content, title=title, tags=tags)
-        # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-        stats = await comp.index_engine.index_file(target, already_scanned=True)
+        from memtomem.context._atomic import (
+            _CRUD_SIDECAR_LOCK_BUDGET_S,
+            _lock_path_for,
+            async_file_lock,
+        )
 
-        # Apply tags to indexed chunks (chunker doesn't parse tag text from content)
-        if tags and stats.indexed_chunks > 0:
-            chunks = await comp.storage.list_chunks_by_source(target)
-            updated = []
-            for c in chunks:
-                merged = set(c.metadata.tags) | set(tags)
-                if merged != set(c.metadata.tags):
-                    c.metadata = c.metadata.__class__(
-                        **{
-                            **{f: getattr(c.metadata, f) for f in c.metadata.__dataclass_fields__},
-                            "tags": tuple(sorted(merged)),
-                        }
-                    )
-                    updated.append(c)
-            if updated:
-                await comp.storage.upsert_chunks(updated)
+        # #1587: hold the target file's cross-process sidecar (L2) across append
+        # + reindex + tag-merge so a concurrent MCP mem_edit/mem_delete rollback
+        # (this CLI runs in a separate process from the MCP server) cannot erase
+        # this appended entry. ``lock_held=True`` skips the nested engine acquire.
+        try:
+            async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+                # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+                stats = await comp.index_engine.index_file(
+                    target, already_scanned=True, lock_held=True
+                )
+
+                # Apply tags to indexed chunks (chunker doesn't parse tag text
+                # from content). Inside the lock — keyed to this file's chunks.
+                if tags and stats.indexed_chunks > 0:
+                    chunks = await comp.storage.list_chunks_by_source(target)
+                    updated = []
+                    for c in chunks:
+                        merged = set(c.metadata.tags) | set(tags)
+                        if merged != set(c.metadata.tags):
+                            c.metadata = c.metadata.__class__(
+                                **{
+                                    **{
+                                        f: getattr(c.metadata, f)
+                                        for f in c.metadata.__dataclass_fields__
+                                    },
+                                    "tags": tuple(sorted(merged)),
+                                }
+                            )
+                            updated.append(c)
+                    if updated:
+                        await comp.storage.upsert_chunks(updated)
+        except TimeoutError as exc:
+            raise click.ClickException(
+                f"{target} is locked by another process (another server or "
+                "migrate in flight); retry."
+            ) from exc
 
         click.echo(f"Added to {target} ({stats.indexed_chunks} chunks indexed)")
 

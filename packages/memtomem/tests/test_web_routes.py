@@ -4342,3 +4342,150 @@ class TestFsList:
         nfc_path = unicodedata.normalize("NFC", str(memdir / "한글노트"))
         resp2 = await client.get(f"/api/fs/list?path={nfc_path}")
         assert resp2.status_code == 200, resp2.text
+
+
+class TestChunkCrudCrossProcessLock:
+    """#1587: web chunk edit/delete and add hold the source file's cross-process
+    sidecar (L2) across the read → rewrite → reindex span. These pin the new
+    failure surfaces — timeout → 503, concurrent migration → 409, and the edit
+    rollback the web path previously lacked.
+    """
+
+    def _chunk_on(self, source: Path, cid: uuid.uuid4 | None = None) -> Chunk:
+        c = _make_test_chunk(chunk_id=cid, source=str(source))
+        return c.__class__(
+            content=c.content,
+            metadata=c.metadata.__class__(
+                source_file=source,
+                heading_hierarchy=("## H",),
+                tags=c.metadata.tags,
+                namespace=c.metadata.namespace,
+                start_line=1,
+                end_line=3,
+            ),
+            id=c.id,
+            content_hash=c.content_hash,
+            embedding=c.embedding,
+            created_at=c.created_at,
+            updated_at=c.updated_at,
+        )
+
+    async def test_edit_chunk_returns_503_when_sidecar_held(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        from memtomem.context._atomic import _lock_path_for, async_file_lock
+
+        src = tmp_path / "note.md"
+        src.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        monkeypatch.setattr("memtomem.context._atomic._CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+        async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
+            resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "updated"})
+        assert resp.status_code == 503
+        # File untouched — the edit never ran.
+        assert src.read_text(encoding="utf-8") == "## H\n\nbody\n"
+
+    @pytest.mark.requires_symlinks
+    async def test_edit_chunk_rechecks_symlink_on_fresh_chunk(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        """The symlink refusal is re-evaluated on the chunk re-fetched under the
+        lock: a concurrent re-point to a symlink (resolving to the same target,
+        so not reported as "moved") must still be refused with 403."""
+        real = tmp_path / "real.md"
+        real.write_text("## H\n\nbody\n", encoding="utf-8")
+        link = tmp_path / "link.md"
+        link.symlink_to(real)
+        cid = uuid.uuid4()
+        # Pre-check + unlocked fetch see the real (non-symlink) path; the
+        # under-lock re-fetch sees the symlink (resolves to the same target).
+        app.state.storage.get_chunk = AsyncMock(
+            side_effect=[
+                self._chunk_on(real, cid),
+                self._chunk_on(real, cid),
+                self._chunk_on(link, cid),
+            ]
+        )
+        resp = await client.patch(f"/api/chunks/{cid}", json={"new_content": "updated"})
+        assert resp.status_code == 403
+        # The real file was not edited.
+        assert real.read_text(encoding="utf-8") == "## H\n\nbody\n"
+
+    async def test_edit_chunk_returns_409_when_file_moved(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        srca = tmp_path / "a.md"
+        srcb = tmp_path / "b.md"
+        srca.write_text("## H\n\nbody\n", encoding="utf-8")
+        srcb.write_text("## H\n\nbody\n", encoding="utf-8")
+        cid = uuid.uuid4()
+        # Three fetches: the route's symlink/404 pre-check and locked_source_chunk's
+        # unlocked fetch both see a.md; the re-fetch under the lock sees b.md
+        # (a concurrent migrate moved it) → the route reports 409 retry.
+        app.state.storage.get_chunk = AsyncMock(
+            side_effect=[
+                self._chunk_on(srca, cid),
+                self._chunk_on(srca, cid),
+                self._chunk_on(srcb, cid),
+            ]
+        )
+        resp = await client.patch(f"/api/chunks/{cid}", json={"new_content": "updated"})
+        assert resp.status_code == 409
+
+    async def test_edit_chunk_rolls_back_file_on_reindex_failure(
+        self, app, client: AsyncClient, tmp_path: Path
+    ):
+        src = tmp_path / "note.md"
+        original = "## H\n\nold body\n"
+        src.write_text(original, encoding="utf-8")
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        # Forward reindex raises; the rollback reindex (2nd call) succeeds.
+        app.state.index_engine.index_file = AsyncMock(
+            side_effect=[
+                RuntimeError("boom"),
+                IndexingStats(
+                    total_files=1,
+                    total_chunks=1,
+                    indexed_chunks=1,
+                    skipped_chunks=0,
+                    deleted_chunks=0,
+                    duration_ms=1.0,
+                ),
+            ]
+        )
+
+        resp = await client.patch(f"/api/chunks/{chunk.id}", json={"new_content": "new body"})
+        assert resp.status_code == 500
+        # The failed edit was rolled back — original bytes restored.
+        assert src.read_text(encoding="utf-8") == original
+
+    async def test_delete_chunk_returns_503_when_sidecar_held(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        from memtomem.context._atomic import _lock_path_for, async_file_lock
+
+        src = tmp_path / "note.md"
+        src.write_text("## H\n\nbody\n", encoding="utf-8")
+        chunk = self._chunk_on(src)
+        app.state.storage.get_chunk = AsyncMock(return_value=chunk)
+        monkeypatch.setattr("memtomem.context._atomic._CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+        async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
+            resp = await client.delete(f"/api/chunks/{chunk.id}")
+        assert resp.status_code == 503
+
+    async def test_add_memory_returns_503_when_sidecar_held(
+        self, app, client: AsyncClient, tmp_path: Path, monkeypatch
+    ):
+        from memtomem.context._atomic import _lock_path_for, async_file_lock
+
+        app.state.config.indexing.memory_dirs = [tmp_path]
+        monkeypatch.setattr("memtomem.context._atomic._CRUD_SIDECAR_LOCK_BUDGET_S", 0.2)
+        target = (tmp_path / "pinned.md").resolve()
+
+        async with async_file_lock(_lock_path_for(target), timeout=5.0):
+            resp = await client.post("/api/add", json={"content": "hello", "file": "pinned.md"})
+        assert resp.status_code == 503

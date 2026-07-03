@@ -1761,28 +1761,51 @@ async def add_memory(
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = (base / f"{date_str}.md").resolve()
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tags = req.tags or []
-    append_entry(target, req.content, title=req.title, tags=tags)
-    # Compose/add route guarded this content above (``enforce_write_guard``);
-    # skip the engine gate (ADR-0006 PR-A).
-    stats = await index_engine.index_file(target, namespace=req.namespace, already_scanned=True)
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        _lock_path_for,
+        async_file_lock,
+    )
 
-    # Apply tags to indexed chunks (the chunker doesn't parse tag text from content)
-    if tags and stats.indexed_chunks > 0:
-        chunks = await storage.list_chunks_by_source(target)
-        updated = []
-        for c in chunks:
-            merged = set(c.metadata.tags) | set(tags)
-            if merged != set(c.metadata.tags):
-                c.metadata = c.metadata.__class__(
-                    **{
-                        **{f: getattr(c.metadata, f) for f in c.metadata.__dataclass_fields__},
-                        "tags": tuple(sorted(merged)),
-                    }
-                )
-                updated.append(c)
-        if updated:
-            await storage.upsert_chunks(updated)
+    tags = req.tags or []
+    # #1587: hold the target file's cross-process sidecar (L2) across append +
+    # reindex + tag-merge so a concurrent MCP mem_edit/mem_delete rollback — in
+    # this process or another — cannot erase this appended entry. ``mm web`` has
+    # no AppContext L1 lock; L2's in-process guard serializes web handlers too.
+    # ``lock_held=True`` skips the nested engine acquire.
+    try:
+        async with async_file_lock(_lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Guarded above (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
+            await _asyncio.to_thread(append_entry, target, req.content, title=req.title, tags=tags)
+            stats = await index_engine.index_file(
+                target, namespace=req.namespace, already_scanned=True, lock_held=True
+            )
+
+            # Apply tags to indexed chunks (the chunker doesn't parse tag text
+            # from content). Inside the lock — it upserts rows keyed to this
+            # file's just-indexed chunks.
+            if tags and stats.indexed_chunks > 0:
+                chunks = await storage.list_chunks_by_source(target)
+                updated = []
+                for c in chunks:
+                    merged = set(c.metadata.tags) | set(tags)
+                    if merged != set(c.metadata.tags):
+                        c.metadata = c.metadata.__class__(
+                            **{
+                                **{
+                                    f: getattr(c.metadata, f)
+                                    for f in c.metadata.__dataclass_fields__
+                                },
+                                "tags": tuple(sorted(merged)),
+                            }
+                        )
+                        updated.append(c)
+                if updated:
+                    await storage.upsert_chunks(updated)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503, detail="Memory file is locked by another writer; try again."
+        ) from exc
 
     return AddMemoryResponse(file=str(target), indexed_chunks=stats.indexed_chunks)
