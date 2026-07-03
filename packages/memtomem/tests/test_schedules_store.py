@@ -141,3 +141,88 @@ class TestScheduleStore:
         # Should not raise.
         due = await storage.schedule_list_due(datetime.now(timezone.utc))
         assert due == []
+
+
+class TestScheduleClaim:
+    """Atomic run-claim CAS on ``last_run_at`` (issue #1564)."""
+
+    @pytest.mark.asyncio
+    async def test_claim_first_run_null_token_then_second_fails(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "compaction")
+        # First run: last_run_at is NULL, so the CAS token is None.
+        assert await storage.schedule_try_claim(sid, None) is True
+        sched = await storage.schedule_get(sid)
+        assert sched["last_run_at"] is not None
+        assert sched["last_run_status"] == "running"
+        # A second dispatcher reading the same (stale) NULL token loses.
+        assert await storage.schedule_try_claim(sid, None) is False
+
+    @pytest.mark.asyncio
+    async def test_claim_clears_stale_error(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "compaction")
+        await storage.schedule_mark_run(sid, "error", error="boom")
+        sched = await storage.schedule_get(sid)
+        token = sched["last_run_at"]
+        assert await storage.schedule_try_claim(sid, token) is True
+        sched = await storage.schedule_get(sid)
+        assert sched["last_run_status"] == "running"
+        assert sched["last_run_error"] is None
+
+    @pytest.mark.asyncio
+    async def test_claim_with_nonnull_token_then_second_fails(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "compaction")
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        await storage.schedule_mark_run(sid, "ok", when=when)
+        token = when.isoformat(timespec="seconds")
+        assert await storage.schedule_try_claim(sid, token) is True
+        # Re-claiming with the now-stale token loses.
+        assert await storage.schedule_try_claim(sid, token) is False
+
+    @pytest.mark.asyncio
+    async def test_claim_wrong_token_fails(self, storage):
+        sid = await storage.schedule_insert("* * * * *", "compaction")
+        await storage.schedule_mark_run(sid, "ok")
+        # A token that never matched what's stored must not win.
+        assert await storage.schedule_try_claim(sid, "1999-01-01T00:00:00+00:00") is False
+
+    @pytest.mark.asyncio
+    async def test_claim_without_terminal_mark_blocks_refire(self, storage):
+        """Crash-re-fire pin: a claim advances last_run_at so the same slot
+        is no longer due even if the process dies before mark_run."""
+        sid = await storage.schedule_insert("0 * * * *", "compaction")
+        sched = await storage.schedule_get(sid)
+        created = datetime.fromisoformat(sched["created_at"])
+        now = created + timedelta(hours=2)
+
+        # Row is due at `now`.
+        assert len(await storage.schedule_list_due(now)) == 1
+        # Claim (simulating a crash before the terminal mark_run).
+        assert await storage.schedule_try_claim(sid, sched["last_run_at"], when=now) is True
+        # Same `now`: last_run_at advanced to `now`, next slot is in the
+        # future — no re-fire.
+        assert await storage.schedule_list_due(now) == []
+
+    @pytest.mark.asyncio
+    async def test_two_backends_only_one_claims(self, storage, tmp_path):
+        """Two SqliteBackends on the same DB file racing to claim one row —
+        exactly one wins (cross-process double-fire guard, in-process)."""
+        from memtomem.storage.sqlite_backend import SqliteBackend
+
+        sid = await storage.schedule_insert("* * * * *", "compaction")
+
+        # Second backend pointed at the same DB file, matching the fixture's
+        # embedding meta so initialize() doesn't trip the strict dim check.
+        other = SqliteBackend(
+            storage._config,
+            dimension=storage._dimension,
+            embedding_provider=storage._embedding_provider,
+            embedding_model=storage._embedding_model,
+            strict_dim_check=False,
+        )
+        await other.initialize()
+        try:
+            r1 = await storage.schedule_try_claim(sid, None)
+            r2 = await other.schedule_try_claim(sid, None)
+            assert [r1, r2].count(True) == 1
+        finally:
+            await other.close()

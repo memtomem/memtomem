@@ -88,6 +88,32 @@ async def test_single_due_fires_once_status_ok(storage, patch_jobs):
 
 
 @pytest.mark.asyncio
+async def test_second_dispatch_of_same_slot_does_not_refire(storage, patch_jobs):
+    """A second dispatcher reading the same due row loses the claim and does
+    not re-invoke the runner (issue #1564)."""
+    calls: list[str] = []
+
+    async def runner(app):
+        calls.append("ran")
+        return {"ok": True}
+
+    spec = JobSpec("compaction", "test", _NoParams, runner)
+    sid = await storage.schedule_insert("* * * * *", "compaction")
+    # Snapshot the pre-claim row so both _run_schedule calls carry the same
+    # (stale after the first) last_run_at token, as two racing dispatchers would.
+    sched = await storage.schedule_get(sid)
+
+    wd = _make_watchdog(storage)
+    with patch_jobs({"compaction": spec}):
+        await wd._run_schedule(sched, timeout=5.0)
+        await wd._run_schedule(sched, timeout=5.0)
+
+    assert calls == ["ran"]
+    final = await storage.schedule_get(sid)
+    assert final["last_run_status"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_two_due_serialized_with_concurrency_one(storage, patch_jobs):
     """max_concurrent_jobs=1 forces serial execution (B starts after A finishes)."""
     in_flight = 0
