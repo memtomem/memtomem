@@ -334,10 +334,16 @@ def _print_artifact_init(
     *,
     scope: TargetScope = "project_shared",
     force_unsafe_import: bool = False,
-) -> None:
+    only_name: str | None = None,
+) -> Any:
+    """Run one kind's runtime import and print the outcome; returns the
+    engine result so ``init --only`` can detect the not-found case
+    (empty ``imported`` + ``skipped`` — the engine silently skips
+    non-matching stems)."""
     result = spec.extract_fn(
         root,
         overwrite=overwrite,
+        only_name=only_name,
         scope=scope,
         force_unsafe_import=force_unsafe_import,
     )
@@ -356,6 +362,7 @@ def _print_artifact_init(
         click.echo(f"  (no runtime {spec.import_plural} imported into {scope})")
     for name, reason, code in result.skipped:
         click.secho(f"    skipped {name}: {reason}", fg=_skip_color(code))
+    return result
 
 
 def _print_artifact_generate(
@@ -802,12 +809,24 @@ def detect_cmd(include: tuple[str, ...]) -> None:
         "hard-refuses (ADR-0011 §5)."
     ),
 )
+@click.option(
+    "--only",
+    "only_name",
+    metavar="NAME",
+    default=None,
+    help=(
+        "Import only the runtime artifact with this exact name (import-only "
+        "mode: skips context.md and directory seeding). Requires exactly one "
+        "--include kind of skills, agents, or commands."
+    ),
+)
 def init_cmd(
     include: tuple[str, ...],
     overwrite: bool,
     scope_flag: str | None,
     confirm_project_shared: bool,
     force_unsafe_import: bool,
+    only_name: str | None,
 ) -> None:
     """Seed canonical artifact dirs and (optionally) import existing runtime files.
 
@@ -818,8 +837,39 @@ def init_cmd(
     ``--scope=project_local`` to seed at the user or local-draft tier
     instead. ADR-0011 §5 Gate A scans every imported file's bytes for
     secrets; project_shared hard-refuses on any hit.
+
+    ``--only NAME`` (#1520 item 4) narrows the runtime import to one named
+    artifact — the CLI twin of the web's single-name import route. It is
+    import-only: context.md, directory seeding, and the .gitignore append
+    are skipped; the scope gates above still apply because they guard the
+    import write itself. ``--scope=project_local`` is rejected — the draft
+    tier has no runtime fan-out to import from, so the command could only
+    ever no-op. Exits 1 when no runtime artifact matches (the engine
+    contract reports not-found as empty ``imported`` + ``skipped``).
     """
     inc = _parse_include(include)
+    if only_name is not None:
+        # Fail fast, before any prompt or filesystem write. ``settings`` is
+        # parse-accepted for init but has no import branch at all, and the
+        # engine ``only_name=`` narrowing exists only for the three artifact
+        # kinds — so exactly one of skills/agents/commands is required.
+        if len(inc) != 1 or "settings" in inc:
+            raise click.UsageError(
+                "--only requires exactly one --include kind (skills, agents, or commands)."
+            )
+        try:
+            validate_name(only_name)
+        except InvalidNameError as exc:
+            raise click.ClickException(str(exc)) from exc
+        # Codex review: project_local has no runtime fan-out to import FROM
+        # (ADR-0011 §3 — the engines short-circuit to a skip), and --only
+        # disables every seeding side effect, so the command would exit 0
+        # having done literally nothing. Reject up front instead.
+        if scope_flag == "project_local":
+            raise click.UsageError(
+                "--only cannot import into --scope=project_local: the draft "
+                "tier has no runtime fan-out to import from (ADR-0011 §3)."
+            )
     root = _find_project_root()
     scope_explicit = scope_flag is not None
     scope = _resolve_artifact_cli_scope(scope_flag)
@@ -874,7 +924,7 @@ def init_cmd(
     #   - explicit ``--scope project_shared`` AND a project context
     #     exists (Gate B already opted in upstream of this branch).
     artifact_only_scope = scope_explicit and scope in ("user", "project_local")
-    write_context_md = has_project_signal and not artifact_only_scope
+    write_context_md = has_project_signal and not artifact_only_scope and only_name is None
     if write_context_md:
         ctx_path = _context_path(root)
         if ctx_path.exists() and not click.confirm(
@@ -926,14 +976,18 @@ def init_cmd(
         click.echo("  Edit this file, then run 'mm context generate' to sync.")
 
     # Seed canonical sub-artifact dirs at the resolved scope (idempotent).
-    for kind in ("agents", "skills", "commands"):
-        d = canonical_artifact_dir(kind, scope, root)
-        d.mkdir(parents=True, exist_ok=True)
-        click.secho(f"  Created {d}", fg="green")
+    # Skipped in --only import-only mode: the extract engines mkdir their
+    # own destination parents, and a single-name import should not seed
+    # sibling kinds' directories.
+    if only_name is None:
+        for kind in ("agents", "skills", "commands"):
+            d = canonical_artifact_dir(kind, scope, root)
+            d.mkdir(parents=True, exist_ok=True)
+            click.secho(f"  Created {d}", fg="green")
 
     # project_local — auto-append the .gitignore block so the local-draft
     # tier and staging dir never end up tracked by accident.
-    if scope == "project_local":
+    if only_name is None and scope == "project_local":
         wrote, msg = _append_gitignore_marker(root)
         if wrote:
             click.secho(
@@ -962,13 +1016,21 @@ def init_cmd(
     for spec in _ARTIFACT_PRINT_SPECS:
         if spec.kind in inc:
             click.echo("")
-            _print_artifact_init(
+            result = _print_artifact_init(
                 spec,
                 root,
                 overwrite=overwrite,
                 scope=scope,
                 force_unsafe_import=force_unsafe_import,
+                only_name=only_name,
             )
+            # Engine contract: non-matching stems are silently skipped, so
+            # "no such runtime artifact" surfaces as empty imported+skipped
+            # (mirrors the web single-name import's 404).
+            if only_name and not result.imported and not result.skipped:
+                raise click.ClickException(
+                    f"No runtime {spec.kind} entry named {only_name!r} to import at scope='{scope}'"
+                )
 
 
 def _read_agent_file(path: Path) -> str:

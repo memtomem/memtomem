@@ -906,3 +906,157 @@ def test_extract_surface_kwarg_reaches_gate_a_for_all_kinds(
     surfaces.clear()
     extract_commands_to_canonical(proj, scope="user", surface="probe_commands")
     assert surfaces == ["probe_commands", "probe_commands"]  # claude + gemini branches
+
+
+# ── `mm context init --only NAME` (#1520 item 4) ────────────────────────
+
+
+class TestInitOnly:
+    """Single-name import-only mode: the CLI twin of the web single-name
+    import route. Engine ``only_name=`` narrowing already existed; these
+    pin the CLI wiring — option validation, side-effect skipping, and the
+    not-found exit (empty ``imported`` + ``skipped`` per engine contract).
+    """
+
+    def _proj_with_two_skills(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        proj = _make_project(tmp_path)
+        monkeypatch.chdir(proj)
+        set_home(monkeypatch, str(tmp_path / "home"))
+        for name in ("alpha", "beta"):
+            skill = proj / ".claude" / "skills" / name
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(f"---\nname: {name}\n---\nbody\n", encoding="utf-8")
+        return proj
+
+    def test_only_imports_named_skill_and_skips_seeding(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        proj = self._proj_with_two_skills(tmp_path, monkeypatch)
+
+        result = runner.invoke(cli, ["context", "init", "--include", "skills", "--only", "alpha"])
+
+        assert result.exit_code == 0, result.output
+        assert (proj / ".memtomem" / "skills" / "alpha" / "SKILL.md").is_file()
+        # Sibling skill not imported; import-only mode: no context.md, no
+        # sibling-kind dir seeding.
+        assert not (proj / ".memtomem" / "skills" / "beta").exists()
+        assert not (proj / ".memtomem" / "context.md").exists()
+        assert not (proj / ".memtomem" / "agents").exists()
+        assert not (proj / ".memtomem" / "commands").exists()
+
+    def test_only_not_found_exits_1_with_kind_and_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        self._proj_with_two_skills(tmp_path, monkeypatch)
+
+        result = runner.invoke(cli, ["context", "init", "--include", "skills", "--only", "ghost"])
+
+        assert result.exit_code == 1, result.output
+        assert "No runtime skills entry named 'ghost'" in result.output
+        assert "scope='project_shared'" in result.output
+
+    @pytest.mark.parametrize(
+        "include_args",
+        [
+            [],  # zero kinds
+            ["--include", "skills,agents"],  # two kinds
+            ["--include", "settings"],  # settings has no import branch
+        ],
+    )
+    def test_only_requires_exactly_one_artifact_kind(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        runner: CliRunner,
+        include_args: list[str],
+    ) -> None:
+        proj = self._proj_with_two_skills(tmp_path, monkeypatch)
+
+        result = runner.invoke(cli, ["context", "init", *include_args, "--only", "alpha"])
+
+        assert result.exit_code == 2, result.output
+        assert "--only requires exactly one --include kind" in result.output
+        # Fail-fast: nothing written.
+        assert not (proj / ".memtomem").exists()
+
+    def test_only_invalid_name_rejected_before_any_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        proj = self._proj_with_two_skills(tmp_path, monkeypatch)
+
+        result = runner.invoke(cli, ["context", "init", "--include", "skills", "--only", "../evil"])
+
+        assert result.exit_code == 1, result.output
+        assert not (proj / ".memtomem").exists()
+
+    def test_only_rejects_project_local_scope(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        """Codex review: project_local has no runtime fan-out to import from
+        and --only disables all seeding side effects — reject up front rather
+        than exiting 0 having done nothing."""
+        proj = self._proj_with_two_skills(tmp_path, monkeypatch)
+
+        result = runner.invoke(
+            cli,
+            [
+                "context",
+                "init",
+                "--include",
+                "skills",
+                "--only",
+                "alpha",
+                "--scope",
+                "project_local",
+            ],
+        )
+
+        assert result.exit_code == 2, result.output
+        assert "--only cannot import into --scope=project_local" in result.output
+        assert not (proj / ".memtomem").exists()
+
+    def test_only_agents_happy_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        proj = _make_project(tmp_path)
+        monkeypatch.chdir(proj)
+        set_home(monkeypatch, str(tmp_path / "home"))
+        _seed_project_runtime_agents(proj, "helper", "---\nname: helper\n---\nbody\n")
+        _seed_project_runtime_agents(proj, "other", "---\nname: other\n---\nbody\n")
+
+        result = runner.invoke(cli, ["context", "init", "--include", "agents", "--only", "helper"])
+
+        assert result.exit_code == 0, result.output
+        assert (proj / ".memtomem" / "agents" / "helper").exists()
+        assert not (proj / ".memtomem" / "agents" / "other").exists()
+
+    def test_only_commands_happy_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        proj = _make_project(tmp_path)
+        monkeypatch.chdir(proj)
+        set_home(monkeypatch, str(tmp_path / "home"))
+        cmds = proj / ".claude" / "commands"
+        cmds.mkdir(parents=True)
+        (cmds / "ship.md").write_text("Ship it.\n", encoding="utf-8")
+        (cmds / "hold.md").write_text("Hold it.\n", encoding="utf-8")
+
+        result = runner.invoke(cli, ["context", "init", "--include", "commands", "--only", "ship"])
+
+        assert result.exit_code == 0, result.output
+        assert (proj / ".memtomem" / "commands" / "ship").exists()
+        assert not (proj / ".memtomem" / "commands" / "hold").exists()
+
+    def test_only_without_flag_preserves_full_init(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+    ) -> None:
+        """No --only → pre-#1520 behavior intact (context.md + dir seeding)."""
+        proj = self._proj_with_two_skills(tmp_path, monkeypatch)
+
+        result = runner.invoke(cli, ["context", "init", "--include", "skills"], input="")
+
+        assert result.exit_code == 0, result.output
+        assert (proj / ".memtomem" / "context.md").exists()
+        assert (proj / ".memtomem" / "skills" / "alpha").exists()
+        assert (proj / ".memtomem" / "skills" / "beta").exists()
+        assert (proj / ".memtomem" / "agents").exists()
