@@ -13,8 +13,10 @@ Pins two cross-cutting invariants per RFC #787 stage 1:
 
 2. **Redaction guard coverage.** Every web-route handler that writes
    user-supplied content to LTM must scan it (``enforce_write_guard``
-   directly, or the ``scan_text_content`` wrapper *and* a refusal on the
-   result — see ``_function_scans_and_refuses``), or be in
+   directly, an engine wrapper like ``scan_mcp_server_text`` that self-
+   refuses, or the ``scan_text_content`` wrapper *and* a refusal on the
+   result — the guard also follows one level of local-module delegation;
+   see ``_function_scans_and_refuses``), or be in
    ``_REDACTION_EXEMPT``. The list of handlers requiring redaction is
    explicit (``_REDACTION_PROTECTED``) — drift is caught by the
    classification test, which fails when an unsafe-method route is
@@ -164,6 +166,14 @@ _REDACTION_PROTECTED: frozenset[str] = frozenset(
         "context_commands.update_command",
         "context_skills.create_skill",
         "context_skills.update_skill",
+        # The mcp-servers editors write free-form user bytes into the
+        # git-tracked project_shared canonical (.mcp.json fan-out). Write-time
+        # Gate A scan in-route via ``scan_mcp_server_text`` (create in-body;
+        # update/patch through the ``_update_mcp_server_impl`` delegate) — the
+        # AST guard recognizes the wrapper + one-level delegation (#1579).
+        "context_mcp_servers.create_mcp_server",
+        "context_mcp_servers.patch_mcp_server",
+        "context_mcp_servers.update_mcp_server",
         "scratch.promote_scratch",
         # Promote appends a private-tier hook rule (free-form command
         # strings + a free-string event key) into the git-tracked shared
@@ -200,21 +210,15 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_commands.import_command": "structured artifact import; see above",
     "context_commands.import_commands": "bulk structured artifact import",
     "context_commands.sync_commands": "filesystem-driven sync; see above",
-    # The mcp-servers editors DO scan in-route (Gate A before the write) via
-    # ``scan_mcp_server_text``, an engine wrapper around enforce_write_guard.
-    # They stay EXEMPT only because the AST guard does not recognize the
-    # wrapper name (and update/patch delegate to _update_mcp_server_impl);
-    # migrating them to _REDACTION_PROTECTED needs a guard extension — a
-    # tracked follow-up to #1509.
-    "context_mcp_servers.create_mcp_server": (
-        "scans in-route via scan_mcp_server_text; wrapper name not recognized by the AST guard"
-    ),
-    "context_mcp_servers.update_mcp_server": (
-        "scans in-route via scan_mcp_server_text inside _update_mcp_server_impl; see above"
-    ),
-    "context_mcp_servers.patch_mcp_server": "same _update_mcp_server_impl delegate; see above",
+    # The mcp-servers create/update/patch editors moved to _REDACTION_PROTECTED
+    # (#1579): they scan in-route via ``scan_mcp_server_text`` and the AST guard
+    # now recognizes the wrapper + one-level ``_update_mcp_server_impl``
+    # delegation. Only the payload-free operations stay EXEMPT here.
     "context_mcp_servers.delete_mcp_server": "delete-only, no payload",
-    "context_mcp_servers.sync_mcp_servers": "filesystem-driven sync; see above",
+    "context_mcp_servers.sync_mcp_servers": (
+        "filesystem-driven fan-out of already-canonical bytes; Gate A runs "
+        "in-engine on the canonical tree, no HTTP-layer content payload"
+    ),
     # Wiki install/update (ADR-0008 PR-E E-3): snapshots existing wiki canonical
     # bytes into <project>/.memtomem/; no user payload (update body is just
     # ``force``). Gate A runs in-engine on the wiki source tree before the copy.
@@ -428,6 +432,85 @@ def _arg_names(call: ast.Call) -> set[str]:
 _BLOCKED_DECISIONS = frozenset({"blocked", "blocked_project_shared"})
 
 
+# Engine scan wrappers that internally call ``enforce_write_guard`` and
+# self-refuse (raise on a blocked decision) — recognized as a chokepoint,
+# like a direct ``enforce_write_guard`` call. Explicit allow-list so an
+# unrelated helper name cannot silently satisfy the invariant (#1579). A call
+# to one of these names is trusted only when the name is soundly bound to the
+# engine import (``_trusted_engine_wrappers``), never a rebinding / shadow.
+_ENGINE_SCAN_WRAPPERS = frozenset({"scan_mcp_server_text"})
+_ENGINE_WRAPPER_MODULE = "memtomem.context.mcp_servers"
+
+# Local-module delegation targets the guard follows exactly one level deep
+# (``update``/``patch`` → ``_update_mcp_server_impl``). An explicit allow-list,
+# NOT "any sibling function": following any sibling that happens to scan would
+# let a handler delegate the scan to unrelated content and write its own body
+# unscanned, yet still pass (#1579 review — Codex). A new delegating handler
+# must add its delegate here.
+_DELEGATE_TARGETS = frozenset({"_update_mcp_server_impl"})
+
+
+def _trusted_engine_wrappers(tree: ast.Module) -> set[str]:
+    """``_ENGINE_SCAN_WRAPPERS`` names soundly bound to the trusted engine import.
+
+    A wrapper name is trusted as the self-refusing chokepoint only when the
+    module imports it *from* ``memtomem.context.mcp_servers`` (no alias) and
+    nothing else binds it *at module scope*. Trust is the single canonical
+    import; ANY other module-scope binding of the name drops it — a ``def`` /
+    ``class`` (even nested in a top-level ``if`` / ``try`` / ``with``), an
+    import from a different module, a ``from other import *`` wildcard that
+    could shadow it, a ``match`` capture, or any Store (plain / annotated /
+    augmented assignment, tuple/list destructuring, ``for`` / ``with`` target,
+    walrus). We walk the module's OWN scope (``_walk_own_scope``, not
+    ``ast.walk``) so a binding inside a top-level compound statement counts but
+    one inside a nested function / class body does not — that is a different
+    scope, whose trust boundary is code review + the runtime 422 tests.
+    Name-only matching would let a shadow / rebinding masquerade as the trusted
+    wrapper (#1579 review — Codex).
+    """
+    imported: set[str] = set()
+    rebound: set[str] = set()
+    for node in _walk_own_scope(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    # A wildcard from a non-canonical module could bind any
+                    # wrapper name — we cannot prove it does not; fail closed.
+                    if node.module != _ENGINE_WRAPPER_MODULE:
+                        rebound |= set(_ENGINE_SCAN_WRAPPERS)
+                    continue
+                bound = alias.asname or alias.name
+                if bound not in _ENGINE_SCAN_WRAPPERS:
+                    continue
+                if node.module == _ENGINE_WRAPPER_MODULE and alias.asname is None:
+                    imported.add(bound)
+                else:
+                    rebound.add(bound)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if bound in _ENGINE_SCAN_WRAPPERS:
+                    rebound.add(bound)
+        elif isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef):
+            if node.name in _ENGINE_SCAN_WRAPPERS:
+                rebound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            if node.id in _ENGINE_SCAN_WRAPPERS:
+                rebound.add(node.id)
+        elif isinstance(node, ast.MatchAs | ast.MatchStar):
+            if node.name in _ENGINE_SCAN_WRAPPERS:
+                rebound.add(node.name)
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest in _ENGINE_SCAN_WRAPPERS:
+                rebound.add(node.rest)
+        elif isinstance(node, ast.ExceptHandler):
+            # ``except ... as scan_mcp_server_text`` binds the name (the binder
+            # is ``ExceptHandler.name``, a str — not a ``Name`` Store node).
+            if node.name in _ENGINE_SCAN_WRAPPERS:
+                rebound.add(node.name)
+    return imported - rebound
+
+
 def _is_scan_decision(node: ast.AST, scan_vars: set[str]) -> bool:
     """True iff ``node`` is ``<scan_var>.decision`` for a tracked scan var."""
     return (
@@ -507,13 +590,43 @@ def _wrapper_scan_refused(func: ast.AST, scan_vars: set[str]) -> bool:
     return False
 
 
+def _sole_awaited_delegate(
+    node: ast.AsyncFunctionDef | ast.FunctionDef, module_funcs: set[str]
+) -> str | None:
+    """The allow-listed delegate a pure trampoline handler forwards to, or None.
+
+    Only a handler whose body is exactly ``return await <delegate>(...)`` (a
+    leading docstring aside) trampolines — the real ``update_mcp_server`` /
+    ``patch_mcp_server`` shape. A handler that does anything else in its own
+    scope (an own write before/around the ``await``, an un-awaited call) is not
+    a trampoline: its own-scope write could bypass the delegate's scan, so the
+    delegate is not followed (#1579 review — Codex). The delegate must be a
+    bare-name call to an ``_DELEGATE_TARGETS`` sibling defined in this module.
+    """
+    body = node.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # skip a docstring
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return None
+    value = body[0].value
+    if not isinstance(value, ast.Await) or not isinstance(value.value, ast.Call):
+        return None
+    call = value.value
+    name = _call_name(call)
+    if isinstance(call.func, ast.Name) and name in _DELEGATE_TARGETS and name in module_funcs:
+        return name
+    return None
+
+
 def _function_scans_and_refuses(module: str, function_name: str) -> bool:
     """Wrapper over :func:`_source_scans_and_refuses` reading a route module."""
     source = (ROUTES_DIR / f"{module}.py").read_text(encoding="utf-8")
     return _source_scans_and_refuses(source, function_name)
 
 
-def _source_scans_and_refuses(source: str, function_name: str) -> bool:
+def _source_scans_and_refuses(
+    source: str, function_name: str, *, _follow_delegation: bool = True
+) -> bool:
     """True iff ``function_name`` in ``source`` scans user content — and, when
     it scans through the thin ``scan_text_content`` wrapper, refuses on the
     result *bound to that scan*.
@@ -543,6 +656,14 @@ def _source_scans_and_refuses(source: str, function_name: str) -> bool:
     update).
     """
     tree = ast.parse(source)
+    # Sibling module-level functions — delegation targets we may follow one
+    # level deep (Module.body only; nested defs and imported symbols excluded).
+    module_funcs = {
+        n.name for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)
+    }
+    # Engine wrapper names soundly bound to the trusted engine import (not a
+    # shadow / rebinding) — the only bare names trusted as self-refusing.
+    trusted_wrappers = _trusted_engine_wrappers(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
             continue
@@ -565,6 +686,12 @@ def _source_scans_and_refuses(source: str, function_name: str) -> bool:
                     )
                 ):
                     has_chokepoint = True
+                # A bare-name engine scan wrapper that self-refuses internally
+                # (``scan_mcp_server_text``) — trusted like the chokepoint, but
+                # only when soundly bound to the engine import. A shadow / local
+                # def / rebinding of the same name does NOT count (#1579).
+                elif isinstance(f, ast.Name) and name in trusted_wrappers:
+                    has_chokepoint = True
             elif isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
                 # Track ``scan = scan_text_content(...)`` target names (plain
                 # Name targets only — see the convention note above).
@@ -576,6 +703,18 @@ def _source_scans_and_refuses(source: str, function_name: str) -> bool:
             return True
         if scan_vars:
             return _wrapper_scan_refused(node, scan_vars)
+        # Follow one level of local-module delegation, but ONLY for a pure
+        # ``return await _update_mcp_server_impl(...)`` trampoline (``update`` /
+        # ``patch``). A handler that also writes in its own scope is not a
+        # trampoline — that own-scope write could bypass the delegate's scan
+        # (#1579 review — Codex). Depth is bounded to 1 via the recursive
+        # ``_follow_delegation=False`` — a scan two hops away is not seen.
+        if _follow_delegation:
+            delegate = _sole_awaited_delegate(node, module_funcs)
+            if delegate is not None and _source_scans_and_refuses(
+                source, delegate, _follow_delegation=False
+            ):
+                return True
         return False
     return False
 
@@ -641,6 +780,12 @@ def test_redaction_protected_handlers_scan_and_refuse() -> None:
 
 def _one_handler(body: str) -> str:
     return "async def handler():\n" + textwrap.indent(textwrap.dedent(body), "    ")
+
+
+# A route module imports the engine wrapper from its canonical module; a bare
+# ``scan_mcp_server_text(...)`` call is trusted only under this binding
+# (see ``_trusted_engine_wrappers``). Prepended to the engine-wrapper sources.
+_ENGINE_IMPORT = f"from {_ENGINE_WRAPPER_MODULE} import scan_mcp_server_text\n\n\n"
 
 
 def test_detector_rejects_wrapper_scan_without_any_refusal() -> None:
@@ -805,6 +950,243 @@ def test_detector_rejects_walrus_bound_scan() -> None:
             raise_if_privacy_blocked(scan, kind="command", artifact_name=name)
         atomic_write_text(path, body.content)
         """
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_accepts_engine_wrapper_scan() -> None:
+    # #1579: an engine scan wrapper that self-refuses internally
+    # (``scan_mcp_server_text``) is a chokepoint, like a direct
+    # ``enforce_write_guard`` call — the ``create_mcp_server`` shape.
+    src = _ENGINE_IMPORT + _one_handler(
+        """
+        scan_mcp_server_text(body.content, source_path=path, project_root=root, surface="s")
+        atomic_write_text(path, body.content)
+        """
+    )
+    assert _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_accepts_delegated_scan() -> None:
+    # #1579: update/patch delegate to the allow-listed ``_update_mcp_server_impl``
+    # which scans; the guard follows one level of local-module delegation — the
+    # ``update_mcp_server`` → ``_update_mcp_server_impl`` shape.
+    src = _ENGINE_IMPORT + (
+        "async def _update_mcp_server_impl():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+        "\n"
+        "async def handler():\n"
+        "    return await _update_mcp_server_impl()\n"
+    )
+    assert _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_two_level_delegation() -> None:
+    # #1579: delegation follows exactly ONE level. A scan two hops away
+    # (handler → _update_mcp_server_impl → _deeper) is not seen — this keeps the
+    # guard from degrading into a full call-graph walker.
+    src = _ENGINE_IMPORT + (
+        "async def _deeper():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "\n"
+        "async def _update_mcp_server_impl():\n"
+        "    return await _deeper()\n"
+        "\n"
+        "async def handler():\n"
+        "    return await _update_mcp_server_impl()\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_delegate_without_scan() -> None:
+    # #1579: following an allow-listed delegate that does not scan must not
+    # fabricate a pass.
+    src = (
+        "async def _update_mcp_server_impl():\n"
+        "    atomic_write_text(path, body.content)\n"
+        "\n"
+        "async def handler():\n"
+        "    return await _update_mcp_server_impl()\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_non_allowlisted_delegate_that_scans() -> None:
+    # #1579 (review — Codex): delegation is an explicit allow-list, NOT "any
+    # sibling that scans". A handler that delegates to an unrelated sibling
+    # which scans *different* content, then writes the body unscanned, must not
+    # pass — the sibling is not in ``_DELEGATE_TARGETS``.
+    src = _ENGINE_IMPORT + (
+        "async def _unrelated_helper():\n"
+        '    scan_mcp_server_text(other.content, surface="s")\n'
+        "\n"
+        "async def handler():\n"
+        "    await _unrelated_helper()\n"
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_shadowed_engine_wrapper() -> None:
+    # #1579 (review — Codex): a module-local ``def`` shadowing the engine
+    # wrapper name is not the trusted engine import — even alongside the real
+    # import — so a call to it is not a self-refusing chokepoint.
+    src = _ENGINE_IMPORT + (
+        "def scan_mcp_server_text(*a, **k):\n"
+        "    return None\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_reassigned_engine_wrapper() -> None:
+    # #1579 (review — Codex): a top-level reassignment of the wrapper name is
+    # not the trusted engine import, even alongside the real import.
+    src = _ENGINE_IMPORT + (
+        "scan_mcp_server_text = lambda *a, **k: None\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_wrapper_imported_from_other_module() -> None:
+    # #1579 (review — Codex): the wrapper name imported from a *different*
+    # module is not the trusted engine chokepoint.
+    src = (
+        "from other.module import scan_mcp_server_text\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_wildcard_import_shadow() -> None:
+    # #1579 (review — Codex): a non-canonical ``import *`` could shadow the
+    # wrapper name, so the guard fails closed even alongside the real import.
+    src = (
+        _ENGINE_IMPORT + "from other.module import *\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_tuple_destructured_wrapper() -> None:
+    # #1579 (review — Codex): a tuple/list destructuring assignment rebinds the
+    # wrapper name just like a plain assignment, even alongside the real import.
+    src = _ENGINE_IMPORT + (
+        "scan_mcp_server_text, _other = (None, None)\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_def_shadow_in_compound_stmt() -> None:
+    # #1579 (review — Codex): a shadow ``def`` nested in a top-level compound
+    # statement is still a module-scope binding — it executes in module scope,
+    # so it drops trust even alongside the real import.
+    src = _ENGINE_IMPORT + (
+        "if True:\n"
+        "    def scan_mcp_server_text(*a, **k):\n"
+        "        return None\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_foreign_import_in_compound_stmt() -> None:
+    # #1579 (review — Codex): a foreign import nested in a top-level compound
+    # statement is a module-scope rebinding too.
+    src = _ENGINE_IMPORT + (
+        "if True:\n"
+        "    from other.module import scan_mcp_server_text\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_match_capture_shadow() -> None:
+    # #1579 (review — Codex): a top-level ``match`` capture binds the wrapper
+    # name in module scope, so it drops trust.
+    src = _ENGINE_IMPORT + (
+        "match value:\n"
+        "    case scan_mcp_server_text:\n"
+        "        pass\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_except_handler_binding() -> None:
+    # #1579 (review — Codex): ``except ... as scan_mcp_server_text`` binds the
+    # wrapper name in module scope (the binder is ExceptHandler.name, a str),
+    # so it drops trust.
+    src = _ENGINE_IMPORT + (
+        "try:\n"
+        "    pass\n"
+        "except Exception as scan_mcp_server_text:\n"
+        "    pass\n"
+        "\n"
+        "async def handler():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_unawaited_delegate() -> None:
+    # #1579 (review — Codex): an un-awaited call to the async delegate never
+    # runs its scan — constructing the coroutine and then writing the body is a
+    # bypass, not a delegated scan. Only a ``return await <delegate>(...)``
+    # trampoline is followed.
+    src = _ENGINE_IMPORT + (
+        "async def _update_mcp_server_impl():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+        "\n"
+        "async def handler():\n"
+        "    _update_mcp_server_impl()\n"
+        "    atomic_write_text(path, body.content)\n"
+    )
+    assert not _source_scans_and_refuses(src, "handler")
+
+
+def test_detector_rejects_write_before_awaited_delegate() -> None:
+    # #1579 (review — Codex): delegation is followed ONLY for a pure
+    # ``return await <delegate>(...)`` trampoline. A handler that writes in its
+    # own scope before awaiting the delegate could bypass the delegate's scan,
+    # so it is not a trampoline and is not followed.
+    src = _ENGINE_IMPORT + (
+        "async def _update_mcp_server_impl():\n"
+        '    scan_mcp_server_text(body.content, surface="s")\n'
+        "    atomic_write_text(path, body.content)\n"
+        "\n"
+        "async def handler():\n"
+        "    atomic_write_text(path, body.content)\n"
+        "    return await _update_mcp_server_impl()\n"
     )
     assert not _source_scans_and_refuses(src, "handler")
 
