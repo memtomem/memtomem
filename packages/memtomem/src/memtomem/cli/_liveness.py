@@ -1,7 +1,8 @@
-"""Server liveness probe shared by ``mm uninstall`` and ``mm upgrade``.
+"""Process liveness probes shared by ``mm uninstall`` and ``mm upgrade``.
 
-Both commands need to know whether a ``memtomem-server`` process is currently
-holding the pid lock file. The probe uses ``portalocker.lock(LOCK_EX | LOCK_NB)``
+Both commands need to know whether a ``memtomem-server`` (or ``mm web``)
+process is currently holding its pid lock file. The probe uses
+``portalocker.lock(LOCK_EX | LOCK_NB)``
 — if we can acquire it, no live writer is holding the file (it's a stale
 leftover or fresh and unowned). If we cannot, a writer is alive, regardless
 of whether the recorded PID is still valid or has been recycled.
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import portalocker
 
-from memtomem._runtime_paths import legacy_server_pid_path, server_pid_path
+from memtomem._runtime_paths import legacy_server_pid_path, server_pid_path, web_pid_path
 
 
 @dataclass(frozen=True)
@@ -116,3 +117,16 @@ def check_server_liveness() -> ServerState:
         if state.alive:
             return state
     return ServerState(alive=False, pid=None, pid_file=None)
+
+
+def check_web_liveness() -> ServerState:
+    """Probe ``mm web``'s pid file (``web.pid``).
+
+    Same portalocker contract as the server probe: ``web._web_pid_lock``
+    holds ``LOCK_EX`` on the file for the UI process lifetime, and
+    ``_parse_pid_payload`` already understands its pid/port/started
+    payload. Kept separate from :func:`check_server_liveness` so callers
+    that only care about the MCP server (and their tests) are unaffected
+    (#1569).
+    """
+    return probe_pid_file(web_pid_path())

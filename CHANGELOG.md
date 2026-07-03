@@ -166,6 +166,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **`mm upgrade` now stops a running `mm web` too, not just the MCP server**
+  (#1569). The command exists to prevent the "on-disk bytes swapped but a live
+  process keeps running the old version" split-brain, but its liveness probe
+  only covered the server pid files — a backgrounded `mm web` (a live
+  SQLite/WAL writer holding `web.pid` under the same flock contract) survived
+  the reinstall and kept serving the previous version against the shared DB.
+  The upgrade plan now probes `web.pid` alongside `server.pid`, stops the web
+  UI with the same SIGTERM → grace → SIGKILL ladder, sweeps its `web.json`
+  metadata sidecar on the SIGKILL path, and reports every stopped pid;
+  `--dry-run --json` lists the web pid in `would_kill`/`would_remove`. On
+  Windows the manual-stop warning now names `mm web` as well.
 - **Concurrent MCP memory-CRUD calls on the same file no longer lose updates or
   corrupt an unrelated entry** (#1570). `mem_edit` / `mem_delete` did their
   read → rewrite (`replace_chunk_body` / `remove_lines`) → re-index → rollback

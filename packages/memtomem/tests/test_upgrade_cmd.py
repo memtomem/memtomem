@@ -57,8 +57,13 @@ def fake_uv(monkeypatch):
     return calls, configure
 
 
-def _patch_liveness(monkeypatch, state: ServerState) -> None:
+_DEAD = ServerState(alive=False, pid=None, pid_file=None)
+
+
+def _patch_liveness(monkeypatch, state: ServerState, web: ServerState = _DEAD) -> None:
+    """Patch both probes; web defaults to dead so tests never touch the real runtime dir."""
     monkeypatch.setattr(upgrade_cmd, "check_server_liveness", lambda: state)
+    monkeypatch.setattr(upgrade_cmd, "check_web_liveness", lambda: web)
 
 
 # ---------------------------------------------------------------- tests
@@ -74,7 +79,7 @@ def test_no_running_server_just_reinstalls(monkeypatch, fake_uv, force_tty):
 
     result = CliRunner().invoke(cli, ["upgrade", "-y"])
     assert result.exit_code == 0, result.output
-    assert "No running server detected" in result.output
+    assert "No running server or web UI detected" in result.output
     assert calls == [["uv", "tool", "install", "--refresh", "--reinstall", "memtomem"]]
 
 
@@ -273,6 +278,168 @@ def test_pid_file_unlink_skipped_if_respawned(monkeypatch, tmp_path, fake_uv, fo
     assert result.exit_code == 0, result.output
     assert pid_file.exists()
     assert "freshly started writer" in result.output
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: web-UI kill path; Windows skips process termination entirely (covered by test_windows_skips_web_kill)",
+)
+def test_running_web_ui_is_stopped(monkeypatch, tmp_path, fake_uv, force_tty):
+    """#1569: a live ``mm web`` must be stopped, not survive the byte-swap."""
+    calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    web_info_file = tmp_path / "web.json"
+    web_info_file.write_text('{"pid": 4242, "port": 8080}')
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "1"])
+    assert result.exit_code == 0, result.output
+    assert "Stop running web UI (pid 4242" in result.output
+    assert (4242, upgrade_cmd.signal.SIGTERM) in sent
+    assert not web_pid_file.exists()
+    # SIGKILL-path leftover metadata sidecar is swept alongside the pid file.
+    assert not web_info_file.exists()
+    assert "Stopped pid 4242." in result.output
+    assert calls  # uv was invoked
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: kill paths; Windows skips process termination entirely (covered by test_windows_skips_web_kill)",
+)
+def test_server_and_web_both_stopped(monkeypatch, tmp_path, fake_uv, force_tty):
+    _calls, _configure = fake_uv
+    server_pid_file = tmp_path / "server.pid"
+    server_pid_file.write_text("12345")
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    _patch_liveness(
+        monkeypatch,
+        ServerState(alive=True, pid=12345, pid_file=server_pid_file),
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "1"])
+    assert result.exit_code == 0, result.output
+    assert (12345, upgrade_cmd.signal.SIGTERM) in sent
+    assert (4242, upgrade_cmd.signal.SIGTERM) in sent
+    assert not server_pid_file.exists()
+    assert not web_pid_file.exists()
+    assert "Stopped pids 12345, 4242." in result.output
+
+
+def test_dry_run_json_includes_web(monkeypatch, tmp_path, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["would_kill"] == [4242]
+    assert payload["would_remove"] == [str(web_pid_file)]
+    assert calls == []
+    assert web_pid_file.exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: exercises the sidecar respawn-detection path; Windows skips kill entirely",
+)
+def test_web_sidecar_kept_if_respawned_after_pid_cleanup(monkeypatch, tmp_path, fake_uv, force_tty):
+    """A web UI respawned between the pid-file cleanup and the sidecar sweep
+    must keep its fresh ``web.json``."""
+    _calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    web_info_file = tmp_path / "web.json"
+    web_info_file.write_text('{"pid": 99999, "port": 8080}')
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(upgrade_cmd, "_pid_alive", lambda pid: False)
+
+    # First re-probe (pid-file unlink guard in _stop_server) sees no holder;
+    # second re-probe (sidecar sweep) sees the respawned web UI.
+    probes = iter(
+        [
+            ServerState(alive=False, pid=None, pid_file=web_pid_file),
+            ServerState(alive=True, pid=99999, pid_file=web_pid_file),
+        ]
+    )
+    monkeypatch.setattr(upgrade_cmd, "probe_pid_file", lambda p: next(probes))
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--grace", "0.1"])
+    assert result.exit_code == 0, result.output
+    assert not web_pid_file.exists()
+    assert web_info_file.exists()
+
+
+def test_windows_dry_run_json_reports_no_kills(monkeypatch, tmp_path, fake_uv, force_tty):
+    """Windows skips the kill stage, so dry-run JSON must not claim otherwise."""
+    calls, _configure = fake_uv
+    server_pid_file = tmp_path / "server.pid"
+    server_pid_file.write_text("12345")
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    _patch_liveness(
+        monkeypatch,
+        ServerState(alive=True, pid=12345, pid_file=server_pid_file),
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.sys, "platform", "win32")
+
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["would_kill"] == []
+    assert payload["would_remove"] == []
+    assert calls == []
+
+
+def test_windows_skips_web_kill(monkeypatch, tmp_path, fake_uv, force_tty):
+    calls, _configure = fake_uv
+    web_pid_file = tmp_path / "web.pid"
+    web_pid_file.write_text("4242\n8080\n2026-07-03T00:00:00+00:00\n")
+    _patch_liveness(
+        monkeypatch,
+        _DEAD,
+        web=ServerState(alive=True, pid=4242, pid_file=web_pid_file, port=8080),
+    )
+    monkeypatch.setattr(upgrade_cmd.sys, "platform", "win32")
+
+    def boom(*_a, **_k):
+        raise AssertionError("os.kill must not be called on Windows")
+
+    monkeypatch.setattr(upgrade_cmd.os, "kill", boom)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "Detected Windows" in result.output
+    assert "mm web" in result.output
+    assert calls  # uv still ran
+    assert web_pid_file.exists()
 
 
 def test_version_specifier_rejected(monkeypatch, fake_uv, force_tty):

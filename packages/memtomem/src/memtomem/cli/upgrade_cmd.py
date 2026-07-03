@@ -1,18 +1,22 @@
-"""CLI: ``mm upgrade`` — stop the running server, then reinstall.
+"""CLI: ``mm upgrade`` — stop running memtomem processes, then reinstall.
 
 ``uv tool install --reinstall memtomem`` only replaces the on-disk bytes;
 any ``memtomem-server`` process already imported by an MCP client keeps
 running the old code until it exits. That split-brain is exactly what
 caused the v0.1.25 → v0.1.26 stale ``.server.pid`` repro that motivated
-issue #443. ``mm upgrade`` wraps the reinstall with process-level hygiene:
+issue #443. The same applies to a backgrounded ``mm web`` — it holds
+``web.pid`` and keeps serving the previous version against the shared DB
+(#1569). ``mm upgrade`` wraps the reinstall with process-level hygiene:
 
-    probe live server → SIGTERM (escalate to SIGKILL after grace) →
-    unlink stale pid file → ``uv tool install --refresh --reinstall``.
+    probe live server + web UI → SIGTERM (escalate to SIGKILL after
+    grace) → unlink stale pid files → ``uv tool install --refresh
+    --reinstall``.
 
 There is no ``--skip-pkill``: the kill-then-reinstall ordering is the
 whole reason this command exists. On Windows the kill stage is skipped
 automatically (POSIX advisory flock + signals are unavailable) and the
-user is told to stop the server manually if they observe a split-brain.
+user is told to stop the processes manually if they observe a
+split-brain.
 """
 
 from __future__ import annotations
@@ -29,7 +33,12 @@ from pathlib import Path
 
 import click
 
-from memtomem.cli._liveness import ServerState, check_server_liveness, probe_pid_file
+from memtomem.cli._liveness import (
+    ServerState,
+    check_server_liveness,
+    check_web_liveness,
+    probe_pid_file,
+)
 
 # Bare PEP 440 release identifier — no operators, no whitespace. We pin
 # with ``memtomem==<version>``, so accepting a specifier like ``>=0.1.30``
@@ -74,10 +83,12 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path]]:
-    """SIGTERM the live server, escalate to SIGKILL after ``grace`` seconds.
+    """SIGTERM the live pid-file holder, escalate to SIGKILL after ``grace`` seconds.
 
-    Returns ``(killed_pids, removed_pid_files)``. Caller is responsible
-    for skipping this on Windows / when ``state.alive`` is False.
+    Works on any :class:`ServerState` — the MCP server and ``mm web``
+    both hold their pid file with the same flock contract. Returns
+    ``(killed_pids, removed_pid_files)``. Caller is responsible for
+    skipping this on Windows / when ``state.alive`` is False.
     """
     killed: list[int] = []
     removed: list[Path] = []
@@ -92,7 +103,7 @@ def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path
             pid = None
         except PermissionError as exc:
             raise click.ClickException(
-                f"cannot signal pid {pid}: {exc}. Stop the server manually and retry."
+                f"cannot signal pid {pid}: {exc}. Stop the process manually and retry."
             ) from exc
 
         # Poll for exit. server's ``_install_sigterm_handler`` (#439)
@@ -246,18 +257,23 @@ def upgrade(
     json_out: bool,
     dry_run: bool,
 ) -> None:
-    """Stop a running memtomem-server, then reinstall via ``uv tool``.
+    """Stop a running memtomem-server and Web UI, then reinstall via ``uv tool``.
 
     The canonical ``uv tool install --reinstall memtomem`` only swaps the
-    on-disk bytes; any server already imported by an MCP client keeps
-    running the previous version. ``mm upgrade`` adds the missing
-    process-level hygiene step around it.
+    on-disk bytes; any server already imported by an MCP client — and any
+    backgrounded ``mm web`` (#1569) — keeps running the previous version.
+    ``mm upgrade`` adds the missing process-level hygiene step around it.
     """
     is_windows = sys.platform == "win32"
     state = check_server_liveness()
+    web_state = check_web_liveness()
     extras, extras_auto = _resolve_extras(extras_flag)
     install_cmd = _build_install_cmd(version, extras)
     pkg_target = install_cmd[-1]
+    live_states = [s for s in (state, web_state) if s.alive]
+    # Windows skips the kill stage entirely, so a truthful plan/dry-run
+    # must not claim we would kill or remove anything there.
+    planned_stops = [] if is_windows else live_states
 
     # ----- plan -----
     if not json_out:
@@ -265,18 +281,21 @@ def upgrade(
         if is_windows:
             click.secho(
                 "  Detected Windows; skipping process termination. "
-                "Stop the server manually before rerunning if you see a "
-                "split-brain after upgrade.",
+                "Stop the server (and any `mm web`) manually before "
+                "rerunning if you see a split-brain after upgrade.",
                 fg="yellow",
             )
-        elif state.alive:
-            pid_repr = state.pid if state.pid is not None else "?"
-            pid_file_repr = _format_path(state.pid_file) if state.pid_file else "?"
-            click.echo(f"  Stop running server (pid {pid_repr}, lock {pid_file_repr})")
-            click.echo(f"  Wait up to {grace:g}s for graceful exit, then SIGKILL")
-            click.echo(f"  Remove stale {pid_file_repr}")
+        elif live_states:
+            for live, label in ((state, "server"), (web_state, "web UI")):
+                if not live.alive:
+                    continue
+                pid_repr = live.pid if live.pid is not None else "?"
+                pid_file_repr = _format_path(live.pid_file) if live.pid_file else "?"
+                click.echo(f"  Stop running {label} (pid {pid_repr}, lock {pid_file_repr})")
+                click.echo(f"  Wait up to {grace:g}s for graceful exit, then SIGKILL")
+                click.echo(f"  Remove stale {pid_file_repr}")
         else:
-            click.echo("  No running server detected — reinstall only")
+            click.echo("  No running server or web UI detected — reinstall only")
         if extras:
             source = "auto-detected from uv tool receipt" if extras_auto else "from --extras"
             click.echo(f"  Extras: [{','.join(extras)}] ({source})")
@@ -291,10 +310,10 @@ def upgrade(
                     {
                         "ok": True,
                         "dry_run": True,
-                        "would_kill": [state.pid] if (state.alive and state.pid) else [],
-                        "would_remove": (
-                            [str(state.pid_file)] if (state.alive and state.pid_file) else []
-                        ),
+                        "would_kill": [s.pid for s in planned_stops if s.pid is not None],
+                        "would_remove": [
+                            str(s.pid_file) for s in planned_stops if s.pid_file is not None
+                        ],
                         "would_install": install_cmd,
                         "extras": extras,
                         "version": version,
@@ -323,9 +342,28 @@ def upgrade(
     # ----- stop -----
     killed: list[int] = []
     removed: list[Path] = []
-    if state.alive and not is_windows:
+    if planned_stops:
         try:
-            killed, removed = _stop_server(state, grace=grace)
+            for live in planned_stops:
+                stopped, cleaned = _stop_server(live, grace=grace)
+                killed.extend(stopped)
+                removed.extend(cleaned)
+            if web_state.pid_file is not None and web_state.pid_file in removed:
+                # ``mm web`` unlinks its ``web.json`` metadata sidecar on a
+                # graceful SIGTERM but not on the SIGKILL path; sweep it so
+                # the next start doesn't inherit stale pid/port metadata.
+                # Re-probe right before the unlink (mirroring the pid-file
+                # guard in _stop_server): a web UI respawned after the pid
+                # file was cleaned must keep its fresh sidecar.
+                from memtomem.cli.web import _WEB_INFO_NAME
+
+                info_file = web_state.pid_file.with_name(_WEB_INFO_NAME)
+                if info_file.exists() and not probe_pid_file(web_state.pid_file).alive:
+                    try:
+                        info_file.unlink()
+                        removed.append(info_file)
+                    except OSError:
+                        pass
         except click.ClickException as exc:
             if json_out:
                 click.echo(_json.dumps({"ok": False, "error": str(exc)}))
@@ -385,7 +423,9 @@ def upgrade(
         return
 
     if killed:
-        click.secho(f"\nStopped pid {killed[0]}.", fg="green")
+        pids_repr = ", ".join(str(pid) for pid in killed)
+        noun = "pids" if len(killed) > 1 else "pid"
+        click.secho(f"\nStopped {noun} {pids_repr}.", fg="green")
     if removed:
         for path in removed:
             click.echo(f"Removed {_format_path(path)}.")
