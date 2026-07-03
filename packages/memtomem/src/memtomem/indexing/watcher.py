@@ -240,27 +240,51 @@ class FileWatcher:
             try:
                 file_path = await asyncio.wait_for(self._queue.get(), timeout=self._debounce_s)
                 if file_path == _STOP_SENTINEL:
-                    # Flush remaining pending files before exiting
+                    # Flush remaining pending files before exiting. A file whose
+                    # reindex times out on the sidecar is dropped here (we are
+                    # shutting down; the next start's backfill will catch it).
                     if pending:
-                        batch = list(pending)
-                        pending.clear()
-                        await asyncio.gather(
-                            *(self._reindex(p) for p in batch),
-                            return_exceptions=True,
-                        )
+                        await self._flush_batch(pending)
                     return
                 pending.add(file_path)
             except TimeoutError:
                 if pending:
-                    batch = list(pending)
-                    pending.clear()
-                    await asyncio.gather(
-                        *(self._reindex(p) for p in batch),
-                        return_exceptions=True,
-                    )
+                    # Reindex the batch and carry forward any file whose sidecar
+                    # acquire timed out, so the next debounce window retries it.
+                    pending = await self._flush_batch(pending)
                 continue
 
-    async def _reindex(self, file_path: Path) -> None:
+    async def _flush_batch(self, pending: set[Path]) -> set[Path]:
+        """Reindex every file in *pending*; return the set to retry next window.
+
+        ``_reindex`` returns a path when its sidecar acquire timed out (a CRUD
+        span or ``memory-migrate`` held the file past the budget) and ``None``
+        otherwise. Timed-out paths are re-queued by merging them back into the
+        in-memory ``pending`` set — NOT by ``put_nowait`` onto the bounded
+        watchdog queue, which drops under pressure and would silently lose the
+        event (#1587). The next ``_debounce_s`` timeout is the natural retry
+        backoff.
+        """
+        batch = list(pending)
+        results = await asyncio.gather(
+            *(self._reindex(p) for p in batch),
+            return_exceptions=True,
+        )
+        retry: set[Path] = set()
+        for path, result in zip(batch, results):
+            if isinstance(result, Path):
+                retry.add(result)
+            elif isinstance(result, BaseException) and not isinstance(result, Exception):
+                # Re-raise CancelledError / KeyboardInterrupt / SystemExit —
+                # ``return_exceptions=True`` captured them but they must not be
+                # swallowed as an ordinary reindex failure.
+                raise result
+        return retry
+
+    async def _reindex(self, file_path: Path) -> Path | None:
+        """Reindex one changed file. Returns ``file_path`` when the reindex
+        timed out acquiring the file's cross-process sidecar (so the caller can
+        retry it next window), else ``None``."""
         from memtomem.indexing.engine import PrivacyRejection
 
         try:
@@ -290,5 +314,17 @@ class FileWatcher:
                 file_path.name,
                 exc.hit_count,
             )
+        except TimeoutError:
+            # #1587: a CRUD span or ``memory-migrate`` held this file's sidecar
+            # past the bounded acquire budget. The change is NOT lost — return
+            # the path so ``_process_events`` retries it next debounce window
+            # (the debounce interval is the natural backoff). Warn, not error:
+            # this is expected contention, not a failure.
+            logger.warning(
+                "Auto-reindex deferred for %s: file locked by another writer; will retry",
+                file_path.name,
+            )
+            return file_path
         except Exception as exc:
             logger.error("Auto-reindex failed for %s: %s", file_path, exc)
+        return None

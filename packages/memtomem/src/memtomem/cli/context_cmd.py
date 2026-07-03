@@ -4504,11 +4504,16 @@ async def _memory_migrate_run(
     before.
     """
     import shutil
-    from contextlib import ExitStack
+    import time
+    from contextlib import AsyncExitStack
 
     from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.context._atomic import _file_lock, _lock_path_for
+    from memtomem.context._atomic import (
+        _MIGRATE_SIDECAR_LOCK_BUDGET_S,
+        _lock_path_for,
+        async_file_lock,
+    )
     from memtomem.memory_scope import (
         MemoryScopeError,
         is_project_tier_registered,
@@ -4730,20 +4735,40 @@ async def _memory_migrate_run(
         completed: list[tuple[Path, Path, int]] = []
         # Codex review round 1, Major 1: acquire locks in a globally
         # stable order (sorted by string path) rather than plan order.
-        # ``_file_lock`` uses blocking ``portalocker.LOCK_EX`` with no
-        # timeout (see ``context/_atomic.py``), so two concurrent batch
-        # migrations that share files in opposite orders would deadlock
-        # indefinitely. ``context/migrate.py`` sorts lock paths for the
-        # same reason. The unique set is built first so plan-order
-        # duplicates (same source dir matched twice) don't try to
-        # re-acquire the same lock on this thread.
+        # ``async_file_lock`` uses a bounded ``portalocker.LOCK_EX`` poll, so
+        # two concurrent batch migrations that share files in opposite orders
+        # cannot deadlock indefinitely; the sort keeps the acquisition order
+        # stable so they can't livelock either. ``context/migrate.py`` sorts
+        # lock paths for the same reason. The unique set is built first so
+        # plan-order duplicates (same source dir matched twice) don't try to
+        # re-acquire the same lock.
+        #
+        # #1587: acquire the sidecars via the ASYNC bounded primitive, not the
+        # synchronous blocking ``_file_lock``. This function is awaited by the
+        # MCP ``mem_context_memory_migrate`` tool, so a blocking ``LOCK_EX`` on
+        # the event loop would freeze the whole server if a watcher held one of
+        # these sidecars while suspended on an embed await (the sidecar is now
+        # held across CRUD spans too). ONE shared deadline bounds the WHOLE
+        # batch — per-lock timeouts would sum to N×budget (#1145) — so each lock
+        # gets only the remaining budget.
         all_lock_paths: set[Path] = set()
         for entry in plan:
             all_lock_paths.add(_lock_path_for(entry["source"]))
             all_lock_paths.add(_lock_path_for(entry["target"]))
-        with ExitStack() as stack:
+        deadline = time.monotonic() + _MIGRATE_SIDECAR_LOCK_BUDGET_S
+        async with AsyncExitStack() as stack:
             for lp in sorted(all_lock_paths, key=str):
-                stack.enter_context(_file_lock(lp))
+                remaining = deadline - time.monotonic()
+                try:
+                    if remaining <= 0:
+                        raise TimeoutError
+                    await stack.enter_async_context(async_file_lock(lp, timeout=remaining))
+                except TimeoutError:
+                    raise click.ClickException(
+                        f"could not acquire memory-migrate locks within "
+                        f"{_MIGRATE_SIDECAR_LOCK_BUDGET_S:g}s — a CRUD writer or another "
+                        "migrate is holding a memory file; retry."
+                    ) from None
 
             for i, entry in enumerate(plan, 1):
                 src, tgt = entry["source"], entry["target"]

@@ -426,7 +426,11 @@ class IndexEngine:
                 ReStructuredTextChunker(),
             ]
         )
-        self._index_lock = asyncio.Lock()  # prevent concurrent indexing of same files
+        # Prevent concurrent indexing of the same files. This is level L3 of the
+        # memory-file lock order (see ``context._atomic`` module docstring): the
+        # per-file sidecar (L2) is acquired ABOVE this lock, never below, so no
+        # path ever waits on a sidecar while holding ``_index_lock`` (#1587).
+        self._index_lock = asyncio.Lock()
         # Observability counter for ``GET /api/indexing/active`` — independent
         # of ``_index_lock`` because ``index_path_stream`` runs outside the
         # lock and ``asyncio.Lock.locked()`` is racy. Incremented on entry
@@ -596,8 +600,21 @@ class IndexEngine:
         *,
         force_unsafe: bool = False,
         already_scanned: bool = False,
+        lock_held: bool = False,
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
+
+        ``lock_held=True`` tells this method the caller already holds this
+        file's cross-process sidecar lock (L2) for the whole read→rewrite→
+        reindex span — the memory-CRUD tools, web chunk edit/delete, web/CLI
+        add, all of which mutate the file and then reindex under one
+        ``async_file_lock`` (issue #1587). Re-acquiring the sidecar here would
+        self-deadlock (portalocker contends between fds within one process), so
+        this path skips straight to ``_index_lock`` (L3). It also stands in for
+        the #1566 "parent dir gone" case, whose outermost acquirer likewise
+        skips the sidecar (see below). Un-serialized callers (watcher, backfill,
+        ``mm index <file>``, importers) leave it ``False`` and this method takes
+        the sidecar itself, off the event loop, bounded.
 
         ``already_scanned=True`` skips the ADR-0006 redaction gate for callers
         that already ran ``privacy.enforce_write_guard`` on the new content at
@@ -651,42 +668,34 @@ class IndexEngine:
             )
         self._active_runs += 1
         try:
-            async with self._index_lock:
-                start = time.monotonic()
-                # ADR-0011 PR-D round 11 (B2): cross-process advisory
-                # lock so the sibling sidecar lock taken by
-                # ``mm context memory-migrate`` is honored on this
-                # path too. Without this, a watcher firing
-                # ``index_file(target)`` mid-migrate races with
-                # migrate's ``shutil.move`` + DB UPDATE pair —
-                # migrate's lock alone is one-sided. The lock is
-                # ``portalocker.LOCK_EX`` (blocking); the typical
-                # window is sub-millisecond so brief event-loop
-                # blocking is acceptable. Migrate holds the lock for
-                # at most the duration of one DB UPDATE, so watcher
-                # contention is bounded.
-                from memtomem.context._atomic import _file_lock, _lock_path_for
+            # ADR-0011 PR-D round 11 (B2): cross-process advisory lock so the
+            # sibling sidecar lock taken by ``mm context memory-migrate`` is
+            # honored on this path too. Without it, a watcher firing
+            # ``index_file(target)`` mid-migrate races with migrate's
+            # ``shutil.move`` + DB UPDATE pair (migrate's lock alone is
+            # one-sided). #1587 hoists this sidecar acquire ABOVE ``_index_lock``
+            # (L2 before L3) and makes it async + bounded, so it can never freeze
+            # the loop while a suspended holder needs it — and lets CRUD callers
+            # hold the sidecar across their whole read→rewrite→reindex span and
+            # reach here with ``lock_held=True`` instead of self-deadlocking.
+            from memtomem.context._atomic import (
+                _MEMORY_SIDECAR_LOCK_BUDGET_S,
+                _lock_path_for,
+                async_file_lock,
+            )
 
-                resolved_path = file_path.resolve()
-                if resolved_path.parent.is_dir():
-                    with _file_lock(_lock_path_for(resolved_path)):
-                        result = await self._index_file(
-                            resolved_path,
-                            force,
-                            namespace=namespace,
-                            force_unsafe=force_unsafe,
-                            already_scanned=already_scanned,
-                        )
-                else:
-                    # #1566: the parent dir is gone (deleted subtree / unmounted
-                    # volume), so this is a delete-by-source pass for a vanished
-                    # file. Taking the sidecar lock would ``mkdir`` the deleted
-                    # parent back into existence (``_file_lock`` recreates
-                    # ``lock_path.parent``) just to hold a lock over a delete —
-                    # resurrecting the directory the user removed. ``_index_lock``
-                    # still serializes in-process; migrate's sidecar lock for this
-                    # path lives in the same missing parent, so no live pair-op
-                    # can be mid-flight on it.
+            resolved_path = file_path.resolve()
+            # Skip the sidecar when the caller already holds it (lock_held) or
+            # when the parent dir is gone (#1566: a delete-by-source pass for a
+            # vanished file — taking the sidecar would ``mkdir`` the deleted
+            # parent back into existence just to lock a delete, resurrecting the
+            # directory the user removed). ``_index_lock`` still serializes
+            # in-process; a migrate sidecar for a missing-parent path lives in
+            # that same missing parent, so no live pair-op can be mid-flight.
+            skip_sidecar = lock_held or not resolved_path.parent.is_dir()
+            if skip_sidecar:
+                async with self._index_lock:
+                    start = time.monotonic()
                     result = await self._index_file(
                         resolved_path,
                         force,
@@ -694,7 +703,22 @@ class IndexEngine:
                         force_unsafe=force_unsafe,
                         already_scanned=already_scanned,
                     )
-                duration = (time.monotonic() - start) * 1000
+                    duration = (time.monotonic() - start) * 1000
+            else:
+                async with async_file_lock(
+                    _lock_path_for(resolved_path),
+                    timeout=_MEMORY_SIDECAR_LOCK_BUDGET_S,
+                ):
+                    async with self._index_lock:
+                        start = time.monotonic()
+                        result = await self._index_file(
+                            resolved_path,
+                            force,
+                            namespace=namespace,
+                            force_unsafe=force_unsafe,
+                            already_scanned=already_scanned,
+                        )
+                        duration = (time.monotonic() - start) * 1000
         finally:
             self._active_runs -= 1
         return IndexingStats(

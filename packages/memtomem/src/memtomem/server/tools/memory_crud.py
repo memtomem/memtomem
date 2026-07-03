@@ -37,43 +37,65 @@ _CHUNK_LOCK_MOVE_RETRIES = 3
 async def _locked_chunk(
     app: AppContext, uid: UUID, chunk_id: str
 ) -> AsyncIterator[tuple[Chunk | None, str | None]]:
-    """Yield ``(chunk, None)`` with the per-source-file lock held and the
-    chunk re-fetched fresh under it, or ``(None, error_message)``.
+    """Yield ``(chunk, None)`` with the source file's L1+L2 locks held and the
+    chunk re-fetched fresh under them, or ``(None, error_message)``.
 
-    Two-step acquire (issue #1570): the lock key is the chunk's resolved
-    ``source_file``, which we only learn by fetching the chunk — so fetch
-    once *unlocked* to learn the path, acquire that file's lock, then
-    re-fetch *under* the lock so ``start_line`` / ``end_line`` reflect any
-    CRUD write that committed on the same file while we waited (chunk UUIDs
-    are stable across ``index_file(force=True)``, ADR-0005). If the file was
-    moved (``mm context memory-migrate``) between the two fetches, re-key
-    onto the new path and retry, bounded by ``_CHUNK_LOCK_MOVE_RETRIES``.
+    Three-step acquire (issues #1570, #1587):
 
-    Scope: serializes only same-process MCP CRUD. ``memory-migrate`` takes
-    the engine's sidecar lock, not this one, so the re-key covers a migrate
-    that *finished* before we locked — not one racing the edit span. Other
-    processes and a user's editor are likewise unguarded (out of scope for
-    #1570; tracked separately). Exactly one ``yield`` runs on every path so
-    the ``@asynccontextmanager`` protocol holds.
+    1. Fetch the chunk *unlocked* to learn its ``source_file`` — the lock key,
+       which we can only get by reading the chunk.
+    2. Acquire that file's in-process per-file lock (L1,
+       ``get_memory_file_lock``) *and* its cross-process sidecar (L2,
+       ``async_file_lock``). L2 is held for the whole span, so a second MCP
+       server, the CLI, or ``memory-migrate`` cannot mutate or move the file
+       under us — this is what closes the cross-process hole #1570 left open.
+    3. Re-fetch *under both locks* so ``start_line`` / ``end_line`` reflect any
+       CRUD write that committed while we waited (chunk UUIDs are stable across
+       ``index_file(force=True)``, ADR-0005).
+
+    If ``memory-migrate`` grabbed L2 first and moved the file between the
+    unlocked fetch and our re-fetch, the fresh chunk's ``source_file`` differs;
+    re-key onto the new path and retry, bounded by ``_CHUNK_LOCK_MOVE_RETRIES``.
+    A sidecar acquire that times out (another process holds it past the budget)
+    surfaces a retryable error instead of blocking. Exactly one ``yield`` runs
+    on every path so the ``@asynccontextmanager`` protocol holds.
     """
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        _lock_path_for,
+        async_file_lock,
+    )
+
     chunk = await app.storage.get_chunk(uid)
     if chunk is None:
         yield None, f"Error: chunk {chunk_id} not found."
         return
-    key = AppContext.memory_file_lock_key(chunk.metadata.source_file)
+    source_file = chunk.metadata.source_file
     for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
-        async with app.get_memory_file_lock(key):
-            fresh = await app.storage.get_chunk(uid)
-            if fresh is None:
-                yield None, f"Error: chunk {chunk_id} not found."
-                return
-            fresh_key = AppContext.memory_file_lock_key(fresh.metadata.source_file)
-            if fresh_key == key:
-                yield fresh, None
-                return
-        # Moved out from under us (migrate finished between fetches): re-key
-        # onto the new path and retry the fresh read there.
-        key = fresh_key
+        key = AppContext.memory_file_lock_key(source_file)
+        sidecar = _lock_path_for(source_file.expanduser().resolve())
+        try:
+            async with app.get_memory_file_lock(key):
+                async with async_file_lock(sidecar, timeout=_CRUD_SIDECAR_LOCK_BUDGET_S):
+                    fresh = await app.storage.get_chunk(uid)
+                    if fresh is None:
+                        yield None, f"Error: chunk {chunk_id} not found."
+                        return
+                    if AppContext.memory_file_lock_key(fresh.metadata.source_file) == key:
+                        yield fresh, None
+                        return
+                    # Moved out from under us (migrate re-scoped the chunk before
+                    # we took L2): re-key onto the new path and retry there.
+                    source_file = fresh.metadata.source_file
+        except TimeoutError:
+            yield (
+                None,
+                (
+                    f"Error: chunk {chunk_id} source file is locked by another process "
+                    "(migration in flight?); retry."
+                ),
+            )
+            return
     yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry."
 
 
@@ -87,9 +109,12 @@ async def _mutate_file_and_reindex(
 
     Shared tail of ``mem_edit`` and ``mem_delete``'s chunk branch so the
     rollback contract lives in exactly one place. The caller MUST hold the
-    file's memory-file lock: under it, no other locked CRUD writer can
-    commit between the backup read and the rollback ``write_text``, so
-    restoring ``original`` reverts only this call's own mutation.
+    file's L1 *and* L2 locks (via ``_locked_chunk``): under them, no other
+    CRUD writer — in this process or any other, and no ``memory-migrate`` —
+    can commit between the backup read and the rollback ``write_text``, so
+    restoring ``original`` reverts only this call's own mutation. Because L2
+    is already held, both ``index_file`` calls pass ``lock_held=True`` to skip
+    the nested sidecar acquire that would otherwise self-deadlock (#1587).
 
     Returns ``(stats, None)`` on success or ``(None, error_message)`` after
     a rollback; ``op`` ("edit"/"delete") only shapes the messages.
@@ -97,13 +122,17 @@ async def _mutate_file_and_reindex(
     original = await asyncio.to_thread(source_file.read_text, encoding="utf-8")
     try:
         await asyncio.to_thread(mutate)
-        stats = await app.index_engine.index_file(source_file, force=True, already_scanned=True)
+        stats = await app.index_engine.index_file(
+            source_file, force=True, already_scanned=True, lock_held=True
+        )
         app.search_pipeline.invalidate_cache()
         return stats, None
     except Exception as exc:
         await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")
         try:
-            await app.index_engine.index_file(source_file, force=True, already_scanned=True)
+            await app.index_engine.index_file(
+                source_file, force=True, already_scanned=True, lock_held=True
+            )
         except Exception:
             logger.warning("Rollback re-index also failed", exc_info=True)
         app.search_pipeline.invalidate_cache()
@@ -391,21 +420,41 @@ async def _mem_add_core(
 
     assert target is not None
 
-    # Serialize append + re-index under the per-file lock (issue #1570): a
-    # concurrent mem_edit/mem_delete rollback restores its own pre-image, so
-    # an append landing mid-span would be silently erased without this.
-    async with app.get_memory_file_lock(target):
-        # Resolve the session-derived namespace *inside* the lock: waiting on
-        # the lock is a suspension point, and the active session can change
-        # during it — the entry must land under the namespace active at write
-        # time, not one captured before the wait.
-        effective_ns = namespace or _resolve_agent_namespace(app, None)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
-        # Re-index the whole file via the standard pipeline so the watcher
-        # (which also calls index_file) produces identical hashes → no duplicates.
-        stats = await app.index_engine.index_file(
-            target, namespace=effective_ns, already_scanned=True
+    # Serialize append + re-index under the per-file lock (issue #1570) plus the
+    # cross-process sidecar (issue #1587): a concurrent mem_edit/mem_delete
+    # rollback — in this process OR another server/CLI — restores its own
+    # pre-image, so an append landing mid-span would be silently erased without
+    # both. ``lock_held=True`` skips index_file's nested sidecar acquire.
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        _lock_path_for,
+        async_file_lock,
+    )
+
+    try:
+        async with (
+            app.get_memory_file_lock(target),
+            async_file_lock(
+                _lock_path_for(target.expanduser().resolve()),
+                timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
+            ),
+        ):
+            # Resolve the session-derived namespace *inside* the lock: waiting on
+            # the lock is a suspension point, and the active session can change
+            # during it — the entry must land under the namespace active at write
+            # time, not one captured before the wait.
+            effective_ns = namespace or _resolve_agent_namespace(app, None)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+            # Re-index the whole file via the standard pipeline so the watcher
+            # (which also calls index_file) produces identical hashes → no dups.
+            stats = await app.index_engine.index_file(
+                target, namespace=effective_ns, already_scanned=True, lock_held=True
+            )
+    except TimeoutError:
+        return (
+            f"Error: {target} is locked by another process (migration in flight?); retry.",
+            None,
         )
     app.search_pipeline.invalidate_cache()
 
@@ -718,24 +767,42 @@ async def mem_delete(
         if sf_err:
             return sf_err
         assert sf_path is not None
-        # Same per-file lock as the chunk branch (issue #1570): without it a
-        # concurrent locked CRUD span's ``index_file(force=True)`` lands after
+        # Same per-file lock as the chunk branch (issue #1570) plus the
+        # cross-process sidecar (#1587): without both, a locked CRUD span's
+        # ``index_file(force=True)`` — in this process or another — lands after
         # this delete and re-upserts the whole file, silently resurrecting the
-        # rows just removed. The Gate-B scope probe runs under the lock too so
+        # rows just removed. The Gate-B scope probe runs under the locks too so
         # it sees the same state the delete acts on.
-        async with app.get_memory_file_lock(sf_path):
-            scopes = await app.storage.list_scopes_by_source(sf_path)
-            if "project_shared" in scopes and not confirm_project_shared:
-                logger.info(
-                    "mem_delete rejected bulk project_shared source without confirmation",
-                    extra={"source_file": str(sf_path), "scopes": sorted(scopes)},
-                )
-                return (
-                    "Error: source_file delete would remove scope='project_shared' chunks; "
-                    "pass confirm_project_shared=True to proceed. Bulk source deletes are "
-                    "all-or-nothing; use chunk_id for per-chunk control."
-                )
-            deleted = await app.storage.delete_by_source(sf_path)
+        from memtomem.context._atomic import (
+            _CRUD_SIDECAR_LOCK_BUDGET_S,
+            _lock_path_for,
+            async_file_lock,
+        )
+
+        try:
+            async with (
+                app.get_memory_file_lock(sf_path),
+                async_file_lock(
+                    _lock_path_for(sf_path.expanduser().resolve()),
+                    timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
+                ),
+            ):
+                scopes = await app.storage.list_scopes_by_source(sf_path)
+                if "project_shared" in scopes and not confirm_project_shared:
+                    logger.info(
+                        "mem_delete rejected bulk project_shared source without confirmation",
+                        extra={"source_file": str(sf_path), "scopes": sorted(scopes)},
+                    )
+                    return (
+                        "Error: source_file delete would remove scope='project_shared' chunks; "
+                        "pass confirm_project_shared=True to proceed. Bulk source deletes are "
+                        "all-or-nothing; use chunk_id for per-chunk control."
+                    )
+                deleted = await app.storage.delete_by_source(sf_path)
+        except TimeoutError:
+            return (
+                f"Error: {source_file} is locked by another process (migration in flight?); retry."
+            )
         app.search_pipeline.invalidate_cache()
         return f"Removed {deleted} chunks from index for {source_file}"
 
@@ -748,6 +815,13 @@ async def mem_delete(
         # one of these locks without acquiring more — no cycle is possible.
         # A file that gains namespace chunks after this snapshot is not
         # locked (same point-in-time semantics the unlocked delete had).
+        #
+        # This branch stays L1-only (no L2 sidecar) by design (#1587): it is a
+        # DB-only bulk delete over N files with no file read/rewrite, and taking
+        # N sidecars would add a shared-deadline multi-resource acquire for a
+        # race whose only cross-process outcome — a concurrent add re-inserting
+        # rows for a file that still exists on disk — is coherent
+        # file-is-source-of-truth behavior, not corruption.
         sources = await app.storage.list_sources_by_namespace(namespace)
         lock_keys = sorted({AppContext.memory_file_lock_key(p) for p in sources})
         async with AsyncExitStack() as stack:
@@ -1012,18 +1086,34 @@ async def mem_batch_add(
             append_entry(target, value, title=key or None, tags=entry_tags)
         return skipped
 
-    # Serialize the batch append + re-index under the per-file lock so a
-    # concurrent mem_edit/mem_delete rollback cannot erase these entries
-    # (issue #1570), same as the single-entry mem_add path above.
-    async with app.get_memory_file_lock(target):
-        # Inside the lock for the same write-time-namespace reason as
-        # ``_mem_add_core`` — the session can change during the lock wait.
-        effective_ns = namespace or _resolve_agent_namespace(app, None)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        skipped = await asyncio.to_thread(_append_entries)
-        stats = await app.index_engine.index_file(
-            target, namespace=effective_ns, already_scanned=True
-        )
+    # Serialize the batch append + re-index under the per-file lock (issue
+    # #1570) plus the cross-process sidecar (#1587) so a concurrent
+    # mem_edit/mem_delete rollback — in this process or another — cannot erase
+    # these entries, same as the single-entry mem_add path above.
+    from memtomem.context._atomic import (
+        _CRUD_SIDECAR_LOCK_BUDGET_S,
+        _lock_path_for,
+        async_file_lock,
+    )
+
+    try:
+        async with (
+            app.get_memory_file_lock(target),
+            async_file_lock(
+                _lock_path_for(target.expanduser().resolve()),
+                timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
+            ),
+        ):
+            # Inside the lock for the same write-time-namespace reason as
+            # ``_mem_add_core`` — the session can change during the lock wait.
+            effective_ns = namespace or _resolve_agent_namespace(app, None)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            skipped = await asyncio.to_thread(_append_entries)
+            stats = await app.index_engine.index_file(
+                target, namespace=effective_ns, already_scanned=True, lock_held=True
+            )
+    except TimeoutError:
+        return f"Error: {target} is locked by another process (migration in flight?); retry."
     app.search_pipeline.invalidate_cache()
 
     display_ns = effective_ns or app.config.namespace.default_namespace

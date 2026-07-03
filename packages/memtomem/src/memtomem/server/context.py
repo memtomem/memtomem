@@ -143,13 +143,15 @@ class AppContext:
     # each snapshot the same pre-image and stale line range, then clobber
     # each other or splice over an unrelated entry (issue #1570).
     #
-    # In-process ONLY, by design. This serializes concurrent CRUD within a
-    # single MCP server process/event loop — the issue's realistic vector
-    # (several agents sharing one server). Cross-process races (a second
-    # MCP server, the CLI, ``mm web``) and CRUD-vs-``memory-migrate`` are
-    # NOT covered here — the tool layer cannot hold the engine's sidecar
-    # ``_file_lock`` across the whole span without self-deadlocking on the
-    # nested acquisition inside ``index_file`` (see ``get_memory_file_lock``).
+    # This is level L1 of the memory-file lock order (see the ``context._atomic``
+    # module docstring): in-process, serializing concurrent CRUD within a single
+    # MCP server process/event loop. Cross-process races (a second MCP server,
+    # the CLI, ``mm web``) and CRUD-vs-``memory-migrate`` are closed by L2 — the
+    # per-file cross-process sidecar, held across the whole span via
+    # ``async_file_lock`` and passed down to ``index_file(lock_held=True)`` so
+    # the nested engine acquire is skipped instead of self-deadlocking (#1587).
+    # The CRUD tools acquire L1 then L2; this L1 lock is still needed on its own
+    # for the DB-only bulk ``mem_delete`` namespace branch (no sidecar there).
     #
     # A plain ``dict`` (not the ``web/routes/_locks.py`` per-loop proxy) is
     # correct because an ``AppContext`` never outlives one event loop —
@@ -224,13 +226,12 @@ class AppContext:
         Get-or-create is race-free: a single event loop never suspends
         between the ``dict`` read and write below.
 
-        Do NOT additionally hold the engine's sidecar ``_file_lock`` for
-        the same path across a span that calls ``index_file`` — that lock
-        is re-acquired inside ``index_file`` and ``portalocker`` contends
-        between file descriptors even in one process, so nesting it here
-        would self-deadlock. This in-process lock is the only serialization
-        the tool layer takes; cross-process safety is out of scope (see the
-        ``_memory_file_locks`` field comment).
+        This is L1 in the memory-file lock order (``context._atomic``). L2 —
+        the cross-process sidecar — is acquired *inside* this lock via
+        ``async_file_lock`` (never the blocking ``_file_lock`` on the loop) and
+        passed to ``index_file(lock_held=True)`` so the engine's own sidecar
+        acquire is skipped rather than self-deadlocking (#1587). Acquire order
+        is always L1 → L2 → L3 (``_index_lock``); never the reverse.
         """
         key = path if isinstance(path, str) else self.memory_file_lock_key(path)
         lock = self._memory_file_locks.get(key)

@@ -20,15 +20,16 @@ module and covers ``~/.memtomem/config.json`` specifically.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 import portalocker
 
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "COPY_SKIP_NAMES",
     "DIRTY_SKIP_SUFFIXES",
+    "async_file_lock",
     "atomic_write_bytes",
     "atomic_write_text",
     "copy_tree_atomic",
@@ -148,6 +150,143 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None) -> Iterator[Non
 def _lock_path_for(data_path: Path) -> Path:
     """Sidecar lockfile path for *data_path* (``.{name}.lock`` next to it)."""
     return data_path.parent / f".{data_path.name}.lock"
+
+
+# --- Memory-file cross-process CRUD serialization (issue #1587) -------------
+#
+# Lock-ordering invariant for the memory-file domain. Levels are acquired
+# low→high; NEVER acquire a lower level while holding a higher one; within a
+# level, multi-acquires MUST use sorted key order.
+#
+#   L0  debounce queue _Lock (indexing/debounce.py) — CLI hook path only.
+#   L1  per-file asyncio.Lock — AppContext.get_memory_file_lock. Multi: sorted
+#       keys. In-process, MCP-server-scope only.
+#   L2  cross-process sidecar lock — ``async_file_lock(_lock_path_for(f))``.
+#       Multi: sorted by str(lock_path) (memory-migrate). From ANY event loop
+#       acquire ONLY via ``async_file_lock`` (never the blocking ``_file_lock``
+#       synchronously on a loop): a sync ``LOCK_EX`` here can block the loop
+#       while the current holder is a *suspended task on the same loop*
+#       (portalocker/flock contends between fds within one process) = permanent
+#       deadlock. ``async_file_lock`` is itself two-layered — an in-process
+#       asyncio guard THEN the cross-process flock — because Windows
+#       ``LockFileEx`` does not reliably block a second handle from one process
+#       (same reason ``debounce._Lock`` #759 pairs a threading.Lock with the
+#       flock). #1566: if the parent dir is gone, the sidecar is SKIPPED (never
+#       mkdir-resurrect it); that decision is made once by the outermost
+#       acquirer and flows down as ``index_file(lock_held=True)``.
+#   L3  IndexEngine._index_lock. ``index_file(lock_held=True)`` asserts the
+#       caller already holds (or #1566-skipped) this file's L2 sidecar and
+#       enters at L3 directly; the sidecar is HOISTED above ``_index_lock`` so
+#       no path ever acquires L2 while holding L3.
+#   L4  storage / embedder / LLM — leaves; must never acquire L0–L3.
+#
+# Disjoint domains (config.json sidecar, context-gateway sidecars for
+# settings/skills/versions/wiki, web _gateway_lock/_config_lock) never nest
+# with this domain.
+
+# Per-hold-span acquisition budgets (seconds). Monkeypatchable by dotted path
+# in tests, matching the ``config._CONFIG_LOCK_BUDGET_S`` convention. Fail-fast
+# for interactive CRUD, longer for the internal reindex acquire (which may wait
+# behind one CRUD span), longest for a whole migrate batch.
+_CRUD_SIDECAR_LOCK_BUDGET_S: float = 5.0
+_MEMORY_SIDECAR_LOCK_BUDGET_S: float = 10.0
+_MIGRATE_SIDECAR_LOCK_BUDGET_S: float = 30.0
+
+# Layer-1 (in-process) guard for ``async_file_lock``: per-lockfile-path, keyed
+# by event loop. A bare module-level ``asyncio.Lock`` binds to the first loop
+# that acquires it and then raises "bound to a different event loop" when reused
+# from another loop — production runs one loop, but pytest gives each async test
+# its own. Keying by (path, loop) keeps same-loop callers sharing one lock while
+# distinct loops get distinct locks; closed loops are pruned on the new-loop
+# path (a WeakKeyDictionary can't reclaim them — a contended lock strongly refs
+# its bound loop). Mirrors ``web/routes/_locks._LoopLocalLock``, inlined here to
+# keep ``context`` free of a ``web`` import.
+_intra_async_locks: dict[str, dict[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
+
+
+def _intra_async_lock_for(lock_path: Path) -> asyncio.Lock:
+    """Return the in-process asyncio guard for *lock_path* on the running loop."""
+    loop = asyncio.get_running_loop()
+    per_loop = _intra_async_locks.setdefault(str(lock_path), {})
+    lock = per_loop.get(loop)
+    if lock is None:
+        for dead in [lp for lp in per_loop if lp.is_closed()]:
+            del per_loop[dead]
+        lock = asyncio.Lock()
+        per_loop[loop] = lock
+    return lock
+
+
+@asynccontextmanager
+async def async_file_lock(lock_path: Path, *, timeout: float) -> AsyncIterator[None]:
+    """Async, bounded, two-layer sidecar lock — the L2 primitive of the
+    memory-file lock order above.
+
+    Unlike :func:`_file_lock`, this never blocks the event loop: the
+    cross-process ``portalocker`` acquire polls ``LOCK_NB`` and yields with
+    ``await asyncio.sleep`` between attempts, so a task waiting here (or another
+    process holding the sidecar) can never freeze the loop that a suspended
+    lock-holder needs to make progress on. The whole acquisition is bounded by a
+    single ``timeout`` budget shared across both layers; on expiry it raises
+    ``TimeoutError`` having acquired nothing.
+
+    Two layers, released in reverse order:
+
+    1. **In-process** per-path ``asyncio.Lock`` (``_intra_async_lock_for``).
+       Acquired first with the shared deadline. Required because Windows
+       ``LockFileEx`` does not reliably block a second handle from the same
+       process, so the flock alone would let two concurrent in-process handlers
+       (e.g. two ``mm web`` chunk-edit requests) race. This is also what gives
+       web/CLI callers — which hold no L1 ``AppContext`` lock — in-process
+       serialization.
+    2. **Cross-process** ``portalocker.LOCK_EX`` on the sidecar. Acquired
+       second; serializes against other processes (a second server, the CLI,
+       ``memory-migrate``).
+
+    The caller passes the sidecar path (``_lock_path_for(data_file)``), not the
+    data file. ``**Never**`` unlink the sidecar — deleting it reintroduces the
+    ``os.replace`` inode race (see
+    ``feedback_sidecar_lockfile_for_replaced_files``).
+    """
+    deadline = time.monotonic() + timeout
+    intra = _intra_async_lock_for(lock_path)
+    try:
+        await asyncio.wait_for(intra.acquire(), timeout=timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        raise TimeoutError(
+            f"could not acquire {lock_path} within {timeout:g}s (in-process contention)"
+        ) from None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fp = os.fdopen(fd, "rb+")
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            delay = 0.05
+            while True:
+                try:
+                    portalocker.lock(fp, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    break
+                except portalocker.LockException:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"could not acquire {lock_path} within {timeout:g}s "
+                            f"(held by another process)"
+                        ) from None
+                    await asyncio.sleep(min(delay, remaining))
+                    delay = min(delay * 2, 0.5)
+            try:
+                yield
+            finally:
+                portalocker.unlock(fp)
+        finally:
+            fp.close()
+    finally:
+        intra.release()
 
 
 def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:

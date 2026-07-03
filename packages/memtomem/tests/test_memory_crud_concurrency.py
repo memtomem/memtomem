@@ -376,6 +376,11 @@ class TestLockedChunkHelper:
             assert chunk.metadata.source_file == p2
             assert app.get_memory_file_lock(p2).locked()
             assert not app.get_memory_file_lock(p1).locked()
+            # #1587: the span now also holds the cross-process sidecar (L2) for
+            # the settled path — its lockfile exists while we hold it.
+            from memtomem.context._atomic import _lock_path_for
+
+            assert _lock_path_for(p2).exists()
 
     @pytest.mark.asyncio
     async def test_perpetually_moving_file_returns_retryable_error(self, bm25_only_components):

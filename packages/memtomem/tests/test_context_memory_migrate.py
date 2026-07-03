@@ -313,39 +313,36 @@ async def test_engine_index_file_acquires_sidecar_lock_for_watcher_cooperation(
     migrate's ``shutil.move`` and the DB UPDATE still produces
     duplicate chunks at the destination.
 
-    Spy on ``memtomem.context._atomic._file_lock`` to confirm
-    ``index_file`` enters the lock for the resolved file path. The
-    presence assertion is sufficient — the lock primitive itself
-    is exercised by ``test_memory_migrate_compensation_*`` and the
-    sidecar lockfile pattern's own pin in
-    ``test_atomic_lockfile.py`` (#548 line of work).
+    Spy on ``memtomem.context._atomic.async_file_lock`` to confirm
+    ``index_file`` enters the lock for the resolved file path. #1587 hoisted
+    the sidecar acquire above ``_index_lock`` and switched it to the async,
+    bounded ``async_file_lock`` primitive; the presence assertion is still
+    sufficient — the lock primitive itself is exercised by
+    ``test_memory_migrate_compensation_*`` and the sidecar lockfile pattern's
+    own pin in ``test_atomic_lockfile.py`` (#548 line of work).
     """
     comp, mem_dir = bm25_only_components
 
     src = mem_dir / "rule.md"
     src.write_text("## Rule\n\nbody.\n", encoding="utf-8")
 
-    # Capture every (lock_path, kind) pair entering ``_file_lock``.
-    from contextlib import contextmanager
+    # Capture every lock_path entering ``async_file_lock``.
+    from contextlib import asynccontextmanager
 
     from memtomem.context import _atomic as atomic_mod
 
-    real_file_lock = atomic_mod._file_lock
+    real_async_file_lock = atomic_mod.async_file_lock
     lock_calls: list[Path] = []
 
-    @contextmanager
-    def _spy_file_lock(lock_path):
+    @asynccontextmanager
+    async def _spy_async_file_lock(lock_path, *, timeout):
         lock_calls.append(lock_path)
-        with real_file_lock(lock_path):
+        async with real_async_file_lock(lock_path, timeout=timeout):
             yield
 
-    monkeypatch.setattr(atomic_mod, "_file_lock", _spy_file_lock)
-    # The engine imports lazily inside ``index_file`` so the symbol
-    # we want to patch is the module-attribute view there too.
-    monkeypatch.setattr(
-        "memtomem.context._atomic._file_lock",
-        _spy_file_lock,
-    )
+    # The engine imports lazily inside ``index_file`` so patching the module
+    # attribute is enough (that lazy import reads it back off the module).
+    monkeypatch.setattr(atomic_mod, "async_file_lock", _spy_async_file_lock)
 
     # ``index_file`` is the canonical entry the watcher uses
     # (``watcher.py:230`` calls ``self._engine.index_file(file_path)``).
@@ -359,6 +356,73 @@ async def test_engine_index_file_acquires_sidecar_lock_for_watcher_cooperation(
         f"engine.index_file did not acquire {expected_lock} — the migrate "
         f"sidecar lock is one-sided. Captured locks: {lock_calls}"
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_migrate_times_out_when_crud_holds_sidecar(
+    bm25_only_components, monkeypatch, tmp_path
+):
+    """#1587: a CRUD span holding a source file's sidecar makes ``memory-migrate``
+    fail with a bounded, friendly ``ClickException`` instead of freezing.
+
+    Before #1587 the MCP migrate tool acquired sidecars with a *blocking*
+    ``LOCK_EX`` synchronously on the event loop; a same-loop holder (a CRUD span
+    now holds the sidecar across its whole span) would freeze the server forever.
+    The async, bounded, shared-deadline acquisition breaks that: it gives up
+    within the budget and reports a retryable error. Holding the lock on THIS
+    loop also drives the in-process (layer-1) guard, so the test is deterministic
+    without a second process.
+    """
+    import time
+
+    import click
+
+    from memtomem.cli.context_cmd import _memory_migrate_run
+    from memtomem.context import _atomic as atomic_mod
+    from memtomem.context._atomic import _lock_path_for, async_file_lock
+
+    comp, mem_dir = bm25_only_components
+    project_root = tmp_path / "proj_lock"
+    proj_shared = project_root / ".memtomem" / "memories"
+    proj_shared.mkdir(parents=True)
+    (project_root / ".git").mkdir()
+    comp.config.indexing.project_memory_dirs = [proj_shared]
+
+    src = mem_dir / "rule.md"
+    src.write_text("## Rule\n\nharmless body.\n", encoding="utf-8")
+    await comp.storage.upsert_chunks(
+        [
+            Chunk(
+                content="harmless body.",
+                metadata=ChunkMetadata(source_file=src, scope="user", start_line=3, end_line=3),
+                embedding=[0.1] * 1024,
+            )
+        ]
+    )
+
+    _patch_cli_components(monkeypatch, comp)
+    monkeypatch.chdir(project_root)
+    monkeypatch.setattr(atomic_mod, "_MIGRATE_SIDECAR_LOCK_BUDGET_S", 0.2)
+
+    # Stand in for an in-flight CRUD span owning the source file's sidecar.
+    async with async_file_lock(_lock_path_for(src.resolve()), timeout=5.0):
+        start = time.monotonic()
+        with pytest.raises(click.ClickException) as excinfo:
+            await _memory_migrate_run(
+                [src.resolve()],
+                from_scope="user",
+                to_scope="project_shared",
+                apply_=True,
+                yes=True,
+                confirm_project_shared=True,
+            )
+        # Bounded (no permanent freeze), and names the contention.
+        assert time.monotonic() - start < 5.0
+        assert "could not acquire memory-migrate locks" in str(excinfo.value)
+
+    # The move never happened — source is intact, target absent.
+    assert src.exists()
+    assert not (proj_shared / "rule.md").exists()
 
 
 @pytest.mark.asyncio
