@@ -799,6 +799,39 @@ class TestConfigSaveValidationAndRollback:
 
         assert app_mock.config.session_trace.langfuse_enabled is False
 
+    @pytest.mark.anyio
+    async def test_mcp_config_persist_timeout_reverts_and_skips_fanout(self, monkeypatch, tmp_path):
+        # #1567: save_config_overrides can now raise TimeoutError when another
+        # process holds the config write lock. mem_config persists BEFORE the
+        # runtime fanout (cache invalidation / FTS rebuild), so on timeout it
+        # reverts the config field and returns without any fanout — the
+        # "rolled back" message must be truthful, not leave the cache/FTS ahead.
+        set_home(monkeypatch, tmp_path)
+        app_mock = MagicMock()
+        app_mock.config = Mem2MemConfig()
+        app_mock.search_pipeline.invalidate_cache = MagicMock()
+
+        from memtomem.server.tools import status_config
+
+        monkeypatch.setattr(status_config, "_get_app_initialized", AsyncMock(return_value=app_mock))
+        monkeypatch.setattr(
+            "memtomem.config.save_config_overrides",
+            MagicMock(side_effect=TimeoutError("locked")),
+        )
+
+        from memtomem.server.tools.status_config import mem_config
+
+        res = await mem_config(
+            key="search.default_top_k", value="20", persist=True, ctx=MagicMock()
+        )
+
+        assert "another process is writing" in res.lower()
+        assert "rolled back" in res.lower()
+        # Config reverted to disk state (isolated empty HOME → default), not 20.
+        assert app_mock.config.search.default_top_k != 20
+        # Fanout skipped: persist failed before invalidate_cache could run.
+        app_mock.search_pipeline.invalidate_cache.assert_not_called()
+
 
 class TestConfigMaskingAndSecretsSecurity:
     @pytest.mark.anyio

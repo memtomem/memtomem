@@ -96,6 +96,14 @@ def config_set(key: str, value: str) -> None:
     except ValueError as e:
         click.echo(click.style(f"{key}: {e}", fg="red"))
         raise SystemExit(1)
+    except TimeoutError:
+        click.echo(
+            click.style(
+                "Could not lock config.json: another process is writing it. Retry in a moment.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1) from None
 
     old_show = old_val
     new_show = coerced
@@ -153,6 +161,7 @@ def config_unset(keys: tuple[str, ...]) -> None:
     """
     from memtomem.config import (
         _atomic_write_json,
+        _config_write_lock,
         _override_path,
         _relativize_config_paths_in_place,
     )
@@ -160,67 +169,79 @@ def config_unset(keys: tuple[str, ...]) -> None:
     canonical = _canonical_unset_keys()
     path = _override_path()
 
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            click.echo(
-                click.style(
-                    f"Cannot read {path}: malformed JSON ({exc}). "
-                    "Run 'mm init --fresh' or edit the file manually.",
-                    fg="red",
-                )
-            )
-            raise SystemExit(1) from None
-        if not isinstance(existing, dict):
-            click.echo(
-                click.style(
-                    f"Cannot read {path}: malformed top-level value "
-                    "(expected object). Run 'mm init --fresh' or edit the "
-                    "file manually.",
-                    fg="red",
-                )
-            )
-            raise SystemExit(1)
-
     lines: list[str] = []
     removed_extra_mutation = False
     any_skip = False
 
-    for key in keys:
-        if key not in canonical:
-            any_skip = True
-            suggestion = _suggest_key(key, canonical)
-            if suggestion is not None:
-                lines.append(
-                    click.style(
-                        f"Skipped {key}: not set (did you mean '{suggestion}'?)",
-                        fg="yellow",
+    # Hold the sidecar lock across read→merge→write (incl. the empty-file
+    # removal) so a concurrent writer can't clobber our unset (issue #1567).
+    try:
+        with _config_write_lock(path):
+            existing: dict = {}
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    click.echo(
+                        click.style(
+                            f"Cannot read {path}: malformed JSON ({exc}). "
+                            "Run 'mm init --fresh' or edit the file manually.",
+                            fg="red",
+                        )
                     )
-                )
-            else:
-                lines.append(click.style(f"Skipped {key}: not set", fg="yellow"))
-            continue
+                    raise SystemExit(1) from None
+                if not isinstance(existing, dict):
+                    click.echo(
+                        click.style(
+                            f"Cannot read {path}: malformed top-level value "
+                            "(expected object). Run 'mm init --fresh' or edit the "
+                            "file manually.",
+                            fg="red",
+                        )
+                    )
+                    raise SystemExit(1)
 
-        section, field = key.split(".", 1)
-        section_data = existing.get(section)
-        if isinstance(section_data, dict) and field in section_data:
-            section_data.pop(field)
-            if not section_data:
-                existing.pop(section, None)
-            lines.append(f"Removed: {key}")
-            if field in _EXTRA_MUTATION_FIELDS.get(section, set()):
-                removed_extra_mutation = True
-        else:
-            lines.append(f"Unset: {key} (already at default)")
+            for key in keys:
+                if key not in canonical:
+                    any_skip = True
+                    suggestion = _suggest_key(key, canonical)
+                    if suggestion is not None:
+                        lines.append(
+                            click.style(
+                                f"Skipped {key}: not set (did you mean '{suggestion}'?)",
+                                fg="yellow",
+                            )
+                        )
+                    else:
+                        lines.append(click.style(f"Skipped {key}: not set", fg="yellow"))
+                    continue
 
-    if existing:
-        _relativize_config_paths_in_place(existing)
-        _atomic_write_json(path, existing)
-    elif path.exists():
-        path.unlink()
-        lines.append("Note: config.json now empty, file removed.")
+                section, field = key.split(".", 1)
+                section_data = existing.get(section)
+                if isinstance(section_data, dict) and field in section_data:
+                    section_data.pop(field)
+                    if not section_data:
+                        existing.pop(section, None)
+                    lines.append(f"Removed: {key}")
+                    if field in _EXTRA_MUTATION_FIELDS.get(section, set()):
+                        removed_extra_mutation = True
+                else:
+                    lines.append(f"Unset: {key} (already at default)")
+
+            if existing:
+                _relativize_config_paths_in_place(existing)
+                _atomic_write_json(path, existing)
+            elif path.exists():
+                path.unlink()
+                lines.append("Note: config.json now empty, file removed.")
+    except TimeoutError:
+        click.echo(
+            click.style(
+                f"Could not lock {path}: another process is writing config. Retry in a moment.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1) from None
 
     for line in lines:
         click.echo(line)

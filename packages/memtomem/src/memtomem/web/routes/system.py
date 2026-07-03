@@ -423,6 +423,14 @@ async def patch_config(
     rejected: list[str] = []
     tokenizer_changed = False
     rerank_changed = False
+    # Deferred live-fanout state (#1567): the reranker swap and tokenizer/FTS
+    # rebuild are held back until AFTER a successful persist so a persist
+    # timeout/validation failure reverts config and never leaves the live
+    # pipeline on a value that was rejected (the old reranker is close()'d
+    # during install and can't be restored). pending_reranker may be None on a
+    # disable — rerank_changed is the gate, not the reranker's presence.
+    pending_reranker: object | None = None
+    pending_rerank_config: object | None = None
 
     try:
         async with _asyncio.timeout(60):
@@ -489,15 +497,17 @@ async def patch_config(
                             rejected.append(f"rerank.enabled: {e}")
                             continue
 
-                        old_reranker = getattr(search_pipeline, "_reranker", None)
-                        if old_reranker is not None and old_reranker is not new_reranker:
-                            await _hot_reload._close_reranker_safely(old_reranker)
-                        search_pipeline._reranker = new_reranker
-                        search_pipeline._rerank_config = (
-                            candidate_rerank if candidate_rerank.enabled else None
-                        )
+                        # Record the config mutation now (so it persists) but
+                        # DEFER the live pipeline swap until after a successful
+                        # persist (see the fanout block below). Validating the
+                        # reranker here still rejects a broken config with 400
+                        # before any write.
                         config.rerank = candidate_rerank
                         rerank_changed = True
+                        pending_reranker = new_reranker
+                        pending_rerank_config = (
+                            candidate_rerank if candidate_rerank.enabled else None
+                        )
 
                         for key, old_val, coerced in pending_changes:
                             old_show = str(old_val)
@@ -546,14 +556,56 @@ async def patch_config(
                             )
                         )
 
-                # Runtime fanout: tokenizer FTS rebuild + cache invalidation.
-                # Tokenizer fanout is shared with the disk-reload path via
-                # ``apply_runtime_config_changes``. Reranker sync is handled
-                # inline above (before this point) instead of via the helper
-                # because the route runs in an async context and can
-                # ``await`` validation + close; the helper's sync path uses
-                # fire-and-forget close. Keep the two paths in lockstep when
-                # changing either.
+                # Persist BEFORE any live fanout so a failed save (validation or
+                # a cross-process lock timeout, #1567) reverts config and skips
+                # the tokenizer/FTS/reranker fanout entirely — matching the
+                # mem_config and CLI ``config set`` ordering. Otherwise a 400/503
+                # would leave the live tokenizer or reranker on the rejected
+                # value (and the old reranker already close()'d, unrecoverable).
+                if persist:
+                    try:
+                        save_config_overrides(config)
+                    except (ValueError, TimeoutError) as e:
+                        request.app.state.config = _hot_reload._build_fresh_config()
+                        _hot_reload._set_last_signature(
+                            request.app, _hot_reload.current_signature()
+                        )
+                        # Discard the validated-but-uninstalled reranker.
+                        if pending_reranker is not None:
+                            await _hot_reload._close_reranker_safely(pending_reranker)
+                        if isinstance(e, TimeoutError):
+                            raise HTTPException(
+                                503,
+                                "Config update timed out — another update may be in progress",
+                            )
+                        raise HTTPException(400, detail=str(e))
+                    # Self-write mtime bump — otherwise the next GET sees
+                    # our own edit as "external" and reloads spuriously.
+                    _hot_reload.commit_writer_signature(request.app)
+
+                # Runtime fanout — applied only after a successful persist (or
+                # immediately when persist=False). Reranker sync is inline here
+                # (not via ``apply_runtime_config_changes``) because the route
+                # runs in an async context and can ``await`` validation + close;
+                # the helper's sync path uses fire-and-forget close. Keep the two
+                # paths in lockstep when changing either. ``rerank_changed`` (not
+                # the reranker's presence) is the gate so a disable — where
+                # pending_reranker is None — still closes the old one and clears
+                # the pipeline.
+                if rerank_changed:
+                    # Publish the validated new reranker FIRST (a non-awaiting
+                    # pointer swap), THEN close the old one — mirroring
+                    # ``_sync_reranker`` in hot_reload.py. If the old reranker's
+                    # close() hangs into the request timeout, the live pipeline
+                    # is already correctly on the new reranker and config is
+                    # persisted; only the old instance leaks (logged), rather
+                    # than leaving the pipeline stale with the new one dropped.
+                    old_reranker = getattr(search_pipeline, "_reranker", None)
+                    search_pipeline._reranker = pending_reranker
+                    search_pipeline._rerank_config = pending_rerank_config
+                    if old_reranker is not None and old_reranker is not pending_reranker:
+                        await _hot_reload._close_reranker_safely(old_reranker)
+
                 if tokenizer_changed:
                     from memtomem.storage.fts_tokenizer import set_tokenizer
 
@@ -567,19 +619,6 @@ async def patch_config(
 
                 if applied or rerank_changed:
                     search_pipeline.invalidate_cache()
-
-                if persist:
-                    try:
-                        save_config_overrides(config)
-                    except ValueError as e:
-                        request.app.state.config = _hot_reload._build_fresh_config()
-                        _hot_reload._set_last_signature(
-                            request.app, _hot_reload.current_signature()
-                        )
-                        raise HTTPException(400, detail=str(e))
-                    # Self-write mtime bump — otherwise the next GET sees
-                    # our own edit as "external" and reloads spuriously.
-                    _hot_reload.commit_writer_signature(request.app)
     except TimeoutError:
         raise HTTPException(503, "Config update timed out — another update may be in progress")
 
@@ -672,7 +711,19 @@ async def add_memory_dir(
 
                 if not already_present:
                     config.indexing.memory_dirs.append(resolved)
-                    save_config_overrides(config)
+                    try:
+                        save_config_overrides(config)
+                    except TimeoutError:
+                        # Cross-process lock timeout (#1567): the append was not
+                        # persisted, so revert runtime to disk state instead of
+                        # keeping an unpersisted dir the 503 claims we didn't add.
+                        request.app.state.config = _hot_reload._build_fresh_config()
+                        _hot_reload._set_last_signature(
+                            request.app, _hot_reload.current_signature()
+                        )
+                        raise HTTPException(
+                            503, "memory-dirs/add timed out — another update may be in progress"
+                        )
                     _hot_reload.commit_writer_signature(request.app)
 
                 memory_dirs_snapshot = [
@@ -760,7 +811,17 @@ async def remove_memory_dir(
                     raise HTTPException(status_code=400, detail="Cannot remove last memory_dir")
 
                 config.indexing.memory_dirs = new_dirs
-                save_config_overrides(config)
+                try:
+                    save_config_overrides(config)
+                except TimeoutError:
+                    # Cross-process lock timeout (#1567): the removal was not
+                    # persisted, so revert runtime to disk state instead of
+                    # dropping a dir the 503 claims we kept.
+                    request.app.state.config = _hot_reload._build_fresh_config()
+                    _hot_reload._set_last_signature(request.app, _hot_reload.current_signature())
+                    raise HTTPException(
+                        503, "memory-dirs/remove timed out — another update may be in progress"
+                    )
                 _hot_reload.commit_writer_signature(request.app)
 
                 # Chunk cleanup happens after the registration is removed

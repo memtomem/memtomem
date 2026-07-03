@@ -230,33 +230,50 @@ async def mem_config(
         result = _set_config_key(app.config, key, value)
         # Side effects for specific field changes
         if result.startswith("Set "):
-            # Invalidate search cache so changes take effect immediately
-            app.search_pipeline.invalidate_cache()
-            # Rebuild FTS index when tokenizer changes
-            if key == "search.tokenizer":
-                from memtomem.storage.fts_tokenizer import set_tokenizer
-
-                set_tokenizer(app.config.search.tokenizer)
-                count = await app.storage.rebuild_fts()
-                result += f"\nFTS index rebuilt ({count} chunks)."
-            # Persist to disk if requested
+            # Persist FIRST when requested, before any runtime fanout. If the
+            # save fails (validation, or a cross-process lock timeout now that
+            # save_config_overrides can raise TimeoutError — issue #1567) we
+            # revert the config field and return early, so the tokenizer/FTS
+            # rebuild below never runs. Otherwise a failed persist would leave
+            # the FTS index and tokenizer ahead of the reverted config, and the
+            # "rolled back" message would be a lie. Mirrors the CLI
+            # ``mm config set`` ordering (persist, then fanout).
             if persist:
                 from memtomem.config import save_config_overrides
 
                 try:
                     save_config_overrides(app.config)
-                    result += " (persisted to config.json)"
-                except ValueError as e:
-                    # Rollback the runtime mutation by reloading the configuration from disk
+                except (ValueError, TimeoutError) as e:
+                    # Rollback the runtime mutation by reloading the configuration
+                    # from disk. TimeoutError means another process holds the
+                    # config write lock — nothing was written, so reverting
+                    # runtime keeps memory and disk consistent.
                     from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
 
                     fresh = Mem2MemConfig()
                     load_config_d(fresh, quiet=True)
                     load_config_overrides(fresh)
                     app.config = fresh
+                    if isinstance(e, TimeoutError):
+                        return (
+                            "Could not persist config: another process is writing "
+                            "config.json. Runtime change rolled back; retry in a moment."
+                        )
                     return f"Failed to persist config: {e}. Runtime change rolled back."
-            else:
-                result += " (runtime only — not persisted)"
+
+            # Invalidate search cache so changes take effect immediately.
+            app.search_pipeline.invalidate_cache()
+            # Rebuild FTS index when tokenizer changes.
+            if key == "search.tokenizer":
+                from memtomem.storage.fts_tokenizer import set_tokenizer
+
+                set_tokenizer(app.config.search.tokenizer)
+                count = await app.storage.rebuild_fts()
+                result += f"\nFTS index rebuilt ({count} chunks)."
+
+            result += (
+                " (persisted to config.json)" if persist else " (runtime only — not persisted)"
+            )
         return result
 
     config_dict = app.config.model_dump()

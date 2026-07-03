@@ -2150,185 +2150,202 @@ def _write_config_and_summary(
     # Read existing config as merge base (preserves post-init user edits).
     # If the file is unreadable we save a timestamped backup and start fresh —
     # better than silently wiping what might be salvageable by hand.
-    existing: dict = {}
-    if config_path.exists():
-        try:
-            existing = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            backup_path = config_path.with_suffix(f".json.bak-{int(time.time())}")
-            try:
-                shutil.copy2(config_path, backup_path)
-                click.secho(
-                    f"  Note: {config_path.name} was unreadable ({exc.__class__.__name__}); "
-                    f"backed up to {backup_path.name} and starting from empty.",
-                    fg="yellow",
-                )
-            except OSError as backup_exc:
-                click.secho(
-                    f"  Warning: {config_path.name} unreadable and backup failed "
-                    f"({backup_exc}); proceeding with empty base.",
-                    fg="yellow",
-                )
-    # Snapshot for the preserved-values summary below — must happen BEFORE
-    # merge so we can diff pre-merge vs post-write.
-    existing_before = copy.deepcopy(existing)
+    from memtomem.config import (
+        _atomic_write_json,
+        _config_write_lock,
+        _relativize_config_paths_in_place,
+    )
 
-    # Build init-target fields only. ``memory_dirs`` combines the user's
-    # primary directory with any provider folders accepted in Step 4
-    # (Claude memory, Claude plans, Codex memories), deduped while
-    # preserving order so the primary dir always lists first.
-    provider_dirs = state.get("provider_dirs", []) or []
-    combined_dirs: list[str] = []
-    seen: set[str] = set()
-    for entry in [state["memory_dir"], *provider_dirs]:
-        key = str(Path(entry).expanduser())
-        if key in seen:
-            continue
-        seen.add(key)
-        combined_dirs.append(entry)
+    # Hold the sidecar lock across the whole read→merge→write below so a
+    # concurrent config writer (Web UI PATCH, another `mm` invocation) can't
+    # read the pre-merge file and clobber the wizard's write (issue #1567).
+    try:
+        with _config_write_lock(config_path):
+            existing: dict = {}
+            if config_path.exists():
+                try:
+                    existing = json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    backup_path = config_path.with_suffix(f".json.bak-{int(time.time())}")
+                    try:
+                        shutil.copy2(config_path, backup_path)
+                        click.secho(
+                            f"  Note: {config_path.name} was unreadable "
+                            f"({exc.__class__.__name__}); backed up to "
+                            f"{backup_path.name} and starting from empty.",
+                            fg="yellow",
+                        )
+                    except OSError as backup_exc:
+                        click.secho(
+                            f"  Warning: {config_path.name} unreadable and backup failed "
+                            f"({backup_exc}); proceeding with empty base.",
+                            fg="yellow",
+                        )
+            # Snapshot for the preserved-values summary below — must happen BEFORE
+            # merge so we can diff pre-merge vs post-write.
+            existing_before = copy.deepcopy(existing)
 
-    indexing_block: dict = {"memory_dirs": combined_dirs, "auto_discover": False}
-    # Only emit ``startup_backfill`` when the user explicitly opted in via
-    # ``_maybe_offer_startup_backfill`` — leaving it unset preserves the
-    # ``False`` default (PR #295 lesson) and keeps ``config.json`` minimal.
-    if state.get("startup_backfill"):
-        indexing_block["startup_backfill"] = True
+            # Build init-target fields only. ``memory_dirs`` combines the user's
+            # primary directory with any provider folders accepted in Step 4
+            # (Claude memory, Claude plans, Codex memories), deduped while
+            # preserving order so the primary dir always lists first.
+            provider_dirs = state.get("provider_dirs", []) or []
+            combined_dirs: list[str] = []
+            seen: set[str] = set()
+            for entry in [state["memory_dir"], *provider_dirs]:
+                key = str(Path(entry).expanduser())
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined_dirs.append(entry)
 
-    init_data: dict = {
-        "embedding": {
-            "provider": state["provider"],
-            "model": state["model"],
-            "dimension": state["dimension"],
-        },
-        "storage": {"backend": "sqlite", "sqlite_path": state["db_path"]},
-        "indexing": indexing_block,
-        "namespace": {
-            "enable_auto_ns": state["enable_auto_ns"],
-            "default_namespace": state["default_ns"],
-        },
-        "search": {"default_top_k": state["top_k"], "tokenizer": state["tokenizer"]},
-        "decay": {"enabled": state["decay_enabled"]},
-    }
-    if state["provider"] == "ollama":
-        init_data["embedding"]["base_url"] = "http://localhost:11434"
-    if state.get("api_key"):
-        init_data["embedding"]["api_key"] = state["api_key"]
-    if state.get("rerank_enabled"):
-        init_data["rerank"] = {
-            "enabled": True,
-            "provider": "fastembed",
-            "model": state["rerank_model"],
-        }
+            indexing_block: dict = {"memory_dirs": combined_dirs, "auto_discover": False}
+            # Only emit ``startup_backfill`` when the user explicitly opted in via
+            # ``_maybe_offer_startup_backfill`` — leaving it unset preserves the
+            # ``False`` default (PR #295 lesson) and keeps ``config.json`` minimal.
+            if state.get("startup_backfill"):
+                indexing_block["startup_backfill"] = True
 
-    # Compute wizard-touched keys upfront — both --fresh drop logic and the
-    # post-write Preserved block need them.
-    wizard_touched_keys = _flatten_init_data_keys(init_data)
+            init_data: dict = {
+                "embedding": {
+                    "provider": state["provider"],
+                    "model": state["model"],
+                    "dimension": state["dimension"],
+                },
+                "storage": {"backend": "sqlite", "sqlite_path": state["db_path"]},
+                "indexing": indexing_block,
+                "namespace": {
+                    "enable_auto_ns": state["enable_auto_ns"],
+                    "default_namespace": state["default_ns"],
+                },
+                "search": {"default_top_k": state["top_k"], "tokenizer": state["tokenizer"]},
+                "decay": {"enabled": state["decay_enabled"]},
+            }
+            if state["provider"] == "ollama":
+                init_data["embedding"]["base_url"] = "http://localhost:11434"
+            if state.get("api_key"):
+                init_data["embedding"]["api_key"] = state["api_key"]
+            if state.get("rerank_enabled"):
+                init_data["rerank"] = {
+                    "enabled": True,
+                    "provider": "fastembed",
+                    "model": state["rerank_model"],
+                }
 
-    # --fresh: drop wizard-untouched non-default canonical leftovers from
-    # `existing` BEFORE merge so they don't survive the round-trip. Always
-    # back up first, but only if there's at least one drop — otherwise we'd
-    # litter ~/.memtomem/ with redundant `.bak-<ts>` files on every re-run.
-    fresh_drops: list[tuple[str, object, object]] = []
-    fresh_backup_path: Path | None = None
-    if fresh:
-        fresh_drops = _compute_fresh_drops(existing, wizard_touched_keys)
-        if fresh_drops and config_path.exists():
-            fresh_backup_path = config_path.with_suffix(f".json.bak-{int(time.time())}")
-            try:
-                shutil.copy2(config_path, fresh_backup_path)
-            except OSError as exc:
-                # --fresh is destructive; refuse to drop without a recovery
-                # path. The user can re-run without --fresh, or fix the
-                # backup target (disk full / permission) and retry.
-                click.secho(
-                    f"  Error: --fresh requires a successful backup but "
-                    f"copy to {fresh_backup_path} failed ({exc}). "
-                    "Aborting to avoid data loss.",
-                    fg="red",
-                )
-                raise SystemExit(1) from exc
-            _drop_flat_keys(existing, fresh_drops)
+            # Compute wizard-touched keys upfront — both --fresh drop logic and the
+            # post-write Preserved block need them.
+            wizard_touched_keys = _flatten_init_data_keys(init_data)
 
-    # Namespace preset rules from accepted provider categories — append to
-    # existing ``namespace.rules`` (dedup by ``path_glob``, user rules win
-    # per the A-2 decision in #296's design thread). Mutates ``existing``
-    # directly because ``init_data["namespace"]`` intentionally doesn't
-    # carry ``rules`` (the merge loop would overwrite user rules via
-    # ``update``). Banner is printed *before* write so a partial failure
-    # surfaces what was attempted.
-    proposed_rules: list[tuple[str, dict]] = state.get("provider_rules") or []
-    if proposed_rules:
-        existing_ns = existing.setdefault("namespace", {})
-        raw_rules = existing_ns.get("rules")
-        existing_rules: list[dict] = raw_rules if isinstance(raw_rules, list) else []
+            # --fresh: drop wizard-untouched non-default canonical leftovers from
+            # `existing` BEFORE merge so they don't survive the round-trip. Always
+            # back up first, but only if there's at least one drop — otherwise we'd
+            # litter ~/.memtomem/ with redundant `.bak-<ts>` files on every re-run.
+            fresh_drops: list[tuple[str, object, object]] = []
+            fresh_backup_path: Path | None = None
+            if fresh:
+                fresh_drops = _compute_fresh_drops(existing, wizard_touched_keys)
+                if fresh_drops and config_path.exists():
+                    fresh_backup_path = config_path.with_suffix(f".json.bak-{int(time.time())}")
+                    try:
+                        shutil.copy2(config_path, fresh_backup_path)
+                    except OSError as exc:
+                        # --fresh is destructive; refuse to drop without a recovery
+                        # path. The user can re-run without --fresh, or fix the
+                        # backup target (disk full / permission) and retry.
+                        click.secho(
+                            f"  Error: --fresh requires a successful backup but "
+                            f"copy to {fresh_backup_path} failed ({exc}). "
+                            "Aborting to avoid data loss.",
+                            fg="red",
+                        )
+                        raise SystemExit(1) from exc
+                    _drop_flat_keys(existing, fresh_drops)
 
-        # Drop superseded legacy presets for the categories being applied so a
-        # re-run after upgrading replaces — rather than shadows — the stale
-        # rule (e.g. the codex flat ``codex`` catch-all that the per-subdir
-        # split supersedes). Without this, the new subdir rules would land
-        # *after* the old catch-all and never match (first-match-wins).
-        proposed_cats = {cat for cat, _ in proposed_rules}
-        replaced: list[tuple[str, dict]] = []
-        if existing_rules:
-            kept: list[dict] = []
-            for r in existing_rules:
-                cat = _superseded_category(r, proposed_cats)
-                if cat is not None:
-                    replaced.append((cat, r))
+            # Namespace preset rules from accepted provider categories — append to
+            # existing ``namespace.rules`` (dedup by ``path_glob``, user rules win
+            # per the A-2 decision in #296's design thread). Mutates ``existing``
+            # directly because ``init_data["namespace"]`` intentionally doesn't
+            # carry ``rules`` (the merge loop would overwrite user rules via
+            # ``update``). Banner is printed *before* write so a partial failure
+            # surfaces what was attempted.
+            proposed_rules: list[tuple[str, dict]] = state.get("provider_rules") or []
+            if proposed_rules:
+                existing_ns = existing.setdefault("namespace", {})
+                raw_rules = existing_ns.get("rules")
+                existing_rules: list[dict] = raw_rules if isinstance(raw_rules, list) else []
+
+                # Drop superseded legacy presets for the categories being applied so a
+                # re-run after upgrading replaces — rather than shadows — the stale
+                # rule (e.g. the codex flat ``codex`` catch-all that the per-subdir
+                # split supersedes). Without this, the new subdir rules would land
+                # *after* the old catch-all and never match (first-match-wins).
+                proposed_cats = {cat for cat, _ in proposed_rules}
+                replaced: list[tuple[str, dict]] = []
+                if existing_rules:
+                    kept: list[dict] = []
+                    for r in existing_rules:
+                        cat = _superseded_category(r, proposed_cats)
+                        if cat is not None:
+                            replaced.append((cat, r))
+                        else:
+                            kept.append(r)
+                    existing_rules = kept
+
+                to_append: list[tuple[str, dict]] = []
+                to_skip: list[tuple[str, dict]] = []
+                for cat, rule in proposed_rules:
+                    if _rule_matches_existing(rule["path_glob"], existing_rules):
+                        to_skip.append((cat, rule))
+                    else:
+                        to_append.append((cat, rule))
+
+                # Drop proposals made unreachable by a surviving existing rule whose
+                # recursive glob already covers their tree (first-match-wins). Without
+                # this, a user-kept custom catch-all (e.g. ``~/.codex/memories/** ->
+                # my-ns``) would get the proposed subdir rules appended after it —
+                # dead config the banner would falsely report as added.
+                existing_globs = [
+                    r["path_glob"] for r in existing_rules if isinstance(r.get("path_glob"), str)
+                ]
+                shadowed: list[tuple[str, dict]] = []
+                if existing_globs and to_append:
+                    reachable: list[tuple[str, dict]] = []
+                    for cat, rule in to_append:
+                        if any(_glob_shadows(g, rule["path_glob"]) for g in existing_globs):
+                            shadowed.append((cat, rule))
+                        else:
+                            reachable.append((cat, rule))
+                    to_append = reachable
+
+                _emit_rules_banner(to_append, to_skip, replaced, shadowed)
+                if replaced or to_append:
+                    merged_rules = list(existing_rules)
+                    for _, rule in to_append:
+                        merged_rules.append(dict(rule))
+                    existing_ns["rules"] = merged_rules
+                # Mark as wizard-touched so the Preserved block doesn't flag the
+                # merged-rule list as "leftover from a prior config" on a clean
+                # re-run where every preset is already present.
+                wizard_touched_keys.add("namespace.rules")
+
+            # Merge: init fields overwrite, non-init sections/fields preserved
+            for section, fields in init_data.items():
+                if section not in existing:
+                    existing[section] = {}
+                if isinstance(fields, dict) and isinstance(existing[section], dict):
+                    existing[section].update(fields)
                 else:
-                    kept.append(r)
-            existing_rules = kept
+                    existing[section] = fields
 
-        to_append: list[tuple[str, dict]] = []
-        to_skip: list[tuple[str, dict]] = []
-        for cat, rule in proposed_rules:
-            if _rule_matches_existing(rule["path_glob"], existing_rules):
-                to_skip.append((cat, rule))
-            else:
-                to_append.append((cat, rule))
-
-        # Drop proposals made unreachable by a surviving existing rule whose
-        # recursive glob already covers their tree (first-match-wins). Without
-        # this, a user-kept custom catch-all (e.g. ``~/.codex/memories/** ->
-        # my-ns``) would get the proposed subdir rules appended after it —
-        # dead config the banner would falsely report as added.
-        existing_globs = [
-            r["path_glob"] for r in existing_rules if isinstance(r.get("path_glob"), str)
-        ]
-        shadowed: list[tuple[str, dict]] = []
-        if existing_globs and to_append:
-            reachable: list[tuple[str, dict]] = []
-            for cat, rule in to_append:
-                if any(_glob_shadows(g, rule["path_glob"]) for g in existing_globs):
-                    shadowed.append((cat, rule))
-                else:
-                    reachable.append((cat, rule))
-            to_append = reachable
-
-        _emit_rules_banner(to_append, to_skip, replaced, shadowed)
-        if replaced or to_append:
-            merged_rules = list(existing_rules)
-            for _, rule in to_append:
-                merged_rules.append(dict(rule))
-            existing_ns["rules"] = merged_rules
-        # Mark as wizard-touched so the Preserved block doesn't flag the
-        # merged-rule list as "leftover from a prior config" on a clean
-        # re-run where every preset is already present.
-        wizard_touched_keys.add("namespace.rules")
-
-    # Merge: init fields overwrite, non-init sections/fields preserved
-    for section, fields in init_data.items():
-        if section not in existing:
-            existing[section] = {}
-        if isinstance(fields, dict) and isinstance(existing[section], dict):
-            existing[section].update(fields)
-        else:
-            existing[section] = fields
-
-    from memtomem.config import _atomic_write_json, _relativize_config_paths_in_place
-
-    _relativize_config_paths_in_place(existing)
-    _atomic_write_json(config_path, existing)
+            _relativize_config_paths_in_place(existing)
+            _atomic_write_json(config_path, existing)
+    except TimeoutError:
+        click.secho(
+            f"  Error: could not lock {config_path.name} (another process is "
+            "writing config). Re-run `mm init` in a moment.",
+            fg="red",
+        )
+        raise SystemExit(1) from None
     click.echo(f"  Config: {config_path}")
 
     if fresh:

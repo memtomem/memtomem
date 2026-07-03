@@ -953,7 +953,7 @@ class TestConfigFallback:
         (state / "config.json").write_text("{}", encoding="utf-8")
         (state / "memtomem.db").write_bytes(b"sqlite-fake")
 
-        def _boom(_cfg):
+        def _boom(_cfg, *, migrate=True):
             raise PermissionError("fake permission denied on config.json")
 
         monkeypatch.setattr("memtomem.config.load_config_overrides", _boom)

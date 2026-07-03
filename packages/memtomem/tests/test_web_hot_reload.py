@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -254,6 +254,157 @@ async def test_memory_dirs_remove_reloads_before_write(
     assert on_disk.get("mmr", {}).get("enabled") is True
     remaining = on_disk.get("indexing", {}).get("memory_dirs", [])
     assert str(second.resolve()) not in remaining
+
+
+# ---------------------------------------------------------------------------
+# Persist-lock timeout rollback (#1567): save_config_overrides can now raise
+# TimeoutError when another process holds the cross-process config lock. The
+# write handlers mutate app.state.config before persisting, so on timeout they
+# must revert runtime to disk state — otherwise the 503 the client sees would
+# be a lie (a runtime-only change that "failed").
+# ---------------------------------------------------------------------------
+
+
+async def test_config_patch_persist_timeout_reverts_runtime(home: Path, app, client: AsyncClient):
+    _write_config(home, {"search": {"default_top_k": 5}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    with patch(
+        "memtomem.web.routes.system.save_config_overrides",
+        side_effect=TimeoutError("locked"),
+    ):
+        resp = await client.patch(
+            "/api/config?persist=true", json={"search": {"default_top_k": 20}}
+        )
+
+    assert resp.status_code == 503, resp.text
+    # Runtime reverted to the on-disk value, not the attempted 20.
+    assert app.state.config.search.default_top_k == 5
+    on_disk = json.loads((home / ".memtomem" / "config.json").read_text())
+    assert on_disk["search"]["default_top_k"] == 5
+
+
+async def test_memory_dirs_add_persist_timeout_reverts_runtime(
+    home: Path, app, client: AsyncClient, tmp_path: Path
+):
+    first = tmp_path / "first"
+    first.mkdir()
+    _write_config(home, {"indexing": {"memory_dirs": [str(first)]}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    second = tmp_path / "second"
+    second.mkdir()
+    with patch(
+        "memtomem.web.routes.system.save_config_overrides",
+        side_effect=TimeoutError("locked"),
+    ):
+        resp = await client.post(
+            "/api/memory-dirs/add", json={"path": str(second), "auto_index": False}
+        )
+
+    assert resp.status_code == 503, resp.text
+    # The unpersisted append was reverted — runtime holds only the disk dir.
+    assert len(app.state.config.indexing.memory_dirs) == 1
+    on_disk = json.loads((home / ".memtomem" / "config.json").read_text())
+    assert len(on_disk["indexing"]["memory_dirs"]) == 1
+
+
+async def test_memory_dirs_remove_persist_timeout_reverts_runtime(
+    home: Path, app, client: AsyncClient, tmp_path: Path
+):
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    _write_config(home, {"indexing": {"memory_dirs": [str(first), str(second)]}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    with patch(
+        "memtomem.web.routes.system.save_config_overrides",
+        side_effect=TimeoutError("locked"),
+    ):
+        resp = await client.post("/api/memory-dirs/remove", json={"path": str(second)})
+
+    assert resp.status_code == 503, resp.text
+    # The unpersisted removal was reverted — runtime still holds both dirs.
+    assert len(app.state.config.indexing.memory_dirs) == 2
+    on_disk = json.loads((home / ".memtomem" / "config.json").read_text())
+    assert len(on_disk["indexing"]["memory_dirs"]) == 2
+
+
+async def test_config_patch_persist_timeout_skips_tokenizer_fanout(
+    home: Path, app, client: AsyncClient
+):
+    # Persist runs BEFORE the tokenizer/FTS fanout, so a persist timeout must
+    # leave the module-level tokenizer and FTS index untouched — not just the
+    # config field (#1567). Otherwise search would run on a tokenizer the user
+    # was told was not saved.
+    _write_config(home, {"search": {"tokenizer": "unicode61"}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    with (
+        patch(
+            "memtomem.web.routes.system.save_config_overrides",
+            side_effect=TimeoutError("locked"),
+        ),
+        patch("memtomem.storage.fts_tokenizer.set_tokenizer") as set_tok,
+    ):
+        resp = await client.patch(
+            "/api/config?persist=true", json={"search": {"tokenizer": "kiwipiepy"}}
+        )
+
+    assert resp.status_code == 503, resp.text
+    # No fanout: tokenizer global never set, FTS never rebuilt.
+    set_tok.assert_not_called()
+    app.state.storage.rebuild_fts.assert_not_called()
+    # Config reverted to the on-disk tokenizer.
+    assert app.state.config.search.tokenizer == "unicode61"
+
+
+async def test_config_patch_persist_timeout_skips_reranker_install(
+    home: Path, app, client: AsyncClient
+):
+    # The reranker swap close()s the old instance during install, so it cannot
+    # be undone. It must therefore run only AFTER a successful persist; a
+    # persist timeout must leave the live pipeline reranker untouched and close
+    # the validated-but-uninstalled candidate (#1567).
+    _write_config(home, {"rerank": {"enabled": False}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+    app.state.search_pipeline._reranker = None
+    app.state.search_pipeline._rerank_config = None
+
+    class StubReranker:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    candidate = StubReranker()
+    with (
+        patch("memtomem.web.routes.system.create_reranker", return_value=candidate),
+        patch(
+            "memtomem.web.routes.system._validate_reranker_ready",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "memtomem.web.routes.system.save_config_overrides",
+            side_effect=TimeoutError("locked"),
+        ),
+    ):
+        resp = await client.patch("/api/config?persist=true", json={"rerank": {"enabled": True}})
+
+    assert resp.status_code == 503, resp.text
+    # Live pipeline untouched; the candidate reranker was discarded (closed).
+    assert app.state.search_pipeline._reranker is None
+    assert candidate.closed is True
+    # Config reverted — rerank still disabled on disk.
+    assert app.state.config.rerank.enabled is False
 
 
 # ---------------------------------------------------------------------------

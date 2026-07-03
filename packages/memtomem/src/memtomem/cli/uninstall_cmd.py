@@ -122,7 +122,11 @@ def _load_config_safely() -> tuple[Path, str | None]:
 
         cfg = Mem2MemConfig()
         load_config_d(cfg, quiet=True)
-        load_config_overrides(cfg)
+        # migrate=False: uninstall only reads the db path — it must not run the
+        # auto_discover migration, which would rewrite config.json (and create
+        # the .config.json.lock sidecar) right before we delete it. Read-only
+        # diagnostic surface, per feedback_doctor_no_migration_loader.
+        load_config_overrides(cfg, migrate=False)
         db_path = Path(cfg.storage.sqlite_path).expanduser()
         return db_path, None
     except Exception as exc:  # broad: uninstall must never abort on config
@@ -269,7 +273,12 @@ def _collect_inventory(db_path: Path) -> _Inventory:
     uploads, _ = _dir_total(upload_dir)
 
     other: list[Path] = []
-    for name in (".current_session", ".server.pid"):
+    # ``.config.json.lock`` is the sidecar lock for config.json read-modify-write
+    # (issue #1567). ``_file_lock`` creates it on first write and never unlinks it
+    # (deleting it would reintroduce the os.replace inode race for a waiting
+    # writer), so it persists in state_dir and must be cleaned here or it would
+    # keep the directory non-empty after uninstall.
+    for name in (".current_session", ".server.pid", ".config.json.lock"):
         candidate = state_dir / name
         if candidate.exists():
             other.append(candidate)

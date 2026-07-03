@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
@@ -1862,34 +1863,47 @@ def _persist_auto_discover_migration(config_path: Path, full_memory_dirs: list[P
 
     _log = logging.getLogger(__name__)
 
-    existing: dict = {}
-    if config_path.exists():
-        try:
-            existing = _json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError) as exc:
-            _log.warning(
-                "Cannot read %s during auto_discover migration (%s); skipping persist",
-                config_path,
-                exc,
-            )
-            return
-
-    if not isinstance(existing, dict):
-        return
-
-    indexing = existing.get("indexing")
-    if not isinstance(indexing, dict):
-        indexing = {}
-        existing["indexing"] = indexing
-
-    indexing["memory_dirs"] = [str(d) for d in full_memory_dirs]
-    indexing["auto_discover"] = False
-
-    _relativize_config_paths_in_place(existing)
+    # This runs on every legacy-config load at startup, so use a short lock
+    # budget: a deferred migration (re-attempted next load) is far cheaper than
+    # a 30s stall on every ``mm`` command when another writer holds the lock.
     try:
-        _atomic_write_json(config_path, existing)
-    except OSError as exc:
-        _log.warning("Failed to persist auto_discover migration to %s: %s", config_path, exc)
+        with _config_write_lock(config_path, timeout=_MIGRATION_LOCK_BUDGET_S):
+            existing: dict = {}
+            if config_path.exists():
+                try:
+                    existing = _json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, _json.JSONDecodeError) as exc:
+                    _log.warning(
+                        "Cannot read %s during auto_discover migration (%s); skipping persist",
+                        config_path,
+                        exc,
+                    )
+                    return
+
+            if not isinstance(existing, dict):
+                return
+
+            indexing = existing.get("indexing")
+            if not isinstance(indexing, dict):
+                indexing = {}
+                existing["indexing"] = indexing
+
+            indexing["memory_dirs"] = [str(d) for d in full_memory_dirs]
+            indexing["auto_discover"] = False
+
+            _relativize_config_paths_in_place(existing)
+            try:
+                _atomic_write_json(config_path, existing)
+            except OSError as exc:
+                _log.warning(
+                    "Failed to persist auto_discover migration to %s: %s", config_path, exc
+                )
+    except TimeoutError:
+        _log.warning(
+            "auto_discover migration could not lock %s (another writer holds it); "
+            "skipping this run, will retry next config load",
+            config_path,
+        )
 
 
 # Fields that ``save_config_overrides`` persists but ``MUTABLE_FIELDS`` does
@@ -2001,6 +2015,38 @@ def _json_default(obj: object) -> object:
     return str(obj)
 
 
+# Cross-process lock budget for config.json read-modify-write (issue #1567).
+# Matches the 30s convention of _MCP/_SETTINGS/_SKILLS_LOCK_BUDGET_S in
+# memtomem.context. Migration uses a shorter budget because it runs on every
+# legacy-config load at startup (see _MIGRATION_LOCK_BUDGET_S below).
+_CONFIG_LOCK_BUDGET_S = 30.0
+_MIGRATION_LOCK_BUDGET_S = 5.0
+
+
+@contextmanager
+def _config_write_lock(config_path: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """Serialize config.json read-modify-write across processes (issue #1567).
+
+    ``_atomic_write_json`` prevents torn/corrupt JSON, but nothing serializes
+    the read→merge→write window across processes: two concurrent writers each
+    read the pre-change file, merge only their own delta, and whichever
+    ``os.replace``\\s second silently discards the other's update. This holds a
+    ``portalocker`` sidecar lock (``.config.json.lock``) across that whole
+    span so writers serialize instead of clobbering each other.
+
+    Locks a **sidecar**, not config.json itself — ``os.replace`` rebinds the
+    data-file inode mid-write, so a lock on the data file disconnects (see
+    ``_file_lock``). ``config_path`` is passed by the caller (not resolved via
+    ``_override_path()`` here) so migration's explicit path and isolated-HOME
+    tests lock the file they actually write. On timeout ``_file_lock`` raises
+    ``TimeoutError`` having acquired nothing — callers surface a clean abort.
+    """
+    from memtomem.context._atomic import _file_lock, _lock_path_for
+
+    with _file_lock(_lock_path_for(config_path), timeout=timeout or _CONFIG_LOCK_BUDGET_S):
+        yield
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     """Write JSON atomically via tempfile in the same directory + os.replace.
 
@@ -2008,9 +2054,11 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     dies mid-write or disk fills up. The tempfile lives in ``path.parent``
     so ``os.replace`` is a same-filesystem rename (atomic on POSIX + Windows).
 
-    Used by ``mm config unset``. Follow-up work will migrate
-    ``save_config_overrides`` and ``cli/init_cmd.py``'s ``--fresh`` write
-    path onto this helper as well.
+    All four config.json writers (``save_config_overrides``, ``mm config
+    unset``, ``mm init``'s ``_write_config_and_summary``, and
+    ``_persist_auto_discover_migration``) route through this helper. Atomic
+    replace covers crash-mid-write; concurrent writers are serialized by
+    ``_config_write_lock``, which callers hold across their read-modify-write.
     """
     import json as _json
     import os
@@ -2107,46 +2155,54 @@ def save_config_overrides(
 
     _log = logging.getLogger(__name__)
     base_fields: dict[str, set[str]] = mutable_fields or MUTABLE_FIELDS
+    # build_comparand is a slow, read-only rebuild — keep it OUTSIDE the lock so
+    # the serialized critical section stays as narrow as read→merge→write.
     comparand = build_comparand(quiet=True)
 
     path = _override_path()
 
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = _json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, _json.JSONDecodeError) as exc:
-            _log.warning("Cannot read existing config at %s: %s — overwriting", path, exc)
+    # Hold the sidecar lock across read→merge→write so a concurrent writer
+    # (e.g. the Web UI PATCH path racing a terminal ``mm config set``) can't
+    # read the pre-change file and clobber our delta (issue #1567). Web callers
+    # already run under an in-process asyncio lock and wrap this in their own
+    # timeout; the file lock's TimeoutError surfaces there as a 503.
+    with _config_write_lock(path):
+        existing: dict = {}
+        if path.exists():
+            try:
+                existing = _json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, _json.JSONDecodeError) as exc:
+                _log.warning("Cannot read existing config at %s: %s — overwriting", path, exc)
 
-    # Union with dedicated-endpoint fields (memory_dirs). No exemption —
-    # env-dependent factory output is already part of the comparand, so
-    # "current == factory" still drops cleanly.
-    sections = {*base_fields, *_EXTRA_MUTATION_FIELDS}
-    for section_name in sections:
-        live_section = getattr(config, section_name, None)
-        comp_section = getattr(comparand, section_name, None)
-        if live_section is None or comp_section is None:
-            continue
-        keys = base_fields.get(section_name, set()) | _EXTRA_MUTATION_FIELDS.get(
-            section_name, set()
-        )
+        # Union with dedicated-endpoint fields (memory_dirs). No exemption —
+        # env-dependent factory output is already part of the comparand, so
+        # "current == factory" still drops cleanly.
+        sections = {*base_fields, *_EXTRA_MUTATION_FIELDS}
+        for section_name in sections:
+            live_section = getattr(config, section_name, None)
+            comp_section = getattr(comparand, section_name, None)
+            if live_section is None or comp_section is None:
+                continue
+            keys = base_fields.get(section_name, set()) | _EXTRA_MUTATION_FIELDS.get(
+                section_name, set()
+            )
 
-        section_data: dict[str, object] = existing.get(section_name, {})
-        if not isinstance(section_data, dict):
-            section_data = {}
+            section_data: dict[str, object] = existing.get(section_name, {})
+            if not isinstance(section_data, dict):
+                section_data = {}
 
-        for key in keys:
-            live_val = getattr(live_section, key, None)
-            comp_val = getattr(comp_section, key, None)
-            if live_val is None or live_val == comp_val:
-                section_data.pop(key, None)
+            for key in keys:
+                live_val = getattr(live_section, key, None)
+                comp_val = getattr(comp_section, key, None)
+                if live_val is None or live_val == comp_val:
+                    section_data.pop(key, None)
+                else:
+                    section_data[key] = live_val
+
+            if section_data:
+                existing[section_name] = section_data
             else:
-                section_data[key] = live_val
+                existing.pop(section_name, None)
 
-        if section_data:
-            existing[section_name] = section_data
-        else:
-            existing.pop(section_name, None)
-
-    _relativize_config_paths_in_place(existing)
-    _atomic_write_json(path, existing)
+        _relativize_config_paths_in_place(existing)
+        _atomic_write_json(path, existing)
