@@ -1374,12 +1374,20 @@ def _run_artifact_flat_apply(project_root: Path, rows: list[MigrateRow], *, forc
 
 def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -> str:
     """Plain-text summary for one scope-tier move (mirrors the CLI's
-    ``_print_migrate_scope_result``)."""
+    ``_print_migrate_scope_result`` content, not its verbatim paths).
+
+    Every echoed path is ``$HOME``-collapsed via ``_redact_reason`` (#1520
+    item 7) — the absolute src/dst/fan-out paths embed the username on the
+    MCP wire. Redaction is per path, not per line, so the 200-char cap can't
+    bite surrounding text (#1550 precedent). No root-stripping: root-relative
+    from/to lines would render identically for same-named artifacts in
+    different projects.
+    """
     layout_note = " (flat layout)" if result.layout == "flat" else ""
     lines = [
         f"Plan: migrate {result.kind}/{result.name}{layout_note}",
-        f"  from {result.from_scope}: {result.src_path}",
-        f"  to   {result.to_scope}: {result.dst_path}",
+        f"  from {result.from_scope}: {_redact_reason(str(result.src_path))}",
+        f"  to   {result.to_scope}: {_redact_reason(str(result.dst_path))}",
     ]
     if not apply_:
         if result.fanout_planned:
@@ -1389,7 +1397,7 @@ def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -
                 f"that diverges from the canonical render is snapshotted to "
                 f"a .bak first):"
             )
-            lines.extend(f"    - {path}" for path in result.fanout_planned)
+            lines.extend(f"    - {_redact_reason(str(path))}" for path in result.fanout_planned)
         lines.append("\nRe-call with apply=True to execute.")
         lines.append(
             f"After apply, run mem_context_sync(scope='{result.to_scope}') "
@@ -1400,14 +1408,14 @@ def _format_artifact_scope_result(result: MigrateScopeResult, *, apply_: bool) -
     lines.append(f"\n✓ moved {result.kind}/{result.name}: {result.from_scope} → {result.to_scope}")
     if result.fanout_cleaned:
         lines.append(f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out target(s):")
-        lines.extend(f"    - {path}" for path in result.fanout_cleaned)
+        lines.extend(f"    - {_redact_reason(str(path))}" for path in result.fanout_cleaned)
     if result.fanout_backed_up:
         lines.append(
             f"  {len(result.fanout_backed_up)} target(s) diverged from the "
             f"canonical render — snapshotted before removal (review and "
             f"delete manually):"
         )
-        lines.extend(f"    - {path}" for path in result.fanout_backed_up)
+        lines.extend(f"    - {_redact_reason(str(path))}" for path in result.fanout_backed_up)
     lines.append(
         f"\nNext: run mem_context_sync(scope='{result.to_scope}') "
         "to regenerate runtime fan-out at the new tier."
@@ -1650,6 +1658,15 @@ def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, app
     The dry-run footer additionally names the confirmation flag(s) the
     destination tier will require at apply time, so an agent learns the
     full re-call shape from the preview.
+
+    Unlike the CLI mirror, every echoed path and engine note is
+    ``$HOME``-collapsed via ``_redact_reason`` (#1520 item 7) — absolute
+    src/dst/fan-out paths embed the username on the MCP wire. Per path,
+    not per line, so the 200-char cap can't bite surrounding text (#1550
+    precedent); no root-stripping because a transfer straddles two
+    projects and root-relative lines would render identically for
+    same-named artifacts. ``sync_command``/``sync_hint`` stay verbatim —
+    they are runnable remediation commands (``error_redact`` doctrine).
     """
     layout_note = (
         " (flat layout)" if result.layout == "flat" and result.kind != "mcp-servers" else ""
@@ -1657,8 +1674,8 @@ def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, app
     rename_note = f" as {result.dst_name}" if result.dst_name != result.name else ""
     lines = [
         f"Plan: {result.mode} {result.kind}/{result.name}{rename_note}{layout_note}",
-        f"  from {result.from_scope}: {result.src_path}",
-        f"  to   {result.to_scope}: {result.dst_path}",
+        f"  from {result.from_scope}: {_redact_reason(str(result.src_path))}",
+        f"  to   {result.to_scope}: {_redact_reason(str(result.dst_path))}",
     ]
     if not apply_:
         if result.fanout_planned:
@@ -1668,20 +1685,24 @@ def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, app
                 f"that diverges from the canonical render is snapshotted to "
                 f"a .bak first):"
             )
-            lines.extend(f"    - {path}" for path in result.fanout_planned)
+            lines.extend(f"    - {_redact_reason(str(path))}" for path in result.fanout_planned)
         if result.provenance == "carried":
             lines.append(
                 "  will carry the wiki install provenance (lock.json entry) to the destination"
             )
         elif result.provenance == "not_carried":
+            # provenance_reason can wrap an OSError from the lock.json write
+            # (absolute path inside) — same $HOME collapse as the notes.
             lines.append(
                 f"  install provenance will not be carried — the artifact "
-                f"lands untracked: {result.provenance_reason}"
+                f"lands untracked: {_redact_reason(result.provenance_reason)}"
             )
         # Engine caveats render in the PLAN too (CLI _print_transfer_result
         # mirror) — a caveat the agent only learns post-apply is not a plan
-        # it confirmed.
-        lines.extend(f"  note: {note}" for note in result.notes)
+        # it confirmed. Notes can embed absolute paths (e.g. the copy-rename
+        # overrides note carries dst_path/overrides), so they get the same
+        # $HOME collapse as the path lines.
+        lines.extend(f"  note: {_redact_reason(note)}" for note in result.notes)
         confirm_note = ""
         if result.to_scope == "project_shared":
             confirm_note = " and confirm_project_shared=True"
@@ -1704,22 +1725,22 @@ def _format_transfer_result(result: TransferResult | McpServerCopyResult, *, app
             f"  cleaned {len(result.fanout_cleaned)} stale runtime fan-out "
             f"target(s) at scope='{result.from_scope}':"
         )
-        lines.extend(f"    - {path}" for path in result.fanout_cleaned)
+        lines.extend(f"    - {_redact_reason(str(path))}" for path in result.fanout_cleaned)
     if result.fanout_backed_up:
         lines.append(
             f"  {len(result.fanout_backed_up)} target(s) diverged from the "
             f"canonical render — snapshotted before removal (review and "
             f"delete manually):"
         )
-        lines.extend(f"    - {path}" for path in result.fanout_backed_up)
+        lines.extend(f"    - {_redact_reason(str(path))}" for path in result.fanout_backed_up)
     if result.provenance == "carried":
         lines.append("  carried the wiki install provenance (lock.json entry) to the destination")
     elif result.provenance == "not_carried":
         lines.append(
             f"  install provenance not carried — the artifact lands "
-            f"untracked at the destination: {result.provenance_reason}"
+            f"untracked at the destination: {_redact_reason(result.provenance_reason)}"
         )
-    lines.extend(f"  note: {note}" for note in result.notes)
+    lines.extend(f"  note: {_redact_reason(note)}" for note in result.notes)
     if result.needs_sync and result.sync_command:
         lines.append(
             f"\nNext: run `{result.sync_command}` to generate runtime fan-out at the destination."
