@@ -551,3 +551,158 @@ class TestWebParityGuard:
                     msg,
                     root,
                 )
+
+
+# ── #1520 item 7: migrate/transfer success-path formatters collapse $HOME ────
+
+
+class TestSuccessPathFormattersCollapseHome:
+    """The migrate/transfer result formatters must ``~``-collapse every echoed
+    path (src/dst headers, fan-out lists, engine notes) — those absolute paths
+    embed the username on the MCP wire. Redaction is per path, not per line
+    (#1550: a line-level pass lets the 200-char cap bite surrounding text).
+    ``sync_command`` stays verbatim by doctrine — it is a runnable remediation
+    command. Formatters are exercised directly with fabricated results whose
+    paths sit under a patched ``error_redact._HOME``.
+
+    Cross-platform (#838 discipline): the fabricated paths are ``Path``
+    objects, so ``str(path)`` renders with ``os.sep`` (``\\`` on Windows) —
+    the patched ``_HOME`` must therefore be ``str(Path(HOME))`` too, or the
+    collapse's literal ``replace`` would miss on Windows exactly as
+    production would not (there ``_HOME = str(Path.home())`` already carries
+    ``os.sep``). Assertions compare in POSIX space via ``_norm``.
+    """
+
+    HOME = "/Users/alice"
+
+    @staticmethod
+    def _norm(out: str) -> str:
+        return out.replace("\\", "/")
+
+    @pytest.fixture(autouse=True)
+    def _pin_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from memtomem.context import error_redact
+
+        # os.sep-native so the literal $HOME replace fires on Windows too.
+        monkeypatch.setattr(error_redact, "_HOME", str(Path(self.HOME)))
+
+    def _migrate_result(self, *, moved: bool):
+        from memtomem.context.migrate import MigrateScopeResult
+
+        home = Path(self.HOME)
+        return MigrateScopeResult(
+            kind="skills",
+            name="demo",
+            from_scope="user",
+            to_scope="project_shared",
+            src_path=home / ".memtomem" / "skills" / "demo",
+            dst_path=home / "proj" / ".memtomem" / "skills" / "demo",
+            layout="dir",
+            moved=moved,
+            fanout_cleaned=[home / ".claude" / "skills" / "demo" / "SKILL.md"],
+            fanout_backed_up=[home / ".claude" / "skills" / "demo" / "SKILL.md.bak"],
+            fanout_planned=[home / ".claude" / "skills" / "demo" / "SKILL.md"],
+        )
+
+    def _transfer_result(self, *, transferred: bool, **overrides):
+        from memtomem.context.transfer import TransferResult
+
+        home = Path(self.HOME)
+        kwargs = dict(
+            kind="skills",
+            name="demo",
+            dst_name="demo-copy",
+            mode="copy",
+            from_scope="project_shared",
+            to_scope="user",
+            src_project_root=home / "proj",
+            dst_project_root=None,
+            src_path=home / "proj" / ".memtomem" / "skills" / "demo",
+            dst_path=home / ".memtomem" / "skills" / "demo-copy",
+            layout="dir",
+            transferred=transferred,
+            fanout_cleaned=[home / ".claude" / "skills" / "demo" / "SKILL.md"],
+            fanout_backed_up=[home / ".claude" / "skills" / "demo" / "SKILL.md.bak"],
+            fanout_planned=[home / ".claude" / "skills" / "demo" / "SKILL.md"],
+            needs_sync=True,
+            sync_command="mm context sync --include=skills",
+            notes=(
+                "overrides travel verbatim: "
+                + str(home / ".memtomem" / "skills" / "demo-copy" / "overrides"),
+            ),
+        )
+        kwargs.update(overrides)
+        return TransferResult(**kwargs)
+
+    def test_migrate_dry_run_collapses_all_paths(self) -> None:
+        from memtomem.server.tools.context import _format_artifact_scope_result
+
+        norm = self._norm(
+            _format_artifact_scope_result(self._migrate_result(moved=False), apply_=False)
+        )
+
+        assert self.HOME not in norm, norm  # native home gone (both sep forms)
+        assert "from user: ~/.memtomem/skills/demo" in norm
+        assert "    - ~/" in norm  # fanout_planned entries
+        assert "Re-call with apply=True" in norm  # tail survives — no cap bite
+
+    def test_migrate_apply_collapses_all_paths(self) -> None:
+        from memtomem.server.tools.context import _format_artifact_scope_result
+
+        norm = self._norm(
+            _format_artifact_scope_result(self._migrate_result(moved=True), apply_=True)
+        )
+
+        assert self.HOME not in norm, norm
+        assert "✓ moved skills/demo" in norm
+        assert norm.count("    - ~/") == 2  # fanout_cleaned + fanout_backed_up
+
+    def test_transfer_dry_run_collapses_paths_and_notes(self) -> None:
+        from memtomem.server.tools.context import _format_transfer_result
+
+        norm = self._norm(
+            _format_transfer_result(self._transfer_result(transferred=False), apply_=False)
+        )
+
+        assert self.HOME not in norm, norm
+        assert "  note: overrides travel verbatim: ~/" in norm
+        # sync_command renders verbatim (runnable remediation command).
+        assert "`mm context sync --include=skills`" in norm
+
+    def test_transfer_apply_collapses_paths_and_notes(self) -> None:
+        from memtomem.server.tools.context import _format_transfer_result
+
+        norm = self._norm(
+            _format_transfer_result(self._transfer_result(transferred=True), apply_=True)
+        )
+
+        assert self.HOME not in norm, norm
+        assert "✓ copied skills/demo" in norm
+        assert "  note: overrides travel verbatim: ~/" in norm
+        assert norm.count("    - ~/") == 2  # fanout_cleaned + fanout_backed_up
+
+    @pytest.mark.parametrize("apply_", [False, True])
+    def test_transfer_provenance_reason_collapses_home(self, apply_: bool) -> None:
+        # Codex review on the #1520 item 7 round: ``provenance_reason`` can
+        # wrap an OSError from the destination lock.json write (absolute path
+        # inside) and rendered verbatim on both the dry-run and apply legs.
+        from memtomem.server.tools.context import _format_transfer_result
+
+        # Native str(Path(...)), NOT repr — an os.sep path so the collapse
+        # fires under the os-native _HOME on every platform (a repr would
+        # double the Windows backslashes and dodge the literal replace).
+        lock_path = str(Path(self.HOME) / ".memtomem" / "lock.json")
+        result = self._transfer_result(
+            transferred=apply_,
+            provenance="not_carried",
+            provenance_reason=(
+                f"destination lock.json could not be written "
+                f"([Errno 13] Permission denied: {lock_path})"
+            ),
+        )
+
+        norm = self._norm(_format_transfer_result(result, apply_=apply_))
+
+        assert self.HOME not in norm, norm
+        assert "destination lock.json could not be written" in norm
+        assert "~/.memtomem/lock.json" in norm  # collapsed, diagnostic survives

@@ -281,13 +281,17 @@ describe('wiki.js install/update (E-3, dev tier)', () => {
     return posts;
   }
 
-  it('shows install/update buttons in dev and hides them in prod', async () => {
+  it('shows functional install/update buttons in dev', async () => {
     const dev = await bootDev();
     await dev.window.loadWiki();
     await dev.window.loadWikiDetail('skills', 'alpha');
     expect(dev.window.document.getElementById('wiki-install-btn')).not.toBeNull();
     expect(dev.window.document.getElementById('wiki-update-btn')).not.toBeNull();
+    // Dev shows no prod discoverability note.
+    expect(dev.window.document.getElementById('wiki-install-prod-note')).toBeNull();
+  });
 
+  it('shows a disabled affordance + --dev note in prod, not a silent dead-end (#1511)', async () => {
     const prod = await boot({
       '/api/wiki': WIKI_LIST,
       '/api/wiki/skills/alpha/diff': ALPHA_DIFF_NONE,
@@ -295,7 +299,17 @@ describe('wiki.js install/update (E-3, dev tier)', () => {
     });
     await prod.window.loadWiki();
     await prod.window.loadWikiDetail('skills', 'alpha');
-    expect(prod.window.document.getElementById('wiki-install-btn')).toBeNull();
+    const doc = prod.window.document;
+    // No FUNCTIONAL install button in prod (the POST route is dev-only), so
+    // the id bound by _bindWikiInstallAction is still absent.
+    expect(doc.getElementById('wiki-install-btn')).toBeNull();
+    // But the capability is now discoverable: a note names the remediation...
+    const note = doc.getElementById('wiki-install-prod-note');
+    expect(note).not.toBeNull();
+    expect(note.textContent).toContain('--dev');
+    // ...alongside inert (disabled) Install/Update buttons.
+    const buttons = doc.querySelectorAll('.wiki-install-action-prod button[disabled]');
+    expect(buttons.length).toBe(2);
   });
 
   it('project <select> lists the roster and defaults to the active scope', async () => {

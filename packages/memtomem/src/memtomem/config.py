@@ -791,9 +791,7 @@ class ContextGatewayConfig(ConfigModel):
 
     See ``memtomem-docs/memtomem/planning/multi-project-context-ui-rfc.md`` —
     PR2 lands the read-only fields (``known_projects_path``,
-    ``experimental_claude_projects_scan``); ``user_tier_enabled`` reserved
-    here so PR3's mutating routes can wire onto a stable schema without a
-    second config bump.
+    ``experimental_claude_projects_scan``).
     """
 
     # Where ``Add Project`` registrations are persisted. Sibling to the
@@ -813,9 +811,6 @@ class ContextGatewayConfig(ConfigModel):
     # name changes (no validation_alias infra) and the unfiltered default is
     # untouched.
     auto_display_configured_projects: bool = True
-    # PR3 surface — listed here for forward-compat. While ``False`` the user
-    # scope is hidden from discovery responses entirely (RFC §Decision 5).
-    user_tier_enabled: bool = False
 
 
 class SessionTraceConfig(ConfigModel):
