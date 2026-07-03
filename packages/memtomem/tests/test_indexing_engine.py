@@ -797,9 +797,11 @@ class TestActiveRunsCounter:
 
     The counter feeds ``GET /api/indexing/active`` so the web UI's header
     indicator (#582 item 4.11) survives page reloads and reaches second
-    tabs. It must cover all three public entry points — including
-    ``index_path_stream``, which runs **outside** ``_index_lock`` and is
-    therefore invisible to ``asyncio.Lock.locked()``.
+    tabs. It must cover all three public entry points. It stays independent
+    of ``_index_lock``: runs also span discovery, gaps between files, and
+    lock-wait periods where ``asyncio.Lock.locked()`` would misreport
+    (since #1574 item 6 the stream takes the lock per file, but the
+    counter contract is unchanged).
     """
 
     async def test_idle_engine_is_not_active(self, components):
@@ -840,10 +842,10 @@ class TestActiveRunsCounter:
             engine._index_file = orig  # type: ignore[method-assign]
 
     async def test_active_during_index_path_stream(self, components, memory_dir):
-        """``index_path_stream`` runs outside ``_index_lock`` — verify the
-        counter still tracks it. This is the critical path: a server-bound
-        active-state endpoint that read ``_index_lock.locked()`` would
-        miss every streaming run.
+        """The counter must track stream runs across discovery and the gaps
+        between files, where no lock is held — an active-state endpoint
+        that read ``_index_lock.locked()`` would flicker off there even
+        though the stream now takes the lock per file (#1574 item 6).
         """
         (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
         engine = components.index_engine
@@ -889,6 +891,74 @@ class TestActiveRunsCounter:
             assert engine.is_active is False
         finally:
             engine._index_file = orig  # type: ignore[method-assign]
+
+    async def test_stream_serializes_against_index_path(self, components, memory_dir):
+        """The stream's per-file work parks on ``_index_lock`` while an
+        ``index_path`` run holds it (#1574 item 6) — before that fix the
+        stream interleaved freely with locked runs on the same files."""
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+        gate = asyncio.Event()
+        orig = engine._index_file
+        calls = {"n": 0}
+
+        async def first_call_blocked(fp, force=False, namespace=None, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:  # only index_path's call parks, holding the lock
+                await gate.wait()
+            return await orig(fp, force, namespace=namespace)
+
+        engine._index_file = first_call_blocked  # type: ignore[method-assign]
+        try:
+            locked_run = asyncio.create_task(engine.index_path(memory_dir))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert engine._index_lock.locked(), "index_path must be parked holding the lock"
+
+            gen = engine.index_path_stream(memory_dir, recursive=True)
+            ev = await gen.__anext__()
+            assert ev["type"] == "discovery"  # discovery needs no lock
+            nxt = asyncio.create_task(gen.__anext__())
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not nxt.done(), (
+                "stream produced a per-file event while index_path held _index_lock"
+            )
+
+            gate.set()
+            await locked_run
+            ev = await nxt
+            assert ev["type"] in ("chunk_progress", "progress")
+            async for _ in gen:
+                pass
+        finally:
+            engine._index_file = orig  # type: ignore[method-assign]
+
+    async def test_stream_aclose_while_parked_on_index_lock(self, components, memory_dir):
+        """Cancelling a stream whose runner is waiting on ``_index_lock``
+        must unwind cleanly: counter back to 0 and the lock not leaked
+        (#1574 item 6 cancellation contract)."""
+        (memory_dir / "notes.md").write_text("# Keep\n\nContent.")
+        engine = components.index_engine
+
+        await engine._index_lock.acquire()  # stand in for a concurrent locked run
+        try:
+            gen = engine.index_path_stream(memory_dir, recursive=True)
+            ev = await gen.__anext__()
+            assert ev["type"] == "discovery"
+            nxt = asyncio.create_task(gen.__anext__())
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not nxt.done()
+
+            nxt.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await nxt
+            assert engine._active_runs == 0
+            assert engine.is_active is False
+        finally:
+            engine._index_lock.release()
+        assert not engine._index_lock.locked(), "cancelled stream leaked _index_lock"
 
     async def test_decrements_on_stream_aclose(self, components, memory_dir):
         """Async-generator path relies on ``GeneratorExit`` triggering the
