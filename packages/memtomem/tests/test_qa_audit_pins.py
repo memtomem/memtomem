@@ -39,6 +39,8 @@ from httpx import ASGITransport, AsyncClient
 
 from memtomem.web.app import create_app
 
+from .helpers import ctx_gateway_js_text
+
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "src" / "memtomem" / "web" / "static"
 
@@ -833,7 +835,7 @@ class TestA11yModalToggleAntipattern:
         )
 
     def test_ctx_conflict_uses_modal_manager(self):
-        js = (_STATIC_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        js = ctx_gateway_js_text()  # #1517: gateway split into fragments
         # ``_ctxResolveConflict`` currently calls ``show(modal)`` / ``hide(modal)``
         # which are the generic helpers at app.js:527-528. After the modal
         # manager lands the modal-overlay path must use openModal/closeModal.

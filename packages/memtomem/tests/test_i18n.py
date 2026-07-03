@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from .helpers import CTX_GATEWAY_JS_FILES, ctx_gateway_js_text
+
 _LOCALES_DIR = (
     Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static" / "locales"
 )
@@ -175,7 +177,9 @@ class TestNoHardcodedStrings:
         "settings-namespaces.js",
         "settings-config.js",
         "settings-hooks-watchdog.js",
-        "context-gateway.js",
+        # context-gateway.js is split into fragments (#1517) — scan each so
+        # a hardcoded string in any fragment is caught with its own file:line.
+        *CTX_GATEWAY_JS_FILES,
         "context-portal.js",
         "wiki.js",
     )
@@ -672,7 +676,7 @@ class TestNoHardcodedStrings:
     def test_no_hardcoded_ctx_create_name_placeholder(self) -> None:
         """``context-gateway.js`` create form must not rebuild the name input
         placeholder as a raw ``my-${type...}`` template literal (#1022)."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         assert 'placeholder="my-${type' not in text, (
             "Found re-introduced #1022 hardcoded name placeholder in context-gateway.js. "
             "Use t('settings.ctx.create_name_placeholder', { type: type.slice(0, -1) })."
@@ -1602,7 +1606,7 @@ class TestNoHardcodedStrings:
         bug was the unconditional ``replace`` — guard the full
         ``key ? t(key) : <fallback>`` shape so a regression that drops the
         ``t()`` wrap or hardcodes a string still trips the test."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         assert "_SETTINGS_STATUS_I18N" in text, (
             "context-gateway.js missing _SETTINGS_STATUS_I18N map (#775)"
         )
@@ -1663,7 +1667,7 @@ class TestNoHardcodedStrings:
         assert not missing_ko, f"#774 keys missing from ko.json: {sorted(missing_ko)}"
 
         # JS branches on the per-result status, not on resp.ok alone.
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         assert "settingsResp.json()" in text, (
             "context-gateway.js Sync All must read the Settings sync "
             "response body — resp.ok alone hides ``needs_confirmation``"
@@ -1709,7 +1713,7 @@ class TestNoHardcodedStrings:
         both ``'error'`` and ``'aborted'`` literals catches a regression
         that drops one branch back into the success fallthrough.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         # Both new statuses are inspected.
         assert "'error'" in text and "firstWithStatus('error')" in text, (
             "context-gateway.js Sync All must classify ``status === 'error'`` "
@@ -1938,10 +1942,10 @@ class TestNoHardcodedStrings:
             re.compile(r"settings\.ctx\.detect(?:_tooltip|_aria)?\b(?!_)"),
         ]
         bad: list[str] = []
-        for name in ("index.html", "context-gateway.js"):
+        # No path.exists() skip: a missing fragment name (#1517) must fail
+        # loudly here rather than pass this guard vacuously.
+        for name in ("index.html", *CTX_GATEWAY_JS_FILES):
             path = _STATIC_JS_DIR / name
-            if not path.exists():
-                continue
             for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 for pat in forbidden_patterns:
                     if pat.search(line):
@@ -1962,7 +1966,7 @@ class TestNoHardcodedStrings:
         the dashboard's translation surface doesn't reach across into
         the hooks panel's keys (where a future hooks relabel would
         silently drift the ctx text)."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         m = re.search(
             r"if \(d\.error\) \{\s*\n(?:\s*//[^\n]*\n)*\s*badgeText = ([^;]+);",
             text,
@@ -2001,7 +2005,7 @@ class TestNoHardcodedStrings:
         ``seq !== _ctxOverviewSeq || requestedTier !== _ctxTargetScope`` —
         the regex below tolerates that optional tier-drift clause while
         still requiring the seq check, so removing the guard still fails."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         assert "_ctxOverviewSeq" in text, (
             "missing _ctxOverviewSeq module counter — Bug-1 race guard"
         )
@@ -2049,7 +2053,7 @@ class TestNoHardcodedStrings:
         The active-class gate matches ``switchSettingsSection``'s own
         ``section.classList.add('active')`` contract (app.js:1191).
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         body = _langchange_listener_body(text)
         # Cache-driven re-render path is the primary action; the
         # ``loadCtxOverview()`` cold-mount fallback covers the case when
@@ -2103,7 +2107,7 @@ class TestNoHardcodedStrings:
         the runtime badges. The same module also defines ``_ctxStatusCls``
         which separately keys ``'parse error'`` (to a CSS class) — extract
         the label block first so the assertion targets the i18n map only."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         block_match = re.search(
             r"const _ctxStatusLabel\s*=\s*\{(.+?)\};",
             text,
@@ -2124,7 +2128,7 @@ class TestNoHardcodedStrings:
         ``settings.ctx.status_invalid_name`` — same shape as the Drift-4
         parse-error pin above; locale presence is covered by the en/ko
         parity gate."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         block_match = re.search(
             r"const _ctxStatusLabel\s*=\s*\{(.+?)\};",
             text,
@@ -2149,7 +2153,7 @@ class TestNoHardcodedStrings:
         rebuilds the list — the same class of staleness PR #824 fixed for
         the overview cards.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         body = _langchange_listener_body(text)
         # All three per-type sections must be referenced — using the
         # template literal ``settings-ctx-${type}`` is the canonical form,
@@ -2177,7 +2181,7 @@ class TestNoHardcodedStrings:
         preview source. Both must be reachable from the listener, gated by
         the ``runtimeOnly`` flag on ``_ctxCurrentDetail``.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         body = _langchange_listener_body(text)
         assert "loadCtxDetail(" in body, (
             "langchange listener must call loadCtxDetail() to re-mount the canonical detail pane"
@@ -2205,7 +2209,7 @@ class TestNoHardcodedStrings:
         stays stale until the user clicks Diff manually — review finding
         P1.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         body = _langchange_listener_body(text)
         # Active-tab capture: must query for the .ctx-detail-tab[data-pane="diff"]
         # element and check whether it carries ``.active``.
@@ -2232,7 +2236,7 @@ class TestNoHardcodedStrings:
         ``statusEl.innerHTML = ''`` behavior at the top of ``loadCtxList``
         itself.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         body = _langchange_listener_body(text)
         # The clear happens implicitly via ``loadCtxList`` (which clears
         # ``statusEl.innerHTML`` near its top). Pin both the call and the
@@ -2264,7 +2268,7 @@ class TestNoHardcodedStrings:
           container.innerHTML + _ctxRefreshSectionState)
         * ``_loadScopeGroupItems`` catch path (before emptyState write)
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         assert "_ctxListSeq" in text, "missing _ctxListSeq module counter — Q-PR4 list race guard"
         assert re.search(r"const seq\s*=\s*\+\+_ctxListSeq\[type\]", text), (
             "loadCtxList must capture-and-bump _ctxListSeq[type] at entry"
@@ -2289,7 +2293,7 @@ class TestNoHardcodedStrings:
         overview branch is wasted work — and would still be a correctness
         bug if a future refactor weakened the section-active invariant.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         body = _langchange_listener_body(text)
         # Find the overview branch (settings-ctx-overview gate) and
         # confirm it ends with ``return;`` before the per-type loop.
@@ -2316,7 +2320,7 @@ class TestNoHardcodedStrings:
         path which only triggers on the conflict dialog, not on a normal
         language toggle.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         # Slice from the listener's `addEventListener('langchange',` line
         # to the next "// -- " section comment header (or, defensively,
         # the next `// Sync All button` block which follows the listener).
@@ -2365,7 +2369,7 @@ class TestNoHardcodedStrings:
         all three keys; bumped at the entry of each loader; checked at
         the success and catch innerHTML write sites in both functions.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         assert re.search(
             r"_ctxDetailSeq\s*=\s*\{[^}]*skills[^}]*commands[^}]*agents[^}]*\}",
             text,
@@ -2400,7 +2404,7 @@ class TestNoHardcodedStrings:
         latest detail mount's ``.then()`` (gated by
         ``_ctxDetailSeq``) consumes it.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         # Module-level declaration.
         assert re.search(r"^let _ctxPendingEdit\s*=\s*null;", text, re.MULTILINE), (
             "missing module-level _ctxPendingEdit declaration"
@@ -2459,7 +2463,7 @@ class TestNoHardcodedStrings:
              to L2's ``.then()``; clearing on supersede would race
              against L2's apply.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
 
         # 1+2. Both entry points carry the guard.
         canonical_match = re.search(
@@ -2546,7 +2550,7 @@ class TestNoHardcodedStrings:
         runtime-only items after the list is rebuilt — the card's
         ``data-canonical-path`` attribute is gone with the wiped DOM.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         # Declaration includes the field with a default.
         assert re.search(
             r"_ctxCurrentDetail\s*=\s*\{[^}]*runtimeOnly\s*:\s*false[^}]*\}",
@@ -2707,7 +2711,7 @@ class TestNoHardcodedStrings:
         Static-source pin: looks for the regex form on the settings
         branch and explicitly forbids the single-arg literal form.
         """
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         # Positive — the global regex form is present on the settings
         # status fallthrough.
         assert re.search(
@@ -2741,7 +2745,7 @@ class TestNoHardcodedStrings:
         asymmetry without needing the browser harness. The Playwright
         spec stubs the API and asserts the rendered text; this pin
         catches the source change at the layer above."""
-        text = (_STATIC_JS_DIR / "context-gateway.js").read_text(encoding="utf-8")
+        text = ctx_gateway_js_text()
         m = re.search(
             r'<div class="ctx-overview-count">\$\{([^}]+)\}</div>',
             text,

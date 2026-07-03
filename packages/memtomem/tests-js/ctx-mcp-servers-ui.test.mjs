@@ -1,7 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import fs from 'node:fs';
-import path from 'node:path';
-import { bootApp, STATIC_DIR } from './setup/jsdom-app.mjs';
+import { bootApp, readGatewayText } from './setup/jsdom-app.mjs';
 
 function installOverviewFetch(window) {
   const upstream = window.fetch;
@@ -69,7 +67,8 @@ describe('Context Gateway MCP Servers UI', () => {
   });
 
   it('includes mcp-servers in the Sync All phase list', () => {
-    const text = fs.readFileSync(path.join(STATIC_DIR, 'context-gateway.js'), 'utf-8');
+    // #1517: gateway source is split into fragments — grep the concatenation.
+    const text = readGatewayText();
     expect(text).toContain("const types = ['skills', 'commands', 'agents', 'mcp-servers']");
   });
 });
