@@ -293,3 +293,43 @@ class TestDuplicateChunksMigration:
             assert idx_row is not None
         finally:
             db.close()
+
+
+class TestIdempotencyLedgerSchema:
+    """The idempotency_ledger table (issue #1573) installs idempotently."""
+
+    def test_table_and_index_created(self) -> None:
+        db = _connect_with_vec()
+        try:
+            meta = MetaManager(lambda: db)
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='idempotency_ledger'"
+            ).fetchone()
+            index = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_idempotency_expires'"
+            ).fetchone()
+            assert table is not None
+            assert index is not None
+            cols = {r[1] for r in db.execute("PRAGMA table_info(idempotency_ledger)")}
+            assert cols == {"tool", "key", "result", "created_at", "expires_at"}
+        finally:
+            db.close()
+
+    def test_rerun_is_noop(self) -> None:
+        db = _connect_with_vec()
+        try:
+            meta = MetaManager(lambda: db)
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            db.execute(
+                "INSERT INTO idempotency_ledger (tool, key, result, created_at, expires_at) "
+                "VALUES ('mem_add', 'k', 'r', '2026-01-01T00:00:00+00:00', "
+                "'2030-01-01T00:00:00+00:00')"
+            )
+            db.commit()
+            # Re-running create_tables must not drop the table or its row.
+            create_tables(db, meta, dimension=0, embedding_provider="none", embedding_model="")
+            n = db.execute("SELECT COUNT(*) FROM idempotency_ledger").fetchone()[0]
+            assert n == 1
+        finally:
+            db.close()

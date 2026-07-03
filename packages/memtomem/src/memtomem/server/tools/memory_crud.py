@@ -16,7 +16,7 @@ from memtomem.server.error_handler import tool_handler
 from memtomem.server.helpers import _announce_dim_mismatch_once, _check_embedding_mismatch
 from memtomem.server.tool_registry import register
 from memtomem.server.tools.multi_agent import _resolve_agent_namespace
-from memtomem.server.validation import MAX_CONTENT_LENGTH
+from memtomem.server.validation import MAX_CONTENT_LENGTH, MAX_IDEMPOTENCY_KEY_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
 
 if TYPE_CHECKING:
@@ -31,6 +31,54 @@ logger = logging.getLogger(__name__)
 # few times is transient; a chunk that keeps moving returns a retryable error
 # instead of spinning.
 _CHUNK_LOCK_MOVE_RETRIES = 3
+
+# Appended to a result string returned from the idempotency ledger (issue
+# #1573) so a replayed keyed write is distinguishable from the original —
+# nothing machine-parses these strings, but the marker stops an LLM caller
+# from concluding a second physical write happened.
+_REPLAY_MARKER = "\n\n[idempotent replay] Result returned from ledger; no new write was performed."
+
+
+def _idempotency_in_progress_error(key: str) -> str:
+    """Retryable message when a concurrent call already holds the claim.
+
+    Only reachable when two same-key calls race to *different* targets (a
+    same-target race is serialized by the per-file lock, so the second sees a
+    completed claim and replays). A sequential retry after this resolves once
+    the in-flight write completes.
+    """
+    return (
+        f"Error: a memory write with idempotency_key '{key}' is already in progress; retry shortly."
+    )
+
+
+def _validate_idempotency_key(key: str) -> str | None:
+    """Return an ``Error: ...`` string for an invalid idempotency key, else None.
+
+    Over-long keys are rejected loudly rather than truncated: truncation could
+    collide two distinct keys and silently drop a write, which is strictly
+    worse than an error the caller can see and fix.
+    """
+    if not key.strip():
+        return "Error: idempotency_key must be non-empty."
+    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        return (
+            f"Error: idempotency_key too long "
+            f"(max {MAX_IDEMPOTENCY_KEY_LENGTH} chars, got {len(key)})."
+        )
+    return None
+
+
+async def _release_idempotency_claim(app: AppContext, tool: str, key: str) -> None:
+    """Best-effort release of a won-but-failed claim so the key stays re-runnable.
+
+    A release failure must not mask the write error that triggered it, so it is
+    swallowed and logged.
+    """
+    try:
+        await app.storage.idempotency_release(tool, key)
+    except Exception:
+        logger.warning("idempotency claim release failed for %s", tool, exc_info=True)
 
 
 @asynccontextmanager
@@ -223,6 +271,7 @@ async def _mem_add_core(
     scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     project_root_override: Path | None = None,
+    idempotency_key: str | None = None,
 ) -> tuple[str, "IndexingStats | None"]:
     """Core logic for ``mem_add`` — also usable from internal callers that
     need the ``IndexingStats`` (e.g. ``mem_consolidate_apply`` linking new
@@ -242,13 +291,22 @@ async def _mem_add_core(
     cwd and the summary would silently cross project boundaries
     (ADR-0011 PR-D review round 7).
 
+    ``idempotency_key`` makes the write idempotent (issue #1573): a retry
+    with the same key returns the original result and performs no second
+    write. On such a replay ``stats`` is ``None`` (the write already
+    happened), so id-consuming internal callers must not pass a key.
+
     Returns:
         Tuple of ``(user_facing_message, stats)``. ``stats`` is ``None``
         for early error returns (empty content, oversized content,
         redaction-guard hit without ``force_unsafe``, template failure,
-        invalid path, missing project_shared confirm) so callers must
-        tolerate ``None``.
+        invalid path, missing project_shared confirm) and for an
+        idempotent replay, so callers must tolerate ``None``.
     """
+    if idempotency_key is not None:
+        key_err = _validate_idempotency_key(idempotency_key)
+        if key_err:
+            return (key_err, None)
     if not content.strip():
         return ("Error: content cannot be empty.", None)
     if len(content) > MAX_CONTENT_LENGTH:
@@ -261,6 +319,14 @@ async def _mem_add_core(
     from memtomem.tools.memory_writer import append_entry
 
     app = await _get_app_initialized(ctx)
+
+    # Fast-path idempotent replay: return the stored result before re-running
+    # the redaction gates (avoids double-counting privacy outcomes). The
+    # authoritative re-check happens under the file lock below.
+    if idempotency_key is not None:
+        stored = await app.storage.idempotency_get("mem_add", idempotency_key)
+        if stored is not None:
+            return (stored + _REPLAY_MARKER, None)
 
     # Block vector-dependent writes when the server is in degraded mode
     # (see issue #349). Without this gate the subsequent ``index_file``
@@ -439,32 +505,67 @@ async def _mem_add_core(
                 timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
             ),
         ):
+            # Idempotency claim under the lock (issue #1573). The claim is a
+            # global (tool, key) row, not a file lock, so it also blocks a
+            # concurrent same-key call that targets a *different* file: exactly
+            # one caller wins the write, the rest replay or get "in progress".
+            if idempotency_key is not None:
+                state, stored = await app.storage.idempotency_claim("mem_add", idempotency_key)
+                if state == "completed":
+                    assert stored is not None  # completed rows always carry a result
+                    return (stored + _REPLAY_MARKER, None)
+                if state == "pending":
+                    return (_idempotency_in_progress_error(idempotency_key), None)
             # Resolve the session-derived namespace *inside* the lock: waiting on
             # the lock is a suspension point, and the active session can change
             # during it — the entry must land under the namespace active at write
             # time, not one captured before the wait.
             effective_ns = namespace or _resolve_agent_namespace(app, None)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+            # Release the claim only for a failure *before* the append is
+            # durable (mkdir / append itself) — nothing landed, so the key must
+            # stay re-runnable. Once the append lands we NEVER release: a keyed
+            # retry must not re-append. If index_file (below) raises, the claim
+            # is left pending (retry gets "in progress", not a duplicate) and
+            # the watcher / ``mm index --force`` recovers the un-indexed entry.
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+            except Exception:
+                if idempotency_key is not None:
+                    await _release_idempotency_claim(app, "mem_add", idempotency_key)
+                raise
             # Re-index the whole file via the standard pipeline so the watcher
             # (which also calls index_file) produces identical hashes → no dups.
             stats = await app.index_engine.index_file(
                 target, namespace=effective_ns, already_scanned=True, lock_held=True
             )
+            display_ns = effective_ns or app.config.namespace.default_namespace
+            result = (
+                f"Memory added to {target}\n"
+                f"- Namespace: {display_ns}\n"
+                f"- Chunks indexed: {stats.indexed_chunks}\n"
+                f"- File: {target}"
+            )
+            # Fill in the won claim with the base result, under the lock. Only
+            # the deterministic base message is stored — the advisory tails
+            # below are non-deterministic and original-only. A complete failure
+            # leaves the row pending (never released — the append is durable),
+            # so a retry replays/blocks instead of duplicating.
+            if idempotency_key is not None:
+                try:
+                    await app.storage.idempotency_complete("mem_add", idempotency_key, result)
+                except Exception:
+                    logger.warning(
+                        "idempotency ledger complete failed; mem_add key left pending "
+                        "(retry blocks until TTL)",
+                        exc_info=True,
+                    )
     except TimeoutError:
         return (
             f"Error: {target} is locked by another process (migration in flight?); retry.",
             None,
         )
     app.search_pipeline.invalidate_cache()
-
-    display_ns = effective_ns or app.config.namespace.default_namespace
-    result = (
-        f"Memory added to {target}\n"
-        f"- Namespace: {display_ns}\n"
-        f"- Chunks indexed: {stats.indexed_chunks}\n"
-        f"- File: {target}"
-    )
 
     # Semantic duplicate check: warn if very similar content already exists
     try:
@@ -521,6 +622,7 @@ async def mem_add(
     force_unsafe: bool = False,
     scope: TargetScope = "user",
     confirm_project_shared: bool = False,
+    idempotency_key: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Add a new memory entry to a markdown file and immediately index it.
@@ -555,6 +657,13 @@ async def mem_add(
                       even when content matches a secret pattern. Use only
                       when matches are known false positives (e.g.,
                       documenting an example credential schema).
+        idempotency_key: Optional client-chosen key (max 256 chars) making
+                         this write idempotent for 24h: a retried call with
+                         the same key returns the original result and performs
+                         no new write. Only successful writes are recorded — a
+                         failed call may be retried with the same key. Without
+                         a key, semantics stay at-least-once (a transport retry
+                         may duplicate the entry).
 
     Returns a confirmation message. If highly similar memories already exist
     (≥90% match), a duplicate warning is appended to the output.
@@ -569,6 +678,7 @@ async def mem_add(
         force_unsafe=force_unsafe,
         scope=scope,
         confirm_project_shared=confirm_project_shared,
+        idempotency_key=idempotency_key,
         ctx=ctx,
     )
     return message
@@ -861,6 +971,7 @@ async def mem_batch_add(
     force_unsafe: bool = False,
     scope: TargetScope = "user",
     confirm_project_shared: bool = False,
+    idempotency_key: str | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Add multiple memory entries in one call (KV batch).
@@ -895,20 +1006,39 @@ async def mem_batch_add(
                ``project_local``). Applies to every entry in the batch.
         confirm_project_shared: Required when ``scope='project_shared'``
                                 — Gate B explicit opt-in for git-tracked writes.
+        idempotency_key: Optional client-chosen key (max 256 chars) making
+                         this write idempotent for 24h: a retried call with
+                         the same key returns the original result and performs
+                         no new write. Only successful writes are recorded — a
+                         failed call may be retried with the same key. Without
+                         a key, semantics stay at-least-once (a transport retry
+                         may duplicate the entries).
     """
     if len(entries) > 500:
         return f"Error: batch too large (max 500 entries, got {len(entries)})."
+    if idempotency_key is not None:
+        key_err = _validate_idempotency_key(idempotency_key)
+        if key_err:
+            return key_err
 
     from datetime import datetime, timezone
 
     from memtomem import privacy
     from memtomem.config import classify_scope
-    from memtomem.tools.memory_writer import append_entry
+    from memtomem.tools.memory_writer import append_blocks, format_entry_block
 
     app = await _get_app_initialized(ctx)
     mismatch_msg = _check_embedding_mismatch(app)
     if mismatch_msg:
         return mismatch_msg
+
+    # Fast-path idempotent replay before the redaction loop so a retry doesn't
+    # re-record per-entry privacy outcomes. Authoritative re-check is under the
+    # file lock below.
+    if idempotency_key is not None:
+        stored = await app.storage.idempotency_get("mem_batch_add", idempotency_key)
+        if stored is not None:
+            return stored + _REPLAY_MARKER
     mdirs = app.config.indexing.memory_dirs
     pmdirs = app.config.indexing.project_memory_dirs
 
@@ -1071,11 +1201,14 @@ async def mem_batch_add(
     assert target is not None
 
     def _append_entries() -> int:
-        """Append all non-empty entries; returns the skipped count. Runs in
-        one worker thread so up to 500 file appends don't block the event
-        loop (matching the single-entry ``mem_add`` path).
+        """Append all non-empty entries in ONE write; returns the skipped
+        count. Composing every block up front and doing a single append
+        makes the batch all-or-nothing (issue #1573) — a mid-batch failure
+        can no longer leave entries ``0..k-1`` stranded on disk. Runs in one
+        worker thread so formatting up to 500 blocks doesn't block the loop.
         """
         skipped = 0
+        blocks: list[str] = []
         for entry in entries:
             key = entry.get("key") or entry.get("title", "")
             value = entry.get("value") or entry.get("content", "")
@@ -1083,7 +1216,8 @@ async def mem_batch_add(
             if not value:
                 skipped += 1
                 continue
-            append_entry(target, value, title=key or None, tags=entry_tags)
+            blocks.append(format_entry_block(value, title=key or None, tags=entry_tags))
+        append_blocks(target, blocks)
         return skipped
 
     # Serialize the batch append + re-index under the per-file lock (issue
@@ -1104,26 +1238,58 @@ async def mem_batch_add(
                 timeout=_CRUD_SIDECAR_LOCK_BUDGET_S,
             ),
         ):
+            # Idempotency claim under the lock (issue #1573), same protocol as
+            # ``_mem_add_core``: the global (tool, key) claim blocks a concurrent
+            # same-key batch even when it targets a different file.
+            if idempotency_key is not None:
+                state, stored = await app.storage.idempotency_claim(
+                    "mem_batch_add", idempotency_key
+                )
+                if state == "completed":
+                    assert stored is not None  # completed rows always carry a result
+                    return stored + _REPLAY_MARKER
+                if state == "pending":
+                    return _idempotency_in_progress_error(idempotency_key)
             # Inside the lock for the same write-time-namespace reason as
             # ``_mem_add_core`` — the session can change during the lock wait.
             effective_ns = namespace or _resolve_agent_namespace(app, None)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            skipped = await asyncio.to_thread(_append_entries)
+            # Release only for a failure before the append is durable (same rule
+            # as ``_mem_add_core``); once the single append lands the claim is
+            # never released, so a keyed retry can't duplicate the batch.
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                skipped = await asyncio.to_thread(_append_entries)
+            except Exception:
+                if idempotency_key is not None:
+                    await _release_idempotency_claim(app, "mem_batch_add", idempotency_key)
+                raise
             stats = await app.index_engine.index_file(
                 target, namespace=effective_ns, already_scanned=True, lock_held=True
             )
+            display_ns = effective_ns or app.config.namespace.default_namespace
+            result = (
+                f"Batch add complete ({len(entries)} entries) → {target}\n"
+                f"- Namespace: {display_ns}\n"
+                f"- Chunks indexed: {stats.indexed_chunks}"
+            )
+            if skipped:
+                result += f"\n- Skipped: {skipped} entries (empty content)"
+            # Fill in the won claim under the lock. A complete failure leaves the
+            # row pending (never released — the append is durable), so a retry
+            # replays/blocks instead of duplicating.
+            if idempotency_key is not None:
+                try:
+                    await app.storage.idempotency_complete("mem_batch_add", idempotency_key, result)
+                except Exception:
+                    logger.warning(
+                        "idempotency ledger complete failed; mem_batch_add key left "
+                        "pending (retry blocks until TTL)",
+                        exc_info=True,
+                    )
     except TimeoutError:
         return f"Error: {target} is locked by another process (migration in flight?); retry."
     app.search_pipeline.invalidate_cache()
 
-    display_ns = effective_ns or app.config.namespace.default_namespace
-    result = (
-        f"Batch add complete ({len(entries)} entries) → {target}\n"
-        f"- Namespace: {display_ns}\n"
-        f"- Chunks indexed: {stats.indexed_chunks}"
-    )
-    if skipped:
-        result += f"\n- Skipped: {skipped} entries (empty content)"
     return result
 
 
