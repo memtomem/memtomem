@@ -420,6 +420,28 @@ def create_tables(
         "ON working_memory(expires_at) WHERE expires_at IS NOT NULL"
     )
 
+    # --- Idempotency ledger (issue #1573) ---
+    # (tool, key) -> the result string of a keyed memory write. A replayed call
+    # with a seen key returns the stored result and performs no write.
+    # ``result`` is NULL for a *pending* claim (write in flight) and filled in
+    # on completion — the pending row is the pre-write test-and-set that stops
+    # two concurrent same-key calls (even to different files) from both writing.
+    # Rows expire after IdempotencyMixin.IDEMPOTENCY_TTL_S; purge is lazy
+    # (idempotency_claim deletes expired rows), mirroring working_memory.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS idempotency_ledger (
+            tool TEXT NOT NULL,
+            key TEXT NOT NULL,
+            result TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (tool, key)
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_ledger(expires_at)"
+    )
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS chunk_relations (
             source_id TEXT NOT NULL,
