@@ -16,7 +16,14 @@ from typing import Literal
 
 import pytest
 
-from memtomem.cli.init_cmd import MmBinaryOrigin, RuntimeProfile, _write_mcp_json
+import click
+
+from memtomem.cli.init_cmd import (
+    MmBinaryOrigin,
+    RuntimeProfile,
+    _write_kimi_mcp_json,
+    _write_mcp_json,
+)
 from memtomem.config import Mem2MemConfig
 
 from .helpers import set_home
@@ -51,6 +58,149 @@ def test_write_mcp_json_preserves_valid_env(
 
     data = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     assert data["mcpServers"]["memtomem"]["env"] == env
+
+
+def test_write_mcp_json_merges_preserving_other_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Updating an existing .mcp.json must keep the user's other MCP servers
+    and any unrelated top-level keys (#1568 merge branch, previously untested)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"other": {"command": "other-server", "args": []}},
+                "unrelatedTopLevel": True,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    _write_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    data = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert data["mcpServers"]["other"] == {"command": "other-server", "args": []}
+    assert data["unrelatedTopLevel"] is True
+    assert data["mcpServers"]["memtomem"]["command"] == "uvx"
+
+
+def test_write_mcp_json_corrupt_existing_is_actionable_and_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-edited .mcp.json that no longer parses must surface a
+    fix-or-remove ClickException, not a JSONDecodeError traceback, and the
+    file must be left byte-for-byte intact (#1568)."""
+    monkeypatch.chdir(tmp_path)
+    corrupt = '{"mcpServers": {"other": {}},}'  # trailing comma
+    (tmp_path / ".mcp.json").write_text(corrupt, encoding="utf-8")
+
+    with pytest.raises(click.ClickException, match=r"not valid JSON(.|\n)*re-run mm init"):
+        _write_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == corrupt
+
+
+def test_write_mcp_json_non_object_existing_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".mcp.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(click.ClickException, match=r"not a JSON object"):
+        _write_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == "[]"
+
+
+def test_write_mcp_json_non_object_mcp_servers_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid JSON whose ``mcpServers`` value has the wrong shape must be
+    refused actionably, not crash with a raw TypeError (review finding)."""
+    monkeypatch.chdir(tmp_path)
+    content = '{"mcpServers": []}'
+    (tmp_path / ".mcp.json").write_text(content, encoding="utf-8")
+
+    with pytest.raises(click.ClickException, match=r'"mcpServers".*not a JSON object'):
+        _write_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert (tmp_path / ".mcp.json").read_text(encoding="utf-8") == content
+
+
+@pytest.mark.requires_symlinks
+def test_write_mcp_json_writes_through_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlinked .mcp.json (dotfile-managed) must stay a symlink; the
+    atomic replace goes to the resolved target, not over the link."""
+    real = tmp_path / "dotfiles" / "mcp.json"
+    real.parent.mkdir()
+    real.write_text(
+        json.dumps({"mcpServers": {"other": {"command": "other-server", "args": []}}}),
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".mcp.json").symlink_to(real)
+    monkeypatch.chdir(project)
+
+    _write_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert (project / ".mcp.json").is_symlink()
+    data = json.loads(real.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["other"] == {"command": "other-server", "args": []}
+    assert data["mcpServers"]["memtomem"]["command"] == "uvx"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_write_mcp_json_preserves_existing_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The atomic rewrite swaps the inode; a user-tightened 0o600 file must
+    not silently come back 0o644."""
+    monkeypatch.chdir(tmp_path)
+    mcp_path = tmp_path / ".mcp.json"
+    mcp_path.write_text("{}", encoding="utf-8")
+    mcp_path.chmod(0o600)
+
+    _write_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert mcp_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_write_kimi_mcp_json_merges_preserving_other_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    share_dir = tmp_path / "kimi-share"
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+    share_dir.mkdir(parents=True)
+    (share_dir / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"other": {"command": "other-server", "args": []}}}),
+        encoding="utf-8",
+    )
+
+    written = _write_kimi_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert written == share_dir / "mcp.json"
+    data = json.loads(written.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["other"] == {"command": "other-server", "args": []}
+    assert data["mcpServers"]["memtomem"]["command"] == "uvx"
+
+
+def test_write_kimi_mcp_json_corrupt_existing_is_actionable_and_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    share_dir = tmp_path / "kimi-share"
+    monkeypatch.setenv("KIMI_SHARE_DIR", str(share_dir))
+    share_dir.mkdir(parents=True)
+    corrupt = "{not json"
+    (share_dir / "mcp.json").write_text(corrupt, encoding="utf-8")
+
+    with pytest.raises(click.ClickException, match=r"not valid JSON(.|\n)*re-run mm init"):
+        _write_kimi_mcp_json("uvx", ["--from", "memtomem", "memtomem-server"], {})
+
+    assert (share_dir / "mcp.json").read_text(encoding="utf-8") == corrupt
 
 
 def _make_test_profile(

@@ -2608,41 +2608,80 @@ def _write_config_and_summary(
     click.echo()
 
 
-def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> None:
-    """Write or update .mcp.json in current directory."""
+def _merge_mcp_server_entry(mcp_path: Path, server_entry: dict) -> None:
+    """Merge the memtomem entry into ``mcp_path``'s ``mcpServers``, atomically.
+
+    This runs as one of ``mm init``'s last steps — ``config.json`` is already
+    written — so failures here must not corrupt the editor's MCP config for
+    every configured server, and must surface as an actionable message
+    instead of a traceback that leaves the run half-applied (#1568):
+
+    - a hand-edited file that no longer parses (trailing comma, comment) or
+      has the wrong JSON shape is refused with a fix-or-remove hint, and
+      left byte-for-byte untouched;
+    - the write goes through ``atomic_write_text`` (tempfile + fsync +
+      ``os.replace``) so a crash mid-write can't truncate the file.
+    """
+    from memtomem.context._atomic import atomic_write_text
+
+    # ``os.replace`` would swap a symlinked config out for a regular file,
+    # silently disconnecting a dotfile-managed target — resolve and write
+    # through to the real file instead. Error messages keep the user-facing
+    # ``mcp_path`` spelling.
+    target = mcp_path.resolve()
+
+    existing: dict = {}
+    mode = 0o644
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise click.ClickException(
+                f"existing {mcp_path} is not valid JSON: {exc} — "
+                "fix or remove it and re-run mm init"
+            ) from exc
+        if not isinstance(existing, dict):
+            raise click.ClickException(
+                f"existing {mcp_path} is not a JSON object "
+                f"(got {type(existing).__name__}) — fix or remove it and re-run mm init"
+            )
+        # ``os.replace`` swaps the inode, so carry the current permissions
+        # over instead of silently loosening a user-tightened file to 0o644.
+        try:
+            mode = target.stat().st_mode & 0o777
+        except OSError:
+            pass
+    servers = existing.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise click.ClickException(
+            f'"mcpServers" in {mcp_path} is not a JSON object '
+            f"(got {type(servers).__name__}) — fix or remove it and re-run mm init"
+        )
+    servers["memtomem"] = server_entry
+    atomic_write_text(target, json.dumps(existing, indent=2), mode=mode)
+
+
+def _mcp_server_entry(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> dict:
     server_entry: dict = {
         "command": server_cmd,
         "args": server_args,
     }
     if mcp_env:
         server_entry["env"] = mcp_env
-    mcp_config: dict = {"mcpServers": {"memtomem": server_entry}}
-    mcp_path = Path(".mcp.json")
-    if mcp_path.exists():
-        existing = json.loads(mcp_path.read_text(encoding="utf-8"))
-        existing.setdefault("mcpServers", {})["memtomem"] = mcp_config["mcpServers"]["memtomem"]
-        mcp_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    else:
-        mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+    return server_entry
+
+
+def _write_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> None:
+    """Write or update .mcp.json in current directory."""
+    _merge_mcp_server_entry(Path(".mcp.json"), _mcp_server_entry(server_cmd, server_args, mcp_env))
 
 
 def _write_kimi_mcp_json(server_cmd: str, server_args: list[str], mcp_env: dict[str, str]) -> Path:
     """Write or update Kimi CLI's MCP config file."""
-    server_entry: dict = {
-        "command": server_cmd,
-        "args": server_args,
-    }
-    if mcp_env:
-        server_entry["env"] = mcp_env
     base = Path(os.environ.get("KIMI_SHARE_DIR", "~/.kimi")).expanduser()
     mcp_path = base / "mcp.json"
     mcp_path.parent.mkdir(parents=True, exist_ok=True)
-    if mcp_path.exists():
-        existing = json.loads(mcp_path.read_text(encoding="utf-8"))
-    else:
-        existing = {}
-    existing.setdefault("mcpServers", {})["memtomem"] = server_entry
-    mcp_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    _merge_mcp_server_entry(mcp_path, _mcp_server_entry(server_cmd, server_args, mcp_env))
     return mcp_path
 
 

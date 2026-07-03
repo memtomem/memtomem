@@ -177,6 +177,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   metadata sidecar on the SIGKILL path, and reports every stopped pid;
   `--dry-run --json` lists the web pid in `would_kill`/`would_remove`. On
   Windows the manual-stop warning now names `mm web` as well.
+- **`mm init`'s `.mcp.json` / Kimi `mcp.json` writers are atomic and refuse
+  invalid pre-existing files with an actionable message** (#1568). Both
+  editor-config writers used truncate-then-write, so a crash mid-write could
+  corrupt the editor's MCP config for *every* configured server, and they
+  parsed a pre-existing file unguarded, so a hand-edited `.mcp.json`
+  (trailing comma, comment) aborted `mm init` at its final step with a raw
+  `JSONDecodeError` traceback — after `config.json` was already written,
+  leaving the run half-applied with no hint how to recover. The merge now
+  goes through the fsync-hardened `atomic_write_text` (tempfile +
+  `os.replace`, preserving the existing file's permission bits and writing
+  through a symlinked config to its resolved target instead of replacing
+  the link), and an unparseable existing file — or one whose top level or
+  `mcpServers` value is not a JSON object — is refused with a
+  "fix or remove it and re-run mm init" error, leaving it byte-for-byte
+  untouched.
 - **Concurrent MCP memory-CRUD calls on the same file no longer lose updates or
   corrupt an unrelated entry** (#1570). `mem_edit` / `mem_delete` did their
   read → rewrite (`replace_chunk_body` / `remove_lines`) → re-index → rollback
