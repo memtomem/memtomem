@@ -156,6 +156,57 @@ class TestScheduleActions:
         assert "params" in info.params
 
 
+class TestContextSurfacePosture:
+    """#1510: context install/update and the projects registry are intentionally
+    CLI + dev-tier-web only, with NO ``mem_context_*`` MCP verb (ADR-0008
+    "Surface coverage" section).
+
+    The web routes exist (``context_mutations.install_asset``/``update_asset``,
+    ``context_projects.{add,delete,update}_known_project`` — see
+    ``test_web_invariants_registry.py``); the CLI verbs exist
+    (``mm context install|update|projects``). Only the MCP surface omits them.
+    This pins both the exact registered-context action set and the deliberate
+    absence, so adding a verb later must consciously flip this test rather than
+    slip in unnoticed."""
+
+    # The 10 @register("context") actions. mem_context_migrate is @mcp.tool()
+    # only (a deprecated alias, not @register-ed), so it is not in ACTIONS.
+    _EXPECTED_CONTEXT_ACTIONS = frozenset(
+        {
+            "context_init",
+            "context_detect",
+            "context_generate",
+            "context_diff",
+            "context_sync",
+            "context_memory_migrate",
+            "context_artifact_migrate",
+            "context_artifact_transfer",
+            "context_version",
+            "context_promote",
+        }
+    )
+
+    def test_registered_context_actions_are_exactly_the_expected_set(self):
+        registered = {name for name, info in ACTIONS.items() if info.category == "context"}
+        assert registered == self._EXPECTED_CONTEXT_ACTIONS
+
+    def test_no_install_update_or_projects_mcp_verb(self):
+        """The posture pin: these three surfaces write into a project tree or
+        mutate cross-project enrollment, so they stay CLI/web-only. If you are
+        adding one, update _EXPECTED_CONTEXT_ACTIONS, ADR-0008, and
+        docs/guides/reference.md in the same change — and replicate the
+        sync-eligibility gate (today a web-route-layer check) at the MCP
+        boundary."""
+        forbidden = {
+            name
+            for name in ACTIONS
+            if name.startswith(("context_install", "context_update", "context_projects"))
+        }
+        assert forbidden == set(), (
+            f"unexpected CLI/web-only context verb(s) exposed on MCP: {sorted(forbidden)}"
+        )
+
+
 class TestMemVersion:
     """Tests for mem_version (mem_do action='version')."""
 

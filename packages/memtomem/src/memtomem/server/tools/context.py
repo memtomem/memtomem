@@ -1778,8 +1778,9 @@ def _resolve_transfer_destination(to_project: str, src_root: Path) -> tuple[Path
     if scope is None:
         return None, (
             f"error: unknown to_project_scope_id: '{to_project}'. Destinations "
-            f"are restricted to registered projects — list them with "
-            f"`mm context projects list`."
+            f"are restricted to registered projects. The projects registry has "
+            f"no MCP verb — list registered projects at a terminal with "
+            f"`mm context projects list`, then retry with a scope_id it prints."
         )
     if scope.root is None or scope.missing:
         return None, (f"error: scope '{to_project}' is registered but its root is missing.")
@@ -1788,14 +1789,16 @@ def _resolve_transfer_destination(to_project: str, src_root: Path) -> tuple[Path
             return None, (
                 f"refused: destination project {scope.scope_id} ({scope.root}) is "
                 f"paused — sync enrollment is disabled, so the transferred "
-                f"artifact would not fan out there. Run `mm context projects "
-                f"resume {scope.scope_id}` first, or pick another destination."
+                f"artifact would not fan out there. Resuming enrollment has no "
+                f"MCP verb: run `mm context projects resume {scope.scope_id}` at "
+                f"a terminal first, or pick another destination."
             )
         return None, (
             f"refused: destination project {scope.scope_id} ({scope.root}) is "
             f"discovery-only (never enrolled for sync), so the transferred "
-            f"artifact would not fan out there. Enroll it first with "
-            f"`mm context projects add {scope.root}`, or pick another destination."
+            f"artifact would not fan out there. Enrolling has no MCP verb: run "
+            f"`mm context projects add {scope.root}` at a terminal first, or "
+            f"pick another destination."
         )
     return scope.root, ""
 

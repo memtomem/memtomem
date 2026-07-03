@@ -120,6 +120,8 @@ The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skill
 - **`artifact_migrate`** migrates agents/commands/skills — flat→dir layout when `to_scope` is omitted, or a scope-tier move when it is set (`apply=True` to execute, `force=True` for a dirty flat→dir, `confirm_project_shared=True` for the git-tracked tier).
 - **`artifact_transfer`** moves or copies one canonical artifact between tiers and/or registered projects — `mode="move"|"copy"`, `to_project_scope_id` (from `mm context projects list`), `as_name` for a renamed copy, and `asset_type="mcp-servers"` for cross-project MCP-server definition copies (`apply=True` to execute, `confirm_project_shared=True` for the git-tracked tier, `allow_host_writes=True` for a user-tier landing).
 
+> **CLI/web-only (no MCP verb).** Wiki→project install/update (`mm context install`/`update`) and the projects registry (`mm context projects {list, add, resume}`) are intentionally not exposed as `mem_context_*` tools — they write into a project's `.memtomem/` tree or mutate cross-project enrollment state, so they run from the CLI or the dev-tier Web UI only (ADR-0008). A headless agent that hits an `artifact_transfer` refusal naming one of these (unknown / paused / discovery-only destination) must run the printed `mm context projects …` command at a terminal; there is no MCP equivalent to retry with.
+
 ---
 
 ## Next Steps

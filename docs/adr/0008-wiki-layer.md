@@ -167,6 +167,33 @@ files (no lockfile entry) and orphan lockfile entries (entry but no
 files on disk) are surfaced as `skip` rows and left untouched — those
 are out of scope for the install/upgrade lifecycle.
 
+### Surface coverage: no MCP verb for install/update/projects (by design)
+
+Most `mm context` verbs have a `mem_context_*` MCP counterpart — the MCP
+tool, CLI, and web app share one engine definition (the parity invariant
+in `server/tools/context.py`). `install`, `update`, and the projects
+registry (`mm context projects {list, add, resume}`) intentionally break
+that parity and are **CLI + dev-tier-web only, with no MCP verb**:
+
+- `install` / `update` read the host-global wiki but *write* into a
+  project's `.memtomem/` tree, so on the web they mount only in
+  `mode=dev` (PR-E row E-3, `context_mutations.py`). Exposing them
+  headless would let an agent snapshot wiki bytes into arbitrary
+  registered projects without the operator-in-the-loop the dev tier and
+  interactive CLI confirm prompts assume.
+- The projects registry mutates cross-project enrollment state
+  (`known_projects.json`), a host-scope trust boundary the MCP surface
+  does not own.
+
+Because of this, `mem_context_artifact_transfer`'s destination refusals
+(unknown / paused / discovery-only project) name the `mm context
+projects …` remediation *and* state explicitly that it has no MCP verb —
+a headless agent must escalate to a terminal rather than retry. If a
+future workflow needs headless install/update, adding the verbs means
+replicating the sync-eligibility gate (today a web-route-layer check,
+not an engine-layer one) at the MCP boundary; the tool-registry parity
+test pins the current absence so that becomes a conscious decision.
+
 ## Lockfile schema
 
 `<project>/.memtomem/lock.json`:
