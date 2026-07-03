@@ -155,6 +155,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Changed
 
+- **Claude-plugin skill `/memtomem:context` is now `/memtomem:recall`**
+  (#1520 item 6). The skill injects relevant memories as context for the
+  current task; its old name collided with the context-gateway subsystem
+  (Skills / Commands / Agents / `mm context …`), which the plugin does not
+  drive — `recall` says what it actually does. Invoke `/memtomem:recall
+  [topic]` after updating the plugin; no gateway-driving plugin skill is
+  planned for now.
+
 - **Config sections no longer bind bare, unprefixed environment variables**
   (#1522). The 22 sub-config sections (`embedding`, `storage`, `llm`,
   `session_trace`, …) plus `NamespacePolicyRule` were `BaseSettings` classes
