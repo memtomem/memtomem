@@ -166,6 +166,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Concurrent MCP memory-CRUD calls on the same file no longer lose updates or
+  corrupt an unrelated entry** (#1570). `mem_edit` / `mem_delete` did their
+  read → rewrite (`replace_chunk_body` / `remove_lines`) → re-index → rollback
+  with nothing serializing the span: two overlapping calls on one file each
+  captured the same pre-image and a stale `start_line`/`end_line`, so the
+  second write clobbered the first, or — if the first changed the file's line
+  count — spliced over a *different* entry; a failing re-index then rolled the
+  file back to the caller's own pre-image, reverting a concurrent committed
+  edit. Each markdown-mutating tool (`mem_edit`, `mem_delete`, `mem_add`,
+  `mem_batch_add`) now holds a per-resolved-file `asyncio.Lock`
+  (`AppContext.get_memory_file_lock`) across its whole span, and the edit/delete
+  paths re-fetch the chunk *under* the lock so the line range is never stale.
+  This serializes concurrent CRUD **within one MCP server process** — the
+  issue's realistic vector (several agents sharing one server). The tool layer
+  deliberately does not also take the engine's sidecar `_file_lock`: that lock
+  is re-acquired inside `index_file` and `portalocker` contends between file
+  descriptors even in one process, so nesting it would self-deadlock. Cross-
+  process races (a second MCP server, the CLI, `mm web`) and CRUD-vs-`memory-
+  migrate` remain out of scope and are tracked separately.
 - **Deleting or renaming a watched markdown file now removes its chunks from
   the index immediately** (#1566). The file watcher had no `on_deleted`
   handler and `on_moved` enqueued only the new path, so a deleted or

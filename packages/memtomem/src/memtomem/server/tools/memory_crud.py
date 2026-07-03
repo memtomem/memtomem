@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
@@ -19,9 +20,62 @@ from memtomem.server.validation import MAX_CONTENT_LENGTH
 from memtomem.server.webhooks import webhook_error_cb
 
 if TYPE_CHECKING:
-    from memtomem.models import IndexingStats
+    from collections.abc import AsyncIterator
+
+    from memtomem.models import Chunk, IndexingStats
+    from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
+
+# Bound on how many times ``_locked_chunk`` re-keys onto a moved file before
+# giving up. A migrate (``mm context memory-migrate``) that races the lock a
+# few times is transient; a chunk that keeps moving returns a retryable error
+# instead of spinning.
+_CHUNK_LOCK_MOVE_RETRIES = 3
+
+
+@asynccontextmanager
+async def _locked_chunk(
+    app: AppContext, uid: UUID, chunk_id: str
+) -> AsyncIterator[tuple[Chunk | None, str | None]]:
+    """Yield ``(chunk, None)`` with the per-source-file lock held and the
+    chunk re-fetched fresh under it, or ``(None, error_message)``.
+
+    Two-step acquire (issue #1570): the lock key is the chunk's resolved
+    ``source_file``, which we only learn by fetching the chunk — so fetch
+    once *unlocked* to learn the path, acquire that file's lock, then
+    re-fetch *under* the lock so ``start_line`` / ``end_line`` reflect any
+    CRUD write that committed on the same file while we waited (chunk UUIDs
+    are stable across ``index_file(force=True)``, ADR-0005). If the file was
+    moved (``mm context memory-migrate``) between the two fetches, re-key
+    onto the new path and retry, bounded by ``_CHUNK_LOCK_MOVE_RETRIES``.
+
+    Scope: serializes only same-process MCP CRUD. ``memory-migrate`` takes
+    the engine's sidecar lock, not this one, so the re-key covers a migrate
+    that *finished* before we locked — not one racing the edit span. Other
+    processes and a user's editor are likewise unguarded (out of scope for
+    #1570; tracked separately). Exactly one ``yield`` runs on every path so
+    the ``@asynccontextmanager`` protocol holds.
+    """
+    chunk = await app.storage.get_chunk(uid)
+    if chunk is None:
+        yield None, f"Error: chunk {chunk_id} not found."
+        return
+    path = chunk.metadata.source_file.expanduser().resolve()
+    for _ in range(_CHUNK_LOCK_MOVE_RETRIES):
+        async with app.get_memory_file_lock(path):
+            fresh = await app.storage.get_chunk(uid)
+            if fresh is None:
+                yield None, f"Error: chunk {chunk_id} not found."
+                return
+            fresh_path = fresh.metadata.source_file.expanduser().resolve()
+            if fresh_path == path:
+                yield fresh, None
+                return
+        # Moved out from under us (migrate finished between fetches): re-key
+        # onto the new path and retry the fresh read there.
+        path = fresh_path
+    yield None, f"Error: chunk {chunk_id} source file is being moved concurrently; retry."
 
 
 def _validate_path(
@@ -303,14 +357,19 @@ async def _mem_add_core(
         target = base / f"{date_str}.md"
 
     assert target is not None
-    target.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
-
     effective_ns = namespace or _resolve_agent_namespace(app, None)
 
-    # Re-index the whole file via the standard pipeline so the watcher
-    # (which also calls index_file) produces identical hashes → no duplicates.
-    stats = await app.index_engine.index_file(target, namespace=effective_ns, already_scanned=True)
+    # Serialize append + re-index under the per-file lock (issue #1570): a
+    # concurrent mem_edit/mem_delete rollback restores its own pre-image, so
+    # an append landing mid-span would be silently erased without this.
+    async with app.get_memory_file_lock(target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(append_entry, target, content, title=title, tags=tags)
+        # Re-index the whole file via the standard pipeline so the watcher
+        # (which also calls index_file) produces identical hashes → no duplicates.
+        stats = await app.index_engine.index_file(
+            target, namespace=effective_ns, already_scanned=True
+        )
     app.search_pipeline.invalidate_cache()
 
     display_ns = effective_ns or app.config.namespace.default_namespace
@@ -482,66 +541,76 @@ async def mem_edit(
     except (ValueError, TypeError):
         return f"Error: invalid chunk ID format: {chunk_id}"
 
-    chunk = await app.storage.get_chunk(uid)
-    if chunk is None:
-        return f"Error: chunk {chunk_id} not found."
+    # Serialize the whole read → rewrite → re-index → rollback span on the
+    # chunk's source file, re-fetching the chunk fresh under the lock so the
+    # line range reflects any concurrent CRUD write (issue #1570).
+    async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err):
+        if lock_err:
+            return lock_err
+        assert chunk is not None
+        meta = chunk.metadata
 
-    meta = chunk.metadata
-
-    # ADR-0011: infer scope from the loaded chunk's persisted metadata.
-    # The privacy gate sees the same scope the chunk lives under, so
-    # editing a project_shared chunk gets the project_shared refusal
-    # rule even when the caller did not pass an explicit scope kwarg.
-    inferred_scope = meta.scope or "user"
-    guard = privacy.enforce_write_guard(
-        new_content,
-        surface="mem_edit",
-        force_unsafe=force_unsafe,
-        scope=inferred_scope,
-        audit_context={"chunk_id": chunk_id, "scope": inferred_scope},
-    )
-    if guard.decision == "blocked":
-        return (
-            f"Error: new_content matches {len(guard.hits)} privacy pattern(s); "
-            "edit rejected. Retry with force_unsafe=True to bypass (audit-logged)."
+        # ADR-0011: infer scope from the loaded chunk's persisted metadata.
+        # The privacy gate sees the same scope the chunk lives under, so
+        # editing a project_shared chunk gets the project_shared refusal
+        # rule even when the caller did not pass an explicit scope kwarg.
+        # Evaluated on the fresh chunk: a migrate could have re-scoped it
+        # while we waited, and validating a stale snapshot would reopen the
+        # Gate-A bypass ADR-0011 closed.
+        inferred_scope = meta.scope or "user"
+        guard = privacy.enforce_write_guard(
+            new_content,
+            surface="mem_edit",
+            force_unsafe=force_unsafe,
+            scope=inferred_scope,
+            audit_context={"chunk_id": chunk_id, "scope": inferred_scope},
         )
-    if guard.decision == "blocked_project_shared":
-        return (
-            f"Error: new_content matches {len(guard.hits)} privacy pattern(s) "
-            "and force_unsafe=True is not permitted on scope='project_shared' "
-            "chunks (git history is forever). Move the chunk to a different "
-            "scope first, or hand-edit the canonical file with explicit review."
-        )
-    # Backup for rollback on indexing failure
-    original = await asyncio.to_thread(meta.source_file.read_text, encoding="utf-8")
-    try:
-        # ``replace_chunk_body`` preserves the heading + section-leading
-        # blockquote header (``> created:`` / ``> tags:``) so that callers
-        # supplying body-only ``new_content`` don't accidentally erase the
-        # metadata. Pass a content prefixed with ``## `` to override the
-        # heading explicitly and bypass preservation.
-        await asyncio.to_thread(
-            replace_chunk_body, meta.source_file, meta.start_line, meta.end_line, new_content
-        )
-        stats = await app.index_engine.index_file(
-            meta.source_file, force=True, already_scanned=True
-        )
-        app.search_pipeline.invalidate_cache()
-    except Exception as exc:
-        await asyncio.to_thread(meta.source_file.write_text, original, encoding="utf-8")
+        if guard.decision == "blocked":
+            return (
+                f"Error: new_content matches {len(guard.hits)} privacy pattern(s); "
+                "edit rejected. Retry with force_unsafe=True to bypass (audit-logged)."
+            )
+        if guard.decision == "blocked_project_shared":
+            return (
+                f"Error: new_content matches {len(guard.hits)} privacy pattern(s) "
+                "and force_unsafe=True is not permitted on scope='project_shared' "
+                "chunks (git history is forever). Move the chunk to a different "
+                "scope first, or hand-edit the canonical file with explicit review."
+            )
+        # Backup for rollback on indexing failure. Safe under the lock: no
+        # other locked CRUD writer can commit between this read and the
+        # rollback below, so restoring ``original`` reverts only this call.
+        original = await asyncio.to_thread(meta.source_file.read_text, encoding="utf-8")
         try:
-            await app.index_engine.index_file(meta.source_file, force=True, already_scanned=True)
-        except Exception:
-            logger.warning("Rollback re-index also failed", exc_info=True)
-        app.search_pipeline.invalidate_cache()
-        logger.error("mem_edit rollback after indexing failure: %s", exc, exc_info=True)
-        return f"Error: edit failed and rolled back: {exc}"
+            # ``replace_chunk_body`` preserves the heading + section-leading
+            # blockquote header (``> created:`` / ``> tags:``) so that callers
+            # supplying body-only ``new_content`` don't accidentally erase the
+            # metadata. Pass a content prefixed with ``## `` to override the
+            # heading explicitly and bypass preservation.
+            await asyncio.to_thread(
+                replace_chunk_body, meta.source_file, meta.start_line, meta.end_line, new_content
+            )
+            stats = await app.index_engine.index_file(
+                meta.source_file, force=True, already_scanned=True
+            )
+            app.search_pipeline.invalidate_cache()
+        except Exception as exc:
+            await asyncio.to_thread(meta.source_file.write_text, original, encoding="utf-8")
+            try:
+                await app.index_engine.index_file(
+                    meta.source_file, force=True, already_scanned=True
+                )
+            except Exception:
+                logger.warning("Rollback re-index also failed", exc_info=True)
+            app.search_pipeline.invalidate_cache()
+            logger.error("mem_edit rollback after indexing failure: %s", exc, exc_info=True)
+            return f"Error: edit failed and rolled back: {exc}"
 
-    return (
-        f"Memory updated in {meta.source_file}\n"
-        f"- Lines {meta.start_line}-{meta.end_line} replaced\n"
-        f"- Re-indexed: {stats.indexed_chunks} chunks"
-    )
+        return (
+            f"Memory updated in {meta.source_file}\n"
+            f"- Lines {meta.start_line}-{meta.end_line} replaced\n"
+            f"- Re-indexed: {stats.indexed_chunks} chunks"
+        )
 
 
 @mcp.tool()
@@ -581,45 +650,53 @@ async def mem_delete(
         except (ValueError, TypeError):
             return f"Error: invalid chunk ID format: {chunk_id}"
 
-        chunk = await app.storage.get_chunk(uid)
-        if chunk is None:
-            return f"Error: chunk {chunk_id} not found."
-
-        meta = chunk.metadata
-        inferred_scope = meta.scope or "user"
-        if inferred_scope == "project_shared" and not confirm_project_shared:
-            logger.info(
-                "mem_delete rejected project_shared chunk without confirmation",
-                extra={"chunk_id": chunk_id, "scope": inferred_scope},
-            )
-            return (
-                "Error: deleting scope='project_shared' chunks requires "
-                "confirm_project_shared=True."
-            )
-        # Backup for rollback on indexing failure
-        original = await asyncio.to_thread(meta.source_file.read_text, encoding="utf-8")
-        try:
-            await asyncio.to_thread(remove_lines, meta.source_file, meta.start_line, meta.end_line)
-            stats = await app.index_engine.index_file(
-                meta.source_file, force=True, already_scanned=True
-            )
-            app.search_pipeline.invalidate_cache()
-        except Exception as exc:
-            await asyncio.to_thread(meta.source_file.write_text, original, encoding="utf-8")
+        # Serialize the read → rewrite → re-index → rollback span on the
+        # chunk's source file; re-fetch fresh under the lock (issue #1570).
+        async with _locked_chunk(app, uid, chunk_id) as (chunk, lock_err):
+            if lock_err:
+                return lock_err
+            assert chunk is not None
+            meta = chunk.metadata
+            # Confirm gate on the fresh chunk: a migrate could have re-scoped
+            # it while we waited for the lock (see mem_edit for the rationale).
+            inferred_scope = meta.scope or "user"
+            if inferred_scope == "project_shared" and not confirm_project_shared:
+                logger.info(
+                    "mem_delete rejected project_shared chunk without confirmation",
+                    extra={"chunk_id": chunk_id, "scope": inferred_scope},
+                )
+                return (
+                    "Error: deleting scope='project_shared' chunks requires "
+                    "confirm_project_shared=True."
+                )
+            # Backup for rollback on indexing failure. Safe under the lock:
+            # no other locked CRUD writer can commit between this read and the
+            # rollback below, so restoring ``original`` reverts only this call.
+            original = await asyncio.to_thread(meta.source_file.read_text, encoding="utf-8")
             try:
-                await app.index_engine.index_file(
+                await asyncio.to_thread(
+                    remove_lines, meta.source_file, meta.start_line, meta.end_line
+                )
+                stats = await app.index_engine.index_file(
                     meta.source_file, force=True, already_scanned=True
                 )
-            except Exception:
-                logger.warning("Rollback re-index also failed", exc_info=True)
-            app.search_pipeline.invalidate_cache()
-            logger.error("mem_delete rollback after indexing failure: %s", exc, exc_info=True)
-            return f"Error: delete failed and rolled back: {exc}"
-        return (
-            f"Memory deleted from {meta.source_file}\n"
-            f"- Lines {meta.start_line}-{meta.end_line} removed\n"
-            f"- Re-indexed: {stats.indexed_chunks} chunks"
-        )
+                app.search_pipeline.invalidate_cache()
+            except Exception as exc:
+                await asyncio.to_thread(meta.source_file.write_text, original, encoding="utf-8")
+                try:
+                    await app.index_engine.index_file(
+                        meta.source_file, force=True, already_scanned=True
+                    )
+                except Exception:
+                    logger.warning("Rollback re-index also failed", exc_info=True)
+                app.search_pipeline.invalidate_cache()
+                logger.error("mem_delete rollback after indexing failure: %s", exc, exc_info=True)
+                return f"Error: delete failed and rolled back: {exc}"
+            return (
+                f"Memory deleted from {meta.source_file}\n"
+                f"- Lines {meta.start_line}-{meta.end_line} removed\n"
+                f"- Re-indexed: {stats.indexed_chunks} chunks"
+            )
 
     if source_file:
         sf_path, sf_err = _validate_path(
@@ -887,19 +964,26 @@ async def mem_batch_add(
         target = base / f"{date_str}.md"
 
     assert target is not None
-    target.parent.mkdir(parents=True, exist_ok=True)
-    skipped = 0
-    for entry in entries:
-        key = entry.get("key") or entry.get("title", "")
-        value = entry.get("value") or entry.get("content", "")
-        entry_tags = entry.get("tags")
-        if not value:
-            skipped += 1
-            continue
-        append_entry(target, value, title=key or None, tags=entry_tags)
-
     effective_ns = namespace or _resolve_agent_namespace(app, None)
-    stats = await app.index_engine.index_file(target, namespace=effective_ns, already_scanned=True)
+    skipped = 0
+
+    # Serialize the batch append + re-index under the per-file lock so a
+    # concurrent mem_edit/mem_delete rollback cannot erase these entries
+    # (issue #1570), same as the single-entry mem_add path above.
+    async with app.get_memory_file_lock(target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            key = entry.get("key") or entry.get("title", "")
+            value = entry.get("value") or entry.get("content", "")
+            entry_tags = entry.get("tags")
+            if not value:
+                skipped += 1
+                continue
+            append_entry(target, value, title=key or None, tags=entry_tags)
+
+        stats = await app.index_engine.index_file(
+            target, namespace=effective_ns, already_scanned=True
+        )
     app.search_pipeline.invalidate_cache()
 
     display_ns = effective_ns or app.config.namespace.default_namespace
