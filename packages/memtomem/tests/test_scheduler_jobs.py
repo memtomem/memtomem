@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from pydantic import ValidationError
 
 from memtomem.scheduler import JOB_KINDS, JobSpec
 from memtomem.server.context import AppContext
+from memtomem.storage import orphan_detect
 
 
 @pytest.fixture
@@ -120,3 +123,84 @@ class TestDeadLinkCleanupSemantics:
         # Live row survives.
         remaining = db.execute("SELECT link_type FROM chunk_links ORDER BY link_type").fetchall()
         assert [r[0] for r in remaining] == ["summarizes"]
+
+
+class _ScriptedSource:
+    """Source path whose ``exists()`` yields a scripted True/False sequence."""
+
+    def __init__(self, name: str, exists_seq: list[bool]) -> None:
+        self._name = name
+        self._seq = list(exists_seq)
+        self._last = self._seq[-1]
+
+    def exists(self) -> bool:
+        if self._seq:
+            self._last = self._seq.pop(0)
+        return self._last
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"<src {self._name}>"
+
+
+def _fake_app(sources, *, delete_return: int = 3) -> MagicMock:
+    app = MagicMock()
+    app.storage.get_all_source_files = AsyncMock(return_value=set(sources))
+    app.storage.delete_by_source = AsyncMock(return_value=delete_return)
+    app.search_pipeline.invalidate_cache = MagicMock()
+    return app
+
+
+class TestCompactionOrphanGuards:
+    """#1565 — compaction must not mass-delete on a transient/mount blip."""
+
+    @pytest.fixture(autouse=True)
+    def _no_delay(self, monkeypatch):
+        # Keep the two-pass re-check instant in tests.
+        monkeypatch.setattr(orphan_detect, "ORPHAN_RECHECK_DELAY_SECONDS", 0.0)
+
+    @pytest.mark.asyncio
+    async def test_transient_absence_not_deleted(self):
+        """A source absent on pass 1 but back on pass 2 is never deleted."""
+        transient = _ScriptedSource("flaky", [False, True])
+        present = _ScriptedSource("ok", [True])
+        app = _fake_app([transient, present])
+
+        result = await JOB_KINDS["compaction"].runner(app)
+
+        assert result["chunks_deleted"] == 0
+        assert result["orphan_files"] == 0
+        assert result["sources_checked"] == 2
+        assert "skipped_reason" not in result
+        app.storage.delete_by_source.assert_not_awaited()
+        app.search_pipeline.invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mass_orphan_event_skips_delete(self):
+        """Many sources vanishing at once is refused, not deleted."""
+        sources = [_ScriptedSource(f"gone-{i}", [False, False]) for i in range(12)]
+        app = _fake_app(sources)
+
+        result = await JOB_KINDS["compaction"].runner(app)
+
+        assert result["chunks_deleted"] == 0
+        assert result["orphan_files"] == 12
+        assert result["sources_checked"] == 12
+        assert result["skipped_reason"] == "orphan_ratio_exceeded"
+        app.storage.delete_by_source.assert_not_awaited()
+        app.search_pipeline.invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_small_stable_orphan_is_deleted(self):
+        """A confirmed orphan below the mass-delete brake deletes normally."""
+        gone = _ScriptedSource("gone", [False, False])
+        present = [_ScriptedSource(f"ok-{i}", [True]) for i in range(4)]
+        app = _fake_app([gone, *present], delete_return=3)
+
+        result = await JOB_KINDS["compaction"].runner(app)
+
+        assert result["chunks_deleted"] == 3
+        assert result["orphan_files"] == 1
+        assert result["sources_checked"] == 5
+        assert "skipped_reason" not in result
+        app.storage.delete_by_source.assert_awaited_once_with(gone)
+        app.search_pipeline.invalidate_cache.assert_called_once()

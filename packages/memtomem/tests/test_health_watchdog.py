@@ -233,8 +233,12 @@ class TestDeepChecks:
 
 class TestMaintenanceExecutor:
     @pytest.mark.asyncio
-    async def test_cleanup_orphans(self, mock_app, tmp_path):
+    async def test_cleanup_orphans(self, mock_app, tmp_path, monkeypatch):
         from memtomem.server.health_maintenance import MaintenanceExecutor
+        from memtomem.storage import orphan_detect
+
+        # Keep the #1565 two-pass re-check instant.
+        monkeypatch.setattr(orphan_detect, "ORPHAN_RECHECK_DELAY_SECONDS", 0.0)
 
         app, _db = mock_app
         config = HealthWatchdogConfig(enabled=True)
@@ -243,9 +247,33 @@ class TestMaintenanceExecutor:
         app.storage.delete_by_source = AsyncMock(return_value=5)
 
         executor = MaintenanceExecutor(app, config)
+        # One orphan is below the mass-delete brake, so it deletes normally.
         result = await executor.cleanup_orphans()
         assert result["orphaned"] == 1
         assert result["deleted_chunks"] == 5
+
+    @pytest.mark.asyncio
+    async def test_cleanup_orphans_skips_suspected_mass_delete(
+        self, mock_app, tmp_path, monkeypatch
+    ):
+        """#1565 — a mount blip vanishing every source is refused, not wiped."""
+        from memtomem.server.health_maintenance import MaintenanceExecutor
+        from memtomem.storage import orphan_detect
+
+        monkeypatch.setattr(orphan_detect, "ORPHAN_RECHECK_DELAY_SECONDS", 0.0)
+
+        app, _db = mock_app
+        config = HealthWatchdogConfig(enabled=True)
+        missing = {tmp_path / f"gone-{i}.md" for i in range(12)}
+        app.storage.get_all_source_files = AsyncMock(return_value=missing)
+        app.storage.delete_by_source = AsyncMock(return_value=5)
+
+        executor = MaintenanceExecutor(app, config)
+        result = await executor.cleanup_orphans()
+        assert result["orphaned"] == 12
+        assert result["deleted_chunks"] == 0
+        assert result["skipped_reason"] == "orphan_ratio_exceeded"
+        app.storage.delete_by_source.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_trim_search_cache(self, mock_app):
