@@ -23,6 +23,36 @@ _MEMTOMEM_ENV_VARS = (
 )
 
 
+_WEB_STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
+
+# #1517: context-gateway.js was split into ordered classic-script fragments.
+# Whole-file readers (test_i18n, test_web_a11y, test_qa_audit_pins,
+# test_web_mode) concatenate them in index.html LOAD ORDER via
+# ``ctx_gateway_js_text()`` so a content assertion still sees the full module
+# regardless of which fragment holds the line. This tuple MUST NOT be sorted:
+# the ``_langchange_listener_body`` sentinel slice in test_i18n depends on the
+# overview fragment (langchange #1 + the ``// Sync All button`` marker)
+# preceding the conflict fragment (langchange #2), which alphabetical order
+# would invert. Keep in sync with the ``<script>`` order in index.html and with
+# ``CTX_GATEWAY_SCRIPTS`` in tests-js/setup/jsdom-app.mjs.
+CTX_GATEWAY_JS_FILES = (
+    "context-gateway-core.js",
+    "context-gateway-controls.js",
+    "context-gateway-overview.js",
+    "context-gateway-list.js",
+    "context-gateway-conflict.js",
+    "context-gateway-detail.js",
+    "context-gateway-actions.js",
+)
+
+
+def ctx_gateway_js_text() -> str:
+    """Concatenate the context-gateway.js fragment(s) in index.html load order."""
+    return "\n".join(
+        (_WEB_STATIC_DIR / name).read_text(encoding="utf-8") for name in CTX_GATEWAY_JS_FILES
+    )
+
+
 def isolate_memtomem_env(monkeypatch) -> None:
     """Strip ``MEMTOMEM_*`` env vars and stub out ``load_config_overrides``
     so a freshly constructed ``Mem2MemConfig`` is not mutated by the

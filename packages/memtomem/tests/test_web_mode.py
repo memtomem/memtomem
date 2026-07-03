@@ -23,6 +23,8 @@ from memtomem.web.app import (
     resolve_web_mode_from_env,
 )
 
+from .helpers import ctx_gateway_js_text
+
 
 # ---------------------------------------------------------------------------
 # Factory + app.state
@@ -647,7 +649,7 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
     # absence of any client-side ``STATE.uiMode`` gate in
     # ``context-gateway.js`` so a future refactor doesn't silently
     # reintroduce a tier split that hides artifacts from prod users.
-    cg_js = _read_static("context-gateway.js")
+    cg_js = ctx_gateway_js_text()  # #1517: gateway split into fragments
     eq_count = cg_js.count("STATE.uiMode === 'dev'")
     ne_count = cg_js.count("STATE.uiMode !== 'dev'")
     assert (eq_count, ne_count) == (0, 0), (

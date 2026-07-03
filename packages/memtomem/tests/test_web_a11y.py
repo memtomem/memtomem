@@ -12,11 +12,12 @@ from pathlib import Path
 
 import pytest
 
+from .helpers import ctx_gateway_js_text
+
 _STATIC_DIR = Path(__file__).resolve().parents[1] / "src" / "memtomem" / "web" / "static"
 _APP_JS = _STATIC_DIR / "app.js"
 _INDEX_HTML = _STATIC_DIR / "index.html"
 _TIMELINE_JS = _STATIC_DIR / "timeline.js"
-_CTX_JS = _STATIC_DIR / "context-gateway.js"
 
 
 @pytest.fixture(scope="module")
@@ -39,8 +40,9 @@ def timeline_js() -> str:
 
 @pytest.fixture(scope="module")
 def ctx_js() -> str:
-    assert _CTX_JS.exists(), f"context-gateway.js missing: {_CTX_JS}"
-    return _CTX_JS.read_text(encoding="utf-8")
+    # context-gateway.js is split into fragments (#1517); concatenate in load
+    # order so the source-scan pins see the whole module.
+    return ctx_gateway_js_text()
 
 
 def _extract_function(source: str, name: str) -> str:

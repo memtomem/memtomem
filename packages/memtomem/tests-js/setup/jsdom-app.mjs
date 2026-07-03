@@ -24,6 +24,27 @@ function readStatic(rel) {
   return fs.readFileSync(path.join(STATIC_DIR, rel), 'utf-8');
 }
 
+// #1517: context-gateway.js was split into ordered classic-script fragments.
+// Tests keep passing the sentinel 'context-gateway.js' in their ``scripts``
+// arrays to mean "the whole gateway module"; ``bootApp`` expands it to these
+// real files in index.html load order. Order MUST match the <script> tags in
+// index.html and CTX_GATEWAY_JS_FILES in tests/helpers.py.
+export const CTX_GATEWAY_SCRIPTS = [
+  'context-gateway-core.js',
+  'context-gateway-controls.js',
+  'context-gateway-overview.js',
+  'context-gateway-list.js',
+  'context-gateway-conflict.js',
+  'context-gateway-detail.js',
+  'context-gateway-actions.js',
+];
+
+// Concatenate the fragments in load order for the rare suite that greps the
+// gateway source as one blob (vs. booting it).
+export function readGatewayText() {
+  return CTX_GATEWAY_SCRIPTS.map(readStatic).join('\n');
+}
+
 function jsonResponse(body, ok = true, status = 200) {
   // ``i18n.js`` only reads ``resp.ok`` and ``resp.json()``, so a plain
   // duck-typed object is enough — ``window.Response`` isn't exposed by
@@ -154,7 +175,13 @@ export async function bootApp({
     window.Storage.prototype[method] = () => { throw new Error(`localStorage.${method} blocked`); };
   }
 
-  for (const filename of scripts) {
+  // Expand the 'context-gateway.js' sentinel to its real fragments (#1517) so
+  // the ~65 existing scripts:[...] arrays need no per-suite edits. Each
+  // fragment is injected as its own <script>, exactly like production.
+  const expanded = scripts.flatMap((f) =>
+    f === 'context-gateway.js' ? CTX_GATEWAY_SCRIPTS : [f],
+  );
+  for (const filename of expanded) {
     const code = readStatic(filename);
     const el = window.document.createElement('script');
     el.textContent = code;
