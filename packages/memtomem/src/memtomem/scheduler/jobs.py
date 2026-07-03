@@ -19,17 +19,23 @@ runner without passing schema validation.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 
 # expire_chunks lives in the search package; importing at module top is
-# safe — there is no scheduler ↔ search cycle.
+# safe — there is no scheduler ↔ search cycle. Likewise orphan_detect lives
+# in the leaf ``storage`` package, so this stays clear of the heavy
+# ``server`` import that would risk a scheduler ↔ server cycle.
 from memtomem.search.decay import expire_chunks
+from memtomem.storage.orphan_detect import is_suspected_mass_orphan, scan_orphans
 
 if TYPE_CHECKING:
     from memtomem.server.context import AppContext
+
+logger = logging.getLogger(__name__)
 
 
 JobRunStatus = Literal["ok", "error", "timeout", "running"]
@@ -88,21 +94,45 @@ class DedupScanParams(BaseModel):
 async def _run_compaction(app: AppContext) -> JobResult:
     """Delete orphan chunks (chunks whose source file no longer exists).
 
-    Loops orphans one-by-one rather than batching: orphan counts are
+    Orphans are confirmed with a two-pass scan (``scan_orphans``) so a
+    transient absence — a cloud-sync/network mount briefly unavailable when
+    the cron tick fires — is not mistaken for a deletion. As a second guard,
+    a suspected *mass* orphan event (many sources vanishing at once, the
+    tell-tale of a mount failure rather than a real deletion) is refused
+    outright: this job runs unattended with ``dry_run=False``, so skipping and
+    warning is far safer than wiping every chunk under the mount. See #1565.
+
+    Loops confirmed orphans one-by-one rather than batching: orphan counts are
     typically small, and ``delete_by_source`` already handles its own
     invalidation. If this turns into a bottleneck, add a bulk
     ``delete_by_sources`` to the storage layer (follow-up).
     """
-    sources = await app.storage.get_all_source_files()
-    orphaned = [sf for sf in sources if not sf.exists()]
+    result = await scan_orphans(app.storage)
+    if is_suspected_mass_orphan(result):
+        logger.warning(
+            "compaction: refusing to delete %d/%d orphaned sources (%.0f%%) — "
+            "exceeds mass-delete brake; likely a transient mount/permission "
+            "failure, not a real mass deletion. Re-run after verifying source "
+            "roots are mounted.",
+            len(result.confirmed_orphans),
+            result.total_sources,
+            100 * result.ratio,
+        )
+        return {
+            "sources_checked": result.total_sources,
+            "orphan_files": len(result.confirmed_orphans),
+            "chunks_deleted": 0,
+            "skipped_reason": "orphan_ratio_exceeded",
+        }
+
     deleted = 0
-    for sf in orphaned:
+    for sf in result.confirmed_orphans:
         deleted += await app.storage.delete_by_source(sf)
     if deleted > 0:
         app.search_pipeline.invalidate_cache()
     return {
-        "sources_checked": len(sources),
-        "orphan_files": len(orphaned),
+        "sources_checked": result.total_sources,
+        "orphan_files": len(result.confirmed_orphans),
         "chunks_deleted": deleted,
     }
 

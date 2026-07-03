@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from uuid import UUID
 
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
 from memtomem.server.tool_registry import register
+from memtomem.storage.orphan_detect import scan_orphans
 
 
 @mcp.tool()
@@ -182,15 +182,16 @@ async def mem_cleanup_orphans(
         dry_run: If True (default), only list orphaned files without deleting.
     """
     app = await _get_app_initialized(ctx)
-    source_files = await app.storage.get_all_source_files()
-
-    orphaned: list[Path] = []
-    for sf in source_files:
-        if not sf.exists():
-            orphaned.append(sf)
+    # Two-pass scan (scan_orphans) so a source that is only transiently
+    # inaccessible — a cloud-sync/network mount mid-reconnect — is not listed
+    # or deleted as an orphan. The mass-delete brake is intentionally *not*
+    # applied here: this tool is user-initiated and dry_run defaults to True,
+    # so an explicit large cleanup is the caller's call to make. See #1565.
+    result = await scan_orphans(app.storage)
+    orphaned = result.confirmed_orphans
 
     if not orphaned:
-        return f"No orphaned chunks found ({len(source_files)} source files checked)."
+        return f"No orphaned chunks found ({result.total_sources} source files checked)."
 
     if dry_run:
         lines = [f"Orphaned files: {len(orphaned)} (dry-run, no deletions)\n"]
