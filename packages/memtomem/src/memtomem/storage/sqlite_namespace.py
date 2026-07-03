@@ -167,32 +167,37 @@ class NamespaceOps:
     ) -> None:
         _ensure_valid_namespace(namespace)
         db = self._get_db()
-        existing = await self.get_namespace_meta(namespace)
         now = now_iso()
 
-        if existing is None:
+        # INSERT OR IGNORE instead of read-then-branch: two concurrent
+        # first-time registrations (e.g. ``mem_agent_register`` racing itself
+        # across the ``await`` of a read) would both see "missing" and both
+        # INSERT — the loser died on the PK (#1574 item 4). The atomic upsert
+        # pair below keeps the old semantics: a fresh row gets ``""`` for
+        # omitted fields, an existing row is only touched for the fields the
+        # caller actually passed (None means "leave as is").
+        db.execute(
+            "INSERT OR IGNORE INTO namespace_metadata "
+            "(namespace, description, color, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (namespace, description or "", color or "", now, now),
+        )
+        updates = []
+        params: list[object] = []
+        if description is not None:
+            updates.append("description=?")
+            params.append(description)
+        if color is not None:
+            updates.append("color=?")
+            params.append(color)
+        if updates:
+            updates.append("updated_at=?")
+            params.append(now)
+            params.append(namespace)
             db.execute(
-                "INSERT INTO namespace_metadata (namespace, description, color, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (namespace, description or "", color or "", now, now),
+                f"UPDATE namespace_metadata SET {', '.join(updates)} WHERE namespace=?",
+                params,
             )
-        else:
-            updates = []
-            params: list[object] = []
-            if description is not None:
-                updates.append("description=?")
-                params.append(description)
-            if color is not None:
-                updates.append("color=?")
-                params.append(color)
-            if updates:
-                updates.append("updated_at=?")
-                params.append(now)
-                params.append(namespace)
-                db.execute(
-                    f"UPDATE namespace_metadata SET {', '.join(updates)} WHERE namespace=?",
-                    params,
-                )
         db.commit()
 
     async def list_namespace_meta(self) -> list[dict]:

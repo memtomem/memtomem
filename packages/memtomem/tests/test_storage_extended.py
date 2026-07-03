@@ -995,3 +995,47 @@ class TestStorageExtended:
 
         assert await storage.get_ai_summary(src_a) is None  # fully emptied
         assert await storage.get_ai_summary(src_b) is not None  # partial
+
+
+class TestSetNamespaceMetaAtomicity:
+    """``set_namespace_meta`` must be a single atomic upsert, not
+    check-then-INSERT — two concurrent first-time registrations of the same
+    namespace (e.g. ``mem_agent_register`` from two clients) raced across the
+    read's await window and the loser died on the PK (#1574 item 4)."""
+
+    @pytest.mark.asyncio
+    async def test_lost_race_insert_does_not_raise(self, components, monkeypatch):
+        """Simulate the raced loser: the row appears after this call's read
+        window. Any read the implementation performs reports "missing" —
+        exactly what the loser saw — and the call must still succeed."""
+        from unittest.mock import AsyncMock
+
+        storage = components.storage
+        await storage.set_namespace_meta("agent-runtime:planner", description="winner")
+
+        monkeypatch.setattr(storage._ns, "get_namespace_meta", AsyncMock(return_value=None))
+        await storage.set_namespace_meta("agent-runtime:planner", description="loser")
+
+        monkeypatch.undo()
+        meta = await storage.get_namespace_meta("agent-runtime:planner")
+        assert meta is not None
+        assert meta["description"] == "loser"  # last-writer-wins, no PK error
+
+    @pytest.mark.asyncio
+    async def test_fresh_create_defaults_omitted_fields_to_empty(self, components):
+        storage = components.storage
+        await storage.set_namespace_meta("agent-runtime:coder", description="only desc")
+        meta = await storage.get_namespace_meta("agent-runtime:coder")
+        assert meta["description"] == "only desc"
+        assert meta["color"] == ""
+
+    @pytest.mark.asyncio
+    async def test_partial_update_preserves_unset_fields(self, components):
+        """None means "leave as is" — the upsert must not clobber an existing
+        field the caller did not pass."""
+        storage = components.storage
+        await storage.set_namespace_meta("shared", description="keep me", color="blue")
+        await storage.set_namespace_meta("shared", color="red")
+        meta = await storage.get_namespace_meta("shared")
+        assert meta["description"] == "keep me"
+        assert meta["color"] == "red"
