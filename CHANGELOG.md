@@ -194,6 +194,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   descriptors even in one process, so nesting it would self-deadlock. Cross-
   process races (a second MCP server, the CLI, `mm web`) and CRUD-vs-`memory-
   migrate` remain out of scope and are tracked separately.
+- **`mem_session_end` no longer double-writes the summary on a retried or
+  concurrent call** (#1571). Only the final state reset was guarded by
+  `_session_lock`; the effectful phase — `end_session`, the billable
+  auto-summary LLM call, and the archive summary-chunk write+index — ran
+  unlocked before it, so a client retry (or two agents sharing the session)
+  re-read the same `current_session_id` and re-ran the whole phase. The active
+  handle is now *claimed* — read and nulled atomically under `_session_lock` at
+  entry — so the effectful phase runs at most once and the loser returns "No
+  active session." (matching the claim-then-run contract from #1564). The handle
+  is not restored on mid-phase failure; an orphaned active row is reaped by the
+  existing stale-session path.
 - **Deleting or renaming a watched markdown file now removes its chunks from
   the index immediately** (#1566). The file watcher had no `on_deleted`
   handler and `on_moved` enqueued only the new path, so a deleted or
