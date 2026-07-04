@@ -6563,6 +6563,72 @@ class TestBackNavThroughSilentStep:
         )
 
 
+class TestNonInteractivePresetNotice:
+    """#1616: ``-y`` is the only CLI flag whose meaning goes beyond
+    "skip the confirmation prompt" — it silently selects ``--preset
+    minimal``, a materially weaker setup than the wizard's default
+    (english). Until the flag split lands, the implicit-preset run must
+    say so loudly on stderr, and an explicit ``--preset`` must silence
+    the notice."""
+
+    def _setup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from memtomem.cli import init_cmd
+
+        set_home(monkeypatch, tmp_path)
+        monkeypatch.setattr(init_cmd, "_runtime_profile", lambda: _make_test_profile(kind="pypi"))
+        monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+        monkeypatch.setattr("memtomem.cli.web._missing_web_deps", lambda: None, raising=False)
+
+    def test_bare_yes_emits_notice_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        self._setup(tmp_path, monkeypatch)
+
+        result = CliRunner().invoke(cli, ["init", "-y", "--mcp", "skip"])
+
+        assert result.exit_code == 0, result.output
+        assert "'minimal' preset" in result.stderr
+        assert "wizard defaults to 'english'" in result.stderr
+        assert "confirmation-skipping only" in result.stderr
+        # stderr only — scripted stdout consumers must not see the notice.
+        assert "'minimal' preset" not in result.stdout
+        assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_explicit_preset_silences_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        self._setup(tmp_path, monkeypatch)
+
+        result = CliRunner().invoke(cli, ["init", "-y", "--preset", "english", "--mcp", "skip"])
+
+        assert result.exit_code == 0, result.output
+        assert "'minimal' preset" not in result.stderr
+        assert (tmp_path / ".memtomem" / "config.json").exists()
+
+    def test_help_documents_preset_side_effect(self) -> None:
+        from click.testing import CliRunner
+
+        from memtomem.cli import cli
+
+        result = CliRunner().invoke(cli, ["init", "--help"])
+
+        assert result.exit_code == 0
+        # The -y help must name the side-effect and the planned narrowing,
+        # not just "skip wizard". Normalize whitespace — click re-wraps
+        # help text, splitting words across lines.
+        normalized = " ".join(result.output.split())
+        assert "`--preset minimal` (BM25-only, no embeddings)" in normalized
+        assert "A future release will narrow -y" in normalized
+
+
 class TestStepHeaderPosition:
     """(#420) ``step_header`` reads its step number from
     ``state["_wizard_position"]`` (seeded by ``run_steps``) rather than from a
