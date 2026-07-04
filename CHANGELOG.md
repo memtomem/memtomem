@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-07-04
+
 ### Added
 
 - **`mm context init --only NAME`** (#1520 item 4) imports a single named
@@ -16,6 +18,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   tier has no runtime fan-out to import from); Gate A/B apply unchanged. The
   engine already supported single-name narrowing (`only_name=`) for the
   web routes — this wires it into the CLI.
+- **MCP memory-write tools accept an `idempotency_key` for safe retries;
+  batch append is atomic** (#1596). `mem_add` / `mem_batch_add` / `mem_edit`
+  / `mem_delete` take an optional `idempotency_key`: a retried or duplicated
+  call with the same key replays the stored result (tagged `[idempotent
+  replay]`) instead of double-writing, and a concurrent in-flight claim
+  returns a retryable "already in progress" message. `mem_batch_add` now
+  appends the whole batch atomically.
+- **`mm context version delete-label` and `mm context version enable`**
+  (#1549) close the web/MCP parity gaps — deleting a version label and
+  enabling versioning for an artifact are now reachable from the CLI, not
+  only the web UI.
+- **`mm context update --dry-run`** (#1547) prints the same four-state
+  (update / unchanged / refuse / error) preview as a real run and stops
+  without writing anything.
+- **`mm reset --backup`** (#1595) opt-in snapshots the DB to a timestamped
+  `<db>.pre-reset-<ts>.bak` sibling (via the stdlib `sqlite3` backup API,
+  never overwriting an existing snapshot) before wiping.
+- **The web overview surfaces a "wiki update-available (behind)" badge**
+  (#1546) for the lockfile ↔ wiki staleness axis, so a divergent pin no
+  longer hides behind a green "synced" state.
+- **In prod, the browse-only wiki renders an inert install affordance**
+  (#1604) — disabled buttons plus a note naming the `--dev` remediation —
+  instead of a silent dead-end where the install/update routes are not
+  mounted.
 
 ### Security
 
@@ -153,6 +179,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   its warning and aggregates non-redaction errors to one line per directory.
   `mm index` output is unchanged.
 
+- **Canonical-path disclosure sweep completed (#1412 follow-through).**
+  Absolute filesystem paths are now redacted in MCP context-tool errors
+  (#1539) and success-path messages (#1599), across all web kind routes
+  (#1538), in the index SSE error event (#1527), and in settings-sync
+  reason/target/dup-tier emissions (#1556) — so a server-side path can no
+  longer leak to an MCP client or the browser.
+- **Wiki `git show` reads go through the redaction boundary, and remote/ref
+  values are pinned as positional args** (#1544), closing an argv-injection
+  vector where a crafted URL or ref beginning with `-` could be read as a
+  git flag.
+- **The Gate-A blocked-file audit surface is threaded through wiki
+  install/update to the web route** (#1528), giving wiki writes the same
+  secret-redaction audit visibility as canonical writes.
+
 ### Changed
 
 - **Claude-plugin skill `/memtomem:context` is now `/memtomem:recall`**
@@ -183,6 +223,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` (and `LANGFUSE_HOST`) still
   count as credentials — they are read by the SDK itself and are never copied
   into memtomem config. `LANGFUSE_ENABLED` alone never turns tracing on.
+
+- **Web + MCP read-path work is offloaded off the event loop** (#1597) so
+  context-gateway and project reads no longer block the async event loop
+  under concurrent load; the "no await under lock" invariant is preserved.
 
 ### Removed
 
@@ -250,8 +294,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   deliberately does not also take the engine's sidecar `_file_lock`: that lock
   is re-acquired inside `index_file` and `portalocker` contends between file
   descriptors even in one process, so nesting it would self-deadlock. Cross-
-  process races (a second MCP server, the CLI, `mm web`) and CRUD-vs-`memory-
-  migrate` remain out of scope and are tracked separately.
+  process races (a second MCP server, the CLI, `mm web`) and
+  CRUD-vs-`memory-migrate` are now serialized too — see the cross-process CRUD
+  fix (#1588 / #1589 / #1591) below.
 - **`mem_session_end` no longer double-writes the summary on a retried or
   concurrent call** (#1571). Only the final state reset was guarded by
   `_session_lock`; the effectful phase — `end_session`, the billable
@@ -288,6 +333,67 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   mass-deleted per event; and the delete pass never resurrects a removed parent
   directory via the sidecar lock. Orphan compaction remains the backstop for
   events missed while the watcher is down.
+- **Concurrent memory-CRUD writes across separate processes no longer lose
+  updates or clobber a concurrent edit** (#1589, #1591). A shared
+  re-fetch-under-lock + rollback contract now covers the web chunk-PATCH and
+  CLI edit paths (a second MCP server, `mm web`, and the CLI): a contended
+  lock returns 503 / a `ClickException`, and a concurrent index migration
+  returns 409 rather than corrupting the file.
+- **`config.json` read-modify-write is serialized across processes** (#1588)
+  via a `portalocker` sidecar lock, so overlapping `mm config` / `mm init` /
+  web settings writes no longer lose each other's changes.
+- **`upsert_entities` is atomic** (#1583) — a mid-write failure can no longer
+  leave a chunk's entities DELETEd-but-not-replaced; the DELETE rolls back.
+- **Indexing rejects a short/truncated embedding array instead of zipping it
+  against the wrong chunks** (#1563), preventing silent embedding/text
+  misalignment.
+- **Ollama embeddings retry on a transient 5xx/429 (e.g. a 503 while a model
+  reloads), namespace-meta upsert is atomic, and a scoped session-id error is
+  swallowed only in-scope** (#1594).
+- **A poison file can no longer stall the debounce indexing queue** (#1593):
+  the watcher caps a poison debounce entry, logs a full queue, and locks the
+  index stream.
+- **The scheduler claims a schedule atomically before dispatch** (#1564), so
+  an overlapping tick can't double-run the same job.
+- **Orphan compaction uses a two-pass scan with a mass-delete brake** (#1565),
+  so a transiently-missing watched mount can't wipe every chunk under it.
+- **`.mcp.json` read-merge-write is locked and mtime-guarded** (#1532), so
+  concurrent context installs no longer corrupt or drop editor MCP entries.
+- **Settings copy aborts cleanly when a destination file is deleted mid-apply**
+  (#1524) instead of leaving a partial write.
+- **`mm context install --all --force` no longer silently swaps pre-digest
+  legacy clean rows** (#1600).
+- **Context transfer previews are honest, and the no-op partial-move sync hint
+  is dropped** (#1551).
+- **Editor `.bak` backups no longer dirty the wiki working tree** (#1552).
+- **Wiki action buttons get a double-submit guard and install-scope pinning**
+  (#1553).
+- **The wiki commit stale-confirm dialog z-order is fixed and the
+  privacy-block install error is localized** (#1554).
+- **The `context_skills` routes close two non-UTF-8 parity gaps** (#1537).
+- **`mm context generate` / `sync` exit non-zero when they refuse a missing
+  `context.md`** (#1536) instead of exiting 0 silently.
+- **Context status no longer labels a diverged wiki pin "behind"** (#1535).
+- **Wiki edits preserve the executable bit on commit** (#1534).
+- **The web and wiki degrade gracefully on an unborn-HEAD (no-commits) wiki**
+  (#1543) instead of erroring.
+- **A detached-HEAD wiki commit is classified as `WikiDetachedHeadError`**
+  (#1525) — a clear error instead of a raw traceback.
+- **Wiki `ls-tree` parsing preserves non-ASCII asset paths** (#1521).
+- **The default wiki path resolves at call time, not import time** (#1507), so
+  a HOME/config set after import is respected.
+- **The version-route sidecar lock is bounded and its engine work is
+  offloaded** (#1523), so a stuck lock no longer hangs the web request.
+- **`mm upgrade` warns when a non-pid-file writer still holds the DB** (#1607)
+  via a warn-only `BEGIN IMMEDIATE` probe after the pid-file holders are
+  stopped, surfacing a split-brain the pid files can't see.
+- **`mm reset` refuses to run while a server/web process is live or any writer
+  holds the DB** (#1595), preventing a wipe under a live writer.
+- **The enable-versioning route returns the same invalid-name error envelope
+  as its sibling version routes** (#1558).
+- **`mm context migrate` hints emit the plural asset type** (#1526).
+- **The wiki dirty-dot tooltip points at a remediation that exists in prod**
+  (#1548).
 
 ## [0.3.2] — 2026-06-30
 
