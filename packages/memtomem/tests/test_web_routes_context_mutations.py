@@ -340,6 +340,30 @@ async def test_update_dirty_with_force_writes_bak(
 
 
 @pytest.mark.asyncio
+async def test_update_uncommitted_wiki_is_409(
+    client, seeded_wiki: Path, project_root: Path
+) -> None:
+    """Commit-true update (#1652): an asset whose wiki working tree differs
+    from HEAD refuses with 409 ``wiki_uncommitted`` and a fixed message —
+    the engine text embeds the absolute wiki root and must not leak."""
+    assert (await client.post("/api/context/skills/alpha/install")).status_code == 200
+    old_pin = _lock_entry(project_root, "skills", "alpha")["wiki_commit"]
+    _advance_wiki(seeded_wiki)
+    (seeded_wiki / "skills" / "alpha" / "SKILL.md").write_text(
+        _SKILL_BODY + "\nUncommitted edit.\n", encoding="utf-8"
+    )
+    resp = await client.post("/api/context/skills/alpha/update")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "wiki_uncommitted"
+    assert str(seeded_wiki) not in resp.text
+    # Zero residue: old bytes, old pin, no .bak.
+    landed = project_root / ".memtomem" / "skills" / "alpha" / "SKILL.md"
+    assert landed.read_text(encoding="utf-8") == _SKILL_BODY
+    assert _lock_entry(project_root, "skills", "alpha")["wiki_commit"] == old_pin
+    assert list(landed.parent.rglob("*.bak")) == []
+
+
+@pytest.mark.asyncio
 async def test_update_never_installed_is_404(client, seeded_wiki) -> None:
     resp = await client.post("/api/context/skills/alpha/update")
     assert resp.status_code == 404

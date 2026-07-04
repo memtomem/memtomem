@@ -1,6 +1,6 @@
 # ADR-0008: Wiki layer for shared canonical artifacts
 
-**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown; amended 2026-07-04: single-asset install is commit-true, #1643)
+**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown; amended 2026-07-04: single-asset install and update are commit-true, #1643/#1652)
 **Date:** 2026-04-30 (amended 2026-07-04)
 **Context:** Context gateway today is a per-project canonical → multi-runtime
 fan-out router (ADR-0001). Users with several projects must re-author the
@@ -242,14 +242,15 @@ without a valid manifest degrade to the pre-manifest behavior
 `digests` / `digests_installed_at` (added with the #1247 id 15
 content-digest work) record the SHA-256 of **the bytes the writing
 operation put into dest** — content identity of the install, not commit
-provenance (update copies from the wiki *working tree*; the digest
-map inherits exactly the pre-existing `wiki_commit` provenance
-imprecision and adds none. **Amended 2026-07-04, #1643:** single-asset
-*install* is now commit-true — it extracts the asset's bytes from git
-objects at HEAD and refuses when the asset's worktree state differs
-from HEAD, so install-minted digests carry exact commit provenance;
-the imprecision remains only for update-minted and legacy entries,
-which `install --all`'s data-safety no-op continues to protect). The algorithm is fixed at SHA-256; an
+provenance (historically: the pre-commit-true verbs copied from the wiki
+*working tree*; the digest map inherited exactly the pre-existing
+`wiki_commit` provenance imprecision and added none. **Amended
+2026-07-04, #1643/#1652:** single-asset *install* and *update* are now
+commit-true — both extract the asset's bytes from git objects at HEAD
+and refuse when the asset's worktree state differs from HEAD, so
+newly-minted digests carry exact commit provenance; the imprecision
+remains only for legacy entries in existing lockfiles, which
+`install --all`'s data-safety no-op continues to protect). The algorithm is fixed at SHA-256; an
 algorithm change is a NEW key name, not a value prefix. Hashes are
 computed from the in-memory bytes the copier wrote, never from a re-read
 of dest (a re-read would bless a concurrent edit — the TOCTOU this map

@@ -106,9 +106,11 @@ This is the fact the "→commit" half of the deferred question exists for:
 
 So an edit that is **saved but not committed** is visible in the editor
 and in `diff`/`lint`, but **does not propagate to any project** until it
-is committed. The CLI already surfaces this (`_WIKI_DIRTY_WARN`: "warning:
-wiki has uncommitted changes; using HEAD which doesn't include them",
-`context_cmd.py:1830`). The editor must make the same gap legible — and a
+is committed. The CLI surfaces this gap asset-scoped (#1643/#1652
+commit-true gates: install/update refuse to write a dirty asset with a
+`mm wiki <type> commit` hint, and a no-op update prints an
+uncommitted-edits note; the earlier repo-wide `_WIKI_DIRTY_WARN` was
+removed by #1652). The editor must make the same gap legible — and a
 Commit affordance is what lets the user close it without a terminal.
 
 ### What already exists to build on
@@ -198,8 +200,8 @@ prior bytes intact:
 
 This preserves the shipped E-2 + ADR-0008:286 "never auto-commit"
 contract bit-for-bit. The dirty→not-yet-fanned-out gap (§Background) is
-surfaced by the dirty badge and a one-line hint reusing the
-`_WIKI_DIRTY_WARN` wording.
+surfaced by the dirty badge and a one-line hint mirroring the CLI's
+asset-scoped uncommitted-edits note (#1652).
 
 ### 3. Commit semantics — explicit, opt-in, dev-tier (the deferred core question)
 

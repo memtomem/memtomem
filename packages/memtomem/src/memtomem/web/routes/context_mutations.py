@@ -222,10 +222,16 @@ async def update_asset(
 ) -> dict:
     """Refresh an installed wiki asset to wiki HEAD (parity of ``mm context update``).
 
-    No-op when the lockfile pin already matches HEAD (``was_no_op=True``).
-    Refuses with 409 ``stale_install`` when local edits would be clobbered; the
-    client re-POSTs ``{"force": true}`` to overwrite (each dirty file kept as a
-    ``.bak`` sibling). An asset with no lockfile entry → 404 ``not_installed``.
+    Commit-true (#1652): extracts the asset from the wiki's git objects at
+    HEAD and pins that commit — never the working tree, so the pin always
+    reproduces the refreshed bytes. An asset whose wiki working tree
+    differs from HEAD refuses with 409 ``wiki_uncommitted`` (``force``
+    does NOT bypass — it only overrides project-side edits). No-op when
+    the lockfile pin already matches HEAD (``was_no_op=True``) — returned
+    before the wiki-side gates. Refuses with 409 ``stale_install`` when
+    local edits would be clobbered; the client re-POSTs
+    ``{"force": true}`` to overwrite (each dirty file kept as a ``.bak``
+    sibling). An asset with no lockfile entry → 404 ``not_installed``.
     """
     _validate_name_or_error(asset_type, name)
     force = body.force if body is not None else False
@@ -271,6 +277,19 @@ async def update_asset(
             f"{asset_type}/{name} has local edits; re-run with force to overwrite "
             "(each edited file is kept as a .bak sibling)",
             reason_code="stale_install",
+        ) from exc
+    except UncommittedAssetError as exc:
+        # Fixed message, NOT ``str(exc)`` — the engine message embeds the
+        # absolute wiki root (its raw-git remediation hint), which must not
+        # leak into the HTTP envelope (module contract; the
+        # ``_privacy_blocked`` precedent). Same shape as install's arm.
+        raise _error(
+            409,
+            "conflict",
+            f"{asset_type}/{name} has uncommitted changes in the wiki (update is "
+            f"commit-true and records HEAD's bytes only); commit them — e.g. "
+            f"`mm wiki <type> commit <name> --canonical` — and retry",
+            reason_code="wiki_uncommitted",
         ) from exc
     except PrivacyScanError as exc:
         raise _privacy_blocked() from exc

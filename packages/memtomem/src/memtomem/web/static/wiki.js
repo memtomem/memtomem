@@ -1080,8 +1080,8 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
       return;
     }
     if (reason === 'wiki_uncommitted') {
-      // Commit-true install (#1643): the asset's wiki working tree differs
-      // from HEAD, so the pin couldn't reproduce the installed bytes.
+      // Commit-true install/update (#1643/#1652): the asset's wiki working
+      // tree differs from HEAD, so the pin couldn't reproduce the bytes.
       showToast(
         t('settings.ctx.wiki_install_uncommitted', { type: _wikiTypeLabel(type), name }),
         'error',

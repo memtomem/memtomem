@@ -32,7 +32,6 @@ from memtomem.context.install import (
     install_skill,
     install_agent,
     install_command,
-    update_skill,
 )
 from memtomem.context.lockfile import Lockfile
 from memtomem.wiki.store import WikiStore
@@ -94,6 +93,38 @@ def _bump_mtime(path: Path, *, seconds_in_future: float = 1.0) -> None:
 
     future = datetime.now(timezone.utc).timestamp() + seconds_in_future
     os.utime(path, (future, future))
+
+
+def _rewrite_entry_as_legacy_update(project_root: Path, name: str, *, pin: str) -> None:
+    """Rewrite ``skills/<name>``'s lock entry the way a pre-#1652 update minted it.
+
+    The worktree-copying update recorded ``wiki_commit=<pin>`` while its
+    ``files``/``digests`` described whatever bytes sat in the wiki WORKING
+    TREE — bytes the pin never contained. Both verbs are commit-true now
+    (#1643/#1652), so tests exercising ``install --all``'s data-safety
+    no-op mint that legacy shape directly: digests are hashed from the
+    CURRENT dest bytes and ``installed_at`` is captured after the dest
+    write so the ``digests_installed_at`` pairing holds (a broken pairing
+    would degrade the row to the pre-digest path and mask the guard).
+    """
+    import hashlib
+
+    from memtomem.context._atomic import installed_at_from_dest, iter_installed_files
+
+    dest = project_root / ".memtomem" / "skills" / name
+    digests = {
+        f.relative_to(dest).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
+        for f in iter_installed_files(dest)
+    }
+    Lockfile.at(project_root).upsert_entry(
+        "skills",
+        name,
+        wiki_commit=pin,
+        installed_at=installed_at_from_dest(dest),
+        files=sorted(digests),
+        files_commit=pin,
+        digests=digests,
+    )
 
 
 def _make_orphan(wiki_root_path: Path, name: str) -> None:
@@ -278,27 +309,26 @@ def test_clean_install_off_dirty_wiki_survives_all_force(
     """Regression: a clean row whose recorded bytes diverge from its pin must
     not be silently swapped by ``install --all --force``.
 
-    ``mm context update`` copies the wiki WORKING TREE but pins HEAD (ADR-0008's
-    accepted ``wiki_commit`` provenance imprecision — since #1643 the single
-    install is commit-true and can no longer mint such entries, so the update
-    path builds the divergence here), so an update taken off a dirty wiki holds
-    bytes the pin never described. ``--force`` used to re-extract the pin over
-    such a clean row with NO ``.bak`` — a silent destructive swap. It must now
-    leave the row untouched (the recorded digests differ from the pin's bytes);
-    ``--force`` re-extraction is reserved for dirty/unprovable rows, which
-    always get a ``.bak``.
+    Pre-#1652, ``mm context update`` copied the wiki WORKING TREE but pinned
+    HEAD (ADR-0008's accepted ``wiki_commit`` provenance imprecision), so an
+    update taken off a dirty wiki held bytes the pin never described. Both
+    verbs are commit-true now, so the divergence is minted directly
+    (``_rewrite_entry_as_legacy_update``) — the rows this guard protects
+    survive only in legacy lockfiles. ``--force`` used to re-extract the pin
+    over such a clean row with NO ``.bak`` — a silent destructive swap. It
+    must leave the row untouched (the recorded digests differ from the pin's
+    bytes); ``--force`` re-extraction is reserved for dirty/unprovable rows,
+    which always get a ``.bak``.
     """
     _initialized_wiki(wiki_root)
     _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v0\n"})
     install_skill(tmp_path, "foo")
-    # Advance HEAD to v1, then edit the WORKING TREE without committing: the
-    # update below copies the working tree (v2) yet pins HEAD (v1) — the
-    # recorded digests describe bytes the pin's commit does not contain.
+    # Advance HEAD to v1, then mint the legacy shape: dest bytes (v2) the
+    # pin's commit (v1) does not contain, recorded as a clean install.
     pin = _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
-    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
-    update_skill(tmp_path, "foo")
     dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
-    assert dest.read_bytes() == b"working-tree-v2\n"
+    dest.write_bytes(b"working-tree-v2\n")
+    _rewrite_entry_as_legacy_update(tmp_path, "foo", pin=pin)
     lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
     assert lock_doc["skills"]["foo"]["wiki_commit"] == pin
 
@@ -325,28 +355,24 @@ def test_clean_empty_install_off_dirty_wiki_survives_all_force(
     """A VALID EMPTY recorded digest map (``digests={}``) must be honored, not
     treated as "no digests" (Codex gate).
 
-    If the wiki working tree has no copyable file at update time, the update
-    records ``digests={}`` (a valid empty map, not ``None``) while the pin's
-    commit still contains files (post-#1643 the commit-true single install
-    can't produce this shape, so the worktree-copying update path builds it).
-    ``install --all --force`` must not fall through and silently resurrect the
-    pin's files over the recorded-empty dest with no ``.bak``. The guard
-    distinguishes ``{}`` (honor: divergence) from ``None`` (pre-digest: legacy
-    re-extract).
+    Pre-#1652, an update off a wiki working tree with no copyable file
+    recorded ``digests={}`` (a valid empty map, not ``None``) while the
+    pin's commit still contained files. The commit-true verbs can't produce
+    this shape anymore, so it is minted directly — it survives only in
+    legacy lockfiles. ``install --all --force`` must not fall through and
+    silently resurrect the pin's files over the recorded-empty dest with no
+    ``.bak``. The guard distinguishes ``{}`` (honor: divergence) from
+    ``None`` (pre-digest: legacy re-extract).
     """
     _initialized_wiki(wiki_root)
     _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v0\n"})
     install_skill(tmp_path, "foo")
     # The pinned commit (v1) contains SKILL.md...
-    _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
-    # ...but the dirty working tree has no copyable file (only a skip-filtered
-    # ``.bak``), so the update copies zero files, reconciles the dest file
-    # away, and records digests={} while pinning v1.
-    asset = wiki_root / "skills" / "foo"
-    (asset / "SKILL.md").unlink()
-    (asset / "SKILL.md.bak").write_bytes(b"skipped\n")
-    update_skill(tmp_path, "foo")
+    pin = _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
+    # ...but the legacy entry records an EMPTY install at that pin.
     dest = tmp_path / ".memtomem" / "skills" / "foo"
+    (dest / "SKILL.md").unlink()
+    _rewrite_entry_as_legacy_update(tmp_path, "foo", pin=pin)
     lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
     assert lock_doc["skills"]["foo"]["files"] == []
     assert lock_doc["skills"]["foo"]["digests"] == {}
@@ -687,19 +713,19 @@ def test_legacy_clean_install_off_dirty_wiki_survives_all_force(
     ``install --all --force``.
 
     Same shape as ``test_clean_install_off_dirty_wiki_survives_all_force``
-    (divergence minted via the worktree-copying update path — post-#1643 the
-    commit-true single install can't produce it), but with the digest keys
-    stripped: before #1512 the ``recorded_digests is not None`` gate let
-    exactly this row fall through to a silent, ``.bak``-less re-extract. The
-    clean-dest hash now stands in for the missing recorded map."""
+    (divergence minted directly via ``_rewrite_entry_as_legacy_update`` —
+    the commit-true verbs, #1643/#1652, can't produce it), but with the
+    digest keys stripped: before #1512 the ``recorded_digests is not None``
+    gate let exactly this row fall through to a silent, ``.bak``-less
+    re-extract. The clean-dest hash now stands in for the missing recorded
+    map."""
     _initialized_wiki(wiki_root)
     _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v0\n"})
     install_skill(tmp_path, "foo")
     pin = _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
-    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
-    update_skill(tmp_path, "foo")
     dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
-    assert dest.read_bytes() == b"working-tree-v2\n"
+    dest.write_bytes(b"working-tree-v2\n")
+    _rewrite_entry_as_legacy_update(tmp_path, "foo", pin=pin)
     lock_path = _strip_to_legacy_entry(tmp_path, "skills", "foo")
 
     monkeypatch.chdir(tmp_path)

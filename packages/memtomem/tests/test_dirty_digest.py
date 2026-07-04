@@ -352,29 +352,32 @@ def test_reconcile_digest_provenance_beats_divergent_manifest(
 def test_reconcile_membership_is_written_set_not_post_copy_src_walk(
     wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex impl-gate Major: ``_apply_update`` derived reconcile membership
-    by re-walking the wiki working tree AFTER the copy returned. A src
-    mutation landing in that window (file dropped from the worktree) made
-    reconcile erase a file this very update just wrote — its unchanged
-    bytes still matched the OLD digests ("provably untouched") — while
-    ``files``/``digests`` recorded it: a phantom lock entry that the next
-    dirty check reports as a local deletion. Membership must come from the
-    copier's returned written set."""
-    import memtomem.context.install as install_module
-
+    """Codex impl-gate Major: ``_apply_update`` used to derive reconcile
+    membership by re-walking the wiki working tree AFTER the copy returned —
+    a src mutation in that window made reconcile erase a file this very
+    update just wrote while ``files``/``digests`` recorded it (a phantom
+    lock entry). The commit-true update (#1652) closes the mutable-src
+    window by construction, but the contract this test pins survives:
+    membership must come from the extractor's RETURNED written set, never a
+    re-read of the (mutable) wiki — so a worktree mutation landing in the
+    extract→reconcile window must still be invisible."""
     _initialized_wiki(wiki_root)
     _seed_wiki_skill(wiki_root, "web", {"SKILL.md": b"v1\n", "keep.md": b"same\n"})
     install_skill(tmp_path, "web")
     _modify_wiki_skill(wiki_root, "web", {"SKILL.md": b"v2\n"})  # keep.md unchanged
 
-    real_copy = install_module.copy_tree_atomic
+    real_extract = WikiStore.copy_asset_at_commit
 
-    def copy_then_mutate_src(src: Path, dst: Path, **kwargs: object) -> dict[str, str]:
-        result = real_copy(src, dst, **kwargs)  # type: ignore[arg-type]
-        (src / "keep.md").unlink()  # worktree mutation in the copy→reconcile window
+    def extract_then_mutate_worktree(
+        self: WikiStore, commit: str, asset_type: str, name: str, dest: Path
+    ) -> dict[str, str]:
+        result = real_extract(self, commit, asset_type, name, dest)
+        # Worktree mutation in the extract→reconcile window (after the
+        # wiki-side dirty gate already passed).
+        (self.root / asset_type / name / "keep.md").unlink()
         return result
 
-    monkeypatch.setattr(install_module, "copy_tree_atomic", copy_then_mutate_src)
+    monkeypatch.setattr(WikiStore, "copy_asset_at_commit", extract_then_mutate_worktree)
     result = update_skill(tmp_path, "web")
 
     kept = tmp_path / ".memtomem" / "skills" / "web" / "keep.md"
