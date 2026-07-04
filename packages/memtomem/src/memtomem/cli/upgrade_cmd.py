@@ -41,6 +41,7 @@ from memtomem.cli._liveness import (
     check_web_liveness,
     probe_pid_file,
 )
+from memtomem.cli._prompts import confirm as _confirm
 
 # Bare PEP 440 release identifier — no operators, no whitespace. We pin
 # with ``memtomem==<version>``, so accepting a specifier like ``>=0.1.30``
@@ -355,7 +356,9 @@ def upgrade(
                 sys.exit(1)
             click.secho(msg, fg="red")
             raise click.Abort()
-        if not click.confirm("\nProceed with upgrade?", default=True):
+        # err=json_out keeps stdout a single JSON document in interactive
+        # `mm upgrade --json` runs (via _prompts.confirm — #1640).
+        if not _confirm("\nProceed with upgrade?", default=True, err=json_out):
             # Voluntary cancel → exit 0; keep JSON schema consistent.
             if json_out:
                 click.echo(_json.dumps({"ok": True, "cancelled": True}))

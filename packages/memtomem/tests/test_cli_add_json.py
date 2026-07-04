@@ -130,6 +130,30 @@ class TestAddJsonAck:
         assert "Continue?" in result.stderr
         comp.index_engine.index_file.assert_not_called()
 
+    def test_project_shared_decline_json_win_prompt_branch(self, monkeypatch, tmp_path):
+        """#1640: forced WIN prompt branch must not pollute the JSON ack —
+        this flow failed on windows-latest until Gate B moved to
+        ``_prompts.confirm``."""
+        import click.termui
+
+        proj = tmp_path / "proj"
+        base = proj / ".memtomem" / "memories"
+        comp = _components(tmp_path)
+        comp.config.indexing.project_memory_dirs = [str(base)]
+        _patch_components(monkeypatch, comp)
+        monkeypatch.setattr(
+            "memtomem.server.tools.search._resolve_project_context_root", lambda comp: proj
+        )
+        monkeypatch.setattr(click.termui, "WIN", True)
+
+        result = CliRunner().invoke(
+            add_cmd, [_CLEAN, "--scope", "project_shared", "--json"], input="n\n"
+        )
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data == {"ok": False, "reason": "cancelled at project_shared confirmation prompt"}
+
     def test_unexpected_error_keeps_nonzero_exit(self, monkeypatch, tmp_path):
         # Only CLI-classified failures (ClickException) ride the exit-0
         # JSON body; a crashed index engine must stay loud (CONTRIBUTING:

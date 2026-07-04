@@ -480,11 +480,29 @@ def test_cancel_exits_zero_and_json_consistent(monkeypatch, fake_uv, force_tty):
     calls, _configure = fake_uv
     _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
 
-    # Decline confirmation by feeding "n" to click.confirm.
+    # Decline confirmation by feeding "n" to the prompt.
     result = CliRunner().invoke(cli, ["upgrade", "--json"], input="n\n")
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output.strip().splitlines()[-1])
+    # #1640: stdout must be a single JSON document — the prompt rides
+    # stderr under --json, so `mm upgrade --json | jq` works on cancel.
+    payload = json.loads(result.stdout)
     assert payload == {"ok": True, "cancelled": True}
+    assert "Proceed with upgrade?" in result.stderr
+    assert calls == []
+
+
+def test_cancel_json_win_prompt_branch(monkeypatch, fake_uv, force_tty):
+    """#1640: forcing click's WIN prompt branch must not pollute the JSON
+    ack — _prompts.confirm never enters click's prompt machinery."""
+    import click.termui
+
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, ServerState(alive=False, pid=None, pid_file=None))
+    monkeypatch.setattr(click.termui, "WIN", True)
+
+    result = CliRunner().invoke(cli, ["upgrade", "--json"], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"ok": True, "cancelled": True}
     assert calls == []
 
 

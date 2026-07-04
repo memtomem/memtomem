@@ -11,6 +11,7 @@ from typing import get_args
 import click
 
 from memtomem.cli._errors import raise_cli_error
+from memtomem.cli._prompts import confirm as _confirm
 from memtomem.config import TargetScope
 from memtomem.memory_scope import (
     MemoryScopeError,
@@ -37,13 +38,14 @@ def _prompt_project_shared_confirm(target: Path, *, err: bool = False) -> bool:
     """Prompt before writing to the git-tracked project_shared tier.
 
     ``err=True`` routes the prompt chrome to stderr so ``--json`` runs
-    keep stdout as a single machine-readable ack.
+    keep stdout as a single machine-readable ack (via ``_prompts.confirm``,
+    which bypasses click's Windows stdout leak — #1640).
     """
     click.secho(
         "This will write to the git-tracked project memory directory:", fg="yellow", err=err
     )
     click.echo(f"  {target}", err=err)
-    return click.confirm("Continue?", default=False, err=err)
+    return _confirm("Continue?", default=False, err=err)
 
 
 def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | None) -> str:

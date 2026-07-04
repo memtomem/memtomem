@@ -251,6 +251,24 @@ class TestResetJson:
         assert "Continue?" in result.stderr
         assert _count(db_path, "chunks") >= 1
 
+    def test_cancelled_confirm_json_win_prompt_branch(self, home, monkeypatch):
+        """#1640: click's WIN prompt branch leaked the CliRunner reply echo
+        into stdout (`' n\\n' + JSON`), failing this flow on windows-latest.
+        ``_prompts.confirm`` bypasses that branch, so stdout must stay a
+        single JSON document even with the branch forced."""
+        import click.termui
+
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+        monkeypatch.setattr(click.termui, "WIN", True)
+
+        result = runner.invoke(cli, ["reset", "--json"], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data == {"ok": False, "reason": "cancelled at confirmation prompt"}
+
 
 # ---------------------------------------------------------------- backup
 

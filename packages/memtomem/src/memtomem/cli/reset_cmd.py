@@ -33,6 +33,7 @@ import click
 
 from memtomem.cli._db_lock import check_db_lock, sqlite_file_uri
 from memtomem.cli._liveness import check_server_liveness, check_web_liveness
+from memtomem.cli._prompts import confirm as _confirm
 
 
 @click.command("reset")
@@ -195,7 +196,8 @@ async def _run(
     if not yes:
         # err=as_json keeps stdout pure JSON under --json — the prompt is
         # interactive chrome, and `mm reset --json | jq` must not choke on it.
-        if not click.confirm(
+        # _prompts.confirm bypasses click's Windows stdout leak (#1640).
+        if not _confirm(
             f"This will permanently delete ALL data ({total} chunks, sessions, "
             f"history, etc.) from the database. Continue?",
             default=False,
