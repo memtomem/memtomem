@@ -22,6 +22,7 @@ Destructive by intent, so it carries the same operational gates as
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import sys
@@ -47,23 +48,36 @@ from memtomem.cli._liveness import check_server_liveness, check_web_liveness
     help="Bypass the running-server / write-lock safety gates (use only if you "
     "know the pid or lock is stale).",
 )
-def reset(yes: bool, backup: bool, force: bool) -> None:
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit a machine-readable JSON ack instead of text output.",
+)
+def reset(yes: bool, backup: bool, force: bool, as_json: bool) -> None:
     """Delete ALL data (chunks, sessions, history, etc.) and reinitialize the DB.
 
     Embedding configuration is preserved — no need to re-configure after reset.
     A re-index is required to repopulate memory.
     """
-    asyncio.run(_run(yes, backup=backup, force=force))
+    asyncio.run(_run(yes, backup=backup, force=force, as_json=as_json))
 
 
-def _refuse(message: str, hint: str) -> None:
+def _refuse(message: str, hint: str, *, as_json: bool = False) -> None:
+    if as_json:
+        # Write-command JSON error shape (CONTRIBUTING): the refusal is a
+        # handled failure, so it rides the body with exit 0 — scripts read
+        # `ok`, not the exit code.
+        click.echo(json.dumps({"ok": False, "reason": f"{message} {hint}"}))
+        sys.exit(0)
     click.secho(message, fg="red")
     click.secho(f"  {hint}", fg="red")
     sys.exit(2)
 
 
-def _check_gates(db_path: Path) -> None:
-    """Refuse (exit 2) while any known writer is alive or holds the DB lock."""
+def _check_gates(db_path: Path, *, as_json: bool = False) -> None:
+    """Refuse (exit 2; exit 0 + ``ok: false`` under ``--json``) while any
+    known writer is alive or holds the DB lock."""
     server = check_server_liveness()
     if server.alive:
         who = f"pid {server.pid}" if server.pid is not None else "pid unknown, flock held"
@@ -71,6 +85,7 @@ def _check_gates(db_path: Path) -> None:
             f"MCP server still running ({who}). Refusing to reset — a live "
             "writer racing the wipe can lose data or corrupt the WAL.",
             "Stop the server first, or pass --force to override.",
+            as_json=as_json,
         )
     web = check_web_liveness()
     if web.alive:
@@ -80,6 +95,7 @@ def _check_gates(db_path: Path) -> None:
             f"mm web still running ({who}{port}). Refusing to reset — the web "
             "UI writes to this database.",
             "Stop it first (mm web is a foreground process), or pass --force to override.",
+            as_json=as_json,
         )
     db_lock = check_db_lock(db_path)
     if db_lock.locked:
@@ -87,6 +103,7 @@ def _check_gates(db_path: Path) -> None:
             f"Another process holds a write lock on {db_path}. Refusing to reset.",
             f"Find it with `lsof {db_path}` (or `ps aux | grep memtomem`), stop "
             "it, or pass --force to override.",
+            as_json=as_json,
         )
 
 
@@ -135,7 +152,9 @@ def _backup_db(db_path: Path) -> Path:
     return dest
 
 
-async def _run(yes: bool, *, backup: bool = False, force: bool = False) -> None:
+async def _run(
+    yes: bool, *, backup: bool = False, force: bool = False, as_json: bool = False
+) -> None:
     from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
     from memtomem.storage.sqlite_backend import SqliteBackend
 
@@ -152,7 +171,7 @@ async def _run(yes: bool, *, backup: bool = False, force: bool = False) -> None:
     # migrations, i.e. write to a DB we have not yet verified is unowned.
     # --yes must never skip these (uninstall -y precedent).
     if not force:
-        _check_gates(db_path)
+        _check_gates(db_path, as_json=as_json)
 
     storage = SqliteBackend(
         cfg.storage,
@@ -166,34 +185,61 @@ async def _run(yes: bool, *, backup: bool = False, force: bool = False) -> None:
     total = stats.get("total_chunks", 0)
 
     if total == 0:
-        click.echo("Database is already empty — nothing to reset.")
+        if as_json:
+            click.echo(json.dumps({"ok": True, "deleted": {}, "backup": None}))
+        else:
+            click.echo("Database is already empty — nothing to reset.")
         await storage.close()
         return
 
     if not yes:
+        # err=as_json keeps stdout pure JSON under --json — the prompt is
+        # interactive chrome, and `mm reset --json | jq` must not choke on it.
         if not click.confirm(
             f"This will permanently delete ALL data ({total} chunks, sessions, "
             f"history, etc.) from the database. Continue?",
             default=False,
+            err=as_json,
         ):
-            click.echo("Cancelled.")
+            if as_json:
+                click.echo(json.dumps({"ok": False, "reason": "cancelled at confirmation prompt"}))
+            else:
+                click.echo("Cancelled.")
             await storage.close()
             return
 
+    backup_path: Path | None = None
     if backup:
         # After the confirm so a cancelled run leaves no backup litter;
         # abort without wiping if the snapshot fails.
         try:
-            dest = _backup_db(db_path)
+            backup_path = _backup_db(db_path)
         except (sqlite3.Error, OSError) as exc:
             await storage.close()
+            if as_json:
+                click.echo(
+                    json.dumps({"ok": False, "reason": f"backup failed ({exc}); nothing wiped"})
+                )
+                sys.exit(0)
             click.secho(f"Backup failed ({exc}); aborting without wiping.", fg="red")
             sys.exit(1)
-        click.echo(f"Backup written to {dest}")
+        if not as_json:
+            click.echo(f"Backup written to {backup_path}")
 
     deleted = await storage.reset_all()
     await storage.close()
 
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "ok": True,
+                    "deleted": {table: count for table, count in deleted.items() if count > 0},
+                    "backup": str(backup_path) if backup_path else None,
+                }
+            )
+        )
+        return
     click.secho("Database reset complete.", fg="green")
     for table, count in deleted.items():
         if count > 0:

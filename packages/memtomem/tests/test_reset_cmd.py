@@ -14,6 +14,7 @@ gate ordering, not the wipe itself (``reset_all`` is covered in
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -149,6 +150,106 @@ class TestResetGates:
         assert result.exit_code == 0, result.output
         # Proceeded past the gates to the empty-DB early exit.
         assert "already empty" in result.output
+
+
+# ---------------------------------------------------------------- --json acks
+
+
+class TestResetJson:
+    """``--json`` write acks (#1615) — CONTRIBUTING write-command shape:
+    handled outcomes (success, gate refusal, cancellation, backup failure)
+    ride the body with exit 0; text-path behavior is untouched."""
+
+    def test_wipe_json_ack(self, home, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        result = runner.invoke(cli, ["reset", "-y", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["ok"] is True
+        assert data["backup"] is None
+        assert data["deleted"].get("chunks", 0) >= 1
+        assert _count(db_path, "chunks") == 0
+
+    def test_already_empty_json_is_ok_noop(self, home, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        mem_dir = home / "memories"
+        mem_dir.mkdir(exist_ok=True)
+        r = runner.invoke(
+            cli,
+            ["init", "-y", "--provider", "none", "--memory-dir", str(mem_dir), "--mcp", "skip"],
+        )
+        assert r.exit_code == 0, r.output
+
+        result = runner.invoke(cli, ["reset", "-y", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"ok": True, "deleted": {}, "backup": None}
+
+    def test_gate_refusal_json_exit_zero(self, home, monkeypatch):
+        _patch_liveness(
+            monkeypatch, server=ServerState(alive=True, pid=4242, pid_file=home / "pid")
+        )
+
+        result = CliRunner().invoke(cli, ["reset", "-y", "--json"])
+
+        # Text path exits 2; under --json the refusal is a handled failure
+        # carried in the body.
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["ok"] is False
+        assert "MCP server still running" in data["reason"]
+        assert "--force" in data["reason"]
+
+    def test_backup_json_ack_carries_path(self, home, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        _init_and_index(home, runner)
+
+        result = runner.invoke(cli, ["reset", "-y", "--backup", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["ok"] is True
+        (bak,) = (home / ".memtomem").glob("memtomem.db.pre-reset-*.bak")
+        assert data["backup"] == str(bak)
+
+    def test_backup_failure_json_exit_zero_without_wiping(self, home, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        def _boom(_db_path: Path) -> Path:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(reset_cmd, "_backup_db", _boom)
+        result = runner.invoke(cli, ["reset", "-y", "--backup", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["ok"] is False
+        assert "backup failed" in data["reason"]
+        assert _count(db_path, "chunks") >= 1, "DB was wiped despite backup failure"
+
+    def test_cancelled_confirm_json(self, home, monkeypatch):
+        _patch_liveness(monkeypatch)
+        runner = CliRunner()
+        db_path = _init_and_index(home, runner)
+
+        result = runner.invoke(cli, ["reset", "--json"], input="n\n")
+
+        assert result.exit_code == 0, result.output
+        # stdout must be a single JSON document — the prompt rides stderr
+        # under --json so `mm reset --json | jq` works on the cancel path.
+        # (result.output merges the streams; assert on stdout alone.)
+        data = json.loads(result.stdout)
+        assert data == {"ok": False, "reason": "cancelled at confirmation prompt"}
+        assert "Continue?" in result.stderr
+        assert _count(db_path, "chunks") >= 1
 
 
 # ---------------------------------------------------------------- backup

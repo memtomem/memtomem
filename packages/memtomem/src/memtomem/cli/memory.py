@@ -32,11 +32,17 @@ def _resolve_memory_scope_dir(
         raise click.ClickException(str(exc)) from exc
 
 
-def _prompt_project_shared_confirm(target: Path) -> bool:
-    """Prompt before writing to the git-tracked project_shared tier."""
-    click.secho("This will write to the git-tracked project memory directory:", fg="yellow")
-    click.echo(f"  {target}")
-    return click.confirm("Continue?", default=False)
+def _prompt_project_shared_confirm(target: Path, *, err: bool = False) -> bool:
+    """Prompt before writing to the git-tracked project_shared tier.
+
+    ``err=True`` routes the prompt chrome to stderr so ``--json`` runs
+    keep stdout as a single machine-readable ack.
+    """
+    click.secho(
+        "This will write to the git-tracked project memory directory:", fg="yellow", err=err
+    )
+    click.echo(f"  {target}", err=err)
+    return click.confirm("Continue?", default=False, err=err)
 
 
 def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | None) -> str:
@@ -91,6 +97,13 @@ def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | No
     default=False,
     help="Skip confirmation prompts.",
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit a machine-readable JSON ack instead of text output.",
+)
 def add(
     content: str,
     title: str | None,
@@ -100,6 +113,7 @@ def add(
     scope: TargetScope,
     confirm_project_shared: bool,
     yes: bool,
+    as_json: bool,
 ) -> None:
     """Add a memory entry and index it."""
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -114,9 +128,16 @@ def add(
                 scope,
                 confirm_project_shared,
                 yes,
+                as_json=as_json,
             )
         )
-    except click.ClickException:
+    except click.ClickException as e:
+        if as_json:
+            # Write-command JSON error shape (CONTRIBUTING): failures the
+            # CLI classified ride the body with exit 0; unexpected
+            # exceptions below keep the nonzero Click exit.
+            click.echo(json.dumps({"ok": False, "reason": e.format_message()}))
+            return
         raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
@@ -131,6 +152,8 @@ async def _add(
     scope: TargetScope = "user",
     confirm_project_shared: bool = False,
     yes: bool = False,
+    *,
+    as_json: bool = False,
 ) -> None:
     from memtomem import privacy
     from memtomem.cli._bootstrap import cli_components
@@ -214,7 +237,12 @@ async def _add(
                     "--yes alone is not sufficient: project_shared writes go to "
                     "the git-tracked memory tier and require explicit opt-in."
                 )
-            if not _prompt_project_shared_confirm(target):
+            if not _prompt_project_shared_confirm(target, err=as_json):
+                if as_json:
+                    # Declining the prompt is a handled outcome — surface
+                    # it as the write-command JSON error shape (exit 0)
+                    # instead of the text path's click.Abort.
+                    raise click.ClickException("cancelled at project_shared confirmation prompt")
                 raise click.Abort()
 
         from memtomem.context._atomic import (
@@ -262,7 +290,12 @@ async def _add(
                 "migrate in flight); retry."
             ) from exc
 
-        click.echo(f"Added to {target} ({stats.indexed_chunks} chunks indexed)")
+        if as_json:
+            click.echo(
+                json.dumps({"ok": True, "target": str(target), "chunks": stats.indexed_chunks})
+            )
+        else:
+            click.echo(f"Added to {target} ({stats.indexed_chunks} chunks indexed)")
 
 
 @click.command()

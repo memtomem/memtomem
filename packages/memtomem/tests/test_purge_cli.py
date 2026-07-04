@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -149,4 +150,52 @@ class TestPurgeCLI:
 
         assert result.exit_code == 0, result.output
         assert "No stored chunks match" in result.output
+        comp.storage.delete_by_source.assert_not_called()
+
+
+class TestPurgeJson:
+    """``--json`` write acks (#1615) — CONTRIBUTING write-command shape."""
+
+    def test_dry_run_json_ack(self, monkeypatch):
+        comp = _mock_components([Path("/home/u/.gemini/oauth_creds.json")])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = CliRunner().invoke(cli, ["purge", "--matching-excluded", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data == {
+            "ok": True,
+            "apply": False,
+            "files": 1,
+            "chunks": 2,
+            # str(Path(...)) keeps the assertion portable across separators.
+            "sample": [str(Path("/home/u/.gemini/oauth_creds.json"))],
+        }
+        comp.storage.delete_by_source.assert_not_called()
+
+    def test_apply_json_ack(self, monkeypatch):
+        sources = [
+            Path("/home/u/.gemini/oauth_creds.json"),
+            Path("/home/u/.ssh/id_rsa.pub"),
+        ]
+        comp = _mock_components(sources)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = CliRunner().invoke(cli, ["purge", "--matching-excluded", "--apply", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        # delete_by_source is mocked to return 2 per file.
+        assert data == {"ok": True, "apply": True, "files": 2, "chunks": 4}
+
+    def test_no_matches_json_is_ok_noop(self, monkeypatch):
+        comp = _mock_components([Path("/home/u/notes/day.md")])
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = CliRunner().invoke(cli, ["purge", "--matching-excluded", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data == {"ok": True, "apply": False, "files": 0, "chunks": 0, "sample": []}
         comp.storage.delete_by_source.assert_not_called()

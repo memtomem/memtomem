@@ -225,6 +225,8 @@ Examples in the current CLI:
 - `--format` — `mm search` (has `context`, `smart`), `mm recall` (has
   `plain`), `mm config show` and `mm status` (keep the original option
   alongside `--json`).
+- `--json` write acks — `mm reset`, `mm purge`, `mm add` emit the
+  write-command `{"ok": ...}` shape below.
 
 **If the two-mode nature of a new command is uncertain** — i.e. it's
 plausible a `context` / `digest` / `diff` mode gets added later — choose
