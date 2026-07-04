@@ -220,11 +220,11 @@ command:
 
 Examples in the current CLI:
 
-- `--json` — `mm watchdog status`, `mm watchdog run`, `mm config show`
-  (alias of `--format json`).
+- `--json` — `mm watchdog status`, `mm watchdog run`, `mm config show`,
+  `mm status` (aliases of `--format json`).
 - `--format` — `mm search` (has `context`, `smart`), `mm recall` (has
-  `plain`), `mm config show` (keeps the original option alongside
-  `--json`).
+  `plain`), `mm config show` and `mm status` (keep the original option
+  alongside `--json`).
 
 **If the two-mode nature of a new command is uncertain** — i.e. it's
 plausible a `context` / `digest` / `diff` mode gets added later — choose

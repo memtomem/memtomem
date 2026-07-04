@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,252 @@ async def mem_stats(
     return out
 
 
+async def collect_status_report(app: AppContext) -> dict:
+    """Gather the status report as a structured dict.
+
+    Single source of truth for both surfaces: ``mm status --format json``
+    emits this dict verbatim, and ``render_status_report`` turns it into
+    the human-readable text ``mem_status`` / ``mm status`` print. Keys are
+    part of the CLI's machine-readable contract — treat renames as
+    breaking. ``warnings`` entries keep the stable ``kind``/``fix``
+    (plus optional ``doc``/``detail``) schema documented on
+    ``mem_status``.
+    """
+    stats = await app.storage.get_stats()
+    config = app.config
+
+    stored = getattr(app.storage, "stored_embedding_info", None)
+    if stored:
+        embedding = {
+            "provider": stored["provider"],
+            "model": stored["model"],
+            "dimension": stored["dimension"],
+            "source": "stored",
+        }
+    else:
+        embedding = {
+            "provider": config.embedding.provider,
+            "model": config.embedding.model,
+            "dimension": config.embedding.dimension,
+            "source": "configured",
+        }
+
+    # Orphan check — count source files no longer on disk
+    orphaned = 0
+    try:
+        source_files = await app.storage.get_all_source_files()
+        orphaned = sum(1 for sf in source_files if not sf.exists())
+    except Exception:
+        logger.debug("Orphan detection failed", exc_info=True)
+
+    # Dense-vector coverage. The ``none`` state surfaces the BM25-only
+    # run case loudly: an embedder that crashed mid-init or fell back to
+    # NoopEmbedder will still index chunks into ``chunks`` +
+    # ``chunks_fts`` but skip ``chunks_vec`` entirely, so semantic search
+    # returns nothing while keyword search keeps working. The check is
+    # gated on ``hasattr`` so older storage doubles that haven't grown
+    # the method don't break the report; ``None`` means "unknown", not
+    # "no coverage".
+    dense_coverage = None
+    if hasattr(app.storage, "get_dense_coverage"):
+        try:
+            cov = await app.storage.get_dense_coverage()
+            total = int(cov["total"])
+            with_dense = int(cov["with_dense"])
+            if total > 0:
+                if with_dense == total:
+                    state = "full"
+                elif with_dense == 0:
+                    state = "none"
+                else:
+                    state = "partial"
+                dense_coverage = {
+                    "with_dense": with_dense,
+                    "total": total,
+                    "percent": round((with_dense / total) * 100, 1),
+                    "state": state,
+                }
+            else:
+                dense_coverage = {
+                    "with_dense": with_dense,
+                    "total": total,
+                    "percent": None,
+                    "state": "empty",
+                }
+        except Exception:
+            logger.debug("dense coverage query failed", exc_info=True)
+
+    warnings: list[dict] = []
+    if config.scheduler.enabled and not config.health_watchdog.enabled:
+        warnings.append(
+            {
+                "kind": "scheduler_watchdog_disabled",
+                "detail": "scheduler.enabled=True but health_watchdog.enabled=False",
+                "fix": "set health_watchdog.enabled=True (scheduler rides its tick)",
+            }
+        )
+    mismatch = getattr(app.storage, "embedding_mismatch", None)
+    if mismatch is not None:
+        warnings.append(
+            {
+                "kind": "embedding_dim_mismatch",
+                "stored": dict(mismatch["stored"]),
+                "configured": dict(mismatch["configured"]),
+                "fix": "uv run mm embedding-reset --mode apply-current",
+                "doc": "docs/guides/configuration.md#reset-flow",
+            }
+        )
+
+    return {
+        "config": {
+            "storage_backend": config.storage.backend,
+            "db_path": str(Path(config.storage.sqlite_path).expanduser()),
+            "embedding": embedding,
+            "top_k": config.search.default_top_k,
+            "rrf_k": config.search.rrf_k,
+        },
+        "index": {
+            "total_chunks": stats["total_chunks"],
+            "total_sources": stats["total_sources"],
+            "orphaned_sources": orphaned,
+            "dense_coverage": dense_coverage,
+        },
+        # Immutable fields — these cannot be changed via mem_config at
+        # runtime. Keys are the dotted names ``mm config set`` takes, so
+        # operators are not surprised when a set on one of these paths
+        # fails silently.
+        "immutable": {
+            "embedding.provider": config.embedding.provider,
+            "embedding.model": config.embedding.model or None,
+            "embedding.dimension": config.embedding.dimension,
+            "search.tokenizer": config.search.tokenizer,
+            "storage.backend": config.storage.backend,
+        },
+        "warnings": warnings,
+    }
+
+
+# Dense-coverage hints, keyed by ``dense_coverage["state"]``.
+_DENSE_HINTS = {
+    "none": "  (BM25-only — dense retrieval will return nothing)",
+    "partial": "  (partial dense coverage — some chunks BM25-only)",
+}
+
+_IMMUTABLE_GUIDANCE = (
+    "  -> To change: re-run `mm init` for provider/tokenizer/backend, "
+    "or `mm embedding-reset` to switch embedder (re-index required)."
+)
+
+
+@dataclass(frozen=True)
+class StatusLine:
+    """One rendered report line, split so stylers never re-parse text.
+
+    ``key`` carries its column padding (and the ``"- "``/``"  "`` warning
+    prefix) so ``key + value + suffix`` reproduces the plain line exactly;
+    ``role``/``meta`` tell the CLI styler what the line is without the
+    regex re-parsing this replaced (#1615).
+    """
+
+    role: str  # "title" | "rule" | "section" | "kv" | "immutable_kv"
+    # | "dense" | "guidance" | "warning_kv" | "blank"
+    key: str = ""
+    value: str = ""
+    suffix: str = ""
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def text(self) -> str:
+        return self.key + self.value + self.suffix
+
+
+def iter_status_lines(data: dict) -> list[StatusLine]:
+    """Lay out a ``collect_status_report`` dict as report lines."""
+    cfg = data["config"]
+    emb = cfg["embedding"]
+    index = data["index"]
+
+    lines = [
+        StatusLine("title", value="memtomem Status"),
+        StatusLine("rule", value="==============", meta={"tone": "title"}),
+        StatusLine("kv", key="Storage:".ljust(11), value=str(cfg["storage_backend"])),
+        StatusLine("kv", key="DB path:".ljust(11), value=cfg["db_path"], meta={"value_fg": "cyan"}),
+        StatusLine("kv", key="Embedding:".ljust(11), value=f"{emb['provider']} / {emb['model']}"),
+        StatusLine("kv", key="Dimension:".ljust(11), value=str(emb["dimension"])),
+        StatusLine("kv", key="Top-K:".ljust(11), value=str(cfg["top_k"])),
+        StatusLine("kv", key="RRF k:".ljust(11), value=str(cfg["rrf_k"])),
+        StatusLine("blank"),
+        StatusLine("section", value="Index stats", meta={"tone": "plain"}),
+        StatusLine("rule", value="-----------", meta={"tone": "plain"}),
+        StatusLine("kv", key="Total chunks:".ljust(15), value=str(index["total_chunks"])),
+        StatusLine(
+            "kv",
+            key="Source files:".ljust(15),
+            value=str(index["total_sources"]),
+            suffix=(
+                f" ({index['orphaned_sources']} orphaned — run mem_cleanup_orphans)"
+                if index["orphaned_sources"]
+                else ""
+            ),
+        ),
+    ]
+
+    coverage = index["dense_coverage"]
+    if coverage is not None:
+        percent = coverage["percent"]
+        lines.append(
+            StatusLine(
+                "dense",
+                key="Dense vectors:".ljust(15),
+                value=f"{coverage['with_dense']}/{coverage['total']}",
+                suffix=(
+                    f" ({percent}%){_DENSE_HINTS.get(coverage['state'], '')}"
+                    if percent is not None
+                    else ""
+                ),
+                meta={"state": coverage["state"]},
+            )
+        )
+
+    lines += [
+        StatusLine("blank"),
+        StatusLine("section", value="Immutable fields (set once at init)", meta={"tone": "warn"}),
+        StatusLine("rule", value="------------------------------------", meta={"tone": "warn"}),
+    ]
+    for key, value in data["immutable"].items():
+        lines.append(
+            StatusLine(
+                "immutable_kv",
+                key=f"{key}:".ljust(21),
+                value="(unset)" if value is None else str(value),
+            )
+        )
+    lines.append(StatusLine("guidance", value=_IMMUTABLE_GUIDANCE))
+
+    if data["warnings"]:
+        lines += [
+            StatusLine("blank"),
+            StatusLine("section", value="Warnings", meta={"tone": "warn"}),
+            StatusLine("rule", value="--------", meta={"tone": "warn"}),
+        ]
+        for warning in data["warnings"]:
+            for i, (key, value) in enumerate(warning.items()):
+                if isinstance(value, dict):
+                    # stored/configured embedding sub-blocks
+                    text = f"{value['provider']}/{value['model']} ({value['dimension']}d)"
+                else:
+                    text = str(value)
+                prefix = "- " if i == 0 else "  "
+                lines.append(StatusLine("warning_kv", key=prefix + f"{key}:".ljust(12), value=text))
+
+    return lines
+
+
+def render_status_report(data: dict) -> str:
+    """Render a ``collect_status_report`` dict as plain report text."""
+    return "\n".join(line.text for line in iter_status_lines(data))
+
+
 async def format_status_report(app: AppContext) -> str:
     """Render the status report shared by ``mem_status`` and ``mm status``.
 
@@ -69,108 +316,7 @@ async def format_status_report(app: AppContext) -> str:
     same formatting without going through MCP — both surface the same
     text so users learn one output and can recognize it in either place.
     """
-    stats = await app.storage.get_stats()
-    config = app.config
-
-    stored = getattr(app.storage, "stored_embedding_info", None)
-    if stored:
-        emb_line = f"{stored['provider']} / {stored['model']}"
-        dim_line = str(stored["dimension"])
-    else:
-        emb_line = f"{config.embedding.provider} / {config.embedding.model}"
-        dim_line = str(config.embedding.dimension)
-
-    lines = [
-        "memtomem Status",
-        "==============",
-        f"Storage:   {config.storage.backend}",
-        f"DB path:   {Path(config.storage.sqlite_path).expanduser()}",
-        f"Embedding: {emb_line}",
-        f"Dimension: {dim_line}",
-        f"Top-K:     {config.search.default_top_k}",
-        f"RRF k:     {config.search.rrf_k}",
-        "",
-        "Index stats",
-        "-----------",
-        f"Total chunks:  {stats['total_chunks']}",
-        f"Source files:  {stats['total_sources']}",
-    ]
-
-    # Orphan check — count source files no longer on disk
-    try:
-        source_files = await app.storage.get_all_source_files()
-        orphaned = sum(1 for sf in source_files if not sf.exists())
-        if orphaned:
-            lines[-1] = (
-                f"Source files:  {stats['total_sources']} ({orphaned} orphaned — run mem_cleanup_orphans)"
-            )
-    except Exception:
-        logger.debug("Orphan detection failed", exc_info=True)
-
-    # Dense-vector coverage line. The hint at the end surfaces the
-    # BM25-only run case loudly: an embedder that crashed mid-init or
-    # fell back to NoopEmbedder will still index chunks into ``chunks``
-    # + ``chunks_fts`` but skip ``chunks_vec`` entirely, so semantic
-    # search returns nothing while keyword search keeps working. The
-    # check is gated on ``hasattr`` so older storage doubles that
-    # haven't grown the method don't break the report.
-    if hasattr(app.storage, "get_dense_coverage"):
-        try:
-            cov = await app.storage.get_dense_coverage()
-            total = int(cov["total"])
-            with_dense = int(cov["with_dense"])
-            if total > 0:
-                pct = round((with_dense / total) * 100, 1)
-                hint = ""
-                if with_dense == 0:
-                    hint = "  (BM25-only — dense retrieval will return nothing)"
-                elif with_dense < total:
-                    hint = "  (partial dense coverage — some chunks BM25-only)"
-                lines.append(f"Dense vectors: {with_dense}/{total} ({pct}%){hint}")
-            else:
-                lines.append("Dense vectors: 0/0")
-        except Exception:
-            logger.debug("dense coverage query failed", exc_info=True)
-
-    # Immutable fields — these cannot be changed via mem_config at runtime.
-    # Surfacing them here so operators are not surprised when a `mm config set`
-    # on one of these paths fails silently.
-    lines.append("")
-    lines.append("Immutable fields (set once at init)")
-    lines.append("------------------------------------")
-    lines.append(f"embedding.provider:  {config.embedding.provider}")
-    lines.append(f"embedding.model:     {config.embedding.model or '(unset)'}")
-    lines.append(f"embedding.dimension: {config.embedding.dimension}")
-    lines.append(f"search.tokenizer:    {config.search.tokenizer}")
-    lines.append(f"storage.backend:     {config.storage.backend}")
-    lines.append(
-        "  -> To change: re-run `mm init` for provider/tokenizer/backend, "
-        "or `mm embedding-reset` to switch embedder (re-index required)."
-    )
-
-    mismatch = getattr(app.storage, "embedding_mismatch", None)
-    scheduler_misconfig = config.scheduler.enabled and not config.health_watchdog.enabled
-    if mismatch is not None or scheduler_misconfig:
-        lines.append("")
-        lines.append("Warnings")
-        lines.append("--------")
-    if scheduler_misconfig:
-        lines.append("- kind:       scheduler_watchdog_disabled")
-        lines.append("  detail:     scheduler.enabled=True but health_watchdog.enabled=False")
-        lines.append("  fix:        set health_watchdog.enabled=True (scheduler rides its tick)")
-    if mismatch is not None:
-        stored_info = mismatch["stored"]
-        cfg = mismatch["configured"]
-        lines.append("- kind:       embedding_dim_mismatch")
-        lines.append(
-            f"  stored:     {stored_info['provider']}/{stored_info['model']} "
-            f"({stored_info['dimension']}d)"
-        )
-        lines.append(f"  configured: {cfg['provider']}/{cfg['model']} ({cfg['dimension']}d)")
-        lines.append("  fix:        uv run mm embedding-reset --mode apply-current")
-        lines.append("  doc:        docs/guides/configuration.md#reset-flow")
-
-    return "\n".join(lines)
+    return render_status_report(await collect_status_report(app))
 
 
 @mcp.tool()
@@ -195,8 +341,10 @@ async def mem_status(
                 ``stale_index``, ``orphan_vectors``, etc. — consumers
                 must tolerate unknown kinds rather than erroring.
     ``fix``     the canonical CLI command a user should run.
-    ``doc``     a relative-path link into ``docs/guides/`` with the full
-                remediation flow (see ``configuration.md#reset-flow``).
+    ``doc``     optional — a relative-path link into ``docs/guides/``
+                with the full remediation flow (see
+                ``configuration.md#reset-flow``). Not every warning kind
+                carries one (``scheduler_watchdog_disabled`` does not).
 
     Embedding-mismatch entries also include ``stored`` and ``configured``
     sub-blocks echoing the DB vs runtime provider/model/dimension so the
