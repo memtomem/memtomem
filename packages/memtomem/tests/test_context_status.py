@@ -388,7 +388,9 @@ def test_cli_status_empty_lockfile_exits_0(
     result = runner.invoke(context_group, ["status"])
     assert result.exit_code == 0
     assert "No wiki assets installed" in result.output
-    assert "scope project_shared" in result.output
+    assert "tier project_shared" in result.output
+    # Empty state must hint the next step (#1647 item 2).
+    assert "mm context init" in result.output
 
 
 def test_cli_status_renders_states(
@@ -646,7 +648,7 @@ def test_cli_status_renders_draft_no_fanout_annotation(
     assert "draft-only" in result.output
     assert "(draft, no fan-out)" in result.output
     assert "1 local-draft" in result.output
-    assert "scope project_local" in result.output
+    assert "tier project_local" in result.output
 
 
 def test_cli_status_default_hides_project_local_drafts(
@@ -877,7 +879,7 @@ def test_cli_status_user_scope_lists_user_artifacts(monkeypatch, tmp_path: Path)
 
     assert result.exit_code == 0
     assert "myagent" in result.output
-    assert "scope user" in result.output
+    assert "tier user" in result.output
 
 
 def test_cli_status_user_scope_empty_message(monkeypatch, tmp_path: Path) -> None:
@@ -891,7 +893,40 @@ def test_cli_status_user_scope_empty_message(monkeypatch, tmp_path: Path) -> Non
     )
 
     assert result.exit_code == 0
-    assert "No user-scope assets found" in result.output
+    assert "No user-tier assets found" in result.output
+    # Empty state must hint the next step (#1647 item 2). --include is
+    # load-bearing: bare `init --scope=user` seeds empty dirs, it does
+    # not import runtime copies.
+    assert "mm context init --include=agents,commands,skills --scope=user" in result.output
+
+
+def test_cli_status_project_local_empty_hint_gated_on_project_signal(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The project_local empty-state hint must never recommend a command
+    that immediately fails: ``init --scope=project_local`` rejects cwds
+    without a project signal (.git / pyproject.toml), so outside one the
+    hint says to run it from inside a project instead (#1647 item 2)."""
+    home = tmp_path / "home"
+    set_home(monkeypatch, home)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+
+    result = CliRunner().invoke(
+        context_group, ["status", "--scope", "project_local"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    assert "No project_local draft assets" in result.output
+    assert "from inside a project" in result.output
+
+    (proj / ".git").mkdir()
+    result = CliRunner().invoke(
+        context_group, ["status", "--scope", "project_local"], catch_exceptions=False
+    )
+    assert result.exit_code == 0
+    assert "Run 'mm context init --scope=project_local' to seed drafts." in result.output
+    assert "from inside a project" not in result.output
 
 
 # ── flat-layout reason (#1247 id 0) ──────────────────────────────────────

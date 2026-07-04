@@ -754,7 +754,16 @@ def _warn_label_ineligible_kinds(label: str | None, inc: set[str]) -> None:
 
 @click.group("context")
 def context() -> None:
-    """Manage unified agent context (CLAUDE.md, .cursorrules, GEMINI.md, etc.)."""
+    """Manage the canonical artifact Store and sync it to your AI tools.
+
+    The Store (``.memtomem/`` / ``~/.memtomem/``) holds your master copies
+    of skills, agents, commands, MCP servers and settings. ``sync`` fans
+    them out to detected runtimes (Claude Code, Codex, Kimi, Antigravity,
+    ...); ``init`` imports existing runtime copies into the Store;
+    ``install`` / ``update`` / ``version`` manage wiki assets. Also
+    includes the unified ``context.md`` generators (CLAUDE.md, GEMINI.md,
+    etc.).
+    """
 
 
 @context.command("detect")
@@ -2510,7 +2519,7 @@ def status_cmd(scope_flag: TargetScope, all_projects: bool) -> None:
     if untracked_count:
         extra_parts.append(f"{untracked_count} untracked")
     extra_suffix = f" (+ {', '.join(extra_parts)})" if extra_parts else ""
-    scope_suffix = f" — scope {scope_flag}"
+    scope_suffix = f" — tier {scope_flag}"
     if wiki_head is None:
         wiki_root = wiki.root
         # Absent vs present-but-unusable (#1247 id 9): exists() is a pure
@@ -2535,12 +2544,30 @@ def status_cmd(scope_flag: TargetScope, all_projects: bool) -> None:
     if not rows and lockfile_error is None:
         if scope_flag == "project_local":
             click.echo("\nNo project_local draft assets in this project.")
+            # init rejects an explicit project_* scope outside a project
+            # root — don't hint a command that immediately fails there.
+            if (root / ".git").exists() or (root / "pyproject.toml").exists():
+                click.echo("Run 'mm context init --scope=project_local' to seed drafts.")
+            else:
+                click.echo(
+                    "Run 'mm context init --scope=project_local' from inside a "
+                    "project (with .git or pyproject.toml) to seed drafts."
+                )
         elif scope_flag == "user":
-            click.echo("\nNo user-scope assets found under ~/.memtomem/.")
+            click.echo("\nNo user-tier assets found under ~/.memtomem/.")
+            click.echo(
+                "Run 'mm context init --include=agents,commands,skills --scope=user' "
+                "to import from runtimes."
+            )
         else:
             click.echo(
                 f"\nNo wiki assets installed and no untracked canonicals "
-                f"in this project for scope {scope_flag}."
+                f"in this project for tier {scope_flag}."
+            )
+            click.echo(
+                "Run 'mm context detect' to see importable runtime files, "
+                "'mm context init' to seed canonicals, or "
+                "'mm context install <type> <name>' to install from the wiki."
             )
         return
 
