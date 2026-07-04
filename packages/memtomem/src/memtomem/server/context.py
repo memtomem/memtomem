@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,6 +126,12 @@ class AppContext:
     _scheduler: object | None = field(default=None, init=False, repr=False)
     _policy_scheduler: object | None = field(default=None, init=False, repr=False)
     _health_watchdog: object | None = field(default=None, init=False, repr=False)
+    # Lifespan-owned model-warmup task (#1621, ``config.warmup.enabled``).
+    # Held here rather than in ``app_lifespan`` so the task keeps a strong
+    # reference (fire-and-forget tasks are otherwise GC-collectable) and
+    # so ``close()`` can cancel an in-flight warmup *before* components
+    # shut down under it. ``from_components`` contexts leave it ``None``.
+    _warmup_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     # per-session, scoped to AppContext lifetime. Gate to emit a dim-mismatch
     # hint only once per MCP session so repeated mem_add / mem_search calls
     # do not spam the same notice. Writes go through ``_config_lock``.
@@ -443,6 +450,19 @@ class AppContext:
         calls are no-ops.
         """
         from memtomem.server.component_factory import close_components
+
+        # Cancel an in-flight warmup first so it can't race the component
+        # teardown below (loading a model into a closing embedder). The
+        # await also blocks until any in-flight loader *thread* settles —
+        # ``_warm_one`` waits for its executor future on cancellation,
+        # since a thread can't be interrupted. The task body swallows its
+        # own errors, so awaiting after cancel can only surface the
+        # CancelledError suppressed here.
+        if self._warmup_task is not None:
+            self._warmup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._warmup_task
+            self._warmup_task = None
 
         await _stop_quietly(self._health_watchdog, "health_watchdog")
         await _stop_quietly(self._policy_scheduler, "policy_scheduler")

@@ -97,6 +97,12 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
     and starts the file watcher + schedulers + health watchdog inside
     the context (which from then on owns their lifetime).
 
+    One opt-in exception (#1621): when ``config.warmup.enabled`` is set,
+    a background task runs the full init + local model preload right
+    away so the first query doesn't pay the cold-start cost. That flag
+    deliberately trades the handshake-only laziness for warm models —
+    the default-off path stays byte-for-byte lazy.
+
     Shutdown closes the webhook manager first — dropping outstanding
     network retries before the slower DB teardown, see PR #404 — then
     ``ctx.close()`` stops anything ``ensure_initialized`` started and
@@ -128,6 +134,10 @@ async def app_lifespan(_server: FastMCP) -> AsyncIterator[AppContext]:
         raise
 
     try:
+        if config.warmup.enabled:
+            from memtomem.server.warmup import spawn_warmup
+
+            ctx._warmup_task = spawn_warmup(ctx)
         yield ctx
     finally:
         await _stop_quietly(webhook_mgr, "webhook_manager")

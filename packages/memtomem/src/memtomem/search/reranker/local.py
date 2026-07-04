@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,13 +19,19 @@ class LocalReranker:
     def __init__(self, config: RerankConfig):
         self._config = config
         self._model = None
+        # Serializes the first load — same contract as ``OnnxEmbedder``:
+        # the search path and the opt-in warmup task (#1621) can race into
+        # ``_get_model`` from different threads.
+        self._load_lock = threading.Lock()
 
     def _get_model(self):
         if self._model is None:
-            from sentence_transformers import CrossEncoder
+            with self._load_lock:
+                if self._model is None:
+                    from sentence_transformers import CrossEncoder
 
-            self._model = CrossEncoder(self._config.model)
-            logger.info("Loaded local reranker: %s", self._config.model)
+                    self._model = CrossEncoder(self._config.model)
+                    logger.info("Loaded local reranker: %s", self._config.model)
         return self._model
 
     async def rerank(

@@ -614,6 +614,21 @@ class ConsolidationScheduleConfig(ConfigModel):
     max_groups: int = 10
 
 
+class WarmupConfig(ConfigModel):
+    """Opt-in eager model loading at MCP server start (#1621).
+
+    Default off: handshake-only sessions stay fully lazy (#399 — no
+    storage open, no model import). When enabled, ``app_lifespan``
+    spawns a background task that runs the full component init and
+    pre-loads the local embedder/reranker models, so the first query
+    after server start doesn't pay the model download/load cost.
+    Remote providers (ollama, openai, cohere) are skipped — they have
+    no local model to preload. Startup-only; not runtime-mutable.
+    """
+
+    enabled: bool = False
+
+
 class PolicyConfig(ConfigModel):
     """Memory lifecycle policies."""
 
@@ -891,6 +906,7 @@ class Mem2MemConfig(BaseSettings):
     consolidation_schedule: ConsolidationScheduleConfig = Field(
         default_factory=ConsolidationScheduleConfig
     )
+    warmup: WarmupConfig = Field(default_factory=WarmupConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
     health_watchdog: HealthWatchdogConfig = Field(default_factory=HealthWatchdogConfig)

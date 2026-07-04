@@ -16,6 +16,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Opt-in model warmup** (#1621) — `MEMTOMEM_WARMUP__ENABLED=true` makes the
+  MCP server pre-load the local embedder/reranker models in a background
+  task at startup, so the first query doesn't pay the model download/load
+  cost; `mm warmup` runs the same preload one-shot for CLI users. Default
+  off — the lazy handshake behaviour (#399) is unchanged unless explicitly
+  opted in. Remote providers (ollama, openai, cohere) are skipped.
 - **Schema-version downgrade fence** (#1614) — the database now records a
   monotonic `schema_version` in `_memtomem_meta`; opening a database written
   by a newer memtomem release fails fast with a typed `SchemaDowngradeError`

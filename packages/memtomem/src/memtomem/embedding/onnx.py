@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from typing import Sequence
 
@@ -59,43 +60,55 @@ class OnnxEmbedder:
         # observe transient states without taking a lock.
         self._loading: bool = False
         self._load_error: str | None = None
+        # Serializes the first load: the MCP request path and the opt-in
+        # warmup task (#1621) can race into ``_get_model`` from different
+        # threads — without the lock both would construct (and download)
+        # the model.
+        self._load_lock = threading.Lock()
 
     def _get_model(self) -> object:
-        """Lazily initialise the fastembed model (downloads on first use)."""
+        """Lazily initialise the fastembed model (downloads on first use).
+
+        Double-checked lock so concurrent first-callers (request path vs
+        warmup) share a single construction.
+        """
         if self._model is not None:
             return self._model
-        try:
-            from fastembed import TextEmbedding  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise EmbeddingError(
-                "fastembed is required for the ONNX embedding provider. "
-                "Install it with: pip install memtomem[onnx]"
-            ) from exc
+        with self._load_lock:
+            if self._model is not None:
+                return self._model
+            try:
+                from fastembed import TextEmbedding  # type: ignore[import-untyped]
+            except ImportError as exc:
+                raise EmbeddingError(
+                    "fastembed is required for the ONNX embedding provider. "
+                    "Install it with: pip install memtomem[onnx]"
+                ) from exc
 
-        _register_custom_models_if_needed()
-        model_id = resolve_embedder_id(self._config.model)
-        # threads=0 → leave ORT default (all physical cores); threads>0 caps
-        # the intra-op pool so seeding doesn't saturate the machine.
-        threads = self._config.threads or None
-        cache_dir = resolve_fastembed_cache_dir()
-        logger.info(
-            "Loading ONNX embedding model %s (threads=%s, cache_dir=%s) …",
-            model_id,
-            threads if threads is not None else "ORT default",
-            cache_dir,
-        )
-        self._loading = True
-        self._load_error = None
-        try:
-            self._model = TextEmbedding(
-                model_name=model_id, threads=threads, cache_dir=str(cache_dir)
+            _register_custom_models_if_needed()
+            model_id = resolve_embedder_id(self._config.model)
+            # threads=0 → leave ORT default (all physical cores); threads>0 caps
+            # the intra-op pool so seeding doesn't saturate the machine.
+            threads = self._config.threads or None
+            cache_dir = resolve_fastembed_cache_dir()
+            logger.info(
+                "Loading ONNX embedding model %s (threads=%s, cache_dir=%s) …",
+                model_id,
+                threads if threads is not None else "ORT default",
+                cache_dir,
             )
-        except Exception as exc:
-            self._load_error = str(exc)
-            raise
-        finally:
-            self._loading = False
-        return self._model
+            self._loading = True
+            self._load_error = None
+            try:
+                self._model = TextEmbedding(
+                    model_name=model_id, threads=threads, cache_dir=str(cache_dir)
+                )
+            except Exception as exc:
+                self._load_error = str(exc)
+                raise
+            finally:
+                self._loading = False
+            return self._model
 
     @property
     def dimension(self) -> int:

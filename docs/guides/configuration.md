@@ -787,6 +787,21 @@ assert request.headers["X-Webhook-Signature"] == f"sha256={expected}"
 | `MEMTOMEM_CONSOLIDATION_SCHEDULE__MIN_GROUP_SIZE` | `3` | Minimum chunks per source to trigger consolidation |
 | `MEMTOMEM_CONSOLIDATION_SCHEDULE__MAX_GROUPS` | `10` | Maximum source groups to process per run |
 
+## Warmup
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMTOMEM_WARMUP__ENABLED` | `false` | Pre-load local embedder/reranker models at MCP server start |
+
+By default the embedding and reranker models load lazily on first use, so
+the first query after server start pays the model download/load cost. With
+warmup enabled the server front-loads that in a background task right after
+startup. Note this is the one opt-in exception to the lazy-handshake
+behaviour: an enabled warmup opens storage and loads models even for
+sessions that never issue a tool call. Remote providers (ollama, openai,
+cohere) are skipped — they have no local model to preload. CLI users can
+run the same preload once with `mm warmup` (no flag needed).
+
 ## Health Watchdog
 
 | Variable | Default | Description |

@@ -54,6 +54,7 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     monkeypatch.setenv("MEMTOMEM_POLICY__ENABLED", "false")
     monkeypatch.setenv("MEMTOMEM_HEALTH_WATCHDOG__ENABLED", "false")
     monkeypatch.setenv("MEMTOMEM_WEBHOOK__ENABLED", "false")
+    monkeypatch.setenv("MEMTOMEM_WARMUP__ENABLED", "false")
     return {"home": home, "db_path": db_path}
 
 

@@ -63,6 +63,7 @@ def _register() -> None:
     from memtomem.cli.tags_cmd import tags
     from memtomem.cli.uninstall_cmd import uninstall
     from memtomem.cli.upgrade_cmd import upgrade
+    from memtomem.cli.warmup_cmd import warmup
     from memtomem.cli.watchdog_cmd import watchdog
     from memtomem.cli.web import web
     from memtomem.cli.wiki_cmd import wiki
@@ -93,6 +94,7 @@ def _register() -> None:
     cli.add_command(agent)
     cli.add_command(uninstall)
     cli.add_command(upgrade)
+    cli.add_command(warmup)
     cli.add_command(wiki)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
@@ -33,49 +34,62 @@ class FastEmbedReranker:
         # single contract without each provider having a bespoke surface.
         self._loading: bool = False
         self._load_error: str | None = None
+        # Serializes the first load — same contract as ``OnnxEmbedder``:
+        # the search path and the opt-in warmup task (#1621) can race into
+        # ``_get_model`` from different threads.
+        self._load_lock = threading.Lock()
 
     def _get_model(self) -> object:
-        """Lazily construct the ``TextCrossEncoder`` — downloads on first use."""
+        """Lazily construct the ``TextCrossEncoder`` — downloads on first use.
+
+        Double-checked lock so concurrent first-callers (search path vs
+        warmup) share a single construction.
+        """
         if self._model is not None:
             return self._model
-        try:
-            from fastembed.rerank.cross_encoder import (  # type: ignore[import-untyped]
-                TextCrossEncoder,
-            )
-        except ImportError as exc:
-            raise ImportError(
-                "fastembed is required for the fastembed reranker. "
-                "Install it with: pip install memtomem[onnx]"
-            ) from exc
+        with self._load_lock:
+            if self._model is not None:
+                return self._model
+            try:
+                from fastembed.rerank.cross_encoder import (  # type: ignore[import-untyped]
+                    TextCrossEncoder,
+                )
+            except ImportError as exc:
+                raise ImportError(
+                    "fastembed is required for the fastembed reranker. "
+                    "Install it with: pip install memtomem[onnx]"
+                ) from exc
 
-        cache_dir = resolve_fastembed_cache_dir()
-        logger.info(
-            "Loading fastembed reranker %s (cache_dir=%s) …",
-            self._config.model,
-            cache_dir,
-        )
-        self._loading = True
-        self._load_error = None
-        try:
-            self._model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
-        except ValueError as exc:
-            supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
-            self._load_error = str(exc)
-            raise ValueError(
-                f"fastembed reranker model {self._config.model!r} is not supported. "
-                f"Built-in options: {', '.join(sorted(s for s in supported if s))}. "
-                "For Korean/Chinese/Japanese try "
-                "'jinaai/jina-reranker-v2-base-multilingual' (1.1 GB); for lightweight "
-                "English 'Xenova/ms-marco-MiniLM-L-6-v2' (80 MB). Custom ONNX exports "
-                "must be registered via TextCrossEncoder.add_custom_model() before the "
-                "reranker is invoked."
-            ) from exc
-        except Exception as exc:
-            self._load_error = str(exc)
-            raise
-        finally:
-            self._loading = False
-        return self._model
+            cache_dir = resolve_fastembed_cache_dir()
+            logger.info(
+                "Loading fastembed reranker %s (cache_dir=%s) …",
+                self._config.model,
+                cache_dir,
+            )
+            self._loading = True
+            self._load_error = None
+            try:
+                self._model = TextCrossEncoder(
+                    model_name=self._config.model, cache_dir=str(cache_dir)
+                )
+            except ValueError as exc:
+                supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
+                self._load_error = str(exc)
+                raise ValueError(
+                    f"fastembed reranker model {self._config.model!r} is not supported. "
+                    f"Built-in options: {', '.join(sorted(s for s in supported if s))}. "
+                    "For Korean/Chinese/Japanese try "
+                    "'jinaai/jina-reranker-v2-base-multilingual' (1.1 GB); for lightweight "
+                    "English 'Xenova/ms-marco-MiniLM-L-6-v2' (80 MB). Custom ONNX exports "
+                    "must be registered via TextCrossEncoder.add_custom_model() before the "
+                    "reranker is invoked."
+                ) from exc
+            except Exception as exc:
+                self._load_error = str(exc)
+                raise
+            finally:
+                self._loading = False
+            return self._model
 
     def _rerank_sync(self, query: str, documents: list[str]) -> list[float]:
         """Run inference synchronously — called inside ``asyncio.to_thread``."""
