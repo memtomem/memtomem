@@ -49,6 +49,13 @@ from memtomem.server.tools.search import (
     "fmt",
     type=click.Choice(["table", "json", "plain", "context", "smart"]),
     default="table",
+    show_default=True,
+    help=(
+        "Output format: table (aligned columns), json (machine-readable), "
+        "plain (bare source+content lines), context (markdown 'Relevant "
+        "Memories' block ready to paste into a prompt), smart "
+        "(namespace-grouped, relevance-tiered truncation)."
+    ),
 )
 def search(
     query: str,
