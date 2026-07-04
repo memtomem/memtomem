@@ -102,6 +102,34 @@ def test_add_is_idempotent_with_distinct_copy(cli_env: dict[str, Path]) -> None:
     assert len(KnownProjectsStore(cli_env["kp"]).load()) == 1
 
 
+def test_add_relative_path_registers_per_project(
+    cli_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1644 repro: ``projects add .`` from two different projects registers
+    both (no silent cross-project dedup) and echoes the resolved root."""
+    alpha = cli_env["cwd"] / "alpha"
+    beta = cli_env["cwd"] / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    runner = CliRunner()
+
+    monkeypatch.chdir(alpha)
+    first = runner.invoke(context, ["projects", "add", "."])
+    assert first.exit_code == 0, first.output
+    assert "Registered:" in first.output
+    assert str(alpha.resolve()) in first.output
+
+    monkeypatch.chdir(beta)
+    second = runner.invoke(context, ["projects", "add", "."])
+    assert second.exit_code == 0, second.output
+    assert "Registered:" in second.output
+    assert "Already registered:" not in second.output
+    assert str(beta.resolve()) in second.output
+
+    entries = KnownProjectsStore(cli_env["kp"]).load()
+    assert {e.root for e in entries} == {alpha.resolve(), beta.resolve()}
+
+
 def test_pause_resume_round_trip(cli_env: dict[str, Path]) -> None:
     KnownProjectsStore(cli_env["kp"]).add(cli_env["other"])
     scope_id = compute_scope_id(cli_env["other"])

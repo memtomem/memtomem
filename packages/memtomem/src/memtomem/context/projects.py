@@ -258,7 +258,11 @@ class KnownProjectsStore:
                 continue
             entries.append(
                 _KnownProjectEntry(
-                    root=Path(root),
+                    # Canonicalize on load so legacy relative rows (pre-#1644) stop
+                    # floating with the reader's cwd. In-memory only — the load path
+                    # must not write (#1567); mutators persist the healed roots on
+                    # their next locked load-then-write.
+                    root=Path(root).expanduser().resolve(),
                     added_at=str(item.get("added_at") or ""),
                     label=item.get("label") if isinstance(item.get("label"), str) else None,
                     # Legacy rows (pre-``enabled`` schema) and any non-bool value
@@ -296,8 +300,12 @@ class KnownProjectsStore:
 
         Raises :class:`KnownProjectsCorruptError` instead of re-baselining
         the list to ``[new_entry]`` when the file exists but is corrupt.
+
+        *root* is canonicalized (``expanduser().resolve()``) before dedup and
+        persist — a relative root would otherwise be stored verbatim and mean
+        a different directory per reader cwd (#1644).
         """
-        normalized = Path(root).expanduser()
+        normalized = Path(root).expanduser().resolve()
         with _file_lock(_lock_path_for(self._path)):
             entries = self.load(strict=True)
             for existing in entries:
@@ -352,7 +360,8 @@ class KnownProjectsStore:
         Updates *every* entry whose scope_id matches — mirroring
         ``remove_by_scope_id``'s all-matching semantics — so a manually corrupted
         file with duplicate rows can't leave a stale row behind a "success".
-        ``add`` dedups by resolved path, so duplicates never arise via the API.
+        ``add`` canonicalizes roots before persisting and dedups on the same
+        resolved form, so duplicates never arise via the API.
         """
         with _file_lock(_lock_path_for(self._path)):
             entries = self.load(strict=True)

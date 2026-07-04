@@ -692,6 +692,23 @@ async def test_post_idempotent(client, tmp_path: Path) -> None:
     assert len(listing.json()["scopes"]) == 2
 
 
+@pytest.mark.asyncio
+async def test_post_echoes_canonical_root(client, tmp_path: Path) -> None:
+    """The response ``root`` is the canonicalized path that was persisted
+    (#1644): an absolute-but-non-canonical input (``..`` component) must not
+    round-trip verbatim into the registry."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".claude").mkdir()
+    detour = tmp_path / "detour"
+    detour.mkdir()
+    non_canonical = detour / ".." / "proj"
+
+    resp = await client.post("/api/context/known-projects", json={"root": str(non_canonical)})
+    assert resp.status_code == 200
+    assert resp.json()["root"] == str(proj.resolve())
+
+
 # ── DELETE /context/known-projects/{scope_id} ───────────────────────────
 
 

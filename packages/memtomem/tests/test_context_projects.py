@@ -117,6 +117,85 @@ def test_store_add_with_status_reports_created(tmp_path: Path) -> None:
     assert len(store.load()) == 1
 
 
+def test_store_add_relative_root_persists_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative root is canonicalized before persist (#1644) — the on-disk
+    row must not depend on which process later reads the registry."""
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    kp = tmp_path / "kp.json"
+    store = KnownProjectsStore(kp)
+    monkeypatch.chdir(alpha)
+
+    entry = store.add(Path("."))
+
+    assert entry.root.is_absolute()
+    assert entry.root == alpha.resolve()
+    (row,) = json.loads(kp.read_text(encoding="utf-8"))["projects"]
+    assert Path(row["root"]).is_absolute()
+    assert compute_scope_id(entry.root) == compute_scope_id(alpha)
+
+
+def test_store_add_relative_root_from_two_cwds_registers_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1644 repro: ``add .`` from a second project must register it, not
+    silently dedup against the first project's floating relative entry."""
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+
+    monkeypatch.chdir(alpha)
+    _, created_alpha = store.add_with_status(Path("."))
+    monkeypatch.chdir(beta)
+    _, created_beta = store.add_with_status(Path("."))
+
+    assert created_alpha is True
+    assert created_beta is True
+    entries = store.load()
+    assert {e.root for e in entries} == {alpha.resolve(), beta.resolve()}
+    assert len({compute_scope_id(e.root) for e in entries}) == 2
+
+
+def test_store_load_heals_legacy_relative_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-#1644 relative row reads back absolute (resolved against the
+    reader's cwd — the interpretation every read surface already applied).
+    ``load`` itself must not rewrite the file (#1567: no writes on the load
+    path); the first mutation persists the healed root."""
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    kp = tmp_path / "kp.json"
+    kp.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [{"root": ".", "added_at": "2026-01-01T00:00:00Z", "label": None}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = KnownProjectsStore(kp)
+    monkeypatch.chdir(alpha)
+
+    (entry,) = store.load()
+    assert entry.root == alpha.resolve()
+    # Heal is in-memory only — the load path must not write.
+    assert json.loads(kp.read_text(encoding="utf-8"))["projects"][0]["root"] == "."
+
+    # First mutation rewrites the registry with the canonical root.
+    store.add(beta)
+    roots = [row["root"] for row in json.loads(kp.read_text(encoding="utf-8"))["projects"]]
+    assert all(Path(r).is_absolute() for r in roots)
+    assert Path(roots[0]) == alpha.resolve()
+
+
 def test_store_remove_by_scope_id(tmp_path: Path) -> None:
     project = tmp_path / "alpha"
     project.mkdir()
