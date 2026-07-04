@@ -27,6 +27,8 @@ from typing import get_args
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
+
 from memtomem import privacy
 from memtomem.cli.context_cmd import _find_project_root
 from memtomem.config import TargetScope
@@ -149,7 +151,7 @@ def rescan_cmd(
     except click.ClickException:
         raise
     except Exception as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise_cli_error(exc)
 
     scanned, violations = result
     if as_json:

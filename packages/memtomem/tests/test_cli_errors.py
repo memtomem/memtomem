@@ -8,8 +8,10 @@ catch-all sites used to emit.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,6 +19,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
+import memtomem.cli
 from memtomem.cli import cli
 from memtomem.cli._errors import raise_cli_error
 from memtomem.errors import (
@@ -79,6 +82,33 @@ class TestHintMapping:
         with pytest.raises(click.ClickException) as info:
             raise_cli_error(exc)
         assert info.value.__cause__ is exc
+
+
+class TestNoBareCatchAllRegression:
+    """#1617 sweep pin: no ``except Exception`` in ``cli/`` may re-wrap
+    as a bare ``ClickException(str(e))`` — that's ``raise_cli_error``'s
+    job now. Typed conversions (``except WikiNotFoundError`` etc.) stay
+    allowed: their messages are already the actionable text."""
+
+    _PATTERN = re.compile(
+        r"except Exception as (\w+):\n"  # catch-all only
+        r"(?:[^\n]*\n){0,2}?"  # tolerate up to 2 bookkeeping lines (trace_ctx etc.)
+        r"\s*raise click\.ClickException\(str\(\1\)\)",
+    )
+
+    def test_no_catch_all_rewrap_in_cli(self) -> None:
+        cli_dir = Path(memtomem.cli.__file__).parent
+        offenders = []
+        for path in sorted(cli_dir.glob("*.py")):
+            if path.name == "_errors.py":  # docstring shows the old shape
+                continue
+            for match in self._PATTERN.finditer(path.read_text(encoding="utf-8")):
+                # Windows-safe: report by file name only.
+                offenders.append(f"{path.name}: {match.group(0).splitlines()[0]}")
+        assert not offenders, (
+            "bare `except Exception -> ClickException(str(e))` re-wraps found; "
+            f"route them through cli._errors.raise_cli_error instead: {offenders}"
+        )
 
 
 class TestWrappedCommandIntegration:

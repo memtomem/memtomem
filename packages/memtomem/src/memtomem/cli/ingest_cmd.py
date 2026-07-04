@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Protocol
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
+
 from memtomem.config import index_excluded_filenames
 from memtomem.storage.sqlite_namespace import sanitize_namespace_segment
 
@@ -123,7 +125,7 @@ def claude_memory(source_path: Path, dry_run: bool) -> None:
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _run_claude_ingest(source_path: Path, dry_run: bool) -> None:
@@ -408,7 +410,7 @@ def gemini_memory(source_path: Path, dry_run: bool) -> None:
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _run_gemini_ingest(source_path: Path, dry_run: bool) -> None:
@@ -516,7 +518,7 @@ def codex_memory(source_path: Path, dry_run: bool) -> None:
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _run_codex_ingest(source_path: Path, dry_run: bool) -> None:

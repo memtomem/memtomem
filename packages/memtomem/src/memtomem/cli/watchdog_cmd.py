@@ -8,6 +8,8 @@ from pathlib import Path
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
+
 
 @click.group()
 def watchdog() -> None:
@@ -23,7 +25,7 @@ def watchdog_status(as_json: bool) -> None:
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 @watchdog.command("run")
@@ -35,7 +37,7 @@ def watchdog_run(as_json: bool) -> None:
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 @watchdog.command("history")
@@ -48,7 +50,7 @@ def watchdog_history(check_name: str, hours: float) -> None:
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 # ── Async implementations ──────────────────────────────────────────
