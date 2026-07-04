@@ -286,7 +286,7 @@ mm wiki list                           # list canonical assets (--type skills|ag
 mm wiki skill lint <name>              # CI gate — exits non-zero on errors
 mm wiki skill commit <name> --canonical   # ONE isolated commit of just the canonical path
 cd <your project>                      # wiki is global; install/status are project-scoped
-mm context install skill <name>        # snapshot the wiki asset into <project>/.memtomem/
+mm context install skill <name>        # snapshot the wiki asset (at HEAD; commit-true — refuses if the asset has uncommitted wiki changes)
 mm context update skill <name>         # re-snapshot an installed asset after the wiki changed (--all, --force, --yes)
 mm context status                      # installed wiki assets + drift (reads the CURRENT project)
 

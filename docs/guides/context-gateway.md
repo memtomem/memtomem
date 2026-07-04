@@ -109,6 +109,9 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
 - **Install** — `mm context install <type> <name>` (or the **Install** button in
   the Web UI's Wiki section) snapshots one canonical asset from the wiki into the
   **current project's** `.memtomem/` Store, pinned to the wiki's HEAD commit.
+  Install is commit-true: it extracts the committed bytes at HEAD, and refuses
+  (with a `mm wiki <type> commit` hint) if the asset has uncommitted changes in
+  the wiki working tree — commit first, then install.
 - **Update** — `mm context update <type> <name>` refreshes an installed snapshot
   to the wiki's latest HEAD. Add `--dry-run` to print the would-update /
   unchanged / refuse preview without writing anything (also works with

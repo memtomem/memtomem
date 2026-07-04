@@ -21,6 +21,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   skip). Scripts should use `--non-interactive`, ideally with an explicit
   `--preset`.
 
+### Changed
+
+- **`mm context install` (single asset) is commit-true** (#1643) — install now
+  extracts the asset's bytes from the wiki's git objects at HEAD (the same
+  mechanism as `install --all`'s pinned restore), so the recorded lockfile pin
+  always reproduces the installed bytes. If the asset's wiki working tree
+  differs from HEAD (modified/deleted tracked files, untracked files, or a
+  never-committed asset), install refuses with `UncommittedAssetError` (CLI)
+  / HTTP 409 `wiki_uncommitted` (web) and a runnable `mm wiki <type> commit`
+  hint; dirt elsewhere in the wiki does not block. Previously install copied
+  the dirty worktree bytes while pinning HEAD — silently recording a pin that
+  never contained them. As part of the same fix, committed symlinks are now
+  skipped (with a warning) during commit extraction — previously the pinned
+  `install --all` restore path materialized the symlink's *target path* as
+  file content. `mm context update` still copies the working tree; tracked
+  as a follow-up.
+
 ### Added
 
 - **Opt-in model warmup** (#1621) — `MEMTOMEM_WARMUP__ENABLED=true` makes the

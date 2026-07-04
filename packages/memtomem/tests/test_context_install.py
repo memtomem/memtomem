@@ -25,6 +25,7 @@ from memtomem.context._names import InvalidNameError
 from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
+    UncommittedAssetError,
     install_agent,
     install_command,
     install_skill,
@@ -37,20 +38,29 @@ from memtomem.wiki.store import WikiNotFoundError, WikiStore
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def _seed_skill(wiki_root_path: Path, name: str, files: dict[str, bytes]) -> None:
-    """Drop a skill into an initialized wiki and commit."""
+def _write_skill_files(wiki_root_path: Path, name: str, files: dict[str, bytes]) -> None:
+    """Drop skill files into the wiki working tree WITHOUT committing."""
     skill_dir = wiki_root_path / "skills" / name
-    skill_dir.mkdir(parents=True)
+    skill_dir.mkdir(parents=True, exist_ok=True)
     for relpath, data in files.items():
         target = skill_dir / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+
+
+def _git_commit_all(wiki_root_path: Path, message: str) -> None:
     subprocess.run(["git", "-C", str(wiki_root_path), "add", "."], check=True, capture_output=True)
     subprocess.run(
-        ["git", "-C", str(wiki_root_path), "commit", "-m", f"add {name}"],
+        ["git", "-C", str(wiki_root_path), "commit", "-m", message],
         check=True,
         capture_output=True,
     )
+
+
+def _seed_skill(wiki_root_path: Path, name: str, files: dict[str, bytes]) -> None:
+    """Drop a skill into an initialized wiki and commit."""
+    _write_skill_files(wiki_root_path, name, files)
+    _git_commit_all(wiki_root_path, f"add {name}")
 
 
 def _initialized_wiki(wiki_root_path: Path) -> WikiStore:
@@ -194,13 +204,15 @@ def test_install_skips_dsstore_and_pycache(wiki_root: Path, tmp_path: Path) -> N
 def test_install_skips_symlinks_in_source(
     wiki_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """copy_tree_atomic refuses to dereference symlinks — would silently
-    leak out-of-tree bytes (e.g., /etc/passwd) into the project otherwise."""
+    """A committed symlink is never dereferenced OR materialized: pre-#1643
+    the worktree copier skipped it (dereferencing would leak out-of-tree
+    bytes, e.g. /etc/passwd); the commit-true extractor must not regress
+    into writing the link's *target path* as file content either."""
     _initialized_wiki(wiki_root)
     skill_dir = wiki_root / "skills" / "foo"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("real", encoding="utf-8")
-    # Dangling symlink — entry.is_symlink() fires regardless of target validity.
+    # Dangling symlink — mode 120000 in the commit regardless of target validity.
     (skill_dir / "danger.md").symlink_to("/nonexistent/target")
     subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
     subprocess.run(
@@ -210,7 +222,7 @@ def test_install_skips_symlinks_in_source(
     )
     project = tmp_path
 
-    with caplog.at_level("WARNING", logger="memtomem.context._atomic"):
+    with caplog.at_level("WARNING", logger="memtomem.wiki.store"):
         install_skill(project, "foo")
 
     dest = project / ".memtomem" / "skills" / "foo"
@@ -661,3 +673,202 @@ def test_install_interrupted_before_lockfile_hint_breaks_circle(
     # hint pair really was a closed loop.
     with pytest.raises(NotInstalledError):
         update_skill(project, "foo")
+
+
+# ── commit-true install (#1643) ──────────────────────────────────────────
+#
+# Single-asset install extracts bytes from git objects at HEAD and refuses
+# when the asset's OWN worktree state differs from HEAD — the pin must
+# always reproduce the installed bytes. Dirt outside the asset never blocks.
+
+
+def _assert_zero_residue(project: Path, name: str) -> None:
+    """A refusal must leave no dest bytes, no type dir, and no lock entry."""
+    assert not (project / ".memtomem" / "skills" / name).exists()
+    lock_json = project / ".memtomem" / "lock.json"
+    if lock_json.exists():
+        assert Lockfile.at(project).read_entry("skills", name) is None
+
+
+def test_install_refuses_modified_tracked_file(wiki_root: Path, tmp_path: Path) -> None:
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2 uncommitted\n")
+
+    with pytest.raises(UncommittedAssetError) as excinfo:
+        install_skill(tmp_path, "foo")
+
+    msg = str(excinfo.value)
+    assert "differs from HEAD" in msg
+    assert "SKILL.md" in msg
+    # Runnable commit hint + the raw-git fallback (the hinted command can
+    # only commit canonical/vendor paths — R3).
+    assert "`mm wiki skill commit foo --canonical`" in msg
+    assert "git directly" in msg
+    _assert_zero_residue(tmp_path, "foo")
+
+
+def test_install_refuses_untracked_file_inside_asset(wiki_root: Path, tmp_path: Path) -> None:
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    (wiki_root / "skills" / "foo" / "notes.md").write_bytes(b"scratch\n")
+
+    with pytest.raises(UncommittedAssetError, match="notes.md"):
+        install_skill(tmp_path, "foo")
+    _assert_zero_residue(tmp_path, "foo")
+
+
+def test_install_refuses_worktree_deletion(wiki_root: Path, tmp_path: Path) -> None:
+    """Deleted-in-worktree files are dirt too: installing would resurrect
+    content the user just removed from the wiki they're looking at."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"v1\n", "scripts/run.sh": b"#!/bin/sh\n"})
+    (wiki_root / "skills" / "foo" / "scripts" / "run.sh").unlink()
+
+    with pytest.raises(UncommittedAssetError, match="run.sh"):
+        install_skill(tmp_path, "foo")
+    _assert_zero_residue(tmp_path, "foo")
+
+
+def test_install_refuses_entirely_untracked_asset(wiki_root: Path, tmp_path: Path) -> None:
+    """The #1643 repro: a never-committed asset must classify as
+    UNCOMMITTED (with the commit hint), not as absent — pre-fix this
+    installed the worktree bytes while pinning a HEAD that lacked them."""
+    _initialized_wiki(wiki_root)  # scaffold commit exists; asset is not in it
+    _write_skill_files(wiki_root, "foo", {"SKILL.md": b"never committed\n"})
+
+    with pytest.raises(UncommittedAssetError) as excinfo:
+        install_skill(tmp_path, "foo")
+
+    msg = str(excinfo.value)
+    assert "never been committed" in msg
+    assert "`mm wiki skill commit foo --canonical`" in msg
+    _assert_zero_residue(tmp_path, "foo")
+
+
+def test_install_dirt_in_other_asset_does_not_block(wiki_root: Path, tmp_path: Path) -> None:
+    """The gate is asset-scoped: a dirty sibling asset (or any other wiki
+    dirt) must not stop a clean asset from installing."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"clean\n"})
+    _seed_skill(wiki_root, "bar", {"SKILL.md": b"v1\n"})
+    (wiki_root / "skills" / "bar" / "SKILL.md").write_bytes(b"bar dirty\n")
+    _write_skill_files(wiki_root, "baz", {"SKILL.md": b"untracked sibling\n"})
+
+    result = install_skill(tmp_path, "foo")
+
+    assert result.files_written == 1
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").read_bytes() == b"clean\n"
+
+
+def test_install_ignores_skip_filtered_dirt(wiki_root: Path, tmp_path: Path) -> None:
+    """Untracked files the extractor would never copy (.DS_Store, *.bak)
+    are not dirt. The wiki scaffold .gitignore is stripped so the rows
+    actually reach the is_copy_skipped_rel filter (legacy-clone shape)
+    instead of being hidden by git ignore rules."""
+    store = _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "foo", {"SKILL.md": b"clean\n"})
+    gitignore = store.root / ".gitignore"
+    if gitignore.exists():
+        gitignore.write_text("", encoding="utf-8")
+        _git_commit_all(wiki_root, "strip scaffold ignores")
+    exclude = store.root / ".git" / "info" / "exclude"
+    if exclude.exists():
+        exclude.write_text("", encoding="utf-8")
+    (wiki_root / "skills" / "foo" / ".DS_Store").write_bytes(b"\x00\x00")
+    (wiki_root / "skills" / "foo" / "SKILL.md.bak").write_bytes(b"old\n")
+    # Sanity: the rows are really visible to git status now.
+    assert store.asset_uncommitted_paths("skills", "foo")
+
+    result = install_skill(tmp_path, "foo")
+
+    assert result.files_written == 1
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+    assert not (dest / ".DS_Store").exists()
+    assert not (dest / "SKILL.md.bak").exists()
+
+
+def test_install_commit_true_digest_parity(wiki_root: Path, tmp_path: Path) -> None:
+    """The lockfile digests describe exactly the bytes at the pinned commit
+    — the literal #1643 contract (pin reproduces the installed bytes)."""
+    store = _initialized_wiki(wiki_root)
+    _seed_skill(
+        wiki_root,
+        "foo",
+        {"SKILL.md": b"# foo\n", "scripts/run.sh": b"#!/bin/sh\necho hi\n"},
+    )
+
+    result = install_skill(tmp_path, "foo")
+
+    entry = Lockfile.at(tmp_path).read_entry("skills", "foo")
+    assert entry is not None
+    pin = entry["wiki_commit"]
+    assert pin == result.wiki_commit
+    expected = {
+        rel: hashlib.sha256(store.read_asset_file_at_commit(pin, "skills", "foo", rel)).hexdigest()
+        for rel in store.asset_files_at_commit(pin, "skills", "foo")
+    }
+    assert entry["digests"] == expected
+    assert entry["files_commit"] == pin
+
+
+def test_install_gate_a_hint_is_install_flavored(wiki_root: Path, tmp_path: Path) -> None:
+    """The pinned Gate A scan runs before a FIRST extraction here — its
+    default restore-flavored hint ("re-pin … before restoring") would
+    misdirect; install passes its own remediation wording."""
+    _initialized_wiki(wiki_root)
+    _seed_skill(wiki_root, "leak", {"SKILL.md": b"# leak\n" + SECRET.encode() + b"\n"})
+
+    with pytest.raises(PrivacyBlockedError) as excinfo:
+        install_skill(tmp_path, "leak")
+
+    msg = excinfo.value.message
+    assert "re-run install" in msg
+    assert "restoring" not in msg
+    _assert_zero_residue(tmp_path, "leak")
+
+
+@pytest.mark.requires_symlinks
+def test_install_symlink_only_asset_is_empty_not_absent(wiki_root: Path, tmp_path: Path) -> None:
+    """A committed asset whose entries are ALL skipped (symlink-only) is an
+    empty extraction, not AssetNotFoundError — the empty-before-mode-filter
+    distinction (Codex gate Major-1)."""
+    _initialized_wiki(wiki_root)
+    skill_dir = wiki_root / "skills" / "linky"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "only.md").symlink_to("/nonexistent/target")
+    subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "add symlink-only asset"],
+        check=True,
+        capture_output=True,
+    )
+
+    result = install_skill(tmp_path, "linky")
+
+    assert result.files_written == 0
+    dest = tmp_path / ".memtomem" / "skills" / "linky"
+    assert dest.is_dir()
+    assert not (dest / "only.md").exists()
+    entry = Lockfile.at(tmp_path).read_entry("skills", "linky")
+    assert entry is not None
+    assert entry["digests"] == {}
+
+
+def test_cli_install_uncommitted_message(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """CLI boundary: UncommittedAssetError maps to exit 1 with the runnable
+    commit hint — never a traceback."""
+    _initialized_wiki(wiki_root)
+    _write_skill_files(wiki_root, "draft", {"SKILL.md": b"wip\n"})
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "skill", "draft"])
+
+    assert result.exit_code == 1, result.output
+    assert "never been committed" in result.output
+    assert "mm wiki skill commit draft --canonical" in result.output
+    assert "Traceback" not in result.output

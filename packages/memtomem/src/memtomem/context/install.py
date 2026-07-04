@@ -1,9 +1,15 @@
 """Install a single wiki asset into ``<project>/.memtomem/<type>/<name>/``.
 
 Implements ADR-0008 PR-B (skills) and PR-C (agents, commands). The wiki at
-``~/.memtomem-wiki/`` is the source of truth; an "install" is a copytree
-snapshot pinned to the wiki's HEAD commit, recorded in
-:class:`memtomem.context.lockfile.Lockfile`.
+``~/.memtomem-wiki/`` is the source of truth; an "install" extracts the
+asset's bytes **from git objects at the wiki's HEAD commit** (#1643) and
+records that commit in :class:`memtomem.context.lockfile.Lockfile` — the pin
+therefore always reproduces the installed bytes. A wiki working tree that
+differs from HEAD for the asset (modified/deleted tracked files, untracked
+files, or a never-committed asset) refuses with
+:class:`UncommittedAssetError`; dirt elsewhere in the wiki does not block.
+(``mm context update`` still copies the working tree — follow-up tracked
+separately.)
 
 Public wrappers — :func:`install_skill`, :func:`install_agent`,
 :func:`install_command` — all delegate to :func:`_install_asset`. The wiki
@@ -65,6 +71,7 @@ __all__ = [
     "NotInstalledError",
     "ProjectInstallClassification",
     "StaleInstallError",
+    "UncommittedAssetError",
     "UpdateResult",
     "install_agent",
     "install_command",
@@ -91,6 +98,22 @@ class ProjectRootMissingError(FileNotFoundError):
 
 class AssetNotFoundError(RuntimeError):
     """Raised when the requested asset directory does not exist in the wiki."""
+
+
+class UncommittedAssetError(RuntimeError):
+    """Raised when install would snapshot wiki state the HEAD pin can't reproduce.
+
+    Single-asset install is commit-true (#1643): bytes are extracted from git
+    objects at HEAD and the lockfile pins that commit. When the asset's OWN
+    worktree state differs from HEAD — modified/deleted tracked files,
+    untracked files under the asset dir, or an asset that was never committed
+    at all — proceeding would either install bytes the user doesn't see in
+    the wiki (HEAD ≠ worktree) or record a pin that doesn't contain the asset.
+    The message carries a runnable ``mm wiki <type> commit`` hint plus a
+    raw-git fallback (the hinted command commits only the canonical file and
+    vendor overrides — it cannot commit e.g. a skill's ``scripts/`` or
+    deletions). Dirt outside the asset never raises this.
+    """
 
 
 class AlreadyInstalledError(RuntimeError):
@@ -125,8 +148,9 @@ class InstallResult:
 
     ``was_no_op=True`` is set only by ``install --all``'s
     :func:`_apply_pinned_install` when a ``--force`` row re-classifies CLEAN
-    AND its recorded digests differ from the pin's bytes (a clean install
-    taken off a dirty wiki working tree): the row is left untouched rather
+    AND its recorded digests differ from the pin's bytes (an entry written
+    by the pre-#1643 worktree-copying install, or by ``mm context update``,
+    off a dirty wiki working tree): the row is left untouched rather
     than silently re-extracted, so nothing is written or removed
     (``files_written=0``). It is reachable only under ``--force`` — without
     it the caller skips clean rows before calling this helper.
@@ -216,12 +240,16 @@ def install_skill(
     lock_timeout: float | None = None,
     surface: str = "cli_context_install",
 ) -> InstallResult:
-    """Snapshot ``<wiki>/skills/<name>/`` into ``<project>/.memtomem/skills/<name>/``.
+    """Snapshot ``skills/<name>/`` **at wiki HEAD** into ``<project>/.memtomem/skills/<name>/``.
 
-    Pins the wiki HEAD commit at the start of the operation so a concurrent
-    ``git pull`` in the wiki cannot make the recorded ``wiki_commit`` drift
-    from the bytes that were copied. Refuses if either the lockfile entry
-    or the destination directory already exists — see module docstring.
+    Commit-true (#1643): bytes are extracted from git objects at the HEAD
+    commit read at the start of the operation, so neither a concurrent
+    ``git pull`` nor a worktree edit in the wiki can make the recorded
+    ``wiki_commit`` drift from the bytes that were copied; an asset whose
+    worktree state differs from HEAD refuses with
+    :class:`UncommittedAssetError`. Also refuses if either the lockfile
+    entry or the destination directory already exists — see module
+    docstring.
 
     ``surface`` names the ingress in the Gate-A privacy audit log
     (#1246/#1248 real-ingress rule): the CLI keeps the default, the web
@@ -241,7 +269,7 @@ def install_agent(
     lock_timeout: float | None = None,
     surface: str = "cli_context_install",
 ) -> InstallResult:
-    """Snapshot ``<wiki>/agents/<name>/`` into ``<project>/.memtomem/agents/<name>/``."""
+    """Snapshot ``agents/<name>/`` at wiki HEAD into ``<project>/.memtomem/agents/<name>/``."""
     return _install_asset(
         project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
     )
@@ -255,7 +283,7 @@ def install_command(
     lock_timeout: float | None = None,
     surface: str = "cli_context_install",
 ) -> InstallResult:
-    """Snapshot ``<wiki>/commands/<name>/`` into ``<project>/.memtomem/commands/<name>/``."""
+    """Snapshot ``commands/<name>/`` at wiki HEAD into ``<project>/.memtomem/commands/<name>/``."""
     return _install_asset(
         project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
     )
@@ -476,8 +504,16 @@ def _gate_a_scan_pinned_asset(
     *,
     surface: str,
     project_root: Path,
+    remediation_hint: str | None = None,
 ) -> None:
-    """Gate A over the bytes a pinned re-extraction would write.
+    """Gate A over the bytes a pinned extraction would write.
+
+    ``remediation_hint`` overrides the default restore-flavored hint ("…
+    re-pin to a clean commit before restoring") — the commit-true single
+    install (#1643) scans HEAD here before a FIRST extraction, where
+    "restoring"/"re-pin" would misdirect; it passes an install-flavored
+    hint instead. ``{pin}``/``{rel}`` placeholders are not interpolated —
+    pass a fully-rendered string.
 
     The wiki working tree is irrelevant here — the extractor reads git
     objects at *pin*, so the scan does too (:meth:`WikiStore.
@@ -508,7 +544,8 @@ def _gate_a_scan_pinned_asset(
                 scope="project_shared",
                 kind=kind,
                 artifact_name=name,
-                remediation_hint=(
+                remediation_hint=remediation_hint
+                or (
                     f"The pinned wiki commit {pin[:12]} ships a secret in "
                     f"{asset_type}/{name}/{rel}; fix the asset in the wiki and "
                     f"re-pin to a clean commit before restoring."
@@ -525,14 +562,33 @@ def _install_asset(
     lock_timeout: float | None = None,
     surface: str = "cli_context_install",
 ) -> InstallResult:
-    """Internal: install a single asset of any type.
+    """Internal: install a single asset of any type — commit-true (#1643).
+
+    Bytes are extracted from git objects at HEAD
+    (:meth:`WikiStore.copy_asset_at_commit`, the same mechanism as
+    ``install --all``'s pinned restore), never from the wiki working tree,
+    so the recorded ``wiki_commit`` pin always reproduces the installed
+    bytes. Two gates precede extraction: the asset must exist at HEAD (an
+    asset present only in the worktree — never committed — refuses with
+    :class:`UncommittedAssetError` rather than pinning a commit that lacks
+    it), and the asset's own worktree state must match HEAD (any
+    modified/deleted/untracked path under the asset dir refuses the same
+    way; dirt elsewhere in the wiki is ignored). All refusals fire before
+    any dest mkdir / byte / lockfile write — zero residue. A crash DURING
+    extraction can leave a partially-mirrored dest with no lockfile entry,
+    the same residue class as the pre-#1643 copytree (the
+    dest-without-entry hint below covers it).
 
     Concurrency contract: same-asset races accept last-write-wins on the
-    lockfile entry. Both writers pin the same ``wiki_commit`` (HEAD is read
-    once per call before copy) and per-file ``atomic_write_bytes`` keeps
-    individual files consistent, so byte content under ``dest`` converges
-    even if the workers interleave. Distinct-asset writers serialize
-    cleanly on the lockfile sidecar lock and both entries survive.
+    lockfile entry. HEAD is read once per call and extraction reads that
+    commit's immutable objects, so racers that observe the SAME HEAD write
+    identical bytes regardless of interleaving — and a concurrent wiki
+    *edit* can no longer bleed into the copy (strictly stronger than the
+    worktree-copy era). Racers that observe DIFFERENT HEADs can still
+    interleave files from two commits with the last lockfile write winning
+    — the same class as before, reconciled by ``install --all``/update.
+    Distinct-asset writers serialize cleanly on the lockfile sidecar lock
+    and both entries survive.
 
     ``installed_at`` is captured at the lockfile-upsert boundary (after the
     copytree completes) so that a subsequent ``mm context update``'s
@@ -551,9 +607,11 @@ def _install_asset(
     wiki = wiki if wiki is not None else WikiStore.at_default()
     wiki.require_exists()
 
+    # Worktree presence is a boolean input to the HEAD-presence gate below,
+    # not a raise site — "in the worktree but not at HEAD" must classify as
+    # uncommitted, not absent (#1643).
     src = wiki.root / asset_type / validated
-    if not src.is_dir():
-        raise AssetNotFoundError(f"{asset_type}/{validated} not in wiki at {wiki.root}")
+    worktree_present = src.is_dir()
 
     wiki_commit = wiki.current_commit()
 
@@ -590,24 +648,82 @@ def _install_asset(
             f"{hint}"
         )
 
-    # Gate A (ADR-0011 §5, #1247): wiki bytes are user-tier — secrets are
-    # legal there — but dest is the git-tracked project_shared canonical.
-    # Scan before mkdir so refusal leaves zero residue (no empty type dir,
-    # no dest bytes, no lockfile entry).
-    _gate_a_scan_src_tree(
-        src,
-        surface=surface,
-        project_root=project_root,
-        asset_type=asset_type,
-        name=validated,
+    singular = asset_type.removesuffix("s")
+    commit_hint = (
+        f"commit it first: `mm wiki {singular} commit {validated} --canonical` "
+        f"(add `--vendor <vendor>` for override files; for scripts, deletions, "
+        f"or other paths that command can't commit, use git directly in the "
+        f"wiki at {wiki.root})"
     )
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    digest_map = copy_tree_atomic(src, dest, skip_suffixes=DIRTY_SKIP_SUFFIXES)
+    # HEAD-presence gate (#1643): the pin must CONTAIN the asset. An asset
+    # that exists only in the worktree would install bytes whose recorded
+    # provenance points at a commit that lacks them entirely — the worst
+    # shape of the unreproducible-pin bug (a `git clean` in the wiki then
+    # destroys the only source while the lockfile claims a valid pin).
+    try:
+        wiki.asset_files_at_commit(wiki_commit, asset_type, validated)
+    except AssetNotFoundError:
+        if worktree_present:
+            raise UncommittedAssetError(
+                f"{asset_type}/{validated}: exists in the wiki working tree but "
+                f"has never been committed, so the HEAD pin would not contain "
+                f"it; {commit_hint}"
+            ) from None
+        raise AssetNotFoundError(f"{asset_type}/{validated} not in wiki at {wiki.root}") from None
 
-    # files= derives from the copier's WRITTEN set, not a post-copy re-walk
-    # (#1247 id 15) — a concurrent addition landing during the copy can no
-    # longer be absorbed into the manifest as if wiki-shipped.
+    # Same-asset dirty gate (#1643): worktree state must equal HEAD for THIS
+    # asset — otherwise the user-visible wiki bytes and the installed bytes
+    # silently diverge. Repo-relative rows are stripped to asset-inner rels
+    # so is_copy_skipped_rel matches the same surface the extractor filters
+    # (a legacy untracked `*.bak` or a stray `.DS_Store` is not dirt: it
+    # would never be extracted). Dirt in OTHER assets never reaches this
+    # gate (asset_uncommitted_paths is pathspec-scoped).
+    asset_prefix = f"{asset_type}/{validated}/"
+    dirty_rels = sorted(
+        rel
+        for row in wiki.asset_uncommitted_paths(asset_type, validated)
+        if (rel := row[len(asset_prefix) :]) and not is_copy_skipped_rel(rel)
+    )
+    if dirty_rels:
+        shown = ", ".join(dirty_rels[:5])
+        more = "" if len(dirty_rels) <= 5 else f", +{len(dirty_rels) - 5} more"
+        raise UncommittedAssetError(
+            f"{asset_type}/{validated}: wiki working tree differs from HEAD for "
+            f"this asset ({len(dirty_rels)} file(s): {shown}{more}); install is "
+            f"commit-true and records HEAD's bytes only — {commit_hint}"
+        )
+
+    # Gate A (ADR-0011 §5, #1247): wiki bytes are user-tier — secrets are
+    # legal there — but dest is the git-tracked project_shared canonical.
+    # The scan reads git objects at the pin (#1643): exactly the immutable
+    # bytes the extractor below will write (scan set == write set, and no
+    # scan→write TOCTOU). Runs before any mkdir so refusal leaves zero
+    # residue (no empty type dir, no dest bytes, no lockfile entry).
+    _gate_a_scan_pinned_asset(
+        wiki,
+        wiki_commit,
+        asset_type,
+        validated,
+        surface=surface,
+        project_root=project_root,
+        remediation_hint=(
+            f"The wiki HEAD commit {wiki_commit[:12]} ships a secret in "
+            f"{asset_type}/{validated}; remove it from the asset, commit the "
+            f"fix in the wiki, and re-run install."
+        ),
+    )
+
+    # Commit-true extraction (#1643): bytes come from git objects at the
+    # pinned commit, never the worktree, so the lockfile's digests/
+    # files_commit claims below are literally true. copy_asset_at_commit
+    # does its own dest.parent.mkdir + tmpdir-adjacent materialization and
+    # applies the same skip predicate as the old copytree.
+    digest_map = wiki.copy_asset_at_commit(wiki_commit, asset_type, validated, dest)
+
+    # files= derives from the extractor's WRITTEN set (#1247 id 15) — and the
+    # source is now an immutable commit, so no concurrent wiki addition can
+    # be absorbed into the manifest as if wiki-shipped.
     installed_at = installed_at_from_dest(dest)
     lock.upsert_entry(
         asset_type,
@@ -1503,10 +1619,13 @@ def _apply_pinned_install(
             f"overwrite (every current file gets a .bak sibling)"
         )
 
-    # Data-safety no-op (ADR-0008 wiki_commit provenance imprecision): a single
-    # install/update copies the wiki WORKING TREE but pins HEAD, so a clean
-    # install taken off a *dirty* wiki holds bytes the recorded pin never
-    # described. Such a row re-classifies CLEAN here (dest == its recorded
+    # Data-safety no-op (ADR-0008 wiki_commit provenance imprecision): the
+    # legacy single-install path (pre-#1643) and the current update path copy
+    # the wiki WORKING TREE while pinning HEAD, so entries created by them off
+    # a *dirty* wiki hold bytes the recorded pin never described (the
+    # commit-true single install can no longer mint such entries, but
+    # existing lockfiles and update keep them alive). Such a row
+    # re-classifies CLEAN here (dest == its recorded
     # digests), and --force would then re-extract the pin over it — SILENTLY
     # swapping the installed bytes for the pin's, with no .bak (files_to_bak is
     # empty on a clean row). `install --all` reproduces the RECORDED install, so

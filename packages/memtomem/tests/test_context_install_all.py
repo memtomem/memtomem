@@ -32,6 +32,7 @@ from memtomem.context.install import (
     install_skill,
     install_agent,
     install_command,
+    update_skill,
 )
 from memtomem.context.lockfile import Lockfile
 from memtomem.wiki.store import WikiStore
@@ -274,25 +275,28 @@ def test_yes_force_emits_destructive_warning(wiki_root: Path, tmp_path: Path, mo
 def test_clean_install_off_dirty_wiki_survives_all_force(
     wiki_root: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """Regression: a clean row installed off a *dirty* wiki working tree must not
-    be silently swapped by ``install --all --force``.
+    """Regression: a clean row whose recorded bytes diverge from its pin must
+    not be silently swapped by ``install --all --force``.
 
-    A single install copies the wiki WORKING TREE but pins HEAD (ADR-0008's
-    accepted ``wiki_commit`` provenance imprecision), so a clean install taken
-    off a dirty wiki holds bytes the pin never described. ``--force`` used to
-    re-extract the pin over such a clean row with NO ``.bak`` — a silent
-    destructive swap. It must now leave the row untouched (the recorded digests
-    differ from the pin's bytes); ``--force`` re-extraction is reserved for
-    dirty/unprovable rows, which always get a ``.bak``.
+    ``mm context update`` copies the wiki WORKING TREE but pins HEAD (ADR-0008's
+    accepted ``wiki_commit`` provenance imprecision — since #1643 the single
+    install is commit-true and can no longer mint such entries, so the update
+    path builds the divergence here), so an update taken off a dirty wiki holds
+    bytes the pin never described. ``--force`` used to re-extract the pin over
+    such a clean row with NO ``.bak`` — a silent destructive swap. It must now
+    leave the row untouched (the recorded digests differ from the pin's bytes);
+    ``--force`` re-extraction is reserved for dirty/unprovable rows, which
+    always get a ``.bak``.
     """
     _initialized_wiki(wiki_root)
-    # Commit v1, then edit the wiki WORKING TREE without committing: HEAD still
-    # points at the v1 commit, but the working tree now holds v2 (wiki dirty).
-    pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
-    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
-    # The single install copies the working tree (v2) yet pins HEAD (v1): the
-    # recorded digests describe bytes the pin's commit does not contain.
+    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v0\n"})
     install_skill(tmp_path, "foo")
+    # Advance HEAD to v1, then edit the WORKING TREE without committing: the
+    # update below copies the working tree (v2) yet pins HEAD (v1) — the
+    # recorded digests describe bytes the pin's commit does not contain.
+    pin = _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
+    update_skill(tmp_path, "foo")
     dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
     assert dest.read_bytes() == b"working-tree-v2\n"
     lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
@@ -321,22 +325,27 @@ def test_clean_empty_install_off_dirty_wiki_survives_all_force(
     """A VALID EMPTY recorded digest map (``digests={}``) must be honored, not
     treated as "no digests" (Codex gate).
 
-    If the wiki working tree has no copyable file at single-install time, the
-    install records ``digests={}`` (a valid empty map, not ``None``) while the
-    pin's commit still contains files. ``install --all --force`` must not fall
-    through and silently resurrect the pin's files over the recorded-empty dest
-    with no ``.bak``. The guard distinguishes ``{}`` (honor: divergence) from
-    ``None`` (pre-digest: legacy re-extract).
+    If the wiki working tree has no copyable file at update time, the update
+    records ``digests={}`` (a valid empty map, not ``None``) while the pin's
+    commit still contains files (post-#1643 the commit-true single install
+    can't produce this shape, so the worktree-copying update path builds it).
+    ``install --all --force`` must not fall through and silently resurrect the
+    pin's files over the recorded-empty dest with no ``.bak``. The guard
+    distinguishes ``{}`` (honor: divergence) from ``None`` (pre-digest: legacy
+    re-extract).
     """
     _initialized_wiki(wiki_root)
-    # The pinned commit contains SKILL.md...
-    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed\n"})
+    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v0\n"})
+    install_skill(tmp_path, "foo")
+    # The pinned commit (v1) contains SKILL.md...
+    _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
     # ...but the dirty working tree has no copyable file (only a skip-filtered
-    # ``.bak``), so the single install copies zero files and records digests={}.
+    # ``.bak``), so the update copies zero files, reconciles the dest file
+    # away, and records digests={} while pinning v1.
     asset = wiki_root / "skills" / "foo"
     (asset / "SKILL.md").unlink()
     (asset / "SKILL.md.bak").write_bytes(b"skipped\n")
-    install_skill(tmp_path, "foo")
+    update_skill(tmp_path, "foo")
     dest = tmp_path / ".memtomem" / "skills" / "foo"
     lock_doc = json.loads((tmp_path / ".memtomem" / "lock.json").read_text())
     assert lock_doc["skills"]["foo"]["files"] == []
@@ -353,6 +362,38 @@ def test_clean_empty_install_off_dirty_wiki_survives_all_force(
     assert not (dest / "SKILL.md.bak").exists()
     assert "1 installed" not in result.output
     assert "skipped" in result.output
+
+
+@pytest.mark.requires_symlinks
+def test_install_all_symlink_only_asset_restores_empty(
+    wiki_root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Codex gate Major-1 twin: a pin whose asset holds ONLY skipped entries
+    (symlink-only) restores as an empty tree — the asset exists at the pin,
+    so it must not classify as absent/orphan, and the symlink's target path
+    must not be materialized as file content."""
+    _initialized_wiki(wiki_root)
+    asset = wiki_root / "skills" / "linky"
+    asset.mkdir(parents=True)
+    (asset / "only.md").symlink_to("/nonexistent/target")
+    subprocess.run(["git", "-C", str(wiki_root), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "add symlink-only asset"],
+        check=True,
+        capture_output=True,
+    )
+    install_skill(tmp_path, "linky")
+    dest = tmp_path / ".memtomem" / "skills" / "linky"
+    shutil.rmtree(dest)
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["install", "--all", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 installed" in result.output
+    assert dest.is_dir()
+    assert not (dest / "only.md").exists()
 
 
 # ── orphan / error paths ────────────────────────────────────────────────
@@ -641,18 +682,22 @@ def test_legacy_row_with_stale_dest_only_file_noops_under_force(
 def test_legacy_clean_install_off_dirty_wiki_survives_all_force(
     wiki_root: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    """The #1512 harmful case: a PRE-DIGEST legacy clean row installed off a
-    dirty wiki working tree must not be silently swapped by
+    """The #1512 harmful case: a PRE-DIGEST legacy clean row whose bytes
+    diverge from its pin must not be silently swapped by
     ``install --all --force``.
 
-    Same shape as ``test_clean_install_off_dirty_wiki_survives_all_force``,
-    but with the digest keys stripped: before #1512 the ``recorded_digests is
-    not None`` gate let exactly this row fall through to a silent, ``.bak``-less
-    re-extract. The clean-dest hash now stands in for the missing recorded map."""
+    Same shape as ``test_clean_install_off_dirty_wiki_survives_all_force``
+    (divergence minted via the worktree-copying update path — post-#1643 the
+    commit-true single install can't produce it), but with the digest keys
+    stripped: before #1512 the ``recorded_digests is not None`` gate let
+    exactly this row fall through to a silent, ``.bak``-less re-extract. The
+    clean-dest hash now stands in for the missing recorded map."""
     _initialized_wiki(wiki_root)
-    pin = _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
-    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
+    _seed_wiki_asset(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v0\n"})
     install_skill(tmp_path, "foo")
+    pin = _advance_wiki(wiki_root, "skills", "foo", {"SKILL.md": b"committed-v1\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"working-tree-v2\n")
+    update_skill(tmp_path, "foo")
     dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
     assert dest.read_bytes() == b"working-tree-v2\n"
     lock_path = _strip_to_legacy_entry(tmp_path, "skills", "foo")

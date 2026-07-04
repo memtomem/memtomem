@@ -417,6 +417,43 @@ describe('wiki.js install/update (E-3, dev tier)', () => {
     expect(errToast.msg).not.toContain(RAW_SERVER_MSG);
   });
 
+  it('a wiki_uncommitted install (#1643) shows the localized copy, not the raw envelope', async () => {
+    const dom = await bootDev();
+    const toasts = [];
+    dom.window.showToast = (msg, kind) => { toasts.push({ msg, kind }); };
+    const RAW_SERVER_MSG =
+      'skills/alpha has uncommitted changes in the wiki (install is commit-true '
+      + "and records HEAD's bytes only); commit them and retry";
+    const base = dom.window.fetch;
+    dom.window.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input?.url;
+      const method = ((init && init.method) || 'GET').toUpperCase();
+      if (method === 'POST' && (url || '').split('?')[0] === '/api/context/skills/alpha/install') {
+        return {
+          ok: false, status: 409,
+          json: async () => ({
+            detail: {
+              error_kind: 'conflict',
+              reason_code: 'wiki_uncommitted',
+              message: RAW_SERVER_MSG,
+            },
+          }),
+          text: async () => '',
+        };
+      }
+      return base(input, init);
+    };
+    await dom.window.loadWiki();
+    await dom.window.loadWikiDetail('skills', 'alpha');
+    await dom.window._onWikiInstallOrUpdate('install');
+    const errToast = toasts.find((x) => x.kind === 'error');
+    expect(errToast).toBeTruthy();
+    expect(errToast.msg).toBe(dom.window.t('settings.ctx.wiki_install_uncommitted', {
+      type: dom.window._wikiTypeLabel('skills'), name: 'alpha',
+    }));
+    expect(errToast.msg).not.toContain(RAW_SERVER_MSG);
+  });
+
   it('rapid double-click on install fires exactly one POST (double-submit guard)', async () => {
     const dom = await bootDev();
     const posts = recordingCtxFetch(dom.window);

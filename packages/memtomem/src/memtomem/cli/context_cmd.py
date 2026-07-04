@@ -44,6 +44,7 @@ from memtomem.context.install import (
     ProjectClassification,
     ProjectInstallClassification,
     StaleInstallError,
+    UncommittedAssetError,
     _apply_pinned_install,
     _apply_update,
     _classify_for_all_update,
@@ -1851,8 +1852,11 @@ def install_cmd(
     """Install a wiki asset into ``<project>/.memtomem/<type>/<name>/``.
 
     Without ``--all``: install a single ``<type> <name>`` from the wiki at
-    HEAD. The wiki at ``~/.memtomem-wiki/`` must be initialized first
-    (``mm wiki init``).
+    HEAD — commit-true (#1643): bytes are extracted from git objects at
+    HEAD, so an asset whose wiki working tree differs from HEAD (or was
+    never committed) refuses with a ``mm wiki <type> commit`` hint instead
+    of recording a pin that can't reproduce the installed bytes. The wiki
+    at ``~/.memtomem-wiki/`` must be initialized first (``mm wiki init``).
 
     With ``--all``: walk ``<project>/.memtomem/lock.json`` and re-install
     every entry **at the commit each entry pins** (NOT wiki HEAD). This
@@ -1880,6 +1884,7 @@ def install_cmd(
         WikiUnbornHeadError,
         AssetNotFoundError,
         AlreadyInstalledError,
+        UncommittedAssetError,
         InvalidNameError,
         LockfileError,
         PrivacyScanError,

@@ -303,6 +303,125 @@ class TestIsDirty:
             store.is_dirty()
 
 
+class TestAssetUncommittedPaths:
+    """Direct pins for the porcelain ``-z`` parser behind the #1643 install
+    gate — a subtly-wrong parser either misses same-asset dirt (silent
+    unreproducible pin) or false-blocks unrelated assets (Codex gate
+    Major-2), so the row shapes are exercised here, not only through the
+    CLI."""
+
+    def _store(self, wiki_root: Path, files: dict[str, bytes]) -> WikiStore:
+        store = WikiStore.at_default()
+        store.init()
+        _seed_skill(wiki_root, "foo", files)
+        return store
+
+    def test_clean_asset_is_empty(self, wiki_root: Path) -> None:
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        assert store.asset_uncommitted_paths("skills", "foo") == []
+
+    def test_modified_tracked_file(self, wiki_root: Path) -> None:
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2\n")
+        assert store.asset_uncommitted_paths("skills", "foo") == ["skills/foo/SKILL.md"]
+
+    def test_untracked_file_inside_asset(self, wiki_root: Path) -> None:
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        (wiki_root / "skills" / "foo" / "notes.md").write_bytes(b"wip\n")
+        assert store.asset_uncommitted_paths("skills", "foo") == ["skills/foo/notes.md"]
+
+    def test_entirely_untracked_asset_lists_per_file(self, wiki_root: Path) -> None:
+        """``-uall`` expands the untracked dir into file rows — without it
+        git collapses to one ``?? skills/bar/`` row and the per-file skip
+        filter downstream has nothing to work with."""
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        bar = wiki_root / "skills" / "bar"
+        (bar / "scripts").mkdir(parents=True)
+        (bar / "SKILL.md").write_bytes(b"new\n")
+        (bar / "scripts" / "run.sh").write_bytes(b"#!/bin/sh\n")
+        assert store.asset_uncommitted_paths("skills", "bar") == [
+            "skills/bar/SKILL.md",
+            "skills/bar/scripts/run.sh",
+        ]
+
+    def test_deleted_worktree_file(self, wiki_root: Path) -> None:
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n", "extra.md": b"x\n"})
+        (wiki_root / "skills" / "foo" / "extra.md").unlink()
+        assert store.asset_uncommitted_paths("skills", "foo") == ["skills/foo/extra.md"]
+
+    def test_dirt_outside_asset_is_invisible(self, wiki_root: Path) -> None:
+        """Pathspec scoping: sibling-asset and wiki-root dirt never leak in."""
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        _seed_skill(wiki_root, "bar", {"SKILL.md": b"v1\n"})
+        (wiki_root / "skills" / "bar" / "SKILL.md").write_bytes(b"dirty\n")
+        (wiki_root / "stray.txt").write_bytes(b"wip\n")
+        assert store.asset_uncommitted_paths("skills", "foo") == []
+
+    def test_staged_rename_within_asset_reports_both_sides(self, wiki_root: Path) -> None:
+        """A porcelain rename row is TWO NUL tokens (``XY new\\0orig``) — a
+        naive splitter would misread the orig token as the next row."""
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n", "a.md": b"a\n"})
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "mv", "skills/foo/a.md", "skills/foo/b.md"],
+            check=True,
+            capture_output=True,
+        )
+        # A second dirty file AFTER the rename row exercises the token-stream
+        # resync: misparse of the two-token row would swallow or garble it.
+        (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2\n")
+        paths = store.asset_uncommitted_paths("skills", "foo")
+        assert "skills/foo/SKILL.md" in paths
+        # Both rename sides are dirt (b.md appears, a.md disappears at install).
+        assert "skills/foo/b.md" in paths
+        assert "skills/foo/a.md" in paths
+
+    def test_staged_rename_out_of_asset_is_dirt(self, wiki_root: Path) -> None:
+        """Renaming a tracked file OUT of the asset must classify as dirt —
+        the asset at HEAD still has it, the worktree doesn't."""
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n", "a.md": b"a\n"})
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "mv", "skills/foo/a.md", "escaped.md"],
+            check=True,
+            capture_output=True,
+        )
+        paths = store.asset_uncommitted_paths("skills", "foo")
+        assert any(p.endswith("a.md") for p in paths), paths
+        # The out-of-asset side must NOT be reported.
+        assert not any("escaped" in p for p in paths), paths
+
+    def test_staged_rename_into_asset_is_dirt(self, wiki_root: Path) -> None:
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        (wiki_root / "incoming.md").write_bytes(b"in\n")
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "add", "incoming.md"], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "commit", "-m", "add incoming"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(wiki_root), "mv", "incoming.md", "skills/foo/incoming.md"],
+            check=True,
+            capture_output=True,
+        )
+        paths = store.asset_uncommitted_paths("skills", "foo")
+        assert "skills/foo/incoming.md" in paths, paths
+
+    def test_non_ascii_paths_round_trip(self, wiki_root: Path) -> None:
+        """``-z`` bytes framing: a Korean filename must come back verbatim,
+        not C-quoted (the ``core.quotePath`` default would octal-escape it
+        in line-oriented porcelain and break the prefix match)."""
+        store = self._store(wiki_root, {"SKILL.md": b"v1\n"})
+        (wiki_root / "skills" / "foo" / "한글노트.md").write_bytes("메모\n".encode())
+        assert store.asset_uncommitted_paths("skills", "foo") == ["skills/foo/한글노트.md"]
+
+    def test_raises_when_wiki_absent(self, wiki_root: Path) -> None:
+        store = WikiStore.at_default()
+        with pytest.raises(WikiNotFoundError):
+            store.asset_uncommitted_paths("skills", "foo")
+
+
 # ── helpers for commit-bound tests ──────────────────────────────────────
 
 

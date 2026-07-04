@@ -34,6 +34,7 @@ from memtomem.context.install import (
     NotInstalledError,
     ProjectRootMissingError,
     StaleInstallError,
+    UncommittedAssetError,
     UpdateResult,
     install_agent,
     install_command,
@@ -119,10 +120,14 @@ async def install_asset(
 ) -> dict:
     """Install a single wiki asset into the project (parity of ``mm context install``).
 
-    Snapshots ``<wiki>/<type>/<name>/`` into ``<project>/.memtomem/<type>/<name>/``
-    at the wiki HEAD and pins it in ``lock.json``. project_shared tier only — the
-    engine has no tier axis (see the pinned resolver). Non-destructive: an
-    already-installed asset refuses with 409 ``already_installed`` (use update).
+    Commit-true (#1643): extracts ``<type>/<name>/`` from the wiki's git
+    objects at HEAD and pins that commit in ``lock.json`` — never the
+    working tree, so the pin always reproduces the installed bytes. An
+    asset whose wiki working tree differs from HEAD (or was never
+    committed) refuses with 409 ``wiki_uncommitted``. project_shared tier
+    only — the engine has no tier axis (see the pinned resolver).
+    Non-destructive: an already-installed asset refuses with 409
+    ``already_installed`` (use update).
     """
     _validate_name_or_error(asset_type, name)
     installer = _INSTALLERS[asset_type]
@@ -161,6 +166,19 @@ async def install_asset(
             "conflict",
             f"{asset_type}/{name} is already installed in this project; use update to refresh",
             reason_code="already_installed",
+        ) from exc
+    except UncommittedAssetError as exc:
+        # Fixed message, NOT ``str(exc)`` — the engine message embeds the
+        # absolute wiki root (its raw-git remediation hint), which must not
+        # leak into the HTTP envelope (module contract; the
+        # ``_privacy_blocked`` precedent).
+        raise _error(
+            409,
+            "conflict",
+            f"{asset_type}/{name} has uncommitted changes in the wiki (install is "
+            f"commit-true and records HEAD's bytes only); commit them — e.g. "
+            f"`mm wiki <type> commit <name> --canonical` — and retry",
+            reason_code="wiki_uncommitted",
         ) from exc
     except PrivacyScanError as exc:
         raise _privacy_blocked() from exc

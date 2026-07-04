@@ -165,6 +165,23 @@ async def test_install_already_installed_is_409(client, seeded_wiki, project_roo
 
 
 @pytest.mark.asyncio
+async def test_install_uncommitted_wiki_is_409(client, seeded_wiki, project_root: Path) -> None:
+    """Commit-true install (#1643): an asset whose wiki working tree differs
+    from HEAD refuses with 409 ``wiki_uncommitted`` and a fixed message —
+    the engine text embeds the absolute wiki root and must not leak."""
+    (seeded_wiki / "skills" / "alpha" / "SKILL.md").write_text(
+        _SKILL_BODY + "\nUncommitted edit.\n", encoding="utf-8"
+    )
+    resp = await client.post("/api/context/skills/alpha/install")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "wiki_uncommitted"
+    assert str(seeded_wiki) not in resp.text
+    # Refusal left no residue in the project tree.
+    assert not (project_root / ".memtomem" / "skills" / "alpha").exists()
+    assert _lock_entry(project_root, "skills", "alpha") is None
+
+
+@pytest.mark.asyncio
 async def test_install_agent_and_command(client, seeded_wiki, project_root: Path) -> None:
     assert (await client.post("/api/context/agents/beta/install")).status_code == 200
     assert (await client.post("/api/context/commands/gamma/install")).status_code == 200

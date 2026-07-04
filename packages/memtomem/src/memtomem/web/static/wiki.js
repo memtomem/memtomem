@@ -1079,6 +1079,15 @@ async function _installWikiAsset(type, name, scopeId, force, verb) {
       showToast(t('settings.ctx.wiki_not_installed', { type: _wikiTypeLabel(type), name }), 'error');
       return;
     }
+    if (reason === 'wiki_uncommitted') {
+      // Commit-true install (#1643): the asset's wiki working tree differs
+      // from HEAD, so the pin couldn't reproduce the installed bytes.
+      showToast(
+        t('settings.ctx.wiki_install_uncommitted', { type: _wikiTypeLabel(type), name }),
+        'error',
+      );
+      return;
+    }
     if (reason === 'privacy_blocked') {
       // Localized copy, not the envelope's detail.message — that prose is
       // English-only server text and, being always non-empty, would shadow

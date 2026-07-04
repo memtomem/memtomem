@@ -685,8 +685,10 @@ class WikiStore:
 
         Wraps ``git status --porcelain`` — true on any combination of
         modified-tracked, staged, or untracked files. Used by ``mm
-        context update`` to warn the user that the install/update will
-        reflect HEAD only, not the dirty working tree.
+        context update`` to warn the user that the recorded pin reflects
+        HEAD only, not the dirty working tree. (Single-asset install
+        refuses instead, and only on the asset's own dirt — see
+        :meth:`asset_uncommitted_paths`, #1643.)
 
         Returns ``False`` if the wiki is clean. Raises ``WikiNotFoundError``
         if the wiki itself is missing (no ``.git`` directory) — caller
@@ -704,6 +706,69 @@ class WikiStore:
         self.require_exists()
         result = _git(["status", "--porcelain"], cwd=self.root)
         return bool(result.stdout.strip())
+
+    def asset_uncommitted_paths(self, asset_type: str, name: str) -> list[str]:
+        """List worktree paths under ``<asset_type>/<name>/`` that differ from HEAD.
+
+        ``git status --porcelain -z -uall -- <asset_type>/<name>/`` scoped by
+        pathspec, so dirt anywhere ELSE in the wiki is invisible — the
+        deliberate contrast with the repo-wide :meth:`is_dirty`. ``-z``
+        NUL-terminates verbatim pathnames (with git's default
+        ``core.quotePath=true``, line-oriented porcelain C-quotes non-ASCII
+        paths — same caveat as :meth:`asset_files_at_commit`); ``-uall``
+        expands an entirely-untracked asset dir into per-file rows instead of
+        one collapsed ``?? <dir>/`` row. A staged rename/copy row carries a
+        second NUL token (the original path) — both sides are checked against
+        the prefix, so a rename INTO or OUT OF the asset counts as dirt.
+
+        Returns repo-relative POSIX paths, decoded ``errors="replace"`` —
+        they feed refusal messages and skip-filtering only, never extraction.
+        The list is raw: ignored files never appear (the scaffold
+        ``.gitignore`` / :meth:`ensure_bak_excluded` hide ``*.bak``), but a
+        legacy clone where neither ran can still surface one — callers that
+        need the installed-surface view filter with
+        ``is_copy_skipped_rel`` (kept on the context side to avoid a
+        wiki→context import).
+
+        Calls :meth:`require_exists` first. On an unborn HEAD every file
+        reports as untracked/added — callers in the install flow read
+        :meth:`current_commit` before this, so they never get here unborn.
+        Shares :meth:`is_dirty`'s ``.gitattributes`` caveat: a normalizing
+        clean/eol filter can make committed files read permanently dirty,
+        which under the #1643 install gate means a permanent refusal until
+        the filter is dropped (memtomem ships no ``.gitattributes``).
+        """
+        self.require_exists()
+        prefix = f"{asset_type}/{name}/"
+        prefix_bytes = prefix.encode("utf-8")
+        result = _git_bytes(
+            ["status", "--porcelain", "-z", "-uall", "--", prefix],
+            cwd=self.root,
+        )
+        tokens = result.stdout.split(b"\0")
+        paths: list[str] = []
+        i = 0
+        while i < len(tokens):
+            entry = tokens[i]
+            i += 1
+            # Drop the empty tail after the final NUL and any malformed
+            # fragment shorter than "XY <path>".
+            if len(entry) < 4:
+                continue
+            status_xy = entry[:2]
+            path = entry[3:]
+            if path.startswith(prefix_bytes):
+                paths.append(path.decode("utf-8", errors="replace"))
+            # Porcelain v1 -z rename/copy rows are two tokens: "XY new\0orig".
+            # Consume the orig token here even when it's outside the asset —
+            # a naive splitter would misread it as the next row's XY field.
+            if status_xy[0:1] in (b"R", b"C"):
+                if i < len(tokens):
+                    orig = tokens[i]
+                    i += 1
+                    if orig.startswith(prefix_bytes):
+                        paths.append(orig.decode("utf-8", errors="replace"))
+        return paths
 
     def commit_paths(
         self,
@@ -961,17 +1026,27 @@ class WikiStore:
         return result.stdout
 
     def asset_files_at_commit(self, commit: str, asset_type: str, name: str) -> list[str]:
-        """List the asset's file relpaths (relative to the asset dir) at *commit*.
+        """List the asset's regular-file relpaths (relative to the asset dir) at *commit*.
 
-        ``git ls-tree -r -z --name-only`` (NUL-terminated bytes, so non-ASCII
-        pathnames survive ``core.quotePath``) against the commit's objects —
-        the wiki working tree is never consulted. Raises
+        ``git ls-tree -r -z`` (NUL-terminated bytes, so non-ASCII pathnames
+        survive ``core.quotePath``) against the commit's objects — the wiki
+        working tree is never consulted. Only blob modes ``100644``/``100755``
+        are returned: a symlink (``120000``) is skipped with a warning —
+        ``git show`` on one yields the *target string*, and materializing
+        that as file content would silently corrupt the extraction (the
+        worktree copier has always skipped symlinks the same way,
+        :func:`memtomem.context._atomic.copy_tree_atomic`; pre-#1643 the
+        pinned-restore path materialized target-as-content) — and a gitlink
+        (``160000``) is skipped likewise. Raises
         :class:`CommitNotFoundError` for an unreachable SHA and
         :class:`memtomem.context.install.AssetNotFoundError` when the asset
-        path has no files at that revision. Used by
-        :meth:`copy_asset_at_commit` for extraction and by
-        ``mm context install --all`` reconciliation, which needs the
-        expected file set without re-extracting (#1247).
+        path has NO entries at all at that revision — judged BEFORE the mode
+        filter, so a committed asset holding only skipped entries returns
+        ``[]`` (extractable as an empty tree) rather than reading as absent.
+        Used by :meth:`copy_asset_at_commit` for extraction, the pinned
+        Gate-A scan (scan set == write set), and ``mm context install --all``
+        reconciliation, which needs the expected file set without
+        re-extracting (#1247).
         """
         from memtomem.context.install import AssetNotFoundError
 
@@ -986,28 +1061,59 @@ class WikiStore:
         # in double quotes), which fails the prefix match below — a
         # Korean-named file silently vanished from extraction and the digest
         # map. NUL-terminated bytes round-trip every pathname exactly.
+        # Full (non ``--name-only``) output carries the mode column:
+        # ``<mode> <type> <sha>\t<path>`` per NUL-terminated entry.
         ls_result = _git_bytes(
-            ["ls-tree", "-r", "-z", "--name-only", commit, "--", src_prefix],
+            ["ls-tree", "-r", "-z", commit, "--", src_prefix],
             cwd=self.root,
         )
         prefix_bytes = src_prefix.encode("utf-8")
+        inner_relpaths: list[str] = []
+        seen_any_entry = False
         try:
-            inner_relpaths = [
-                entry[len(prefix_bytes) :].decode("utf-8")
-                for entry in ls_result.stdout.split(b"\0")
-                # The startswith filter guards against odd git path output;
-                # the truthiness check drops the empty tail after the final
-                # NUL (and a bare prefix row, which ls-tree -r shouldn't
-                # yield, but guard against odd git versions).
-                if entry.startswith(prefix_bytes) and entry[len(prefix_bytes) :]
-            ]
+            for entry in ls_result.stdout.split(b"\0"):
+                meta, sep, path = entry.partition(b"\t")
+                # The sep check drops the empty tail after the final NUL; the
+                # startswith filter guards against odd git path output, and
+                # the truthiness check drops a bare prefix row (which
+                # ls-tree -r shouldn't yield, but guard against odd
+                # versions).
+                if not sep or not path.startswith(prefix_bytes):
+                    continue
+                rel_bytes = path[len(prefix_bytes) :]
+                if not rel_bytes:
+                    continue
+                seen_any_entry = True
+                mode = meta.split(b" ", 1)[0]
+                if mode == b"120000":
+                    logger.warning(
+                        "asset_files_at_commit: skipping symlink %s/%s/%s at %s",
+                        asset_type,
+                        name,
+                        rel_bytes.decode("utf-8", errors="replace"),
+                        commit[:12],
+                    )
+                    continue
+                if mode not in (b"100644", b"100755"):
+                    # 160000 gitlinks (submodules) and any future exotic mode:
+                    # nothing extractable behind them.
+                    logger.warning(
+                        "asset_files_at_commit: skipping non-file mode %s for %s/%s/%s at %s",
+                        mode.decode("ascii", errors="replace"),
+                        asset_type,
+                        name,
+                        rel_bytes.decode("utf-8", errors="replace"),
+                        commit[:12],
+                    )
+                    continue
+                inner_relpaths.append(rel_bytes.decode("utf-8"))
         except UnicodeDecodeError as exc:
             # Path-free by design: the web routes render RuntimeError as a
             # clean envelope; the raw bytes stay in the chained exception.
             raise RuntimeError(
                 f"non-UTF-8 pathname under {asset_type}/{name} at commit {commit[:12]}"
             ) from exc
-        if not inner_relpaths:
+        if not seen_any_entry:
             raise AssetNotFoundError(
                 f"{asset_type}/{name} not present at commit {commit[:12]} in {self.root}"
             )
