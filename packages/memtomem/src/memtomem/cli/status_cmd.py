@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
+
 if TYPE_CHECKING:
     from memtomem.server.tools.status_config import StatusLine
 
@@ -44,7 +46,7 @@ def status(fmt: str, *, as_json: bool = False) -> None:
             return
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _status(fmt: str) -> None:
