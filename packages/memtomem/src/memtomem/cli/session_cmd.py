@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
 from memtomem.constants import (
     AGENT_NAMESPACE_PREFIX,
     InvalidNameError,
@@ -211,9 +212,7 @@ def start(
             )
         except Exception as e:
             trace_ctx["exit_code"] = 1
-            if isinstance(e, click.ClickException):
-                raise
-            raise click.ClickException(str(e)) from e
+            raise_cli_error(e)
 
 
 async def _start(
@@ -356,9 +355,7 @@ def end(summary: str | None, auto_summary: bool) -> None:
             )
         except Exception as e:
             trace_ctx["exit_code"] = 1
-            if isinstance(e, click.ClickException):
-                raise
-            raise click.ClickException(str(e)) from e
+            raise_cli_error(e)
 
 
 async def _end(session_id: str, summary: str | None, auto_summary: bool) -> tuple[str | None, int]:
@@ -419,7 +416,7 @@ def list_sessions(
             trace_ctx["payload"]["count"] = count
         except Exception as e:
             trace_ctx["exit_code"] = 1
-            raise click.ClickException(str(e)) from e
+            raise_cli_error(e)
 
 
 async def _list_sessions(
@@ -492,7 +489,7 @@ def events(session_id: str, *, as_json: bool = False) -> None:
             trace_ctx["payload"]["count"] = count
         except Exception as e:
             trace_ctx["exit_code"] = 1
-            raise click.ClickException(str(e)) from e
+            raise_cli_error(e)
 
 
 async def _events(session_id: str, *, as_json: bool = False) -> int:

@@ -10,6 +10,7 @@ from typing import get_args
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
 from memtomem.config import TargetScope
 from memtomem.memory_scope import (
     MemoryScopeError,
@@ -140,7 +141,7 @@ def add(
             return
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _add(
@@ -331,7 +332,7 @@ def recall(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _recall(
