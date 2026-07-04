@@ -13,11 +13,13 @@ Covers the new path that runs alongside BM25 + dense:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
 
+import memtomem.search.pipeline as pipeline_module
 from memtomem.config import SearchConfig, SessionSummaryConfig
 from memtomem.models import Chunk, ChunkLink, ChunkMetadata, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
@@ -498,6 +500,111 @@ class TestPipelineEndToEndRescue:
         pipeline = _make_pipeline(storage, session_summary_config=cfg)
         await pipeline.search("q", top_k=10, namespace="agent-runtime:planner")
         assert archive_lookup_called is False
+
+
+# ---------------------------------------------------------------------------
+# 3b. Rescue-leg failure loudness (#1610/#1611)
+# ---------------------------------------------------------------------------
+
+
+class TestRescueLegLoudness:
+    """A rescue-leg failure degrades search to two-leg fusion, which is
+    invisible in production — the swallow sites must log WARNING on the
+    first occurrence (``feedback_silent_except_log_level``) and DEBUG
+    afterwards, and the search itself must still succeed.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_warn_once(self):
+        """The warn-once registry is process-global; isolate each test."""
+        pipeline_module._RESCUE_WARNED.clear()
+        yield
+        pipeline_module._RESCUE_WARNED.clear()
+
+    def _failing_rescue_setup(self) -> tuple[AsyncMock, Chunk]:
+        """Storage where the archive lookup succeeds but the chunk-links
+        walk raises — the rescue leg dies mid-flight while the organic
+        leg stays healthy."""
+        cfg_summary = _chunk("summary body", namespace="archive:session:abc")
+        organic = _chunk("organic chunk")
+        storage = _async_storage()
+
+        async def bm25_dispatch(
+            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+        ):
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                return [_sr(cfg_summary, score=0.9, rank=1, source="bm25")]
+            return [_sr(organic, score=1.0, rank=1, source="bm25")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        storage.get_chunks_shared_from = AsyncMock(side_effect=RuntimeError("links table gone"))
+        return storage, organic
+
+    @pytest.mark.asyncio
+    async def test_failure_degrades_to_organic_and_warns(self, caplog):
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        storage, organic = self._failing_rescue_setup()
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.search.pipeline"):
+            results, _ = await pipeline.search("q", top_k=10)
+
+        # Search must survive the rescue failure on organic results alone.
+        assert {r.chunk.id for r in results} == {organic.id}
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "get_chunks_shared_from failed" in r.message
+        ]
+        assert len(warnings) == 1, "first rescue failure must be loud (WARNING, not DEBUG)"
+
+    @pytest.mark.asyncio
+    async def test_repeat_failure_downgrades_to_debug(self, caplog):
+        """warn-once: a persistently failing dependency must not spam
+        WARNING on every query — repeats log at DEBUG."""
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        storage, _ = self._failing_rescue_setup()
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.search.pipeline"):
+            await pipeline.search("q", top_k=10)
+            await pipeline.search("q2", top_k=10)
+
+        records = [r for r in caplog.records if "get_chunks_shared_from failed" in r.message]
+        assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG]
+
+    @pytest.mark.asyncio
+    async def test_summary_lookup_failure_warns_and_degrades(self, caplog):
+        """The very first rescue stage (archive lookup) failing must also
+        be loud and leave organic retrieval intact."""
+        cfg = SessionSummaryConfig(expansion_lookup_top_k=3, expansion_score_threshold=0.3)
+        organic = _chunk("organic chunk")
+        storage = _async_storage()
+
+        async def bm25_dispatch(
+            query, top_k, namespace_filter=None, scope_filter=None, project_context_root=None
+        ):
+            if getattr(namespace_filter, "pattern", None) == "archive:session:*":
+                raise RuntimeError("archive namespace unreadable")
+            return [_sr(organic, score=1.0, rank=1, source="bm25")]
+
+        storage.bm25_search = AsyncMock(side_effect=bm25_dispatch)
+        pipeline = _make_pipeline(storage, session_summary_config=cfg)
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.search.pipeline"):
+            results, _ = await pipeline.search("q", top_k=10)
+
+        assert {r.chunk.id for r in results} == {organic.id}
+        assert any(
+            r.levelno == logging.WARNING and "session-summary lookup failed" in r.message
+            for r in caplog.records
+        )
+
+
+def test_default_rescue_weight_mirrors_config_default():
+    """#1610: the module fallback must stay in sync with the
+    ``SessionSummaryConfig.expansion_rescue_weight`` default it mirrors."""
+    assert pipeline_module._DEFAULT_RESCUE_WEIGHT == SessionSummaryConfig().expansion_rescue_weight
 
 
 # ---------------------------------------------------------------------------

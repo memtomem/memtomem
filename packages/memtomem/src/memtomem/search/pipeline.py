@@ -6,6 +6,15 @@ per ADR-0011 §6) → RRF fusion → cross-encoder rerank (optional) →
 source/tag filter → validity filter → time-decay → MMR → access-freq
 boost → importance boost → context-window expansion.
 
+Stage 1 enrichment (session-summary rescue, RFC P1 Phase C): between
+retrieval and fusion, when ``namespace is None`` and a
+``SessionSummaryConfig`` with ``expansion_lookup_top_k > 0`` is wired,
+an ``archive:session:*`` summary lookup + ``summarizes`` chunk-links
+walk builds a boost-source set and a retrieval restricted to those
+sources joins RRF as a third input list weighted by
+``expansion_rescue_weight``. Failures degrade to two-leg fusion (loud
+once — see ``_log_rescue_failure``).
+
 The scope-context filter is applied **at the BM25 + dense storage
 calls** (not as a post-fusion stage) because the SQL fragment is the
 single chokepoint that prevents cross-project leak; running it at the
@@ -51,6 +60,25 @@ from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchRes
 from memtomem.search.fusion import reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
+
+# Fallback for the rescue leg's RRF weight when no SessionSummaryConfig
+# is wired. Mirrors ``SessionSummaryConfig.expansion_rescue_weight``'s
+# default (config.py) — keep the two in sync.
+_DEFAULT_RESCUE_WEIGHT = 0.5
+
+# Rescue-leg failures silently degrade search to two-leg fusion, which
+# is invisible in production — loud (warning, not debug) on the first
+# occurrence per site per feedback_silent_except_log_level (reference
+# pattern: storage/mixins/schedules.py), DEBUG afterwards so a
+# persistently failing dependency doesn't spam the log on every query.
+_RESCUE_WARNED: set[str] = set()
+
+
+def _log_rescue_failure(site: str, msg: str, *args: object) -> None:
+    """warn-once-per-process logger for rescue-leg swallow sites."""
+    level = logging.DEBUG if site in _RESCUE_WARNED else logging.WARNING
+    _RESCUE_WARNED.add(site)
+    logger.log(level, msg, *args, exc_info=True)
 
 
 def _bg_task_error_cb(task: asyncio.Task) -> None:
@@ -313,7 +341,7 @@ class SearchPipeline:
                 project_context_root=project_context_root,
             )
         except Exception:
-            logger.debug("session-summary lookup failed; skipping rescue", exc_info=True)
+            _log_rescue_failure("summary_lookup", "session-summary lookup failed; skipping rescue")
             return set()
 
         threshold = cfg.expansion_score_threshold
@@ -332,8 +360,8 @@ class SearchPipeline:
                     r.chunk.id, link_type="summarizes"
                 )
             except Exception:
-                logger.debug(
-                    "get_chunks_shared_from failed for summary %s", r.chunk.id, exc_info=True
+                _log_rescue_failure(
+                    "links_walk", "get_chunks_shared_from failed for summary %s", r.chunk.id
                 )
                 continue
             for link in links:
@@ -345,7 +373,7 @@ class SearchPipeline:
         try:
             chunks_map = await self._storage.get_chunks_batch(target_chunk_ids)
         except Exception:
-            logger.debug("get_chunks_batch failed for rescue targets", exc_info=True)
+            _log_rescue_failure("chunks_batch", "get_chunks_batch failed for rescue targets")
             return set()
 
         return {str(c.metadata.source_file) for c in chunks_map.values()}
@@ -393,7 +421,7 @@ class SearchPipeline:
                     project_context_root=project_context_root,
                 )
             except Exception:
-                logger.debug("rescue bm25 leg failed", exc_info=True)
+                _log_rescue_failure("bm25_leg", "rescue bm25 leg failed")
                 return []
             return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
 
@@ -409,7 +437,7 @@ class SearchPipeline:
                     project_context_root=project_context_root,
                 )
             except Exception:
-                logger.debug("rescue dense leg failed", exc_info=True)
+                _log_rescue_failure("dense_leg", "rescue dense leg failed")
                 return []
             return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
 
@@ -801,7 +829,7 @@ class SearchPipeline:
                     )
                     rescue_chunk_ids = {r.chunk.id for r in rescue_results}
             except Exception:
-                logger.debug("session-summary rescue leg failed", exc_info=True)
+                _log_rescue_failure("rescue_wiring", "session-summary rescue leg failed")
 
         # Stage 3: fusion (or single-retriever passthrough)
         # When reranking is active, widen the candidate pool so the
@@ -825,17 +853,21 @@ class SearchPipeline:
                 dataclass_replace(r, via_session_summary=True) for r in rescue_results
             ]
 
+        # Single source for the rescue leg's RRF weight — the fallback is
+        # effectively unreachable (rescue only fires when the config is
+        # wired) but keeps the three fusion branches total.
+        rescue_w = (
+            self._session_summary_config.expansion_rescue_weight
+            if self._session_summary_config is not None
+            else _DEFAULT_RESCUE_WEIGHT
+        )
+
         if use_bm25 and use_dense:
             fusion_lists = [bm25_results, dense_results]
             fusion_weights = list(effective_weights)
             fusion_labels = ["bm25", "dense"]
             if rescue_results:
                 fusion_lists.append(rescue_results)
-                rescue_w = (
-                    self._session_summary_config.expansion_rescue_weight
-                    if self._session_summary_config is not None
-                    else 0.5
-                )
                 fusion_weights.append(rescue_w)
                 fusion_labels.append("session_rescue")
             fused = reciprocal_rank_fusion(
@@ -847,11 +879,6 @@ class SearchPipeline:
             )
         elif use_bm25:
             if rescue_results:
-                rescue_w = (
-                    self._session_summary_config.expansion_rescue_weight
-                    if self._session_summary_config is not None
-                    else 0.5
-                )
                 fused = reciprocal_rank_fusion(
                     [bm25_results, rescue_results],
                     k=self._config.rrf_k,
@@ -863,11 +890,6 @@ class SearchPipeline:
                 fused = bm25_results[:rerank_pool]
         elif use_dense:
             if rescue_results:
-                rescue_w = (
-                    self._session_summary_config.expansion_rescue_weight
-                    if self._session_summary_config is not None
-                    else 0.5
-                )
                 fused = reciprocal_rank_fusion(
                     [dense_results, rescue_results],
                     k=self._config.rrf_k,
