@@ -573,7 +573,8 @@ class TestSearchDelegation:
                 "id": str(chunk.id),
                 "content": "hello world",
                 "score": 0.9,
-                "source": "notes/a.md",
+                # str(Path) — platform separator (Windows: notes\a.md)
+                "source": str(Path("notes/a.md")),
                 "tags": ["t1"],
                 "namespace": "default",
                 "rank": 1,
@@ -629,7 +630,8 @@ class TestGetDelete:
         assert got == {
             "id": str(chunk.id),
             "content": "c",
-            "source": "n/a.md",
+            # str(Path) — platform separator (Windows: n\a.md)
+            "source": str(Path("n/a.md")),
             "tags": ["x"],
             "namespace": "ns",
         }

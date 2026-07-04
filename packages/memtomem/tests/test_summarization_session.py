@@ -57,8 +57,10 @@ class TestFormatChunksForPrompt:
         )
 
         blocks = body.split("\n\n")
-        assert blocks[0] == "--- chunk 1 | notes/a.md | Top > Sub ---\nfirst body"
-        assert blocks[1] == "--- chunk 2 | notes/b.md ---\nsecond body"
+        # str(Path(...)) so the expected header matches the platform's
+        # path separator (Windows renders notes\a.md).
+        assert blocks[0] == f"--- chunk 1 | {Path('notes/a.md')} | Top > Sub ---\nfirst body"
+        assert blocks[1] == f"--- chunk 2 | {Path('notes/b.md')} ---\nsecond body"
 
     def test_omits_heading_segment_when_hierarchy_empty(self):
         body = _format_chunks_for_prompt([_chunk("plain", headings=())])
