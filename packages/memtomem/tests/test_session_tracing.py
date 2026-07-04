@@ -15,10 +15,14 @@ from memtomem.config import (
     coerce_and_validate,
     FIELD_CONSTRAINTS,
 )
+import logging
+
+import memtomem.observability.session_tracing as session_tracing
 from memtomem.observability.session_tracing import (
     _redact_metadata,
     format_payload,
     format_propagated_metadata,
+    get_trace_config,
     sanitize_metadata_key,
     sanitize_metadata_value,
     trace_session,
@@ -283,6 +287,56 @@ class TestPayloadSanitization:
         assert "specialkey" in clean_meta
         assert len(clean_meta["specialkey"]) == 200
         assert clean_meta["specialkey"].endswith("...")
+
+
+class TestConfigLoadLoudness:
+    """#1612: a config-load failure disables tracing; it must be loud
+    once (WARNING) then quiet (DEBUG) rather than a silent ``pass`` that
+    drops every trace with no signal."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_module_state(self, monkeypatch: pytest.MonkeyPatch):
+        # The config singleton + warn-once flag are process-global.
+        monkeypatch.setattr(session_tracing, "_trace_config", None)
+        monkeypatch.setattr(session_tracing, "_config_load_warned", False)
+        yield
+        monkeypatch.setattr(session_tracing, "_trace_config", None)
+        monkeypatch.setattr(session_tracing, "_config_load_warned", False)
+
+    def _break_config_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import memtomem.config as _cfg
+
+        def _boom(*a, **k):
+            raise RuntimeError("config.d unreadable")
+
+        monkeypatch.setattr(_cfg, "load_config_d", _boom)
+
+    def test_config_load_failure_warns_once_and_disables(
+        self, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        self._break_config_load(monkeypatch)
+        with caplog.at_level(logging.DEBUG, logger="memtomem.observability.session_tracing"):
+            cfg = get_trace_config(force_reload=True)
+
+        # Falls back to the disabled DummyConfig rather than raising.
+        assert cfg.enabled is False
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "config load failed" in r.message
+        ]
+        assert len(warnings) == 1, "first config-load failure must be loud (WARNING)"
+
+    def test_repeat_config_load_failure_downgrades_to_debug(
+        self, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        self._break_config_load(monkeypatch)
+        with caplog.at_level(logging.DEBUG, logger="memtomem.observability.session_tracing"):
+            get_trace_config(force_reload=True)
+            get_trace_config(force_reload=True)
+
+        records = [r for r in caplog.records if "config load failed" in r.message]
+        assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG]
 
 
 class TestTraceSessionContext:

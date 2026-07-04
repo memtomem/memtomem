@@ -7,16 +7,59 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
 _trace_config: Optional[Any] = None
 _langfuse_client: Optional[Any] = None
 
+# Config-load failure disables tracing invisibly; log it once so a
+# broken config doesn't silently drop every trace (loud once, then
+# DEBUG per feedback_silent_except_log_level — reference pattern:
+# storage/mixins/schedules.py).
+_config_load_warned = False
+
+
+class TraceContext(TypedDict):
+    """Mutable per-command trace state yielded from :func:`trace_session`.
+
+    Typed so ``ctx["exit_code"]``/``ctx["status"]`` etc. keep their
+    concrete types instead of collapsing to an ``int | dict | str | None``
+    union the moment the literal dict is inferred (#1612). Callers mutate
+    ``status`` / ``exit_code`` / ``metadata`` in place.
+    """
+
+    session_id: Optional[str]
+    agent_id: str
+    metadata: Dict[str, Any]
+    payload: Dict[str, Any]
+    exit_code: int
+    status: str
+
+
+class TraceRow(TypedDict):
+    """One JSONL trace record. Pins the heterogeneous value types so the
+    ``row`` dict in :func:`_write_local_jsonl` stops inferring
+    ``dict[str, object]`` and threading an ``int | dict | str | None``
+    union into ``_write_local_jsonl``'s typed parameters (#1612)."""
+
+    trace_id: str
+    session_id: Optional[str]
+    agent_id: str
+    command: str
+    event_type: str
+    started_at: str
+    ended_at: str
+    duration_ms: float
+    status: str
+    exit_code: int
+    metadata: Dict[str, Any]
+    payload: Any
+
 
 def get_trace_config(*, force_reload: bool = False) -> Any:
-    global _trace_config
+    global _trace_config, _config_load_warned
     if force_reload:
         _trace_config = None
     if _trace_config is None:
@@ -28,7 +71,15 @@ def get_trace_config(*, force_reload: bool = False) -> Any:
             load_config_overrides(cfg)
             _trace_config = getattr(cfg, "session_trace", None)
         except Exception:
-            pass
+            # Fall through to DummyConfig (tracing disabled). Loud once so
+            # an operator whose config broke sees why traces stopped.
+            level = logging.DEBUG if _config_load_warned else logging.WARNING
+            _config_load_warned = True
+            logger.log(
+                level,
+                "session-trace config load failed; tracing disabled",
+                exc_info=True,
+            )
         if _trace_config is None:
 
             class DummyConfig:
@@ -117,6 +168,10 @@ def _redact_value(val: Any) -> Any:
                 redacted_parsed = _redact_value(parsed)
                 return json.dumps(redacted_parsed, default=str)
             except Exception:
+                # Not valid JSON after all — fall through to scan the raw
+                # string. No log: this is an expected, benign miss (any
+                # ``{``/``[``-bracketed non-JSON text), and the string
+                # still gets secret-scanned below, so nothing leaks.
                 pass
 
         # Scan for secrets using memtomem.privacy.scan
@@ -209,10 +264,10 @@ def trace_session(
     session_id: Optional[str] = None,
     initial_metadata: Optional[Dict[str, Any]] = None,
     initial_payload: Optional[Dict[str, Any]] = None,
-) -> Generator[Dict[str, Any], None, None]:
+) -> Generator[TraceContext, None, None]:
     config = get_trace_config()
     if not getattr(config, "enabled", False):
-        ctx = {
+        disabled_ctx: TraceContext = {
             "session_id": session_id,
             "agent_id": agent_id,
             "metadata": initial_metadata.copy() if initial_metadata else {},
@@ -220,14 +275,14 @@ def trace_session(
             "exit_code": 0,
             "status": "success",
         }
-        yield ctx
+        yield disabled_ctx
         return
 
     start_time = time.perf_counter()
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     trace_id = str(uuid.uuid4())
 
-    ctx = {
+    ctx: TraceContext = {
         "session_id": session_id,
         "agent_id": agent_id,
         "metadata": initial_metadata.copy() if initial_metadata else {},
@@ -261,6 +316,7 @@ def trace_session(
         command_exception = None
         span = None
         try:
+            propagate_attributes: Any = None
             try:
                 from langfuse import propagate_attributes
             except Exception as exc:
@@ -389,7 +445,8 @@ def trace_session(
                 raise command_exception
         finally:
             try:
-                langfuse_client.flush()
+                if langfuse_client is not None:
+                    langfuse_client.flush()
             except Exception as e:
                 logger.warning("Failed to flush Langfuse client: %s", e)
 
@@ -476,7 +533,7 @@ def _write_local_jsonl(
         jsonl_path = Path(jsonl_path_raw).expanduser().resolve()
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
 
-        row = {
+        row: TraceRow = {
             "trace_id": trace_id,
             "session_id": session_id,
             "agent_id": agent_id,
