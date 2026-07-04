@@ -684,11 +684,11 @@ class WikiStore:
         """``True`` when the wiki working tree has uncommitted modifications.
 
         Wraps ``git status --porcelain`` — true on any combination of
-        modified-tracked, staged, or untracked files. Used by ``mm
-        context update`` to warn the user that the recorded pin reflects
-        HEAD only, not the dirty working tree. (Single-asset install
-        refuses instead, and only on the asset's own dirt — see
-        :meth:`asset_uncommitted_paths`, #1643.)
+        modified-tracked, staged, or untracked files. Used by the web
+        wiki-status surfaces and the commit flow's ``wiki_dirty`` echo.
+        (The install/update verbs never consult this repo-wide view:
+        their commit-true gates refuse on the asset's OWN dirt only —
+        see :meth:`asset_uncommitted_paths`, #1643/#1652.)
 
         Returns ``False`` if the wiki is clean. Raises ``WikiNotFoundError``
         if the wiki itself is missing (no ``.git`` directory) — caller
@@ -735,8 +735,9 @@ class WikiStore:
         :meth:`current_commit` before this, so they never get here unborn.
         Shares :meth:`is_dirty`'s ``.gitattributes`` caveat: a normalizing
         clean/eol filter can make committed files read permanently dirty,
-        which under the #1643 install gate means a permanent refusal until
-        the filter is dropped (memtomem ships no ``.gitattributes``).
+        which under the #1643/#1652 install/update gates means a permanent
+        refusal until the filter is dropped (memtomem ships no
+        ``.gitattributes``).
         """
         self.require_exists()
         prefix = f"{asset_type}/{name}/"
@@ -968,8 +969,11 @@ class WikiStore:
            filesystem, so subsequent ``copy_tree_atomic`` rename steps
            don't span devices).
         5. ``copy_tree_atomic(tmpdir, dest)`` mirrors the structure into
-           *dest* using the same per-file atomic semantics as
-           :func:`memtomem.context.install._install_asset`.
+           *dest* using the same per-file atomic semantics as the
+           commit-true install/update verbs
+           (:func:`memtomem.context.install._install_asset` /
+           ``_apply_update``, #1643/#1652), which both extract through
+           this method.
 
         The wiki working tree is **never touched** — every read uses the
         commit's git objects directly, so a concurrent ``git checkout``

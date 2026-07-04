@@ -35,8 +35,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   never contained them. As part of the same fix, committed symlinks are now
   skipped (with a warning) during commit extraction — previously the pinned
   `install --all` restore path materialized the symlink's *target path* as
-  file content. `mm context update` still copies the working tree; tracked
-  as a follow-up.
+  file content.
+- **`mm context update` is commit-true** (#1652) — update (single asset and
+  `--all`) now extracts from the wiki's git objects at HEAD like install
+  (#1643), closing the same unreproducible-pin defect on the last verb that
+  had it: previously update copied the dirty worktree bytes while pinning
+  HEAD. A write refuses with `UncommittedAssetError` (CLI, also on `--all`
+  and `--dry-run`, which exit non-zero) / HTTP 409 `wiki_uncommitted` (web)
+  when the asset's wiki working tree differs from HEAD; `--force` does NOT
+  bypass this (it only overrides project-side edits), and dirt elsewhere in
+  the wiki does not block. A no-op update (pin already at HEAD) still
+  succeeds and prints an asset-scoped note when the asset has uncommitted
+  wiki edits. The repo-wide `_WIKI_DIRTY_WARN` stderr warning is removed —
+  its wording ("using HEAD which doesn't include them") described the
+  opposite of what update actually did. Behavior change: a pin already at
+  HEAD with the asset directory deleted from the wiki worktree now reports
+  `unchanged` (exit 0) instead of "not in wiki" — the no-op short-circuit
+  runs before the presence gate because nothing would be written. With both
+  verbs commit-true, `install --all --force`'s data-safety no-op now
+  protects legacy-lockfile rows only; no verb can mint pin≠bytes entries.
 
 ### Added
 

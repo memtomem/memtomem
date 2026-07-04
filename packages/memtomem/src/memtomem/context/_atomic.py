@@ -461,9 +461,10 @@ def iter_installed_files(root: Path) -> Iterator[Path]:
 
     Enumeration is FAIL-CLOSED by design: an unreadable directory or entry
     raises ``OSError`` rather than silently shrinking the result. The
-    privacy-gate source scan (``install._gate_a_scan_src_tree``) walks this
-    to decide what to copy, so a silently-dropped file would be copied
-    UNSCANNED — the same fail-open hole the skills-import scanner avoids with
+    ``--force`` update/restore paths walk this to enumerate the dest files
+    to preserve as ``.bak`` before overwriting, so a silently-dropped file
+    would be clobbered with NO ``.bak`` — the same fail-open hole the
+    skills-import scanner avoids with
     its own fail-closed walker. Callers that must instead survive an
     unreadable subtree (the read-only ``is_asset_dirty`` status walk) wrap the
     iteration in their own ``try``/``except OSError`` and degrade to "dirty"

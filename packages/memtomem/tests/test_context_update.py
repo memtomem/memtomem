@@ -27,8 +27,10 @@ from memtomem.cli.context_cmd import context as context_group
 from memtomem.context._names import InvalidNameError
 from memtomem.context.install import (
     AlreadyInstalledError,
+    AssetNotFoundError,
     NotInstalledError,
     StaleInstallError,
+    UncommittedAssetError,
     _classify_for_all_update,
     install_skill,
     update_agent,
@@ -1140,40 +1142,50 @@ def test_cli_update_all_force_baks_file_dirtied_during_confirm_prompt(
     assert second.read_bytes() == b"e2\n"
 
 
-# ── CLI: wiki dirty warn timing (single-asset & --all) ──────────────────
+# ── CLI: dirt OUTSIDE the asset never blocks or warns (#1652) ────────────
+# (Replaces the pre-#1652 repo-wide `_WIKI_DIRTY_WARN` timing tests: the
+# warn is gone — wiki dirt is now an asset-scoped hard gate on writes and
+# an asset-scoped hint on no-ops; dirt elsewhere is silent, install parity.)
 
 
-def test_cli_update_wiki_dirty_warn_single_asset(
+def test_cli_update_dirt_outside_asset_proceeds_silently(
     wiki_root: Path,
     project_cwd: Path,
 ) -> None:
-    """Single-asset path: wiki dirty → warn on stderr at update entry."""
+    """Single-asset path: dirt outside the asset → update writes, no warning."""
     _initialized_wiki(wiki_root)
     _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    _seed_wiki_skill(wiki_root, "other", {"SKILL.md": b"other-v1\n"})
     install_skill(project_cwd, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
 
-    # Make the wiki dirty.
+    # Dirt everywhere EXCEPT skills/foo: repo root + a sibling asset.
     (wiki_root / "untracked_marker.txt").write_text("wip", encoding="utf-8")
+    (wiki_root / "skills" / "other" / "SKILL.md").write_bytes(b"other-dirty\n")
 
     runner = CliRunner()
     result = runner.invoke(context_group, ["update", "skill", "foo"])
 
     assert result.exit_code == 0, result.output
-    assert "wiki has uncommitted changes" in result.output
+    assert "Updated skills/foo" in result.output
+    assert "uncommitted" not in result.output
+    dest = project_cwd / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    assert dest.read_bytes() == b"v2\n"
 
 
-def test_cli_update_wiki_dirty_warn_all(
+def test_cli_update_all_dirt_outside_asset_proceeds(
     wiki_root: Path,
     project_cwd: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--all path: wiki dirty → warn on stderr BEFORE classification."""
+    """--all path: dirt outside the asset → batch writes, exit 0, no warning."""
     _initialized_wiki(wiki_root)
     _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
     proj = tmp_path / "p"
     proj.mkdir()
     install_skill(proj, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
 
     (wiki_root / "untracked_marker.txt").write_text("wip", encoding="utf-8")
 
@@ -1185,23 +1197,8 @@ def test_cli_update_wiki_dirty_warn_all(
     result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert "wiki has uncommitted changes" in result.output
-
-
-def test_cli_update_no_wiki_dirty_warn_when_clean(
-    wiki_root: Path,
-    project_cwd: Path,
-) -> None:
-    """Negative pin: clean wiki → no dirty warn line."""
-    _initialized_wiki(wiki_root)
-    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
-    install_skill(project_cwd, "foo")
-
-    runner = CliRunner()
-    result = runner.invoke(context_group, ["update", "skill", "foo"])
-
-    assert result.exit_code == 0, result.output
-    assert "wiki has uncommitted changes" not in result.output
+    assert "uncommitted" not in result.output
+    assert (proj / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
 
 
 # ── B1: upstream-deletion reconcile + deletion-dirty (#1247) ─────────────
@@ -1500,8 +1497,10 @@ class TestUpdatePrivacyGate:
         privacy.reset_for_tests()
 
     def test_update_blocks_on_poisoned_wiki_src(self, wiki_root: Path, tmp_path: Path) -> None:
-        """Design test 2: secret lands in the wiki → update hard-refuses
-        BEFORE any dest write — zero residue (old bytes, old pin, no .bak)."""
+        """Design test 2: secret lands in the wiki HEAD (committed — #1652's
+        pinned Gate A scans git objects, not the worktree) → update
+        hard-refuses BEFORE any dest write — zero residue (old bytes, old
+        pin, no .bak)."""
         _initialized_wiki(wiki_root)
         old_commit = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
         project = tmp_path
@@ -1982,3 +1981,459 @@ def test_cli_update_all_dry_run_all_up_to_date(
 
     assert result.exit_code == 0, result.output
     assert "All projects are up to date." in result.output
+
+
+# ── commit-true update (#1652) ───────────────────────────────────────────
+#
+# Update extracts bytes from git objects at HEAD (mirror of the #1643
+# install contract) and refuses when the asset's OWN worktree state differs
+# from HEAD — never force-able (--force is the dest-side axis). The no-op
+# path (pin already at HEAD) runs BEFORE the gates: nothing would be
+# written, so uncommitted wiki edits only produce an asset-scoped hint.
+
+
+def _install_and_advance(wiki_root: Path, project: Path) -> tuple[str, str]:
+    """Seed+install skills/foo at v1, then advance the wiki to v2 (clean).
+
+    Returns ``(old_pin, new_pin)`` — the standard would-write posture for
+    the gate tests (pin != HEAD, so update is not a no-op).
+    """
+    _initialized_wiki(wiki_root)
+    old_pin = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project, "foo")
+    new_pin = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    return old_pin, new_pin
+
+
+def _assert_update_zero_residue(project: Path, *, old_pin: str) -> None:
+    """A wiki-side refusal must leave dest bytes, pin, and .bak state untouched."""
+    dest = project / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").read_bytes() == b"v1\n"
+    assert _lock_entry(project, "skills", "foo")["wiki_commit"] == old_pin
+    assert list(dest.rglob("*.bak")) == []
+
+
+def test_update_refuses_modified_tracked_file(wiki_root: Path, tmp_path: Path) -> None:
+    old_pin, _ = _install_and_advance(wiki_root, tmp_path)
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    with pytest.raises(UncommittedAssetError) as excinfo:
+        update_skill(tmp_path, "foo")
+
+    msg = str(excinfo.value)
+    assert "differs from HEAD" in msg
+    assert "SKILL.md" in msg
+    assert "`mm wiki skill commit foo --canonical`" in msg
+    assert "git directly" in msg
+    _assert_update_zero_residue(tmp_path, old_pin=old_pin)
+
+
+def test_update_refuses_untracked_file_inside_asset(wiki_root: Path, tmp_path: Path) -> None:
+    old_pin, _ = _install_and_advance(wiki_root, tmp_path)
+    (wiki_root / "skills" / "foo" / "notes.md").write_bytes(b"scratch\n")
+
+    with pytest.raises(UncommittedAssetError, match="notes.md"):
+        update_skill(tmp_path, "foo")
+    _assert_update_zero_residue(tmp_path, old_pin=old_pin)
+
+
+def test_update_refuses_worktree_deletion(wiki_root: Path, tmp_path: Path) -> None:
+    old_pin, _ = _install_and_advance(wiki_root, tmp_path)
+    (wiki_root / "skills" / "foo" / "SKILL.md").unlink()
+
+    with pytest.raises(UncommittedAssetError, match="SKILL.md"):
+        update_skill(tmp_path, "foo")
+    _assert_update_zero_residue(tmp_path, old_pin=old_pin)
+
+
+def test_update_force_does_not_bypass_uncommitted_gate(wiki_root: Path, tmp_path: Path) -> None:
+    """--force is the dest-side axis; wiki-side dirt refuses regardless."""
+    old_pin, _ = _install_and_advance(wiki_root, tmp_path)
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    with pytest.raises(UncommittedAssetError):
+        update_skill(tmp_path, "foo", force=True)
+    _assert_update_zero_residue(tmp_path, old_pin=old_pin)
+
+
+def test_update_refuses_asset_absent_at_head_but_in_worktree(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """HEAD drops the asset but the worktree keeps it → uncommitted, not
+    absent: the pin the update would record would not contain the asset."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "rm", "-r", "--cached", "skills/foo"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "drop foo from history"],
+        check=True,
+        capture_output=True,
+    )
+    assert (wiki_root / "skills" / "foo" / "SKILL.md").exists()
+
+    with pytest.raises(UncommittedAssetError, match="not present at HEAD"):
+        update_skill(tmp_path, "foo")
+
+
+def test_update_absent_everywhere_still_asset_not_found(wiki_root: Path, tmp_path: Path) -> None:
+    """Worktree AND HEAD both lack the asset → the plain AssetNotFoundError
+    message survives the gate rewrite (pin != HEAD so the no-op does not
+    swallow it)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "rm", "-r", "skills/foo"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(wiki_root), "commit", "-m", "drop foo entirely"],
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(AssetNotFoundError, match="not in wiki"):
+        update_skill(tmp_path, "foo")
+
+
+def test_update_dirt_in_other_asset_does_not_block(wiki_root: Path, tmp_path: Path) -> None:
+    """Engine-level twin of the CLI negatives: the gate is pathspec-scoped."""
+    _, new_pin = _install_and_advance(wiki_root, tmp_path)
+    _seed_wiki_skill(wiki_root, "other", {"SKILL.md": b"other-v1\n"})
+    (wiki_root / "skills" / "other" / "SKILL.md").write_bytes(b"other-dirty\n")
+    (wiki_root / "stray.txt").write_bytes(b"wip\n")
+
+    result = update_skill(tmp_path, "foo")
+
+    assert result.was_no_op is False
+    dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    assert dest.read_bytes() == b"v2\n"
+
+
+def test_update_ignores_skip_filtered_dirt(wiki_root: Path, tmp_path: Path) -> None:
+    """Untracked files the extractor would never copy (.DS_Store, *.bak)
+    are not dirt. The wiki scaffold .gitignore is stripped so the rows
+    actually reach the is_copy_skipped_rel filter (legacy-clone shape)."""
+    store = _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    gitignore = store.root / ".gitignore"
+    if gitignore.exists():
+        gitignore.write_text("", encoding="utf-8")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    exclude = store.root / ".git" / "info" / "exclude"
+    if exclude.exists():
+        exclude.write_text("", encoding="utf-8")
+    (wiki_root / "skills" / "foo" / ".DS_Store").write_bytes(b"\x00\x00")
+    (wiki_root / "skills" / "foo" / "SKILL.md.bak").write_bytes(b"old\n")
+    assert store.asset_uncommitted_paths("skills", "foo")
+
+    result = update_skill(tmp_path, "foo")
+
+    assert result.was_no_op is False
+    dest = tmp_path / ".memtomem" / "skills" / "foo"
+    assert (dest / "SKILL.md").read_bytes() == b"v2\n"
+    assert not (dest / ".DS_Store").exists()
+    assert not (dest / "SKILL.md.bak").exists()
+
+
+def test_update_commit_true_bytes(wiki_root: Path, tmp_path: Path) -> None:
+    """The refreshed bytes and lockfile digests describe exactly the bytes
+    at the pinned commit — the literal #1652 contract."""
+    import hashlib
+
+    store = _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    new_pin = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    result = update_skill(tmp_path, "foo")
+
+    assert result.new_wiki_commit == new_pin
+    dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    pin_bytes = store.read_asset_file_at_commit(new_pin, "skills", "foo", "SKILL.md")
+    assert dest.read_bytes() == pin_bytes
+    entry = _lock_entry(tmp_path, "skills", "foo")
+    assert entry["digests"]["SKILL.md"] == hashlib.sha256(pin_bytes).hexdigest()
+    assert entry["files_commit"] == new_pin
+
+
+def test_update_no_op_before_gate(wiki_root: Path, tmp_path: Path) -> None:
+    """Pin already at HEAD + dirty asset → unchanged succeeds (the gate only
+    protects writes) and the lockfile bytes stay byte-identical."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "foo")
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2 uncommitted\n")
+    lock_path = tmp_path / ".memtomem" / "lock.json"
+    pre_lock_bytes = lock_path.read_bytes()
+
+    result = update_skill(tmp_path, "foo")
+
+    assert result.was_no_op is True
+    assert lock_path.read_bytes() == pre_lock_bytes
+
+
+def test_update_gate_a_hint_is_update_flavored(wiki_root: Path, tmp_path: Path) -> None:
+    """The pinned Gate A scan on the update path carries update wording, not
+    the default restore-flavored hint ("re-pin … before restoring")."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "leak", {"SKILL.md": b"v1\n"})
+    install_skill(tmp_path, "leak")
+    _modify_wiki_skill(wiki_root, "leak", {"SKILL.md": b"# leak\n" + SECRET.encode() + b"\n"})
+
+    with pytest.raises(PrivacyBlockedError) as excinfo:
+        update_skill(tmp_path, "leak")
+
+    msg = excinfo.value.message
+    assert "re-run update" in msg
+    assert "restoring" not in msg
+
+
+def test_cli_update_uncommitted_message(wiki_root: Path, project_cwd: Path) -> None:
+    """CLI surface: exit 1 with the file list + runnable commit hint, no
+    traceback."""
+    old_pin, _ = _install_and_advance(wiki_root, project_cwd)
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+    assert result.exit_code == 1, result.output
+    assert "differs from HEAD" in result.output
+    assert "`mm wiki skill commit foo --canonical`" in result.output
+    assert "Traceback" not in result.output
+    _assert_update_zero_residue(project_cwd, old_pin=old_pin)
+
+
+def test_cli_update_noop_dirty_asset_hints(wiki_root: Path, project_cwd: Path) -> None:
+    """Pin at HEAD + dirty asset → exit 0 "unchanged" plus the asset-scoped
+    stderr note (the answer to "why didn't my wiki edit land?")."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2 uncommitted\n")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+    assert result.exit_code == 0, result.output
+    assert "unchanged" in result.output
+    assert "uncommitted wiki edits" in result.output
+    assert "`mm wiki skill commit foo --canonical`" in result.output
+
+
+def test_cli_update_noop_clean_asset_no_hint(wiki_root: Path, project_cwd: Path) -> None:
+    """Negative pin: a clean no-op prints no note (and dirt OUTSIDE the
+    asset doesn't produce one either)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    (wiki_root / "stray.txt").write_bytes(b"wip\n")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+    assert result.exit_code == 0, result.output
+    assert "uncommitted wiki edits" not in result.output
+
+
+def test_cli_update_all_refuses_dirty_asset_batch(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--all with a dirty asset and at least one would-write row refuses the
+    whole batch before the prompt — exit 1, zero writes."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj_behind = tmp_path / "behind"
+    proj_behind.mkdir()
+    install_skill(proj_behind, "foo")
+    new_pin = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    proj_current = tmp_path / "current"
+    proj_current.mkdir()
+    install_skill(proj_current, "foo")
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_behind, proj_current])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes", "--force"])
+
+    assert result.exit_code == 1, result.output
+    assert "differs from HEAD" in result.output
+    assert "Refusing to write any project" in result.output
+    behind_dest = proj_behind / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    assert behind_dest.read_bytes() == b"v1\n"
+    assert (
+        json.loads((proj_behind / ".memtomem" / "lock.json").read_text())["skills"]["foo"][
+            "wiki_commit"
+        ]
+        != new_pin
+    )
+
+
+def test_cli_update_all_dirty_asset_all_unchanged_is_up_to_date(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--all with a dirty asset but every pin at HEAD: nothing would write,
+    so exit 0 "up to date" plus the asset-scoped note (no refusal)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj = tmp_path / "p"
+    proj.mkdir()
+    install_skill(proj, "foo")
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v2 uncommitted\n")
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "All projects are up to date." in result.output
+    assert "uncommitted wiki edits" in result.output
+
+
+def test_cli_update_dry_run_dirty_asset_exits_nonzero(wiki_root: Path, project_cwd: Path) -> None:
+    """Single --dry-run: the wiki-side gate is not force-able, so the dry
+    run fails the way the real run would (the not-installed precedent) —
+    unlike dest-side refuse rows, which preview with exit 0."""
+    old_pin, _ = _install_and_advance(wiki_root, project_cwd)
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run"])
+
+    assert result.exit_code == 1, result.output
+    assert "the real run would refuse" in result.output
+    assert "differs from HEAD" in result.output
+    _assert_update_zero_residue(project_cwd, old_pin=old_pin)
+
+
+def test_cli_update_all_dry_run_dirty_asset_exits_nonzero(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--all --dry-run mirrors the wet batch's wiki-side refusal: exit 1
+    when a would-write row meets a dirty asset."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj = tmp_path / "p"
+    proj.mkdir()
+    install_skill(proj, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--dry-run"])
+
+    assert result.exit_code == 1, result.output
+    assert "the real run would refuse" in result.output
+    assert (proj / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
+
+
+def test_update_wiki_gate_precedes_dest_dirty_gate(wiki_root: Path, tmp_path: Path) -> None:
+    """Single-asset gate precedence: when BOTH the wiki asset and the dest
+    tree are dirty, the wiki-side UncommittedAssetError fires (the engine's
+    wiki gates run before _apply_update's dest classification) — the parity
+    anchor for --all's refuse-row gating below."""
+    _install_and_advance(wiki_root, tmp_path)
+    dest = tmp_path / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    dest.write_bytes(b"local edit\n")
+    _bump_mtime(dest)
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    with pytest.raises(UncommittedAssetError):
+        update_skill(tmp_path, "foo")
+    # Not force-able either — still the wiki error, not a .bak write.
+    with pytest.raises(UncommittedAssetError):
+        update_skill(tmp_path, "foo", force=True)
+    assert dest.read_bytes() == b"local edit\n"
+    assert not dest.with_suffix(dest.suffix + ".bak").exists()
+
+
+def _seed_refuse_only_dirty_batch(
+    wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """One project with LOCAL dest edits (refuse row), wiki advanced past its
+    pin, and the wiki asset left dirty — the refuse-only × dirty-wiki grid
+    cell (no update rows)."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj = tmp_path / "p"
+    proj.mkdir()
+    install_skill(proj, "foo")
+    edited = proj / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local edit\n")
+    _bump_mtime(edited)
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"v3 uncommitted\n")
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+    return proj
+
+
+def test_cli_update_all_refuse_only_dirty_asset_prefers_wiki_refusal(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refuse-only batch WITHOUT --force still surfaces the wiki-side
+    refusal, not the per-project "pass --force" hint — single-asset parity
+    (the engine fires the wiki gate before the dest-dirty gate there too),
+    and committing the wiki dirt moves HEAD, invalidating this preview."""
+    proj = _seed_refuse_only_dirty_batch(wiki_root, tmp_path, monkeypatch)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
+
+    assert result.exit_code == 1, result.output
+    assert "differs from HEAD" in result.output
+    assert "pass --force" not in result.output
+    edited = proj / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    assert edited.read_bytes() == b"local edit\n"
+    assert not edited.with_suffix(edited.suffix + ".bak").exists()
+
+
+def test_cli_update_all_dry_run_refuse_only_dirty_asset_exits_nonzero(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--all --dry-run on the refuse-only × dirty-wiki cell mirrors the wet
+    run above: exit 1 with the wiki-side message (a dest-side refuse row
+    alone still previews with exit 0 — pinned elsewhere)."""
+    _seed_refuse_only_dirty_batch(wiki_root, tmp_path, monkeypatch)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--dry-run"])
+
+    assert result.exit_code == 1, result.output
+    assert "the real run would refuse" in result.output
+    assert "differs from HEAD" in result.output

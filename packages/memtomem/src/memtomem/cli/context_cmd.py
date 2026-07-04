@@ -47,8 +47,10 @@ from memtomem.context.install import (
     UncommittedAssetError,
     _apply_pinned_install,
     _apply_update,
+    _asset_dirty_rels,
     _classify_for_all_update,
     _classify_for_install_all,
+    _commit_hint,
     install_agent,
     install_command,
     install_skill,
@@ -1907,7 +1909,43 @@ def install_cmd(
     click.echo(f"  {result.files_written} file(s) copied")
 
 
-_WIKI_DIRTY_WARN = "warning: wiki has uncommitted changes; using HEAD which doesn't include them"
+def _maybe_hint_dirty_noop(wiki: WikiStore, asset_type_plural: str, name: str) -> None:
+    """Asset-scoped stderr note on a no-op update whose wiki asset is dirty (#1652).
+
+    The commit-true gates only protect writes, so a pin-already-at-HEAD
+    update succeeds without them — but a user who just edited the wiki and
+    ran ``update`` would otherwise see a bare "unchanged" and wonder why
+    the edit didn't land. One pathspec-scoped ``git status`` per no-op;
+    dirt outside the asset stays silent (install parity).
+    """
+    if _asset_dirty_rels(wiki, asset_type_plural, name):
+        singular = asset_type_plural.removesuffix("s")
+        click.secho(
+            f"note: {asset_type_plural}/{name} has uncommitted wiki edits; commit "
+            f"them (`mm wiki {singular} commit {name} --canonical`) and re-run "
+            f"update to make them installable",
+            fg="yellow",
+            err=True,
+        )
+
+
+def _dirty_asset_refusal_text(
+    wiki: WikiStore, asset_type_plural: str, name: str, dirty: list[str]
+) -> str:
+    """Refusal copy for the wiki-side dirty gate on the batch/dry-run paths (#1652).
+
+    Mirrors the engine's single-asset ``UncommittedAssetError`` message so
+    both surfaces read identically; ``--force`` is deliberately not offered
+    as a bypass (it only overrides project-side edits, never wiki dirt).
+    """
+    shown = ", ".join(dirty[:5])
+    more = "" if len(dirty) <= 5 else f", +{len(dirty) - 5} more"
+    return (
+        f"{asset_type_plural}/{name}: wiki working tree differs from HEAD for "
+        f"this asset ({len(dirty)} file(s): {shown}{more}); update is "
+        f"commit-true and records HEAD's bytes only (--force only overrides "
+        f"project-side edits) — {_commit_hint(wiki, asset_type_plural, name)}"
+    )
 
 
 @context.command("update")
@@ -1939,7 +1977,8 @@ _WIKI_DIRTY_WARN = "warning: wiki has uncommitted changes; using HEAD which does
     help=(
         "Classify and print the preview only — nothing is written and no "
         "prompt is shown. Exits 0 whenever the preview was computable, "
-        "including rows the real run would refuse."
+        "including project-side rows the real run would refuse; wiki-side "
+        "uncommitted-asset refusals exit non-zero like the real run."
     ),
 )
 def update_cmd(
@@ -1952,37 +1991,48 @@ def update_cmd(
 ) -> None:
     """Refresh an installed wiki asset from the wiki HEAD.
 
+    Commit-true (#1652): bytes are extracted from git objects at HEAD, so
+    a write refuses with a ``mm wiki <type> commit`` hint when the
+    asset's wiki working tree differs from HEAD (``--force`` does NOT
+    bypass this — it only overrides project-side edits). Dirt elsewhere
+    in the wiki never blocks. A no-op (pin already at HEAD) still
+    succeeds and prints an asset-scoped note when the asset has
+    uncommitted wiki edits.
+
     Without ``--all``: refresh in the current project only. No-op when
     the wiki commit pinned in ``.memtomem/lock.json`` already matches
     the wiki HEAD — the lockfile is not touched and ``unchanged`` is
     reported. Refuses to write when local edits are detected, unless
     ``--force`` is passed (each dirty file is preserved as ``<file>.bak``
-    before overwriting with wiki bytes).
+    before overwriting with the pinned bytes).
 
     With ``--all``: classify the asset across every known project, print
     a 4-state preview (update / unchanged / refuse / error), prompt for
-    confirmation, then refresh each project that needs it. ``--yes``
+    confirmation, then refresh each project that needs it. The wiki-side
+    dirty gate fires once per batch, before the prompt, whenever any
+    ``update`` or ``refuse`` row exists (regardless of ``--force`` —
+    single-asset parity; an all-unchanged batch only hints). ``--yes``
     skips the prompt for automation. ``--yes --force`` is the
     automation invariant — destructive batch with WARNING on stderr,
     no prompt.
 
     With ``--dry-run``: print the same 4-state preview and stop — no
-    writes, no prompt. Works with and without ``--all``; a not-installed
-    asset still exits non-zero with the install hint (a dry run of an
-    impossible update fails the way the real run would).
+    writes, no prompt. Works with and without ``--all``. Project-side
+    ``refuse`` rows preview with exit 0; failures the real run could not
+    be forced past — a not-installed asset, or the wiki-side uncommitted
+    gate — exit non-zero the way the real run would.
     """
     root = _find_project_root()
 
-    # Pin wiki + dirty warn — applies to both single-asset and --all paths.
-    # Warn timing: at update entry, BEFORE classification, BEFORE prompt.
+    # Pin wiki once — applies to both single-asset and --all paths. The old
+    # repo-wide dirty WARN that lived here is gone (#1652): wiki-side dirt
+    # is now an asset-scoped hard gate on the write paths (and a no-op
+    # hint), not a repo-wide advisory with inverted wording.
     try:
         wiki = WikiStore.at_default()
         wiki.require_exists()
     except WikiNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
-
-    if wiki.is_dirty():
-        click.secho(_WIKI_DIRTY_WARN, fg="yellow", err=True)
 
     if all_projects:
         _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force, dry_run=dry_run)
@@ -1999,6 +2049,7 @@ def update_cmd(
         AssetNotFoundError,
         NotInstalledError,
         StaleInstallError,
+        UncommittedAssetError,
         InvalidNameError,
         LockfileError,
         PrivacyScanError,
@@ -2017,6 +2068,7 @@ def update_cmd(
             f"{result.asset_type}/{result.name} unchanged (wiki {result.new_wiki_commit[:12]})",
             fg="cyan",
         )
+        _maybe_hint_dirty_noop(wiki, result.asset_type, result.name)
         return
 
     click.secho(
@@ -2052,10 +2104,15 @@ def _run_update_dry_run_single(
     preview carries the exact gate parity the ``--all`` table already has
     (dirty / flat-layout / unprovable-record, #1247 id 13 family): what
     this prints as ``refuse`` is what the real run would raise as
-    ``StaleInstallError`` — no duplicated gate logic to drift.
+    ``StaleInstallError`` — no duplicated gate logic to drift. The
+    wiki-side uncommitted gate (#1652) exits non-zero instead (the
+    not-installed precedent below: a dry run of an update the real run
+    could not be forced past fails the way the real run would).
     """
     asset_type_plural = f"{asset_type}s"
-    with _translate_to_click(InvalidNameError, AssetNotFoundError, WikiUnbornHeadError):
+    with _translate_to_click(
+        InvalidNameError, AssetNotFoundError, UncommittedAssetError, WikiUnbornHeadError
+    ):
         new_commit, classifications = _classify_for_all_update(
             asset_type_plural,
             name,
@@ -2077,12 +2134,24 @@ def _run_update_dry_run_single(
     _print_classification_table(classifications, asset_type_plural, name, new_commit)
 
     row = classifications[0]
+
+    # Wiki-side dirty gate (#1652): fires only when the real run would
+    # write (parity with the single wet path, where the no-op returns
+    # before the gate). Non-force-able, so it exits non-zero like the
+    # real run — unlike project-side refuse rows, which stay exit 0.
+    if row.state != "unchanged" and (dirty := _asset_dirty_rels(wiki, asset_type_plural, name)):
+        raise click.ClickException(
+            f"the real run would refuse — "
+            f"{_dirty_asset_refusal_text(wiki, asset_type_plural, name, dirty)}"
+        )
+
     if row.state == "update":
         old = (row.lock_entry or {}).get("wiki_commit", "")
         old_abbr = old[:12] if isinstance(old, str) and old else "(unpinned)"
         click.echo(f"\nDry run — nothing written; would update {old_abbr} → {new_commit[:12]}.")
     elif row.state == "unchanged":
         click.echo("\nDry run — nothing written; already up to date.")
+        _maybe_hint_dirty_noop(wiki, asset_type_plural, name)
     elif row.state == "refuse":
         click.echo(
             "\nDry run — nothing written; the real run would refuse "
@@ -2154,8 +2223,11 @@ def _run_update_all(
     # loop runs — the message names the rejected input verbatim.
     # WikiUnbornHeadError: ``current_commit`` fires once at classification
     # entry — a commit-less wiki (clone of an empty remote) has no HEAD to
-    # update to.
-    with _translate_to_click(InvalidNameError, AssetNotFoundError, WikiUnbornHeadError):
+    # update to. UncommittedAssetError: the classifier's HEAD-presence gate
+    # (#1652) — a worktree-only asset can never be batch-updated.
+    with _translate_to_click(
+        InvalidNameError, AssetNotFoundError, UncommittedAssetError, WikiUnbornHeadError
+    ):
         new_commit, classifications = _classify_for_all_update(
             asset_type_plural,
             name,
@@ -2178,7 +2250,34 @@ def _run_update_all(
 
     if not needs_update and not needs_force and not has_errors:
         click.echo("\nAll projects are up to date.")
+        _maybe_hint_dirty_noop(wiki, asset_type_plural, name)
         return
+
+    # Wiki-side dirty gate (#1652): asset-global, so it fires ONCE per
+    # batch — after classification, before the prompt and before any
+    # write. It triggers on `update` plus `refuse` rows REGARDLESS of
+    # --force (only an all-unchanged or error-only batch skips it):
+    # deliberate single-asset parity — the engine's wiki gates precede
+    # the dest-dirty gate there too, so a refuse-only batch without
+    # --force surfaces the wiki dirt (the batch-global, non-force-able
+    # blocker whose remedy moves HEAD and invalidates this preview)
+    # rather than the per-project "pass --force" hint. Not re-checked
+    # per row during execution: the extraction reads immutable objects
+    # at new_commit, so written bytes stay pin-reproducible even if
+    # wiki dirt appears while the user sits on the prompt.
+    if (needs_update or needs_force) and (
+        dirty := _asset_dirty_rels(wiki, asset_type_plural, name)
+    ):
+        refusal = _dirty_asset_refusal_text(wiki, asset_type_plural, name, dirty)
+        if dry_run:
+            click.echo(f"\nDry run — nothing written; the real run would refuse — {refusal}.")
+        else:
+            click.secho(
+                f"\nRefusing to write any project — {refusal}.",
+                fg="red",
+                err=True,
+            )
+        raise click.exceptions.Exit(1)
 
     if dry_run:
         # Preview verb: report what the wet run would do and stop — exit 0
@@ -2231,14 +2330,13 @@ def _run_update_all(
         # preview-only; an edit made during the confirm prompt must still
         # refuse / get its .bak).
         assert c.lock_entry is not None
-        src = wiki.root / asset_type_plural / name
         dest = c.project_root / ".memtomem" / asset_type_plural / name
         try:
             upd = _apply_update(
                 c.project_root,
                 asset_type_plural,
                 name,
-                src=src,
+                wiki=wiki,
                 dest=dest,
                 wiki_commit=new_commit,
                 lock_entry=c.lock_entry,
@@ -2246,6 +2344,13 @@ def _run_update_all(
                 surface="cli_context_update_all",
             )
         except StaleInstallError as exc:
+            click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
+            failures += 1
+        except CommitNotFoundError as exc:
+            # copy_asset_at_commit's reachability precheck: new_commit was
+            # pinned at classify time, so this needs a wiki reset + gc
+            # mid-batch — vanishingly rare, but a red row beats crashing
+            # out of the loop with earlier projects written.
             click.secho(f"  ✗ {c.project_root}: {exc}", fg="red")
             failures += 1
         except PrivacyScanError as exc:

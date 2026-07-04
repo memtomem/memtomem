@@ -113,7 +113,10 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
   (with a `mm wiki <type> commit` hint) if the asset has uncommitted changes in
   the wiki working tree — commit first, then install.
 - **Update** — `mm context update <type> <name>` refreshes an installed snapshot
-  to the wiki's latest HEAD. Add `--dry-run` to print the would-update /
+  to the wiki's latest HEAD. Update is commit-true like install: it extracts
+  the committed bytes at HEAD, and refuses (with a `mm wiki <type> commit`
+  hint; `--force` does not bypass) if the asset has uncommitted changes in
+  the wiki working tree. Add `--dry-run` to print the would-update /
   unchanged / refuse preview without writing anything (also works with
   `--all`, where it prints the batch table and skips the confirm prompt).
 
