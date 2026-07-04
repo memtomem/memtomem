@@ -28,6 +28,17 @@ def _no_extras_by_default(monkeypatch):
     monkeypatch.setattr(upgrade_cmd, "_detect_installed_extras", lambda: [])
 
 
+@pytest.fixture(autouse=True)
+def _no_db_probe_by_default(monkeypatch):
+    """Default tests skip the post-stop DB write-lock probe (#1606).
+
+    ``_resolve_db_path`` loads the real user config; returning None here
+    keeps every test off the real ``~/.memtomem``. Probe tests opt in by
+    re-patching ``_resolve_db_path`` + ``check_db_lock``.
+    """
+    monkeypatch.setattr(upgrade_cmd, "_resolve_db_path", lambda: None, raising=False)
+
+
 @pytest.fixture
 def fake_uv(monkeypatch):
     """Capture subprocess.run invocations and return scripted results."""
@@ -489,3 +500,95 @@ def _make_monotonic(values: list[float]):
         return values[-1]
 
     return _now
+
+
+# ------------------------------------------- post-stop DB probe (#1606)
+
+
+def _patch_db_probe(monkeypatch, tmp_path, *, locked: bool):
+    """Route the probe at a fake DB path with a scripted lock state."""
+    from memtomem.cli._db_lock import DbLockState
+
+    db_path = tmp_path / "memory.db"
+    monkeypatch.setattr(upgrade_cmd, "_resolve_db_path", lambda: db_path, raising=False)
+    monkeypatch.setattr(
+        upgrade_cmd,
+        "check_db_lock",
+        lambda _p: DbLockState(locked=locked, probe_error=None),
+        raising=False,
+    )
+    return db_path
+
+
+def test_db_lock_warns_but_proceeds(monkeypatch, tmp_path, fake_uv, force_tty):
+    """An unknown writer (no pid file) must produce a warning, not a refusal."""
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, _DEAD)
+    _patch_db_probe(monkeypatch, tmp_path, locked=True)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "write lock" in result.output
+    assert "previous version" in result.output
+    assert "lsof" in result.output
+    assert calls  # reinstall proceeded despite the lock
+
+
+def test_db_lock_warning_in_json_output(monkeypatch, tmp_path, fake_uv, force_tty):
+    _calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, _DEAD)
+    _patch_db_probe(monkeypatch, tmp_path, locked=True)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["ok"] is True
+    assert payload["db_lock_warning"] is True
+
+
+def test_no_db_lock_no_warning(monkeypatch, tmp_path, fake_uv, force_tty):
+    _calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, _DEAD)
+    _patch_db_probe(monkeypatch, tmp_path, locked=False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["ok"] is True
+    assert payload["db_lock_warning"] is False
+
+    human = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert human.exit_code == 0, human.output
+    assert "write lock" not in human.output
+
+
+def test_config_failure_skips_probe(monkeypatch, fake_uv, force_tty):
+    """A broken config must not block the upgrade — the probe is skipped."""
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, _DEAD)
+    monkeypatch.setattr(upgrade_cmd, "_resolve_db_path", lambda: None, raising=False)
+
+    def boom(_p):
+        raise AssertionError("check_db_lock must not run without a resolved db path")
+
+    monkeypatch.setattr(upgrade_cmd, "check_db_lock", boom, raising=False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "-y"])
+    assert result.exit_code == 0, result.output
+    assert "write lock" not in result.output
+    assert calls
+
+
+def test_dry_run_skips_db_probe(monkeypatch, tmp_path, fake_uv, force_tty):
+    """Dry-run never stops processes, so the post-stop probe must not run."""
+    calls, _configure = fake_uv
+    _patch_liveness(monkeypatch, _DEAD)
+
+    def boom():
+        raise AssertionError("_resolve_db_path must not run on --dry-run")
+
+    monkeypatch.setattr(upgrade_cmd, "_resolve_db_path", boom, raising=False)
+
+    result = CliRunner().invoke(cli, ["upgrade", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert calls == []

@@ -9,8 +9,9 @@ issue #443. The same applies to a backgrounded ``mm web`` — it holds
 (#1569). ``mm upgrade`` wraps the reinstall with process-level hygiene:
 
     probe live server + web UI → SIGTERM (escalate to SIGKILL after
-    grace) → unlink stale pid files → ``uv tool install --refresh
-    --reinstall``.
+    grace) → unlink stale pid files → ``BEGIN IMMEDIATE`` DB probe for
+    writers the pid files can't see (#1606, warn-only) → ``uv tool
+    install --refresh --reinstall``.
 
 There is no ``--skip-pkill``: the kill-then-reinstall ordering is the
 whole reason this command exists. On Windows the kill stage is skipped
@@ -33,6 +34,7 @@ from pathlib import Path
 
 import click
 
+from memtomem.cli._db_lock import check_db_lock
 from memtomem.cli._liveness import (
     ServerState,
     check_server_liveness,
@@ -147,6 +149,28 @@ def _stop_server(state: ServerState, grace: float) -> tuple[list[int], list[Path
                 ) from exc
 
     return killed, removed
+
+
+def _resolve_db_path() -> Path | None:
+    """Best-effort DB path for the post-stop write-lock probe (#1606).
+
+    ``migrate=False`` for the same reason as ``mm reset``: this is a
+    read-only lookup and the auto-discover migration would rewrite
+    config.json (and create its lock sidecar) as a side effect.
+
+    Returns ``None`` on any failure — the probe is belt-and-braces, and
+    an upgrade must never be blocked by an unrelated config problem
+    (matching ``check_db_lock``'s own fail-open contract).
+    """
+    try:
+        from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+        cfg = Mem2MemConfig()
+        load_config_d(cfg)
+        load_config_overrides(cfg, migrate=False)
+        return Path(cfg.storage.sqlite_path).expanduser()
+    except Exception:
+        return None
 
 
 def _detect_installed_extras() -> list[str]:
@@ -370,6 +394,18 @@ def upgrade(
                 sys.exit(1)
             raise
 
+    # ----- post-stop DB probe (#1606) -----
+    # The pid-file probes only see processes that wrote server.pid /
+    # web.pid. A writer that never did (a user sqlite3 session, a process
+    # launched from another checkout) survives the stop stage and keeps
+    # running the old code after the byte swap. With the known processes
+    # down, a remaining write lock is by definition an unknown writer.
+    # Warn-and-proceed: the reinstall itself is safe, and the probe can't
+    # name a pid for us to stop (contrast mm reset, where the destructive
+    # wipe justifies refusing outright).
+    db_path = _resolve_db_path()
+    db_lock_warning = db_path is not None and check_db_lock(db_path).locked
+
     # ----- reinstall -----
     try:
         result = subprocess.run(install_cmd, capture_output=True, text=True, timeout=600)
@@ -417,6 +453,7 @@ def upgrade(
                     "reinstalled": pkg_target,
                     "extras": extras,
                     "version": version,
+                    "db_lock_warning": db_lock_warning,
                 }
             )
         )
@@ -430,3 +467,12 @@ def upgrade(
         for path in removed:
             click.echo(f"Removed {_format_path(path)}.")
     click.secho(f"Reinstalled {pkg_target}.", fg="green")
+    if db_lock_warning and db_path is not None:
+        db_repr = _format_path(db_path)
+        click.secho(
+            f"Warning: another process still holds a write lock on {db_repr} — "
+            "it keeps running the previous version until it exits. Find it with "
+            f"`lsof {db_repr}` (or `ps aux | grep memtomem`) and restart it to "
+            "pick up the upgrade.",
+            fg="yellow",
+        )
