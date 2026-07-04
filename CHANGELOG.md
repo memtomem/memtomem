@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Deprecations
+
+- **`mem_context_migrate` MCP tool** (deprecated since #1147, timeline set in
+  #1619) — alias for `mem_context_memory_migrate`; forwards every argument
+  unchanged. **Removal target: v0.5.0.** Migrate callers to
+  `mem_context_memory_migrate` (or the `mem_do` action
+  `context_memory_migrate`); the `mem_do` action alias `context_migrate`
+  follows the same timeline.
+
 ### Added
 
 - **Schema-version downgrade fence** (#1614) — the database now records a

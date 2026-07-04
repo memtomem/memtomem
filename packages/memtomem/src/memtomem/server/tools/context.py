@@ -1289,7 +1289,8 @@ async def mem_context_migrate(
     full CLI ``mm context migrate`` (which also does artifact flat→dir and
     scope-tier moves, now exposed as ``mem_context_artifact_migrate``).
     Use ``mem_context_memory_migrate`` instead; this alias forwards every
-    argument unchanged and will be removed in a future major release.
+    argument unchanged and **will be removed in v0.5.0** (timeline recorded
+    in CHANGELOG "Deprecations", #1619 — deprecated since v0.3.x/#1147).
 
     The explicit signature is repeated (rather than ``**kwargs``) because
     the MCP schema is built by inspecting the function signature — a

@@ -536,7 +536,9 @@ def _web_stop() -> None:
 @click.group("web", invoke_without_command=True)
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
 @click.option("--port", default=8080, type=int, help="Port to bind to")
-@click.option("--open", "open_browser", is_flag=True, help="Run with opening the browser")
+@click.option(
+    "--open", "open_browser", is_flag=True, help="Open the Web UI in your browser after startup."
+)
 @click.option(
     "--timeout", default=30, type=int, help="Timeout for web opening (seconds). Zero is no timeout."
 )

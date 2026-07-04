@@ -35,6 +35,16 @@
 | **Namespace** | A label to organize memories (e.g., "work", "personal", "project-x") |
 | **`mem_do`** | Meta-tool that routes to all non-core actions (with aliases). Use `mem_do(action="help")` to list all |
 
+### The three "modes"
+
+Three unrelated settings all use the word *mode* — they control different axes and don't interact:
+
+| Mode | Values | What it controls |
+|------|--------|------------------|
+| **View toggle** (Web UI header) | Simple / Advanced | Which *tabs and sections* the Web UI shows in your browser session. Purely cosmetic — flip the **Advanced** switch in the header. |
+| **Web surface** (`mm web --mode`, `MEMTOMEM_WEB__MODE`) | `prod` / `dev` | Which *pages and API endpoints* the web server exposes. `dev` adds maintainer pages (Sessions, Health Report, …) and structural namespace verbs. See [Operations → Web UI](reference/operations.md#web-ui). |
+| **Tool mode** (`MEMTOMEM_TOOL_MODE`) | `core` / `standard` / `full` | How many *MCP tools* the server registers for your editor. `core` (default) exposes 9 tools and routes the rest through `mem_do`. See [Configuration](configuration.md). |
+
 ---
 
 ## How memtomem Works

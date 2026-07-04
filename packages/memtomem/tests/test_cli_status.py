@@ -550,6 +550,47 @@ class TestStatusJson:
         assert set(warning) == {"kind", "detail", "fix"}
         assert warning["kind"] == "scheduler_watchdog_disabled"
 
+    def test_mmr_without_dense_emits_warning(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # #1619: explicitly enabled MMR with dense retrieval off silently
+        # disables diversity re-ranking — mem_status must say so. Also
+        # covers text rendering: the generic warning renderer needs no
+        # changes for a new kind.
+        comp = _mock_components(
+            total_chunks=1,
+            total_sources=1,
+            config=Mem2MemConfig(mmr={"enabled": True}, search={"enable_dense": False}),
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+        (warning,) = json.loads(result.output)["warnings"]
+        assert set(warning) == {"kind", "detail", "fix"}
+        assert warning["kind"] == "mmr_disabled_no_dense"
+        assert "search.enable_dense=False" in warning["detail"]
+        assert "mmr.enabled=False" in warning["fix"]
+
+        text = runner.invoke(cli, ["status"])
+        assert text.exit_code == 0, text.output
+        assert "- kind:       mmr_disabled_no_dense" in text.output
+
+    def test_mmr_enabled_with_dense_no_warning(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(
+            total_chunks=1,
+            total_sources=1,
+            config=Mem2MemConfig(mmr={"enabled": True}),
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["warnings"] == []
+
     def test_json_unexpected_error_keeps_nonzero_exit(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -158,6 +158,20 @@ async def collect_status_report(app: AppContext) -> dict:
                 "doc": "docs/guides/configuration.md#reset-flow",
             }
         )
+    # #1619: an explicitly enabled MMR silently does nothing without dense
+    # retrieval (no vectors to diversify over) — surface the mismatch where
+    # BM25-only operators will see it. MMR defaults to disabled, so this
+    # never fires out of the box.
+    if config.mmr.enabled and not config.search.enable_dense:
+        warnings.append(
+            {
+                "kind": "mmr_disabled_no_dense",
+                "detail": "mmr.enabled=True but search.enable_dense=False — diversity "
+                "re-ranking is skipped",
+                "fix": "set search.enable_dense=True (needs an embedding provider) "
+                "or set mmr.enabled=False",
+            }
+        )
 
     return {
         "config": {
@@ -337,7 +351,8 @@ async def mem_status(
     can pattern-match on the keys:
 
     ``kind``    open enum describing the warning. Current values:
-                ``embedding_dim_mismatch``. Future releases may add
+                ``embedding_dim_mismatch``, ``scheduler_watchdog_disabled``,
+                ``mmr_disabled_no_dense``. Future releases may add
                 ``stale_index``, ``orphan_vectors``, etc. — consumers
                 must tolerate unknown kinds rather than erroring.
     ``fix``     the canonical CLI command a user should run.

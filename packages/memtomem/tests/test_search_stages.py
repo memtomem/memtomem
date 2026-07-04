@@ -219,3 +219,28 @@ class TestApplyMMR:
         embs = {r1.chunk.id: [1.0, 0.0]}
         result = apply_mmr([r1, r2], embs, lambda_param=0.5)
         assert len(result) == 2
+
+
+class TestMmrNoDenseLog:
+    """#1619: MMR enabled without dense retrieval used to skip silently.
+    The pipeline now logs the mismatch once per process (INFO), then
+    demotes to DEBUG — same shape as the rescue-leg warn-once."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_flag(self, monkeypatch):
+        from memtomem.search import pipeline
+
+        monkeypatch.setattr(pipeline, "_MMR_NO_DENSE_WARNED", False)
+
+    def test_first_call_info_then_debug(self, caplog):
+        import logging
+
+        from memtomem.search.pipeline import _log_mmr_no_dense_once
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.search.pipeline"):
+            _log_mmr_no_dense_once()
+            _log_mmr_no_dense_once()
+
+        levels = [r.levelno for r in caplog.records if "MMR" in r.message]
+        assert levels == [logging.INFO, logging.DEBUG]
+        assert "mmr_disabled_no_dense" in caplog.records[0].message

@@ -81,6 +81,24 @@ def _log_rescue_failure(site: str, msg: str, *args: object) -> None:
     logger.log(level, msg, *args, exc_info=True)
 
 
+# MMR-without-dense is a config mismatch that silently disables diversity
+# re-ranking (#1619) — log once per process, DEBUG afterwards, mirroring
+# the rescue-leg pattern above.
+_MMR_NO_DENSE_WARNED = False
+
+
+def _log_mmr_no_dense_once() -> None:
+    global _MMR_NO_DENSE_WARNED
+    level = logging.DEBUG if _MMR_NO_DENSE_WARNED else logging.INFO
+    _MMR_NO_DENSE_WARNED = True
+    logger.log(
+        level,
+        "MMR diversity re-ranking is enabled (mmr.enabled=True) but dense "
+        "retrieval is off (search.enable_dense=False) — MMR is skipped. "
+        "mem_status reports this as a `mmr_disabled_no_dense` warning.",
+    )
+
+
 def _bg_task_error_cb(task: asyncio.Task) -> None:
     """Log errors from fire-and-forget background tasks."""
     if task.cancelled():
@@ -942,6 +960,13 @@ class SearchPipeline:
             fused = apply_score_decay(fused, half_life_days=self._decay_config.half_life_days)
 
         # Stage 5: MMR diversity re-ranking
+        if self._mmr_config.enabled and not use_dense:
+            # #1619: without dense retrieval there are no vectors to
+            # diversify over, so an explicitly enabled MMR silently did
+            # nothing. Say so once per process (INFO — it's a config
+            # mismatch, not a runtime failure); mem_status carries the
+            # same fact as a persistent `mmr_disabled_no_dense` warning.
+            _log_mmr_no_dense_once()
         if self._mmr_config.enabled and fused and use_dense:
             from memtomem.search.mmr import apply_mmr
 
