@@ -187,10 +187,34 @@ _STANDARD_PACKS = frozenset(
     }
 )
 
+
+def _registered_tool_names() -> frozenset[str]:
+    """Enumerate registered tool names via FastMCP's public-ish surface.
+
+    FastMCP exposes ``remove_tool`` publicly but has no *synchronous*
+    public tool listing (``FastMCP.list_tools`` is async and yields wire
+    objects), so we call the tool manager's synchronous ``list_tools``.
+    Both that method and ``FastMCP.remove_tool`` (used below) are the
+    coupling points to FastMCP internals — pinned by
+    ``tests/test_tool_mode_pruning.py``. Guard the shape explicitly and
+    raise if it changes: a silent failure here would ship every tool in
+    ``core`` mode instead of pruning to 9 (#1609).
+    """
+    manager = getattr(mcp, "_tool_manager", None)
+    lister = getattr(manager, "list_tools", None)
+    if manager is None or not callable(lister):
+        raise RuntimeError(
+            "FastMCP tool-manager API changed: cannot enumerate registered tools "
+            "for MEMTOMEM_TOOL_MODE pruning. Pin the mcp dependency or update the "
+            "tool-mode pruning in memtomem/server/__init__.py."
+        )
+    return frozenset(t.name for t in lister())
+
+
 # Snapshot of every tool registered by the imports above, taken BEFORE
 # pruning — the only place the full surface is still observable once a
 # non-full mode has pruned ``mcp``. Used by the per-mode pin tests.
-_ALL_REGISTERED_TOOLS = frozenset(t.name for t in mcp._tool_manager.list_tools())
+_ALL_REGISTERED_TOOLS = _registered_tool_names()
 
 if _TOOL_MODE != "full":
     if _TOOL_MODE == "standard":
@@ -201,9 +225,18 @@ if _TOOL_MODE != "full":
         }
     else:
         _allowed = _CORE_TOOLS
+    # ``FastMCP.remove_tool`` is the public removal API (mcp>=1.27.2);
+    # raise rather than silently no-op if a future release drops it, so
+    # pruning can't fail open to full mode.
+    if not callable(getattr(mcp, "remove_tool", None)):
+        raise RuntimeError(
+            "FastMCP.remove_tool is unavailable: cannot prune tools for "
+            "MEMTOMEM_TOOL_MODE. Pin the mcp dependency or update "
+            "memtomem/server/__init__.py."
+        )
     for name in _ALL_REGISTERED_TOOLS:
         if name not in _allowed:
-            mcp._tool_manager.remove_tool(name)
+            mcp.remove_tool(name)
 
 
 def _install_sigterm_handler(*pid_files: Path) -> None:
