@@ -8,6 +8,8 @@ from pathlib import Path
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
+
 
 @click.command()
 @click.argument("path", default=".", required=False)
@@ -114,7 +116,7 @@ def index(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _index(

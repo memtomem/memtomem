@@ -11,6 +11,8 @@ import json
 
 import click
 
+from memtomem.cli._errors import raise_cli_error
+
 # ADR-0011 §6: re-export the project-context resolver from the MCP tool so
 # CLI and MCP surfaces share one resolution rule. Both ``app`` (server) and
 # ``comp`` (CLI) carry the same ``.config.indexing.project_memory_dirs``
@@ -64,7 +66,7 @@ def search(
     except click.ClickException:
         raise
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise_cli_error(e)
 
 
 async def _search(

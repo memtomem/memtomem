@@ -92,7 +92,7 @@ async def _run_rename(old_tag: str, new_tag: str, *, apply_: bool, assume_yes: b
         try:
             preview = await tag_svc.rename_tag(comp.storage, old_tag, new_tag, dry_run=True)
         except ValueError as exc:
-            raise click.ClickException(str(exc))
+            raise click.ClickException(str(exc)) from exc
 
         old_s, new_s = old_tag.strip(), new_tag.strip()
         if preview.affected_chunks == 0:
@@ -150,7 +150,7 @@ async def _run_delete(name: str, *, apply_: bool, assume_yes: bool) -> None:
         try:
             preview = await tag_svc.delete_tag(comp.storage, name, dry_run=True)
         except ValueError as exc:
-            raise click.ClickException(str(exc))
+            raise click.ClickException(str(exc)) from exc
 
         name_s = name.strip()
         if preview.affected_chunks == 0:
@@ -209,7 +209,7 @@ async def _run_merge(
         try:
             preview = await tag_svc.merge_tags(comp.storage, list(sources), target, dry_run=True)
         except ValueError as exc:
-            raise click.ClickException(str(exc))
+            raise click.ClickException(str(exc)) from exc
 
         target_s = target.strip()
         src_display = ", ".join(f"'{s.strip()}'" for s in sources if s.strip())
