@@ -1,6 +1,10 @@
 """Tests for LangGraph adapter (MemtomemStore)."""
 
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -398,6 +402,535 @@ class TestMemtomemStoreIndex:
             "IndexEngine.index_path is the target of MemtomemStore.index(); "
             "renaming it without updating the adapter will break LangGraph integration."
         )
+
+
+class TestAddPrivacyGate:
+    """``add()`` routes every write through ``privacy.enforce_write_guard``
+    *before* any filesystem write (trust-boundary contract; the LangGraph
+    adapter is one of the named ingress surfaces). A ``blocked`` decision
+    must return the error dict and leave both the memory file and the
+    index untouched (#1620 — the previously untested gate at
+    ``integrations/langgraph.py`` ``add``).
+    """
+
+    @staticmethod
+    def _guard_stub(monkeypatch, decision: str, hits: list | None = None):
+        """Patch ``enforce_write_guard`` + ``append_entry``; return recorders."""
+        import memtomem.privacy as privacy
+        import memtomem.tools.memory_writer as memory_writer
+        from memtomem.privacy import WriteGuardResult
+
+        guard_calls: list[tuple[str, dict]] = []
+        append_calls: list[tuple[tuple, dict]] = []
+
+        def _fake_guard(content, **kwargs):
+            guard_calls.append((content, kwargs))
+            return WriteGuardResult(decision=decision, hits=list(hits or []))
+
+        monkeypatch.setattr(privacy, "enforce_write_guard", _fake_guard)
+        monkeypatch.setattr(
+            memory_writer, "append_entry", lambda *a, **k: append_calls.append((a, k))
+        )
+        return guard_calls, append_calls
+
+    @staticmethod
+    def _stub_components(indexed_chunks: int = 3):
+        comp = MagicMock()
+        comp.index_engine.index_file = AsyncMock(
+            return_value=MagicMock(indexed_chunks=indexed_chunks)
+        )
+        return comp
+
+    @pytest.mark.asyncio
+    async def test_blocked_decision_short_circuits_write_and_index(self, monkeypatch, tmp_path):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        guard_calls, append_calls = self._guard_stub(monkeypatch, "blocked", hits=["h1", "h2"])
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        store._components = comp
+
+        result = await store.add("secret-bearing content", file=str(tmp_path / "m.md"))
+
+        assert result == {"error": "redaction_blocked", "hits": 2, "surface": "langgraph_add"}
+        assert len(guard_calls) == 1
+        assert append_calls == [], "blocked add must not write the memory file"
+        comp.index_engine.index_file.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pass_decision_writes_and_indexes_with_agent_namespace(
+        self, monkeypatch, tmp_path
+    ):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        guard_calls, append_calls = self._guard_stub(monkeypatch, "pass")
+
+        store = MemtomemStore()
+        comp = self._stub_components(indexed_chunks=3)
+        store._components = comp
+        store._current_agent_id = "planner"
+        target = tmp_path / "entry.md"
+
+        result = await store.add("safe content", title="T", tags=["t1"], file=str(target))
+
+        # Guard saw the langgraph surface + the audit request shape.
+        content, kwargs = guard_calls[0]
+        assert content == "safe content"
+        assert kwargs["surface"] == "langgraph_add"
+        assert kwargs["force_unsafe"] is False
+        assert kwargs["audit_context"] == {"namespace": None, "file": str(target)}
+
+        # Write + index proceeded, defaulting to the bound agent's bucket.
+        (args, akw) = append_calls[0]
+        assert args[0] == target.resolve()
+        assert args[1] == "safe content"
+        assert akw == {"title": "T", "tags": ["t1"]}
+        iargs, ikw = comp.index_engine.index_file.call_args
+        assert iargs[0] == target.resolve()
+        assert ikw["namespace"] == "agent-runtime:planner"
+        assert ikw["already_scanned"] is True
+        assert result == {"file": str(target.resolve()), "indexed_chunks": 3}
+
+    @pytest.mark.asyncio
+    async def test_force_unsafe_flag_reaches_guard(self, monkeypatch, tmp_path):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        guard_calls, append_calls = self._guard_stub(monkeypatch, "bypassed", hits=["h1"])
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        await store.add("content", file=str(tmp_path / "m.md"), force_unsafe=True)
+
+        assert guard_calls[0][1]["force_unsafe"] is True
+        # A bypassed (non-blocked) decision proceeds to the write.
+        assert len(append_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_memory_dirs_errors_after_guard(self, monkeypatch):
+        """Without ``file=`` and with no configured memory_dirs the call
+        errors out — but only *after* the guard ran (guard-first ordering).
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        guard_calls, append_calls = self._guard_stub(monkeypatch, "pass")
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        comp.config.indexing.memory_dirs = []
+        store._components = comp
+
+        result = await store.add("content")
+
+        assert result == {"error": "No memory directories configured. Run 'mm init' first."}
+        assert len(guard_calls) == 1
+        assert append_calls == []
+
+
+class TestSearchDelegation:
+    """``search()`` delegates to the pipeline and flattens results into
+    plain dicts (the LangGraph-facing contract documented in the README
+    snippet at the top of the module).
+    """
+
+    @staticmethod
+    def _chunk(content: str = "hello world"):
+        from memtomem.models import Chunk, ChunkMetadata
+
+        return Chunk(
+            content=content,
+            metadata=ChunkMetadata(
+                source_file=Path("notes/a.md"), tags=("t1",), namespace="default"
+            ),
+        )
+
+    @staticmethod
+    def _store_with_pipeline(results):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        pipeline = MagicMock()
+        pipeline.search = AsyncMock(return_value=(results, MagicMock()))
+        store = MemtomemStore()
+        store._components = MagicMock(search_pipeline=pipeline)
+        return store, pipeline
+
+    @pytest.mark.asyncio
+    async def test_maps_pipeline_results_to_dicts(self, monkeypatch):
+        import memtomem.server.tools.search as search_tools
+
+        monkeypatch.setattr(search_tools, "_resolve_project_context_root", lambda comp: None)
+
+        chunk = self._chunk()
+        store, pipeline = self._store_with_pipeline(
+            [SimpleNamespace(chunk=chunk, score=0.9, rank=1)]
+        )
+
+        results = await store.search("hello", top_k=3)
+
+        assert results == [
+            {
+                "id": str(chunk.id),
+                "content": "hello world",
+                "score": 0.9,
+                "source": "notes/a.md",
+                "tags": ["t1"],
+                "namespace": "default",
+                "rank": 1,
+            }
+        ]
+        kwargs = pipeline.search.call_args.kwargs
+        assert kwargs["query"] == "hello"
+        assert kwargs["top_k"] == 3
+        assert kwargs["rrf_weights"] is None
+        assert kwargs["namespace"] is None
+
+    @pytest.mark.asyncio
+    async def test_partial_weights_agent_namespace_and_project_root_threaded(self, monkeypatch):
+        """A single explicit weight fills the other side with 1.0; a bound
+        agent pins the namespace; the resolved project context root is
+        threaded through to the pipeline (ADR-0011 PR-D round 9).
+        """
+        import memtomem.server.tools.search as search_tools
+
+        monkeypatch.setattr(
+            search_tools, "_resolve_project_context_root", lambda comp: "/proj/root"
+        )
+
+        store, pipeline = self._store_with_pipeline([])
+        store._current_agent_id = "planner"
+
+        results = await store.search("q", bm25_weight=0.7)
+
+        assert results == []
+        kwargs = pipeline.search.call_args.kwargs
+        assert kwargs["rrf_weights"] == [0.7, 1.0]
+        assert kwargs["namespace"] == "agent-runtime:planner,shared"
+        assert kwargs["project_context_root"] == "/proj/root"
+
+
+class TestGetDelete:
+    @pytest.mark.asyncio
+    async def test_get_maps_chunk_to_dict(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+        from memtomem.models import Chunk, ChunkMetadata
+
+        chunk = Chunk(
+            content="c",
+            metadata=ChunkMetadata(source_file=Path("n/a.md"), tags=("x",), namespace="ns"),
+        )
+        comp = MagicMock()
+        comp.storage.get_chunk = AsyncMock(return_value=chunk)
+        store = MemtomemStore()
+        store._components = comp
+
+        got = await store.get(str(chunk.id))
+
+        assert got == {
+            "id": str(chunk.id),
+            "content": "c",
+            "source": "n/a.md",
+            "tags": ["x"],
+            "namespace": "ns",
+        }
+        comp.storage.get_chunk.assert_awaited_once_with(chunk.id)
+
+    @pytest.mark.asyncio
+    async def test_get_missing_returns_none(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        comp = MagicMock()
+        comp.storage.get_chunk = AsyncMock(return_value=None)
+        store = MemtomemStore()
+        store._components = comp
+
+        assert await store.get(str(uuid4())) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("deleted_rows", "expected"), [(1, True), (0, False)])
+    async def test_delete_reports_whether_rows_were_deleted(self, deleted_rows, expected):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        cid = uuid4()
+        comp = MagicMock()
+        comp.storage.delete_chunks = AsyncMock(return_value=deleted_rows)
+        store = MemtomemStore()
+        store._components = comp
+
+        assert await store.delete(str(cid)) is expected
+        comp.storage.delete_chunks.assert_awaited_once_with([cid])
+
+
+class TestStartSessionLowLevel:
+    """``start_session`` is the low-level escape hatch: it records the
+    session but must NOT bind ``_current_agent_id`` (that's
+    ``start_agent_session``'s contract), and an explicit ``namespace``
+    override is gated by ``validate_namespace`` (issue #496).
+    """
+
+    @staticmethod
+    def _stub_components():
+        comp = MagicMock()
+        comp.storage.create_session = AsyncMock(return_value=None)
+        return comp
+
+    @pytest.mark.asyncio
+    async def test_defaults_namespace_and_does_not_bind_agent(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        store._components = comp
+
+        sid = await store.start_session()
+
+        args, _ = comp.storage.create_session.call_args
+        assert args == (sid, "default", "default")
+        assert store._current_session_id == sid
+        assert store._current_agent_id is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_valid_namespace_stored_verbatim(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        store._components = comp
+
+        await store.start_session(agent_id="a1", namespace="custom.scope")
+
+        args, _ = comp.storage.create_session.call_args
+        assert args[1] == "a1"
+        assert args[2] == "custom.scope"
+
+    @pytest.mark.asyncio
+    async def test_replacing_agent_session_clears_stale_agent_binding(self):
+        """Starting a low-level session after ``start_agent_session`` must
+        drop the previous agent binding — otherwise subsequent ``add`` /
+        ``search`` calls keep defaulting to the old ``agent-runtime:<id>``
+        scope while events log to the new session (stale-binding bug
+        caught in #1620's review).
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = self._stub_components()
+
+        await store.start_agent_session("planner")
+        assert store._current_agent_id == "planner"
+
+        sid = await store.start_session()
+
+        assert store._current_session_id == sid
+        assert store._current_agent_id is None
+        assert store._resolve_add_namespace(None) is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_namespace_blocked_before_storage(self):
+        """Regression pin (#496): the Python adapter's low-level entry point
+        must refuse ``"agent-runtime:foo:bar"`` just like
+        ``start_agent_session`` does — otherwise this path reintroduces
+        the namespace-smuggling gap the gate was built to close.
+        """
+        from memtomem.constants import InvalidNameError
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        comp = self._stub_components()
+        store._components = comp
+
+        with pytest.raises(InvalidNameError):
+            await store.start_session(namespace="agent-runtime:foo:bar")
+
+        comp.storage.create_session.assert_not_awaited()
+        assert store._current_session_id is None
+
+
+class TestEndSessionAggregation:
+    @pytest.mark.asyncio
+    async def test_no_active_session_returns_error(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        store._components = MagicMock()
+
+        assert await store.end_session() == {"error": "no active session"}
+
+    @pytest.mark.asyncio
+    async def test_aggregates_event_counts_and_cleans_up(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        events = [
+            {"event_type": "query"},
+            {"event_type": "query"},
+            {"event_type": "write"},
+        ]
+        comp = MagicMock()
+        comp.storage.get_session_events = AsyncMock(return_value=events)
+        comp.storage.end_session = AsyncMock(return_value=None)
+        comp.storage.scratch_cleanup = AsyncMock(return_value=0)
+
+        store = MemtomemStore()
+        store._components = comp
+        store._current_session_id = "sess-9"
+
+        result = await store.end_session(summary="done")
+
+        comp.storage.end_session.assert_awaited_once_with(
+            "sess-9", "done", {"event_counts": {"query": 2, "write": 1}}
+        )
+        comp.storage.scratch_cleanup.assert_awaited_once_with(session_id="sess-9")
+        assert result == {
+            "session_id": "sess-9",
+            "events": 3,
+            "event_counts": {"query": 2, "write": 1},
+        }
+
+
+class TestLogEvent:
+    @pytest.mark.asyncio
+    async def test_no_session_is_a_noop_before_init(self):
+        """Without a session ``log_event`` returns before ``_ensure_init``
+        — components must stay untouched (still ``None``).
+        """
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+
+        await store.log_event("query", "content")
+
+        assert store._components is None
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_storage_with_session_id(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        comp = MagicMock()
+        comp.storage.add_session_event = AsyncMock(return_value=None)
+        store = MemtomemStore()
+        store._components = comp
+        store._current_session_id = "sess-1"
+
+        await store.log_event("query", "looked up X", chunk_ids=["c1"])
+
+        comp.storage.add_session_event.assert_awaited_once_with(
+            "sess-1", "query", "looked up X", ["c1"]
+        )
+
+
+class TestScratchDelegation:
+    @staticmethod
+    def _store_with_storage():
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        comp = MagicMock()
+        comp.storage.scratch_set = AsyncMock(return_value=None)
+        comp.storage.scratch_get = AsyncMock(return_value=None)
+        comp.storage.scratch_list = AsyncMock(return_value=[])
+        store = MemtomemStore()
+        store._components = comp
+        return store, comp
+
+    @pytest.mark.asyncio
+    async def test_scratch_set_without_ttl_has_no_expiry(self):
+        store, comp = self._store_with_storage()
+        store._current_session_id = "s1"
+
+        await store.scratch_set("k", "v")
+
+        comp.storage.scratch_set.assert_awaited_once_with(
+            "k", "v", session_id="s1", expires_at=None
+        )
+
+    @pytest.mark.asyncio
+    async def test_scratch_set_with_ttl_computes_iso_expiry(self):
+        store, comp = self._store_with_storage()
+
+        await store.scratch_set("k", "v", ttl_minutes=5)
+
+        expires_at = comp.storage.scratch_set.call_args.kwargs["expires_at"]
+        assert expires_at is not None
+        # ISO-8601 with seconds precision — must round-trip through fromisoformat.
+        datetime.fromisoformat(expires_at)
+
+    @pytest.mark.asyncio
+    async def test_scratch_get_unwraps_value(self):
+        store, comp = self._store_with_storage()
+        comp.storage.scratch_get = AsyncMock(return_value={"value": "v"})
+
+        assert await store.scratch_get("k") == "v"
+
+    @pytest.mark.asyncio
+    async def test_scratch_get_missing_returns_none(self):
+        store, _ = self._store_with_storage()
+
+        assert await store.scratch_get("missing") is None
+
+    @pytest.mark.asyncio
+    async def test_scratch_list_scoped_to_current_session(self):
+        store, comp = self._store_with_storage()
+        comp.storage.scratch_list = AsyncMock(return_value=[{"key": "k"}])
+        store._current_session_id = "s1"
+
+        assert await store.scratch_list() == [{"key": "k"}]
+        comp.storage.scratch_list.assert_awaited_once_with(session_id="s1")
+
+
+class TestCloseAndContextManager:
+    @pytest.mark.asyncio
+    async def test_close_releases_components(self, monkeypatch):
+        import memtomem.server.component_factory as factory
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        closed = []
+
+        async def _fake_close(comp):
+            closed.append(comp)
+
+        monkeypatch.setattr(factory, "close_components", _fake_close)
+
+        store = MemtomemStore()
+        comp = MagicMock()
+        store._components = comp
+
+        await store.close()
+
+        assert closed == [comp]
+        assert store._components is None
+
+    @pytest.mark.asyncio
+    async def test_close_before_init_is_a_noop(self):
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        store = MemtomemStore()
+        await store.close()  # must not raise or import the factory
+        assert store._components is None
+
+    @pytest.mark.asyncio
+    async def test_context_manager_inits_on_enter_and_closes_on_exit(self, monkeypatch):
+        import memtomem.config as _cfg
+        import memtomem.server.component_factory as factory
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        comp = MagicMock()
+        closed = []
+
+        async def _fake_create(_config):
+            return comp
+
+        async def _fake_close(c):
+            closed.append(c)
+
+        monkeypatch.setattr(factory, "create_components", _fake_create)
+        monkeypatch.setattr(factory, "close_components", _fake_close)
+        # Block real ~/.memtomem/config.json from polluting the override chain.
+        monkeypatch.setattr(_cfg, "load_config_overrides", lambda c: None)
+
+        async with MemtomemStore() as store:
+            assert store._components is comp
+
+        assert closed == [comp]
+        assert store._components is None
 
 
 @pytest.mark.ollama

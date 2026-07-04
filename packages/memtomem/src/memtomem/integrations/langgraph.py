@@ -362,6 +362,12 @@ class MemtomemStore:
         await comp.storage.create_session(session_id, agent_id, ns)
         async with self._session_lock:
             self._current_session_id = session_id
+            # Agent binding follows the session lifecycle: replacing an
+            # agent-bound session with a low-level one must not leave
+            # ``add`` / ``search`` defaulting to the previous agent's
+            # ``agent-runtime:<id>`` scope while events log to the new
+            # session (same reset contract as ``end_session``).
+            self._current_agent_id = None
         return session_id
 
     async def start_agent_session(
