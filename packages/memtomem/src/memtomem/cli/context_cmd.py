@@ -1830,8 +1830,9 @@ def version_enable_cmd(artifact_type: str, name: str, scope_flag: str | None) ->
     is_flag=True,
     help=(
         "Re-install every ASSET in THIS project's .memtomem/lock.json at its "
-        "pinned commit (fresh-machine restore). Note: `update --all` means a "
-        "different axis — ONE asset across every known PROJECT."
+        "pinned commit (fresh-machine restore). Note: `update <type> <name> "
+        "--all` means a different axis — that ONE asset across every known "
+        "PROJECT."
     ),
 )
 @click.option(
@@ -1865,7 +1866,8 @@ def install_cmd(
     is the "fresh-machine restore" verb: a teammate ``git clone``s the
     project, runs ``mm context install --all``, and reproduces the exact
     asset bytes the lockfile recorded. To advance to wiki HEAD instead,
-    use ``mm context update --all``.
+    run ``mm context update <type> <name>`` per asset (there is
+    deliberately no bulk per-project update verb).
     """
     if all_assets:
         if asset_type or name:
@@ -2455,7 +2457,7 @@ def status_cmd(scope_flag: TargetScope, all_projects: bool) -> None:
     Read-only. Walks ``<project>/.memtomem/lock.json`` and classifies
     each entry against the dest tree and the wiki. Always exits 0 for
     normal runs (cron-friendly chaining via ``mm context status && mm
-    context update --all``); only a corrupt / version-mismatched
+    context update <type> <name>``); only a corrupt / version-mismatched
     lockfile produces a non-zero exit.
 
     ``--all-projects`` (#1280) renders the cross-project aggregate

@@ -4,7 +4,7 @@ Powers ``mm context status`` — a diagnostic verb that walks
 ``<project>/.memtomem/lock.json``, classifies each entry against the
 on-disk dest tree and the wiki, and returns a list of
 :class:`StatusRow` for the CLI to render. No writes anywhere; safe to
-run in cron pipes (``mm context status && mm context update --all``).
+run in cron pipes (``mm context status && mm context update <type> <name>``).
 
 State semantics for each lockfile entry:
 

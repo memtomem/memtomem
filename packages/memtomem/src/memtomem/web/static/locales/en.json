@@ -439,7 +439,7 @@
   "settings.ctx.last_synced_label": "Store updated",
   "settings.ctx.last_synced_tooltip": "Reflects the most recent stored-file mtime, not a recorded sync event. Editing a stored file without Sync All also bumps this.",
   "settings.ctx.wiki_behind_badge": "Wiki updates available: {n}",
-  "settings.ctx.wiki_behind_tip": "The wiki has newer commits than {n} installed asset(s) in this project. Update them from the Wiki section, or run `mm context update --all`.",
+  "settings.ctx.wiki_behind_tip": "The wiki has newer commits than {n} installed asset(s) in this project. Run `mm context status` to list them, then `mm context update <type> <name>` for each — or, in dev mode, use each asset's Update button in the Wiki section.",
   "settings.ctx.runtime_undetected_tooltip": "Not detected in this project",
   "settings.ctx.refresh": "Refresh",
   "settings.ctx.sync_all": "Sync All",

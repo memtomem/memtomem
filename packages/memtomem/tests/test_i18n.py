@@ -126,6 +126,31 @@ class TestLocaleFiles:
                 f"tier-portable `mm wiki commit` remediation; got: {tip!r}"
             )
 
+    def test_wiki_behind_tip_remediation_is_runnable(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The wiki-behind badge tooltip must not recommend
+        ``mm context update --all`` — that invocation is a usage error
+        (``update`` requires ``ASSET_TYPE NAME``), and even with
+        arguments ``--all`` means "this ONE asset across every known
+        project", not "the N behind assets in THIS project" the badge
+        counts (#1645). Lead with the tier-portable per-asset CLI
+        remediation instead; the Wiki section's Update button is
+        dev-mode-only, same as the dirty-tip case above."""
+        for name, data in [("en", en), ("ko", ko)]:
+            tip = data["settings.ctx.wiki_behind_tip"]
+            assert "--all" not in tip, (
+                f"{name}.json settings.ctx.wiki_behind_tip must not steer "
+                f"users to any `--all` form — `mm context update --all` is a "
+                f"usage error, and even `update <type> <name> --all` is the "
+                f"cross-project axis, not this badge's per-project count; "
+                f"got: {tip!r}"
+            )
+            assert "mm context update" in tip, (
+                f"{name}.json settings.ctx.wiki_behind_tip must name the "
+                f"per-asset `mm context update` remediation; got: {tip!r}"
+            )
+
 
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 
