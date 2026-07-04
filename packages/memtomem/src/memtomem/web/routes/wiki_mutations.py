@@ -272,7 +272,11 @@ async def edit_wiki_override(
     Privacy posture (§D-E): ``content`` is scanned with the soft, scope-less
     ``privacy.scan`` and a non-blocking ``privacy_warning`` count is returned —
     the write is never refused (the handler is ``_REDACTION_EXEMPT``, not
-    ``_REDACTION_PROTECTED``: a single-curator host-global store).
+    ``_REDACTION_PROTECTED``: a single-curator host-global store). NOTE: the
+    exemption rests on the single-curator premise above — if the wiki ever
+    becomes multi-writer (shared host, remote editors), revisit whether
+    ``_REDACTION_EXEMPT`` still holds, since one curator's secret would then
+    be exposed to others (#1613).
     """
     _validate_name_or_error(asset_type, name)
     _require_vendor(asset_type, body.vendor)

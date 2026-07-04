@@ -616,6 +616,65 @@ class TestStorageExtended:
         rec = await storage.get_ai_summary(Path("/tmp/never-saved.md"))
         assert rec is None
 
+    async def test_corrupt_ai_summary_row_dropped_and_logged_without_path(self, components, caplog):
+        """A corrupt-JSON AI-summary row is dropped from the result but
+        logged at DEBUG so the shrinking set isn't invisible (#1613). The
+        log must NOT contain the source path — keys can be secret-shaped
+        (feedback_canonical_path_leak_resolved_root); only a fingerprint
+        is emitted."""
+        import logging
+
+        storage = components.storage
+        good = Path("/tmp/good.md")
+        await storage.set_ai_summary(good, "valid prose", "sig", "en")
+
+        # Inject a corrupt row directly under a secret-shaped path.
+        secret_path = "/tmp/notes-sk-live-abc123XYZ.md"
+        db = storage._get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO _memtomem_meta (key, value) VALUES (?, ?)",
+            (f"ai_summary:{secret_path}", "{not valid json"),
+        )
+        db.commit()
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.storage.sqlite_backend"):
+            summaries = await storage.get_all_ai_summaries()
+
+        # Corrupt row dropped, good row survives.
+        assert secret_path not in summaries
+        assert any("good.md" in k for k in summaries)
+        # Failure is observable...
+        corrupt_logs = [r for r in caplog.records if "corrupt JSON" in r.message]
+        assert corrupt_logs, "corrupt-JSON drop must be logged at DEBUG"
+        # ...but the path never leaks into any log record.
+        assert not any("sk-live-abc123XYZ" in r.getMessage() for r in caplog.records)
+
+    async def test_corrupt_single_ai_summary_logged_without_path(self, components, caplog):
+        """The single-row accessor ``get_ai_summary`` must not leak the
+        secret-shaped source path either — it logs a key fingerprint on
+        corrupt JSON, same as the bulk path (#1613)."""
+        import logging
+
+        from memtomem.storage.sqlite_backend import _ai_summary_key
+
+        storage = components.storage
+        secret_path = Path("/tmp/session-sk-live-QQQ999.md")
+        # Inject under the exact key the accessor computes (path
+        # normalization must match, or the lookup misses the row).
+        db = storage._get_db()
+        db.execute(
+            "INSERT OR REPLACE INTO _memtomem_meta (key, value) VALUES (?, ?)",
+            (_ai_summary_key(secret_path), "}corrupt{"),
+        )
+        db.commit()
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.storage.sqlite_backend"):
+            rec = await storage.get_ai_summary(secret_path)
+
+        assert rec is None
+        assert any("Corrupt ai_summary" in r.getMessage() for r in caplog.records)
+        assert not any("sk-live-QQQ999" in r.getMessage() for r in caplog.records)
+
     async def test_delete_ai_summary_clears_existing_row(self, components):
         """``delete_ai_summary`` is the targeted eviction primitive used
         by the summarizer's stale-cache cleanup paths (zero-chunk

@@ -102,8 +102,9 @@ class TestKnowledgeGaps:
 
     @pytest.mark.asyncio
     async def test_db_error_logs_debug(self, storage, caplog):
-        # Drop the query_history table to force the query to fail — we want
-        # to verify the failure is logged (debug) rather than silently swallowed.
+        # Drop the query_history table to force the expected missing-table
+        # case — the failure is logged (debug) and degrades to [] rather
+        # than being silently swallowed.
         storage._get_db().execute("DROP TABLE IF EXISTS query_history")
 
         with caplog.at_level(logging.DEBUG, logger="memtomem.storage.mixins.analytics"):
@@ -111,9 +112,41 @@ class TestKnowledgeGaps:
 
         assert result == []
         assert any(
-            rec.levelno == logging.DEBUG and "get_knowledge_gaps query failed" in rec.message
+            rec.levelno == logging.DEBUG and "query_history table missing" in rec.message
             for rec in caplog.records
-        ), "Expected DEBUG log when get_knowledge_gaps query fails (not fully silent)"
+        ), "Expected DEBUG log when query_history is missing (not fully silent)"
+
+    @pytest.mark.asyncio
+    async def test_real_query_bug_reraises(self, storage, monkeypatch):
+        # A non-missing-table OperationalError (e.g. bad column / syntax)
+        # must NOT be swallowed to [] — it's a regression, so re-raise.
+        import sqlite3
+
+        class _BadDB:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("no such column: bogus")
+
+        monkeypatch.setattr(storage, "_get_db", lambda: _BadDB())
+        with pytest.raises(sqlite3.OperationalError, match="no such column"):
+            await storage.get_knowledge_gaps()
+
+
+class TestActivitySummary:
+    @pytest.mark.asyncio
+    async def test_missing_access_log_logs_debug_and_degrades(self, storage, caplog):
+        # Drop access_log to force the expected missing-table case. The
+        # summary must still return (from created/updated) and the failure
+        # must be logged at DEBUG rather than silently swallowed (#1613).
+        storage._get_db().execute("DROP TABLE IF EXISTS access_log")
+
+        with caplog.at_level(logging.DEBUG, logger="memtomem.storage.mixins.analytics"):
+            result = await storage.get_activity_summary()
+
+        assert isinstance(result, list)
+        assert any(
+            rec.levelno == logging.DEBUG and "access_log table missing" in rec.message
+            for rec in caplog.records
+        ), "Expected DEBUG log when access_log is missing (not fully silent)"
 
 
 class TestMostConnected:

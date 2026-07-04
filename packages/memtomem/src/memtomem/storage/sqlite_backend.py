@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -223,6 +224,10 @@ class SqliteBackend(
             try:
                 rconn.close()
             except Exception:
+                # Teardown best-effort: a connection that won't close is
+                # being discarded anyway. DEBUG (not WARNING) is deliberate
+                # per feedback_silent_except_log_level — this is expected
+                # noise on shutdown, not an operational footgun.
                 logger.debug("Failed to close read pool connection", exc_info=True)
         if hasattr(self, "_read_pool"):
             self._read_pool.clear()
@@ -230,6 +235,9 @@ class SqliteBackend(
             try:
                 self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
+                # Best-effort checkpoint on close; the DB closes regardless
+                # and the WAL is replayed on next open. DEBUG by design
+                # (feedback_silent_except_log_level): benign shutdown case.
                 logger.debug("WAL checkpoint failed during close", exc_info=True)
             self._db.close()
             self._db = None
@@ -1664,13 +1672,18 @@ class SqliteBackend(
         is corrupt — callers treat both as "no cache, regenerate".
         """
         assert self._meta is not None
-        raw = self._meta.get_meta(_ai_summary_key(source_file))
+        key = _ai_summary_key(source_file)
+        raw = self._meta.get_meta(key)
         if not raw:
             return None
         try:
             obj = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Corrupt ai_summary record for %s", source_file)
+            # Source paths can be secret-shaped, so log a fingerprint of
+            # the key rather than the path itself (matches the bulk
+            # get_all_ai_summaries path; feedback_canonical_path_leak_resolved_root).
+            fingerprint = hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:12]
+            logger.warning("Corrupt ai_summary record (key %s)", fingerprint)
             return None
         if not isinstance(obj, dict):
             return None
@@ -1718,8 +1731,13 @@ class SqliteBackend(
 
         Prefix-scans ``_memtomem_meta`` for keys starting with
         ``ai_summary:`` so unrelated meta rows (embedding dimension etc.)
-        don't leak in. Records with corrupt JSON are silently dropped — the
-        Source-tab API treats them as "no preview".
+        don't leak in. A record with corrupt JSON is dropped (the
+        Source-tab API treats it as "no preview") but logged at DEBUG —
+        a shrinking result set was previously invisible. Neither the raw
+        value nor the key is logged: the key embeds a source path, which
+        can be secret-shaped (feedback_canonical_path_leak_resolved_root,
+        feedback_no_secret_in_validation_log), so only a short opaque
+        fingerprint of the key is emitted to correlate repeat failures.
         """
         db = self._get_read_db()
         rows = db.execute(
@@ -1732,6 +1750,8 @@ class SqliteBackend(
             try:
                 obj = json.loads(value)
             except (json.JSONDecodeError, TypeError):
+                fingerprint = hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:12]
+                logger.debug("skipping AI-summary row with corrupt JSON (key %s)", fingerprint)
                 continue
             if isinstance(obj, dict):
                 result[path] = obj

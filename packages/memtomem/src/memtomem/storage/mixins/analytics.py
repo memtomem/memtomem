@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,14 @@ class AnalyticsMixin:
                 (limit,),
             ).fetchall()
             return [{"query": r[0], "count": r[1]} for r in rows]
-        except Exception:
-            logger.debug("get_knowledge_gaps query failed", exc_info=True)
+        except sqlite3.OperationalError as exc:
+            # Only the expected "table not created yet on a fresh DB" case
+            # degrades to []. A real bug (bad column, SQL syntax) also
+            # raises OperationalError — re-raise those instead of hiding a
+            # regression behind an empty result.
+            if "no such table" not in str(exc).lower():
+                raise
+            logger.debug("get_knowledge_gaps: query_history table missing", exc_info=True)
             return []
 
     async def get_most_connected(self, limit: int = 5) -> list[dict]:
@@ -268,8 +275,13 @@ class AnalyticsMixin:
                 access_params,
             ).fetchall()
             accessed = {r[0]: r[1] for r in access_rows}
-        except Exception:
-            logger.debug("access_log query failed (table may not exist yet)", exc_info=True)
+        except sqlite3.OperationalError as exc:
+            # Only degrade for the expected missing-table case on a fresh
+            # DB; re-raise real query bugs (bad column, syntax) so they
+            # aren't hidden behind a partial timeline.
+            if "no such table" not in str(exc).lower():
+                raise
+            logger.debug("get_activity_summary: access_log table missing", exc_info=True)
 
         # Merge all days
         all_days = sorted(set(created) | set(updated) | set(accessed))
