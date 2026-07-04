@@ -94,6 +94,11 @@ const I18N = (() => {
     document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
       el.setAttribute('aria-label', t(el.dataset.i18nAriaLabel));
     });
+    // ``<optgroup>`` renders its ``label`` attribute, not textContent, so the
+    // Default Tab group headings need an attribute-targeted variant (#1646).
+    document.querySelectorAll('[data-i18n-label]').forEach(el => {
+      el.setAttribute('label', t(el.dataset.i18nLabel));
+    });
     // ``.help-tip`` popovers read their text from a ``data-help`` attribute
     // (CSS ``::after content: attr(data-help)``). ``data-help-i18n`` carries
     // an i18n key for static help-tips so the popover text + its a11y

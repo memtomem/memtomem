@@ -125,7 +125,7 @@ def test_section_sync_confirm_shows_impact_and_overwrite_warning(page, mm_web_ur
     message = page.locator("#confirm-message").text_content() or ""
     assert "create 1" in message, f"impact sentence missing create count: {message!r}"
     assert "overwrite 1" in message, f"impact sentence missing overwrite count: {message!r}"
-    assert "claude, codex" in message, f"impact sentence missing runtimes: {message!r}"
+    assert "Claude Code, Codex" in message, f"impact sentence missing runtimes: {message!r}"
     warning = page.locator("#confirm-warning")
     assert warning.is_visible(), "overwrite warning line must be visible"
     assert "1" in (warning.text_content() or "")

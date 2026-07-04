@@ -372,8 +372,8 @@ function _renderCtxOverview(data) {
       // matters: ``error`` and the empty-tile case both pre-empt the count
       // ladder; then ``parse_error`` (hard failure — file is malformed),
       // unsynced-runtime states, unimported-canonical, and out-of-sync
-      // content. Falling through to ``{inSync}/{total} synced`` keeps the
-      // all-clear case unchanged.
+      // content. The all-clear fallthrough keeps ``{inSync}/{total} synced``
+      // when the two counts agree and spells out both axes otherwise (#1646).
       let badgeText;
       if (d.error) {
         // Own-namespace key — reaching across into ``settings.hooks.*``
@@ -404,8 +404,16 @@ function _renderCtxOverview(data) {
         badgeText = `${outOfSync} ${t('settings.ctx.badge_out_of_sync')}`;
       } else if (localDraft > 0) {
         badgeText = `${localDraft} ${t('settings.ctx.badge_local_draft')}`;
-      } else {
+      } else if (inSync === total) {
         badgeText = `${inSync}/${total} ${t('settings.ctx.badge_synced')}`;
+      } else {
+        // ``inSync`` counts (runtime, name) copies while ``total`` counts
+        // stored artifacts (see the count-semantics comment above), so with
+        // >1 runtime the fraction exceeds 1× ("4/1 synced") and reads as
+        // nonsense (#1646). Spell out both axes instead. Reaching here with
+        // zero issue counts means every tracked copy IS in sync, so the
+        // two-axis copy stays truthful to the #692 divergence guard.
+        badgeText = t('settings.ctx.badge_synced_two_axis', { stored: total, copies: inSync });
       }
 
       // ADR-0009 §2 sync-direction pointers — surface remediation intent
@@ -858,7 +866,14 @@ async function _ctxSyncProjectScope(scopeId, btn) {
         // going — mirror the backend ``/sync-all`` per-phase isolation (#1396).
         // Only a transport failure (above) aborts the run. ``failed`` keeps the
         // FIRST failure (drives the toast reason + gates the settings phase).
-        const reason = await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`);
+        // The fallback is localized (#1646): it gets interpolated into the
+        // localized ``toast.sync_failed``, so an English literal here would
+        // leak into Korean toasts whenever the response has no structured
+        // detail. Structured-path passthrough above stays verbatim — the
+        // backend reason (e.g. the parse-error filename) is remediation-
+        // critical.
+        const reason = await _ctxErrorMessageFromResponse(
+          resp, t('settings.ctx.sync_phase_failed_fallback', { type: _ctxTypeName(typ) }));
         if (!failed) failed = { phase: typ, reason };
         failedPhases.push(typ);
         continue;
@@ -881,7 +896,8 @@ async function _ctxSyncProjectScope(scopeId, btn) {
         if (!settingsResp.ok) {
           failed = {
             phase: 'settings',
-            reason: await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'),
+            reason: await _ctxErrorMessageFromResponse(
+              settingsResp, t('settings.ctx.sync_settings_failed_fallback')),
           };
           failedPhases.push('settings');
         } else {
@@ -1490,8 +1506,10 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         // the backend ``/sync-all`` per-phase isolation — CONTINUE rather than
         // abort the whole fan-out (only a transport failure, above, aborts). The
         // FIRST failure drives the toast reason + gates settings; the failed
-        // list comes from ``phaseStates`` (#1396).
-        const reason = await _ctxErrorMessageFromResponse(resp, `Sync ${typ} failed`);
+        // list comes from ``phaseStates`` (#1396). Localized fallback — it is
+        // interpolated into ``toast.sync_failed`` (#1646).
+        const reason = await _ctxErrorMessageFromResponse(
+          resp, t('settings.ctx.sync_phase_failed_fallback', { type: _ctxTypeName(typ) }));
         if (!failed) failed = { phase: typ, reason };
         setPhase(typ, 'failed');
         continue;
@@ -1576,7 +1594,8 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
         if (!settingsResp.ok) {
           failed = {
             phase: 'settings',
-            reason: await _ctxErrorMessageFromResponse(settingsResp, 'Settings sync failed'),
+            reason: await _ctxErrorMessageFromResponse(
+              settingsResp, t('settings.ctx.sync_settings_failed_fallback')),
           };
         } else {
           const settingsData = await settingsResp.json().catch(() => ({}));

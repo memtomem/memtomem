@@ -358,15 +358,16 @@ def test_overview_header_labels_translate_on_langchange(page, mm_web_url: str) -
         f"runtimes label must translate to KO; got {runtimes_label!r}"
     )
 
-    # Chip names stay as raw runtime identifiers — proper nouns, not labels.
+    # Chip names stay as branded product names (#1646 item 3) — proper nouns,
+    # identical across locales, so the lang toggle must not touch them.
     claude_text = (
         page.locator(
             "#ctx-overview-content .ctx-overview-runtimes [data-runtime='claude']"
         ).text_content()
         or ""
     ).strip()
-    assert claude_text == "claude", (
-        f"runtime chip text must stay as the raw identifier on lang toggle; got {claude_text!r}"
+    assert claude_text == "Claude Code", (
+        f"runtime chip text must stay the branded name on lang toggle; got {claude_text!r}"
     )
 
 

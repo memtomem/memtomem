@@ -1152,8 +1152,8 @@ def test_sync_all_noop_run_shows_nothing_synced_toast(page, mm_web_url: str) -> 
 
 # B-5 (#1288): per-type × per-runtime breakdown in the Sync All confirm. EN
 # copy pinned as constants (not i18n keys) per the module convention.
-SYNC_BREAKDOWN_SKILLS_CREATE = "Skills: 1 create → claude"
-SYNC_BREAKDOWN_COMMANDS_OVERWRITE = "Commands: 1 overwrite → claude"
+SYNC_BREAKDOWN_SKILLS_CREATE = "Skills: 1 create → Claude Code"
+SYNC_BREAKDOWN_COMMANDS_OVERWRITE = "Commands: 1 overwrite → Claude Code"
 
 
 def _ctx_list_route(page, type_key: str, items: list[dict]) -> None:

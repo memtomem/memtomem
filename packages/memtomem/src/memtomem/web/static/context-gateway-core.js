@@ -87,12 +87,45 @@ function _ctxTypeNameSingular(type) {
   return label === key ? type : label;
 }
 
-// Display label for a runtime key. Only ``gemini`` needs remapping — it is the
-// Antigravity client (RUNTIME_TO_CLIENT: gemini→antigravity), so printing the
-// raw key leaks an internal name the Projects portal already shows as
-// "Antigravity". The on-disk .gemini/ marker paths keep the gemini key
-// untouched — this maps the *label* only.
-const _CTX_RUNTIME_LABEL = { gemini: 'Antigravity' };
+// Localized toast copy for a single-item import skip (#1646 item 2). The skip
+// payload carries a stable ``reason_code`` from the closed set in
+// ``memtomem/context/_skip_reasons.py`` (import codes: already_imported /
+// canonical_exists / invalid_name / parse_error / toml_parse_error /
+// privacy_blocked / privacy_blocked_project_shared), so map code→i18n the
+// same way ``_ctxErrDetail`` does for sync reason codes (#1350). The raw
+// backend ``reason`` stays as the fallback for codes without copy — a future
+// engine code degrades to today's behavior (visible English), never to a
+// silent toast.
+function _ctxImportSkipText(skip) {
+  const code = skip && skip.reason_code;
+  // The shared-tier privacy block already has user-facing remediation copy —
+  // reuse it rather than duplicating the wording under an import_skip_* key.
+  if (code === 'privacy_blocked_project_shared') {
+    return t('settings.ctx.privacy_blocked_shared_hint');
+  }
+  if (code) {
+    const key = `settings.ctx.import_skip_${code}`;
+    const label = t(key);
+    if (label !== key) return label;
+  }
+  return (skip && skip.reason) || t('toast.request_failed');
+}
+
+// Display label for a runtime key. Branded names for the full runtime set
+// (#1646 item 3): raw ids next to "Antigravity" read as a mixed register
+// ("claude", "kimi" chips beside a brand name), and the glossary tooltips
+// already say "Claude Code, Codex, Kimi". ``gemini`` maps to the Antigravity
+// client (RUNTIME_TO_CLIENT: gemini→antigravity). The on-disk marker paths
+// (.gemini/, .claude/, …) keep the raw keys — this maps the *label* only;
+// diagnostic tooltips keep the raw id (see ``renderRuntimeBadges``). Proper-
+// noun product names are identical across locales, so intentionally not i18n
+// (same rationale as ``_ctxPortalRuntimeLabel``).
+const _CTX_RUNTIME_LABEL = {
+  claude: 'Claude Code',
+  gemini: 'Antigravity',
+  codex: 'Codex',
+  kimi: 'Kimi',
+};
 function _ctxRuntimeLabel(name) {
   return _CTX_RUNTIME_LABEL[name] || name;
 }
@@ -101,12 +134,15 @@ function renderRuntimeBadges(runtimes) {
   if (!runtimes || !runtimes.length) return '';
   return '<div class="ctx-runtime-badges">' +
     runtimes.map(r => {
-      const short = r.runtime.replace(/_skills|_commands|_agents/g, '');
       // U7 (#1229): surface the server-sanitized diagnostic reason as a
       // tooltip on the list-card badge — the leaf pane carries the full
-      // rendering; the card gets the at-a-glance cause.
+      // rendering; the card gets the at-a-glance cause. The tooltip keeps
+      // the raw generator id (diagnostic surface); the visible label routes
+      // through ``_ctxImpactRuntimeLabel`` so the MCP fan-out's internal
+      // ``project_mcp`` renders as its target ".mcp.json" — the same name
+      // the Sync button uses — instead of leaking the id (#1646 item 3).
       const title = r.reason ? `${r.runtime} — ${r.reason}` : r.runtime;
-      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(title)}">${escapeHtml(_ctxRuntimeLabel(short))}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
+      return `<span class="ctx-runtime-badge ${_ctxStatusCls[r.status] || ''}" title="${escapeHtml(title)}">${escapeHtml(_ctxImpactRuntimeLabel(r.runtime))}: ${escapeHtml(_ctxStatusText(r.status))}</span>`;
     }).join('') + '</div>';
 }
 

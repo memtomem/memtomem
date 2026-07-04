@@ -1080,11 +1080,9 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
         if (data.imported && data.imported.length) {
           showToast(t('settings.ctx.import_success'));
         } else if (data.skipped && data.skipped.length) {
-          // ``reason`` is backend English (e.g. "canonical exists"); the user
-          // still needs to know the import didn't run, so we surface it as-is
-          // rather than swallow it. Localizing every backend skip reason
-          // would multiply i18n keys without changing behavior.
-          showToast(data.skipped[0].reason || t('toast.request_failed'), 'warning');
+          // The skip's ``reason_code`` maps to localized copy; unknown codes
+          // fall back to the raw backend reason (#1646 item 2).
+          showToast(_ctxImportSkipText(data.skipped[0]), 'warning');
         }
         loadCtxList(type);
       } catch (err) {
@@ -1127,7 +1125,7 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
           showToast(t('settings.ctx.import_to_user_success'));
           loadCtxList('skills');
         } else if (data.skipped && data.skipped.length) {
-          showToast(data.skipped[0].reason || t('toast.request_failed'), 'warning');
+          showToast(_ctxImportSkipText(data.skipped[0]), 'warning');
         }
       } catch (err) {
         showToast(t('toast.import_failed', { error: err.message }), 'error');

@@ -82,7 +82,7 @@ describe('per-type Sync confirm impact (U4)', () => {
     expect(opts.message).toContain('overwrite 2');
     // Runtime display names, sorted; gemini maps to Antigravity and only
     // write-target runtimes appear (kimi only had parse error -> absent).
-    expect(opts.message).toContain('claude, codex');
+    expect(opts.message).toContain('Claude Code, Codex');
     expect(opts.message).not.toContain('Antigravity');
     expect(opts.warningText).toContain('2');
   });
@@ -111,8 +111,9 @@ describe('per-type Sync confirm impact (U4)', () => {
  * capped with "…and N more", degrading to the aggregate counts on a failed
  * list fetch and to the base copy when even the overview fails. */
 
-// skills: 1 create → claude, 1 overwrite → codex; commands: 1 overwrite →
-// claude; agents + mcp-servers clean. Totals: create 1, overwrite 2.
+// skills: 1 create → Claude Code, 1 overwrite → Codex; commands: 1 overwrite
+// → Claude Code (branded labels, #1646 item 3); agents + mcp-servers clean.
+// Totals: create 1, overwrite 2.
 const SA_BODIES = {
   skills: [{
     name: 's1',
@@ -174,9 +175,9 @@ describe('Sync All confirm per-type × per-runtime breakdown (B-5 #1288)', () =>
     expect(opts.message).toContain('create 1');
     expect(opts.message).toContain('overwrite 2');
     // Per-type × per-runtime segments, capitalized type heads + mapped runtimes.
-    expect(opts.message).toContain('Skills: 1 create → claude');
-    expect(opts.message).toContain('Skills: 1 overwrite → codex');
-    expect(opts.message).toContain('Commands: 1 overwrite → claude');
+    expect(opts.message).toContain('Skills: 1 create → Claude Code');
+    expect(opts.message).toContain('Skills: 1 overwrite → Codex');
+    expect(opts.message).toContain('Commands: 1 overwrite → Claude Code');
     // Overwrite total (artifact 2 + settings 0) drives the warning.
     expect(opts.warningText).toContain('2');
   });
@@ -249,8 +250,8 @@ describe('Sync All confirm per-type × per-runtime breakdown (B-5 #1288)', () =>
     await flush(window);
     const opts = captured();
     expect(opts).toBeTruthy();
-    expect(opts.message).toContain('Skills: 1 create → claude');
-    expect(opts.message).toContain('Commands: 1 overwrite → claude');
+    expect(opts.message).toContain('Skills: 1 create → Claude Code');
+    expect(opts.message).toContain('Commands: 1 overwrite → Claude Code');
     expect(opts.warningText).toContain('2');
   });
 });
