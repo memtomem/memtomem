@@ -34,8 +34,13 @@ from memtomem.server.helpers import (
     _parse_recall_date as _parse_recall_date,
     _set_config_key as _set_config_key,
 )
-from memtomem.server.instructions import INSTRUCTIONS as _INSTRUCTIONS
+from memtomem.server.instructions import build_instructions
 from memtomem.server.lifespan import app_lifespan
+
+# Tool mode must be resolved BEFORE the FastMCP instance exists: the
+# instructions text has to describe the tool surface this mode actually
+# exposes (#1608), and ``instructions=`` is only accepted at construction.
+_TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
 
 # ── mcp instance — must be created before tool-module imports ──────────
 # ``instructions=`` is auto-injected into every MCP client's session as
@@ -43,7 +48,7 @@ from memtomem.server.lifespan import app_lifespan
 # documentation surface most LLMs see before picking a tool. Source of
 # truth lives in ``memtomem/server/instructions.py``; pinned by
 # ``tests/test_server_instructions.py``.
-mcp = FastMCP("memtomem", instructions=_INSTRUCTIONS, lifespan=app_lifespan)
+mcp = FastMCP("memtomem", instructions=build_instructions(_TOOL_MODE), lifespan=app_lifespan)
 
 # Pin ``serverInfo.version`` in the MCP ``initialize`` response to the
 # memtomem package version (#383). ``FastMCP.__init__`` has no ``version``
@@ -167,27 +172,36 @@ _CORE_TOOLS = {
     "mem_do",
 }
 
-_TOOL_MODE = os.environ.get("MEMTOMEM_TOOL_MODE", "core").lower()
+# Action categories exposed as individual tools in ``standard`` mode.
+# Module-level so tests (instructions/pruning pins) can derive the
+# expected tool set from the same source the pruning uses.
+_STANDARD_PACKS = frozenset(
+    {
+        "crud",
+        "namespace",
+        "tags",
+        "sessions",
+        "scratch",
+        "relations",
+        "schedule",
+    }
+)
+
+# Snapshot of every tool registered by the imports above, taken BEFORE
+# pruning — the only place the full surface is still observable once a
+# non-full mode has pruned ``mcp``. Used by the per-mode pin tests.
+_ALL_REGISTERED_TOOLS = frozenset(t.name for t in mcp._tool_manager.list_tools())
 
 if _TOOL_MODE != "full":
     if _TOOL_MODE == "standard":
         from memtomem.server.tool_registry import ACTIONS
 
-        _standard_packs = {
-            "crud",
-            "namespace",
-            "tags",
-            "sessions",
-            "scratch",
-            "relations",
-            "schedule",
-        }
         _allowed = _CORE_TOOLS | {
-            f"mem_{name}" for name, info in ACTIONS.items() if info.category in _standard_packs
+            f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS
         }
     else:
         _allowed = _CORE_TOOLS
-    for name in list(mcp._tool_manager._tools):
+    for name in _ALL_REGISTERED_TOOLS:
         if name not in _allowed:
             mcp._tool_manager.remove_tool(name)
 
