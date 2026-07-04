@@ -52,10 +52,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # Windows ships informational pending the test-portability triage tracked
-    # in #634 (umbrella) — ubuntu + macOS are the gating cells today. Flip
-    # this to `false` (or remove) once the Windows triage sub-issues close.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # All three OS cells gate. Windows was informational during the #634
+    # portability triage; it went (and stayed) green once that closed, and
+    # the informational window let a real Windows regression hide behind a
+    # green run-level badge for a day (#1640) — the failure mode this flip
+    # removes. The timeout guards the historical Windows hang mode: a hung
+    # cell must fail fast, not block the required check for six hours.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
