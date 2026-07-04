@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,8 +13,14 @@ import click
 from click.testing import CliRunner
 
 from memtomem.cli import cli
-from memtomem.cli.status_cmd import _style_status_report
+from memtomem.cli.status_cmd import _style_status_lines
 from memtomem.config import Mem2MemConfig
+from memtomem.server.tools.status_config import (
+    StatusLine,
+    collect_status_report,
+    iter_status_lines,
+    render_status_report,
+)
 
 
 def _mock_components(
@@ -24,6 +31,7 @@ def _mock_components(
     stored_embedding_info: dict | None = None,
     embedding_mismatch: dict | None = None,
     dense_coverage: dict | None = None,
+    config: Mem2MemConfig | None = None,
 ) -> SimpleNamespace:
     """Build a minimal ``Components``-shaped mock for ``mm status`` tests.
 
@@ -51,7 +59,7 @@ def _mock_components(
     if dense_coverage is not None:
         storage.get_dense_coverage = AsyncMock(return_value=dense_coverage)
     return SimpleNamespace(
-        config=Mem2MemConfig(),
+        config=config or Mem2MemConfig(),
         storage=storage,
         embedder=SimpleNamespace(),
     )
@@ -187,69 +195,87 @@ class TestStatusOutput:
         assert "Dense vectors:" not in result.output
 
     def test_colored_output_preserves_plain_text(self) -> None:
-        plain = "\n".join(
-            [
-                "memtomem Status",
-                "==============",
-                "Storage:   sqlite",
-                r"DB path:   C:\Users\TonyStark\.memtomem\memtomem.db",
-                "Embedding: onnx / bge-m3",
-                "Dimension: 1024",
-                "Top-K:     10",
-                "RRF k:     60",
-                "",
-                "Index stats",
-                "-----------",
-                "Total chunks:  53",
-                "Source files:  25",
-                "Dense vectors: 53/53 (100.0%)",
-                "",
-                "Immutable fields (set once at init)",
-                "------------------------------------",
-                "embedding.provider:  onnx",
-                "embedding.model:     bge-m3",
-                "embedding.dimension: 1024",
-                "search.tokenizer:    kiwipiepy",
-                "storage.backend:     sqlite",
-                "  -> To change: re-run `mm init` for provider/tokenizer/backend, "
-                "or `mm embedding-reset` to switch embedder (re-index required).",
-            ]
+        # Styling and plain rendering consume the same StatusLine parts,
+        # so unstyle(styled) must reproduce render_status_report exactly.
+        import asyncio
+
+        from memtomem.server.context import AppContext
+
+        comp = _mock_components(
+            total_chunks=53,
+            total_sources=25,
+            stored_embedding_info={"provider": "onnx", "model": "bge-m3", "dimension": 1024},
+            dense_coverage={"total": 53, "with_dense": 53},
         )
+        data = asyncio.run(collect_status_report(AppContext.from_components(comp)))
 
-        styled = _style_status_report(plain)
+        styled = _style_status_lines(iter_status_lines(data))
 
-        assert click.unstyle(styled) == plain
+        assert click.unstyle(styled) == render_status_report(data)
         assert "\x1b[" in styled
         assert "\x1b[36m" in styled  # cyan title/path/commands
         assert "\x1b[32m" in styled  # full dense coverage
         assert "\x1b[33m" in styled  # immutable guidance
 
     @pytest.mark.parametrize(
-        ("line", "ansi_color"),
+        ("with_dense", "total", "percent", "state", "hint", "ansi_color"),
         [
-            ("Dense vectors: 42/42 (100.0%)", "\x1b[32m"),
+            (42, 42, 100.0, "full", "", "\x1b[32m"),
             (
-                "Dense vectors: 21/42 (50.0%)  (partial dense coverage — some chunks BM25-only)",
+                21,
+                42,
+                50.0,
+                "partial",
+                "  (partial dense coverage — some chunks BM25-only)",
                 "\x1b[33m",
             ),
             (
-                "Dense vectors: 0/42 (0.0%)  (BM25-only — dense retrieval will return nothing)",
+                0,
+                42,
+                0.0,
+                "none",
+                "  (BM25-only — dense retrieval will return nothing)",
                 "\x1b[31m",
             ),
-            ("Dense vectors: 0/0", "\x1b[33m"),
+            (0, 0, None, "empty", "", "\x1b[33m"),
         ],
     )
-    def test_dense_coverage_color_thresholds(self, line: str, ansi_color: str) -> None:
-        styled = _style_status_report(line)
+    def test_dense_coverage_color_thresholds(
+        self,
+        with_dense: int,
+        total: int,
+        percent: float | None,
+        state: str,
+        hint: str,
+        ansi_color: str,
+    ) -> None:
+        line = StatusLine(
+            "dense",
+            key="Dense vectors: ",
+            value=f"{with_dense}/{total}",
+            suffix=f" ({percent}%){hint}" if percent is not None else "",
+            meta={"state": state},
+        )
 
-        assert click.unstyle(styled) == line
+        styled = _style_status_lines([line])
+
+        assert click.unstyle(styled) == line.text
         assert ansi_color in styled
 
-    def test_no_color_disables_status_styling(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        plain = "memtomem Status\n==============\nDense vectors: 42/42 (100.0%)"
+    def test_no_color_disables_status_styling(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
         monkeypatch.setenv("NO_COLOR", "1")
 
-        assert _style_status_report(plain) == plain
+        # color=True forces click to keep ANSI codes in the captured
+        # output, so their absence proves NO_COLOR won, not the non-tty
+        # stripping CliRunner does by default.
+        result = runner.invoke(cli, ["status"], color=True)
+
+        assert result.exit_code == 0, result.output
+        assert "\x1b[" not in result.output
 
     def test_embedding_mismatch_warning_block_emitted(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -337,3 +363,206 @@ class TestStatusUnconfigured:
         assert result.exit_code != 0
         assert "not configured" in result.output
         assert "mm init" in result.output
+
+
+class TestStatusTextPin:
+    """Byte-level pin of the rendered report for a maxed-out fixture.
+
+    The #1615 refactor split ``format_status_report`` into
+    ``collect_status_report`` + ``render_status_report``; this literal
+    pin (captured from the pre-refactor output) proves the split changed
+    no bytes — and from now on it is the canonical text-shape regression
+    net for the report. Update it deliberately, never to make a diff
+    pass.
+    """
+
+    def test_full_report_matches_captured_literal(self, tmp_path: Path) -> None:
+        import asyncio
+
+        from memtomem.server.context import AppContext
+        from memtomem.server.tools.status_config import format_status_report
+
+        present = tmp_path / "present.md"
+        present.write_text("hi")
+        comp = _mock_components(
+            total_chunks=53,
+            total_sources=25,
+            source_files=[Path("/nonexistent/a.md"), Path("/nonexistent/b.md"), present],
+            stored_embedding_info={"provider": "onnx", "model": "bge-m3", "dimension": 1024},
+            embedding_mismatch={
+                "stored": {"provider": "ollama", "model": "bge-m3", "dimension": 1024},
+                "configured": {"provider": "ollama", "model": "nomic", "dimension": 768},
+            },
+            dense_coverage={"total": 53, "with_dense": 21},
+            config=Mem2MemConfig(
+                storage={"sqlite_path": "/opt/mm/memtomem.db"},
+                scheduler={"enabled": True},
+            ),
+        )
+
+        text = asyncio.run(format_status_report(AppContext.from_components(comp)))
+
+        # str(Path(...)) so the DB-path line survives Windows separators.
+        expected = f"""\
+memtomem Status
+==============
+Storage:   sqlite
+DB path:   {Path("/opt/mm/memtomem.db").expanduser()}
+Embedding: onnx / bge-m3
+Dimension: 1024
+Top-K:     10
+RRF k:     60
+
+Index stats
+-----------
+Total chunks:  53
+Source files:  25 (2 orphaned — run mem_cleanup_orphans)
+Dense vectors: 21/53 (39.6%)  (partial dense coverage — some chunks BM25-only)
+
+Immutable fields (set once at init)
+------------------------------------
+embedding.provider:  none
+embedding.model:     (unset)
+embedding.dimension: 0
+search.tokenizer:    unicode61
+storage.backend:     sqlite
+  -> To change: re-run `mm init` for provider/tokenizer/backend, or `mm embedding-reset` to switch embedder (re-index required).
+
+Warnings
+--------
+- kind:       scheduler_watchdog_disabled
+  detail:     scheduler.enabled=True but health_watchdog.enabled=False
+  fix:        set health_watchdog.enabled=True (scheduler rides its tick)
+- kind:       embedding_dim_mismatch
+  stored:     ollama/bge-m3 (1024d)
+  configured: ollama/nomic (768d)
+  fix:        uv run mm embedding-reset --mode apply-current
+  doc:        docs/guides/configuration.md#reset-flow"""
+        assert text == expected
+
+
+class TestStatusJson:
+    """``mm status --format json`` / ``--json`` — CONTRIBUTING read-command
+    contract: stable payload keys, ``{"error": ...}`` + exit 0 on handled
+    failure, and byte-parity between the alias and the long form."""
+
+    def test_json_payload_has_stable_keys(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(
+            total_chunks=42,
+            total_sources=7,
+            embedding_mismatch={
+                "stored": {"provider": "ollama", "model": "bge-m3", "dimension": 1024},
+                "configured": {"provider": "ollama", "model": "nomic", "dimension": 768},
+            },
+            dense_coverage={"total": 42, "with_dense": 21},
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+        assert result.exit_code == 0, result.output
+
+        data = json.loads(result.output)
+        assert set(data) == {"config", "index", "immutable", "warnings"}
+        assert data["index"]["total_chunks"] == 42
+        assert data["index"]["dense_coverage"] == {
+            "with_dense": 21,
+            "total": 42,
+            "percent": 50.0,
+            "state": "partial",
+        }
+        # Warnings keep the stable key schema advertised by mem_status,
+        # with stored/configured as structured sub-objects.
+        (warning,) = data["warnings"]
+        assert warning["kind"] == "embedding_dim_mismatch"
+        assert warning["stored"] == {"provider": "ollama", "model": "bge-m3", "dimension": 1024}
+        assert warning["configured"] == {"provider": "ollama", "model": "nomic", "dimension": 768}
+        assert warning["fix"] == "uv run mm embedding-reset --mode apply-current"
+        assert warning["doc"] == "docs/guides/configuration.md#reset-flow"
+
+    def test_json_flag_matches_format_json(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=3, total_sources=2)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        via_flag = runner.invoke(cli, ["status", "--json"])
+        via_format = runner.invoke(cli, ["status", "--format", "json"])
+
+        assert via_flag.exit_code == 0, via_flag.output
+        assert via_flag.output == via_format.output
+
+    def test_json_output_is_never_styled(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"], color=True)
+
+        assert result.exit_code == 0, result.output
+        assert "\x1b[" not in result.output
+
+    def test_json_dense_coverage_null_when_method_missing(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["index"]["dense_coverage"] is None
+
+    def test_json_error_shape_when_unconfigured(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(
+            "memtomem.cli._bootstrap._CONFIG_PATH", tmp_path / "no-such-config.json"
+        )
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        # Handled failure rides the JSON body, not the exit code, so
+        # `mm status --json | jq` pipelines keep working.
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert set(data) == {"error"}
+        assert "not configured" in data["error"]
+
+    def test_scheduler_warning_keys_have_no_doc(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``doc`` is optional per the mem_status docstring — this warning
+        # kind ships without one, and JSON consumers must not assume it.
+        comp = _mock_components(
+            total_chunks=1,
+            total_sources=1,
+            config=Mem2MemConfig(scheduler={"enabled": True}),
+        )
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code == 0, result.output
+        (warning,) = json.loads(result.output)["warnings"]
+        assert set(warning) == {"kind", "detail", "fix"}
+        assert warning["kind"] == "scheduler_watchdog_disabled"
+
+    def test_json_unexpected_error_keeps_nonzero_exit(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only CLI-classified failures (ClickException) become the exit-0
+        # {"error": ...} shape; programmer errors must stay loud so
+        # scripts/CI don't read a crash as a successful status report
+        # (CONTRIBUTING: "Unhandled exceptions ... should still surface
+        # through Click").
+        comp = _mock_components(total_chunks=1, total_sources=1)
+        comp.storage.get_stats = AsyncMock(side_effect=RuntimeError("boom"))
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", _patched_cli_components(comp))
+
+        result = runner.invoke(cli, ["status", "--json"])
+
+        assert result.exit_code != 0
+        assert "boom" in result.output

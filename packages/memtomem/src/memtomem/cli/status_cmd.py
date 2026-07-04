@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-import re
+from typing import TYPE_CHECKING, Any
 
 import click
 
-
-_DENSE_RE = re.compile(r"^(Dense vectors: )(\d+)/(\d+)( \([^)]+\).*)?$")
-_KEY_RE = re.compile(r"^([A-Za-z][A-Za-z .-]*:)(\s+.*)$")
-_IMMUTABLE_KEY_RE = re.compile(r"^([a-z.]+:)(\s+.*)$")
+if TYPE_CHECKING:
+    from memtomem.server.tools.status_config import StatusLine
 
 
 @click.command("status")
-def status() -> None:
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.option("--json", "as_json", is_flag=True, help="Shortcut for --format json.")
+def status(fmt: str, *, as_json: bool = False) -> None:
     """Show indexing statistics and current configuration summary.
 
     Mirrors the MCP ``mem_status`` tool — same output, callable from a
@@ -23,101 +24,87 @@ def status() -> None:
     check that the binary works, the config is readable, and the DB is
     reachable, without having to run a search.
     """
+    # --json is an alias for --format json (CONTRIBUTING "CLI output
+    # convention"); if both are passed, --json wins since it's the more
+    # specific intent.
+    if as_json:
+        fmt = "json"
+
     try:
-        asyncio.run(_status())
-    except click.ClickException:
+        asyncio.run(_status(fmt))
+    except click.ClickException as e:
+        if fmt == "json":
+            # Read-command error shape: {"error": ...} with exit code 0
+            # (CONTRIBUTING "JSON error shape") so `... --json | jq`
+            # pipelines see the failure in-band instead of a broken pipe.
+            # Only ClickException qualifies — it marks failures the CLI
+            # classified as expected; anything else falls through below
+            # and keeps the nonzero exit, per the same convention.
+            click.echo(json.dumps({"error": e.format_message()}))
+            return
         raise
     except Exception as e:
         raise click.ClickException(str(e)) from e
 
 
-async def _status() -> None:
+async def _status(fmt: str) -> None:
     from memtomem.cli._bootstrap import cli_components
     from memtomem.server.context import AppContext
-    from memtomem.server.tools.status_config import format_status_report
+    from memtomem.server.tools.status_config import (
+        collect_status_report,
+        iter_status_lines,
+        render_status_report,
+    )
 
     async with cli_components() as comp:
         ctx = AppContext.from_components(comp)
-        output = await format_status_report(ctx)
+        data = await collect_status_report(ctx)
 
-    click.echo(_style_status_report(output))
+    if fmt == "json":
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+    elif "NO_COLOR" in os.environ:
+        click.echo(render_status_report(data))
+    else:
+        click.echo(_style_status_lines(iter_status_lines(data)))
 
 
-def _style_status_report(output: str) -> str:
+_TONE_STYLES: dict[str, dict[str, Any]] = {
+    "title": {"fg": "cyan", "bold": True},
+    "plain": {"bold": True},
+    "warn": {"fg": "yellow", "bold": True},
+}
+
+_DENSE_STATE_COLORS = {"full": "green", "partial": "yellow", "none": "red", "empty": "yellow"}
+
+
+def _style_status_lines(lines: list[StatusLine]) -> str:
     """Add terminal-only scanability hints without changing report text."""
-
-    if "NO_COLOR" in os.environ:
-        return output
-
-    lines = output.splitlines()
     styled: list[str] = []
-    immutable_section = False
 
     for line in lines:
-        if line == "memtomem Status":
-            styled.append(click.style(line, fg="cyan", bold=True))
-        elif line == "==============":
-            styled.append(click.style(line, fg="cyan", bold=True))
-        elif line == "Index stats":
-            immutable_section = False
-            styled.append(click.style(line, bold=True))
-        elif line == "-----------":
-            styled.append(click.style(line, bold=True))
-        elif line == "Immutable fields (set once at init)":
-            immutable_section = True
-            styled.append(click.style(line, fg="yellow", bold=True))
-        elif line == "------------------------------------":
-            styled.append(click.style(line, fg="yellow", bold=True))
-        elif line == "Warnings":
-            immutable_section = False
-            styled.append(click.style(line, fg="yellow", bold=True))
-        elif line == "--------":
-            styled.append(click.style(line, fg="yellow", bold=True))
-        elif line.startswith("Dense vectors: "):
-            styled.append(_style_dense_vectors(line))
-        elif line.startswith("  ->"):
-            styled.append(_style_guidance_line(line))
-        elif immutable_section:
-            styled.append(_style_key_value(line, _IMMUTABLE_KEY_RE))
-        else:
-            styled.append(_style_key_value(line, _KEY_RE))
+        if line.role == "title":
+            styled.append(click.style(line.text, fg="cyan", bold=True))
+        elif line.role in ("rule", "section"):
+            styled.append(click.style(line.text, **_TONE_STYLES[line.meta["tone"]]))
+        elif line.role == "dense":
+            styled.append(
+                click.style(line.key, bold=True)
+                + click.style(
+                    line.value + line.suffix,
+                    fg=_DENSE_STATE_COLORS[line.meta["state"]],
+                    bold=True,
+                )
+            )
+        elif line.role == "guidance":
+            styled.append(_style_guidance_line(line.text))
+        elif line.role in ("kv", "immutable_kv"):
+            value_fg = line.meta.get("value_fg")
+            value = click.style(line.value, fg=value_fg) if value_fg else line.value
+            styled.append(click.style(line.key, bold=True) + value + line.suffix)
+        else:  # "warning_kv" | "blank" — plain on purpose
+            styled.append(line.text)
 
     return "\n".join(styled)
-
-
-def _style_key_value(line: str, pattern: re.Pattern[str]) -> str:
-    match = pattern.match(line)
-    if not match:
-        return line
-
-    key, value = match.groups()
-    if key == "DB path:":
-        return click.style(key, bold=True) + click.style(value, fg="cyan")
-    return click.style(key, bold=True) + value
-
-
-def _style_dense_vectors(line: str) -> str:
-    match = _DENSE_RE.match(line)
-    if not match:
-        return click.style(line, bold=True)
-
-    label, with_dense_text, total_text, suffix = match.groups()
-    suffix = suffix or ""
-    with_dense = int(with_dense_text)
-    total = int(total_text)
-
-    if total == 0:
-        color = "yellow"
-    elif with_dense == total:
-        color = "green"
-    elif with_dense == 0:
-        color = "red"
-    else:
-        color = "yellow"
-
-    return click.style(label, bold=True) + click.style(
-        f"{with_dense_text}/{total_text}{suffix}", fg=color, bold=True
-    )
 
 
 def _style_guidance_line(line: str) -> str:
