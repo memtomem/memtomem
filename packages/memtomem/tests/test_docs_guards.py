@@ -82,6 +82,11 @@ def reference() -> str:
 
 
 @pytest.fixture(scope="module")
+def operations() -> str:
+    return _read(_GUIDES / "reference" / "operations.md")
+
+
+@pytest.fixture(scope="module")
 def canonical_footnote(reference: str) -> str:
     """The tool-mode footnote line, extracted from reference.md.
 
@@ -148,6 +153,42 @@ class TestToolModeFootnoteParity:
             "line verbatim so the CLI / Web UI alternate-access hint stays "
             "in sync across the two Config-table entry points."
         )
+
+
+class TestWebRemoteAccessDocs:
+    """#1618: the ``mm web`` remote-access flags are security-critical
+    (they gate off-loopback exposure and startup refuses without them),
+    so the operations guide must document them — and the doc must track
+    the live CLI, not a remembered spelling. ``TestDocumentedCliExists``
+    strips flags when validating ``mm ...`` snippets, so this guard
+    checks the flag surface explicitly."""
+
+    _REMOTE_FLAGS = ("--allow-remote-ui", "--trusted-origin", "--trusted-host")
+
+    def test_flags_exist_on_live_cli(self) -> None:
+        web = _CLI.commands["web"]
+        live = {p for param in web.params for p in param.opts}
+        for flag in self._REMOTE_FLAGS:
+            assert flag in live, (
+                f"{flag} disappeared from `mm web` — update the Remote access "
+                "section in docs/guides/reference/operations.md in the same PR."
+            )
+
+    def test_operations_documents_every_remote_flag(self, operations: str) -> None:
+        assert "### Remote access" in operations
+        for flag in self._REMOTE_FLAGS:
+            assert flag in operations, (
+                f"operations.md Remote access section lost {flag} — it must "
+                "name every off-loopback opt-in flag (#1618)."
+            )
+
+    def test_operations_names_the_refusal_and_proxy_guidance(self, operations: str) -> None:
+        # The two security-load-bearing statements: startup refuses
+        # off-loopback binds, and public exposure needs an authenticating
+        # reverse proxy (no first-party auth, ADR-0029).
+        assert "refuses to start" in operations
+        assert "reverse proxy" in operations
+        assert "0029-mcp-network-transport-auth-stance.md" in operations
 
 
 def _extract_hooks_snippet(claude_code_md: str) -> dict:

@@ -29,6 +29,36 @@ mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 
 Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces/{ns}/rename`, `DELETE /api/namespaces/{ns}`, etc. need `dev` mode. `GET /api/namespaces` (list) and `PATCH /api/namespaces/{ns}` (cosmetic edit — color, description) are prod-tier and respond in both modes.
 
+### Remote access
+
+`mm web` binds the loopback interface (`127.0.0.1`) by default, and **refuses to start** when `--host` is anything else:
+
+```text
+Error: --host 0.0.0.0 exposes the Web UI off-loopback. Pass --allow-remote-ui
+to acknowledge, paired with --trusted-origin and --trusted-host so the
+CSRF/Origin/Host allow-list covers the remote shape.
+```
+
+The refusal is deliberate: the Web UI is an **unauthenticated** single-page app — memtomem ships no first-party login ([ADR-0029](../../adr/0029-mcp-network-transport-auth-stance.md)) — so anyone who can reach the port can read and modify your memory store. Exposing it off-loopback takes three flags:
+
+| Flag | Effect |
+|------|--------|
+| `--allow-remote-ui` | Acknowledge the off-loopback bind. Required whenever `--host` is non-loopback; startup refuses without it. |
+| `--trusted-origin HOST` | Add a hostname to the CSRF Origin/Referer allow-list (repeatable). Loopback (`127.0.0.1`, `::1`, `localhost`) is always trusted; anything else must be named explicitly. |
+| `--trusted-host HOST` | Add a hostname to the Host-header allow-list (repeatable). Defends DNS rebinding when running with `--allow-remote-ui`. |
+
+A trusted-LAN example — serving the UI to browsers that reach this machine as `workstation.local`:
+
+```bash
+mm web --host 0.0.0.0 --allow-remote-ui \
+  --trusted-origin workstation.local \
+  --trusted-host workstation.local
+```
+
+Requests whose `Origin`/`Referer` or `Host` headers are not on the allow-list are rejected by the three-layer request guard — see [SECURITY.md](../../../SECURITY.md#csrf--origin--host-guard-rfc-787) for the full model and the `MEMTOMEM_WEB__CSRF_ENFORCE` rollback valve.
+
+**Anything beyond a trusted LAN needs an authenticating reverse proxy** — TLS plus auth in front, with memtomem still bound to loopback behind it. The [authenticated reverse proxy recipe](../mcp-clients.md#authenticated-reverse-proxy-required-for-public-exposure) (nginx, TLS + Basic auth) applies to the Web UI the same way it does to MCP network transports.
+
 ---
 
 ## Troubleshooting
