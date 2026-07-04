@@ -2952,7 +2952,16 @@ _MODEL_DIMS: dict[str, int] = {
 
 @click.command("init")
 @click.option(
-    "-y", "--non-interactive", is_flag=True, help="Skip wizard, use defaults or provided options"
+    "-y",
+    "--non-interactive",
+    is_flag=True,
+    help=(
+        "Skip the wizard. Without --preset this applies `--preset minimal` "
+        "(BM25-only, no embeddings) — unlike -y elsewhere in the CLI, it "
+        "selects configuration, not just prompt-skipping. A future release "
+        "will narrow -y to confirmation-skipping only; scripts should pass "
+        "an explicit --preset."
+    ),
 )
 @click.option("--provider", type=click.Choice(["none", "onnx", "ollama", "openai"]), default=None)
 @click.option("--model", default=None, help="Embedding model name")
@@ -3083,6 +3092,22 @@ def init(
         # unicode61, auto_ns=False, top_k=10). Explicit flags then override the
         # preset baseline, preserving the prior `-y --provider onnx --model X`
         # contract.
+        if preset is None:
+            # #1616: everywhere else in the CLI `-y` means "skip the
+            # confirmation prompt"; here it silently selects a materially
+            # weaker setup than the wizard's default (english). Until the
+            # flag split lands, say so loudly — on stderr, so scripted
+            # stdout parsing is unaffected.
+            click.secho(
+                "  Note: -y without --preset applies the 'minimal' preset "
+                "(BM25 keyword search only, no embeddings); the interactive "
+                "wizard defaults to 'english'. Pass --preset "
+                "minimal|english|korean to choose explicitly, or run "
+                "`mm init` for the wizard. A future release will narrow -y "
+                "to confirmation-skipping only.",
+                fg="yellow",
+                err=True,
+            )
         effective_preset = preset or "minimal"
         _apply_preset(state, effective_preset)
         _override_from_flags(
