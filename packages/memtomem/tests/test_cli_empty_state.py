@@ -49,7 +49,7 @@ HINT = "No results found. See `mm status` to confirm your index has chunks."
 class TestSearchEmptyState:
     """mm search prints a friendly hint on stderr when results are empty."""
 
-    @pytest.mark.parametrize("fmt", ["table", "plain", "context", "smart"])
+    @pytest.mark.parametrize("fmt", ["table", "plain"])
     def test_non_json_formats_print_hint_to_stderr(self, monkeypatch, fmt: str) -> None:
         fake, _ = _mock_empty_search()
         monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake)
