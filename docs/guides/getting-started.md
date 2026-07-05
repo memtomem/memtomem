@@ -362,7 +362,7 @@ Results are ranked by a combination of keyword relevance and semantic similarity
 
 ```
 "Remember that Redis LRU→LFU reduced cache misses by 40%"
-→  mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags="redis,performance")
+→  mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags=["redis", "performance"])
 ```
 
 ```bash

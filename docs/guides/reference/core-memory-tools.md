@@ -277,7 +277,7 @@ Like `mem_search`, `mem_recall` hides system namespaces (`archive:*` by default)
 ### `mem_add` — Add a note
 
 ```
-mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags="redis,performance")
+mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags=["redis", "performance"])
 → Saved to ~/.memtomem/memories/2026-03-30.md (1 chunk indexed)
 ```
 
@@ -285,13 +285,13 @@ mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags="r
 |-----------|-------------|
 | `content` | The note text |
 | `title` | Optional heading (becomes `## title` in the file) |
-| `tags` | Comma-separated tags |
+| `tags` | List of tags (`list[str]`) |
 | `file` | Target file path (auto-generates date-stamped file if omitted) |
 | `namespace` | Namespace assignment |
 | `template` | Structured template (`adr`, `meeting`, `debug`, `decision`, `procedure`) |
 
 ```
-mem_add(content="New rate limit: 1000 req/min", file="api-notes.md", tags="api")
+mem_add(content="New rate limit: 1000 req/min", file="api-notes.md", tags=["api"])
 mem_add(content="Sprint decision: use GraphQL", title="Sprint 12", namespace="work")
 ```
 
