@@ -855,6 +855,8 @@
   "settings.ctx.portal_label_placeholder": "프로젝트 라벨",
   "settings.ctx.portal_stale": "미초기화",
   "settings.ctx.portal_stale_tip": "이 폴더에는 아직 .memtomem 저장소가 없습니다 — 폴더 안에서 mm context init 을 실행하면 추적이 시작됩니다.",
+  "settings.ctx.portal_drift_badge": "드리프트",
+  "settings.ctx.portal_drift_tip": "이 프로젝트의 동기화된 컨텍스트가 저장소와 더 이상 일치하지 않습니다 (wiki 핀이 뒤처졌거나 런타임 파일이 변경됨). 이 행의 Sync 를 누르거나, 자세한 내용은 mm context status --all-projects 를 실행하세요.",
   "settings.ctx.portal_root_unknown": "(경로 없음)",
   "settings.ctx.portal_load_failed": "프로젝트를 불러오지 못했습니다",
   "settings.ctx.portal_add_project_tooltip": "memtomem이 추적할 수 있도록 프로젝트 폴더를 등록합니다",

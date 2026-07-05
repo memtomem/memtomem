@@ -238,6 +238,12 @@ the server is running in (marked *current folder*), any roots you registered, an
 — if you opt in — roots discovered under `~/.claude/projects/`. Each runtime
 shows a detection badge (*Not installed* / *Installed* / *Registered*).
 
+Shortly after the list paints, a background fleet check marks any project whose
+synced context has fallen out of step with the Store — wiki pins behind or
+runtime files changed — with a **drift** badge. Click **Sync** on that row to
+resolve it, or run `mm context status --all-projects` for the per-project
+breakdown.
+
 > Note: the `gemini` runtime is shown as **Antigravity** in the UI.
 
 ## From the CLI — the core loop

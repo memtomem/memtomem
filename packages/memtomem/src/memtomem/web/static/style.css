@@ -4304,6 +4304,9 @@ body.app-simple [data-ui-adv="advanced"] { display: none; }
 .ctx-scope-badge--stale { background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
 /* Sync paused (enrolled but enabled:false) — neutral/muted, not an error state. */
 .ctx-scope-badge--paused { background: rgba(128, 128, 128, 0.15); color: var(--text-secondary); }
+/* Cross-project drift (#1649) — update available, warning tone (mirrors the
+   overview wiki-behind badge; not an error like missing). */
+.ctx-scope-badge--drift { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
 
 /* Context Portal (ADR-0021 PR4) — multi-project board */
 .ctx-portal-toolbar {
