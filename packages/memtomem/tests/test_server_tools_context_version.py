@@ -200,8 +200,96 @@ async def test_flat_layout_create_refuses(layout):
     flat = _seed_flat(layout, "agents", "flatone")
     out = await mem_context_version("agents", "flatone", action="create")
     assert out.startswith("error:") and "flat layout" in out
+    # The refusal now leads with the enable action (the lightweight adopt).
+    assert "action='enable'" in out
     # Nothing was written next to the flat file.
     assert not (flat.parent / "flatone" / "versions.json").exists()
+
+
+# ── enable (flat → dir adopt, ADR-0022) ───────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_enable_flat_adopts_to_dir(layout):
+    # The MCP twin of ``mm context version enable`` / web ``POST …/versions/enable``:
+    # a byte-identical flat→dir move that unlocks versioning.
+    flat = _seed_flat(layout, "agents", "flatone")
+    body = flat.read_text(encoding="utf-8")
+    out = await mem_context_version("agents", "flatone", action="enable")
+    assert out.startswith("Adopted") and "directory layout" in out
+    root = _canonical_root(layout, "agents", "project_shared")
+    # The flat file moved (byte-identical) into <name>/agent.md.
+    assert not flat.exists()
+    adopted = root / "flatone" / "agent.md"
+    assert adopted.is_file() and adopted.read_text(encoding="utf-8") == body
+    # Versioning is now unlocked: create freezes a v1 snapshot.
+    created = await mem_context_version("agents", "flatone", action="create")
+    assert created.startswith("Created")
+    assert (root / "flatone" / "versions" / "v1.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_enable_idempotent_on_dir(layout):
+    _seed_dir(layout, "agents", "foo")
+    out = await mem_context_version("agents", "foo", action="enable")
+    assert not out.startswith("error:")
+    assert "already uses directory layout" in out
+
+
+@pytest.mark.anyio
+async def test_enable_commands_artifact(layout):
+    # Parity across both versionable types (agents + commands).
+    _seed_flat(layout, "commands", "flatcmd")
+    out = await mem_context_version("commands", "flatcmd", action="enable")
+    assert out.startswith("Adopted")
+    root = _canonical_root(layout, "commands", "project_shared")
+    assert (root / "flatcmd" / "command.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_enable_flat_dir_collision_refuses(layout):
+    # Both <name>.md and <name>/agent.md present (resolver picks dir) → refuse
+    # rather than report a misleading idempotent success while a stray flat lingers.
+    _seed_flat(layout, "agents", "foo")
+    _seed_dir(layout, "agents", "foo")
+    out = await mem_context_version("agents", "foo", action="enable")
+    assert out.startswith("error:") and "both flat" in out
+
+
+@pytest.mark.anyio
+async def test_enable_orphaned_store_refuses(layout):
+    # A flat canonical plus a pre-existing version store under <name>/ (no
+    # working canonical) → adopting would silently attach that history; refuse.
+    _seed_flat(layout, "agents", "foo")
+    root = _canonical_root(layout, "agents", "project_shared")
+    (root / "foo" / "versions").mkdir(parents=True)
+    out = await mem_context_version("agents", "foo", action="enable")
+    assert out.startswith("error:") and "orphaned version store" in out
+
+
+@pytest.mark.anyio
+async def test_enable_missing_artifact_errors(layout):
+    out = await mem_context_version("agents", "ghost", action="enable")
+    assert out.startswith("error:") and "not found" in out
+
+
+@pytest.mark.anyio
+async def test_enable_explicit_project_shared_confirm_gate(layout):
+    _seed_flat(layout, "agents", "flatone")
+    gated = await mem_context_version("agents", "flatone", action="enable", scope="project_shared")
+    assert gated.startswith("needs confirmation")
+    root = _canonical_root(layout, "agents", "project_shared")
+    # Untouched until confirmed — the flat file still sits where it was.
+    assert (root / "flatone.md").is_file()
+    ok = await mem_context_version(
+        "agents",
+        "flatone",
+        action="enable",
+        scope="project_shared",
+        confirm_project_shared=True,
+    )
+    assert ok.startswith("Adopted")
+    assert (root / "flatone" / "agent.md").is_file()
 
 
 # ── Gate A privacy scan on create ─────────────────────────────────────────
@@ -353,6 +441,18 @@ async def test_mem_do_routes_version_and_promote(layout):
         {"artifact_type": "agents", "name": "foo", "label": "production", "version": "v1"},
     )
     assert "production → v1" in promoted
+
+
+@pytest.mark.anyio
+async def test_mem_do_routes_enable(layout):
+    from memtomem.server.tools.meta import mem_do
+
+    _seed_flat(layout, "agents", "flatone")
+    out = await mem_do(
+        "context_version",
+        {"artifact_type": "agents", "name": "flatone", "action": "enable"},
+    )
+    assert out.startswith("Adopted")
 
 
 # ── label-aware deploy (mem_context_sync / mem_context_generate --label) ────

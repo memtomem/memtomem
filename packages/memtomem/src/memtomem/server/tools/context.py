@@ -2180,11 +2180,19 @@ def _resolve_version_artifact(
 
 
 def _flat_layout_hint(artifact_type: str, name: str) -> str:
-    """The shared "no version store on flat layout" remediation line (inv 3)."""
+    """The shared "no version store on flat layout" remediation line (inv 3).
+
+    Leads with the lightweight ``action="enable"`` adopt (the byte-identical
+    flat→dir move) and keeps ``mem_context_artifact_migrate`` for wiki-installed
+    assets, which also consolidate the lockfile manifest — mirrors the CLI
+    ``version create`` hint fix (#1549).
+    """
     return (
         f"{artifact_type}/{name} uses flat layout, which has no per-artifact version "
-        f"store. Run mem_context_artifact_migrate(asset_type='{artifact_type}', "
-        f"name='{name}') to convert it to directory layout first."
+        f"store. Run mem_context_version(artifact_type='{artifact_type}', "
+        f"name='{name}', action='enable') to adopt it into directory layout "
+        f"(wiki-installed assets: mem_context_artifact_migrate("
+        f"asset_type='{artifact_type}', name='{name}'))."
     )
 
 
@@ -2248,8 +2256,10 @@ async def mem_context_version(
         name: Canonical artifact name (the directory under
             ``.memtomem/<type>/``).
         action: ``list`` (default, read-only) to show versions + label
-            pointers, or ``create`` to freeze the current working canonical
-            into a new ``vN`` snapshot.
+            pointers, ``create`` to freeze the current working canonical into a
+            new ``vN`` snapshot, or ``enable`` to adopt a flat-layout artifact
+            into directory layout so it can be versioned (a byte-identical,
+            same-scope move — the MCP twin of ``mm context version enable``).
         note: Optional annotation stored with a ``create`` snapshot; ignored
             for ``list``.
         scope: ADR-0011 canonical residency tier — ``project_shared``
@@ -2263,8 +2273,10 @@ async def mem_context_version(
             default scope does not require it (mirrors ``mem_context_init``).
 
     A flat-layout artifact has no per-artifact ``versions/`` store (ADR-0022
-    invariant 3): ``list`` returns a benign migrate-required hint and
-    ``create`` refuses with a "run mem_context_artifact_migrate first" error.
+    invariant 3): ``list`` returns a benign hint and ``create`` refuses, both
+    pointing at ``action="enable"`` to adopt it into directory layout first;
+    ``enable`` is idempotent on an already-dir artifact and refuses a
+    flat+dir collision or an orphaned version store.
 
     On ``create`` the snapshot bytes are privacy-scanned (Gate A, ADR-0011
     trust boundary): for ``project_shared`` a secret hard-refuses with a
@@ -2275,8 +2287,8 @@ async def mem_context_version(
     ``privacy block:``) so callers can branch on the prefix.
     """
     action = (action or "").strip().lower()
-    if action not in ("list", "create"):
-        return f"error: unknown action {action!r}. Supported: list, create."
+    if action not in ("list", "create", "enable"):
+        return f"error: unknown action {action!r}. Supported: list, create, enable."
 
     root = await asyncio.to_thread(_find_project_root)
     scope_explicit = bool(scope.strip())
@@ -2300,6 +2312,72 @@ async def mem_context_version(
         except versioning.VersionError as exc:
             return f"error: {exc}"
         return _format_version_list(artifact_type, name, artifact_scope, manifest)
+
+    if action == "enable":
+        # Adopt a flat-layout artifact into directory layout so it can be
+        # versioned — the MCP twin of ``mm context version enable`` and the web
+        # ``POST …/versions/enable`` route. The adopt itself is a byte-identical,
+        # same-scope ``os.replace`` (``adopt_flat_to_dir``): the bytes are
+        # unchanged and stay in the same tier, so no privacy re-scan is needed
+        # here — a labeled sync still re-scans the frozen versions/vN.md at
+        # deploy time (ADR-0022 Gate A). Unlike the web route (which hard-limits
+        # to project_shared via ``_reject_non_shared_write``), MCP honors the
+        # ``scope`` arg with the same Gate B as create/promote, matching the CLI
+        # ``--scope`` and the sibling MCP verbs.
+        if scope_explicit and artifact_scope == "project_shared" and not confirm_project_shared:
+            return (
+                "needs confirmation: scope='project_shared' restructures the "
+                "git-tracked tree (flat file → directory layout). Re-call with "
+                "confirm_project_shared=True to proceed."
+            )
+        # ``artifact_dir`` is <root>/<name> on dir layout, <root> on flat — so the
+        # canonical <type> root is its parent only when already dir (mirror of the
+        # web router's ``working_file.parent.parent if dir else parent``).
+        canonical_root = artifact_dir.parent if layout == "dir" else artifact_dir
+        flat_path = canonical_root / f"{name}.md"
+        dir_path = canonical_root / name
+
+        if layout == "dir":
+            # Already dir: idempotent no-op, unless a stray flat sibling lingers —
+            # then refuse rather than report a misleading success (web-route mirror).
+            if await asyncio.to_thread(flat_path.exists):
+                return (
+                    f"error: {artifact_type}/{name} has both flat ({flat_path.name}) and "
+                    f"directory layouts; remove the redundant flat file to resolve the "
+                    f"collision."
+                )
+            return (
+                f"{artifact_type}/{name} [{artifact_scope}] already uses directory layout; "
+                f"nothing to do."
+            )
+
+        # Flat → adopt. Refuse an orphaned version store: adopting into it would
+        # silently attach a prior same-named artifact's history (web-route mirror).
+        orphaned = await asyncio.to_thread(
+            lambda: (
+                versioning.versions_json_path(dir_path).exists()
+                or versioning.versions_dir(dir_path).is_dir()
+            )
+        )
+        if orphaned:
+            return (
+                f"error: {artifact_type}/{name} cannot be adopted: an orphaned version "
+                f"store already exists. Resolve it manually first."
+            )
+
+        from memtomem.context.migrate import adopt_flat_to_dir
+
+        try:
+            await asyncio.to_thread(adopt_flat_to_dir, artifact_type, flat_path, dir_path)
+        except (FileNotFoundError, FileExistsError, OSError, ValueError) as exc:
+            # These messages embed absolute canonical paths (the web twin never
+            # echoes them) — redact before returning.
+            return f"error: {_redact_reason(str(exc), root)}"
+        return (
+            f"Adopted {artifact_type}/{name} [{artifact_scope}] into directory layout — "
+            f"next: mem_context_version(artifact_type='{artifact_type}', name='{name}', "
+            f"action='create')."
+        )
 
     # ── action == "create" ──
     # Gate B: an explicit project_shared write into the git-tracked tree needs

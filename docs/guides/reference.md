@@ -124,7 +124,7 @@ The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skill
 - **All context tools** accept `include="skills,agents,commands"` to scope a canonical artifact workflow.
 - **`init`, `generate`, `sync`, `diff`, `version`, `promote`** accept `scope="project_shared|user|project_local"` — the canonical **tier** (ADR-0016 §2).
 - **`generate` / `sync`** also accept `on_drop="ignore|warn|error"` (the legacy alias `strict=True` ≡ `on_drop="error"`) to control how dropped sub-agent or command fields are reported, and `label="latest|v1|production"` to deploy from a specific version snapshot (agents/commands only).
-- **`version`** manages snapshots via `action="list"|"create"`.
+- **`version`** manages snapshots via `action="list"|"create"|"enable"` — `enable` adopts a flat-layout artifact into directory layout (a byte-identical, same-scope move) so it can be versioned, mirroring `mm context version enable` and the web `POST …/versions/enable` route (`confirm_project_shared=True` for the git-tracked tier).
 - **`promote`** moves or deletes label pointers to versions.
 - **`memory_migrate`** takes `from_scope`/`to_scope` instead of a single `scope` (it has two endpoints), plus `apply=True` to execute and `confirm_project_shared=True` when writing to the git-tracked tier. (`mem_context_migrate` is a deprecated alias for `mem_context_memory_migrate`.)
 - **`artifact_migrate`** migrates agents/commands/skills — flat→dir layout when `to_scope` is omitted, or a scope-tier move when it is set (`apply=True` to execute, `force=True` for a dirty flat→dir, `confirm_project_shared=True` for the git-tracked tier).
