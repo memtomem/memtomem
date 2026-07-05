@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-07-05
+
 ### Deprecations
 
 - **`mem_context_migrate` MCP tool** (deprecated since #1147, timeline set in
@@ -54,6 +56,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   runs before the presence gate because nothing would be written. With both
   verbs commit-true, `install --all --force`'s data-safety no-op now
   protects legacy-lockfile rows only; no verb can mint pin≠bytes entries.
+- **Catch-all CLI failures now carry a next-step hint** (#1617) — commands that
+  ended in a bare `raise click.ClickException(str(e))` (status, add/recall,
+  session, plus watchdog, ingest, search, mem, indexing) now append a one-line
+  remediation hint for recognized failure classes (locked / "no such table"
+  SQLite, embedding dim-mismatch, schema-downgrade, `EmbeddingError`,
+  `ConfigError`) via the new `cli/_errors.raise_cli_error`. Already-tailored
+  messages and unknown exceptions are unchanged, so no misleading advice is ever
+  attached.
+- **MMR-without-dense misconfiguration is now visible** (#1619) — enabling MMR
+  diversity re-ranking on a BM25-only deployment (no dense vectors to diversify
+  over) previously skipped silently. The search pipeline now logs the mismatch
+  once per process (INFO, then DEBUG) and `mm status` carries a persistent
+  `mmr_disabled_no_dense` warning. MMR defaults to disabled, so neither fires
+  out of the box.
+- **`mm context` help / status / empty-state wording** (#1647) — `mm context
+  --help` is rewritten around the artifact Store + sync model (was the legacy
+  `context.md` framing); `mm context status` empty states now hint a runnable
+  next command (`mm context init …`, gated on the same project signal
+  `init --scope=project_*` requires, with `--include=...` for the user tier);
+  the guide documents both privacy valves (`--force-unsafe` for sync,
+  `--force-unsafe-import` for init); and status prose standardizes on "tier"
+  (the `--scope` flag name is unchanged).
 
 ### Added
 
@@ -70,6 +94,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   unknown-structure code paths. Same, older, and pre-versioning databases
   open unchanged — additive idempotent migrations remain the forward
   mechanism; this adds only the downgrade guard.
+- **`mm status --format`/`--json`** (#1615) — `mm status`, the post-install
+  sanity check, was the one read command with no machine-readable output. It now
+  takes `--format [table|json]` with `--json` as the alias for `--format json`
+  (mirroring `mm config show`). CLI-classified failures emit `{"error": ...}`
+  with exit 0 so `mm status --json | jq` pipelines see them in-band; unexpected
+  crashes keep the nonzero exit. The MCP `mem_status` text is byte-identical
+  (single-source dict split).
+- **`--json` write acks for `mm reset` / `mm purge` / `mm add`** (#1615) — the
+  three write-shaped commands now emit the documented `{"ok": true, ...}` /
+  `{"ok": false, "reason": ...}` shape under `--json`, so scripts no longer
+  scrape styled text. All CLI-classified outcomes (reset's liveness/lock
+  refusals, purge's no-match no-op, add's privacy-guard block, prompt
+  cancellations) ride the JSON body with exit 0; unexpected exceptions keep the
+  nonzero exit. Interactive prompt chrome moves to stderr under `--json` so
+  stdout stays a single JSON document.
+- **`mm wiki {skill,agent,command} new <name>`** (#1648) — scaffolds a canonical
+  wiki asset from a minimal parse-clean template so first-time authoring no
+  longer requires reading source; refuses to overwrite an existing asset and
+  classifies a directory/file squatting the target path instead of leaking a raw
+  OS error. Related behavior change: bare `mm wiki commit <name>` now defaults to
+  `--canonical` when the asset has no registered vendor override (announced via a
+  note line) — scripts that relied on the bare-invocation error as a guard
+  should pass `--canonical` explicitly. Lint now warns when a canonical filename
+  matches only case-insensitively (`AGENT.md` vs `agent.md`), which is invisible
+  on case-sensitive clones.
+- **`mem_context_version(action="enable")` MCP action** (#1650) — headless agents
+  can now adopt a flat-layout context artifact into directory layout through the
+  existing `mem_context_version` tool, closing the last CLI/web versioning parity
+  gap (`mm context version enable` and `POST …/versions/enable` already shipped
+  in #1549). It reuses the byte-identical same-scope `adopt_flat_to_dir` rename,
+  honors the `scope` arg with the same Gate B as create/promote, and is
+  idempotent on dir layout. Previously the only MCP remedy was the heavier
+  `mem_context_artifact_migrate`, which skipped hand-authored/UI-created flats.
+- **Per-project fleet-drift badges on the Projects portal** (#1649) — each row on
+  the web Projects portal now shows a drift badge sourced from the
+  `GET /api/context/status-all` cross-project aggregation, which previously had
+  no web consumer. The badge is fetched fire-and-forget after the initial paint
+  (the endpoint shells out to git per project), reset on every fresh load so a
+  tier flip never shows a stale badge, gated on the `project_shared` tier, and
+  skipped during inline rename; all fetch failures are swallowed silently.
 
 ### Fixed
 
@@ -84,6 +148,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   translated hint (en/ko) and keeps the raw English detail in a hover tooltip
   for fidelity. MCP servers, which are project_shared-only, get a hint that
   omits the user-tier remediation. CLI/MCP-tool wording is unchanged.
+- **MCP `initialize` instructions now match the exposed tool surface** (#1608) —
+  the server instructions string walked every client through direct multi-agent
+  tool calls (`mem_agent_register`, `mem_session_start`, `mem_agent_search`, …)
+  that do not exist under the shipping default `MEMTOMEM_TOOL_MODE=core`
+  (9 tools), so a client following it verbatim called missing tools.
+  Instructions are now built per mode: `core` renders the workflow through
+  `mem_do(action=..., params={...})` and points at `mem_do(action="help")` +
+  `MEMTOMEM_TOOL_MODE`; `standard` shows session/crud tools directly but routes
+  multi_agent actions; `full` keeps direct calls.
+- **LangGraph `MemtomemStore.start_session()` stale agent binding** (#1620) —
+  starting a low-level session after an agent-bound one left the previous
+  `start_agent_session()` binding intact, so subsequent `add()` / `search()`
+  kept defaulting to the old `agent-runtime:<id>` scope while events logged to
+  the new session. `start_session()` now clears the agent binding under the same
+  lock, mirroring `end_session()`.
+- **`--json` stdout no longer leaks prompt text on Windows** (#1640) — under the
+  new `--json` write acks (#1615), an interactive confirm prompt's tail (and,
+  under the test runner, the echoed reply) leaked into stdout on Windows —
+  click 8.4 only redirects the prompt to stderr on POSIX — breaking the
+  single-JSON-document contract. A new `cli/_prompts.confirm` writes the full
+  prompt to stderr and reads stdin directly when `err=True`; the reset, add
+  Gate B, and upgrade confirm sites migrate to it.
+- **`mm context projects add <path>` canonicalizes the root** (#1644) — the
+  project root was stored with only `expanduser()` while every read surface
+  (dedup, scope-id, display, `is_dir()`) resolves it against the reader's cwd, so
+  a relative root like `.` meant a different directory per process and `add .`
+  from a second project silently matched the first project's floating entry.
+  `add_with_status` now stores `expanduser().resolve()` before dedup/persist, and
+  `load()` heals legacy relative rows in-memory (persisted on the next mutation,
+  no write on the load path). CLI/web responses now echo the resolved absolute
+  root.
+- **Wiki-behind badge tooltip recommends a runnable command** (#1645) — the web
+  overview "Wiki updates available: N" tooltip told users to run
+  `mm context update --all`, which exits 2 (`update` requires `ASSET_TYPE NAME`;
+  `--all` is the cross-project axis, not "update the N behind assets in this
+  project"). Both locales now lead with the tier-portable per-asset flow
+  (`mm context status` → `mm context update <type> <name>`) and qualify the
+  Wiki-section button as dev-mode; the same unrunnable spelling is fixed in
+  `--help` text and the `context/status.py` module docstring.
+- **Gateway display polish batch** (#1646) — five web display fixes from the
+  post-campaign gateway audit: the overview all-clear badge no longer renders a
+  cross-axis "4/1 synced" fraction (spells out both axes when they differ, keeps
+  `N/N synced` otherwise); single-item import-skip toasts map the backend
+  `reason_code` to localized copy instead of surfacing raw English; runtime
+  chips/badges brand the full set (Claude Code, Antigravity, Codex, Kimi) and
+  render the fan-out's internal `project_mcp` id as its `.mcp.json` target;
+  sync-phase failure toasts use localized keys instead of English literal
+  fallbacks; and Default Tab selector option labels and optgroup headings are
+  localized.
 
 ## [0.3.3] — 2026-07-04
 
