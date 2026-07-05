@@ -374,6 +374,23 @@ def _lint_canonical_parse(asset_type: str, canonical: Path) -> list[LintFinding]
     return []
 
 
+def _wrong_case_canonical(asset_dir: Path, expected: str) -> str | None:
+    """Stored filename that matches ``expected`` only case-insensitively, else None.
+
+    ``iterdir()`` reveals the *stored* case, so this catches both failure modes:
+    on a case-sensitive filesystem the canonical ``.is_file()`` check already
+    missed (this explains why), and on a case-insensitive one (macOS default)
+    the asset works locally but git records the wrong case, so every
+    case-sensitive clone (Linux) sees no canonical at all.
+    """
+    if not asset_dir.is_dir():
+        return None
+    for p in sorted(asset_dir.iterdir()):
+        if p.is_file() and p.name != expected and p.name.casefold() == expected.casefold():
+            return p.name
+    return None
+
+
 def _scan_overrides(asset_type: str, asset_dir: Path) -> tuple[list[str], list[str]]:
     """Classify the files in ``<asset_dir>/overrides/`` against the registered
     formats.
@@ -480,7 +497,10 @@ def lint_asset(
     1. **Name** — :func:`validate_name`. An invalid name makes every path
        join below unsafe, so this short-circuits to a single error.
     2. **Canonical** — the ``SKILL.md`` / ``agent.md`` / ``command.md`` is
-       present and (agents / commands) parses.
+       present and (agents / commands) parses. A file matching the expected
+       name only case-insensitively (e.g. ``AGENT.md``) draws a warning: git
+       records the stored case, so the asset is invisible on case-sensitive
+       clones even when it works on a macOS checkout.
     3. **Stray override files** — anything in ``overrides/`` that is not a
        registered ``<vendor>.<ext>`` (nor a ``.bak``) is an error: the runtime
        resolver would silently ignore it. Scanned even when the canonical is
@@ -507,22 +527,28 @@ def lint_asset(
     findings: list[LintFinding] = []
     canonical_ok = True
 
-    if asset_type == "skills":
-        if not (asset_dir / "SKILL.md").is_file():
-            findings.append(LintFinding("error", f"missing canonical {asset_type}/{name}/SKILL.md"))
-            canonical_ok = False
-    else:
-        stem = asset_type[:-1]  # "agents" → "agent", "commands" → "command"
-        canonical = asset_dir / f"{stem}.md"
-        if not canonical.is_file():
-            findings.append(
-                LintFinding("error", f"missing canonical {asset_type}/{name}/{stem}.md")
+    # "SKILL.md" for skills; "agents" → "agent.md", "commands" → "command.md".
+    expected = "SKILL.md" if asset_type == "skills" else f"{asset_type[:-1]}.md"
+    canonical = asset_dir / expected
+    if not canonical.is_file():
+        findings.append(LintFinding("error", f"missing canonical {asset_type}/{name}/{expected}"))
+        canonical_ok = False
+    elif asset_type != "skills":
+        parse_findings = _lint_canonical_parse(asset_type, canonical)
+        findings.extend(parse_findings)
+        canonical_ok = not parse_findings
+
+    wrong_case = _wrong_case_canonical(asset_dir, expected)
+    if wrong_case is not None:
+        findings.append(
+            LintFinding(
+                "warning",
+                f"canonical filename is case-sensitive: found {wrong_case}, expected "
+                f"{expected} — rename it (git mv {asset_type}/{name}/{wrong_case} "
+                f"{asset_type}/{name}/{expected}), or the asset is invisible on "
+                "case-sensitive clones (Linux)",
             )
-            canonical_ok = False
-        else:
-            parse_findings = _lint_canonical_parse(asset_type, canonical)
-            findings.extend(parse_findings)
-            canonical_ok = not parse_findings
+        )
 
     valid_vendors, stray = _scan_overrides(asset_type, asset_dir)
     for filename in stray:

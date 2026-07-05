@@ -282,9 +282,10 @@ mm wiki init                           # create ~/.memtomem-wiki (writes a READM
 mm wiki list                           # list canonical assets (--type skills|agents|commands)
 
 # Minimal first asset (canonical-only) — empty wiki to installed project copy:
-#   create ~/.memtomem-wiki/skills/<name>/SKILL.md   (see the wiki README for the layout)
+mm wiki skill new <name>               # scaffold skills/<name>/SKILL.md (exact, case-sensitive filename; --editor opens $EDITOR)
 mm wiki skill lint <name>              # CI gate — exits non-zero on errors
 mm wiki skill commit <name> --canonical   # ONE isolated commit of just the canonical path
+                                       # (bare `commit <name>` defaults to --canonical while no vendor overrides exist)
 cd <your project>                      # wiki is global; install/status are project-scoped
 mm context install skill <name>        # snapshot the wiki asset (at HEAD; commit-true — refuses if the asset has uncommitted wiki changes)
 mm context update skill <name>         # re-snapshot at HEAD (commit-true — refuses if the asset has uncommitted wiki changes; --all, --force, --yes)

@@ -135,6 +135,18 @@ install never changes your machine-wide settings or User-tier copies. Once
 installed, the snapshot is an ordinary Store artifact: you Sync it out to your
 runtimes like any other.
 
+**Authoring a new asset** — `mm wiki <type> new <name>` scaffolds the
+canonical file, e.g. `mm wiki skill new my-skill` writes
+`~/.memtomem-wiki/skills/my-skill/SKILL.md` with a minimal starter template
+(`--editor` opens it in `$EDITOR`). The canonical filenames are exactly
+`SKILL.md`, `agent.md`, and `command.md` — **case-sensitive**: git records the
+stored case, so an `AGENT.md` authored on macOS is invisible to clones on
+case-sensitive filesystems (`mm wiki <type> lint` warns about this). Edit the
+file, then record it with `mm wiki <type> commit <name>` — while the asset has
+no vendor overrides, the commit defaults to the canonical, so no flags are
+needed; in scripts, keep the explicit `mm wiki <type> commit <name>
+--canonical` form.
+
 In the Web UI the wiki panel is **read-only** (browse + Install); authoring
 canonical or vendor-override files is done with the `mm wiki …` CLI (or the
 in-browser editor in dev mode). See [the CLI reference](reference/data-config-cli.md#cli-reference)

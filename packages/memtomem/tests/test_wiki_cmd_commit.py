@@ -174,15 +174,94 @@ def test_commit_message_privacy_warning_is_soft(wiki_root: Path) -> None:
 # ── classified errors (no traceback leaks) ─────────────────────────────────
 
 
-def test_no_targets_errors(wiki_root: Path) -> None:
+def test_no_targets_errors_when_overrides_exist(wiki_root: Path) -> None:
+    # With a registered override on disk, a bare commit must NOT default to the
+    # canonical: silently omitting the override would leave the user believing
+    # they committed "the asset". The error enumerates what is there.
     _init_wiki()
     _seed_skill(wiki_root)
     runner = CliRunner()
+    runner.invoke(wiki_group, ["skill", "override", "demo", "--vendor", "claude"])
 
     result = runner.invoke(wiki_group, ["skill", "commit", "demo"])
 
     assert result.exit_code != 0
-    assert "nothing to commit: pass --canonical" in result.output
+    assert "nothing to commit: this asset has overrides on disk (claude.md)" in result.output
+    assert "pass --canonical and/or --vendor" in result.output
+
+
+def test_bare_commit_defaults_to_canonical(wiki_root: Path) -> None:
+    # First-authoring flow (#1648): no registered overrides on disk → a bare
+    # commit selects the canonical, and says so (the note line is the pinned
+    # evidence this is an announced default, not a silent behavior change).
+    _init_wiki()
+    _seed_skill(wiki_root)
+    (wiki_root / "skills/demo/SKILL.md").write_bytes(b"# canonical v2\n")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "commit", "demo"])
+
+    assert result.exit_code == 0, _combined(result)
+    assert "no registered vendor overrides on disk" in result.output
+    assert "Committed" in result.output
+    head = _git(wiki_root, "rev-parse", "HEAD").strip()
+    assert _git(wiki_root, "show", f"{head}:skills/demo/SKILL.md") == "# canonical v2\n"
+    files = _git(wiki_root, "show", "--name-only", "--format=", head).split()
+    assert files == ["skills/demo/SKILL.md"]
+
+
+def test_bare_commit_ignores_stray_override_files(wiki_root: Path) -> None:
+    # Stray files in overrides/ (wrong extension, .bak) are not commit targets
+    # (the runtime resolver never loads them), so they must not block the
+    # canonical default — same membership rule lint's _scan_overrides uses.
+    _init_wiki()
+    _seed_skill(wiki_root)
+    (wiki_root / "skills/demo/SKILL.md").write_bytes(b"# canonical v2\n")
+    stray_dir = wiki_root / "skills/demo/overrides"
+    stray_dir.mkdir()
+    (stray_dir / "gemini.bad").write_bytes(b"wrong extension\n")
+    (stray_dir / "claude.md.bak").write_bytes(b"backup\n")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "commit", "demo"])
+
+    assert result.exit_code == 0, _combined(result)
+    assert "no registered vendor overrides on disk" in result.output
+
+
+def test_bare_commit_missing_canonical_friendly_error(wiki_root: Path) -> None:
+    # The default may select a canonical that was never authored — the existing
+    # "create it first" pre-check stays the safety net.
+    _init_wiki()
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "commit", "ghost"])
+
+    assert result.exit_code != 0
+    out = result.output.replace("\\", "/")
+    assert "no such file in the wiki: skills/ghost/SKILL.md" in out
+
+
+def test_agent_bare_commit_defaults_to_canonical(wiki_root: Path) -> None:
+    # Type parity: the default lives in the shared _run_commit helper.
+    _init_wiki()
+    d = wiki_root / "agents" / "beta"
+    d.mkdir(parents=True)
+    (d / "agent.md").write_text(
+        "---\nname: beta\ndescription: a test agent\n---\n\nBody.\n", encoding="utf-8"
+    )
+    _git(wiki_root, "add", ".")
+    _git(wiki_root, "commit", "-m", "add agent beta")
+    (d / "agent.md").write_text(
+        "---\nname: beta\ndescription: edited\n---\n\nBody v2.\n", encoding="utf-8"
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["agent", "commit", "beta"])
+
+    assert result.exit_code == 0, _combined(result)
+    assert "no registered vendor overrides on disk" in result.output
+    assert "edited" in _git(wiki_root, "show", "HEAD:agents/beta/agent.md")
 
 
 def test_missing_file_friendly_error(wiki_root: Path) -> None:

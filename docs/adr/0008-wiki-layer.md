@@ -1,7 +1,7 @@
 # ADR-0008: Wiki layer for shared canonical artifacts
 
-**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown; amended 2026-07-04: single-asset install and update are commit-true, #1643/#1652)
-**Date:** 2026-04-30 (amended 2026-07-04)
+**Status:** Accepted (PR-A/B/C/D/E merged — read-only browser, dev-tier override-seed, and dev-tier project install/update shipped; the in-browser canonical/override editor + isolated commit affordance also shipped, specified in ADR-0027 — see PR Breakdown; amended 2026-07-04: single-asset install and update are commit-true, #1643/#1652; amended 2026-07-05: `new` scaffold verb + bare-commit canonical default, #1648)
+**Date:** 2026-04-30 (amended 2026-07-05)
 **Context:** Context gateway today is a per-project canonical → multi-runtime
 fan-out router (ADR-0001). Users with several projects must re-author the
 same skill/agent/command in each `<project>/.memtomem/`. This ADR introduces
@@ -121,8 +121,8 @@ be reconsidered in v2 if a real workflow demands it.
 
 ## Subcommands
 
-`mm wiki` is nested per asset type so `{override, diff, lint, commit}` form
-a single mental group of "manipulate this artifact":
+`mm wiki` is nested per asset type so `{new, override, diff, lint, commit}`
+form a single mental group of "manipulate this artifact":
 
 ```
 mm wiki init [--from <git-url>]
@@ -131,9 +131,9 @@ mm wiki remote [<url>]
 mm wiki push
 mm wiki pull
 
-mm wiki skill   {override, diff, lint, commit} <name> [--vendor <vendor>]
-mm wiki agent   {override, diff, lint, commit} <name> [--vendor <vendor>]
-mm wiki command {override, diff, lint, commit} <name> [--vendor <vendor>]
+mm wiki skill   {new, override, diff, lint, commit} <name> [--vendor <vendor>]
+mm wiki agent   {new, override, diff, lint, commit} <name> [--vendor <vendor>]
+mm wiki command {new, override, diff, lint, commit} <name> [--vendor <vendor>]
 
 mm context install <type> <name>
 mm context install --all                # lockfile-driven re-setup
@@ -141,6 +141,17 @@ mm context update  <type> <name> [--all]
 mm context status
 mm context migrate [<type> [<name>]] [--apply] [--force] [--yes]
 ```
+
+`new` (2026-07-05, #1648) scaffolds the canonical file
+(`skills/<name>/SKILL.md`, `agents/<name>/agent.md`,
+`commands/<name>/command.md` — the filenames are case-sensitive) from a
+minimal parse-clean template, refusing to overwrite an existing asset. It is
+the creation counterpart of the ADR-0027 editor, which deliberately only
+edits. `commit` with neither `--canonical` nor `--vendor` defaults to the
+canonical when — and only when — the asset has no registered vendor override
+on disk (with overrides present it still requires explicit selection, so a
+bare commit can never silently omit an edited override); scripts should keep
+passing `--canonical` explicitly.
 
 `mm context sync --include=skills` (existing, ADR-0001 §3) is unchanged.
 The `mm wiki` group is single-asset; `mm context sync` remains the

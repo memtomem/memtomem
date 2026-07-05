@@ -10,6 +10,7 @@ errors (no traceback leaks), and the lint exit-code gate.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -374,6 +375,57 @@ def test_command_lint_missing_wiki_classified_error(monkeypatch, tmp_path: Path)
 
     assert result.exit_code != 0
     assert "wiki not found" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_lint_wrong_case_canonical_warns_agent(wiki_root: Path) -> None:
+    """A canonical stored under the wrong case (AGENT.md) draws a warning on
+    every platform: on a case-insensitive FS (macOS) the asset works locally
+    but git records the wrong case, so case-sensitive clones (Linux) see no
+    canonical; there, the missing-canonical error additionally fails lint."""
+    _initialized_wiki()
+    _seed_agent(wiki_root, "beta")
+    agent_dir = wiki_root / "agents" / "beta"
+    os.rename(agent_dir / "agent.md", agent_dir / "AGENT.md")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["agent", "lint", "beta"])
+
+    assert (
+        "canonical filename is case-sensitive: found AGENT.md, expected agent.md" in result.output
+    )
+    if not (agent_dir / "agent.md").is_file():  # case-sensitive FS
+        assert result.exit_code != 0
+        assert "missing canonical agents/beta/agent.md" in result.output
+    else:  # case-insensitive FS: works locally, warning-only
+        assert result.exit_code == 0
+
+
+def test_lint_wrong_case_canonical_warns_skill(wiki_root: Path) -> None:
+    _initialized_wiki()
+    _seed_skill(wiki_root, "hello")
+    skill_dir = wiki_root / "skills" / "hello"
+    os.rename(skill_dir / "SKILL.md", skill_dir / "skill.md")
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["skill", "lint", "hello"])
+
+    assert (
+        "canonical filename is case-sensitive: found skill.md, expected SKILL.md" in result.output
+    )
+
+
+def test_lint_missing_asset_dir_stays_classified(wiki_root: Path) -> None:
+    """Linting a name with no asset dir must stay a lint finding, never an
+    unclassified FileNotFoundError from scanning a nonexistent directory."""
+    _initialized_wiki()
+    runner = CliRunner()
+
+    result = runner.invoke(wiki_group, ["agent", "lint", "ghost"])
+
+    assert result.exit_code != 0
+    assert "missing canonical agents/ghost/agent.md" in result.output
+    assert not isinstance(result.exception, FileNotFoundError)
     assert "Traceback" not in result.output
 
 

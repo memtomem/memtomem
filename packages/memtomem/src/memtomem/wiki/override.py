@@ -26,12 +26,14 @@ from pathlib import Path
 
 from memtomem.context._atomic import atomic_write_bytes
 from memtomem.context._names import OVERRIDE_FORMATS, validate_name
-from memtomem.wiki.store import WikiStore
+from memtomem.wiki.store import WIKI_ASSET_TYPES, WikiStore
 
 __all__ = [
+    "AssetExistsError",
     "OverrideExistsError",
     "SeedResult",
     "canonical_asset_file",
+    "create_canonical",
     "render_seed_bytes",
     "seed_override",
     "write_canonical",
@@ -41,6 +43,15 @@ __all__ = [
 
 class OverrideExistsError(RuntimeError):
     """Raised when an override file already exists and ``force`` was not given."""
+
+
+class AssetExistsError(RuntimeError):
+    """Raised by :func:`create_canonical` when the asset's canonical already exists.
+
+    The message is deliberately **path-free** (relative form only): unlike
+    :class:`OverrideExistsError` it is surfaced verbatim by callers that must
+    not leak the absolute wiki path.
+    """
 
 
 @dataclass(frozen=True)
@@ -279,4 +290,91 @@ def write_canonical(
     backup = target.with_suffix(target.suffix + ".bak")
     atomic_write_bytes(backup, target.read_bytes())
     atomic_write_bytes(target, content)
+    return target
+
+
+_CANONICAL_TEMPLATES: dict[str, str] = {
+    "skills": (
+        "---\n"
+        "name: {name}\n"
+        "description: TODO — one line on when to use this skill.\n"
+        "---\n"
+        "\n"
+        "# {name}\n"
+        "\n"
+        "TODO — write the skill instructions.\n"
+    ),
+    "agents": (
+        "---\n"
+        "name: {name}\n"
+        "description: TODO — one line on what this agent does.\n"
+        "---\n"
+        "\n"
+        "TODO — write the agent system prompt.\n"
+    ),
+    "commands": (
+        "---\n"
+        "name: {name}\n"
+        "description: TODO — one line on what this command does.\n"
+        "---\n"
+        "\n"
+        "TODO — write the command prompt ($ARGUMENTS is substituted).\n"
+    ),
+}
+"""Minimal, parse-clean starter content for :func:`create_canonical`.
+
+Each template must keep parsing under the same gate the in-browser editor
+uses (:func:`memtomem.wiki.inspect.validate_canonical_text`) — a lint test
+pins ``new`` → ``lint`` green for every asset type so template and parser
+cannot drift apart.
+"""
+
+
+def create_canonical(store: WikiStore, asset_type: str, name: str) -> Path:
+    """Scaffold a new asset's canonical file (``mm wiki <type> new``).
+
+    Writes the minimal starter template to ``skills/<name>/SKILL.md`` /
+    ``agents/<name>/agent.md`` / ``commands/<name>/command.md`` and returns the
+    path. The complement of :func:`write_canonical`, which *edits* an existing
+    asset and deliberately refuses to create one (ADR-0027 Editor-B) — creation
+    is this wider, wiki-side operation.
+
+    Refuses with :class:`AssetExistsError` when the canonical is already there
+    (no ``force``: clobbering an authored canonical from a scaffold has no
+    legitimate use; edit the file directly instead). On a case-insensitive
+    filesystem a wrong-case canonical (``AGENT.md``) also counts as existing —
+    ``mm wiki <type> lint`` is the diagnostic for that state. An asset directory
+    that exists *without* a canonical is allowed: scaffolding repairs the
+    half-authored dir. All preconditions run before any mutation; the rendered
+    template is parse-gated so a broken template never reaches disk.
+    """
+    if asset_type not in WIKI_ASSET_TYPES:
+        raise ValueError(f"unsupported asset_type for canonical creation: {asset_type!r}")
+    store.require_exists()
+    validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    target = canonical_asset_file(store, asset_type, name)
+    # ``exists()`` not ``is_file()``: a directory squatting on the canonical
+    # path is also a collision — falling through would surface a raw
+    # IsADirectoryError instead of a classified, path-free message.
+    if target.exists():
+        raise AssetExistsError(
+            f"{asset_type}/{name} already has a canonical "
+            f"({target.relative_to(store.root).as_posix()}) — edit the file directly, "
+            f"or seed a vendor override with `mm wiki {asset_type.removesuffix('s')} override`"
+        )
+    if target.parent.exists() and not target.parent.is_dir():
+        # A stray FILE at <type>/<name> would make mkdir below raise a raw
+        # FileExistsError; classify it the same way.
+        raise AssetExistsError(
+            f"{asset_type}/{name} already exists in the wiki but is not an asset "
+            "directory — remove or rename it first"
+        )
+    content = _CANONICAL_TEMPLATES[asset_type].format(name=name)
+    # Function-body import dodges the wiki-internal cycle: ``wiki.inspect``
+    # imports ``canonical_asset_file`` from this module at import time.
+    from memtomem.wiki.inspect import validate_canonical_text
+
+    validate_canonical_text(asset_type, name, content)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(target, content.encode("utf-8"))
     return target

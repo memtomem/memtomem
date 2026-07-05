@@ -33,8 +33,10 @@ from memtomem.wiki.inspect import (
     lint_asset,
 )
 from memtomem.wiki.override import (
+    AssetExistsError,
     OverrideExistsError,
     canonical_asset_file,
+    create_canonical,
     seed_override,
 )
 from memtomem.wiki.store import WikiHeadMovedError, _redact_url_userinfo
@@ -121,6 +123,44 @@ def _run_seed_override(
 
     if editor:
         click.edit(filename=str(result.path), require_save=False)
+
+
+def _run_new(
+    asset_type: Literal["skills", "agents", "commands"],
+    name: str,
+    *,
+    editor: bool,
+) -> None:
+    """Shared body for ``mm wiki {skill,agent,command} new``.
+
+    Scaffolds the asset's canonical file from the minimal starter template
+    (:func:`memtomem.wiki.override.create_canonical`), then mirrors the
+    ``override`` verb's trust-UX: green summary + absolute path on stdout,
+    next-step hints steering to the flag-free ``commit``, classified
+    ClickException for known errors, optional ``$EDITOR``.
+    """
+    store = WikiStore.at_default()
+    try:
+        path = create_canonical(store, asset_type, name)
+    except (WikiNotFoundError, AssetExistsError, InvalidNameError) as exc:
+        # Disjoint siblings (WikiNotFoundError / AssetExistsError -> RuntimeError;
+        # InvalidNameError -> ValueError), ordering irrelevant. AssetExistsError's
+        # message is path-free by contract, so surfacing it verbatim leaks nothing.
+        raise click.ClickException(str(exc)) from exc
+
+    # ``create_canonical`` invariant: target lives under ``store.root``.
+    rel = path.relative_to(store.root)
+    click.secho(f"Created {rel.as_posix()}", fg="green")
+    click.echo(str(path))
+    singular = asset_type[:-1]  # "skills" -> "skill": the per-type CLI verb is singular
+    click.echo(f"# next: edit the file, then: mm wiki {singular} commit {name}")
+    click.echo(
+        f"# then: cd <project> && mm context install {singular} {name}"
+        "   # or update an installed copy"
+    )
+
+    if editor:
+        click.edit(filename=str(path), require_save=False)
 
 
 def _echo_diff_line(line: str) -> None:
@@ -245,7 +285,9 @@ def _run_commit(
     :func:`memtomem.wiki.commit.commit_targets` engine — never a bare
     ``git add . && git commit`` that would sweep unrelated staged changes. The
     paths are server-resolved from the typed ``--canonical`` / ``--vendor`` flags
-    (a raw path is never accepted), and every engine error maps to a classified
+    (a raw path is never accepted); a bare invocation defaults to the canonical
+    when — and only when — no registered vendor override exists on disk, so the
+    first-authoring flow needs no flags. Every engine error maps to a classified
     :class:`click.ClickException` so no traceback — and no absolute wiki path —
     leaks. Unlike the web route there is no client Save token, so the commit
     takes the bytes currently on disk and lands on the freshest HEAD (the
@@ -264,9 +306,32 @@ def _run_commit(
         raise click.ClickException(str(exc)) from exc
 
     if not canonical and not vendors:
-        raise click.ClickException(
-            "nothing to commit: pass --canonical and/or --vendor <vendor> to select targets"
-        )
+        # Bare invocation defaults to the canonical, but ONLY when the asset has
+        # no registered vendor overrides on disk — with overrides present, a
+        # silent canonical-only commit would leave the user believing they
+        # committed "the asset" while the overrides stay uncommitted (exactly
+        # the dirty-wiki state `mm context install` pins around, #1643/#1648).
+        # Stray files in overrides/ (wrong extension, .bak) do not count: the
+        # runtime resolver never loads them, so they cannot be commit targets.
+        existing = [
+            f"{vendor}.{OVERRIDE_FORMATS[(asset_type, vendor)][1]}"
+            for vendor in override_vendors(asset_type)
+            if (
+                store.root
+                / asset_type
+                / name
+                / "overrides"
+                / f"{vendor}.{OVERRIDE_FORMATS[(asset_type, vendor)][1]}"
+            ).is_file()
+        ]
+        if existing:
+            raise click.ClickException(
+                f"nothing to commit: this asset has overrides on disk ({', '.join(existing)}) "
+                "— pass --canonical and/or --vendor <vendor> to select targets"
+            )
+        canonical = True
+        rel = canonical_asset_file(store, asset_type, name).relative_to(store.root).as_posix()
+        click.echo(f"# no registered vendor overrides on disk — committing the canonical {rel}")
 
     targets: list[ResolvedTarget] = []
     if canonical:
@@ -499,8 +564,32 @@ def pull_cmd() -> None:
 def skill_group() -> None:
     """Manage wiki skills.
 
-    Seed vendor overrides, then diff, lint, and commit selected paths.
+    Create a canonical skill (new), seed vendor overrides, then diff, lint,
+    and commit selected paths.
     """
+
+
+@skill_group.command("new")
+@click.argument("name")
+@click.option(
+    "--editor",
+    "-e",
+    is_flag=True,
+    help="Open $EDITOR on the created file after writing.",
+)
+def skill_new_cmd(name: str, editor: bool) -> None:
+    """Scaffold a new canonical skill in the wiki.
+
+    ``mm wiki skill new <name>`` writes a minimal starter template to
+    ``<wiki>/skills/<name>/SKILL.md`` — the canonical filename is exactly
+    ``SKILL.md`` (case-sensitive; git records the stored case, so a
+    ``skill.md`` authored on macOS is invisible on Linux clones). Edit the
+    file (``--editor`` opens ``$EDITOR``), then record it with
+    ``mm wiki skill commit <name>`` — with no overrides yet, the commit
+    defaults to the canonical, no flags needed. Refuses to overwrite an
+    existing skill.
+    """
+    _run_new("skills", name, editor=editor)
 
 
 @skill_group.command("override")
@@ -591,7 +680,7 @@ def skill_lint_cmd(name: str, vendor: str | None) -> None:
     "--canonical",
     "-c",
     is_flag=True,
-    help="Also commit the canonical SKILL.md.",
+    help="Commit the canonical SKILL.md (the default when no registered vendor overrides exist).",
 )
 @click.option(
     "--message",
@@ -608,7 +697,10 @@ def skill_commit_cmd(
     selected paths layered onto HEAD — never a bare ``git add . && git commit``
     that would sweep unrelated staged changes. Edit the files first (e.g.
     ``mm wiki skill override <name> --vendor <v> --editor``), then select targets
-    with ``--canonical`` and/or one or more ``--vendor`` flags.
+    with ``--canonical`` and/or one or more ``--vendor`` flags. With no flags,
+    the commit defaults to the canonical when — and only when — the skill has
+    no registered vendor overrides on disk; scripts should keep passing
+    ``--canonical`` explicitly.
     """
     _run_commit("skills", name, vendors, canonical=canonical, message=message)
 
@@ -620,8 +712,32 @@ def skill_commit_cmd(
 def agent_group() -> None:
     """Manage wiki agents.
 
-    Seed vendor overrides, then diff, lint, and commit selected paths.
+    Create a canonical agent (new), seed vendor overrides, then diff, lint,
+    and commit selected paths.
     """
+
+
+@agent_group.command("new")
+@click.argument("name")
+@click.option(
+    "--editor",
+    "-e",
+    is_flag=True,
+    help="Open $EDITOR on the created file after writing.",
+)
+def agent_new_cmd(name: str, editor: bool) -> None:
+    """Scaffold a new canonical agent in the wiki.
+
+    ``mm wiki agent new <name>`` writes a minimal starter template to
+    ``<wiki>/agents/<name>/agent.md`` — the canonical filename is exactly
+    ``agent.md`` (lowercase, case-sensitive; git records the stored case, so
+    an ``AGENT.md`` authored on macOS is invisible on Linux clones). Edit the
+    file (``--editor`` opens ``$EDITOR``), then record it with
+    ``mm wiki agent commit <name>`` — with no overrides yet, the commit
+    defaults to the canonical, no flags needed. Refuses to overwrite an
+    existing agent.
+    """
+    _run_new("agents", name, editor=editor)
 
 
 @agent_group.command("override")
@@ -714,7 +830,7 @@ def agent_lint_cmd(name: str, vendor: str | None) -> None:
     "--canonical",
     "-c",
     is_flag=True,
-    help="Also commit the canonical agent.md.",
+    help="Commit the canonical agent.md (the default when no registered vendor overrides exist).",
 )
 @click.option(
     "--message",
@@ -731,7 +847,10 @@ def agent_commit_cmd(
     selected paths layered onto HEAD — never a bare ``git add . && git commit``
     that would sweep unrelated staged changes. Edit the files first (e.g.
     ``mm wiki agent override <name> --vendor <v> --editor``), then select targets
-    with ``--canonical`` and/or one or more ``--vendor`` flags.
+    with ``--canonical`` and/or one or more ``--vendor`` flags. With no flags,
+    the commit defaults to the canonical when — and only when — the agent has
+    no registered vendor overrides on disk; scripts should keep passing
+    ``--canonical`` explicitly.
     """
     _run_commit("agents", name, vendors, canonical=canonical, message=message)
 
@@ -743,8 +862,32 @@ def agent_commit_cmd(
 def command_group() -> None:
     """Manage wiki commands.
 
-    Seed vendor overrides, then diff, lint, and commit selected paths.
+    Create a canonical command (new), seed vendor overrides, then diff, lint,
+    and commit selected paths.
     """
+
+
+@command_group.command("new")
+@click.argument("name")
+@click.option(
+    "--editor",
+    "-e",
+    is_flag=True,
+    help="Open $EDITOR on the created file after writing.",
+)
+def command_new_cmd(name: str, editor: bool) -> None:
+    """Scaffold a new canonical command in the wiki.
+
+    ``mm wiki command new <name>`` writes a minimal starter template to
+    ``<wiki>/commands/<name>/command.md`` — the canonical filename is exactly
+    ``command.md`` (lowercase, case-sensitive; git records the stored case, so
+    a ``COMMAND.md`` authored on macOS is invisible on Linux clones). Edit the
+    file (``--editor`` opens ``$EDITOR``), then record it with
+    ``mm wiki command commit <name>`` — with no overrides yet, the commit
+    defaults to the canonical, no flags needed. Refuses to overwrite an
+    existing command.
+    """
+    _run_new("commands", name, editor=editor)
 
 
 @command_group.command("override")
@@ -839,7 +982,7 @@ def command_lint_cmd(name: str, vendor: str | None) -> None:
     "--canonical",
     "-c",
     is_flag=True,
-    help="Also commit the canonical command.md.",
+    help="Commit the canonical command.md (the default when no registered vendor overrides exist).",
 )
 @click.option(
     "--message",
@@ -856,6 +999,9 @@ def command_commit_cmd(
     selected paths layered onto HEAD — never a bare ``git add . && git commit``
     that would sweep unrelated staged changes. Edit the files first (e.g.
     ``mm wiki command override <name> --vendor <v> --editor``), then select
-    targets with ``--canonical`` and/or one or more ``--vendor`` flags.
+    targets with ``--canonical`` and/or one or more ``--vendor`` flags. With no
+    flags, the commit defaults to the canonical when — and only when — the
+    command has no registered vendor overrides on disk; scripts should keep
+    passing ``--canonical`` explicitly.
     """
     _run_commit("commands", name, vendors, canonical=canonical, message=message)
