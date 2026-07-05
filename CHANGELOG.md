@@ -71,6 +71,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   open unchanged — additive idempotent migrations remain the forward
   mechanism; this adds only the downgrade guard.
 
+### Fixed
+
+- **Write-time Gate A block reads as localized, jargon-free copy in the web
+  editors** (#1651) — saving a canonical skill/command/agent that trips the
+  project_shared privacy gate (#1509) previously surfaced the raw-English
+  engine string ("Gate A: … no force bypass available for project_shared
+  (ADR-0011 §5) … target_scope=user") verbatim in a localized session. The
+  422 now carries a top-level `reason_code: "privacy_blocked"` sibling (the
+  #1409 hoist mechanism; the string `detail` is byte-identical), so the web
+  UI shows a plain-language, translated hint (en/ko) and keeps the raw
+  English detail in a hover tooltip for fidelity. CLI/MCP wording is
+  unchanged.
+
 ## [0.3.3] — 2026-07-04
 
 ### Added

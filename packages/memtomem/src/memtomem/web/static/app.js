@@ -1241,6 +1241,11 @@ function showToast(message, type = 'success', options = {}) {
   const msgSpan = document.createElement('span');
   msgSpan.className = 'toast-msg';
   msgSpan.textContent = message;
+  // ``options.title`` keeps a raw/verbatim string in a hover tooltip while the
+  // visible text stays a short localized message — e.g. the privacy-block toast
+  // shows a jargon-free hint but preserves the raw English server detail for
+  // fidelity (#1651). Mirrors the overview error tile's ``title=`` tooltip.
+  if (options.title) msgSpan.title = options.title;
   toast.appendChild(msgSpan);
   const delay = type === 'error' ? 5000 : 3000;
   let timer;
