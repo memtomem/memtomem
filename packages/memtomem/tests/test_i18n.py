@@ -151,6 +151,30 @@ class TestLocaleFiles:
                 f"per-asset `mm context update` remediation; got: {tip!r}"
             )
 
+    def test_portal_drift_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The Projects-portal fleet-drift badge (#1649) needs both its badge
+        label and tooltip in each locale, and the tooltip must recommend a
+        runnable remediation: ``mm context status --all-projects`` (the read-only
+        cross-project inspector the badge is fed from), not any ``--all`` update
+        form (#1645 lesson — a usage error / wrong axis)."""
+        for name, data in [("en", en), ("ko", ko)]:
+            for key in (
+                "settings.ctx.portal_drift_badge",
+                "settings.ctx.portal_drift_tip",
+            ):
+                assert key in data, f"{name}.json missing {key}"
+                assert data[key].strip(), f"{name}.json has empty {key}"
+            tip = data["settings.ctx.portal_drift_tip"]
+            assert "mm context status --all-projects" in tip, (
+                f"{name}.json settings.ctx.portal_drift_tip must name the "
+                f"runnable `mm context status --all-projects` inspector; "
+                f"got: {tip!r}"
+            )
+            assert "update --all" not in tip, (
+                f"{name}.json settings.ctx.portal_drift_tip must not steer to "
+                f"an `update --all` form (#1645); got: {tip!r}"
+            )
+
 
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 

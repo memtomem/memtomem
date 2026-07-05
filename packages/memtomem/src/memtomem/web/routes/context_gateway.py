@@ -394,12 +394,13 @@ async def context_overview(
 
         # Wiki-install staleness axis (0629 backlog c/d): the count of
         # installed assets whose lockfile pin sits behind wiki HEAD ("update
-        # available"). This is the lockfile↔wiki axis — none of the
-        # canonical→runtime tiles above carry it, and the cross-project
-        # /context/status-all route that does has zero web consumers by
-        # design. ``None`` (not zeros) on failure: the badge is a pure header
-        # enhancement, but "0 behind" is a clean-state claim we can't back
-        # when the classifier itself raised.
+        # available"). This is the single-project lockfile↔wiki axis — none of
+        # the canonical→runtime tiles above carry it. The cross-project roll-up
+        # of the same drift lives on /context/status-all, which the Projects
+        # portal consumes for its per-project drift badge (#1649); this overview
+        # axis stays the single-project view. ``None`` (not zeros) on failure:
+        # the badge is a pure header enhancement, but "0 behind" is a
+        # clean-state claim we can't back when the classifier itself raised.
         wiki_installs: dict[str, int] | None
         try:
             if target_scope == "project_shared":

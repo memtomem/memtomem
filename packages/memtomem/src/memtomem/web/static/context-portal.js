@@ -67,6 +67,13 @@ let _ctxPortalHideUninit = true;
 // Map of scope_id -> runtimes list (one GET /api/context/runtimes per scope; the
 // endpoint resolves per-scope via resolve_scope_root's project_scope_id param).
 let _ctxPortalRuntimesMap = {};
+// Set of scope_ids whose synced context has drifted from the Store, from the
+// deferred GET /api/context/status-all fetch (#1649). Kept out of the initial
+// render path: status-all shells out to git per project (sequential), so the
+// board paints from projects+runtimes first and the drift badge fills in when
+// this resolves. Reset on every fresh load so a tier flip / refresh can't leave
+// a stale badge. project_shared tier only (the endpoint 400s on other tiers).
+let _ctxPortalDriftMap = {};
 // Active runtime filter: null | 'claude' | 'antigravity' | 'codex' | 'kimi'
 let _ctxPortalRuntimeFilter = null;
 
@@ -412,6 +419,10 @@ async function loadCtxProjects() {
     // any render reads it.
     _ctxPortalEditingId = null;
     _ctxPortalScopes = scopes;
+    // Drop any drift badges from the previous load before it repaints — a tier
+    // flip or refresh must not carry a stale badge into the new roster. The
+    // deferred fetch below (project_shared only) repopulates it.
+    _ctxPortalDriftMap = {};
     if (!scopes.length) {
       // Server CWD is always present, so an empty roster means the load
       // failed — render the shared load-error + Retry (#1287; the helper
@@ -453,6 +464,13 @@ async function loadCtxProjects() {
     _ctxPortalRenderHeadingChips();
     _ctxPortalRenderScaffold(listEl);
     _ctxPortalRenderRows();
+    // Fire-and-forget the cross-project drift check (#1649). Not awaited: the
+    // board is already painted and status-all runs sequential per-project git
+    // work, so the drift badge fills in when it resolves. Gated on
+    // project_shared — the only tier the endpoint serves (400 otherwise).
+    if (requestedScope === 'project_shared') {
+      _ctxPortalLoadDrift(seq, requestedScope, signal);
+    }
     return true;
   } catch (err) {
     // Aborted = a newer portal load superseded us (#1286); its seq guard owns
@@ -468,6 +486,40 @@ async function loadCtxProjects() {
     );
     return true; // owned the (error) render — ran to completion as the latest
   }
+}
+
+// Deferred cross-project drift check (#1649) — the sole web consumer of
+// GET /api/context/status-all. Called (not awaited) after the board paints, so
+// its sequential per-project git work never blocks the initial render. Best
+// effort throughout: any abort / non-OK / network failure leaves the board as
+// painted (no badge, no toast), mirroring the overview wiki-behind badge's
+// defensive-reader posture (#1546). ``seq``/``requestedScope``/``signal`` are
+// captured from the enclosing loadCtxProjects invocation so a superseded load's
+// late result is discarded by the same guard the projects+runtimes fetches use.
+async function _ctxPortalLoadDrift(seq, requestedScope, signal) {
+  let data;
+  try {
+    const res = await fetch(
+      '/api/context/status-all?target_scope=project_shared', { signal },
+    );
+    if (!res.ok) return;
+    data = await res.json();
+  } catch (err) {
+    return; // abort (superseded load) or network error — leave the board as-is
+  }
+  // A newer load started or the tier flipped mid-fetch: this payload was
+  // computed for a roster that is no longer on screen.
+  if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return;
+  const projects = Array.isArray(data?.projects) ? data.projects : [];
+  const driftMap = {};
+  for (const entry of projects) {
+    if (entry?.status === 'drift') driftMap[entry.project_scope_id || ''] = true;
+  }
+  _ctxPortalDriftMap = driftMap;
+  // Skip the immediate repaint while a row is in inline-rename mode — a full
+  // repaint would discard the open input's typed value. The map is already set,
+  // so the next natural repaint (save/cancel/langchange) shows the badges.
+  if (_ctxPortalEditingId === null) _ctxPortalRenderRows();
 }
 
 // Header (search + sort) is painted once and kept across row repaints so the
@@ -666,6 +718,14 @@ function _ctxPortalBadgesHtml(scope) {
   } else if (scope.stale) {
     const tip = escapeHtml(t('settings.ctx.portal_stale_tip'));
     parts.push(`<span class="ctx-scope-badge ctx-scope-badge--stale" title="${tip}">${escapeHtml(t('settings.ctx.portal_stale'))}</span>`);
+  }
+  // Cross-project drift (#1649) — this scope's synced context no longer matches
+  // the Store, per the deferred status-all fetch. Skipped for missing rows (no
+  // synced context to drift). Populated only under project_shared; the map is
+  // empty otherwise, so this renders nothing on other tiers.
+  if (!scope.missing && _ctxPortalDriftMap[scope.scope_id || '']) {
+    const tip = escapeHtml(t('settings.ctx.portal_drift_tip'));
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--drift" title="${tip}">${escapeHtml(t('settings.ctx.portal_drift_badge'))}</span>`);
   }
   return parts.join('');
 }
