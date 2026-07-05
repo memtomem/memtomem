@@ -299,6 +299,11 @@ them out:
   only — the Web UI has no Project (local) write surface (its write routes
   reject that tier before any privacy check).
 
+The override flag has two spellings, one per direction: `mm context sync
+--force-unsafe` (Store → runtimes) and `mm context init --force-unsafe-import`
+(existing runtime files being imported into the Store). Both follow the tier
+rules above — a `project_shared` destination always hard-refuses.
+
 See [`configuration.md#context-gateway`](configuration.md#context-gateway) for
 the related environment variables.
 
