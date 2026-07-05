@@ -167,16 +167,21 @@ function _ctxErrDetail(detail, fallback) {
   return fallback;
 }
 
-// The write-time Gate A privacy block (#1509) is the one editor 422 that ships a
+// The write-time Gate A privacy block (#1509) is the editor 422 that ships a
 // path-free but raw-ENGLISH, jargon-heavy string ``detail`` ("Gate A: … ADR-0011
 // §5 … target_scope=user"). The server hoists ``reason_code: "privacy_blocked"``
 // to a top-level sibling of that string (``_sync_phase`` handler, #1409), so we
 // can show a localized, jargon-free hint here and keep the raw English detail in
-// a tooltip for fidelity (#1651). ``err`` is the parsed 422 body. Returns true
-// when it handled a privacy block (caller should stop and not toast again).
-function _ctxMaybePrivacyToast(err) {
+// a tooltip for fidelity (#1651). ``err`` is the parsed 422 body; ``type`` is the
+// artifact kind. MCP servers are project_shared-only (ADR-0011 §1), so they get a
+// hint that omits the "save to your user library" remediation (invalid there).
+// Returns true when it handled a privacy block (caller should stop, not re-toast).
+function _ctxMaybePrivacyToast(err, type) {
   if (err && err.reason_code === 'privacy_blocked') {
-    showToast(t('settings.ctx.privacy_blocked_editor_hint'), 'error', {
+    const key = type === 'mcp-servers'
+      ? 'settings.ctx.privacy_blocked_mcp_hint'
+      : 'settings.ctx.privacy_blocked_editor_hint';
+    showToast(t(key), 'error', {
       title: typeof err.detail === 'string' ? err.detail : undefined,
     });
     return true;

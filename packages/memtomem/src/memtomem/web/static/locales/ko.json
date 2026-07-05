@@ -755,6 +755,7 @@
   "settings.ctx.privacy_blocked_shared_hint": "공유(프로젝트) 가져오기는 표시된 시크릿을 우회할 수 없습니다 — git 기록은 영구적입니다. 스킬을 열어 '사용자 라이브러리로 가져오기'를 쓰거나, 표시된 줄을 제거하세요.",
   "settings.ctx.privacy_blocked_shared_sync_hint": "공유(프로젝트) 동기화는 표시된 시크릿을 우회할 수 없습니다 — git 기록은 영구적입니다. 표시된 줄을 제거한 뒤 다시 동기화하세요.",
   "settings.ctx.privacy_blocked_editor_hint": "이 콘텐츠에서 비밀값(secret)이 감지되어 공유(프로젝트) 티어에 저장할 수 없습니다 — git 기록은 영구적이라 강제 저장할 수 없습니다. 비밀값을 제거하거나, 개인 사용자 라이브러리에 저장하세요.",
+  "settings.ctx.privacy_blocked_mcp_hint": "이 MCP 서버 설정에서 비밀값(secret)이 감지되어 공유 프로젝트 .mcp.json 에 저장할 수 없습니다 — git 기록은 영구적이라 강제 저장할 수 없습니다. 저장하기 전에 비밀값을 제거하세요.",
   "settings.ctx.import_to_user": "사용자 라이브러리로 가져오기",
   "settings.ctx.import_to_user_success": "사용자 라이브러리(~/.memtomem)로 가져왔습니다",
   "settings.ctx.runtime_only_detail_hint": "런타임 미리보기 — 아직 .memtomem/ 에 없습니다.",
