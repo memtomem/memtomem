@@ -86,6 +86,42 @@ def _mount_and_save(page) -> None:
     page.locator("#ctx-skills-detail .ctx-edit-save").click()
 
 
+def _stub_conflict_then_privacy(page) -> dict:
+    """GET serves detail; the 1st PUT returns a 409 stale-mtime (opens the
+    conflict modal), the 2nd PUT (Force save) returns the privacy 422 — force
+    bypasses only the mtime guard, never Gate A."""
+    state = {"puts": 0}
+
+    def _handler(route):
+        if route.request.method == "PUT":
+            state["puts"] += 1
+            if state["puts"] == 1:
+                route.fulfill(
+                    status=409,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "status": "aborted",
+                            "reason": "File was modified by another process. Reload and retry.",
+                            "mtime_ns": "1700000000000000001",
+                            "error_kind": "conflict",
+                            "reason_code": "stale_mtime",
+                        }
+                    ),
+                )
+            else:
+                route.fulfill(
+                    status=422,
+                    content_type="application/json",
+                    body=json.dumps({"detail": _GATE_A_DETAIL, "reason_code": "privacy_blocked"}),
+                )
+            return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(_SKILL_DETAIL))
+
+    page.route("**/api/context/skills/demo-skill**", _handler)
+    return state
+
+
 def _toast_text(page) -> str:
     toast = page.wait_for_selector("#toast-container .toast", timeout=3_000)
     return (toast.text_content() or "").strip()
@@ -127,3 +163,24 @@ def test_editor_privacy_block_localized_ko(page, mm_web_url: str) -> None:
     assert KO_HINT in text, f"KO toast must surface the KO hint; got {text!r}"
     assert "Gate A" not in text, f"raw jargon must not reach the visible toast; got {text!r}"
     assert EN_HINT not in text, f"EN copy must not leak under the KO locale; got {text!r}"
+
+
+def test_editor_privacy_block_localized_on_conflict_force_save(page, mm_web_url: str) -> None:
+    """force=true bypasses only the mtime guard, never Gate A: a secret saved
+    through the conflict dialog's Force-save path must still surface the
+    localized hint, not the raw English wall (#1651 conflict-path coverage)."""
+    install_default_stubs(page)
+    _stub_conflict_then_privacy(page)
+    page.goto(mm_web_url)
+    _open_skills(page)
+    _mount_and_save(page)
+    # First save → 409 → the conflict modal opens; choose Force save, which
+    # re-PUTs with force=true and trips Gate A.
+    force = page.wait_for_selector("#ctx-conflict-force-btn", state="visible", timeout=4_000)
+    force.click()
+
+    text = _toast_text(page)
+    assert EN_HINT in text, f"conflict Force-save must localize the privacy block; got {text!r}"
+    assert "Gate A" not in text, f"raw jargon must not reach the visible toast; got {text!r}"
+    title = page.locator("#toast-container .toast-msg").get_attribute("title") or ""
+    assert "Gate A: demo-skill" in title, f"raw detail must survive in the tooltip; got {title!r}"

@@ -780,6 +780,10 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
       let r2 = await forcePut({});
       if (!r2.ok) {
         const err = await r2.json().catch(() => ({}));
+        // force=true bypasses only the mtime guard, never Gate A (#1509), so a
+        // secret in the resolved buffer still trips the write-time privacy 422 —
+        // localize it here too, not just on the plain save path (#1651).
+        if (_ctxMaybePrivacyToast(err, type)) return;
         showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
         return;
       }
@@ -792,6 +796,7 @@ async function _ctxHandleConflict(type, name, userBuffer, staleMtimeNs, detailEl
         if (!r2) return;
         if (!r2.ok) {
           const err = await r2.json().catch(() => ({}));
+          if (_ctxMaybePrivacyToast(err, type)) return;
           showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
