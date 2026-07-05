@@ -684,6 +684,7 @@ async function loadCtxDetail(type, name, opts = {}) {
         }
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
+          if (_ctxMaybePrivacyToast(err, type)) return;
           showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
           return;
         }
@@ -700,6 +701,7 @@ async function loadCtxDetail(type, name, opts = {}) {
           }
           if (!r.ok) {
             const err = await r.json().catch(() => ({}));
+            if (_ctxMaybePrivacyToast(err, type)) return;
             showToast(_ctxErrDetail(err.detail, t('toast.request_failed')), 'error');
             return;
           }

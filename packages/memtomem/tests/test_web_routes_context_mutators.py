@@ -830,6 +830,9 @@ async def test_POST_rejects_secret_shaped_content(
     assert "privacy pattern" in detail
     assert secret not in r.text
     assert str(gateway_root) not in detail
+    # #1651: reason_code is hoisted to a top-level sibling (detail string stays
+    # byte-identical) so the localized web UI can translate the block.
+    assert r.json()["reason_code"] == "privacy_blocked", r.text
     # Nothing landed: no working file and no artifact dir — which also
     # proves the ADR-0022 create_version snapshot never fired.
     assert not adapter["created_working"](gateway_root, "leaky").exists()
@@ -859,7 +862,9 @@ async def test_PUT_rejects_secret_shaped_content_even_with_force(
         },
     )
     assert r.status_code == 422, (adapter["type"], r.text)
+    assert isinstance(r.json()["detail"], str), r.text
     assert "privacy pattern" in r.json()["detail"]
+    assert r.json()["reason_code"] == "privacy_blocked", r.text  # #1651 sibling
     assert secret not in r.text
     assert manifest.read_bytes() == before_bytes
     assert manifest.stat().st_mtime_ns == before_mtime_ns

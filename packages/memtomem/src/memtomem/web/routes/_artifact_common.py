@@ -18,7 +18,6 @@ them into one ``ImportRequest`` component; sharing the class keeps that name.
 
 from __future__ import annotations
 
-from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
@@ -28,6 +27,7 @@ from memtomem.context._sync_atomic import ON_DROP_LEVELS
 from memtomem.context.privacy_scan import FileScan, format_scan_block_message
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.web.routes._errors import _error
+from memtomem.web.routes._sync_phase import SyncPhaseError
 
 # ── Mtime conflict envelope ──────────────────────────────────────────────
 
@@ -95,9 +95,21 @@ def raise_if_privacy_blocked(scan: FileScan, *, kind: str, artifact_name: str) -
     """
     if scan.decision not in ("blocked", "blocked_project_shared"):
         return
-    raise HTTPException(
-        status_code=422,
-        detail=format_scan_block_message(
+    # Raise via SyncPhaseError (not bare HTTPException) so the app-wide
+    # ``_sync_phase_error_handler`` hoists ``reason_code`` to a top-level sibling
+    # of the string ``detail`` (#1409 mechanism), letting the localized web UI
+    # disambiguate a privacy block from a parse/validation 422 and translate it
+    # (#1651) — the editor Gate A 422 was the last privacy 422 without the
+    # sibling, so a ko session saw the raw English jargon wall verbatim. The
+    # ``detail`` string stays byte-identical (path-free count + basename, the
+    # issue-pinned string convention), so every CLI/MCP/web wording pin holds.
+    # The class is historically sync-named, but its handler is the general
+    # string-detail reason_code hoist, and editor create/update routes are never
+    # aggregated by ``sync-all`` (no cross-contamination). ``reason_code`` reuses
+    # the value the sync/import/wiki privacy 422s already emit.
+    raise SyncPhaseError(
+        422,
+        format_scan_block_message(
             scan,
             scope="project_shared",
             kind=kind,
@@ -107,6 +119,8 @@ def raise_if_privacy_blocked(scan: FileScan, *, kind: str, artifact_name: str) -
                 f"in your private user tier (target_scope=user)."
             ),
         ),
+        error_kind="validation",
+        reason_code="privacy_blocked",
     )
 
 

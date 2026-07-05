@@ -167,7 +167,11 @@ async def test_create_rejects_secret_shaped_content(client: AsyncClient) -> None
         },
     )
     assert r.status_code == 422
+    assert isinstance(r.json()["detail"], str), r.text
     assert "privacy pattern" in r.json()["detail"]
+    # #1651: reason_code hoisted as a top-level sibling (string detail unchanged)
+    # so the web editor localizes the MCP block like the per-kind editors.
+    assert r.json()["reason_code"] == "privacy_blocked", r.text
     assert secret not in r.text
 
 
@@ -193,7 +197,9 @@ async def test_update_rejects_secret_shaped_content(client: AsyncClient, tmp_pat
         },
     )
     assert r.status_code == 422
+    assert isinstance(r.json()["detail"], str), r.text
     assert "privacy pattern" in r.json()["detail"]
+    assert r.json()["reason_code"] == "privacy_blocked", r.text  # #1651 sibling
     assert secret not in r.text
     assert path.read_bytes() == before_bytes
 

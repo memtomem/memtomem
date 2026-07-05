@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -210,7 +210,14 @@ async def create_mcp_server(
         # keeps the full message in the server log.
         raise _error(422, "parse", exc.safe_message) from exc
     except McpServerPrivacyError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        # #1651: hoist reason_code as a top-level sibling (the byte-identical
+        # string detail stays issue-pinned) so the web editor localizes the
+        # block, matching the sync path below and the per-kind editors. MCP
+        # servers are project_shared-only (ADR-0011 §1), so the client picks an
+        # MCP-specific hint that omits the user-tier remediation.
+        raise SyncPhaseError(
+            422, str(exc), error_kind="validation", reason_code="privacy_blocked"
+        ) from exc
     return {"name": name, "canonical_path": _safe_rel(path, project_root)}
 
 
@@ -265,7 +272,14 @@ async def _update_mcp_server_impl(
         # Path-free detail at the loopback boundary (#1412); see create route.
         raise _error(422, "parse", exc.safe_message) from exc
     except McpServerPrivacyError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        # #1651: hoist reason_code as a top-level sibling (the byte-identical
+        # string detail stays issue-pinned) so the web editor localizes the
+        # block, matching the sync path below and the per-kind editors. MCP
+        # servers are project_shared-only (ADR-0011 §1), so the client picks an
+        # MCP-specific hint that omits the user-tier remediation.
+        raise SyncPhaseError(
+            422, str(exc), error_kind="validation", reason_code="privacy_blocked"
+        ) from exc
     return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
 
 

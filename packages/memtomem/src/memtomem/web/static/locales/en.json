@@ -754,6 +754,8 @@
   "settings.ctx.force_unsafe_sync_btn": "Sync anyway",
   "settings.ctx.privacy_blocked_shared_hint": "Shared (project) imports can't override a flagged secret — git history is permanent. Open the skill and use 'Import to user library' instead, or remove the flagged line.",
   "settings.ctx.privacy_blocked_shared_sync_hint": "Shared (project) sync can't override a flagged secret — git history is permanent. Remove the flagged line, then re-run sync.",
+  "settings.ctx.privacy_blocked_editor_hint": "A secret was detected in this content, so it can't be saved to the shared (project) tier — git history is permanent, with no force override. Remove the secret, or save it to your private user library instead.",
+  "settings.ctx.privacy_blocked_mcp_hint": "A secret was detected in this MCP server config, so it can't be saved to the shared project .mcp.json — git history is permanent, with no force override. Remove the secret before saving.",
   "settings.ctx.import_to_user": "Import to user library",
   "settings.ctx.import_to_user_success": "Imported into your user library (~/.memtomem)",
   "settings.ctx.runtime_only_detail_hint": "Runtime preview — not yet in .memtomem/.",
