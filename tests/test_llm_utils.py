@@ -47,5 +47,5 @@ def test_strip_llm_response_backticks_in_middle():
 
 def test_strip_llm_response_multiple_code_blocks():
     """Test that only the first code block's opening fence and final closing fence are stripped."""
-    text = "```python\nprint('Hello')\n```\n```json\n{\"key\": \"value\"}\n```"
+    text = '```python\nprint(\'Hello\')\n```\n```json\n{"key": "value"}\n```'
     assert strip_llm_response(text) == 'print("Hello")\n```\n```json\n{"key": "value"}'
