@@ -38,16 +38,30 @@ def test_max_tags_truncation():
     assert len(tags) <= 3
 
 
-def test_heading_boost_3x():
-    """Words from heading hierarchy should get 3x boost."""
-    tags = extract_tags_keyword("test", max_tags=5, heading_hierarchy=("test",))
-    assert "test" in tags
+def test_heading_boost_is_at_least_3x():
+    """The heading boost is 3x, not merely +1.
+
+    Body carries "gamma" twice (frequency 2). A heading-only word "delta"
+    scores purely from the boost, so at 3x it reaches 3 and must outrank
+    "gamma". A boost of 1x (score 1) or 2x (score 2, tied) would leave
+    "delta" behind or tied, so ranking it strictly first pins the
+    multiplier at >= 3. No tie is relied on (3 vs 2).
+    """
+    tags = extract_tags_keyword("gamma gamma", max_tags=5, heading_hierarchy=("delta",))
+    assert tags.index("delta") < tags.index("gamma")
 
 
-def test_heading_boost_outranks_body():
-    """A word appearing in heading should outrank body words."""
-    tags = extract_tags_keyword("important", max_tags=5, heading_hierarchy=("important",))
-    assert "important" in tags
+def test_heading_boost_outranks_more_frequent_body_word():
+    """A heading word must outrank a body word that occurs MORE often.
+
+    Body carries "alpha" twice (frequency 2) and "beta" once (frequency 1).
+    With the 3x boost "beta" scores 1 + 3 = 4 and ranks ahead of "alpha" (2);
+    without the boost the order would reverse. This is the real contract the
+    original test only gestured at (it asserted mere presence, which passes
+    even with no boost at all). No tie is relied on (4 vs 2).
+    """
+    tags = extract_tags_keyword("alpha alpha beta", max_tags=5, heading_hierarchy=("beta",))
+    assert tags.index("beta") < tags.index("alpha")
 
 
 def test_mixed_content():
