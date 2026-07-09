@@ -32,6 +32,7 @@ from memtomem.context.install import (
     AssetNotFoundError,
     InstallResult,
     NotInstalledError,
+    PinNotAncestorError,
     ProjectRootMissingError,
     StaleInstallError,
     UncommittedAssetError,
@@ -290,6 +291,20 @@ async def update_asset(
             f"commit-true and records HEAD's bytes only); commit them — e.g. "
             f"`mm wiki <type> commit <name> --canonical` — and retry",
             reason_code="wiki_uncommitted",
+        ) from exc
+    except PinNotAncestorError as exc:
+        # Forward-only gate (#1685): wiki HEAD does not descend from this
+        # project's pin (wiki reset / force-pull), so update would move the pin
+        # backward. Fixed message (the engine text names the pinned SHA only,
+        # not a host path, but keep the envelope contract uniform); NOT
+        # force-able — the remedy is to fix the wiki, not to re-run with force.
+        raise _error(
+            409,
+            "conflict",
+            f"{asset_type}/{name}: the wiki history diverged from this project's "
+            f"pin (reset or force-pull past it); update would move the pin "
+            f"backward. Investigate the wiki before retrying",
+            reason_code="pin_not_ancestor",
         ) from exc
     except PrivacyScanError as exc:
         raise _privacy_blocked() from exc

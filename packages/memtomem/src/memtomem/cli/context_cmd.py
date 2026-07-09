@@ -42,6 +42,7 @@ from memtomem.context.install import (
     AssetNotFoundError,
     CommitNotFoundError,
     NotInstalledError,
+    PinNotAncestorError,
     ProjectClassification,
     ProjectInstallClassification,
     StaleInstallError,
@@ -2115,6 +2116,7 @@ def update_cmd(
         NotInstalledError,
         StaleInstallError,
         UncommittedAssetError,
+        PinNotAncestorError,
         InvalidNameError,
         LockfileError,
         PrivacyScanError,
@@ -2199,6 +2201,14 @@ def _run_update_dry_run_single(
     _print_classification_table(classifications, asset_type_plural, name, new_commit)
 
     row = classifications[0]
+
+    # Forward-only gate (#1685): a stale pin (HEAD does not descend from it)
+    # exits non-zero like the real run's PinNotAncestorError. Checked BEFORE
+    # the wiki-dirty gate to mirror _update_asset's order (ancestry precedes
+    # the dirty gate). Non-force-able — the reason names the wiki-history fix,
+    # not --force.
+    if row.state == "stale-pin":
+        raise click.ClickException(f"{asset_type_plural}/{name}: {row.reason}")
 
     # Wiki-side dirty gate (#1652): fires only when the real run would
     # write (parity with the single wet path, where the no-op returns
@@ -2311,9 +2321,10 @@ def _run_update_all(
 
     needs_update = [c for c in classifications if c.state == "update"]
     needs_force = [c for c in classifications if c.state == "refuse"]
+    stale_pins = [c for c in classifications if c.state == "stale-pin"]
     has_errors = [c for c in classifications if c.state == "error"]
 
-    if not needs_update and not needs_force and not has_errors:
+    if not needs_update and not needs_force and not stale_pins and not has_errors:
         click.echo("\nAll projects are up to date.")
         _maybe_hint_dirty_noop(wiki, asset_type_plural, name)
         return
@@ -2351,6 +2362,8 @@ def _run_update_all(
         parts = [f"{len(needs_update)} would update"]
         if needs_force:
             parts.append(f"{len(needs_force)} would refuse without --force")
+        if stale_pins:
+            parts.append(f"{len(stale_pins)} stale pin (wiki diverged, not force-able)")
         if has_errors:
             parts.append(f"{len(has_errors)} in error")
         click.echo(f"\nDry run — nothing written; {', '.join(parts)}.")
@@ -2386,6 +2399,15 @@ def _run_update_all(
             continue
         if c.state == "error":
             click.secho(f"  ✗ {c.project_root}: {c.reason}", fg="red")
+            failures += 1
+            continue
+        if c.state == "stale-pin":
+            # Forward-only gate (#1685): HEAD does not descend from this
+            # project's pin — advancing would downgrade it. Per-project skip
+            # (never force-able), counted as a failure so the batch exits
+            # non-zero: the user asked to update and this one could not be
+            # safely advanced. Siblings that ARE forward keep updating.
+            click.secho(f"  ⚠ {c.project_root}: {c.reason}", fg="red")
             failures += 1
             continue
 
@@ -2465,6 +2487,7 @@ def _print_classification_table(
         "update": "green",
         "unchanged": "cyan",
         "refuse": "yellow",
+        "stale-pin": "red",
         "error": "red",
     }
     for c in classifications:

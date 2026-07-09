@@ -29,9 +29,11 @@ from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
     NotInstalledError,
+    PinNotAncestorError,
     StaleInstallError,
     UncommittedAssetError,
     _classify_for_all_update,
+    _pin_backward_reason,
     install_skill,
     update_agent,
     update_command,
@@ -84,6 +86,20 @@ def _modify_wiki_skill(wiki_root_path: Path, name: str, files: dict[str, bytes])
     return WikiStore.at_default().current_commit()
 
 
+def _reset_wiki_hard(wiki_root_path: Path, commit: str) -> None:
+    """``git reset --hard <commit>`` in the wiki — simulate a reset / force-pull.
+
+    HEAD moves to *commit*; any commit made after it becomes unreferenced but
+    stays in the object DB (still reachable to ``cat-file``, no longer an
+    ancestor of HEAD) — exactly the ``stale-pin`` shape (#1685).
+    """
+    subprocess.run(
+        ["git", "-C", str(wiki_root_path), "reset", "--hard", commit],
+        check=True,
+        capture_output=True,
+    )
+
+
 def _bump_mtime(path: Path, *, seconds_in_future: float = 1.0) -> None:
     """Force *path*'s mtime to ``now + seconds_in_future``.
 
@@ -118,6 +134,93 @@ def test_clean_drift_updates(wiki_root: Path, tmp_path: Path) -> None:
     lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
     assert lock_doc["skills"]["foo"]["wiki_commit"] == new_commit
     assert lock_doc["skills"]["foo"]["installed_at"] == result.installed_at
+
+
+# ── forward-only gate (#1685) ────────────────────────────────────────────
+
+
+def test_update_refuses_when_wiki_reset_behind_pin(wiki_root: Path, tmp_path: Path) -> None:
+    """Wiki reset to older history → pin not an ancestor of HEAD → refuse.
+
+    After ``git reset --hard`` past the recorded pin, HEAD no longer descends
+    from it, so advancing to HEAD would move the pin BACKWARD. Update must
+    refuse with :class:`PinNotAncestorError` (#1685) instead of silently
+    downgrading — the write-path counterpart of the ``stale-pin`` status state.
+    """
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+
+    # Advance HEAD and move the project's pin forward to commit2.
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project, "foo")
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    pinned = lock_doc["skills"]["foo"]["wiki_commit"]
+
+    # Reset the wiki HARD back to commit1 — HEAD is now behind the pin.
+    _reset_wiki_hard(wiki_root, commit1)
+
+    with pytest.raises(PinNotAncestorError) as exc:
+        update_skill(project, "foo")
+    assert "backward" in str(exc.value)
+
+    # The lockfile pin is untouched — no silent downgrade.
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pinned
+
+
+def test_update_force_does_not_bypass_stale_pin(wiki_root: Path, tmp_path: Path) -> None:
+    """``--force`` overrides project-side edits, never wiki-side history (#1685)."""
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project, "foo")
+    _reset_wiki_hard(wiki_root, commit1)
+
+    with pytest.raises(PinNotAncestorError):
+        update_skill(project, "foo", force=True)
+
+
+def test_update_refuses_when_pin_unreachable(wiki_root: Path, tmp_path: Path) -> None:
+    """A pin no longer reachable (history rewrite) also refuses forward (#1685)."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    # Repin to an unreachable SHA, then advance HEAD so pin != HEAD.
+    Lockfile.at(project).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    with pytest.raises(PinNotAncestorError) as exc:
+        update_skill(project, "foo")
+    assert "not reachable" in str(exc.value)
+
+
+def test_pin_backward_reason_allows_forward_and_noop(wiki_root: Path, tmp_path: Path) -> None:
+    """``_pin_backward_reason`` returns None for an ancestor pin, a reason otherwise.
+
+    The ancestry target is the caller's ``new_commit`` (the exact commit that
+    would be recorded), not a re-resolved symbolic HEAD (#1685).
+    """
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    wiki = WikiStore.at_default()
+    commit2 = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    assert _pin_backward_reason(wiki, commit1, commit2) is None  # ancestor → forward OK
+    assert _pin_backward_reason(wiki, commit2, commit2) is None  # == target (own ancestor)
+    # commit2 is NOT an ancestor of the older commit1 → a backward move.
+    assert _pin_backward_reason(wiki, commit2, commit1) is not None
+    assert _pin_backward_reason(wiki, "0" * 40, commit2) is not None  # unreachable
+    assert _pin_backward_reason(wiki, "", commit2) is not None  # missing pin
+    assert _pin_backward_reason(wiki, None, commit2) is not None  # non-str pin
 
 
 def test_dirty_refuse_without_force(wiki_root: Path, tmp_path: Path) -> None:
@@ -402,6 +505,49 @@ def test_cli_update_stale_refuse_message(
     assert "--force" in result.output
 
 
+def test_cli_update_stale_pin_refuse_message(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """CLI single update surfaces the forward-only refusal + non-zero exit (#1685)."""
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project_cwd, "foo")  # move pin forward to commit2
+    _reset_wiki_hard(wiki_root, commit1)  # HEAD now behind the pin
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo"])
+
+    assert result.exit_code != 0
+    assert "backward" in result.output
+    # --force must NOT bypass it (wiki-side, not project-side).
+    forced = runner.invoke(context_group, ["update", "skill", "foo", "--force"])
+    assert forced.exit_code != 0
+    assert "backward" in forced.output
+
+
+def test_cli_update_dry_run_stale_pin_exits_nonzero(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """``--dry-run`` of a stale-pin update exits non-zero like the wet run (#1685)."""
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project_cwd, "foo")
+    _reset_wiki_hard(wiki_root, commit1)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run"])
+
+    assert result.exit_code != 0
+    assert "stale-pin" in result.output  # the preview row
+    assert "backward" in result.output
+
+
 # ── coverage: silence unused-import warnings on agent/command wrappers ──
 
 
@@ -534,59 +680,68 @@ def test_classify_for_all_update_calls_current_commit_once(
     assert len(classifications) == 2
 
 
-def test_classify_for_all_update_4_state_coverage(wiki_root: Path, tmp_path: Path) -> None:
-    """One project per state — verifies all 4 states are reachable.
+def test_classify_for_all_update_5_state_coverage(wiki_root: Path, tmp_path: Path) -> None:
+    """One project per state — verifies all 5 states are reachable.
 
-    Setup strategy: wiki has a single commit. All 4 projects install
-    against that commit. Then 3 of them have their lockfile entries
-    back-dated (or corrupted) to simulate drift / dirty / error states.
-    The 4th stays at the live HEAD and classifies as ``unchanged``.
+    Setup strategy: the wiki has two commits (``commit1`` then ``commit2``
+    = HEAD). The ``update`` / ``refuse`` projects pin ``commit1`` — a REAL
+    ancestor of HEAD, so they classify as forward drift (an all-zeros pin
+    would now be ``stale-pin``, #1685, which is exactly the fifth project's
+    setup). Their ``installed_at`` is overridden to control the dirty walk.
     """
     from memtomem.context.lockfile import Lockfile
 
     _initialized_wiki(wiki_root)
-    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
 
     wiki = WikiStore.at_default()
-    head_commit = wiki.current_commit()
 
-    # State 1: "unchanged" — fresh install, lockfile pin == HEAD.
+    # State "update": install at commit1 (a real ancestor once HEAD advances),
+    # clean dest via a far-future installed_at.
+    proj_update = tmp_path / "update_clean"
+    proj_update.mkdir()
+    install_skill(proj_update, "foo")
+
+    # State "refuse": install at commit1, dirty dest via a far-past installed_at.
+    proj_refuse = tmp_path / "refuse"
+    proj_refuse.mkdir()
+    install_skill(proj_refuse, "foo")
+
+    # State "stale-pin": install at commit1, then repin to an unreachable SHA so
+    # HEAD does not descend from it (wiki reset / force-push past the pin).
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+
+    # Advance wiki HEAD → commit1 is now a strict ancestor of commit2.
+    head_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    assert head_commit != commit1
+
+    # State "unchanged": install AFTER the advance so its pin == HEAD.
     proj_unchanged = tmp_path / "unchanged"
     proj_unchanged.mkdir()
     install_skill(proj_unchanged, "foo")
 
-    # State 2: "update" — install, then back-date lockfile pin so HEAD
-    # looks like a newer commit. Dest mtimes are ahead of installed_at
-    # (just installed → fresh), so we also back-date installed_at to
-    # ensure files are NOT classified dirty. Use a fixed past timestamp.
-    # Wait — we WANT the dest tree to be clean (= reason="clean"), but
-    # back-dating installed_at to far past makes ALL current files look
-    # dirty. We need the OPPOSITE: future installed_at OR explicit clean
-    # mtimes. Easiest: back-date both lockfile fields, then bump every
-    # dest file's mtime to BEFORE installed_at_epoch via os.utime.
-    proj_update = tmp_path / "update_clean"
-    proj_update.mkdir()
-    install_skill(proj_update, "foo")
     Lockfile.at(proj_update).upsert_entry(
         "skills",
         "foo",
-        wiki_commit="0" * 40,  # ≠ HEAD → drift
-        installed_at="2030-01-01T00:00:00.000000Z",  # future → all current files are clean
+        wiki_commit=commit1,  # real ancestor of HEAD → forward drift
+        installed_at="2030-01-01T00:00:00.000000Z",  # future → all current files clean
     )
-
-    # State 3: "refuse" — drift + dirty.
-    proj_refuse = tmp_path / "refuse"
-    proj_refuse.mkdir()
-    install_skill(proj_refuse, "foo")
     Lockfile.at(proj_refuse).upsert_entry(
         "skills",
         "foo",
-        wiki_commit="0" * 40,
-        # Past installed_at so every current file is dirty.
-        installed_at="2020-01-01T00:00:00.000000Z",
+        wiki_commit=commit1,
+        installed_at="2020-01-01T00:00:00.000000Z",  # past → every current file dirty
+    )
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills",
+        "foo",
+        wiki_commit="0" * 40,  # unreachable → HEAD cannot descend from it
+        installed_at="2030-01-01T00:00:00.000000Z",  # clean, but the walk is short-circuited
     )
 
-    # State 4: "error" — unknown lockfile version.
+    # State "error" — unknown lockfile version.
     proj_error = tmp_path / "error"
     proj_error.mkdir()
     (proj_error / ".memtomem").mkdir()
@@ -599,7 +754,7 @@ def test_classify_for_all_update_4_state_coverage(wiki_root: Path, tmp_path: Pat
         "skills",
         "foo",
         wiki=wiki,
-        projects=[proj_unchanged, proj_update, proj_refuse, proj_error],
+        projects=[proj_unchanged, proj_update, proj_refuse, proj_stale, proj_error],
     )
 
     assert new_commit == head_commit
@@ -608,12 +763,16 @@ def test_classify_for_all_update_4_state_coverage(wiki_root: Path, tmp_path: Pat
         "unchanged": "unchanged",
         "update_clean": "update",
         "refuse": "refuse",
+        "stale": "stale-pin",
         "error": "error",
     }
-    # Cache pin: unchanged + error have no dirty_report; update + refuse do.
+    # Cache pin: unchanged + stale-pin + error have no dirty_report (the walk
+    # runs only for update + refuse).
     by_name = {c.project_root.name: c for c in classifications}
     assert by_name["unchanged"].dirty_report is None
     assert by_name["error"].dirty_report is None
+    assert by_name["stale"].dirty_report is None
+    assert by_name["stale"].reason and "backward" in by_name["stale"].reason
     assert by_name["update_clean"].dirty_report is not None
     assert by_name["update_clean"].dirty_report.reason == "clean"
     assert by_name["refuse"].dirty_report is not None
@@ -827,6 +986,89 @@ def test_cli_update_all_refuse_without_force_blocks_batch(
     # (not the new wiki HEAD) — the entire batch refused before any write.
     assert (proj_clean / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
     assert lock_doc["skills"]["foo"]["wiki_commit"] != WikiStore.at_default().current_commit()
+
+
+def test_cli_update_all_stale_pin_skipped_forward_sibling_updates(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale-pin project is skipped per-row (non-zero exit) while a forward
+    sibling still updates — the downgrade guard must not block clean rows (#1685)."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_forward = tmp_path / "forward"
+    proj_forward.mkdir()
+    install_skill(proj_forward, "foo")  # pinned commit1 (real ancestor after advance)
+
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+    # Repin to an unreachable SHA — HEAD cannot descend from it.
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+
+    new_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_forward, proj_stale])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes"])
+
+    # Non-zero: the batch could not fulfill the stale-pin row.
+    assert result.exit_code != 0, result.output
+    assert "stale-pin" in result.output  # preview table row
+    assert "backward" in result.output
+
+    # Forward sibling DID update to the new commit.
+    fwd_lock = json.loads((proj_forward / ".memtomem" / "lock.json").read_text())
+    assert fwd_lock["skills"]["foo"]["wiki_commit"] == new_commit
+    assert (proj_forward / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
+
+    # Stale project's pin is untouched — no downgrade.
+    stale_lock = json.loads((proj_stale / ".memtomem" / "lock.json").read_text())
+    assert stale_lock["skills"]["foo"]["wiki_commit"] == "0" * 40
+
+
+def test_cli_update_all_dry_run_reports_stale_pin(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all --dry-run`` counts a stale-pin row and writes nothing (exit 0, #1685)."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_stale])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--dry-run"])
+
+    # Dry run is a preview verb: exit 0, table shows the row, nothing written.
+    assert result.exit_code == 0, result.output
+    assert "stale-pin" in result.output
+    assert "stale pin" in result.output  # summary line
+    stale_lock = json.loads((proj_stale / ".memtomem" / "lock.json").read_text())
+    assert stale_lock["skills"]["foo"]["wiki_commit"] == "0" * 40
 
 
 # ── CLI --all: --yes invariants (no WARN unless --force) ────────────────
