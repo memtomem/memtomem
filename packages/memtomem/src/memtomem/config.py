@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -1200,6 +1201,7 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
     import json as _json
     import logging
     import os
+    import warnings
 
     _log = logging.getLogger(__name__)
 
@@ -1217,6 +1219,11 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
             if section_obj is None and isinstance(updates, dict):
                 _log.warning("Unknown config section '%s' in %s (ignored)", section_name, path)
             continue
+        # Snapshot the pre-override section so a cross-field validation
+        # failure below can roll the whole section back to its known-good
+        # baseline (defaults + any config.d values already applied).
+        section_before = section_obj.model_copy(deep=True)
+        applied_any = False
         for key, value in updates.items():
             if hasattr(section_obj, key):
                 env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
@@ -1245,6 +1252,7 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                         continue
                 try:
                     setattr(section_obj, key, value)
+                    applied_any = True
                 except (TypeError, ValueError) as exc:
                     _log.warning(
                         "Skipping invalid config override %s.%s=%r: %s",
@@ -1252,6 +1260,51 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                         key,
                         value,
                         exc,
+                    )
+        # ``ConfigModel`` sub-configs don't set ``validate_assignment=True``,
+        # so neither the ``@model_validator(mode="after")`` cross-field checks
+        # nor the ``mode="before"`` field migrations re-run for the ``setattr``
+        # overrides above. Re-validate the assembled section so an invariant the
+        # validator was written to reject (e.g. ``session_trace.langfuse_enabled``
+        # with no keys, or ``min_chunk_tokens > max_chunk_tokens``) fails loudly
+        # instead of slipping through, and so legacy-field migrations (e.g.
+        # ``rerank.top_k`` -> ``min_pool``) actually take effect. Assign the
+        # validated model back on success; on failure restore the pre-override
+        # baseline — cross-field invariants are about field *combinations*, so
+        # partial retention isn't meaningful; fall back to known-good as a whole.
+        if applied_any:
+            # ``exclude_defaults`` keeps defaulted legacy fields (e.g. an
+            # untouched ``rerank.top_k``) out of the revalidation payload so
+            # they don't spuriously re-trigger their ``mode="before"``
+            # migration; only values the user actually set are re-run.
+            # ``catch_warnings(record=True)`` captures any deprecation the
+            # user's own config triggers (it forces ``simplefilter("always")``,
+            # so an ambient ``-W error`` can't turn this internal pass into a
+            # crash) — real deprecations are re-surfaced via the logger below
+            # rather than swallowed.
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    validated = type(section_obj).model_validate(
+                        section_obj.model_dump(exclude_defaults=True)
+                    )
+            except ValidationError as exc:
+                _log.warning(
+                    "Invalid config section [%s] in %s: %s (reverting section to defaults)",
+                    section_name,
+                    path,
+                    exc,
+                )
+                setattr(config, section_name, section_before)
+            else:
+                setattr(config, section_name, validated)
+                for w in caught:
+                    _log.warning(
+                        "Config %s [%s] in %s: %s",
+                        w.category.__name__,
+                        section_name,
+                        path,
+                        w.message,
                     )
 
     # One-shot migration of legacy auto_discover=True installs to explicit
