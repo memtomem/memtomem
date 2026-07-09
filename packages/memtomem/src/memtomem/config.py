@@ -1223,7 +1223,7 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
         # failure below can roll the whole section back to its known-good
         # baseline (defaults + any config.d values already applied).
         section_before = section_obj.model_copy(deep=True)
-        applied_any = False
+        applied_keys: set[str] = set()
         for key, value in updates.items():
             if hasattr(section_obj, key):
                 env_var = f"MEMTOMEM_{section_name.upper()}__{key.upper()}"
@@ -1252,7 +1252,7 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                         continue
                 try:
                     setattr(section_obj, key, value)
-                    applied_any = True
+                    applied_keys.add(key)
                 except (TypeError, ValueError) as exc:
                     _log.warning(
                         "Skipping invalid config override %s.%s=%r: %s",
@@ -1272,22 +1272,26 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
         # validated model back on success; on failure restore the pre-override
         # baseline — cross-field invariants are about field *combinations*, so
         # partial retention isn't meaningful; fall back to known-good as a whole.
-        if applied_any:
-            # ``exclude_defaults`` keeps defaulted legacy fields (e.g. an
-            # untouched ``rerank.top_k``) out of the revalidation payload so
-            # they don't spuriously re-trigger their ``mode="before"``
-            # migration; only values the user actually set are re-run.
-            # ``catch_warnings(record=True)`` captures any deprecation the
-            # user's own config triggers (it forces ``simplefilter("always")``,
-            # so an ambient ``-W error`` can't turn this internal pass into a
-            # crash) — real deprecations are re-surfaced via the logger below
-            # rather than swallowed.
+        if applied_keys:
+            # Build the revalidation payload from ``exclude_defaults`` (which
+            # keeps *untouched* defaulted legacy fields like ``rerank.top_k``
+            # out, so they don't spuriously re-fire their ``mode="before"``
+            # migration) then overlay the keys the user *actually* set — even
+            # when their value equals the default. The migrations are
+            # presence-keyed, so an explicitly-configured deprecated field
+            # (e.g. ``{"rerank": {"top_k": 20}}``) must appear in the payload
+            # to surface its deprecation. ``catch_warnings(record=True)``
+            # captures any deprecation the user's config triggers (it forces
+            # ``simplefilter("always")``, so an ambient ``-W error`` can't turn
+            # this internal pass into a crash) — real deprecations are
+            # re-surfaced via the logger below rather than swallowed.
+            dumped = section_obj.model_dump()
+            payload = section_obj.model_dump(exclude_defaults=True)
+            payload.update({k: dumped[k] for k in applied_keys if k in dumped})
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    validated = type(section_obj).model_validate(
-                        section_obj.model_dump(exclude_defaults=True)
-                    )
+                    validated = type(section_obj).model_validate(payload)
             except ValidationError as exc:
                 _log.warning(
                     "Invalid config section [%s] in %s: %s (reverting section to defaults)",

@@ -229,6 +229,31 @@ def test_config_json_legacy_field_migration_applied_and_surfaced(
     )
 
 
+def test_config_json_explicit_deprecated_field_at_default_still_surfaced(
+    override_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An explicitly-set deprecated key whose value equals the model default is
+    still surfaced (issue #1681 review, round 3).
+
+    The migrations are presence-keyed, so ``exclude_defaults`` alone would drop
+    a user's ``{"rerank": {"top_k": 20}}`` (20 == the ``top_k`` default) and
+    silently hide the deprecation. The applied-keys overlay forces it back into
+    the revalidation payload.
+    """
+    import logging
+
+    _clear_all_memtomem_env(monkeypatch)
+    override_path.write_text(json.dumps({"rerank": {"top_k": 20}}), encoding="utf-8")
+    cfg = Mem2MemConfig()
+    with caplog.at_level(logging.WARNING):
+        load_config_overrides(cfg, migrate=False)
+    assert any(
+        "DeprecationWarning" in rec.message and "top_k" in rec.message for rec in caplog.records
+    )
+
+
 def test_env_var_wins_over_config_json_scalar(
     override_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
