@@ -437,7 +437,7 @@ scope model.
 |------|-----------------------|--------------------------|
 | Claude Code | Auto memory is per repository at `~/.claude/projects/<project>/memory/`, with a `MEMORY.md` index plus topic files. Claude also has explicit `CLAUDE.md` / `.claude/rules/` instruction scopes. | `claude:<project>` via the `<project>` folder above `memory/`. `MEMORY.md` is treated as a provider index file, so the topic files carry most searchable detail. |
 | Codex | Generated memories live under `~/.codex/memories/` and include summaries, durable entries, recent inputs, and supporting evidence from prior threads ([official docs](https://developers.openai.com/codex/memories)). | `codex:rollout_summaries` for per-session recap files, `codex:extensions` for ad-hoc/manual note extensions, and `codex:global` for the remaining consolidated top-level memory files. The split follows the on-disk `rollout_summaries/` and `extensions/` subdirectories — an observed layout that Codex's docs don't formally specify, so re-check it if a Codex release reshapes the directory. |
-| Antigravity CLI | Successor to Gemini CLI ([transition notice](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). Its global instructional memory is the single file `~/.gemini/GEMINI.md` — the same hardcoded path the legacy Gemini CLI used ([docs](https://antigravity.google/docs/agent-features)). | Not added as a watched `memory_dirs` provider because the canonical memory surface is a file, not a directory. Use `mm ingest gemini-memory` for a one-shot import with `gemini-memory:<slug>` namespaces — the command keeps the `gemini-memory` name because Antigravity's global memory file is still `~/.gemini/GEMINI.md`. |
+| Antigravity CLI | Successor to Gemini CLI ([transition notice](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). Its global instructional memory is the single file `~/.gemini/GEMINI.md` — the same hardcoded path the legacy Gemini CLI used ([docs](https://antigravity.google/docs/agent-features)). | Not added as a watched `memory_dirs` provider because the canonical memory surface is a file, not a directory. Use `mm ingest gemini-memory --source ~/.gemini/GEMINI.md` for a one-shot import with `gemini-memory:<slug>` namespaces — the command keeps the `gemini-memory` name because Antigravity's global memory file is still `~/.gemini/GEMINI.md`. |
 
 Accepted categories get appended directly to `indexing.memory_dirs` in
 `~/.memtomem/config.json`. Per-project Claude memory subdirs without any
@@ -464,8 +464,8 @@ Gemini CLI's memory surface is the single file `~/.gemini/GEMINI.md`,
 which doesn't fit a `memory_dirs` (directory) abstraction, and the parent
 `~/.gemini/` directory contains secrets like `oauth_creds.json`. For
 Gemini users — and Antigravity CLI (`agy`) users, which read the same
-`~/.gemini/GEMINI.md` — run `mm ingest gemini-memory` for a one-shot import;
-it applies tool-specific tags and skips the noise.
+`~/.gemini/GEMINI.md` — run `mm ingest gemini-memory --source ~/.gemini/GEMINI.md`
+for a one-shot import; it applies tool-specific tags and skips the noise.
 
 #### Migrating from `auto_discover` (legacy)
 
@@ -496,10 +496,11 @@ It prints a dry-run summary by default; re-run with `--apply` to delete. For
 any leftover source the exclude rules don't cover, remove it directly with
 `mem_delete(source_file=...)`.
 
-> **Tip:** `mm ingest claude-memory`, `mm ingest gemini-memory`, and
-> `mm ingest codex-memory` apply per-tool tagging and namespace assignment
-> on top of indexing — useful when you want richer metadata than the plain
-> `memory_dirs` path-based indexing provides.
+> **Tip:** the `mm ingest claude-memory`, `mm ingest gemini-memory`, and
+> `mm ingest codex-memory` commands (each takes a required `--source PATH`)
+> apply per-tool tagging and namespace assignment on top of indexing — useful
+> when you want richer metadata than the plain `memory_dirs` path-based
+> indexing provides.
 
 > **Cloud-sync mounts** (Google Drive Stream, OneDrive Files-On-Demand ON,
 > iCloud Optimize Storage) generally do **not** emit fs watcher events to

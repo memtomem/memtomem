@@ -950,7 +950,9 @@ def _step_provider_dirs(state: dict) -> None:
     if selected:
         click.secho(f"  Added {len(selected)} provider folder(s) to memory_dirs.", fg="green")
         click.echo("  New Claude Code projects created later won't be auto-indexed —")
-        click.echo("  re-run `mm init` or use `mm config set indexing.memory_dirs` to add them.")
+        click.echo(
+            "  re-run `mm init`, set MEMTOMEM_INDEXING__MEMORY_DIRS, or add them in the Web UI."
+        )
     click.echo()
 
 
