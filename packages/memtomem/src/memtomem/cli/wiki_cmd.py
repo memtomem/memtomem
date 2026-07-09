@@ -5,6 +5,8 @@ See ADR-0008 for the wiki layer's role in the context-gateway pipeline.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Literal
 
 import click
@@ -16,6 +18,7 @@ from memtomem.context._names import (
     override_vendors,
     validate_name,
 )
+from memtomem.context.scope_resolver import find_project_root
 from memtomem.wiki import (
     WIKI_ASSET_TYPES,
     WikiAlreadyExistsError,
@@ -32,6 +35,13 @@ from memtomem.wiki.inspect import (
     diff_override,
     lint_asset,
 )
+from memtomem.wiki.promote import (
+    PromoteLintError,
+    PromotePrivacyError,
+    PromoteSourceError,
+    WikiAssetExistsError,
+    promote_asset,
+)
 from memtomem.wiki.override import (
     AssetExistsError,
     OverrideExistsError,
@@ -39,7 +49,14 @@ from memtomem.wiki.override import (
     create_canonical,
     seed_override,
 )
-from memtomem.wiki.store import WikiHeadMovedError, _redact_url_userinfo
+from memtomem.wiki.store import (
+    WikiDetachedHeadError,
+    WikiHeadMovedError,
+    WikiNothingToCommitError,
+    _redact_url_userinfo,
+)
+
+logger = logging.getLogger(__name__)
 
 # ``--vendor`` Choices derive from OVERRIDE_FORMATS (the single source of
 # truth) so they never drift from the matrix: kimi is valid for skills/agents
@@ -405,6 +422,103 @@ def _run_commit(
         )
 
 
+def _run_promote(
+    asset_type: Literal["skills", "agents", "commands"],
+    name: str,
+    *,
+    project: str | None,
+    message: str | None,
+) -> None:
+    """Shared body for ``mm wiki {skill,agent,command} promote``.
+
+    Imports a ``project_shared`` canonical (an ``untracked`` row from
+    ``mm context status``) into the wiki: privacy-scan → copy → lint → isolated
+    commit, all in :func:`memtomem.wiki.promote.promote_asset`. Every engine
+    error maps to a classified :class:`click.ClickException` so no traceback
+    leaks. A raw-git failure's message may embed the local wiki path — that is
+    the user's own path on their own machine, the same trade-off ``mm wiki
+    commit`` makes (the web route uses a fixed message instead because there the
+    path would cross a trust boundary). Project root is ``--project`` (if given)
+    or walked up from cwd, the same resolution ``mm context`` uses.
+    """
+    project_root = Path(project).expanduser() if project else find_project_root()
+    store = WikiStore.at_default()
+
+    try:
+        result = promote_asset(store, project_root, asset_type, name, message=message)
+    except (
+        WikiNotFoundError,
+        WikiUnbornHeadError,
+        PromoteSourceError,
+        WikiAssetExistsError,
+        PromotePrivacyError,
+        InvalidNameError,
+    ) as exc:
+        # Disjoint sibling classes; all carry path-free or project-local-path
+        # messages safe to surface verbatim. WikiAssetExistsError / PromoteSource
+        # / PromotePrivacy -> RuntimeError; InvalidNameError -> ValueError.
+        raise click.ClickException(str(exc)) from exc
+    except PromoteLintError as exc:
+        # Print each error finding the way ``mm wiki <kind> lint`` does, then a
+        # one-line summary. The copy was already rolled back inside the engine.
+        for finding in exc.report.findings:
+            if finding.level == "error":
+                click.secho(f"error: {finding.message}", fg="red", err=True)
+        raise click.ClickException(
+            f"{asset_type}/{name} failed lint — nothing promoted "
+            f"(fix the project canonical, then retry)"
+        ) from exc
+    except WikiHeadMovedError as exc:
+        # An external git moved HEAD out from under the CAS while we held the
+        # lock. Nothing was committed and the copy was rolled back. The message
+        # is the fixed, path-free "wiki <branch> advanced" text.
+        raise click.ClickException(
+            f"the wiki HEAD moved during the promote ({exc}); nothing was committed — retry"
+        ) from exc
+    except WikiDetachedHeadError as exc:
+        # str() is the fixed, path-free "check out a branch" message.
+        raise click.ClickException(str(exc)) from exc
+    except WikiNothingToCommitError as exc:
+        # Should not happen — the under-lock re-check proved the asset absent —
+        # but stay classified and path-free rather than surface a traceback.
+        raise click.ClickException(
+            f"{asset_type}/{name}: nothing to commit (the wiki already matches these bytes)"
+        ) from exc
+    except TimeoutError as exc:
+        # TimeoutError is an OSError, not a RuntimeError — its own clause. A
+        # concurrent `mm wiki commit` / `mm web` commit held the lock too long.
+        raise click.ClickException(
+            "wiki commit timed out — another wiki operation may be in progress; retry shortly"
+        ) from exc
+    except RuntimeError as exc:
+        # Any other git failure (identity/config/index). Unlike `mm wiki commit`
+        # this does NOT surface str(exc): promote is a bulk host-global write, so
+        # the raw stderr — which embeds the local wiki path — is logged and a
+        # fixed, path-free message is shown instead.
+        logger.warning("wiki promote %s/%s failed during commit: %s", asset_type, name, exc)
+        raise click.ClickException(
+            f"promoting {asset_type}/{name} failed during the wiki commit (git error) — "
+            f"check `git -C ~/.memtomem-wiki status`"
+        ) from exc
+
+    singular = asset_type[:-1]
+    click.secho(
+        f"Promoted {result.asset_type}/{result.name} → {result.wiki_head[:12]} "
+        f"({result.files_committed} file(s))",
+        fg="green",
+    )
+    for warning in result.lint_warnings:
+        click.secho(f"warning: {warning}", fg="yellow", err=True)
+    if result.wiki_dirty:
+        click.secho(
+            "warning: the wiki working tree still has uncommitted changes "
+            "(from another asset or a concurrent edit) — run `git -C ~/.memtomem-wiki status`",
+            fg="yellow",
+            err=True,
+        )
+    click.echo(f"# next: cd <project> && mm context install {singular} {name}")
+
+
 @wiki.command("init")
 @click.option(
     "--from",
@@ -705,6 +819,35 @@ def skill_commit_cmd(
     _run_commit("skills", name, vendors, canonical=canonical, message=message)
 
 
+@skill_group.command("promote")
+@click.argument("name")
+@click.option(
+    "--project",
+    "-p",
+    default=None,
+    help="Project root that owns the source .memtomem/ tree (default: walk up from cwd).",
+)
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Commit message (default: 'wiki: promote skills/<name> from <project>').",
+)
+def skill_promote_cmd(name: str, project: str | None, message: str | None) -> None:
+    """Import a project's project_shared skill canonical into the wiki.
+
+    ``mm wiki skill promote <name>`` copies
+    ``<project>/.memtomem/skills/<name>/`` (an ``untracked`` row from
+    ``mm context status``) into ``<wiki>/skills/<name>/``, runs the same lint
+    gate as ``mm wiki skill lint``, and records it as one isolated commit.
+    Every source file is privacy-scanned first — a Gate A hit hard-refuses with
+    no bypass, because the wiki is host-global git history that can be pushed.
+    Refuses if the wiki already has the skill. The project copy stays as-is;
+    install it back with ``mm context install skill <name>``.
+    """
+    _run_promote("skills", name, project=project, message=message)
+
+
 # ── Agent subgroup ──────────────────────────────────────────────────────
 
 
@@ -853,6 +996,35 @@ def agent_commit_cmd(
     ``--canonical`` explicitly.
     """
     _run_commit("agents", name, vendors, canonical=canonical, message=message)
+
+
+@agent_group.command("promote")
+@click.argument("name")
+@click.option(
+    "--project",
+    "-p",
+    default=None,
+    help="Project root that owns the source .memtomem/ tree (default: walk up from cwd).",
+)
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Commit message (default: 'wiki: promote agents/<name> from <project>').",
+)
+def agent_promote_cmd(name: str, project: str | None, message: str | None) -> None:
+    """Import a project's project_shared agent canonical into the wiki.
+
+    ``mm wiki agent promote <name>`` copies
+    ``<project>/.memtomem/agents/<name>/`` (an ``untracked`` row from
+    ``mm context status``) into ``<wiki>/agents/<name>/``, runs the same lint
+    gate as ``mm wiki agent lint``, and records it as one isolated commit.
+    Every source file is privacy-scanned first — a Gate A hit hard-refuses with
+    no bypass, because the wiki is host-global git history that can be pushed.
+    Refuses if the wiki already has the agent. The project copy stays as-is;
+    install it back with ``mm context install agent <name>``.
+    """
+    _run_promote("agents", name, project=project, message=message)
 
 
 # ── Command subgroup ────────────────────────────────────────────────────
@@ -1005,3 +1177,32 @@ def command_commit_cmd(
     passing ``--canonical`` explicitly.
     """
     _run_commit("commands", name, vendors, canonical=canonical, message=message)
+
+
+@command_group.command("promote")
+@click.argument("name")
+@click.option(
+    "--project",
+    "-p",
+    default=None,
+    help="Project root that owns the source .memtomem/ tree (default: walk up from cwd).",
+)
+@click.option(
+    "--message",
+    "-m",
+    default=None,
+    help="Commit message (default: 'wiki: promote commands/<name> from <project>').",
+)
+def command_promote_cmd(name: str, project: str | None, message: str | None) -> None:
+    """Import a project's project_shared command canonical into the wiki.
+
+    ``mm wiki command promote <name>`` copies
+    ``<project>/.memtomem/commands/<name>/`` (an ``untracked`` row from
+    ``mm context status``) into ``<wiki>/commands/<name>/``, runs the same lint
+    gate as ``mm wiki command lint``, and records it as one isolated commit.
+    Every source file is privacy-scanned first — a Gate A hit hard-refuses with
+    no bypass, because the wiki is host-global git history that can be pushed.
+    Refuses if the wiki already has the command. The project copy stays as-is;
+    install it back with ``mm context install command <name>``.
+    """
+    _run_promote("commands", name, project=project, message=message)
