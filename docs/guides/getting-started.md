@@ -443,9 +443,9 @@ mm session wrap -- CMD     # wrap a command with session lifecycle
 mm watchdog status         # show latest health check results
 mm watchdog run            # run health checks immediately
 mm watchdog history        # view historical health check results
-mm ingest claude-memory    # index Claude Code auto-memory
-mm ingest gemini-memory    # index Gemini CLI / Antigravity CLI memory (GEMINI.md)
-mm ingest codex-memory     # index Codex CLI memory
+mm ingest claude-memory --source PATH  # index Claude Code auto-memory
+mm ingest gemini-memory --source PATH  # index Gemini CLI / Antigravity CLI memory (GEMINI.md)
+mm ingest codex-memory --source PATH   # index Codex CLI memory
 mm shell                   # interactive REPL
 mm web                     # launch Web UI (http://127.0.0.1:8080)
 ```
