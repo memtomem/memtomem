@@ -1306,8 +1306,14 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                 setattr(config, section_name, section_before)
             else:
                 for w in caught:
+                    # The captured message may describe an auto-migration (e.g.
+                    # "migrating rerank.top_k to min_pool"), but this validation
+                    # pass does not persist it — the config.json value is used as
+                    # set. Clarify so the operator updates the config themselves.
                     _log.warning(
-                        "Config %s [%s] in %s: %s",
+                        "Config %s [%s] in %s: %s (config.json value is applied "
+                        "as set and not auto-rewritten — update it to the "
+                        "replacement field named above)",
                         w.category.__name__,
                         section_name,
                         path,
