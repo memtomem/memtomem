@@ -116,9 +116,17 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
   to the wiki's latest HEAD. Update is commit-true like install: it extracts
   the committed bytes at HEAD, and refuses (with a `mm wiki <type> commit`
   hint; `--force` does not bypass) if the asset has uncommitted changes in
-  the wiki working tree. Add `--dry-run` to print the would-update /
-  unchanged / refuse preview without writing anything (also works with
-  `--all`, where it prints the batch table and skips the confirm prompt).
+  the wiki working tree. It is also **forward-only**: it advances the pin only
+  when the recorded pin is an ancestor of HEAD. If the wiki was `reset` or
+  force-pulled to older/divergent history so HEAD no longer descends from the
+  pin, update refuses rather than moving the pin **backward** (a silent
+  downgrade) — the same drift `mm context status` reports as `stale-pin`;
+  `--force` does not bypass this either (it overrides project-side edits, not
+  wiki history). Add `--dry-run` to print the would-update / unchanged /
+  refuse / stale-pin preview without writing anything (also works with
+  `--all`, where it prints the batch table and skips the confirm prompt; a
+  stale-pin row there is skipped per-project while forward siblings still
+  update).
 
 > **`--all` means different axes on `install` vs `update`.** They are not the
 > same batch. `mm context install --all` fixes the **project** and restores

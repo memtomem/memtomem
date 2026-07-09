@@ -364,6 +364,31 @@ async def test_update_uncommitted_wiki_is_409(
 
 
 @pytest.mark.asyncio
+async def test_update_stale_pin_is_409(client, seeded_wiki: Path, project_root: Path) -> None:
+    """Forward-only gate (#1685): a wiki reset behind the pin returns 409
+    ``pin_not_ancestor`` (fixed message, no host path) — the pin is untouched."""
+    assert (await client.post("/api/context/skills/alpha/install")).status_code == 200
+    base = WikiStore.at_default().current_commit()
+    # Advance + update so the project's pin moves forward, then reset behind it.
+    _advance_wiki(seeded_wiki)
+    assert (await client.post("/api/context/skills/alpha/update")).status_code == 200
+    new_pin = _lock_entry(project_root, "skills", "alpha")["wiki_commit"]
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "reset", "--hard", base], check=True, capture_output=True
+    )
+
+    resp = await client.post("/api/context/skills/alpha/update")
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "pin_not_ancestor"
+    assert str(seeded_wiki) not in resp.text  # no host-path leak
+    # --force must NOT bypass it, and the pin stays put (no downgrade).
+    forced = await client.post("/api/context/skills/alpha/update", json={"force": True})
+    assert forced.status_code == 409
+    assert forced.json()["detail"]["reason_code"] == "pin_not_ancestor"
+    assert _lock_entry(project_root, "skills", "alpha")["wiki_commit"] == new_pin
+
+
+@pytest.mark.asyncio
 async def test_update_never_installed_is_404(client, seeded_wiki) -> None:
     resp = await client.post("/api/context/skills/alpha/update")
     assert resp.status_code == 404
