@@ -144,11 +144,10 @@ class PromoteLintError(RuntimeError):
 class PromoteResult:
     """Outcome of a successful :func:`promote_asset`.
 
-    ``committed`` is ``False`` on the benign no-op path (the promoted bytes
-    already matched HEAD — only reachable if the collision guard was somehow
-    bypassed; kept for parity with :class:`~memtomem.wiki.commit.CommitOutcome`).
     ``wiki_dirty`` is read back after the commit so the caller can warn about
-    residue a concurrent writer left elsewhere in the wiki.
+    residue a concurrent writer left elsewhere in the wiki. ``commit_message``
+    is the resolved message (user-supplied or the default) so the caller can
+    run the same soft privacy scan ``mm wiki commit`` applies to its message.
     """
 
     asset_type: AssetType
@@ -157,6 +156,7 @@ class PromoteResult:
     wiki_dirty: bool
     files_committed: int
     lint_warnings: tuple[str, ...]
+    commit_message: str
 
 
 def promote_asset(
@@ -217,9 +217,21 @@ def promote_asset(
     # disk-first mode resolution keeps 100755 scripts runnable. This touches no
     # wiki state, so it runs before the lock.
     staged: list[tuple[Path, bytes, int]] = []  # (rel_path, data, mode)
-    for src_file in sorted(iter_installed_files(source_dir)):
+    try:
+        source_files = sorted(iter_installed_files(source_dir))
+    except OSError as exc:
+        # iter_installed_files is fail-closed — an unreadable subtree raises
+        # rather than silently shrinking. Classify it instead of leaking a
+        # traceback (the CLI promises no traceback).
+        raise PromoteSourceError(
+            f"cannot enumerate {source_dir} — a file or subdirectory is unreadable ({exc})"
+        ) from exc
+    for src_file in source_files:
         rel = src_file.relative_to(source_dir)
-        data = src_file.read_bytes()
+        try:
+            data = src_file.read_bytes()
+        except OSError as exc:
+            raise PromoteSourceError(f"cannot read {source_dir / rel} — {exc}") from exc
         # errors="replace" so non-UTF8 bytes cannot mask an embedded ASCII
         # secret from the scanner.
         guard = privacy.enforce_write_guard(
@@ -297,6 +309,7 @@ def promote_asset(
     return PromoteResult(
         asset_type=asset_type,
         name=name,
+        commit_message=msg,
         wiki_head=new_head,
         wiki_dirty=wiki_dirty,
         files_committed=len(files_map),

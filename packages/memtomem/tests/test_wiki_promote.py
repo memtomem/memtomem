@@ -355,6 +355,47 @@ def test_cli_promote_privacy_blocked_exit1(wiki_root: Path, tmp_path: Path) -> N
     assert "Gate A" in _combined(result)
 
 
+def test_cli_promote_message_privacy_warning_is_soft(wiki_root: Path, tmp_path: Path) -> None:
+    """A secret-shaped commit message warns but does not block (a valve, #privacy)."""
+    _init_wiki()
+    project = tmp_path / "proj"
+    _seed_project_asset(project, "commands", "demo", "command.md")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        wiki_group,
+        ["command", "promote", "demo", "--project", str(project), "-m", f"leak {SECRET}"],
+    )
+
+    assert result.exit_code == 0, _combined(result)
+    assert "Promoted commands/demo" in result.output
+    assert "possible" in _combined(result) and "secret/PII" in _combined(result)
+
+
+def test_cli_promote_unreadable_source_is_classified(
+    wiki_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An OSError enumerating the source surfaces as a classified error, not a traceback."""
+    _init_wiki()
+    project = tmp_path / "proj"
+    _seed_project_asset(project, "skills", "demo", "SKILL.md")
+
+    import memtomem.wiki.promote as promote_mod
+
+    def boom(_root):  # noqa: ANN001, ANN202
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(promote_mod, "iter_installed_files", boom)
+
+    result = runner_invoke = CliRunner().invoke(
+        wiki_group, ["skill", "promote", "demo", "--project", str(project)]
+    )
+    assert runner_invoke.exit_code == 1
+    assert "unreadable" in _combined(result)
+    # No traceback leaked to the user.
+    assert "Traceback" not in _combined(result)
+
+
 def test_cli_promote_missing_source_exit1(wiki_root: Path, tmp_path: Path) -> None:
     _init_wiki()
     runner = CliRunner()

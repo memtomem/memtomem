@@ -509,6 +509,17 @@ def _run_promote(
     )
     for warning in result.lint_warnings:
         click.secho(f"warning: {warning}", fg="yellow", err=True)
+    # Soft privacy warning on the commit message, mirroring `mm wiki commit`:
+    # the message is committed regardless (a valve, not a gate), but a
+    # secret-shaped message in host-global history is worth flagging.
+    message_hits = len(privacy.scan(result.commit_message))
+    if message_hits:
+        click.secho(
+            f"warning: commit message has {message_hits} possible "
+            f"secret/PII match{'es' if message_hits != 1 else ''} (committed anyway)",
+            fg="yellow",
+            err=True,
+        )
     if result.wiki_dirty:
         click.secho(
             "warning: the wiki working tree still has uncommitted changes "
