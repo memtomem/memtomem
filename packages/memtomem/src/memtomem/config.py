@@ -1261,37 +1261,41 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                         value,
                         exc,
                     )
-        # ``ConfigModel`` sub-configs don't set ``validate_assignment=True``,
-        # so neither the ``@model_validator(mode="after")`` cross-field checks
-        # nor the ``mode="before"`` field migrations re-run for the ``setattr``
-        # overrides above. Re-validate the assembled section so an invariant the
-        # validator was written to reject (e.g. ``session_trace.langfuse_enabled``
-        # with no keys, or ``min_chunk_tokens > max_chunk_tokens``) fails loudly
-        # instead of slipping through, and so legacy-field migrations (e.g.
-        # ``rerank.top_k`` -> ``min_pool``) actually take effect. Assign the
-        # validated model back on success; on failure restore the pre-override
-        # baseline — cross-field invariants are about field *combinations*, so
-        # partial retention isn't meaningful; fall back to known-good as a whole.
+        # ``ConfigModel`` sub-configs don't set ``validate_assignment=True``, so
+        # the ``@model_validator(mode="after")`` cross-field checks never re-run
+        # for the ``setattr`` overrides above. Re-validate the assembled section
+        # so an invariant the validator was written to reject (e.g.
+        # ``session_trace.langfuse_enabled`` with no keys, or
+        # ``min_chunk_tokens > max_chunk_tokens``) fails loudly instead of
+        # slipping through, and re-surface any deprecation the user's own config
+        # triggers. On failure, restore the pre-override baseline — cross-field
+        # invariants are about field *combinations*, so partial retention isn't
+        # meaningful; fall back to known-good as a whole.
+        #
+        # This is deliberately a *check*, not a rebuild: we do not assign the
+        # coerced model back. ``model_validate`` coerces every field to its
+        # declared type (e.g. a ``config.json`` string ``sqlite_path`` ->
+        # ``Path``), which would diverge from the raw values the ``setattr``
+        # path stores and change ``str()`` output cross-platform. That
+        # normalization is out of scope here; this pass only enforces validity
+        # and surfaces warnings.
         if applied_keys:
-            # Build the revalidation payload from ``exclude_defaults`` (which
-            # keeps *untouched* defaulted legacy fields like ``rerank.top_k``
-            # out, so they don't spuriously re-fire their ``mode="before"``
-            # migration) then overlay the keys the user *actually* set — even
-            # when their value equals the default. The migrations are
-            # presence-keyed, so an explicitly-configured deprecated field
-            # (e.g. ``{"rerank": {"top_k": 20}}``) must appear in the payload
-            # to surface its deprecation. ``catch_warnings(record=True)``
-            # captures any deprecation the user's config triggers (it forces
-            # ``simplefilter("always")``, so an ambient ``-W error`` can't turn
-            # this internal pass into a crash) — real deprecations are
-            # re-surfaced via the logger below rather than swallowed.
+            # ``exclude_defaults`` keeps *untouched* defaulted legacy fields
+            # (e.g. ``rerank.top_k``) out of the payload so they don't spuriously
+            # re-fire their ``mode="before"`` migration; the ``applied_keys``
+            # overlay adds back the keys the user actually set even when their
+            # value equals the default, so an explicitly-configured deprecated
+            # field still surfaces its warning. ``catch_warnings(record=True)``
+            # forces ``simplefilter("always")`` so an ambient ``-W error`` can't
+            # turn this internal pass into a crash; captured deprecations are
+            # re-emitted via the logger rather than swallowed.
             dumped = section_obj.model_dump()
             payload = section_obj.model_dump(exclude_defaults=True)
             payload.update({k: dumped[k] for k in applied_keys if k in dumped})
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    validated = type(section_obj).model_validate(payload)
+                    type(section_obj).model_validate(payload)
             except ValidationError as exc:
                 _log.warning(
                     "Invalid config section [%s] in %s: %s (reverting section to defaults)",
@@ -1301,7 +1305,6 @@ def load_config_overrides(config: Mem2MemConfig, *, migrate: bool = True) -> Non
                 )
                 setattr(config, section_name, section_before)
             else:
-                setattr(config, section_name, validated)
                 for w in caught:
                     _log.warning(
                         "Config %s [%s] in %s: %s",

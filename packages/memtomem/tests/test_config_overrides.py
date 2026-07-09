@@ -197,21 +197,21 @@ def test_config_json_revalidation_does_not_re_emit_field_warnings(
     assert cfg.rerank.enabled is True
 
 
-def test_config_json_legacy_field_migration_applied_and_surfaced(
+def test_config_json_legacy_field_deprecation_surfaced(
     override_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A user-supplied legacy field is migrated (not left inert) *and* its
-    deprecation is surfaced, without crashing under warnings-as-errors
-    (issue #1681 review).
+    """A user-supplied legacy field's deprecation is surfaced (not swallowed)
+    without crashing under warnings-as-errors (issue #1681 review).
 
-    The re-validation assigns the validated model back, so ``rerank.top_k``'s
-    ``mode="before"`` migration to ``min_pool`` takes effect (the plain
-    ``setattr`` path left ``top_k`` set and ``min_pool`` at its default). The
-    triggered ``DeprecationWarning`` is captured and re-emitted via the logger
-    rather than swallowed — and ``catch_warnings(record=True)`` keeps it from
-    escalating to an exception even under ``-W error``.
+    The re-validation captures the ``DeprecationWarning`` triggered by
+    ``rerank.top_k`` and re-emits it via the logger;
+    ``catch_warnings(record=True)`` keeps it from escalating to an exception
+    even under ``-W error``. The re-validation is a *check* — it does not
+    persist the coerced/migrated model back — so ``top_k`` is not auto-rewritten
+    into ``min_pool`` on the ``config.json`` path (that broader normalization is
+    out of scope); the surfaced warning tells the operator to migrate.
     """
     import logging
 
@@ -221,12 +221,12 @@ def test_config_json_legacy_field_migration_applied_and_surfaced(
     with warnings.catch_warnings(), caplog.at_level(logging.WARNING):
         warnings.simplefilter("error", DeprecationWarning)
         load_config_overrides(cfg, migrate=False)
-    # top_k (no sibling min_pool in the payload) migrates into min_pool.
-    assert cfg.rerank.min_pool == 50
     # The deprecation is surfaced to the operator via logging, not swallowed.
     assert any(
         "DeprecationWarning" in rec.message and "top_k" in rec.message for rec in caplog.records
     )
+    # The check does not mutate field types / apply the migration in place.
+    assert cfg.rerank.min_pool == Mem2MemConfig().rerank.min_pool
 
 
 def test_config_json_explicit_deprecated_field_at_default_still_surfaced(
