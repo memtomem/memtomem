@@ -443,9 +443,11 @@ Accepted categories get appended directly to `indexing.memory_dirs` in
 `~/.memtomem/config.json`. Per-project Claude memory subdirs without any
 `*.md` files are skipped so empty session scaffolding doesn't pollute your
 index. New Claude Code projects created after the wizard runs are **not**
-auto-indexed — re-run `mm init` or use
-`mm config set indexing.memory_dirs` to add them when you want them
-searchable.
+auto-indexed — re-run `mm init`, set `MEMTOMEM_INDEXING__MEMORY_DIRS`,
+or add the path from the Web UI when you want them searchable.
+(`indexing.memory_dirs` is not a `mm config set` target — only
+`mm config unset indexing.memory_dirs` is supported, for clearing a
+carried-over path during migration.)
 
 Non-interactive mode supports `--include-provider` (repeatable):
 
