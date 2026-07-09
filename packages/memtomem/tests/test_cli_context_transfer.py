@@ -510,6 +510,8 @@ def test_provenance_not_carried_line_names_the_reason(cli_projects) -> None:
     assert result.exit_code == 0, result.output
     assert "install provenance not carried" in result.output
     assert "local edits" in result.output
+    # The untracked landing offers the explicit re-tracking exit (#1684).
+    assert "mm context adopt agent foo" in result.output
     # Dry-run previews the same refusal.
     _seed_agent(cli_projects, "project_shared", name="bar", root_key="a")
     _wiki_install_entry_cli(cli_projects["a"], name="bar")
@@ -521,6 +523,7 @@ def test_provenance_not_carried_line_names_the_reason(cli_projects) -> None:
     )
     assert preview.exit_code == 0, preview.output
     assert "install provenance will not be carried" in preview.output
+    assert "mm context adopt agent bar" in preview.output
 
 
 # ── mcp-servers copy (A-12 #1282) ────────────────────────────────────

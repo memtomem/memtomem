@@ -25,6 +25,13 @@ classified error (see step 6 of the install pipeline). This forward-
 protects ADR-0008 Invariant 2 ("manual edits are detected, not silently
 clobbered") without depending on PR-D's mtime/dirty detection. PR-D's
 ``mm context update`` is the supported way to refresh an installed asset.
+
+Adopt (#1684) — :func:`adopt_skill` / :func:`adopt_agent` /
+:func:`adopt_command`, delegating to :func:`_adopt_asset` — is the
+explicit exit for the dest-without-entry quadrant install refuses: it
+verifies an existing project canonical byte-by-byte against the asset at
+wiki HEAD and, only on full equality, records the lockfile entry without
+touching a single dest byte.
 """
 
 from __future__ import annotations
@@ -62,6 +69,8 @@ from memtomem.wiki.store import WikiStore
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "AdoptMismatchError",
+    "AdoptResult",
     "AlreadyInstalledError",
     "AssetNotFoundError",
     "CommitNotFoundError",
@@ -71,6 +80,9 @@ __all__ = [
     "StaleInstallError",
     "UncommittedAssetError",
     "UpdateResult",
+    "adopt_agent",
+    "adopt_command",
+    "adopt_skill",
     "install_agent",
     "install_command",
     "install_skill",
@@ -120,6 +132,17 @@ class AlreadyInstalledError(RuntimeError):
     """Raised when install would overwrite an existing lockfile entry or dest."""
 
 
+class AdoptMismatchError(RuntimeError):
+    """Raised when adopt's byte compare finds dest ≠ the wiki HEAD asset (#1684).
+
+    Adopt records provenance only for content proven byte-identical to the
+    pinned commit — any per-file difference (content mismatch, dest-only
+    file, HEAD-only file, or an unreadable dest file) refuses with a
+    categorized per-file report in the message. There is deliberately no
+    ``--force``: a wrong guess must stay impossible by construction.
+    """
+
+
 class NotInstalledError(RuntimeError):
     """Raised by ``_update_asset`` when there is no lockfile entry to refresh.
 
@@ -165,6 +188,24 @@ class InstallResult:
     files_written: int
     files_removed: tuple[Path, ...] = ()
     was_no_op: bool = False
+
+
+@dataclass(frozen=True)
+class AdoptResult:
+    """Outcome of a successful adopt (#1684). Display-oriented; not persisted.
+
+    Adopt never writes dest bytes — ``files_verified`` counts the files
+    proven byte-identical to the wiki HEAD asset before the lockfile entry
+    was recorded (the compare set, i.e. exactly the files a fresh install
+    of this asset would have written).
+    """
+
+    asset_type: Literal["skills", "agents", "commands"]
+    name: str
+    wiki_commit: str
+    installed_at: str
+    dest: Path
+    files_verified: int
 
 
 @dataclass(frozen=True)
@@ -626,10 +667,14 @@ def _install_asset(
             # NotInstalledError without an entry and points back at
             # install — a circle, #1247 id 4). No auto-adopt either:
             # install can't tell a leftover from hand-placed content it
-            # must not clobber.
+            # must not clobber — the explicit, verifying exit is
+            # `mm context adopt` (#1684).
             hint = (
                 f"dest exists with no lockfile entry — hand-placed files or an "
-                f"install interrupted before its lockfile write; inspect {dest}, "
+                f"install interrupted before its lockfile write; if the "
+                f"directory's bytes match wiki HEAD, run "
+                f"`mm context adopt {asset_type_singular} {validated}` to record "
+                f"the pin without reinstalling; otherwise inspect {dest}, "
                 f"remove the directory if it's disposable, then re-run "
                 f"`mm context install {asset_type_singular} {validated}`"
             )
@@ -726,6 +771,267 @@ def _install_asset(
         installed_at=installed_at,
         dest=dest,
         files_written=len(digest_map),
+    )
+
+
+def adopt_skill(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+    lock_timeout: float | None = None,
+    surface: str = "cli_context_adopt",
+) -> AdoptResult:
+    """Lockfile-track an existing ``skills/<name>`` canonical that matches wiki HEAD (#1684).
+
+    The inverse-gate sibling of :func:`install_skill`: requires the dest to
+    exist WITHOUT a lockfile entry, verifies the dest bytes file-by-file
+    against the asset at wiki HEAD, and on full equality records the
+    provenance entry — no dest byte is ever written or moved, so a wrong
+    guess is impossible by construction. Any difference refuses with a
+    per-file report (:class:`AdoptMismatchError`).
+    """
+    return _adopt_asset(
+        project_root, "skills", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
+
+
+def adopt_agent(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+    lock_timeout: float | None = None,
+    surface: str = "cli_context_adopt",
+) -> AdoptResult:
+    """Lockfile-track an existing ``agents/<name>`` canonical that matches wiki HEAD (#1684)."""
+    return _adopt_asset(
+        project_root, "agents", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
+
+
+def adopt_command(
+    project_root: Path | str,
+    name: str,
+    *,
+    wiki: WikiStore | None = None,
+    lock_timeout: float | None = None,
+    surface: str = "cli_context_adopt",
+) -> AdoptResult:
+    """Lockfile-track an existing ``commands/<name>`` canonical that matches wiki HEAD (#1684)."""
+    return _adopt_asset(
+        project_root, "commands", name, wiki=wiki, lock_timeout=lock_timeout, surface=surface
+    )
+
+
+def _mismatch_part(label: str, rels: list[str]) -> str:
+    """One ``label: a, b, +N more`` clause of the adopt mismatch report."""
+    shown = ", ".join(rels[:10])
+    more = "" if len(rels) <= 10 else f", +{len(rels) - 10} more"
+    return f"{label}: {shown}{more}"
+
+
+def _adopt_asset(
+    project_root: Path | str,
+    asset_type: str,
+    name: str,
+    *,
+    wiki: WikiStore | None,
+    lock_timeout: float | None = None,
+    surface: str = "cli_context_adopt",
+) -> AdoptResult:
+    """Internal: adopt a single asset of any type — verify, then record (#1684).
+
+    Install's no-auto-adopt decision (see ``_install_asset``) is about the
+    *implicit* case: install can't tell a half-install leftover from
+    hand-placed content. Adopt is the explicit, verifying contract — it
+    runs install's own reproducible-pin gates (HEAD-presence, same-asset
+    dirty), then a full byte compare, then Gate A over the pinned bytes,
+    so the recorded entry makes exactly the claims a fresh install of the
+    same asset would have made (``wiki_commit``/``files``/``files_commit``/
+    ``digests`` all HEAD-derived AND proven equal to the dest).
+
+    Gate A runs even though adopt writes no dest bytes: without it,
+    hand-copy-then-adopt would reach a tracked state (secret-bearing asset
+    with a lockfile pin) that install itself refuses — the verb must not
+    be a bypass around the ingress scan. It runs AFTER the byte compare
+    (unlike install, which must scan before extraction residue) so a
+    mismatched dest always gets the contract's per-file diff report, and
+    the scan's remediation text can truthfully say the dest bytes are
+    identical.
+
+    All refusals fire before the lockfile write — the only mutation this
+    function ever performs. Concurrency: the single ``upsert_entry`` holds
+    the lockfile sidecar lock; a racing install/adopt of the same asset is
+    last-write-wins on the entry, and both racers verified against
+    immutable commit objects, so an entry written under the SAME observed
+    HEAD is identical regardless of interleaving.
+    """
+    validated = validate_name(name, kind=f"{asset_type.removesuffix('s')} name")
+    project_root = Path(project_root).expanduser()
+    if not project_root.is_dir():
+        raise ProjectRootMissingError(f"project root does not exist: {project_root}")
+
+    wiki = wiki if wiki is not None else WikiStore.at_default()
+    wiki.require_exists()
+
+    src = wiki.root / asset_type / validated
+    worktree_present = src.is_dir()
+
+    wiki_commit = wiki.current_commit()
+
+    dest = project_root / ".memtomem" / asset_type / validated
+    lock = Lockfile.at(project_root)
+    asset_type_singular = asset_type.removesuffix("s")
+
+    # State gate — the exact inverse of install's (#1684): adopt exists for
+    # the dest-without-entry quadrant only.
+    if lock.read_entry(asset_type, validated) is not None:
+        raise AlreadyInstalledError(
+            f"{asset_type}/{validated}: already lockfile-tracked — adopt records "
+            f"provenance for an untracked dest only; run "
+            f"`mm context update {asset_type_singular} {validated}` to refresh "
+            f"from wiki HEAD"
+        )
+    if not dest.is_dir():
+        raise NotInstalledError(
+            f"{asset_type}/{validated}: nothing to adopt — {dest} does not exist; "
+            f"run `mm context install {asset_type_singular} {validated}` to "
+            f"install from wiki HEAD"
+        )
+
+    commit_hint = _commit_hint(wiki, asset_type, validated)
+
+    # HEAD-presence gate — same as install (#1643): the recorded pin must
+    # CONTAIN the asset, otherwise the entry claims provenance from a commit
+    # that lacks the bytes entirely.
+    try:
+        head_rels = wiki.asset_files_at_commit(wiki_commit, asset_type, validated)
+    except AssetNotFoundError:
+        if worktree_present:
+            raise UncommittedAssetError(
+                f"{asset_type}/{validated}: exists in the wiki working tree but "
+                f"has never been committed, so the HEAD pin would not contain "
+                f"it; {commit_hint}"
+            ) from None
+        raise AssetNotFoundError(f"{asset_type}/{validated} not in wiki at {wiki.root}") from None
+
+    # Same-asset dirty gate — same as install (#1643): the user-visible wiki
+    # bytes must equal the HEAD bytes the compare (and the pin) are based on.
+    dirty_rels = _asset_dirty_rels(wiki, asset_type, validated)
+    if dirty_rels:
+        shown = ", ".join(dirty_rels[:5])
+        more = "" if len(dirty_rels) <= 5 else f", +{len(dirty_rels) - 5} more"
+        raise UncommittedAssetError(
+            f"{asset_type}/{validated}: wiki working tree differs from HEAD for "
+            f"this asset ({len(dirty_rels)} file(s): {shown}{more}); adopt "
+            f"verifies against HEAD's bytes and records that pin only — "
+            f"{commit_hint}"
+        )
+
+    # Byte compare — the verb's core. HEAD side and disk side both apply the
+    # copier's skip rules (is_copy_skipped_rel / iter_installed_files), so
+    # the compare set is exactly the file set a fresh install would write.
+    # An asset whose committed files are ALL skip-listed compares as empty
+    # on both sides and adopts with files=[]/digests={} — the same entry a
+    # fresh install of it records (parity; do not refuse what install
+    # accepts).
+    expected: dict[str, str] = {}
+    for rel in head_rels:
+        if is_copy_skipped_rel(rel):
+            continue
+        expected[rel] = hashlib.sha256(
+            wiki.read_asset_file_at_commit(wiki_commit, asset_type, validated, rel)
+        ).hexdigest()
+
+    actual: dict[str, str] = {}
+    unreadable: list[str] = []
+    try:
+        for f in iter_installed_files(dest):
+            rel = f.relative_to(dest).as_posix()
+            try:
+                actual[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError:
+                unreadable.append(rel)  # can't prove equal → mismatch, not a crash
+    except OSError as exc:
+        # iter_installed_files is fail-closed by contract: an unreadable
+        # DIRECTORY raises mid-walk rather than silently shrinking the set.
+        # For adopt that still classifies as "can't prove equal" — a
+        # categorized refusal, never a raw traceback at the CLI boundary.
+        failed = exc.filename or str(dest)
+        raise AdoptMismatchError(
+            f"{asset_type}/{validated}: cannot verify dest against wiki HEAD "
+            f"{wiki_commit[:12]} — unreadable path during the dest walk: "
+            f"{failed}; fix permissions and re-run adopt"
+        ) from None
+
+    differs = sorted(r for r in expected.keys() & actual.keys() if expected[r] != actual[r])
+    only_on_disk = sorted(actual.keys() - expected.keys())
+    only_at_head = sorted(expected.keys() - actual.keys() - set(unreadable))
+    unreadable.sort()
+    if differs or only_on_disk or only_at_head or unreadable:
+        parts = [
+            _mismatch_part(label, rels)
+            for label, rels in (
+                ("differs", differs),
+                ("only on disk", only_on_disk),
+                ("only at HEAD", only_at_head),
+                ("unreadable", unreadable),
+            )
+            if rels
+        ]
+        total = len(differs) + len(only_on_disk) + len(only_at_head) + len(unreadable)
+        raise AdoptMismatchError(
+            f"{asset_type}/{validated}: dest bytes differ from wiki HEAD "
+            f"{wiki_commit[:12]} ({total} file(s)) — {'; '.join(parts)}. adopt "
+            f"records provenance only for byte-identical content; either take "
+            f"HEAD's bytes (move {dest} aside, then "
+            f"`mm context install {asset_type_singular} {validated}`) or push "
+            f"the local edits wiki-ward first "
+            f"(`mm wiki {asset_type_singular} promote {validated}`, #1683)"
+        )
+
+    # Gate A (ADR-0011 §5) over the pinned bytes, the same scan install runs:
+    # adopt writes no dest bytes, but blessing them with a lockfile entry
+    # must not be reachable for content the install ingress scan refuses.
+    # Equality is proven at this point, so the hint's claim is literal.
+    _gate_a_scan_pinned_asset(
+        wiki,
+        wiki_commit,
+        asset_type,
+        validated,
+        surface=surface,
+        project_root=project_root,
+        remediation_hint=(
+            f"The wiki HEAD commit {wiki_commit[:12]} ships a secret in "
+            f"{asset_type}/{validated}, and the byte-identical content already "
+            f"sits in the project tree at {dest}; remove the secret from both, "
+            f"commit the wiki fix, and re-run adopt."
+        ),
+    )
+
+    # Full match → record provenance only. The digests are the proven-equal
+    # hashes, so update's dirty check reads the asset as clean and
+    # install --all treats the entry as a normal pin.
+    installed_at = installed_at_from_dest(dest)
+    lock.upsert_entry(
+        asset_type,
+        validated,
+        wiki_commit=wiki_commit,
+        installed_at=installed_at,
+        files=sorted(expected),
+        files_commit=wiki_commit,
+        digests=expected,
+        lock_timeout=lock_timeout,
+    )
+
+    return AdoptResult(
+        asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
+        name=validated,
+        wiki_commit=wiki_commit,
+        installed_at=installed_at,
+        dest=dest,
+        files_verified=len(expected),
     )
 
 

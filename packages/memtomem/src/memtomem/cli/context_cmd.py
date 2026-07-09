@@ -37,6 +37,7 @@ from memtomem.context.detector import (
     detect_skill_dirs,
 )
 from memtomem.context.install import (
+    AdoptMismatchError,
     AlreadyInstalledError,
     AssetNotFoundError,
     CommitNotFoundError,
@@ -51,6 +52,9 @@ from memtomem.context.install import (
     _classify_for_all_update,
     _classify_for_install_all,
     _commit_hint,
+    adopt_agent,
+    adopt_command,
+    adopt_skill,
     install_agent,
     install_command,
     install_skill,
@@ -1920,6 +1924,56 @@ def install_cmd(
     click.echo(f"  {result.files_written} file(s) copied")
 
 
+@context.command("adopt")
+@click.argument("asset_type", type=click.Choice(["skill", "agent", "command"]))
+@click.argument("name")
+def adopt_cmd(asset_type: str, name: str) -> None:
+    """Lockfile-track an existing ``.memtomem/<type>/<name>/`` that matches wiki HEAD.
+
+    The explicit exit for the state install refuses (#1684): the dest
+    directory exists but has no lockfile entry — hand-placed content, an
+    install interrupted before its lockfile write, or a cross-project
+    transfer that landed untracked. Adopt verifies the dest bytes
+    file-by-file against the asset at wiki HEAD and, only on full
+    equality, records the provenance entry (commit pin + per-file
+    digests) — no dest byte is ever written or moved. Any difference
+    refuses with a per-file report; there is deliberately no ``--force``
+    (take HEAD's bytes via install, or push local edits wiki-ward via
+    ``mm wiki <type> promote`` first).
+    """
+    root = _find_project_root()
+    # PrivacyScanError here is a Gate A refusal over the pinned wiki bytes —
+    # adopt must not bless content the install ingress scan refuses (#1684).
+    with _translate_to_click(
+        WikiNotFoundError,
+        WikiUnbornHeadError,
+        AssetNotFoundError,
+        AlreadyInstalledError,
+        NotInstalledError,
+        UncommittedAssetError,
+        InvalidNameError,
+        LockfileError,
+        PrivacyScanError,
+        AdoptMismatchError,
+    ):
+        if asset_type == "skill":
+            result = adopt_skill(root, name)
+        elif asset_type == "agent":
+            result = adopt_agent(root, name)
+        elif asset_type == "command":
+            result = adopt_command(root, name)
+        else:  # pragma: no cover — guarded by click.Choice
+            raise click.ClickException(f"unknown asset type: {asset_type}")
+
+    click.secho(
+        f"Adopted {result.asset_type}/{result.name} (wiki {result.wiki_commit[:12]})",
+        fg="green",
+    )
+    rel_dest = result.dest.relative_to(root) if result.dest.is_relative_to(root) else result.dest
+    click.echo(f"  → {rel_dest}/")
+    click.echo(f"  {result.files_verified} file(s) verified byte-identical — dest untouched")
+
+
 def _maybe_hint_dirty_noop(wiki: WikiStore, asset_type_plural: str, name: str) -> None:
     """Asset-scoped stderr note on a no-op update whose wiki asset is dirty (#1652).
 
@@ -3726,6 +3780,25 @@ def _transfer_dispatch(
         _ensure_local_tier_gitignored(dst_root)
 
 
+def _maybe_hint_adopt_untracked(result: TransferResult | McpServerCopyResult) -> None:
+    """One-line adopt follow-up under a transfer's untracked-landing warning (#1684).
+
+    A shared→shared transfer whose provenance carry-over was refused lands
+    exactly in adopt's quadrant (dest without a lockfile entry); when the
+    destination bytes still match the wiki HEAD asset, adopt re-establishes
+    the pin without reinstalling. mcp-servers have no lockfile tracking, so
+    the hint is scoped to the artifact kinds.
+    """
+    if result.kind == "mcp-servers":
+        return
+    singular = result.kind.removesuffix("s")
+    click.echo(
+        f"  if the destination bytes match its wiki HEAD, "
+        f"`mm context adopt {singular} {result.dst_name}` there re-establishes "
+        f"the pin without reinstalling"
+    )
+
+
 def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, apply_: bool) -> None:
     """User-facing summary for one copy/move transfer (#1274).
 
@@ -3774,6 +3847,7 @@ def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, appl
                 f"lands untracked: {result.provenance_reason}",
                 fg="yellow",
             )
+            _maybe_hint_adopt_untracked(result)
         # Engine caveats (copy-rename overrides, mcp .mcp.json disclosure)
         # render in the PLAN too — a caveat the user only learns about
         # after --apply is not a plan they confirmed.
@@ -3817,6 +3891,7 @@ def _print_transfer_result(result: TransferResult | McpServerCopyResult, *, appl
             f"untracked at the destination: {result.provenance_reason}",
             fg="yellow",
         )
+        _maybe_hint_adopt_untracked(result)
     for note in result.notes:
         click.secho(f"  note: {note}", fg="yellow")
     if result.needs_sync and result.sync_command:
