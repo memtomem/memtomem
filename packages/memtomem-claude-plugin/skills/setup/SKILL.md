@@ -1,7 +1,7 @@
 ---
 name: setup
 description: Guide through initial memtomem setup and optional hooks activation.
-allowed-tools: mcp__memtomem__mem_status, mcp__memtomem__mem_index, mcp__memtomem__mem_search
+allowed-tools: mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status, mcp__plugin_memtomem_memtomem__mem_index, mcp__memtomem__mem_index, mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search
 disable-model-invocation: true
 ---
 

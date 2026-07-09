@@ -1,7 +1,7 @@
 ---
 name: summarize
 description: Summarize the current conversation and save key decisions, findings, and action items as a memory entry.
-allowed-tools: mcp__memtomem__mem_add, mcp__memtomem__mem_search
+allowed-tools: mcp__plugin_memtomem_memtomem__mem_add, mcp__memtomem__mem_add, mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search
 disable-model-invocation: true
 ---
 

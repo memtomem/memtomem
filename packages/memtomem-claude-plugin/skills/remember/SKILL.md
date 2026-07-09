@@ -2,7 +2,7 @@
 name: remember
 description: Save a new memory entry. Use when user wants to remember something for later.
 argument-hint: [content to remember]
-allowed-tools: mcp__memtomem__mem_add
+allowed-tools: mcp__plugin_memtomem_memtomem__mem_add, mcp__memtomem__mem_add
 ---
 
 Save this as a memory: $ARGUMENTS

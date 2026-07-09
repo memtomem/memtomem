@@ -21,11 +21,12 @@ coverage.json
 .mcp.json
 .mcp.json.bak.*
 !.mcp.json.example
+# The Claude Code plugin ships its MCP server declaration — keep it tracked
+!packages/memtomem-claude-plugin/.mcp.json
 
 # Claude Code
 .claude/
 CLAUDE.local.md
-.claude-plugin/
 
 # Other agent harnesses — context gateway outputs (user-local, derived from
 # CLAUDE.md). Regenerate via `mm context init` + `mm context sync`.

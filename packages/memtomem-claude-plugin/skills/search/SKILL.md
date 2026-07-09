@@ -2,7 +2,7 @@
 name: search
 description: Search memories using semantic search. Use when user asks about past decisions, notes, or context.
 argument-hint: [query]
-allowed-tools: mcp__memtomem__mem_search
+allowed-tools: mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search
 ---
 
 Search memories for: $ARGUMENTS

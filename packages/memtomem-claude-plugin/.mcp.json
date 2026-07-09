@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memtomem": {
+      "command": "uvx",
+      "args": ["--from", "memtomem", "memtomem-server"]
+    }
+  }
+}

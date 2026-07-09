@@ -40,7 +40,44 @@ The most powerful automation pipeline is achieved when combined with Claude Code
 
 ## MCP Server Setup
 
-### Pick an installation scope
+### Option A: Install the plugin (one step)
+
+The memtomem plugin bundles the MCP server, slash commands
+(`/memtomem:status`, `/memtomem:remember`, …), automation hooks, and the
+memory-curator agent in a single install:
+
+```
+/plugin marketplace add memtomem/memtomem
+/plugin install memtomem@memtomem
+```
+
+The plugin launches the server via `uvx --from memtomem memtomem-server`,
+so [uv](https://docs.astral.sh/uv/) must be on your PATH — no separate
+`pip install` needed for the MCP server itself. Hooks additionally need
+the CLI installed (see [Hooks Automation Setup](#hooks-automation-setup)).
+
+> **Already registered via `claude mcp add`?** Nothing runs twice —
+> Claude Code detects that the plugin bundles the same server command
+> and suppresses the plugin-managed copy, so your manual registration
+> keeps winning and tools keep their `mcp__memtomem__mem_*` names.
+> To switch to the plugin-managed server (tools become
+> `mcp__plugin_memtomem_memtomem__mem_*`), remove the manual entry:
+>
+> ```bash
+> claude mcp remove memtomem
+> ```
+>
+> Either way the bundled slash commands and curator agent work — their
+> allowlists cover both tool namespaces. If your own settings
+> allowlist `mcp__memtomem__mem_*`, update it when you remove the
+> manual entry.
+
+Prefer manual registration (no skills/hooks, finer scope control)? Use
+Option B below.
+
+### Option B: Register the MCP server manually
+
+#### Pick an installation scope
 
 Claude Code offers three MCP configuration scopes. Pick the one that
 matches how you want to share this server:
@@ -60,7 +97,7 @@ credentials without editing the committed file.
 workspace-trust approval on first use — cloning an unknown repo never
 silently spawns an MCP server.
 
-### Add via command (`local` / `user`)
+#### Add via command (`local` / `user`)
 
 ```bash
 # User scope — install once, available in every project
@@ -76,7 +113,7 @@ claude mcp add memtomem -s local -- uvx --from memtomem memtomem-server
 Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
 that file by hand.
 
-### Project scope via `.mcp.json`
+#### Project scope via `.mcp.json`
 
 For a team-shared setup, commit a `.mcp.json` at the project root:
 

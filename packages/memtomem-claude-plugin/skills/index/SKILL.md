@@ -2,7 +2,7 @@
 name: index
 description: Index or re-index memory files for search. Use for initial setup or after bulk file changes.
 argument-hint: [path]
-allowed-tools: mcp__memtomem__mem_index, mcp__memtomem__mem_status
+allowed-tools: mcp__plugin_memtomem_memtomem__mem_index, mcp__memtomem__mem_index, mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status
 ---
 
 Index files at: $ARGUMENTS

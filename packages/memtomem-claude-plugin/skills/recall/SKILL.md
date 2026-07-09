@@ -2,7 +2,7 @@
 name: recall
 description: Inject relevant memories as structured context for the current task. Use when starting complex work that may benefit from past decisions or notes.
 argument-hint: [topic or question]
-allowed-tools: mcp__memtomem__mem_search, mcp__memtomem__mem_do
+allowed-tools: mcp__plugin_memtomem_memtomem__mem_search, mcp__memtomem__mem_search, mcp__plugin_memtomem_memtomem__mem_do, mcp__memtomem__mem_do
 ---
 
 Search for relevant memories about: $ARGUMENTS

@@ -74,7 +74,7 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
 Both write to `~/.claude.json` — no need to edit that file by hand.
 
-For the full plugin experience (slash commands, automation hooks, memory curator agent), see the [Claude Code integration guide](integrations/claude-code.md).
+For the full plugin experience (bundled MCP server, slash commands, automation hooks, memory curator agent — one `/plugin install memtomem@memtomem`), see the [Claude Code integration guide](integrations/claude-code.md).
 
 ### Project scope — commit a `.mcp.json`
 

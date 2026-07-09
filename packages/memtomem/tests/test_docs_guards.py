@@ -210,13 +210,14 @@ def _extract_hooks_snippet(claude_code_md: str) -> dict:
     return json.loads(match.group(1))
 
 
-def _commands_by_event_matcher(hooks_doc: dict) -> dict[tuple[str, str], str]:
-    """Flatten a hooks.json shape into ``{(event, matcher): command}``.
+def _commands_by_event_matcher(hooks_doc: dict) -> dict[tuple[str, str], dict]:
+    """Flatten a hooks.json shape into ``{(event, matcher): hook_dict}``
+    where ``hook_dict`` is the single inner hook (``command``, ``timeout``…).
 
     Only entries with a single command are included; multi-command entries
     fail loudly because the parity test isn't designed for them yet.
     """
-    out: dict[tuple[str, str], str] = {}
+    out: dict[tuple[str, str], dict] = {}
     for event, entries in hooks_doc.get("hooks", {}).items():
         for entry in entries:
             matcher = entry.get("matcher", "")
@@ -225,7 +226,7 @@ def _commands_by_event_matcher(hooks_doc: dict) -> dict[tuple[str, str], str]:
                 f"hooks parity helper expected exactly one command per entry, "
                 f"got {len(commands)} at {event}/{matcher!r}"
             )
-            out[(event, matcher)] = commands[0]["command"]
+            out[(event, matcher)] = commands[0]
     return out
 
 
@@ -239,19 +240,19 @@ class TestPluginHooksDocsParity:
     """
 
     @pytest.fixture(scope="class")
-    def plugin_commands(self) -> dict[tuple[str, str], str]:
+    def plugin_commands(self) -> dict[tuple[str, str], dict]:
         plugin_hooks = json.loads(_PLUGIN_HOOKS_JSON.read_text(encoding="utf-8"))
         return _commands_by_event_matcher(plugin_hooks)
 
     @pytest.fixture(scope="class")
-    def docs_commands(self, claude_code: str) -> dict[tuple[str, str], str]:
+    def docs_commands(self, claude_code: str) -> dict[tuple[str, str], dict]:
         snippet = _extract_hooks_snippet(claude_code)
         return _commands_by_event_matcher(snippet)
 
     def test_docs_snippet_is_subset_of_plugin(
         self,
-        plugin_commands: dict[tuple[str, str], str],
-        docs_commands: dict[tuple[str, str], str],
+        plugin_commands: dict[tuple[str, str], dict],
+        docs_commands: dict[tuple[str, str], dict],
     ) -> None:
         missing = [k for k in docs_commands if k not in plugin_commands]
         assert not missing, (
@@ -263,19 +264,51 @@ class TestPluginHooksDocsParity:
 
     def test_docs_snippet_commands_match_plugin(
         self,
-        plugin_commands: dict[tuple[str, str], str],
-        docs_commands: dict[tuple[str, str], str],
+        plugin_commands: dict[tuple[str, str], dict],
+        docs_commands: dict[tuple[str, str], dict],
     ) -> None:
         diffs = [
-            (event_matcher, plugin_commands[event_matcher], docs_cmd)
+            (event_matcher, plugin_commands[event_matcher]["command"], docs_cmd["command"])
             for event_matcher, docs_cmd in docs_commands.items()
-            if plugin_commands.get(event_matcher) != docs_cmd
+            if plugin_commands.get(event_matcher, {}).get("command") != docs_cmd["command"]
         ]
         assert not diffs, (
             "claude-code.md hooks snippet drifted from the plugin's "
             "hooks.json. The two sites must declare byte-identical commands "
             "for every (event, matcher) the docs render. Diffs:\n"
             + "\n".join(f"  {em}:\n    plugin: {p}\n    docs:   {d}" for em, p, d in diffs)
+        )
+
+    def test_docs_snippet_timeouts_match_plugin(
+        self,
+        plugin_commands: dict[tuple[str, str], dict],
+        docs_commands: dict[tuple[str, str], dict],
+    ) -> None:
+        """Claude Code hook ``timeout`` is in seconds; the plugin once
+        shipped millisecond values (5000 → ~83 min hang cap) while the docs
+        said 5. Pin the two sites to identical timeout values so a
+        unit-confusion regression on either side fails loudly."""
+        diffs = [
+            (em, plugin_commands[em].get("timeout"), docs_cmd.get("timeout"))
+            for em, docs_cmd in docs_commands.items()
+            if em in plugin_commands
+            and plugin_commands[em].get("timeout") != docs_cmd.get("timeout")
+        ]
+        assert not diffs, (
+            "hooks timeout drifted between claude-code.md and the plugin "
+            "hooks.json (values are SECONDS — never milliseconds):\n"
+            + "\n".join(f"  {em}: plugin={p} docs={d}" for em, p, d in diffs)
+        )
+
+    def test_plugin_hook_timeouts_are_seconds(
+        self, plugin_commands: dict[tuple[str, str], dict]
+    ) -> None:
+        """Any timeout over 120 almost certainly means someone wrote
+        milliseconds again (Claude Code interprets the field as seconds)."""
+        bad = {em: h["timeout"] for em, h in plugin_commands.items() if h.get("timeout", 0) > 120}
+        assert not bad, (
+            f"plugin hooks.json has timeout values that look like "
+            f"milliseconds (unit is seconds): {bad}"
         )
 
 
