@@ -1522,34 +1522,71 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       }
       const report = await response.json();
       if (Array.isArray(report.phases)) {
-      for (const phase of report.phases) {
-        const counts = phase.type === 'settings'
-          ? undefined
-          : _ctxSyncArtifactCounts(phase);
-        const state = phase.status === 'failed'
-          ? 'failed'
-          : phase.status === 'needs_confirmation'
-            ? 'attention'
-            : 'done';
-        setPhase(phase.type, state, counts);
-      }
-      const failedPhases = report.phases.filter((phase) => phase.status === 'failed');
-      if (failedPhases.length) {
-        showToast(t('toast.sync_partial_failed', {
-          succeeded: report.phases.filter((phase) => phase.status === 'ok').map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
-          failed_phase: failedPhases.map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
-          reason: failedPhases[0].error?.message || t('settings.ctx.sync_settings_failed_fallback'),
-        }), 'error');
-      } else if (report.summary?.changed === false || report.summary?.outcome === 'noop') {
-        showToast(t('settings.ctx.sync_all_nothing_synced'), 'info');
-      } else {
-        showToast(t('settings.ctx.sync_success'));
-      }
-      return;
+        // Skip-row classification deliberately stays client-side (#1262): the
+        // route reports raw ``reason_code`` rows, so run the same
+        // ``_ctxIsAttentionSkip`` sweep as the legacy per-type loop — a
+        // failure-class skip (parse_error / duplicate_name / …) demotes its
+        // row to ``attention`` and gates the success toast (#1247 id 21).
+        const batchAttentionSkips = [];
+        for (const phase of report.phases) {
+          const counts = phase.type === 'settings'
+            ? undefined
+            : _ctxSyncArtifactCounts(phase);
+          const phaseSkips = Array.isArray(phase.skipped) ? phase.skipped : [];
+          const phaseAttention = phaseSkips.filter(_ctxIsAttentionSkip);
+          batchAttentionSkips.push(...phaseAttention.map(_ctxAttentionSkipLabel));
+          const state = phase.status === 'failed'
+            ? 'failed'
+            : phase.status === 'needs_confirmation' || phaseAttention.length
+              ? 'attention'
+              : 'done';
+          setPhase(phase.type, state, counts);
+        }
+        // Toast ladder — mirrors the legacy orchestrator's severity order:
+        // failed > settings needs_confirmation (info + Open Settings action,
+        // #774) > failure-class skips (warning, #1247) > no-op > success.
+        const failedPhases = report.phases.filter((phase) => phase.status === 'failed');
+        const needsConfirmation = report.phases.some(
+          (phase) => phase.status === 'needs_confirmation');
+        if (failedPhases.length) {
+          showToast(t('toast.sync_partial_failed', {
+            succeeded: report.phases.filter((phase) => phase.status === 'ok').map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
+            failed_phase: failedPhases.map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
+            reason: failedPhases[0].error?.message || t('settings.ctx.sync_settings_failed_fallback'),
+          }), 'error');
+        } else if (needsConfirmation) {
+          showToast(
+            t('toast.sync_partial_settings_needs_confirmation'),
+            'info',
+            {
+              action: {
+                label: t('toast.open_settings_action'),
+                onClick: () => switchSettingsSection('hooks-sync'),
+              },
+            },
+          );
+        } else if (batchAttentionSkips.length) {
+          const items = [...new Set(batchAttentionSkips)];
+          showToast(
+            t('settings.ctx.sync_skipped_attention', {
+              count: items.length,
+              items: items.join(', '),
+            }),
+            'warning',
+          );
+        } else if (report.summary?.changed === false || report.summary?.outcome === 'noop') {
+          showToast(t('settings.ctx.sync_all_nothing_synced'), 'info');
+        } else {
+          showToast(t('settings.ctx.sync_success'));
+        }
+        return;
       }
       // An older proxy/test double can answer the new route with a generic
       // object. Treat that as unsupported and retain the established per-type
-      // orchestration instead of leaving five rows stuck on “Syncing”.
+      // orchestration instead of leaving five rows stuck on “Syncing”. If the
+      // 200 actually came from a real (older) server that DID run the batch,
+      // the legacy loop re-POSTs the five phases — accepted: each sync is a
+      // regenerate-from-canonical, so the second pass is an idempotent no-op.
       for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'pending');
     }
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];

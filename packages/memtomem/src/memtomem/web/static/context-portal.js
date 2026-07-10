@@ -477,6 +477,8 @@ async function loadCtxProjects() {
       if (scope.missing) {
         return { scopeId: scope.scope_id, runtimes: [] };
       }
+      // Counts detail and runtimes are fetched under separate try blocks so a
+      // failure in one can't mask the other's result.
       try {
         if (scope.counts == null) {
           const detailUrl = _ctxWithTargetScope(
@@ -484,12 +486,29 @@ async function loadCtxProjects() {
             { includeScope: false, targetScope: requestedScope },
           );
           const detailRes = await fetch(detailUrl, { signal });
-          if (detailRes.ok) {
-            const detail = await detailRes.json();
-            const enriched = detail.scopes?.find((item) => item.scope_id === scope.scope_id);
-            if (enriched) Object.assign(scope, enriched);
+          const enriched = detailRes.ok
+            ? (await detailRes.json()).scopes?.find((item) => item.scope_id === scope.scope_id)
+            : null;
+          if (enriched) {
+            Object.assign(scope, enriched);
+          } else {
+            // The whole detail probe failed (non-OK / scope vanished). Leaving
+            // ``counts`` null would render NO chips at all — a silent variant
+            // of the failure-invisible state #1692 fixed. Mark every kind
+            // unavailable so the shared badge + Retry affordance renders.
+            scope.counts = {};
+            scope.counts_unavailable = _CTX_PORTAL_COUNT_TYPES.map((ct) => ct.key);
           }
         }
+      } catch (err) {
+        // An aborted probe means a newer load superseded us — its own fetch
+        // owns the counts, so don't stamp a failure badge on the shared scope.
+        if (scope.counts == null && !_ctxIsAbortError(err)) {
+          scope.counts = {};
+          scope.counts_unavailable = _CTX_PORTAL_COUNT_TYPES.map((ct) => ct.key);
+        }
+      }
+      try {
         const url = _ctxWithTargetScope('/api/context/runtimes', { scopeId: scope.scope_id });
         const res = await fetch(url, { signal });
         if (!res.ok) throw new Error();

@@ -653,7 +653,13 @@ function _ctxOpenInAdvanced(section) {
 // Apply the persisted flag once at load. The script tag sits at the end of
 // ``index.html`` so the gateway tab markup already exists; the tab itself is
 // ``hidden`` until activated, so toggling the class now causes no flash.
+// The toggle label and active chip are written with ``t()``, and this call
+// runs before ``I18N.init()``'s locale fetch resolves — so their first paint
+// is the raw-key fallback. ``init`` dispatches ``langchange`` once the cache
+// is populated, and the listener below re-renders them (and again on every
+// locale flip — neither element carries ``data-i18n``, so ``applyDOM`` can't).
 _ctxApplySimpleMode();
+window.addEventListener('langchange', _ctxApplySimpleMode);
 
 function _ctxTargetScopeParam(targetScope = _ctxTargetScope) {
   // ``targetScope`` defaults to the live global so existing single-shot
@@ -962,6 +968,11 @@ function _ctxCommitProjects({ data, warn, authoritative, aborted }) {
     // future, distinct failure is not suppressed by a stale key.
     _ctxProjectsFetchWarnKey = null;
   }
+  // The Simple-mode active chip names the active project via the cache this
+  // commit just (possibly) rewrote — at boot it rendered the Server-CWD
+  // fallback against an empty cache, so re-render it now that the roster and
+  // the normalized active scope are known.
+  _ctxApplySimpleMode();
   return data;
 }
 
