@@ -4307,6 +4307,11 @@ body.app-simple [data-ui-adv="advanced"] { display: none; }
 /* Cross-project drift (#1649) — update available, warning tone (mirrors the
    overview wiki-behind badge; not an error like missing). */
 .ctx-scope-badge--drift { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
+/* Status check failed (#1692) — the per-project status probe raised, so drift
+   is unknown. Error tone (danger, like missing) rather than the drift warning
+   tone, because we can't back a clean/drift claim; unlike missing, this is not
+   about an absent root. */
+.ctx-scope-badge--status-error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
 
 /* Context Portal (ADR-0021 PR4) — multi-project board */
 .ctx-portal-toolbar {

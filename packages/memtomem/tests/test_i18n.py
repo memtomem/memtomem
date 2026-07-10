@@ -175,6 +175,25 @@ class TestLocaleFiles:
                 f"an `update --all` form (#1645); got: {tip!r}"
             )
 
+    def test_portal_status_error_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The Projects-portal status-check-failed badge (#1692) needs both its
+        badge label and tooltip in each locale. Like the drift tip, the tooltip
+        must name the runnable ``mm context status --all-projects`` inspector —
+        but unlike drift it must NOT steer to Sync, because a failed status check
+        is not Sync-remediable (drift is unknown, not confirmed)."""
+        for name, data in [("en", en), ("ko", ko)]:
+            for key in (
+                "settings.ctx.portal_status_error_badge",
+                "settings.ctx.portal_status_error_tip",
+            ):
+                assert key in data, f"{name}.json missing {key}"
+                assert data[key].strip(), f"{name}.json has empty {key}"
+            tip = data["settings.ctx.portal_status_error_tip"]
+            assert "mm context status --all-projects" in tip, (
+                f"{name}.json settings.ctx.portal_status_error_tip must name the "
+                f"runnable `mm context status --all-projects` inspector; got: {tip!r}"
+            )
+
 
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 

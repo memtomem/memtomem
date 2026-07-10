@@ -93,6 +93,12 @@ function driftBadge(window, scopeId) {
   );
 }
 
+function statusErrorBadge(window, scopeId) {
+  return window.document.querySelector(
+    `.ctx-portal-row[data-scope-id="${scopeId}"] .ctx-scope-badge--status-error`,
+  );
+}
+
 describe('Projects portal fleet-drift badge (#1649)', () => {
   it('marks the drifted project after the deferred status-all fetch, with a runnable tooltip', async () => {
     const { window } = await boot();
@@ -108,7 +114,7 @@ describe('Projects portal fleet-drift badge (#1649)', () => {
     expect(badge.getAttribute('title')).toContain('mm context status --all-projects');
   });
 
-  it('leaves ok / error projects (and Server CWD) unbadged', async () => {
+  it('leaves ok projects (and Server CWD) unbadged; does not drift-badge the error project', async () => {
     const { window } = await boot();
     installFetch(window);
     await window.loadCtxProjects();
@@ -116,8 +122,49 @@ describe('Projects portal fleet-drift badge (#1649)', () => {
 
     expect(driftBadge(window, 'p-alpha')).not.toBeNull();
     expect(driftBadge(window, 'p-clean')).toBeNull();
+    // The error project must never carry the (Sync-remediable) drift badge...
     expect(driftBadge(window, 'p-err')).toBeNull();
     expect(driftBadge(window, '')).toBeNull();
+  });
+
+  it('marks the error project with a status-error badge (no Sync affordance), not a drift badge (#1692)', async () => {
+    const { window } = await boot();
+    installFetch(window);
+    await window.loadCtxProjects();
+    await flush();
+
+    // ...it carries the distinct status-error badge instead: drift is unknown,
+    // so the board must not read as an all-clear for that row.
+    const badge = statusErrorBadge(window, 'p-err');
+    expect(badge).not.toBeNull();
+    expect(badge.textContent.trim().length).toBeGreaterThan(0);
+    // The tooltip points at the CLI, deliberately NOT at Sync (error ≠ remediable).
+    expect(badge.getAttribute('title')).toContain('mm context status --all-projects');
+    expect(badge.getAttribute('title')).not.toContain('Sync');
+
+    // The error badge is mutually exclusive with drift on the same row, and the
+    // drifted / clean / cwd rows carry no status-error badge.
+    expect(statusErrorBadge(window, 'p-alpha')).toBeNull();
+    expect(statusErrorBadge(window, 'p-clean')).toBeNull();
+    expect(statusErrorBadge(window, '')).toBeNull();
+  });
+
+  it('clears a stale status-error badge when a fresh load reports the project ok (#1692)', async () => {
+    const { window } = await boot();
+    const { state } = installFetch(window);
+    await window.loadCtxProjects();
+    await flush();
+    expect(statusErrorBadge(window, 'p-err')).not.toBeNull();
+
+    // Reload: p-err's status check now succeeds and reports clean.
+    state.statusAll = async () => jsonOk({
+      target_scope: 'project_shared',
+      projects: SCOPES.map(s => ({ project_scope_id: s.scope_id, status: 'ok' })),
+      summary: { projects_total: 4, executed: 4, drifted: 0, clean: 4, errors: 0, skipped: 0 },
+    });
+    await window.loadCtxProjects();
+    await flush();
+    expect(statusErrorBadge(window, 'p-err')).toBeNull();
   });
 
   it('does NOT fetch status-all on a non-project_shared tier', async () => {

@@ -861,6 +861,8 @@
   "settings.ctx.portal_stale_tip": "This folder has no .memtomem store yet — run mm context init inside it to start tracking.",
   "settings.ctx.portal_drift_badge": "drift",
   "settings.ctx.portal_drift_tip": "This project's synced context no longer matches the Store (wiki pins behind or runtime files changed). Click Sync on this row, or run mm context status --all-projects for details.",
+  "settings.ctx.portal_status_error_badge": "check failed",
+  "settings.ctx.portal_status_error_tip": "This project's status check failed, so its sync state is unknown (not clean, not drift). Run mm context status --all-projects for details.",
   "settings.ctx.portal_root_unknown": "(no path)",
   "settings.ctx.portal_load_failed": "Could not load projects",
   "settings.ctx.portal_add_project_tooltip": "Register a project folder so memtomem can track it",
