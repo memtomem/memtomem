@@ -1,0 +1,105 @@
+{
+  "target_scope": "str",
+  "projects": [
+    {
+      "project_scope_id": "str",
+      "label": "str",
+      "root": "str",
+      "status": "str",
+      "wiki_head": "null",
+      "lockfile_error": "null",
+      "state_counts": {
+        "ok": "int",
+        "behind": "int",
+        "dirty": "int",
+        "missing": "int",
+        "stale-pin": "int",
+        "local-draft": "int",
+        "untracked": "int"
+      },
+      "diff_counts": {
+        "skills": {
+          "total": "int"
+        },
+        "commands": {
+          "total": "int"
+        },
+        "agents": {
+          "total": "int",
+          "missing_target": "int"
+        },
+        "mcp_servers": {
+          "total": "int"
+        },
+        "settings": {
+          "total": "int",
+          "in_sync": "int",
+          "out_of_sync": "int",
+          "missing_target": "int",
+          "error": "int",
+          "status": "str"
+        }
+      },
+      "rows": [
+        {
+          "asset_type": "str",
+          "name": "str",
+          "pin_commit": "str",
+          "installed_at": "str",
+          "state": "str",
+          "dirty_file_count": "int",
+          "reason": "str",
+          "tier": "str"
+        }
+      ]
+    },
+    {
+      "project_scope_id": "str",
+      "label": "str",
+      "root": "str",
+      "status": "str",
+      "wiki_head": "null",
+      "lockfile_error": "null",
+      "state_counts": {
+        "ok": "int",
+        "behind": "int",
+        "dirty": "int",
+        "missing": "int",
+        "stale-pin": "int",
+        "local-draft": "int",
+        "untracked": "int"
+      },
+      "diff_counts": {
+        "skills": {
+          "total": "int"
+        },
+        "commands": {
+          "total": "int"
+        },
+        "agents": {
+          "total": "int"
+        },
+        "mcp_servers": {
+          "total": "int"
+        },
+        "settings": {
+          "total": "int",
+          "in_sync": "int",
+          "out_of_sync": "int",
+          "missing_target": "int",
+          "error": "int",
+          "status": "str"
+        }
+      },
+      "rows": []
+    }
+  ],
+  "summary": {
+    "projects_total": "int",
+    "executed": "int",
+    "drifted": "int",
+    "clean": "int",
+    "errors": "int",
+    "skipped": "int"
+  }
+}
