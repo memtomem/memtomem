@@ -310,6 +310,12 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             assert page.evaluate(
                 "() => document.documentElement.scrollWidth <= window.innerWidth + 1"
             )
+            assert page.locator(".home-layout").evaluate("el => el.scrollWidth === el.clientWidth")
+            page.locator("#lang-toggle").click()
+            page.wait_for_function("() => document.documentElement.lang === 'ko'")
+            assert page.locator(".home-layout").evaluate("el => el.scrollWidth === el.clientWidth")
+            page.locator("#lang-toggle").click()
+            page.wait_for_function("() => document.documentElement.lang === 'en'")
 
         page.locator('.tab-btn[data-tab="search"]').focus()
         before_history = page.evaluate("() => history.length")
@@ -339,37 +345,54 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             page.locator("#results-list .results-debug-details summary").inner_text()
             == "Advanced details"
         )
+        if viewport[0] <= 390:
+            detail_actions = page.locator("#detail-panel .detail-actions")
+            assert detail_actions.is_visible()
+            assert detail_actions.evaluate(
+                "el => { const r = el.getBoundingClientRect(); "
+                "return r.top >= 0 && r.bottom <= window.innerHeight + 1; }"
+            )
 
         page.locator('.tab-btn[data-tab="sources"]').click()
         assert page.locator(".sources-vendor-tab").count() >= 1
-        if viewport[0] <= 390:
-            assert not page.locator(".sources-layout").evaluate(
-                "el => el.classList.contains('mobile-detail')"
-            )
-            # Exercise the row's production Enter handler as part of the
-            # keyboard-only acceptance path. This also avoids racing the
-            # source tree's async status repaint with a stale pointer point.
-            source_row = page.locator("#sources-list .source-item").first
-            source_row.focus()
-            page.keyboard.press("Enter")
         page.wait_for_function(
-            "() => document.querySelector('#chunks-browser .chunks-browser-header .file-path')?.textContent.includes('notes.md')",
+            "() => document.querySelectorAll('#sources-list .source-item').length > 0",
             timeout=5_000,
         )
-        if viewport[0] <= 390:
-            assert page.locator(".sources-layout").evaluate(
-                "el => el.classList.contains('mobile-detail')"
-            )
-            assert page.locator(".sources-mobile-back").is_visible()
-            page.locator(".sources-mobile-back").click()
-            assert not page.locator(".sources-layout").evaluate(
-                "el => el.classList.contains('mobile-detail')"
+        if viewport[0] > 390:
+            page.wait_for_function(
+                "() => document.querySelector('#chunks-browser .chunks-browser-header .file-path')?.textContent.includes('notes.md')",
+                timeout=5_000,
             )
         for vendor in ("user", "claude", "openai"):
             tab = page.locator(f'.sources-vendor-tab[data-vendor="{vendor}"]')
             if tab.count():
                 tab.click()
                 assert tab.get_attribute("aria-selected") == "true"
+        if viewport[0] <= 390:
+            # Return to the populated vendor, then reacquire the row after the
+            # asynchronous tree refresh. Pointer click must drive drilldown;
+            # forcing keyboard focus would mask hit-testing/layout regressions.
+            page.locator('.sources-vendor-tab[data-vendor="user"]').click()
+            page.wait_for_function(
+                "() => document.querySelectorAll('#sources-list .source-item').length > 0",
+                timeout=5_000,
+            )
+            source_row = page.locator("#sources-list .source-item").first
+            source_row.click()
+            page.wait_for_function(
+                "() => document.querySelector('.sources-layout')?.classList.contains('mobile-detail')",
+                timeout=5_000,
+            )
+            page.locator(".sources-mobile-back").click()
+            page.wait_for_function(
+                "() => !document.querySelector('.sources-layout')?.classList.contains('mobile-detail')"
+            )
+            page.wait_for_function(
+                "() => document.activeElement === "
+                "document.querySelector('#sources-list .source-item.active')",
+                timeout=2_000,
+            )
 
         page.locator('.tab-btn[data-tab="context-gateway"]').click()
         # ADR-0026 D-F flip: Simple is the production default and hides the gateway
@@ -442,6 +465,18 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
                 )
                 assert checkbox_metrics["inputHeight"] <= 24
                 assert checkbox_metrics["labelHeight"] >= 44
+            if viewport[0] <= 390:
+                action = page.locator(
+                    {
+                        "folder": "#index-btn",
+                        "upload": "#upload-btn",
+                        "compose": "#add-btn",
+                    }[index_mode]
+                )
+                assert action.evaluate(
+                    "el => { const r = el.getBoundingClientRect(); "
+                    "return r.top >= 0 && r.bottom <= window.innerHeight + 1; }"
+                )
 
         page.locator('.tab-btn[data-tab="tags"]').click()
         assert page.locator("#tags-search").is_visible()

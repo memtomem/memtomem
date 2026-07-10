@@ -283,7 +283,7 @@ function _buildMemoryDirsPanel(initialDirs) {
         // Single Sources panel: just open the source in the shared
         // chunks-browser pane.
         if (typeof browseSource === 'function') {
-          browseSource(s.path);
+          browseSource(s.path, 100, true);
         }
       };
       li.addEventListener('click', activate);

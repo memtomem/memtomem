@@ -5345,7 +5345,7 @@ function _renderMemorySourceItem(s, maxChunks) {
     STATE.pendingActivateChunkSourcePath = '';
     document.querySelectorAll('.source-item').forEach(el => el.classList.remove('active'));
     item.classList.add('active');
-    browseSource(s.path);
+    browseSource(s.path, 100, true);
   });
   item.addEventListener('keydown', e => {
     // Only treat Enter/Space as a row-open when the row itself has focus.
@@ -5358,7 +5358,7 @@ function _renderMemorySourceItem(s, maxChunks) {
   return item;
 }
 
-async function browseSource(path, limit = 100) {
+async function browseSource(path, limit = 100, enterMobileDetail = false) {
   const browser = qs('chunks-browser');
   panelLoading(browser);
   try {
@@ -5385,7 +5385,7 @@ async function browseSource(path, limit = 100) {
         ? t('chunks.load_all') : 'Load All';
       loadAllBtn.textContent = loadAllLabel;
       loadAllBtn.setAttribute('data-i18n', 'chunks.load_all');
-      loadAllBtn.addEventListener('click', () => browseSource(path, 500));
+      loadAllBtn.addEventListener('click', () => browseSource(path, 500, enterMobileDetail));
       header.appendChild(loadAllBtn);
     }
     // View mode toggle: Chunks | Document
@@ -5539,7 +5539,9 @@ async function browseSource(path, limit = 100) {
       });
     }
     browser.appendChild(content);
-    _setSourcesMobileDetail(true);
+    if (enterMobileDetail) {
+      _setSourcesMobileDetail(true);
+    }
 
     // Consume ``pendingActivateChunkId`` (set by ``_navigateToSource``
     // when the caller — e.g. Timeline — knows the specific chunk).
