@@ -35,10 +35,12 @@ __all__ = [
     "ProjectScope",
     "ProjectHealth",
     "KnownProjectsCorruptError",
+    "KnownProjectsLoadReport",
     "KnownProjectsStore",
     "UnknownProjectSelectorError",
     "compute_scope_id",
     "discover_project_scopes",
+    "discover_project_scopes_with_report",
     "annotate_project_health",
     "resolve_project_selector",
     "sync_skip_reason",
@@ -169,6 +171,55 @@ class _KnownProjectEntry:
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
+@dataclass(frozen=True)
+class KnownProjectsLoadReport:
+    """Outcome of a tolerant ``known_projects.json`` read.
+
+    ``ok`` is ``False`` iff the file *exists* but was unusable as a whole
+    (unreadable, invalid JSON, unexpected version, unexpected shape) — a
+    missing file is the normal pre-registration state and reads as ok.
+    ``reason_code`` is ``"registry_corrupt"`` whenever there is something to
+    surface (whole-file degradation, or rows the tolerant parser skipped) and
+    ``None`` on a clean read. ``detail`` is the human-readable cause; it may
+    embed filesystem paths and OS error text, so web surfaces must pass it
+    through ``_redact_message`` before serving. ``skipped_rows`` counts rows
+    the tolerant parser dropped; non-zero only when the document itself parsed
+    (``ok`` stays ``True``). ``error_kind`` classifies the degradation at the
+    catch site — one of ``parse`` / ``permission`` / ``missing`` / ``internal``,
+    deliberately the web layer's ``_classify_exception`` vocabulary so the
+    wire value is identical to what classifying the live exception would have
+    produced. Classifying here (and discarding the exception) keeps a caught
+    ``OSError`` — with its traceback and retained frame locals — from being
+    transported across the context/web boundary; it is ``None`` on a clean
+    read.
+    """
+
+    entries: list[_KnownProjectEntry]
+    ok: bool
+    reason_code: str | None
+    detail: str | None
+    skipped_rows: int
+    error_kind: str | None = None
+
+
+def _classify_registry_os_error(exc: OSError) -> str:
+    """Neutral error-kind for an unreadable registry file.
+
+    Mirrors the OSError subset of the web layer's ``_classify_exception``
+    mapping (``PermissionError`` → permission; path-type errors → missing;
+    anything else → internal, since ``errno`` may be EIO/EMFILE/ELOOP etc.)
+    so :class:`KnownProjectsLoadReport.error_kind` carries the same wire value
+    without this module importing web-layer helpers or the report transporting
+    the live exception. ``FileNotFoundError`` never reaches here — the caller
+    treats a missing file as the clean pre-registration state.
+    """
+    if isinstance(exc, PermissionError):
+        return "permission"
+    if isinstance(exc, (FileNotFoundError, NotADirectoryError, IsADirectoryError)):
+        return "missing"
+    return "internal"
+
+
 class KnownProjectsStore:
     """Read / append / delete entries in ``known_projects.json``.
 
@@ -201,6 +252,17 @@ class KnownProjectsStore:
         """
         return self._load_doc(strict=strict)[0]
 
+    def load_with_report(self) -> KnownProjectsLoadReport:
+        """Tolerant :meth:`load` that also reports how the read degraded.
+
+        The entries are identical to ``load(strict=False)``; the report makes
+        the previously log-only degradation contract inspectable so read-only
+        surfaces (``GET /api/context/projects``) can say "registry
+        unavailable" instead of presenting the empty fallback as the truth
+        (#1692). Mutators keep using strict loads — this never raises.
+        """
+        return self._load_doc_with_report(strict=False)[2]
+
     def _load_doc(self, *, strict: bool = False) -> tuple[list[_KnownProjectEntry], dict[str, Any]]:
         """Like :meth:`load`, but also return unknown document-level keys.
 
@@ -211,18 +273,53 @@ class KnownProjectsStore:
         always ``{}`` on any degradation path (missing / corrupt file), so a
         tolerant caller never resurrects partial document state.
         """
+        entries, doc_extra, _ = self._load_doc_with_report(strict=strict)
+        return entries, doc_extra
+
+    def _load_doc_with_report(
+        self, *, strict: bool = False
+    ) -> tuple[list[_KnownProjectEntry], dict[str, Any], KnownProjectsLoadReport]:
+        """:meth:`_load_doc` plus a :class:`KnownProjectsLoadReport`.
+
+        In strict mode every degradation raises before a report could carry
+        it, so a strict return is always a clean report.
+        """
         hint = "fix or remove it (e.g. restore it from version control), then retry"
+
+        def _degraded(
+            detail: str, error_kind: str = "parse"
+        ) -> tuple[list[_KnownProjectEntry], dict[str, Any], KnownProjectsLoadReport]:
+            # "parse" default: decode/version/shape refusals are document
+            # -contract violations with no exception kind of their own.
+            report = KnownProjectsLoadReport(
+                entries=[],
+                ok=False,
+                reason_code="registry_corrupt",
+                detail=detail,
+                skipped_rows=0,
+                error_kind=error_kind,
+            )
+            return [], {}, report
+
+        def _clean_empty() -> tuple[
+            list[_KnownProjectEntry], dict[str, Any], KnownProjectsLoadReport
+        ]:
+            report = KnownProjectsLoadReport(
+                entries=[], ok=True, reason_code=None, detail=None, skipped_rows=0
+            )
+            return [], {}, report
+
         try:
             raw = self._path.read_bytes()
         except FileNotFoundError:
-            return [], {}
+            # Normal pre-registration state — nothing to surface.
+            return _clean_empty()
         except OSError as exc:
+            detail = f"known_projects file at {self._path} is unreadable ({exc}); {hint}"
             if strict:
-                raise KnownProjectsCorruptError(
-                    f"known_projects file at {self._path} is unreadable ({exc}); {hint}"
-                ) from exc
+                raise KnownProjectsCorruptError(detail) from exc
             logger.warning("known_projects: read failed: %s", exc)
-            return [], {}
+            return _degraded(detail, _classify_registry_os_error(exc))
 
         try:
             doc = json.loads(raw)
@@ -230,22 +327,22 @@ class KnownProjectsStore:
             # UnicodeDecodeError: json.loads(bytes) decodes before parsing,
             # so invalid UTF-8 raises it instead of JSONDecodeError — same
             # corrupt-file class, same handling (Codex design review).
+            detail = f"known_projects file at {self._path} is not valid JSON ({exc}); {hint}"
             if strict:
-                raise KnownProjectsCorruptError(
-                    f"known_projects file at {self._path} is not valid JSON ({exc}); {hint}"
-                ) from exc
+                raise KnownProjectsCorruptError(detail) from exc
             logger.warning("known_projects: invalid JSON, ignoring file: %s", exc)
-            return [], {}
+            return _degraded(detail)
 
         if not isinstance(doc, dict) or doc.get("version") != _KNOWN_PROJECTS_VERSION:
             version = doc.get("version") if isinstance(doc, dict) else None
+            detail = (
+                f"known_projects file at {self._path} has unexpected version "
+                f"{version!r} (this build writes version {_KNOWN_PROJECTS_VERSION}); {hint}"
+            )
             if strict:
-                raise KnownProjectsCorruptError(
-                    f"known_projects file at {self._path} has unexpected version "
-                    f"{version!r} (this build writes version {_KNOWN_PROJECTS_VERSION}); {hint}"
-                )
+                raise KnownProjectsCorruptError(detail)
             logger.warning("known_projects: unexpected version %r, ignoring", version)
-            return [], {}
+            return _degraded(detail)
 
         # Past the version gate: capture forward-compat document-level keys.
         doc_extra = {k: v for k, v in doc.items() if k not in ("version", "projects")}
@@ -259,14 +356,16 @@ class KnownProjectsStore:
         # ``label`` / ``enabled``) are NOT corruption and parse normally.
         projects_member = doc.get("projects", [])
         if not isinstance(projects_member, list):
+            detail = (
+                f"known_projects file at {self._path} has a non-list 'projects' "
+                f"member ({type(projects_member).__name__}); {hint}"
+            )
             if strict:
-                raise KnownProjectsCorruptError(
-                    f"known_projects file at {self._path} has a non-list 'projects' "
-                    f"member ({type(projects_member).__name__}); {hint}"
-                )
+                raise KnownProjectsCorruptError(detail)
             logger.warning("known_projects: 'projects' is not a list, ignoring file")
-            return [], {}
+            return _degraded(detail)
 
+        skipped_rows = 0
         entries: list[_KnownProjectEntry] = []
         for item in projects_member:
             if not isinstance(item, dict):
@@ -275,6 +374,7 @@ class KnownProjectsStore:
                         f"known_projects file at {self._path} has a non-object project "
                         f"row ({type(item).__name__}); {hint}"
                     )
+                skipped_rows += 1
                 continue
             root = item.get("root")
             if not isinstance(root, str) or not root:
@@ -283,6 +383,7 @@ class KnownProjectsStore:
                         f"known_projects file at {self._path} has a project row without "
                         f"a usable 'root'; {hint}"
                     )
+                skipped_rows += 1
                 continue
             entries.append(
                 _KnownProjectEntry(
@@ -306,7 +407,25 @@ class KnownProjectsStore:
                     extra={k: v for k, v in item.items() if k not in _KNOWN_ROW_KEYS},
                 )
             )
-        return entries, doc_extra
+        if skipped_rows:
+            # Row skips previously had no signal at all; the document itself
+            # parsed, so this is a warning-with-count, not "unavailable".
+            logger.warning("known_projects: skipped %d unparsable project row(s)", skipped_rows)
+        report = KnownProjectsLoadReport(
+            entries=entries,
+            ok=True,
+            reason_code="registry_corrupt" if skipped_rows else None,
+            detail=(
+                f"known_projects file at {self._path} has {skipped_rows} unparsable "
+                f"project row(s), skipped; {hint}"
+                if skipped_rows
+                else None
+            ),
+            skipped_rows=skipped_rows,
+            # Skipped rows are shape violations inside a document that parsed.
+            error_kind="parse" if skipped_rows else None,
+        )
+        return entries, doc_extra, report
 
     def add(self, root: Path, label: str | None = None) -> _KnownProjectEntry:
         """Register *root*. Idempotent — re-registering an existing root is a no-op
@@ -818,7 +937,34 @@ def discover_project_scopes(
     experimental_claude_projects_scan: bool,
     auto_display_configured_projects: bool = True,
 ) -> list[ProjectScope]:
+    """:func:`discover_project_scopes_with_report` without the registry report.
+
+    For callers that only render the roster; surfaces that must distinguish
+    "empty registry" from "registry unreadable" (#1692) use the ``_with_report``
+    variant.
+    """
+    return discover_project_scopes_with_report(
+        cwd,
+        known_projects_file,
+        experimental_claude_projects_scan=experimental_claude_projects_scan,
+        auto_display_configured_projects=auto_display_configured_projects,
+    )[0]
+
+
+def discover_project_scopes_with_report(
+    cwd: Path,
+    known_projects_file: Path,
+    *,
+    experimental_claude_projects_scan: bool,
+    auto_display_configured_projects: bool = True,
+) -> tuple[list[ProjectScope], KnownProjectsLoadReport]:
     """Enumerate all project scopes the UI should render, in display order.
+
+    Also returns the :class:`KnownProjectsLoadReport` from the tolerant
+    registry read, so the Projects route can surface a degraded registry
+    instead of serving the empty fallback as a truthful roster (#1692). The
+    scope list itself is unchanged by degradation — server cwd (and any scan
+    hits) still appear.
 
     Server cwd is always first (so the user's primary working tree is
     visible even before Add Project is used). Entries with the same
@@ -866,7 +1012,8 @@ def discover_project_scopes(
 
     # 2. User-registered roots from known_projects.json.
     store = KnownProjectsStore(known_projects_file)
-    known_entries = store.load()
+    load_report = store.load_with_report()
+    known_entries = load_report.entries
     # Sync enrollment (``enabled``) is read strictly from the known_projects
     # entry, keyed the same way ``_add`` keys ``by_resolved`` so the lookup at
     # emit time matches. cwd / scan sources never contribute enablement.
@@ -939,7 +1086,7 @@ def discover_project_scopes(
                 sync_eligible=sync_eligible,
             )
         )
-    return scopes
+    return scopes, load_report
 
 
 # ── Validation helpers ──────────────────────────────────────────────────

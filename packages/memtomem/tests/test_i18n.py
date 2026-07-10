@@ -194,6 +194,24 @@ class TestLocaleFiles:
                 f"runnable `mm context status --all-projects` inspector; got: {tip!r}"
             )
 
+    def test_portal_registry_warning_keys_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The Projects-portal registry read-failure banner (#1692) needs both
+        of its messages in each locale; the row-skip variant must carry the
+        ``{count}`` placeholder the banner substitutes."""
+        for name, data in [("en", en), ("ko", ko)]:
+            for key in (
+                "settings.ctx.portal_registry_unavailable",
+                "settings.ctx.portal_registry_rows_skipped",
+            ):
+                assert key in data, f"{name}.json missing {key}"
+                assert data[key].strip(), f"{name}.json has empty {key}"
+            assert "{count}" in data["settings.ctx.portal_registry_rows_skipped"], (
+                f"{name}.json settings.ctx.portal_registry_rows_skipped must carry "
+                f"the {{count}} placeholder"
+            )
+
 
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 

@@ -95,5 +95,7 @@
         }
       ]
     }
-  ]
+  ],
+  "registry_status": "str",
+  "warnings": []
 }

@@ -35,5 +35,7 @@
       "counts": "null",
       "runtime_coverage": "null"
     }
-  ]
+  ],
+  "registry_status": "str",
+  "warnings": []
 }

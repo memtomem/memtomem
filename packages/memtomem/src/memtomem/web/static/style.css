@@ -4313,6 +4313,25 @@ body.app-simple [data-ui-adv="advanced"] { display: none; }
    about an absent root. */
 .ctx-scope-badge--status-error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
 
+/* Registry read-failure banner (#1692) — non-blocking warning above the
+   Portal board; the roster still renders below it (server-cwd / scan rows
+   survive a degraded registry). Warning tone, matching the header banners. */
+.ctx-portal-registry-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: color-mix(in srgb, var(--yellow, #f39c12) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--yellow, #f39c12) 40%, var(--border));
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.ctx-portal-registry-banner-msg { flex: 1; min-width: 0; }
+.ctx-portal-registry-banner .ctx-scopes-retry { flex-shrink: 0; }
+
 /* Context Portal (ADR-0021 PR4) — multi-project board */
 .ctx-portal-toolbar {
   display: flex;
