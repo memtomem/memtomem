@@ -15,6 +15,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -484,6 +485,37 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
         assert page.locator("#tl-days").is_visible()
         assert page.locator("#tl-view-chunks").is_visible()
         assert page.locator("#tl-view-files").is_visible()
+
+        # The vendored axe bundle keeps this gate network-independent. Inject
+        # via ``page.evaluate`` — the app serves ``script-src 'self'``, which
+        # blocks ``add_script_tag``'s inline injection, while CDP evaluation is
+        # exempt from the page CSP. Only serious/critical findings fail the
+        # broad smoke matrix; screenshots remain diagnostic artifacts rather
+        # than pixel-diff assertions.
+        axe_source = (Path(__file__).with_name("vendor") / "axe.min.js").read_text(encoding="utf-8")
+        page.evaluate(f"() => {{ {axe_source} }}")
+        axe_results = page.evaluate(
+            """async () => await axe.run(document, {
+              resultTypes: ['violations'],
+              runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] },
+            })"""
+        )
+        blocking_axe = [
+            violation
+            for violation in axe_results["violations"]
+            if violation.get("impact") in {"serious", "critical"}
+        ]
+        assert blocking_axe == [], json.dumps(
+            [
+                {
+                    "id": violation["id"],
+                    "impact": violation.get("impact"),
+                    "nodes": [node.get("target") for node in violation.get("nodes", [])][:10],
+                }
+                for violation in blocking_axe
+            ],
+            indent=2,
+        )
 
         captured_errors = page.evaluate("() => window.__smokeErrors || []")
 

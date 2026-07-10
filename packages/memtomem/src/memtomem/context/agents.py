@@ -672,6 +672,8 @@ class ExtractResult:
     imported: list[tuple[Path, Layout]]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
+    source_runtimes: dict[str, str] = field(default_factory=dict)
+    runtime_candidates: dict[str, list[str]] = field(default_factory=dict)
 
 
 # Issue #900 extraction: the previously per-module ``generate_all_agents``
@@ -852,6 +854,8 @@ def extract_agents_to_canonical(
     imported: list[tuple[Path, Layout]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # agent_name → first runtime label
+    source_runtimes: dict[str, str] = {}
+    runtime_candidates: dict[str, list[str]] = {}
 
     def _audit_context(src: Path, dst: Path, agent_name: str) -> dict[str, object]:
         return {
@@ -880,10 +884,17 @@ def extract_agents_to_canonical(
             imported=imported,
             skipped=skipped,
             seen=seen,
+            source_runtimes=source_runtimes,
+            runtime_candidates=runtime_candidates,
             logger=logger,
         )
 
-    return ExtractResult(imported=imported, skipped=skipped)
+    return ExtractResult(
+        imported=imported,
+        skipped=skipped,
+        source_runtimes=source_runtimes,
+        runtime_candidates=runtime_candidates,
+    )
 
 
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────

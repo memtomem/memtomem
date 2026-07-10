@@ -475,6 +475,10 @@ def _scope_to_dict(
 @router.get("/context/projects")
 async def list_projects(
     request: Request,
+    scope_id: str | None = Query(
+        default=None,
+        description="Optional project scope filter; preserves the normal response envelope.",
+    ),
     target_scope: TargetScope = Query(
         "project_shared",
         description=(
@@ -528,6 +532,8 @@ async def list_projects(
     with_counts = "counts" in include_tokens
     with_coverage = "runtime_coverage" in include_tokens
     scopes, registry_report = _discover_with_report(request)
+    if scope_id is not None:
+        scopes = [scope for scope in scopes if scope.scope_id == scope_id]
 
     def _build() -> list[dict]:
         return [

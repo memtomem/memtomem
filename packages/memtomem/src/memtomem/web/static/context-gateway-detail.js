@@ -750,7 +750,8 @@ async function loadCtxDetail(type, name, opts = {}) {
       // that only the canonical copy is removed. The §2a 409 handler below is
       // the safety net if eligibility flips between this click and the request.
       const _delScope = (_ctxProjectsCache || []).find(_ctxScopeIsActive);
-      const _cascadeOffered = !_delScope || _ctxScopeSyncEligible(_delScope);
+      const _cascadeOffered = type !== 'mcp-servers'
+        && (!_delScope || _ctxScopeSyncEligible(_delScope));
       const confirmOpts = {
         title: t('settings.ctx.confirm_delete').replace('{name}', name),
         message: _cascadeOffered

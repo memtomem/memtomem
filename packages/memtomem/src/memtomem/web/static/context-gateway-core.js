@@ -450,7 +450,15 @@ function renderImportResult(data) {
   if (data.imported && data.imported.length) {
     html += `<h4>${t('settings.ctx.import_success')}</h4>`;
     for (const item of data.imported) {
-      html += `<div class="ctx-import-item"><span class="badge badge-success">${escapeHtml(item.name)}</span></div>`;
+      const candidates = Array.isArray(item.duplicate_candidates) ? item.duplicate_candidates : [];
+      const source = item.source_runtime;
+      const provenance = source
+        ? `<span class="ctx-import-source">${escapeHtml(t('settings.ctx.import_selected_runtime', { runtime: source }))}</span>`
+        : '';
+      const duplicates = candidates.length > 1
+        ? `<span class="ctx-import-duplicates">${escapeHtml(t('settings.ctx.import_duplicate_candidates', { runtimes: candidates.join(', ') }))}</span>`
+        : '';
+      html += `<div class="ctx-import-item"><span class="badge badge-success">${escapeHtml(item.name)}</span>${provenance}${duplicates}</div>`;
     }
   }
   if (data.skipped && data.skipped.length) {
@@ -604,7 +612,17 @@ function _ctxApplySimpleMode() {
   const tab = document.getElementById('tab-context-gateway');
   if (tab) tab.classList.toggle('ctx-simple', _ctxSimpleMode);
   const toggle = document.getElementById('ctx-mode-toggle');
-  if (toggle) toggle.setAttribute('aria-pressed', _ctxSimpleMode ? 'true' : 'false');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', _ctxSimpleMode ? 'true' : 'false');
+    toggle.textContent = t(_ctxSimpleMode ? 'settings.ctx.open_advanced' : 'settings.ctx.back_to_simple');
+  }
+  const chip = document.getElementById('ctx-simple-active-chip');
+  if (chip) {
+    chip.textContent = t('settings.ctx.active_store_chip', {
+      project: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
+      tier: t(`settings.ctx.tier_option_${_ctxTargetScope}`),
+    });
+  }
 }
 
 // Flip Simple mode, persist, and re-apply the class. Callers staying on the
@@ -635,6 +653,12 @@ function _ctxOpenInAdvanced(section) {
 // Apply the persisted flag once at load. The script tag sits at the end of
 // ``index.html`` so the gateway tab markup already exists; the tab itself is
 // ``hidden`` until activated, so toggling the class now causes no flash.
+// The toggle label and active chip are written with ``t()``, and this call
+// runs before ``I18N.init()``'s locale fetch resolves — so their first paint
+// is the raw-key fallback. ``init`` dispatches ``langchange`` once the cache
+// is populated, and the gateway ``langchange`` listener (context-gateway-
+// overview.js) re-runs this renderer then and on every locale flip — neither
+// element carries ``data-i18n``, so ``applyDOM`` can't repair them.
 _ctxApplySimpleMode();
 
 function _ctxTargetScopeParam(targetScope = _ctxTargetScope) {
@@ -833,8 +857,11 @@ async function _ctxFetchProjectsData(opts = {}) {
     // has NO caller since rank 2 removed its only consumer (the Project Scope
     // Matrix); leaving the gate means re-adding a coverage consumer is a
     // one-flag change. ``_ctxWithTargetScope`` appends ``&target_scope=``.
-    const include = opts.includeCoverage ? 'counts,runtime_coverage' : 'counts';
-    const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }), { signal: opts.signal });
+    const include = opts.includeCounts === false
+      ? ''
+      : (opts.includeCoverage ? 'counts,runtime_coverage' : 'counts');
+    const query = include ? `?include=${include}` : '';
+    const res = await fetch(_ctxWithTargetScope(`/api/context/projects${query}`, { includeScope: false, targetScope: opts.targetScope }), { signal: opts.signal });
     sawResponse = true;
     // Superseded after the request was issued but before its body was read
     // (#1286): skip the parse + classification entirely and return the benign
@@ -941,6 +968,11 @@ function _ctxCommitProjects({ data, warn, authoritative, aborted }) {
     // future, distinct failure is not suppressed by a stale key.
     _ctxProjectsFetchWarnKey = null;
   }
+  // The Simple-mode active chip names the active project via the cache this
+  // commit just (possibly) rewrote — at boot it rendered the Server-CWD
+  // fallback against an empty cache, so re-render it now that the roster and
+  // the normalized active scope are known.
+  _ctxApplySimpleMode();
   return data;
 }
 

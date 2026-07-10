@@ -723,7 +723,13 @@ def _import_payload(
     """
     payload: dict = {
         "imported": [
-            {"name": p.name, "canonical_path": _safe_rel(p, project_root)} for p in result.imported
+            {
+                "name": p.name,
+                "canonical_path": _safe_rel(p, project_root),
+                "source_runtime": result.source_runtimes.get(p.name),
+                "duplicate_candidates": result.runtime_candidates.get(p.name, []),
+            }
+            for p in result.imported
         ],
         "skipped": [
             {"name": name, "reason": reason, "reason_code": code}

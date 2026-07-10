@@ -408,6 +408,8 @@ class TestExtractAgentsToCanonical:
         assert len(result.skipped) == 1
         assert result.skipped[0][0] == "helper"
         assert "already imported" in result.skipped[0][1]
+        assert result.source_runtimes == {"helper": "claude"}
+        assert result.runtime_candidates == {"helper": ["claude", "gemini"]}
 
     def test_overwrite_flag(self, tmp_path):
         claude_dir = tmp_path / ".claude/agents"

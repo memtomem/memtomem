@@ -197,6 +197,8 @@ def import_passthrough_runtime(
     skipped: list[tuple[str, str, skip_codes.SkipCode]],
     seen: dict[str, str],
     logger: logging.Logger,
+    source_runtimes: dict[str, str] | None = None,
+    runtime_candidates: dict[str, list[str]] | None = None,
 ) -> None:
     """Import one runtime's ``*.md`` files into the canonical dir, byte-exact.
 
@@ -239,6 +241,8 @@ def import_passthrough_runtime(
         name = md_file.stem
         if only_name is not None and name != only_name:
             continue
+        if runtime_candidates is not None:
+            runtime_candidates.setdefault(name, []).append(runtime)
         try:
             validate_name(name, kind=name_kind)
         except InvalidNameError as exc:
@@ -297,6 +301,8 @@ def import_passthrough_runtime(
             atomic_write_bytes(dst, content_bytes)
         imported.append((dst, layout))
         seen[name] = runtime_label
+        if source_runtimes is not None:
+            source_runtimes[name] = runtime
 
 
 def diff_atomic_artifact(

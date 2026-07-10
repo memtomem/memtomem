@@ -58,8 +58,8 @@ def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
 def test_changed_static_assets_bump_cache_versions() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert "/style.css?v=134" in html
-    assert "/app.js?v=148" in html
+    assert "/style.css?v=135" in html
+    assert "/app.js?v=149" in html
 
 
 def test_theme_icon_follows_document_theme_without_duplicate_js_state() -> None:
@@ -96,3 +96,46 @@ def test_index_uses_segmented_work_card_and_guarded_risk_disclosure() -> None:
     assert 'id="index-force-unsafe"' in disclosure
     assert ".index-mode-toggle .btn-ghost.btn-active" in css
     assert ".index-risk-content" in css
+
+
+def _relative_luminance(hex_color: str) -> float:
+    """WCAG relative luminance of a ``#rrggbb`` sRGB color."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) / 255 for i in (0, 2, 4))
+
+    def _lin(c: float) -> float:
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+
+
+def _contrast_on_white(hex_color: str) -> float:
+    """Contrast ratio of white (#fff) text over ``hex_color``."""
+    lum = _relative_luminance(hex_color)
+    return (1.0 + 0.05) / (lum + 0.05)
+
+
+def test_filled_button_accent_meets_aa_contrast_both_themes() -> None:
+    """``.btn-primary`` uses ``--accent-fill`` for its background so white text
+    clears WCAG AA (>=4.5:1). The lighter ``--accent`` (a text/tint color) is
+    ~3:1 under white — the axe smoke gate caught it on the dark filled buttons.
+    Pin the fill token per theme AND that the filled-control rules consume it,
+    not the raw ``--accent``.
+    """
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    # Dark base :root and the light override both define an accessible fill.
+    # (#3b63e8 dark, #315fd5 light — both >=4.5:1 under white.)
+    assert "--accent-fill: #3b63e8;" in css
+    assert "--accent-fill: var(--accent);" in css  # light: accent is already AA
+    assert _contrast_on_white("#3b63e8") >= 4.5
+    assert _contrast_on_white("#315fd5") >= 4.5
+    # The lighter dark accent is intentionally NOT used as a filled background.
+    assert _contrast_on_white("#7c9cff") < 4.5
+
+    # Filled backgrounds (base + hover) consume the fill, never the raw accent.
+    assert ".btn-primary { background: var(--accent-fill, var(--accent));" in css
+    assert ".tl-view-btn.tl-view-active { background: var(--accent-fill, var(--accent));" in css
+    hover = css.split(".btn-primary:hover {", maxsplit=1)[1].split("}", maxsplit=1)[0]
+    assert "--accent-fill" in hover, "hover must derive from the accessible fill"
+    assert "white" not in hover, "hover must not lighten toward white (loses contrast)"

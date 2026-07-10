@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=134" />
+  <link rel="stylesheet" href="/style.css?v=135" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -632,12 +632,12 @@
           <div class="ctx-header">
             <div class="ctx-header-title">
               <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
+              <span id="ctx-simple-active-chip" class="ctx-simple-active-chip"></span>
               <span class="help-tip" data-help-i18n="settings.ctx.status_legend" tabindex="0" role="img" aria-label="In sync — nothing to do. Out of sync — Sync to update the runtime. Not in runtime — Sync to add it. Not yet imported — Import to pull it into the Store.">i</span>
             </div>
             <div>
               <button id="ctx-mode-toggle" class="btn-ghost ctx-mode-toggle" type="button"
                       aria-pressed="false"
-                      data-i18n="settings.ctx.simple_toggle"
                       data-i18n-title="settings.ctx.simple_toggle_tooltip"
                       data-i18n-aria-label="settings.ctx.simple_toggle_aria">Simple view</button>
               <button id="ctx-refresh-btn" class="btn-ghost"
@@ -1012,6 +1012,13 @@
             <h2 data-i18n="settings.config.title">Configuration</h2>
           </div>
           <p class="settings-section-desc" data-i18n="settings.config.desc">Server settings: embedding provider, storage backend, search and indexing parameters.</p>
+          <div id="config-browser" class="config-browser" hidden>
+            <div id="config-section-switcher" class="config-section-switcher" role="group" data-i18n-aria-label="settings.config.section_switcher_aria" aria-label="Configuration sections"></div>
+            <label class="config-search-wrap" for="config-search">
+              <span class="sr-only" data-i18n="settings.config.search_label">Search settings</span>
+              <input id="config-search" type="search" autocomplete="off" data-i18n-placeholder="settings.config.search_placeholder" placeholder="Search settings…" />
+            </label>
+          </div>
           <div class="config-layout">
             <div class="config-main">
               <div id="config-reload-banner" class="config-reload-banner" hidden></div>
@@ -1304,22 +1311,23 @@
       <span class="tab-help-bar-text" data-i18n="tags.help">Tag cloud sized by frequency. Click a tag to filter search. Auto-Tag analyzes content to suggest tags for untagged chunks.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="tags" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
+    <div class="feature-page-header"><div><h2 data-i18n="tags.title">Tags</h2><p data-i18n="tags.page_desc">Explore, sort, and manage tags across indexed memories.</p></div></div>
     <div class="tags-layout">
       <div class="tags-left card">
         <div class="tags-header-row">
           <h2 data-i18n="tags.title">Tags</h2>
           <div class="tags-view-toggle">
-            <button id="tags-cloud-btn" class="btn-ghost btn-xs btn-active" title="Cloud view" data-i18n="tags.cloud_btn">Cloud</button>
-            <button id="tags-list-btn" class="btn-ghost btn-xs" title="List view" data-i18n="tags.list_btn">List</button>
+            <button id="tags-cloud-btn" class="btn-ghost btn-xs btn-active" data-i18n-title="tags.cloud_title" data-i18n-aria-label="tags.cloud_title" title="Cloud view" aria-label="Cloud view" data-i18n="tags.cloud_btn">Cloud</button>
+            <button id="tags-list-btn" class="btn-ghost btn-xs" data-i18n-title="tags.list_title" data-i18n-aria-label="tags.list_title" title="List view" aria-label="List view" data-i18n="tags.list_btn">List</button>
           </div>
           <button id="refresh-tags-btn" class="btn-ghost" data-i18n="tags.refresh">Refresh</button>
         </div>
         <input id="tags-search" type="text" data-i18n-placeholder="tags.filter_placeholder" placeholder="Filter tags..." autocomplete="off" />
         <div class="tags-sort-row">
-          <button class="tags-sort-btn btn-ghost btn-xs btn-active" data-sort="count-desc" title="Sort by count descending" data-i18n="tags.sort_count_desc">Count&#8595;</button>
-          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="count-asc" title="Sort by count ascending" data-i18n="tags.sort_count_asc">Count&#8593;</button>
-          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="az" title="Sort alphabetically A-Z" data-i18n="tags.sort_az">A-Z</button>
-          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="za" title="Sort alphabetically Z-A" data-i18n="tags.sort_za">Z-A</button>
+          <button class="tags-sort-btn btn-ghost btn-xs btn-active" data-sort="count-desc" data-i18n-title="tags.sort_count_desc_title" data-i18n-aria-label="tags.sort_count_desc_title" title="Sort by count descending" aria-label="Sort by count descending" data-i18n="tags.sort_count_desc">Count&#8595;</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="count-asc" data-i18n-title="tags.sort_count_asc_title" data-i18n-aria-label="tags.sort_count_asc_title" title="Sort by count ascending" aria-label="Sort by count ascending" data-i18n="tags.sort_count_asc">Count&#8593;</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="az" data-i18n-title="tags.sort_az_title" data-i18n-aria-label="tags.sort_az_title" title="Sort alphabetically A-Z" aria-label="Sort alphabetically A-Z" data-i18n="tags.sort_az">A-Z</button>
+          <button class="tags-sort-btn btn-ghost btn-xs" data-sort="za" data-i18n-title="tags.sort_za_title" data-i18n-aria-label="tags.sort_za_title" title="Sort alphabetically Z-A" aria-label="Sort alphabetically Z-A" data-i18n="tags.sort_za">Z-A</button>
         </div>
         <div id="tags-stats" class="tags-stats" hidden></div>
         <div id="tags-empty" class="empty-state"><div class="spinner-panel"></div></div>
@@ -1377,9 +1385,10 @@
       <span class="tab-help-bar-text" data-i18n="timeline.help">Activity timeline of indexed chunks. Heatmap shows daily activity. Toggle Chunks/Files view.</span>
       <button class="tab-help-bar-dismiss" data-help-tab="timeline" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
     </div>
+    <div class="feature-page-header"><div><h2 data-i18n="timeline.title">Timeline</h2><p data-i18n="timeline.page_desc">Review memory activity over time.</p></div></div>
     <div class="timeline-controls">
       <div class="date-range-picker">
-        <select id="tl-days" title="Time range for timeline">
+        <select id="tl-days" data-i18n-title="timeline.range_title" data-i18n-aria-label="timeline.range_title" title="Time range for timeline" aria-label="Time range for timeline">
           <option value="1" data-i18n="timeline.today">Today</option>
           <option value="7" data-i18n="timeline.7d">Last 7 days</option>
           <option value="30" selected data-i18n="timeline.30d">Last 30 days</option>
@@ -1419,6 +1428,7 @@
     <div id="tl-empty" class="empty-state">
       <span class="empty-state-icon">🕐</span>
       <span data-i18n="timeline.empty_text">Click Load to view the timeline</span>
+      <button type="button" class="btn-primary" id="tl-empty-load-btn" data-i18n="timeline.empty_cta">Load timeline</button>
     </div>
     <div id="tl-list" class="timeline-list" hidden></div>
     <div id="tl-msg" class="status-msg" hidden></div>
@@ -1770,23 +1780,23 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=7"></script>
-  <script src="/app.js?v=148"></script>
+  <script src="/app.js?v=149"></script>
   <script src="/chunk-progress.js?v=1"></script>
-  <script src="/settings-config.js?v=14"></script>
+  <script src="/settings-config.js?v=15"></script>
   <script src="/sources-memory-dirs.js?v=14"></script>
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=12"></script>
-  <script src="/settings-harness.js?v=5"></script>
+  <script src="/settings-harness.js?v=6"></script>
   <script src="/settings-hooks-watchdog.js?v=21"></script>
-  <script src="/timeline.js?v=3"></script>
-  <script src="/context-gateway-core.js?v=2"></script>
+  <script src="/timeline.js?v=4"></script>
+  <script src="/context-gateway-core.js?v=3"></script>
   <script src="/context-gateway-controls.js?v=1"></script>
-  <script src="/context-gateway-overview.js?v=3"></script>
+  <script src="/context-gateway-overview.js?v=4"></script>
   <script src="/context-gateway-list.js?v=2"></script>
   <script src="/context-gateway-conflict.js?v=2"></script>
-  <script src="/context-gateway-detail.js?v=3"></script>
+  <script src="/context-gateway-detail.js?v=4"></script>
   <script src="/context-gateway-actions.js?v=2"></script>
-  <script src="/context-portal.js?v=11"></script>
+  <script src="/context-portal.js?v=12"></script>
   <script src="/wiki.js?v=11"></script>
   <script src="/path-picker.js?v=4"></script>
 </body>

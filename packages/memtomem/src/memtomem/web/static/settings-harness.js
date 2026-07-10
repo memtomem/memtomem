@@ -68,11 +68,11 @@ function toggleHelp() {
 
 async function loadHarnessSessions() {
   const list = qs('sessions-list');
-  list.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
+  renderPageState(list, { kind: 'loading', message: t('common.loading') });
   try {
     const data = await api('GET', '/api/sessions?limit=50');
     if (!data.sessions.length) {
-      list.innerHTML = '<div class="empty-state">No sessions recorded yet</div>';
+      renderPageState(list, { kind: 'empty', message: t('settings.sessions.empty') });
       return;
     }
     list.innerHTML = '<table class="harness-table"><thead><tr>' +
@@ -93,7 +93,7 @@ async function loadHarnessSessions() {
       }).join('') +
       '</tbody></table>';
   } catch (e) {
-    list.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    renderPageState(list, { kind: 'error', message: t('settings.sessions.load_failed'), detail: e.message, retry: loadHarnessSessions });
   }
 }
 
@@ -109,7 +109,7 @@ async function showSessionEvents(sessionId) {
     const data = await api('GET', `/api/sessions/${sessionId}/events`);
     _sessionEventsCache = data.events;
     if (!data.events.length) {
-      list.innerHTML = '<div class="empty-state">No events</div>';
+      renderPageState(list, { kind: 'empty', message: t('settings.sessions.events_empty') });
       return;
     }
     const types = [...new Set(data.events.map(e => e.event_type))];
@@ -131,7 +131,7 @@ async function showSessionEvents(sessionId) {
       });
     });
   } catch (e) {
-    list.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    renderPageState(list, { kind: 'error', message: t('settings.sessions.events_load_failed'), detail: e.message, retry: () => showSessionEvents(sessionId) });
   }
 }
 
@@ -166,11 +166,11 @@ qs('sessions-refresh-btn')?.addEventListener('click', loadHarnessSessions);
 
 async function loadHarnessScratch() {
   const list = qs('scratch-list');
-  list.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
+  renderPageState(list, { kind: 'loading', message: t('common.loading') });
   try {
     const data = await api('GET', '/api/scratch');
     if (!data.entries.length) {
-      list.innerHTML = '<div class="empty-state">No working memory entries</div>';
+      renderPageState(list, { kind: 'empty', message: t('settings.scratch.empty') });
       return;
     }
     list.innerHTML = '<table class="harness-table"><thead><tr>' +
@@ -194,7 +194,7 @@ async function loadHarnessScratch() {
       }).join('') +
       '</tbody></table>';
   } catch (e) {
-    list.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    renderPageState(list, { kind: 'error', message: t('settings.scratch.load_failed'), detail: e.message, retry: loadHarnessScratch });
   }
 }
 
@@ -245,11 +245,11 @@ qs('scratch-refresh-btn')?.addEventListener('click', loadHarnessScratch);
 
 async function loadHarnessProcedures() {
   const list = qs('procedures-list');
-  list.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
+  renderPageState(list, { kind: 'loading', message: t('common.loading') });
   try {
     const data = await api('GET', '/api/procedures');
     if (!data.procedures.length) {
-      list.innerHTML = '<div class="empty-state">No procedures saved yet. Use <code>mem_procedure_save</code> to create one.</div>';
+      renderPageState(list, { kind: 'empty', message: t('settings.procedures.empty') });
       return;
     }
     list.innerHTML = data.procedures.map(p => {
@@ -264,7 +264,7 @@ async function loadHarnessProcedures() {
       </div>`;
     }).join('');
   } catch (e) {
-    list.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    renderPageState(list, { kind: 'error', message: t('settings.procedures.load_failed'), detail: e.message, retry: loadHarnessProcedures });
   }
 }
 
@@ -274,7 +274,7 @@ qs('procedures-refresh-btn')?.addEventListener('click', loadHarnessProcedures);
 
 async function loadHarnessHealth() {
   const report = qs('health-report');
-  report.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
+  renderPageState(report, { kind: 'loading', message: t('common.loading') });
   try {
     const d = await api('GET', '/api/eval');
     report.innerHTML = `
@@ -329,7 +329,7 @@ async function loadHarnessHealth() {
       </div>` : ''}
     `;
   } catch (e) {
-    report.innerHTML = `<div class="empty-state">Error: ${e.message}</div>`;
+    renderPageState(report, { kind: 'error', message: t('settings.health.load_failed'), detail: e.message, retry: loadHarnessHealth });
   }
 }
 
@@ -344,7 +344,7 @@ qs('health-refresh-btn')?.addEventListener('click', loadHarnessHealth);
 async function loadRedactionStats() {
   const report = qs('redaction-stats-report');
   if (!report) return;
-  report.innerHTML = `<div class="empty-state"><div class="spinner-panel"></div>${srLoading()}</div>`;
+  renderPageState(report, { kind: 'loading', message: t('common.loading') });
   try {
     const d = await api('GET', '/api/privacy/stats');
     const outcomes = (d && d.outcomes) || {};
@@ -369,13 +369,12 @@ async function loadRedactionStats() {
           <tbody>${surfaces.map(s => `<tr><td class="mono">${escapeHtml(s)}</td>${
             OUTCOMES.map(k => `<td>${Number(byTool[s] && byTool[s][k]) || 0}</td>`).join('')}</tr>`).join('')}</tbody>
         </table>
-      </div>` : `<div class="empty-state">${t('settings.redaction.empty')}</div>`;
+      </div>` : `<div class="page-state page-state--empty"><span class="page-state-message">${t('settings.redaction.empty')}</span></div>`;
     report.innerHTML = `<div class="health-grid">${cards}</div>${table}`;
   } catch (e) {
-    const msg = escapeHtml((e && e.message) || String(e));
-    report.innerHTML = `<div class="empty-state">${t('settings.redaction.error', { error: msg })}</div>`;
+    const msg = (e && e.message) || String(e);
+    renderPageState(report, { kind: 'error', message: t('settings.redaction.load_failed'), detail: msg, retry: loadRedactionStats });
   }
 }
 
 qs('redaction-stats-refresh-btn')?.addEventListener('click', loadRedactionStats);
-

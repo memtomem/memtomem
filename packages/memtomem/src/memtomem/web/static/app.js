@@ -1222,6 +1222,43 @@ function emptyState(icon, message, hint, cta) {
   return `<div class="empty-state">${i}<span>${escapeHtml(message)}</span>${h}${c}</div>`;
 }
 
+// Shared page state for Settings and other card-based workspaces. Error detail
+// is attached with textContent and exposed only in dev mode; prod callers show
+// a localized summary plus Retry without leaking backend diagnostics.
+function renderPageState(container, { kind, message, detail = '', retry = null }) {
+  if (!container) return;
+  if (kind === 'loading') {
+    panelLoading(container);
+    return;
+  }
+  const state = document.createElement('div');
+  state.className = `page-state page-state--${kind}`;
+  if (kind === 'error') state.setAttribute('role', 'alert');
+  const text = document.createElement('span');
+  text.className = 'page-state-message';
+  text.textContent = message;
+  state.appendChild(text);
+  if (kind === 'error' && retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn-ghost page-state-retry';
+    button.textContent = t('common.retry');
+    button.addEventListener('click', retry);
+    state.appendChild(button);
+  }
+  if (kind === 'error' && detail && STATE.uiMode === 'dev') {
+    const disclosure = document.createElement('details');
+    disclosure.className = 'page-state-details';
+    const summary = document.createElement('summary');
+    summary.textContent = t('common.technical_details');
+    const pre = document.createElement('pre');
+    pre.textContent = detail;
+    disclosure.append(summary, pre);
+    state.appendChild(disclosure);
+  }
+  container.replaceChildren(state);
+}
+
 // ── A1: Toast Notifications ──
 function showToast(message, type = 'success', options = {}) {
   // ``options.action`` ({ label, onClick }) renders an inline action

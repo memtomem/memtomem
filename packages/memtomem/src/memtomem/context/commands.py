@@ -399,6 +399,8 @@ class ExtractResult:
     imported: list[tuple[Path, Layout]]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
+    source_runtimes: dict[str, str] = field(default_factory=dict)
+    runtime_candidates: dict[str, list[str]] = field(default_factory=dict)
 
 
 # Issue #900 extraction — see the matching adapter in
@@ -590,6 +592,8 @@ def extract_commands_to_canonical(
     imported: list[tuple[Path, Layout]] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # cmd_name → first runtime label
+    source_runtimes: dict[str, str] = {}
+    runtime_candidates: dict[str, list[str]] = {}
 
     def _claude_audit_context(src: Path, dst: Path, cmd_name: str) -> dict[str, object]:
         # Mirror agents.py audit_context shape — SOC pipelines grep both
@@ -622,6 +626,8 @@ def extract_commands_to_canonical(
         imported=imported,
         skipped=skipped,
         seen=seen,
+        source_runtimes=source_runtimes,
+        runtime_candidates=runtime_candidates,
         logger=logger,
     )
 
@@ -636,6 +642,7 @@ def extract_commands_to_canonical(
             cmd_name = toml_file.stem
             if only_name is not None and cmd_name != only_name:
                 continue
+            runtime_candidates.setdefault(cmd_name, []).append("gemini")
             try:
                 validate_name(cmd_name, kind="command name")
             except InvalidNameError as exc:
@@ -702,9 +709,15 @@ def extract_commands_to_canonical(
                 atomic_write_text(dst, canonical_content)
             imported.append((dst, layout))
             seen[cmd_name] = gemini_label
+            source_runtimes[cmd_name] = "gemini"
 
     # Codex prompts intentionally not imported (see docstring rationale).
-    return ExtractResult(imported=imported, skipped=skipped)
+    return ExtractResult(
+        imported=imported,
+        skipped=skipped,
+        source_runtimes=source_runtimes,
+        runtime_candidates=runtime_candidates,
+    )
 
 
 # ── Diff: canonical ↔ runtimes ──────────────────────────────────────

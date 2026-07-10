@@ -1239,3 +1239,273 @@ def test_sync_all_confirm_shows_per_type_runtime_breakdown(page, mm_web_url: str
         "() => document.getElementById('confirm-modal').hidden",
         timeout=2_000,
     )
+
+
+# ── Batch endpoint path (PR #1704) ──────────────────────────────────────
+#
+# On the project_shared tier the handler now POSTs the backend orchestrator
+# ``/api/context/sync-all`` once instead of fanning out the five per-type
+# routes. These specs pin the batch branch's report → row-state → toast
+# routing, and the deliberate fallback: a 200 without ``phases`` (older
+# server / generic test double) re-enters the legacy per-type loop.
+
+NOTHING_SYNCED_TOAST = "Nothing to sync yet — every section is empty. Create or import artifacts first."  # settings.ctx.sync_all_nothing_synced
+
+
+def _batch_phase(phase_type: str, *, generated=(), skipped=(), status: str = "ok") -> dict:
+    return {
+        "type": phase_type,
+        "status": status,
+        "generated": list(generated),
+        "dropped": [],
+        "skipped": list(skipped),
+    }
+
+
+def _batch_report(phases: list[dict], *, changed: bool) -> dict:
+    return {
+        "phases": phases,
+        "summary": {
+            "status": "ok",
+            "changed": changed,
+            "outcome": "changed" if changed else "noop",
+        },
+    }
+
+
+def _run_sync_all(page, mm_web_url: str, overview_state: dict | None = None) -> int:
+    """Boot → open the gateway → confirm Sync All. Returns the overview GET
+    count captured between open and click (0 when no counter is threaded), so
+    callers can pin the post-sync reload without counting cold-mount GETs."""
+    page.goto(mm_web_url)
+    _open_context_gateway(page)
+    pre_click_calls = overview_state["n"] if overview_state is not None else 0
+    page.locator("#ctx-sync-all-btn").click()
+    page.wait_for_function("() => !document.getElementById('confirm-modal').hidden", timeout=2_000)
+    page.locator("#confirm-ok-btn").click()
+    page.wait_for_function("() => document.getElementById('confirm-modal').hidden", timeout=2_000)
+    return pre_click_calls
+
+
+def test_sync_all_batch_success_skips_per_type_posts(page, mm_web_url: str) -> None:
+    """Batch-1: a phases report with every phase ``ok`` renders five done rows
+    and the success toast, without firing a single legacy per-type POST."""
+    install_default_stubs(page)
+    overview_state = _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    legacy_calls: list[str] = []
+
+    def _record_sync(route):
+        legacy_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    for typ in ("skills", "commands", "agents", "mcp-servers", "settings"):
+        page.route(f"**/api/context/{typ}/sync", _record_sync)
+
+    batch_calls: list[str] = []
+
+    def _batch(route):
+        batch_calls.append(route.request.url)
+        report = _batch_report(
+            [
+                _batch_phase("skills", generated=["a"]),
+                _batch_phase("commands"),
+                _batch_phase("agents"),
+                _batch_phase("mcp-servers"),
+                {"type": "settings", "status": "ok", "results": [{"status": "ok"}]},
+            ],
+            changed=True,
+        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(report))
+
+    page.route("**/api/context/sync-all**", _batch)
+
+    pre_click_calls = _run_sync_all(page, mm_web_url, overview_state)
+
+    page.wait_for_selector("#toast-container .toast.toast-success", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-success .toast-msg").text_content() or ""
+    ).strip()
+    assert toast_text == SYNC_SUCCESS_TOAST, f"expected success toast, got {toast_text!r}"
+
+    assert len(batch_calls) == 1, f"exactly one batch POST expected, got {batch_calls!r}"
+    assert legacy_calls == [], (
+        f"batch path must not fire legacy per-type POSTs, got {legacy_calls!r}"
+    )
+    done_rows = page.locator("#ctx-sync-status .ctx-sync-phase--done")
+    assert done_rows.count() == 5, "all five phase rows must render done"
+    # The batch branch returns early, but ``finally`` must still refresh the
+    # overview (#1074) — pin the post-sync overview GET.
+    assert overview_state["n"] >= pre_click_calls + 1, (
+        f"Sync All must trigger a post-sync overview reload; calls before "
+        f"= {pre_click_calls}, after = {overview_state['n']}"
+    )
+
+
+def test_sync_all_batch_attention_skip_demotes_row_and_warns(page, mm_web_url: str) -> None:
+    """Batch-2 (#1247 id 21 parity): a failure-class skip inside an ``ok``
+    phase demotes that row to attention and raises the skipped-items warning
+    toast instead of the unqualified success toast."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    def _batch(route):
+        report = _batch_report(
+            [
+                _batch_phase(
+                    "skills",
+                    generated=["a"],
+                    skipped=[
+                        {
+                            "runtime": "broken-skill",
+                            "reason": "front-matter parse failed",
+                            "reason_code": "parse_error",
+                        }
+                    ],
+                ),
+                _batch_phase("commands"),
+                _batch_phase("agents"),
+                _batch_phase("mcp-servers"),
+                {"type": "settings", "status": "ok", "results": [{"status": "ok"}]},
+            ],
+            changed=True,
+        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(report))
+
+    page.route("**/api/context/sync-all**", _batch)
+
+    _run_sync_all(page, mm_web_url)
+
+    page.wait_for_selector("#toast-container .toast.toast-warning", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-warning .toast-msg").text_content() or ""
+    ).strip()
+    assert "broken-skill (parse_error)" in toast_text, (
+        f"warning toast must name the skipped item, got {toast_text!r}"
+    )
+    # Row order is _CTX_SYNC_PHASES: skills is the first row.
+    first_row = page.locator("#ctx-sync-status .ctx-sync-phase").first
+    cls = first_row.get_attribute("class") or ""
+    assert "ctx-sync-phase--attention" in cls, (
+        f"skills row must demote to attention, got class {cls!r}"
+    )
+
+
+def test_sync_all_batch_attention_outranks_needs_confirmation(page, mm_web_url: str) -> None:
+    """Batch-2b (severity-ladder parity): a run with BOTH a failure-class
+    artifact skip AND a settings ``needs_confirmation`` must surface the more
+    severe artifact warning, not the settings info toast — mirroring the legacy
+    orchestrator's ``attentionSkips`` > ``needs_confirmation`` order."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    def _batch(route):
+        report = _batch_report(
+            [
+                _batch_phase(
+                    "skills",
+                    generated=["a"],
+                    skipped=[
+                        {
+                            "runtime": "broken-skill",
+                            "reason": "front-matter parse failed",
+                            "reason_code": "parse_error",
+                        }
+                    ],
+                ),
+                _batch_phase("commands"),
+                _batch_phase("agents"),
+                _batch_phase("mcp-servers"),
+                {
+                    "type": "settings",
+                    "status": "needs_confirmation",
+                    "results": [{"status": "needs_confirmation"}],
+                },
+            ],
+            changed=True,
+        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(report))
+
+    page.route("**/api/context/sync-all**", _batch)
+
+    _run_sync_all(page, mm_web_url)
+
+    # The warning (attention skip) must win over the info (needs_confirmation).
+    page.wait_for_selector("#toast-container .toast.toast-warning", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-warning .toast-msg").text_content() or ""
+    ).strip()
+    assert "broken-skill (parse_error)" in toast_text, (
+        f"combined run must surface the artifact warning, got {toast_text!r}"
+    )
+    assert page.locator("#toast-container .toast.toast-info").count() == 0, (
+        "the settings needs_confirmation info toast must not outrank the warning"
+    )
+
+
+def test_sync_all_batch_noop_emits_nothing_synced_info(page, mm_web_url: str) -> None:
+    """Batch-3: ``summary.changed === false`` routes to the nothing-synced
+    info toast, not the success toast."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    def _batch(route):
+        report = _batch_report(
+            [
+                _batch_phase("skills"),
+                _batch_phase("commands"),
+                _batch_phase("agents"),
+                _batch_phase("mcp-servers"),
+                {"type": "settings", "status": "ok", "results": [{"status": "skipped"}]},
+            ],
+            changed=False,
+        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(report))
+
+    page.route("**/api/context/sync-all**", _batch)
+
+    _run_sync_all(page, mm_web_url)
+
+    page.wait_for_selector("#toast-container .toast.toast-info", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-info .toast-msg").text_content() or ""
+    ).strip()
+    assert toast_text == NOTHING_SYNCED_TOAST, f"expected no-op toast, got {toast_text!r}"
+
+
+def test_sync_all_batch_unsupported_response_falls_back_to_legacy(page, mm_web_url: str) -> None:
+    """Batch-4: a 200 without ``phases`` (older server / generic double) falls
+    back to the legacy per-type orchestration — five POSTs in phase order."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    sync_calls: list[str] = []
+
+    def _record_sync(route):
+        sync_calls.append(route.request.url)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"results": [{"status": "ok"}]})
+            if "settings" in route.request.url
+            else "{}",
+        )
+
+    for typ in ("skills", "commands", "agents", "mcp-servers", "settings"):
+        page.route(f"**/api/context/{typ}/sync", _record_sync)
+    page.route(
+        "**/api/context/sync-all**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+
+    _run_sync_all(page, mm_web_url)
+
+    page.wait_for_selector("#toast-container .toast.toast-success", timeout=4_000)
+    sync_paths = [u.split("/api/")[-1].split("?")[0] for u in sync_calls]
+    assert sync_paths == [
+        "context/skills/sync",
+        "context/commands/sync",
+        "context/agents/sync",
+        "context/mcp-servers/sync",
+        "context/settings/sync",
+    ], f"fallback must run the legacy five-phase order, got {sync_paths!r}"

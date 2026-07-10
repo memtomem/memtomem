@@ -248,8 +248,16 @@ def _summarize(phases: list[dict[str, Any]]) -> dict[str, Any]:
         status = "partial"
     else:
         status = "ok"
+    changed = any(
+        phase.get("generated")
+        or phase.get("dropped")
+        or any(row.get("status") == "ok" for row in phase.get("results", ()))
+        for phase in phases
+    )
     return {
         "status": status,
+        "changed": changed,
+        "outcome": "changed" if changed else "noop",
         **counts,
         "generated_total": generated_total,
         "skipped_total": skipped_total,

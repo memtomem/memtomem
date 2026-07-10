@@ -167,10 +167,13 @@ def _import_payload(
     payload: dict = {
         "imported": [
             {
-                "name": spec.canonical_name(p, layout),
+                "name": name,
                 "canonical_path": _safe_rel(p, project_root),
+                "source_runtime": result.source_runtimes.get(name),
+                "duplicate_candidates": result.runtime_candidates.get(name, []),
             }
             for p, layout in result.imported
+            for name in (spec.canonical_name(p, layout),)
         ],
         "skipped": [
             {"name": name, "reason": reason, "reason_code": code}

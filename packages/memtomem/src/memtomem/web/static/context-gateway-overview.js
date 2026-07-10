@@ -146,7 +146,8 @@ function _ctxSimpleOverviewBody(data, types) {
   if (!anyItems) {
     html += `<div class="ctx-simple-empty-hint">
         <span>${escapeHtml(t('settings.ctx.simple_empty_hint'))}</span>
-        <button type="button" class="btn-ghost ctx-simple-advanced-cta" data-ctx-advance>${escapeHtml(t('settings.ctx.simple_empty_cta'))}</button>
+        <button type="button" class="btn-ghost ctx-simple-advanced-cta" data-ctx-advance data-section="ctx-skills" data-focus-target=".ctx-import-btn">${escapeHtml(t('settings.ctx.simple_empty_import'))}</button>
+        <button type="button" class="btn-primary ctx-simple-advanced-cta" data-ctx-advance data-section="ctx-skills" data-focus-target=".ctx-create-btn">${escapeHtml(t('settings.ctx.simple_empty_create'))}</button>
       </div>`;
   }
   html += '</div>';
@@ -161,7 +162,11 @@ function _ctxSimpleOverviewBody(data, types) {
 // Overview in place on success. No-op in Advanced (neither selector matches).
 function _ctxWireSimpleRows(el) {
   el.querySelectorAll('[data-ctx-advance]').forEach(btn => {
-    btn.addEventListener('click', () => _ctxOpenInAdvanced(btn.dataset.section || ''));
+    btn.addEventListener('click', () => {
+      _ctxOpenInAdvanced(btn.dataset.section || '');
+      const target = btn.dataset.focusTarget;
+      if (target) requestAnimationFrame(() => document.querySelector(`#settings-ctx-skills ${target}`)?.focus());
+    });
   });
   el.querySelectorAll('[data-ctx-action]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1081,6 +1086,14 @@ window.addEventListener('langchange', () => {
   // ``loadCtxList``) is re-rendered by the ``loadCtxList`` re-issue
   // below — no separate handling needed.
   _ctxRefreshWriteBlockedState();
+  // The Simple-mode toggle label + active chip are inline ``t()`` writes with
+  // no ``data-i18n`` (context-gateway-core.js) — their load-time paint runs
+  // before the locale cache exists, so the ``langchange`` that ``I18N.init``
+  // dispatches (and every later flip) must re-run the renderer. BEFORE the
+  // ``hostActive`` gate: the boot dispatch usually fires with another tab
+  // active, and the raw-key labels must be repaired before the user first
+  // opens the gateway.
+  _ctxApplySimpleMode();
   // Gateway sections now live under ``#tab-context-gateway`` (#962). Keep
   // the legacy ``#tab-settings`` check as a fallback so a partial revert
   // doesn't silently disable the langchange re-render — drop it once the
@@ -1501,6 +1514,99 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
+    if (syncAllTier === 'project_shared') {
+      anyPhaseStarted = true;
+      for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'syncing');
+      const response = await fetch(
+        _ctxWithTargetScope('/api/context/sync-all', pinnedScopeOpts),
+        { method: 'POST', headers },
+      );
+      if (!response.ok) {
+        const reason = await _ctxErrorMessageFromResponse(
+          response, t('settings.ctx.sync_settings_failed_fallback'));
+        for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'failed');
+        showToast(t('toast.sync_failed', { error: reason }), 'error');
+        return;
+      }
+      const report = await response.json();
+      if (Array.isArray(report.phases)) {
+        // Skip-row classification deliberately stays client-side (#1262): the
+        // route reports raw ``reason_code`` rows, so run the same
+        // ``_ctxIsAttentionSkip`` sweep as the legacy per-type loop — a
+        // failure-class skip (parse_error / duplicate_name / …) demotes its
+        // row to ``attention`` and gates the success toast (#1247 id 21).
+        const batchAttentionSkips = [];
+        for (const phase of report.phases) {
+          const counts = phase.type === 'settings'
+            ? undefined
+            : _ctxSyncArtifactCounts(phase);
+          const phaseSkips = Array.isArray(phase.skipped) ? phase.skipped : [];
+          const phaseAttention = phaseSkips.filter(_ctxIsAttentionSkip);
+          batchAttentionSkips.push(...phaseAttention.map(_ctxAttentionSkipLabel));
+          const state = phase.status === 'failed'
+            ? 'failed'
+            : phase.status === 'needs_confirmation' || phaseAttention.length
+              ? 'attention'
+              : 'done';
+          setPhase(phase.type, state, counts);
+        }
+        // Toast ladder — mirrors the legacy orchestrator's severity order
+        // (this file, lines ~1794): failed > failure-class skips (warning,
+        // #1247) > settings needs_confirmation (info + Open Settings action,
+        // #774) > no-op > success. Warning outranks info: when a run both
+        // skips a broken artifact AND needs host-write confirmation, the more
+        // severe artifact warning must win, not the settings info toast.
+        const failedPhases = report.phases.filter((phase) => phase.status === 'failed');
+        const needsConfirmation = report.phases.some(
+          (phase) => phase.status === 'needs_confirmation');
+        if (failedPhases.length) {
+          showToast(t('toast.sync_partial_failed', {
+            succeeded: report.phases.filter((phase) => phase.status === 'ok').map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
+            failed_phase: failedPhases.map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
+            reason: failedPhases[0].error?.message || t('settings.ctx.sync_settings_failed_fallback'),
+          }), 'error');
+        } else if (batchAttentionSkips.length) {
+          const items = [...new Set(batchAttentionSkips)];
+          showToast(
+            t('settings.ctx.sync_skipped_attention', {
+              count: items.length,
+              items: items.join(', '),
+            }),
+            'warning',
+          );
+        } else if (needsConfirmation) {
+          showToast(
+            t('toast.sync_partial_settings_needs_confirmation'),
+            'info',
+            {
+              action: {
+                label: t('toast.open_settings_action'),
+                onClick: () => switchSettingsSection('hooks-sync'),
+              },
+            },
+          );
+        } else if (report.summary?.changed === false || report.summary?.outcome === 'noop') {
+          showToast(t('settings.ctx.sync_all_nothing_synced'), 'info');
+        } else {
+          showToast(t('settings.ctx.sync_success'));
+        }
+        return;
+      }
+      // An older proxy/test double can answer the new route with a generic
+      // object. Treat that as unsupported and retain the established per-type
+      // orchestration instead of leaving five rows stuck on “Syncing”. If the
+      // 200 actually came from a real (older) server that DID run the batch,
+      // the legacy loop re-POSTs the five phases — accepted: each sync is a
+      // regenerate-from-canonical, so the second pass is an idempotent no-op.
+      for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'pending');
+    }
+    // Re-bind the CSRF headers next to the legacy fan-out: the batch branch
+    // above pushed these fetches past the CSRF invariant's binding-lookback
+    // window (test_spa_api_fetch_threads_csrf_token), same rationale as the
+    // settings phase's inline binding below. ``csrf`` is the run-level token.
+    const legacyHeaders = csrf
+      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+      : { 'Content-Type': 'application/json' };
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
@@ -1513,7 +1619,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
             scopeResolved: true,
             targetScope: syncAllTier,
           }),
-          { method: 'POST', headers },
+          { method: 'POST', headers: legacyHeaders },
         );
       } catch (err) {
         failed = { phase: typ, reason: err.message };

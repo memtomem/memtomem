@@ -1017,7 +1017,7 @@ input[type="text"]:focus, input[type="number"]:focus, input[type="date"]:focus, 
 button { border: none; cursor: pointer; border-radius: var(--radius); font-size: 0.875rem; padding: 7px 14px; transition: opacity 0.15s; }
 button:hover { opacity: 0.85; }
 button:active { opacity: 0.7; }
-.btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
+.btn-primary { background: var(--accent-fill, var(--accent)); color: #fff; font-weight: 600; }
 .btn-danger  { background: var(--danger); color: #fff; font-weight: 600; }
 .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 /* Solid-bg .btn-danger needs higher contrast than the foreground-color
@@ -2159,7 +2159,7 @@ kbd {
   color: var(--muted); cursor: pointer; transition: background 0.15s, color 0.15s;
 }
 .tl-view-btn:hover { background: var(--bg); color: var(--text); }
-.tl-view-btn.tl-view-active { background: var(--accent); color: #fff; }
+.tl-view-btn.tl-view-active { background: var(--accent-fill, var(--accent)); color: #fff; }
 
 /* Timeline file view */
 .timeline-file-item {
@@ -5151,6 +5151,10 @@ button.ctx-runtime-chip--greyed:focus-visible {
   --muted: #9aa4b8;
   --accent: #7c9cff;
   --accent-rgb: 124, 156, 255;
+  /* Filled-control background. The dark accent (#7c9cff) reads well as text
+     and tint, but white-on-#7c9cff is ~3.0:1 — below the WCAG AA 4.5:1 the
+     axe smoke gate enforces — so filled buttons take this deeper blue. */
+  --accent-fill: #3b63e8;
   --green: #53c78a;
   --yellow: #f2b84b;
   --danger: #f06b72;
@@ -5183,6 +5187,7 @@ button.ctx-runtime-chip--greyed:focus-visible {
   --muted: #5d687a;
   --accent: #315fd5;
   --accent-rgb: 49, 95, 213;
+  --accent-fill: var(--accent);
   --green: #18794e;
   --yellow: #8f5b00;
   --danger: #b4232c;
@@ -5235,7 +5240,10 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: var(--focus-ring); }
-.btn-primary:hover { background: color-mix(in srgb, var(--accent) 86%, white); }
+/* Hover darkens the accessible fill (not the lighter --accent, and not toward
+   white) so white button text keeps its ≥4.5:1 contrast in the hovered state
+   too — the smoke gate doesn't hover, so a lighten-on-hover would slip past it. */
+.btn-primary:hover { background: color-mix(in srgb, var(--accent-fill, var(--accent)) 88%, black); }
 .btn-ghost:hover { background: var(--surface-subtle); border-color: var(--border-strong); color: var(--text); }
 .card,
 .ctx-card,
@@ -5348,7 +5356,29 @@ textarea:focus-visible,
   color: var(--muted);
   line-height: 1.55;
 }
+.config-browser { position: sticky; top: 0; z-index: 8; display: flex; gap: var(--space-3); align-items: center; padding: var(--space-3); margin-bottom: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(8px); }
+.config-section-switcher { display: flex; gap: var(--space-1); min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.config-section-chip { min-height: 44px; flex: 0 0 auto; padding: var(--space-2) var(--space-3); border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted); }
+.config-section-chip.active { color: var(--text); background: rgba(var(--accent-rgb), .12); border-color: rgba(var(--accent-rgb), .35); }
+.config-section-dirty { margin-left: 5px; color: var(--yellow); font-size: 1.1em; }
+.config-search-wrap { margin-left: auto; flex: 0 1 280px; }
+.config-search-wrap input { width: 100%; min-height: 44px; }
 .ctx-control-bar { background: var(--bg); padding: var(--space-3) 0; }
+.ctx-simple-active-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .76rem; }
+#tab-context-gateway:not(.ctx-simple) .ctx-simple-active-chip { display: none; }
+.ctx-simple-empty-hint { flex-wrap: wrap; }
+.feature-page-header { display: flex; align-items: center; justify-content: space-between; padding: var(--space-5); border-bottom: 1px solid var(--border); }
+.feature-page-header h2 { margin: 0; font-size: 1.2rem; }
+.feature-page-header p { margin: 4px 0 0; color: var(--muted); }
+.page-state { min-height: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-6); text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); background: var(--surface-subtle); }
+.page-state--error { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.page-state-details { width: min(100%, 720px); text-align: left; }
+.page-state-details summary { cursor: pointer; color: var(--muted); }
+.page-state-details pre { max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; padding: var(--space-3); border-radius: var(--radius-sm); background: var(--bg); color: var(--muted); }
+.ctx-import-item { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.ctx-import-source, .ctx-import-duplicates { color: var(--muted); font-size: .78rem; }
+.tags-view-toggle, .tags-sort-row, .tl-view-toggle { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-subtle); }
+.tags-view-toggle button, .tags-sort-row button, .tl-view-toggle button { min-height: 44px; }
 
 @media (max-width: 760px) {
   button,
@@ -5431,6 +5461,19 @@ textarea:focus-visible,
   .settings-nav-group { display: none !important; }
   .settings-nav-btn.active { box-shadow: inset 0 -3px 0 var(--accent); }
   .settings-content { padding: var(--space-3); }
+  .config-browser { align-items: stretch; flex-direction: column; }
+  .config-search-wrap { width: 100%; flex-basis: auto; }
+  .feature-page-header { padding: var(--space-4) var(--space-3); }
+  .tags-layout { grid-template-columns: 1fr; }
+  .tags-header-row, .tags-sort-row { align-items: stretch; flex-wrap: wrap; }
+  .tags-view-toggle button, .tags-sort-row button { flex: 1 1 auto; min-width: 44px; }
+  .timeline-controls { display: grid; grid-template-columns: 1fr; }
+  .timeline-controls > * { width: 100%; }
+  .scratch-add-row { display: grid; grid-template-columns: 1fr; }
+  .scratch-add-row > * { width: 100% !important; max-width: none; }
+  .harness-header { align-items: stretch; flex-wrap: wrap; }
+  .harness-table { min-width: 640px; }
+  .harness-list, .harness-health, .harness-events { overflow-x: auto; }
   .ctx-control-bar { align-items: stretch; }
   .ctx-control-bar > * { max-width: 100%; }
 }
