@@ -157,6 +157,50 @@ describe('Context Portal board (PR4)', () => {
     expect(labels[1]).toBe('Alpha');
   });
 
+  it('sort by Most items groups rows with failed count probes last (#1692 PR 5)', async () => {
+    const { window } = await boot();
+    // Local roster: partial totals (failed kinds ride as 0) must not rank
+    // against reliable ones — Zulu's partial 18 would otherwise beat Alpha's
+    // reliable 5. Within the unavailable tail, name order keeps it stable.
+    const base = {
+      tier: 'project', sources: ['known-projects'], missing: false, stale: false,
+      experimental: false,
+    };
+    const scopes = [
+      SCOPES[0],  // Server CWD (pinned first regardless)
+      { ...base, scope_id: 'p-alpha', project_scope_id: 'p-alpha', label: 'Alpha',
+        root: '/work/alpha', counts: { skills: 5, commands: 0, agents: 0, 'mcp-servers': 0 },
+        counts_unavailable: [] },
+      { ...base, scope_id: 'p-omega', project_scope_id: 'p-omega', label: 'Omega',
+        root: '/work/omega', counts: { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 },
+        counts_unavailable: [] },
+      { ...base, scope_id: 'p-zulu', project_scope_id: 'p-zulu', label: 'Zulu',
+        root: '/work/zulu', counts: { skills: 9, commands: 9, agents: 0, 'mcp-servers': 0 },
+        counts_unavailable: ['agents'] },
+      { ...base, scope_id: 'p-mike', project_scope_id: 'p-mike', label: 'Mike',
+        root: '/work/mike', counts: { skills: 0, commands: 0, agents: 0, 'mcp-servers': 0 },
+        counts_unavailable: ['skills'] },
+    ];
+    const upstream = window.fetch;
+    window.fetch = async (input, init) => {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      if (url.startsWith('/api/context/projects')) {
+        return { ok: true, status: 200, json: async () => ({ scopes, target_scope: 'project_shared' }) };
+      }
+      return upstream(input, init);
+    };
+    await window.loadCtxProjects();
+    const sort = window.document.getElementById('ctx-portal-sort');
+    sort.value = 'items';
+    sort.dispatchEvent(new window.Event('change', { bubbles: true }));
+    // CWD, then reliable rows by total (Alpha 5 > Omega 0), then the
+    // unavailable group in name order (Mike < Zulu) despite Zulu's higher
+    // partial total.
+    const labels = rowsText(window);
+    expect(labels[0]).toBe('srv (current folder)');
+    expect(labels.slice(1)).toEqual(['Alpha', 'Omega', 'Mike', 'Zulu']);
+  });
+
   it('switching active project persists the id and marks the row active', async () => {
     const { window } = await boot();
     await window.loadCtxProjects();

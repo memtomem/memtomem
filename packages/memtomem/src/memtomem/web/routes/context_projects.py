@@ -318,13 +318,19 @@ def resolve_scope_root_cascade_gated(
 # ── GET /context/projects ────────────────────────────────────────────────
 
 
-def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
-    """Per-type unique-name counts for a project root.
+def _counts_for(root: Path, *, target_scope: TargetScope) -> tuple[dict[str, int], list[str]]:
+    """Per-type unique-name counts for a project root, plus failed probe kinds.
 
     Mirrors the union the existing ``list_*`` routes render: canonical files
     plus runtime-only items the diff layer surfaces. Each ``diff_*`` call
     returns ``(runtime, name, status)`` triples; we count distinct names
     plus any canonical names with no runtime trace yet.
+
+    A failed probe keeps ``0`` in the counts dict — the wire type of every
+    count is pinned as an int and existing clients sum them — and instead
+    reports its kind key in the second element (#1692 PR 5). Callers surface
+    that list as ``counts_unavailable`` so a probe failure is no longer
+    wire-identical to a genuine zero.
 
     Cost: 3 × (canonical scan + N runtime scans) per scope, executed every
     time the UI fetches ``GET /api/context/projects`` (every tab switch).
@@ -332,6 +338,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     pushes that ceiling.
     """
     counts: dict[str, int] = {}
+    failed: list[str] = []
     try:
         names = {name for _runtime, name, _status in diff_skills(root, scope=target_scope)}
         names.update(p.name for p in list_canonical_skills(root, scope=target_scope))
@@ -339,6 +346,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     except Exception:
         logger.warning("counts: skills failed for %s", root, exc_info=True)
         counts["skills"] = 0
+        failed.append("skills")
 
     try:
         names = {name for _runtime, name, _status in diff_commands(root, scope=target_scope)}
@@ -362,6 +370,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     except Exception:
         logger.warning("counts: commands failed for %s", root, exc_info=True)
         counts["commands"] = 0
+        failed.append("commands")
 
     try:
         names = {name for _runtime, name, _status in diff_agents(root, scope=target_scope)}
@@ -377,6 +386,7 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
     except Exception:
         logger.warning("counts: agents failed for %s", root, exc_info=True)
         counts["agents"] = 0
+        failed.append("agents")
 
     try:
         if target_scope == "project_shared":
@@ -384,12 +394,15 @@ def _counts_for(root: Path, *, target_scope: TargetScope) -> dict[str, int]:
             names.update(p.stem for p in list_canonical_mcp_servers(root))
             counts["mcp-servers"] = len(names)
         else:
+            # Deliberate zero — MCP servers only exist at the project_shared
+            # tier — so this is NOT a probe failure.
             counts["mcp-servers"] = 0
     except Exception:
         logger.warning("counts: mcp-servers failed for %s", root, exc_info=True)
         counts["mcp-servers"] = 0
+        failed.append("mcp-servers")
 
-    return counts
+    return counts, failed
 
 
 def _scope_to_dict(
@@ -407,18 +420,34 @@ def _scope_to_dict(
     # per-type artifact scans (see ``_counts_for``), so the N-project Portal
     # list stays cheap by default. ``null`` means "not computed" — distinct
     # from a genuine zero — and a missing root has nothing to count.
-    counts = (
-        _counts_for(scope.root, target_scope=target_scope) if (with_counts and computable) else None
-    )
+    # ``counts_unavailable`` mirrors that null convention: ``null`` when counts
+    # weren't computed, else the (possibly empty) list of failed probe kinds.
+    counts: dict[str, int] | None = None
+    counts_unavailable: list[str] | None = None
+    if with_counts and computable:
+        counts, counts_unavailable = _counts_for(scope.root, target_scope=target_scope)
 
     # Runtime coverage is opt-in via ``?include=runtime_coverage`` for the same
     # reason: ``compute_runtime_coverage`` runs a ``probe_all_runtimes`` pass
     # (per-client config-file reads) for every scope, so it must not be paid by
     # default callers (ADR-0021 PR2 "cheap by default"). ``null`` means "not
     # computed"; a present root with no detected runtimes yields ``[]``.
+    # A probe exception degrades to ``[]`` for THIS row only and flips
+    # ``runtime_coverage_unavailable`` (#1692 PR 5) — previously it escaped and
+    # 500'd the whole route, taking every healthy scope down with it.
     coverage: list[dict[str, object]] | None = None
+    coverage_unavailable: bool | None = None
     if with_coverage:
-        coverage = compute_runtime_coverage(scope.root) if computable else []
+        coverage_unavailable = False
+        if computable:
+            try:
+                coverage = compute_runtime_coverage(scope.root)
+            except Exception:
+                logger.warning("runtime_coverage failed for %s", scope.root, exc_info=True)
+                coverage = []
+                coverage_unavailable = True
+        else:
+            coverage = []
 
     return {
         "project_scope_id": scope.scope_id,
@@ -438,6 +467,8 @@ def _scope_to_dict(
         "sync_eligible": scope.sync_eligible,
         "counts": counts,
         "runtime_coverage": coverage,
+        "counts_unavailable": counts_unavailable,
+        "runtime_coverage_unavailable": coverage_unavailable,
     }
 
 
@@ -483,6 +514,15 @@ async def list_projects(
     dropped (``registry_status`` stays ``"ok"`` then). Warning items carry no
     ``remediation_action`` by design (D3) — remediation presentation is owned
     by the UI.
+
+    ``counts_unavailable`` / ``runtime_coverage_unavailable`` (#1692 PR 5)
+    distinguish a failed probe from a genuine zero, additively: both are
+    ``null`` when their section wasn't requested (mirroring ``counts`` /
+    ``runtime_coverage``). ``counts_unavailable`` lists the kind keys whose
+    probe raised (``[]`` = all succeeded); failed kinds keep ``0`` inside
+    ``counts`` for wire compatibility. ``runtime_coverage_unavailable`` is
+    ``true`` when the coverage probe raised for that row (``runtime_coverage``
+    degrades to ``[]`` instead of failing the whole route).
     """
     include_tokens = {tok.strip() for tok in include.split(",") if tok.strip()}
     with_counts = "counts" in include_tokens
@@ -503,8 +543,9 @@ async def list_projects(
     # counts/runtime_coverage cost N-scope artifact scans / config probes
     # (see _counts_for), so the opt-in path runs off the event loop like
     # status-all (#1280, #1518); the default path is pure dict shaping and
-    # stays inline ("cheap by default", ADR-0021 PR2). Per-kind failures are
-    # already handled inside _counts_for.
+    # stays inline ("cheap by default", ADR-0021 PR2). Per-kind and coverage
+    # probe failures are handled inside _counts_for / _scope_to_dict and
+    # surface as the per-row *_unavailable fields.
     scope_dicts = await asyncio.to_thread(_build) if (with_counts or with_coverage) else _build()
     return {
         "target_scope": target_scope,

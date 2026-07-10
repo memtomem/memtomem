@@ -369,6 +369,14 @@ function _ctxPortalTotalCount(scope) {
   return _CTX_PORTAL_COUNT_TYPES.reduce((sum, ct) => sum + (scope.counts[ct.key] || 0), 0);
 }
 
+// A count probe failed for at least one kind (#1692 PR 5) — the row's counts
+// are partial (failed kinds ride as 0), so neither the chips nor the items
+// sort may treat the total as authoritative. ``Array.isArray`` doubles as the
+// old-server guard: a payload without the field renders the legacy chip path.
+function _ctxPortalCountsUnavailable(scope) {
+  return !!scope && Array.isArray(scope.counts_unavailable) && scope.counts_unavailable.length > 0;
+}
+
 // A scope is "managed" — renameable / pausable / unregisterable — only when it
 // is enrolled (carries a known_projects entry; ``_ctxScopeIsEnrolled`` reads
 // ``sources`` for "known-projects"). A scan-only auto-displayed row has no
@@ -680,6 +688,14 @@ function _ctxPortalVisibleScopes() {
   const rest = matched.filter(s => !_ctxScopeIsServerCwd(s));
   rest.sort((a, b) => {
     if (_ctxPortalSort === 'items') {
+      // Rows with a failed count probe sort after rows with reliable counts —
+      // their partial totals (failed kinds ride as 0) must not silently rank
+      // against authoritative ones (#1692 PR 5). Name-order within the
+      // unavailable group keeps the tail deterministic.
+      const aUnavail = _ctxPortalCountsUnavailable(a);
+      const bUnavail = _ctxPortalCountsUnavailable(b);
+      if (aUnavail !== bUnavail) return aUnavail ? 1 : -1;
+      if (aUnavail) return _ctxScopeDisplayLabel(a).localeCompare(_ctxScopeDisplayLabel(b));
       return _ctxPortalTotalCount(b) - _ctxPortalTotalCount(a);
     }
     return _ctxScopeDisplayLabel(a).localeCompare(_ctxScopeDisplayLabel(b));
@@ -737,6 +753,22 @@ function _ctxPortalCountsHtml(scope) {
   // ``counts: null`` means "not computed" (or a missing root) — render nothing
   // rather than a misleading row of zeros.
   if (!scope.counts) return '';
+  // Failed count probe (#1692 PR 5): failed kinds ride as 0 in ``counts``, so
+  // falling through would either show misleading zeros or — worse — the
+  // zero-suppressed "Empty" pill, which is exactly the false-confidence bug
+  // being fixed. Render one unavailable pill + Retry instead of any chips.
+  if (_ctxPortalCountsUnavailable(scope)) {
+    const tip = escapeHtml(t('settings.ctx.portal_counts_unavailable_tip', {
+      kinds: scope.counts_unavailable.join(', '),
+    }));
+    const retryAria = escapeHtml(t('settings.ctx.portal_counts_retry_aria', {
+      label: _ctxScopeDisplayLabel(scope),
+    }));
+    return `<div class="ctx-portal-counts">`
+      + `<span class="ctx-portal-count ctx-portal-count--unavailable" title="${tip}">${escapeHtml(t('settings.ctx.portal_counts_unavailable'))}</span>`
+      + `<button type="button" class="btn-ghost btn-xs ctx-portal-counts-retry" aria-label="${retryAria}">${escapeHtml(t('settings.ctx.retry'))}</button>`
+      + `</div>`;
+  }
   // Zero-suppress: four 0-chips are the dominant (and meaningless) visual
   // texture of the board, so collapse an all-zero inventory to one muted
   // "empty" pill. Non-empty scopes keep the per-type breakdown.
@@ -941,6 +973,11 @@ function _ctxPortalWireRows(rowsEl) {
       const scope = _ctxPortalScopeById(btn.dataset.scopeId || '');
       if (scope) _ctxPortalToggleEnabled(scope);
     });
+  });
+  rowsEl.querySelectorAll('.ctx-portal-counts-retry').forEach(btn => {
+    // Whole-roster refetch, same as the registry banner's Retry — one
+    // round-trip re-probes every row and the seq guard handles supersede.
+    btn.addEventListener('click', () => { loadCtxProjects(); });
   });
 
   // Wire the single open editor (if any).

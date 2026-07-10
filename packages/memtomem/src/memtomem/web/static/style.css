@@ -4415,6 +4415,14 @@ body.app-simple [data-ui-adv="advanced"] { display: none; }
 }
 /* Zero-suppressed inventory: a single muted pill in place of four 0-chips. */
 .ctx-portal-count--empty { font-family: inherit; font-style: italic; opacity: 0.7; }
+/* Count probe failed (#1692 PR 5): unknown, not zero — danger tone like the
+   status-error badge so it never reads as a healthy "Empty". */
+.ctx-portal-count--unavailable {
+  font-family: inherit;
+  background: rgba(224, 90, 90, 0.15);
+  color: var(--danger);
+  border-color: rgba(224, 90, 90, 0.4);
+}
 /* "Initialized only" toggle sits beside Sort in the toolbar. */
 .ctx-portal-hide-uninit { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
 .ctx-portal-hide-uninit input { cursor: pointer; }

@@ -97,6 +97,10 @@ async def test_get_projects_cwd_only(client) -> None:
     # list) so the project list stays cheap.
     assert scope["counts"] is None
     assert scope["runtime_coverage"] is None
+    # The availability fields (#1692 PR 5) mirror the null-means-not-computed
+    # convention of the sections they describe.
+    assert scope["counts_unavailable"] is None
+    assert scope["runtime_coverage_unavailable"] is None
 
 
 @pytest.mark.asyncio
@@ -114,6 +118,11 @@ async def test_get_projects_runtime_coverage_opt_in(client) -> None:
     assert isinstance(scope["runtime_coverage"], list)
     runtimes = {r["name"] for r in scope["runtime_coverage"]}
     assert runtimes == {"claude", "gemini", "codex", "kimi"}
+    # Availability fields ride their own section's include token (#1692 PR 5):
+    # a successful coverage probe pins False, while counts (not requested)
+    # keeps its availability null too.
+    assert scope["runtime_coverage_unavailable"] is False
+    assert scope["counts_unavailable"] is None
 
 
 @pytest.mark.asyncio
@@ -311,6 +320,108 @@ async def test_get_projects_unknown_include_token_ignored(client) -> None:
     resp = await client.get("/api/context/projects", params={"include": "bogus"})
     assert resp.status_code == 200
     assert resp.json()["scopes"][0]["counts"] is None
+
+
+# ── Probe availability (#1692 PR 5) ─────────────────────────────────────
+#
+# A failed count/coverage probe must be distinguishable from a genuine zero:
+# ``counts_unavailable`` lists the kind keys whose probe raised (failed kinds
+# keep 0 inside ``counts`` for wire compatibility), and a coverage exception
+# degrades that row to ``[]`` + ``runtime_coverage_unavailable: true`` instead
+# of failing the whole route. ``diff_*`` are module-level imports of the route
+# module, so they are patched there; ``compute_runtime_coverage`` is a
+# function-local import inside ``_scope_to_dict``, so it must be patched at
+# its definition site.
+
+
+def _boom(*_args, **_kwargs):
+    raise RuntimeError("probe exploded")
+
+
+@pytest.mark.asyncio
+async def test_counts_unavailable_empty_when_all_probes_succeed(client) -> None:
+    resp = await client.get("/api/context/projects", params={"include": "counts"})
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    assert scope["counts_unavailable"] == []
+    # Coverage wasn't requested, so its availability stays null.
+    assert scope["runtime_coverage_unavailable"] is None
+
+
+@pytest.mark.asyncio
+async def test_counts_single_kind_failure_reports_kind_keeps_zero(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("memtomem.web.routes.context_projects.diff_skills", _boom)
+    resp = await client.get("/api/context/projects", params={"include": "counts"})
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    assert scope["counts_unavailable"] == ["skills"]
+    # The failed kind keeps 0 on the wire (pinned int type; old clients sum it).
+    assert scope["counts"]["skills"] == 0
+    for kind in ("commands", "agents", "mcp-servers"):
+        assert isinstance(scope["counts"][kind], int)
+
+
+@pytest.mark.asyncio
+async def test_counts_multi_kind_failure_order_stable(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failed kinds report in emission order (skills, commands, agents,
+    mcp-servers), independent of which probes actually raised."""
+    monkeypatch.setattr("memtomem.web.routes.context_projects.diff_agents", _boom)
+    monkeypatch.setattr("memtomem.web.routes.context_projects.diff_skills", _boom)
+    resp = await client.get("/api/context/projects", params={"include": "counts"})
+    assert resp.status_code == 200
+    assert resp.json()["scopes"][0]["counts_unavailable"] == ["skills", "agents"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_coverage_probe_failure_no_longer_500s(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (#1692 PR 5): a coverage exception used to escape
+    ``_scope_to_dict`` unguarded and 500 the whole route; now it degrades
+    that row to ``[]`` and flips the availability flag."""
+    monkeypatch.setattr("memtomem.context.runtime_coverage.compute_runtime_coverage", _boom)
+    resp = await client.get("/api/context/projects", params={"include": "runtime_coverage"})
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    assert scope["runtime_coverage"] == []
+    assert scope["runtime_coverage_unavailable"] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_root_availability_fields(client, tmp_path: Path) -> None:
+    """A missing root has nothing to probe: counts stay null (so does their
+    availability), and the deliberate coverage ``[]`` is not a failure."""
+    gone = tmp_path / "ghost"
+    gone.mkdir()
+    add = await client.post("/api/context/known-projects", json={"root": str(gone)})
+    sid = add.json()["scope_id"]
+    gone.rmdir()
+
+    resp = await client.get("/api/context/projects", params={"include": "counts,runtime_coverage"})
+    assert resp.status_code == 200
+    ghost = next(s for s in resp.json()["scopes"] if s["scope_id"] == sid)
+    assert ghost["counts"] is None
+    assert ghost["counts_unavailable"] is None
+    assert ghost["runtime_coverage"] == []
+    assert ghost["runtime_coverage_unavailable"] is False
+
+
+@pytest.mark.asyncio
+async def test_both_probes_failing_together(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Counts and coverage availability are independent fields — both flip
+    when both probes fail, and the route still answers 200."""
+    for fn in ("diff_skills", "diff_commands", "diff_agents", "diff_mcp_servers"):
+        monkeypatch.setattr(f"memtomem.web.routes.context_projects.{fn}", _boom)
+    monkeypatch.setattr("memtomem.context.runtime_coverage.compute_runtime_coverage", _boom)
+    resp = await client.get("/api/context/projects", params={"include": "counts,runtime_coverage"})
+    assert resp.status_code == 200
+    scope = resp.json()["scopes"][0]
+    assert scope["counts_unavailable"] == ["skills", "commands", "agents", "mcp-servers"]
+    assert scope["runtime_coverage_unavailable"] is True
 
 
 @pytest.mark.asyncio

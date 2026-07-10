@@ -46,7 +46,9 @@
           "installed": "bool",
           "memtomem_registered": "bool"
         }
-      ]
+      ],
+      "counts_unavailable": [],
+      "runtime_coverage_unavailable": "bool"
     },
     {
       "project_scope_id": "str",
@@ -93,7 +95,9 @@
           "installed": "bool",
           "memtomem_registered": "bool"
         }
-      ]
+      ],
+      "counts_unavailable": [],
+      "runtime_coverage_unavailable": "bool"
     }
   ],
   "registry_status": "str",

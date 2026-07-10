@@ -16,7 +16,9 @@
       "enabled": "bool",
       "sync_eligible": "bool",
       "counts": "null",
-      "runtime_coverage": "null"
+      "runtime_coverage": "null",
+      "counts_unavailable": "null",
+      "runtime_coverage_unavailable": "null"
     },
     {
       "project_scope_id": "str",
@@ -33,7 +35,9 @@
       "enabled": "bool",
       "sync_eligible": "bool",
       "counts": "null",
-      "runtime_coverage": "null"
+      "runtime_coverage": "null",
+      "counts_unavailable": "null",
+      "runtime_coverage_unavailable": "null"
     }
   ],
   "registry_status": "str",
