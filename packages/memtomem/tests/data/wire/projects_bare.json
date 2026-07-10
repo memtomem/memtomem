@@ -1,0 +1,39 @@
+{
+  "target_scope": "str",
+  "scopes": [
+    {
+      "project_scope_id": "str",
+      "scope_id": "str",
+      "label": "str",
+      "root": "str",
+      "tier": "str",
+      "sources": [
+        "str"
+      ],
+      "missing": "bool",
+      "stale": "bool",
+      "experimental": "bool",
+      "enabled": "bool",
+      "sync_eligible": "bool",
+      "counts": "null",
+      "runtime_coverage": "null"
+    },
+    {
+      "project_scope_id": "str",
+      "scope_id": "str",
+      "label": "str",
+      "root": "str",
+      "tier": "str",
+      "sources": [
+        "str"
+      ],
+      "missing": "bool",
+      "stale": "bool",
+      "experimental": "bool",
+      "enabled": "bool",
+      "sync_eligible": "bool",
+      "counts": "null",
+      "runtime_coverage": "null"
+    }
+  ]
+}

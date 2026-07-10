@@ -1,0 +1,99 @@
+{
+  "target_scope": "str",
+  "scopes": [
+    {
+      "project_scope_id": "str",
+      "scope_id": "str",
+      "label": "str",
+      "root": "str",
+      "tier": "str",
+      "sources": [
+        "str"
+      ],
+      "missing": "bool",
+      "stale": "bool",
+      "experimental": "bool",
+      "enabled": "bool",
+      "sync_eligible": "bool",
+      "counts": {
+        "skills": "int",
+        "commands": "int",
+        "agents": "int",
+        "mcp-servers": "int"
+      },
+      "runtime_coverage": [
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        },
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        },
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        },
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        }
+      ]
+    },
+    {
+      "project_scope_id": "str",
+      "scope_id": "str",
+      "label": "str",
+      "root": "str",
+      "tier": "str",
+      "sources": [
+        "str"
+      ],
+      "missing": "bool",
+      "stale": "bool",
+      "experimental": "bool",
+      "enabled": "bool",
+      "sync_eligible": "bool",
+      "counts": {
+        "skills": "int",
+        "commands": "int",
+        "agents": "int",
+        "mcp-servers": "int"
+      },
+      "runtime_coverage": [
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        },
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        },
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        },
+        {
+          "name": "str",
+          "available": "bool",
+          "installed": "bool",
+          "memtomem_registered": "bool"
+        }
+      ]
+    }
+  ]
+}
