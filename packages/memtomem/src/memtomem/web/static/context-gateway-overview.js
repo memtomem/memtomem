@@ -38,29 +38,41 @@ function _ctxSimpleVerdict(d) {
   if ((d.missing_canonical || 0) > 0) {
     return { state: 'not_saved', labelKey: 'settings.ctx.status_simple_not_saved', tone: 'info' };
   }
-  if ((d.out_of_sync || 0) > 0) {
+  // Settings/hooks report drift through ``status`` rather than the count
+  // fields (``_SETTINGS_STATUS_I18N`` in the Advanced badge), so honor the
+  // status string here too — otherwise a settings-only ``out_of_sync`` reads
+  // as in-sync in Simple mode.
+  if ((d.out_of_sync || 0) > 0 || d.status === 'out_of_sync') {
     return needsSync;
+  }
+  // A project_local canonical with no runtime fan-out is an intentional draft,
+  // not an in-tools success — surface it as its own muted state so it never
+  // earns the green check or the all-clear verdict (it ranks below every real
+  // issue above, matching the Advanced ``badge_local_draft`` position).
+  if ((d.local_draft || 0) > 0) {
+    return { state: 'local_draft', labelKey: 'settings.ctx.status_simple_local_draft', tone: 'muted' };
   }
   return { state: 'in_tools', labelKey: 'settings.ctx.status_simple_in_tools', tone: 'ok' };
 }
 
 // Build the Simple Overview body: a one-line aggregate verdict + a row per
-// artifact type (skills/commands/agents/mcp — hooks stays Advanced-only,
-// matching the ADR mockup). Each row shows the 3-state status (text is always
-// present — never color-only, ADR-0026 D-G) plus one P1b control: an inline
-// Sync (needs_sync) / Import (not_saved, importable) button running the SAME
-// flow as Advanced, a decorative check (in_tools), or a read-only Manage
-// deep-link (attention, empty, and mcp-servers not_saved — no /import route).
+// artifact type (skills/commands/agents/mcp AND hooks/settings — the latter now
+// participates so a settings-only drift or error can't hide behind an all-clear
+// verdict). Each row shows the 4-state status (text is always present — never
+// color-only, ADR-0026 D-G) plus one P1b control: an inline Sync (needs_sync) /
+// Import (not_saved, importable) button running the SAME flow as Advanced, a
+// decorative check (in_tools), or a read-only Manage deep-link (attention,
+// empty, local_draft, settings, and mcp-servers not_saved — no /import route).
 // Inline ``t()`` matches the langchange re-render ordering of this render path.
 function _ctxSimpleOverviewBody(data, types) {
-  const artifactTypes = types.filter(typ => typ.key !== 'settings');
-  let anyAttention = false, anyAction = false, anyItems = false;
-  const rowsHtml = artifactTypes.map(typ => {
+  let anyAttention = false, anyAction = false, anyItems = false, anyDraft = false;
+  const rowsHtml = types.map(typ => {
     const d = data[typ.key] || {};
     const v = _ctxSimpleVerdict(d);
     if ((d.total || 0) > 0) anyItems = true;
     if (v.state === 'attention') anyAttention = true;
     if (v.state === 'needs_sync' || v.state === 'not_saved') anyAction = true;
+    if (v.state === 'local_draft') anyDraft = true;
     const statusText = t(v.labelKey);
     // P1b (#1353): one control per row (minimal layout). A fixable row carries
     // the resolving verb inline and runs the SAME confirm + impact-preview +
@@ -69,10 +81,15 @@ function _ctxSimpleOverviewBody(data, types) {
     // never glyph-only, D-G); everything else (empty, attention, and the
     // not_saved case for mcp-servers, which has no ``/import`` route) keeps the
     // read-only Manage deep-link into Advanced.
-    const apiType = _ctxSectionToType(typ.section);   // 'skills', 'mcp-servers', …
-    const canImport = apiType !== 'mcp-servers';
+    const apiType = typ.apiType;   // 'skills', 'mcp-servers', 'settings', …
+    // Settings/hooks has neither an ``/import`` route nor the plain per-type
+    // sync semantics the inline flow assumes (it merges per-runtime with a
+    // host-write gate), so its actionable states route to Manage rather than an
+    // inline Sync/Import — the row still counts toward the verdict.
+    const isSettings = apiType === 'settings';
+    const canImport = apiType !== 'mcp-servers' && !isSettings;
     let control;
-    if (v.state === 'needs_sync') {
+    if (v.state === 'needs_sync' && !isSettings) {
       const syncAria = t('settings.ctx.simple_sync_aria', { type: typ.label });
       // Best-effort canonical count for the confirm headline; ``_ctxRunSync``
       // re-fetches the real impact before committing. needs_sync ⟹ canonical
@@ -115,6 +132,9 @@ function _ctxSimpleOverviewBody(data, types) {
   if (anyAttention) { verdictKey = 'settings.ctx.simple_verdict_attention'; verdictTone = 'warn'; }
   else if (anyAction) { verdictKey = 'settings.ctx.simple_verdict_action'; verdictTone = 'warn'; }
   else if (!anyItems) { verdictKey = 'settings.ctx.simple_verdict_empty'; verdictTone = 'muted'; }
+  // Drafts are intentional, so they rank below real actions but must still
+  // block the all-clear verdict — a project_local draft is NOT "in your tools".
+  else if (anyDraft) { verdictKey = 'settings.ctx.simple_verdict_draft'; verdictTone = 'info'; }
   else { verdictKey = 'settings.ctx.simple_verdict_clear'; verdictTone = 'ok'; }
 
   // Plain ``<p>`` (no ``role=status``): the verdict is static render output,
@@ -217,11 +237,11 @@ function _renderCtxOverview(data) {
   if (!el) return;
 
   const types = [
-    { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills' },
-    { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands' },
-    { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents' },
-    { key: 'mcp_servers', label: t('settings.ctx.mcp_servers_title'), section: 'ctx-mcp-servers' },
-    { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync' },
+    { key: 'skills',   label: t('settings.ctx.skills_title'),   section: 'ctx-skills',      apiType: 'skills' },
+    { key: 'commands', label: t('settings.ctx.commands_title'), section: 'ctx-commands',    apiType: 'commands' },
+    { key: 'agents',   label: t('settings.ctx.agents_title'),   section: 'ctx-agents',      apiType: 'agents' },
+    { key: 'mcp_servers', label: t('settings.ctx.mcp_servers_title'), section: 'ctx-mcp-servers', apiType: 'mcp-servers' },
+    { key: 'settings', label: t('settings.hooks.title'),        section: 'hooks-sync',      apiType: 'settings' },
   ];
 
   // Issues #830/#831: surface project root and detected runtimes so a "0 skills"
