@@ -1017,7 +1017,7 @@ input[type="text"]:focus, input[type="number"]:focus, input[type="date"]:focus, 
 button { border: none; cursor: pointer; border-radius: var(--radius); font-size: 0.875rem; padding: 7px 14px; transition: opacity 0.15s; }
 button:hover { opacity: 0.85; }
 button:active { opacity: 0.7; }
-.btn-primary { background: var(--accent); color: #fff; font-weight: 600; }
+.btn-primary { background: var(--accent-fill, var(--accent)); color: #fff; font-weight: 600; }
 .btn-danger  { background: var(--danger); color: #fff; font-weight: 600; }
 .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 /* Solid-bg .btn-danger needs higher contrast than the foreground-color
@@ -2159,7 +2159,7 @@ kbd {
   color: var(--muted); cursor: pointer; transition: background 0.15s, color 0.15s;
 }
 .tl-view-btn:hover { background: var(--bg); color: var(--text); }
-.tl-view-btn.tl-view-active { background: var(--accent); color: #fff; }
+.tl-view-btn.tl-view-active { background: var(--accent-fill, var(--accent)); color: #fff; }
 
 /* Timeline file view */
 .timeline-file-item {
@@ -5151,6 +5151,10 @@ button.ctx-runtime-chip--greyed:focus-visible {
   --muted: #9aa4b8;
   --accent: #7c9cff;
   --accent-rgb: 124, 156, 255;
+  /* Filled-control background. The dark accent (#7c9cff) reads well as text
+     and tint, but white-on-#7c9cff is ~3.0:1 — below the WCAG AA 4.5:1 the
+     axe smoke gate enforces — so filled buttons take this deeper blue. */
+  --accent-fill: #3b63e8;
   --green: #53c78a;
   --yellow: #f2b84b;
   --danger: #f06b72;
@@ -5183,6 +5187,7 @@ button.ctx-runtime-chip--greyed:focus-visible {
   --muted: #5d687a;
   --accent: #315fd5;
   --accent-rgb: 49, 95, 213;
+  --accent-fill: var(--accent);
   --green: #18794e;
   --yellow: #8f5b00;
   --danger: #b4232c;
