@@ -450,6 +450,8 @@ class ExtractResult:
     imported: list[Path]
     # (item_name, human_reason, reason_code) — see :mod:`memtomem.context._skip_reasons`.
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = field(default_factory=list)
+    source_runtimes: dict[str, str] = field(default_factory=dict)
+    runtime_candidates: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -961,6 +963,8 @@ def extract_skills_to_canonical(
     imported: list[Path] = []
     skipped: list[tuple[str, str, skip_codes.SkipCode]] = []
     seen: dict[str, str] = {}  # skill_name → first runtime label
+    source_runtimes: dict[str, str] = {}
+    runtime_candidates: dict[str, list[str]] = {}
 
     # One shared deadline for ALL destination sidecar-lock waits — the whole
     # call, not each destination, is bounded by ``_SKILLS_LOCK_BUDGET_S``
@@ -990,6 +994,7 @@ def extract_skills_to_canonical(
             skill_name = skill_dir.name
             if only_name is not None and skill_name != only_name:
                 continue
+            runtime_candidates.setdefault(skill_name, []).append(runtime)
             try:
                 validate_name(skill_name, kind="skill name")
             except InvalidNameError as exc:
@@ -1180,8 +1185,14 @@ def extract_skills_to_canonical(
                         raise
             imported.append(dst)
             seen[skill_name] = runtime_label
+            source_runtimes[skill_name] = runtime
 
-    return ExtractResult(imported=imported, skipped=skipped)
+    return ExtractResult(
+        imported=imported,
+        skipped=skipped,
+        source_runtimes=source_runtimes,
+        runtime_candidates=runtime_candidates,
+    )
 
 
 # ── Diff: canonical ↔ runtimes ────────────────────────────────────────

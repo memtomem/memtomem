@@ -5362,6 +5362,13 @@ textarea:focus-visible,
 .feature-page-header { display: flex; align-items: center; justify-content: space-between; padding: var(--space-5); border-bottom: 1px solid var(--border); }
 .feature-page-header h2 { margin: 0; font-size: 1.2rem; }
 .feature-page-header p { margin: 4px 0 0; color: var(--muted); }
+.page-state { min-height: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-6); text-align: center; border: 1px dashed var(--border); border-radius: var(--radius); color: var(--muted); background: var(--surface-subtle); }
+.page-state--error { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.page-state-details { width: min(100%, 720px); text-align: left; }
+.page-state-details summary { cursor: pointer; color: var(--muted); }
+.page-state-details pre { max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; padding: var(--space-3); border-radius: var(--radius-sm); background: var(--bg); color: var(--muted); }
+.ctx-import-item { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.ctx-import-source, .ctx-import-duplicates { color: var(--muted); font-size: .78rem; }
 .tags-view-toggle, .tags-sort-row, .tl-view-toggle { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-subtle); }
 .tags-view-toggle button, .tags-sort-row button, .tl-view-toggle button { min-height: 44px; }
 
@@ -5454,6 +5461,11 @@ textarea:focus-visible,
   .tags-view-toggle button, .tags-sort-row button { flex: 1 1 auto; min-width: 44px; }
   .timeline-controls { display: grid; grid-template-columns: 1fr; }
   .timeline-controls > * { width: 100%; }
+  .scratch-add-row { display: grid; grid-template-columns: 1fr; }
+  .scratch-add-row > * { width: 100% !important; max-width: none; }
+  .harness-header { align-items: stretch; flex-wrap: wrap; }
+  .harness-table { min-width: 640px; }
+  .harness-list, .harness-health, .harness-events { overflow-x: auto; }
   .ctx-control-bar { align-items: stretch; }
   .ctx-control-bar > * { max-width: 100%; }
 }

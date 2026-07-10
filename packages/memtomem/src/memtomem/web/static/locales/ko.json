@@ -611,6 +611,8 @@
   "settings.ctx.sync_skipped_attention": "동기화가 끝났지만 {count}개 항목을 건너뛰었습니다: {items}",
   "settings.ctx.sync_dropped": "동기화 중 {count}개 필드가 제거됨",
   "settings.ctx.import_priority": "같은 이름이 여러 런타임에 있으면 정해진 순서로 스캔해 처음 발견한 사본을 가져옵니다 (Claude 먼저, 그다음 Antigravity; 스킬은 Codex 와 Kimi 에서도 가져옵니다). 그 외 런타임으로는 내보내기만 하고 읽어오지 않습니다.",
+  "settings.ctx.import_selected_runtime": "선택된 런타임: {runtime}",
+  "settings.ctx.import_duplicate_candidates": "중복 후보: {runtimes}",
   "settings.ctx.import_result": "{imported}개 가져옴, {skipped}개 건너뜀",
   "settings.ctx.import_success": "가져오기 완료",
   "settings.ctx.import_skip_already_imported": "다른 런타임에서 이미 가져왔습니다 — 먼저 발견된 사본이 우선합니다.",
@@ -1074,6 +1076,10 @@
   "settings.sessions.refresh": "새로고침",
   "settings.sessions.events_title": "세션 이벤트",
   "settings.sessions.events_close": "닫기",
+  "settings.sessions.empty": "기록된 세션이 없습니다.",
+  "settings.sessions.load_failed": "세션을 불러오지 못했습니다.",
+  "settings.sessions.events_empty": "이 세션에 기록된 이벤트가 없습니다.",
+  "settings.sessions.events_load_failed": "세션 이벤트를 불러오지 못했습니다.",
 
   "settings.scratch.desc": "TTL 지원 스크래치 키-값 저장소. 장기 기억으로 승격할 수 있습니다.",
   "settings.scratch.title": "작업 메모리",
@@ -1082,14 +1088,19 @@
   "settings.scratch.value_placeholder": "값",
   "settings.scratch.ttl_placeholder": "TTL (분)",
   "settings.scratch.add_btn": "추가",
+  "settings.scratch.empty": "작업 메모리 항목이 없습니다.",
+  "settings.scratch.load_failed": "작업 메모리를 불러오지 못했습니다.",
 
   "settings.procedures.desc": "저장된 프로시저(레시피) 목록을 조회합니다.",
   "settings.procedures.title": "프로시저",
   "settings.procedures.refresh": "새로고침",
+  "settings.procedures.empty": "저장된 프로시저가 없습니다. mem_procedure_save로 만들 수 있습니다.",
+  "settings.procedures.load_failed": "프로시저를 불러오지 못했습니다.",
 
   "settings.health.desc": "메모리 상태 리포트 — 커버리지, 죽은 청크, 세션 통계. 워치독 실행 포함.",
   "settings.health.title": "메모리 상태",
   "settings.health.refresh": "새로고침",
+  "settings.health.load_failed": "메모리 상태를 불러오지 못했습니다.",
   "settings.health.watchdog_heading": "워치독",
   "settings.health.watchdog_desc": "주기적 백그라운드 상태 점검입니다. 수동 실행하면 즉시 업데이트됩니다.",
 
@@ -1107,6 +1118,7 @@
   "settings.redaction.outcome.pass": "통과",
   "settings.redaction.empty": "이번 세션에서 레닥션 게이트를 거친 쓰기가 아직 없습니다.",
   "settings.redaction.error": "오류: {error}",
+  "settings.redaction.load_failed": "민감정보 차단 통계를 불러오지 못했습니다.",
 
   "settings.export.desc": "필터링된 청크를 JSON 번들로 내보내거나 번들을 다시 가져와 인덱싱합니다.",
   "settings.export.title": "내보내기",
@@ -1243,6 +1255,8 @@
   "shortcut.toggle_shortcuts": "이 도움말 표시/숨기기",
 
   "common.loading": "로딩 중...",
+  "common.retry": "다시 시도",
+  "common.technical_details": "기술 세부정보",
   "common.refresh": "새로고침",
   "common.close": "닫기",
   "common.save": "저장",

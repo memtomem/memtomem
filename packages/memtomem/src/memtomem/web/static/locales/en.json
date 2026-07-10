@@ -611,6 +611,8 @@
   "settings.ctx.sync_skipped_attention": "Sync finished, but {count} item(s) were skipped: {items}",
   "settings.ctx.sync_dropped": "{count} field(s) dropped during sync",
   "settings.ctx.import_priority": "When the same name exists in more than one runtime, the first copy found is imported, scanning runtimes in a fixed order (Claude first, then Antigravity; skills also import from Codex and Kimi). Other runtimes are export-only and never read back.",
+  "settings.ctx.import_selected_runtime": "Selected runtime: {runtime}",
+  "settings.ctx.import_duplicate_candidates": "Duplicate candidates: {runtimes}",
   "settings.ctx.import_result": "{imported} imported, {skipped} skipped",
   "settings.ctx.import_success": "Import completed",
   "settings.ctx.import_skip_already_imported": "Already imported from another runtime — the first copy found wins.",
@@ -1074,6 +1076,10 @@
   "settings.sessions.refresh": "Refresh",
   "settings.sessions.events_title": "Session Events",
   "settings.sessions.events_close": "Close",
+  "settings.sessions.empty": "No sessions recorded yet.",
+  "settings.sessions.load_failed": "Sessions could not be loaded.",
+  "settings.sessions.events_empty": "No events recorded for this session.",
+  "settings.sessions.events_load_failed": "Session events could not be loaded.",
 
   "settings.scratch.desc": "Ephemeral key-value scratch pad with optional TTL, promotable to long-term memory.",
   "settings.scratch.title": "Working Memory",
@@ -1082,14 +1088,19 @@
   "settings.scratch.value_placeholder": "Value",
   "settings.scratch.ttl_placeholder": "TTL (min)",
   "settings.scratch.add_btn": "Add",
+  "settings.scratch.empty": "No working memory entries.",
+  "settings.scratch.load_failed": "Working memory could not be loaded.",
 
   "settings.procedures.desc": "Saved procedures (recipes) available for recall.",
   "settings.procedures.title": "Procedures",
   "settings.procedures.refresh": "Refresh",
+  "settings.procedures.empty": "No procedures saved yet. Use mem_procedure_save to create one.",
+  "settings.procedures.load_failed": "Procedures could not be loaded.",
 
   "settings.health.desc": "Memory health report — coverage, dead chunks, session stats. Includes watchdog run.",
   "settings.health.title": "Memory Health",
   "settings.health.refresh": "Refresh",
+  "settings.health.load_failed": "Memory health could not be loaded.",
   "settings.health.watchdog_heading": "Watchdog",
   "settings.health.watchdog_desc": "Periodic background checks. Run manually to force an update.",
 
@@ -1107,6 +1118,7 @@
   "settings.redaction.outcome.pass": "Passed",
   "settings.redaction.empty": "No writes have hit the redaction gate yet this session.",
   "settings.redaction.error": "Error: {error}",
+  "settings.redaction.load_failed": "Redaction statistics could not be loaded.",
 
   "settings.export.desc": "Export filtered chunks to a JSON bundle or import a bundle to re-index.",
   "settings.export.title": "Export",
@@ -1243,6 +1255,8 @@
   "shortcut.toggle_shortcuts": "Toggle this help",
 
   "common.loading": "Loading...",
+  "common.retry": "Retry",
+  "common.technical_details": "Technical details",
   "common.refresh": "Refresh",
   "common.close": "Close",
   "common.save": "Save",

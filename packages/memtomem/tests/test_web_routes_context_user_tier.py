@@ -642,7 +642,13 @@ class TestUserTierImport:
         assert (canonical / SKILL_MANIFEST).is_file()
         # Regression: bare relative_to(project_root) 500'd on user-tier paths;
         # the POSIX fallback keeps ``canonical_path`` ``/``-joined (#1325).
-        assert body["imported"] == [{"name": "imp1", "canonical_path": canonical.as_posix()}]
+        assert body["imported"] == [{
+            "name": "imp1",
+            "canonical_path": canonical.as_posix(),
+            "source_runtime": "claude",
+            "selected_runtime": "claude",
+            "duplicate_candidates": ["claude"],
+        }]
         assert body["dry_run"] is False
 
     @pytest.mark.anyio

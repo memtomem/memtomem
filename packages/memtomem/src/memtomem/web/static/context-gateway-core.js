@@ -450,7 +450,15 @@ function renderImportResult(data) {
   if (data.imported && data.imported.length) {
     html += `<h4>${t('settings.ctx.import_success')}</h4>`;
     for (const item of data.imported) {
-      html += `<div class="ctx-import-item"><span class="badge badge-success">${escapeHtml(item.name)}</span></div>`;
+      const candidates = Array.isArray(item.duplicate_candidates) ? item.duplicate_candidates : [];
+      const source = item.selected_runtime || item.source_runtime;
+      const provenance = source
+        ? `<span class="ctx-import-source">${escapeHtml(t('settings.ctx.import_selected_runtime', { runtime: source }))}</span>`
+        : '';
+      const duplicates = candidates.length > 1
+        ? `<span class="ctx-import-duplicates">${escapeHtml(t('settings.ctx.import_duplicate_candidates', { runtimes: candidates.join(', ') }))}</span>`
+        : '';
+      html += `<div class="ctx-import-item"><span class="badge badge-success">${escapeHtml(item.name)}</span>${provenance}${duplicates}</div>`;
     }
   }
   if (data.skipped && data.skipped.length) {

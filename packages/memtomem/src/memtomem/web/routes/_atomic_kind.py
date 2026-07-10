@@ -169,6 +169,11 @@ def _import_payload(
             {
                 "name": spec.canonical_name(p, layout),
                 "canonical_path": _safe_rel(p, project_root),
+                "source_runtime": result.source_runtimes.get(spec.canonical_name(p, layout)),
+                "selected_runtime": result.source_runtimes.get(spec.canonical_name(p, layout)),
+                "duplicate_candidates": result.runtime_candidates.get(
+                    spec.canonical_name(p, layout), []
+                ),
             }
             for p, layout in result.imported
         ],

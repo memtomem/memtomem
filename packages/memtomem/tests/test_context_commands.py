@@ -398,6 +398,8 @@ class TestExtractCommandsToCanonical:
         assert len(result.skipped) == 1
         assert result.skipped[0][0] == "shared"
         assert "already imported" in result.skipped[0][1]
+        assert result.source_runtimes == {"shared": "claude"}
+        assert result.runtime_candidates == {"shared": ["claude", "gemini"]}
 
     def test_overwrite_flag(self, tmp_path):
         d = tmp_path / ".claude/commands"
