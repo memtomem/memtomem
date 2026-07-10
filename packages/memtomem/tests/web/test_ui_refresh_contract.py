@@ -31,12 +31,15 @@ def test_refresh_tokens_cover_color_spacing_shape_focus_and_motion() -> None:
 def test_refresh_replaces_global_opacity_hover_and_pins_mobile_targets() -> None:
     css = (STATIC / "style.css").read_text(encoding="utf-8")
 
+    assert "2026 UI refresh foundation" in css
     refresh = css.split("2026 UI refresh foundation", maxsplit=1)[1]
     assert "button:hover { opacity: 1; }" in refresh
     assert "button:active:not(:disabled)" in refresh
     assert "button:focus-visible" in refresh
     assert "min-height: 44px" in refresh
     assert ".tab-btn { min-width: 44px;" in refresh
+    assert 'input:not([type="checkbox"]):not([type="radio"])' in refresh
+    assert "#settings-btn,\n  #help-toggle { display: none; }" not in refresh
 
 
 def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
@@ -50,6 +53,23 @@ def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
     assert "⚙️" not in html
     assert ">🌙<" not in html
     assert ">☀️<" not in html
+
+
+def test_changed_static_assets_bump_cache_versions() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert "/style.css?v=132" in html
+    assert "/app.js?v=148" in html
+
+
+def test_theme_icon_follows_document_theme_without_duplicate_js_state() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "data-theme-state" not in html
+    assert "data-theme-state" not in js
+    assert ':root[data-theme="light"] .theme-icon-moon' in css
 
 
 def test_settings_mobile_navigation_is_horizontal_chip_row() -> None:

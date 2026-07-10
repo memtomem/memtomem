@@ -5121,8 +5121,8 @@ header h1 { font-size: 1.12rem; letter-spacing: -.03em; }
 #help-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #settings-btn svg path { fill: currentColor; stroke: none; }
 .theme-icon-sun { display: none; }
-#theme-toggle[data-theme-state="light"] .theme-icon-moon { display: none; }
-#theme-toggle[data-theme-state="light"] .theme-icon-sun { display: block; }
+:root[data-theme="light"] .theme-icon-moon { display: none; }
+:root[data-theme="light"] .theme-icon-sun { display: block; }
 .header-actions .btn-icon:hover,
 #help-toggle:hover { color: var(--text); background: var(--surface-subtle); border-color: var(--border); }
 
@@ -5256,9 +5256,12 @@ textarea:focus-visible,
 
 @media (max-width: 760px) {
   button,
-  input,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
   select,
   textarea { min-height: 44px; }
+  .checkbox-row label,
+  .index-risk-content label,
+  .bulk-select-all-wrap { min-height: 44px; }
   .skip-link { min-height: 44px; }
   .help-tip[tabindex] {
     display: inline-flex;
@@ -5276,8 +5279,6 @@ textarea:focus-visible,
   .header-actions { gap: var(--space-1); padding-left: var(--space-1); }
   .header-actions .btn-icon,
   #help-toggle { width: 44px; height: 44px; min-width: 44px; }
-  #settings-btn,
-  #help-toggle { display: none; }
   .app-mode-toggle { min-height: 44px; }
   .tab-nav { padding: 0 var(--space-2); scroll-padding-inline: var(--space-2); }
   .tab-btn { min-width: 44px; min-height: 48px; padding-inline: var(--space-3); scroll-snap-align: center; }

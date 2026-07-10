@@ -130,10 +130,9 @@ const STATE = {
   } else if (!saved && window.matchMedia('(prefers-color-scheme: light)').matches) {
     el.setAttribute('data-theme', 'light');
   }
-  // Update toggle icon and finalize initialization on DOM ready
+  // Finalize initialization on DOM ready. Theme icon visibility is CSS-owned
+  // from the document's data-theme attribute, avoiding duplicate JS state.
   document.addEventListener('DOMContentLoaded', async () => {
-    const isDark = el.getAttribute('data-theme') !== 'light';
-    qs('theme-toggle').dataset.themeState = isDark ? 'dark' : 'light';
     // Resolve UI mode + fetch locales in parallel. Both gate rendering.
     const uiModePromise = initUiMode();
     if (typeof I18N !== 'undefined') await I18N.init();
@@ -1768,7 +1767,6 @@ qs('theme-toggle').addEventListener('click', () => {
   const el = document.documentElement;
   const goLight = el.getAttribute('data-theme') !== 'light';
   el.setAttribute('data-theme', goLight ? 'light' : 'dark');
-  qs('theme-toggle').dataset.themeState = goLight ? 'light' : 'dark';
   localStorage.setItem('m2m-theme', goLight ? 'light' : 'dark');
 });
 
@@ -4178,7 +4176,7 @@ function _renderSourcesStats(activeVendor) {
 
 
 function hideBrowser() {
-  _setSourcesMobileDetail(false);
+  document.querySelector('.sources-layout')?.classList.remove('mobile-detail');
   hide(qs('chunks-browser-content'));
   const browser = qs('chunks-browser');
   browser.innerHTML = emptyState('📄', 'Select a source to browse its chunks');
