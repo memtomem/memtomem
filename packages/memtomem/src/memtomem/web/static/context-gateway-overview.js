@@ -1550,9 +1550,12 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
               : 'done';
           setPhase(phase.type, state, counts);
         }
-        // Toast ladder — mirrors the legacy orchestrator's severity order:
-        // failed > settings needs_confirmation (info + Open Settings action,
-        // #774) > failure-class skips (warning, #1247) > no-op > success.
+        // Toast ladder — mirrors the legacy orchestrator's severity order
+        // (this file, lines ~1794): failed > failure-class skips (warning,
+        // #1247) > settings needs_confirmation (info + Open Settings action,
+        // #774) > no-op > success. Warning outranks info: when a run both
+        // skips a broken artifact AND needs host-write confirmation, the more
+        // severe artifact warning must win, not the settings info toast.
         const failedPhases = report.phases.filter((phase) => phase.status === 'failed');
         const needsConfirmation = report.phases.some(
           (phase) => phase.status === 'needs_confirmation');
@@ -1562,6 +1565,15 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
             failed_phase: failedPhases.map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
             reason: failedPhases[0].error?.message || t('settings.ctx.sync_settings_failed_fallback'),
           }), 'error');
+        } else if (batchAttentionSkips.length) {
+          const items = [...new Set(batchAttentionSkips)];
+          showToast(
+            t('settings.ctx.sync_skipped_attention', {
+              count: items.length,
+              items: items.join(', '),
+            }),
+            'warning',
+          );
         } else if (needsConfirmation) {
           showToast(
             t('toast.sync_partial_settings_needs_confirmation'),
@@ -1572,15 +1584,6 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
                 onClick: () => switchSettingsSection('hooks-sync'),
               },
             },
-          );
-        } else if (batchAttentionSkips.length) {
-          const items = [...new Set(batchAttentionSkips)];
-          showToast(
-            t('settings.ctx.sync_skipped_attention', {
-              count: items.length,
-              items: items.join(', '),
-            }),
-            'warning',
           );
         } else if (report.summary?.changed === false || report.summary?.outcome === 'noop') {
           showToast(t('settings.ctx.sync_all_nothing_synced'), 'info');

@@ -5240,7 +5240,10 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: var(--focus-ring); }
-.btn-primary:hover { background: color-mix(in srgb, var(--accent) 86%, white); }
+/* Hover darkens the accessible fill (not the lighter --accent, and not toward
+   white) so white button text keeps its ≥4.5:1 contrast in the hovered state
+   too — the smoke gate doesn't hover, so a lighten-on-hover would slip past it. */
+.btn-primary:hover { background: color-mix(in srgb, var(--accent-fill, var(--accent)) 88%, black); }
 .btn-ghost:hover { background: var(--surface-subtle); border-color: var(--border-strong); color: var(--text); }
 .card,
 .ctx-card,

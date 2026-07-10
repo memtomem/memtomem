@@ -1391,6 +1391,58 @@ def test_sync_all_batch_attention_skip_demotes_row_and_warns(page, mm_web_url: s
     )
 
 
+def test_sync_all_batch_attention_outranks_needs_confirmation(page, mm_web_url: str) -> None:
+    """Batch-2b (severity-ladder parity): a run with BOTH a failure-class
+    artifact skip AND a settings ``needs_confirmation`` must surface the more
+    severe artifact warning, not the settings info toast — mirroring the legacy
+    orchestrator's ``attentionSkips`` > ``needs_confirmation`` order."""
+    install_default_stubs(page)
+    _stub_overview_with_counter(page, [_HEALTHY_OVERVIEW])
+
+    def _batch(route):
+        report = _batch_report(
+            [
+                _batch_phase(
+                    "skills",
+                    generated=["a"],
+                    skipped=[
+                        {
+                            "runtime": "broken-skill",
+                            "reason": "front-matter parse failed",
+                            "reason_code": "parse_error",
+                        }
+                    ],
+                ),
+                _batch_phase("commands"),
+                _batch_phase("agents"),
+                _batch_phase("mcp-servers"),
+                {
+                    "type": "settings",
+                    "status": "needs_confirmation",
+                    "results": [{"status": "needs_confirmation"}],
+                },
+            ],
+            changed=True,
+        )
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(report))
+
+    page.route("**/api/context/sync-all**", _batch)
+
+    _run_sync_all(page, mm_web_url)
+
+    # The warning (attention skip) must win over the info (needs_confirmation).
+    page.wait_for_selector("#toast-container .toast.toast-warning", timeout=4_000)
+    toast_text = (
+        page.locator("#toast-container .toast.toast-warning .toast-msg").text_content() or ""
+    ).strip()
+    assert "broken-skill (parse_error)" in toast_text, (
+        f"combined run must surface the artifact warning, got {toast_text!r}"
+    )
+    assert page.locator("#toast-container .toast.toast-info").count() == 0, (
+        "the settings needs_confirmation info toast must not outrank the warning"
+    )
+
+
 def test_sync_all_batch_noop_emits_nothing_synced_info(page, mm_web_url: str) -> None:
     """Batch-3: ``summary.changed === false`` routes to the nothing-synced
     info toast, not the success toast."""
