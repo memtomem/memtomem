@@ -251,7 +251,7 @@ def _assert_active_panel(page, tab: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["prod", "dev"])
-@pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
+@pytest.mark.parametrize("viewport", [(1440, 1000), (1024, 768), (390, 844)])
 def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
     """Walk the main tabs and nested menus in prod/dev on desktop/mobile."""
     page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
@@ -342,10 +342,29 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
 
         page.locator('.tab-btn[data-tab="sources"]').click()
         assert page.locator(".sources-vendor-tab").count() >= 1
+        if viewport[0] <= 390:
+            assert not page.locator(".sources-layout").evaluate(
+                "el => el.classList.contains('mobile-detail')"
+            )
+            # Exercise the row's production Enter handler as part of the
+            # keyboard-only acceptance path. This also avoids racing the
+            # source tree's async status repaint with a stale pointer point.
+            source_row = page.locator("#sources-list .source-item").first
+            source_row.focus()
+            page.keyboard.press("Enter")
         page.wait_for_function(
             "() => document.querySelector('#chunks-browser .chunks-browser-header .file-path')?.textContent.includes('notes.md')",
             timeout=5_000,
         )
+        if viewport[0] <= 390:
+            assert page.locator(".sources-layout").evaluate(
+                "el => el.classList.contains('mobile-detail')"
+            )
+            assert page.locator(".sources-mobile-back").is_visible()
+            page.locator(".sources-mobile-back").click()
+            assert not page.locator(".sources-layout").evaluate(
+                "el => el.classList.contains('mobile-detail')"
+            )
         for vendor in ("user", "claude", "openai"):
             tab = page.locator(f'.sources-vendor-tab[data-vendor="{vendor}"]')
             if tab.count():
@@ -414,6 +433,15 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             btn.click()
             assert btn.get_attribute("aria-selected") == "true"
             assert page.locator(f'[data-mode-guide="{index_mode}"]').is_visible()
+            if viewport[0] <= 390 and index_mode == "folder":
+                checkbox_metrics = page.locator("#index-recursive").evaluate(
+                    """el => ({
+                        inputHeight: el.getBoundingClientRect().height,
+                        labelHeight: el.closest('label').getBoundingClientRect().height,
+                    })"""
+                )
+                assert checkbox_metrics["inputHeight"] <= 24
+                assert checkbox_metrics["labelHeight"] >= 44
 
         page.locator('.tab-btn[data-tab="tags"]').click()
         assert page.locator("#tags-search").is_visible()

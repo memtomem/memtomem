@@ -130,10 +130,9 @@ const STATE = {
   } else if (!saved && window.matchMedia('(prefers-color-scheme: light)').matches) {
     el.setAttribute('data-theme', 'light');
   }
-  // Update toggle icon and finalize initialization on DOM ready
+  // Finalize initialization on DOM ready. Theme icon visibility is CSS-owned
+  // from the document's data-theme attribute, avoiding duplicate JS state.
   document.addEventListener('DOMContentLoaded', async () => {
-    const isDark = el.getAttribute('data-theme') !== 'light';
-    qs('theme-toggle').textContent = isDark ? '🌙' : '☀️';
     // Resolve UI mode + fetch locales in parallel. Both gate rendering.
     const uiModePromise = initUiMode();
     if (typeof I18N !== 'undefined') await I18N.init();
@@ -1768,7 +1767,6 @@ qs('theme-toggle').addEventListener('click', () => {
   const el = document.documentElement;
   const goLight = el.getAttribute('data-theme') !== 'light';
   el.setAttribute('data-theme', goLight ? 'light' : 'dark');
-  qs('theme-toggle').textContent = goLight ? '☀️' : '🌙';
   localStorage.setItem('m2m-theme', goLight ? 'light' : 'dark');
 });
 
@@ -4178,9 +4176,20 @@ function _renderSourcesStats(activeVendor) {
 
 
 function hideBrowser() {
+  document.querySelector('.sources-layout')?.classList.remove('mobile-detail');
   hide(qs('chunks-browser-content'));
   const browser = qs('chunks-browser');
   browser.innerHTML = emptyState('📄', 'Select a source to browse its chunks');
+}
+
+function _setSourcesMobileDetail(active) {
+  const layout = document.querySelector('.sources-layout');
+  if (!layout) return;
+  layout.classList.toggle('mobile-detail', !!active);
+  if (!active) {
+    const selected = layout.querySelector('.source-item.active');
+    if (selected && typeof selected.focus === 'function') selected.focus();
+  }
 }
 
 // ── Memory-mode source tree ─────────────────────────────────────────
@@ -5083,7 +5092,8 @@ function _renderMemorySourceTree(sources, list) {
   }
 
   const renderedSources = Array.from(list.querySelectorAll('.source-item'));
-  if (renderedSources.length && !list.querySelector('.source-item.active')) {
+  const mobileDrilldown = window.matchMedia?.('(max-width: 760px)').matches;
+  if (renderedSources.length && !list.querySelector('.source-item.active') && !mobileDrilldown) {
     const currentPath = qs('chunks-browser')?.querySelector('.chunks-browser-header .file-path')?.textContent || '';
     const target = renderedSources.find(el => el.title === currentPath) || renderedSources[0];
     if (target) {
@@ -5360,10 +5370,14 @@ async function browseSource(path, limit = 100) {
     const header = document.createElement('div');
     header.className = 'chunks-browser-header';
     header.innerHTML = `
+      <button type="button" class="sources-mobile-back btn-ghost" data-i18n="sources.back_to_list">${escapeHtml(t('sources.back_to_list'))}</button>
       <span class="file-path">${escapeHtml(path)}</span>
       <span class="badge badge-blue">${escapeHtml(t(data.total === 1 ? 'home.source_chunks_one' : 'home.source_chunks_other', { count: data.total }))}</span>
       <span class="chunks-browser-info">${escapeHtml(t('chunks.shown_of_total', { shown: data.chunks.length, total: data.total }))}</span>
     `;
+    header.querySelector('.sources-mobile-back')?.addEventListener('click', () => {
+      _setSourcesMobileDetail(false);
+    });
     if (data.chunks.length < data.total) {
       const loadAllBtn = document.createElement('button');
       loadAllBtn.className = 'btn-ghost btn-xs chunks-load-all-btn';
@@ -5525,6 +5539,7 @@ async function browseSource(path, limit = 100) {
       });
     }
     browser.appendChild(content);
+    _setSourcesMobileDetail(true);
 
     // Consume ``pendingActivateChunkId`` (set by ``_navigateToSource``
     // when the caller — e.g. Timeline — knows the specific chunk).

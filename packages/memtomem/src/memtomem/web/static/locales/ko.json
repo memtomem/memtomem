@@ -980,6 +980,7 @@
   "settings.hooks.badge_out_of_sync": "불일치",
   "settings.hooks.badge_error": "오류",
 
+  "settings.config.title": "환경 설정",
   "settings.config.desc": "서버 설정: 임베딩 제공자, 스토리지 백엔드, 검색·인덱싱 파라미터를 조정합니다.",
   "settings.config.guide_title": "설정 가이드",
   "settings.config.guide_text": "설정 섹션을 선택하면 문서를 볼 수 있습니다.",
@@ -1646,6 +1647,9 @@
   "settings.config.select.structured_mode.original": "키별 원본 텍스트 줄 추출, 큰 구간은 줄 수로 분할",
   "settings.config.select.structured_mode.recursive": "json.dumps로 직렬화, 하위 키 기준 재귀 분할",
   "common.dismiss": "닫기",
+  "sources.back_to_list": "소스 목록으로",
+  "index.advanced_options": "고급 옵션",
+  "index.privacy_bypass_warning": "개인정보 보호 우회는 비밀 정보를 노출할 수 있습니다. 파일을 검토한 뒤에만 사용하세요.",
   "settings.config.decay_status_active": "점수 감쇠: 활성 (반감기 {days}일)",
   "settings.config.decay_status_inactive": "점수 감쇠: 비활성",
   "settings.config.ns_default": "기본 NS: {ns}",
