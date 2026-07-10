@@ -5,6 +5,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **`mm mem init` — project memory tier opt-in** (#1700) — creates
+  `<project>/.memtomem/memories.local/` (default; `--scope project_shared
+  --confirm-project-shared` for the shared tier) and registers it in
+  `indexing.project_memory_dirs`, which previously required hand-editing
+  `~/.memtomem/config.json`. Requires a project marker (`.git` /
+  `pyproject.toml`); for `project_local` the `.gitignore` guard block is
+  written **before** registration and a failed write aborts. The
+  registration append runs inside the config write lock (concurrent
+  registrations can't clobber each other) and persists the fragment-merged
+  aggregate list. Unregistered project-tier write refusals now point at the
+  command first (manual `config.json` editing remains the fallback).
+  Deliberately CLI-only: no MCP twin, so an agent blocked by the
+  registration gate cannot self-authorize; a running MCP server / `mm web`
+  picks up the new tier after restart.
+
 ### Changed
 
 - **A failed status probe is now an error, not drift** (#1692) — in the

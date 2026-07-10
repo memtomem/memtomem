@@ -220,9 +220,10 @@ class IndexingConfig(ConfigModel):
     # Project-tier index roots (ADR-0011). Each entry MUST resolve under a
     # ``<X>/.memtomem/memories`` or ``<X>/.memtomem/memories.local`` directory
     # so the path classifier can derive the scope without a side table. Empty
-    # by default; users opt in via the future ``mm context`` surface (PR-D /
-    # PR-E) or by editing the config directly. Sibling of ``memory_dirs`` so
-    # the wizard / Sources tab / auto-discover migration stay scope-unaware.
+    # by default; users opt in via ``mm mem init`` (#1700 — writes through
+    # ``register_project_memory_dir``) or by editing the config directly.
+    # Sibling of ``memory_dirs`` so the wizard / Sources tab / auto-discover
+    # migration stay scope-unaware.
     project_memory_dirs: Annotated[list[Path], APPEND] = Field(default_factory=list)
     supported_extensions: frozenset[str] = frozenset(
         {
@@ -2045,7 +2046,10 @@ _CONFIG_PATH_SCALAR_FIELDS: tuple[tuple[str, str], ...] = (
     ("storage", "sqlite_path"),
     ("session_trace", "jsonl_path"),
 )
-_CONFIG_PATH_LIST_FIELDS: tuple[tuple[str, str], ...] = (("indexing", "memory_dirs"),)
+_CONFIG_PATH_LIST_FIELDS: tuple[tuple[str, str], ...] = (
+    ("indexing", "memory_dirs"),
+    ("indexing", "project_memory_dirs"),
+)
 
 
 def _relativize_config_paths_in_place(data: dict) -> None:
@@ -2283,3 +2287,80 @@ def save_config_overrides(
 
         _relativize_config_paths_in_place(existing)
         _atomic_write_json(path, existing)
+
+
+def register_project_memory_dir(target_dir: Path, config_path: Path | None = None) -> bool:
+    """Append *target_dir* to ``indexing.project_memory_dirs`` in config.json.
+
+    The dedicated registration write for ``mm mem init`` (ADR-0011 project
+    tier opt-in). The whole read→append→write sequence runs inside
+    ``_config_write_lock`` so two concurrent registrations cannot each read
+    the pre-change file and clobber the other's entry.
+
+    ``project_memory_dirs`` is deliberately **not** in
+    ``_EXTRA_MUTATION_FIELDS``: ``save_config_overrides`` compares the live
+    (possibly stale — a long-running ``mm web`` loaded config at startup)
+    value against the comparand, and membership would let an unrelated
+    settings save silently drop a registration made after that process
+    started. Keeping the field out of every generic save path means those
+    writers never touch the key; this helper and manual editing are the only
+    writers.
+
+    Because ``config.json`` is a REPLACE-on-load layer (unlike ``config.d``
+    fragments, which APPEND), the helper persists the full merged list —
+    fragment-contributed entries included — not just the new entry;
+    otherwise the write would mask fragment registrations on the next load.
+
+    Returns ``True`` when newly registered, ``False`` when *target_dir* is
+    already registered (config.json or a fragment). Raises ``ValueError``
+    when *target_dir* is not a canonical ``.memtomem/memories[.local]``
+    tier directory, ``TimeoutError`` when another writer holds the config
+    lock, and ``OSError`` when the write itself fails.
+    """
+    import json as _json
+
+    resolved = target_dir.expanduser().resolve()
+    if resolved.name not in ("memories", "memories.local") or resolved.parent.name != ".memtomem":
+        raise ValueError(
+            f"not a project memory tier directory: {resolved} "
+            "(expected <project>/.memtomem/memories or <project>/.memtomem/memories.local)"
+        )
+
+    # Slow read-only rebuild — outside the lock, mirroring
+    # ``save_config_overrides``. Fragments are needed for the merged view;
+    # the lock only serializes config.json writers.
+    comparand = build_comparand(quiet=True)
+    path = config_path if config_path is not None else _override_path()
+
+    with _config_write_lock(path):
+        existing: dict = {}
+        if path.exists():
+            existing = _json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            raise ValueError(f"config file is not a JSON object: {path}")
+
+        indexing = existing.get("indexing")
+        if not isinstance(indexing, dict):
+            indexing = {}
+            existing["indexing"] = indexing
+
+        # Effective list mirrors load semantics: config.json REPLACES the
+        # fragment-appended value when the key is present.
+        raw = indexing.get("project_memory_dirs")
+        if isinstance(raw, list):
+            effective: list[object] = list(raw)
+        else:
+            effective = list(comparand.indexing.project_memory_dirs)
+
+        registered = {
+            Path(str(d)).expanduser().resolve() for d in effective if isinstance(d, (str, Path))
+        }
+        if resolved in registered:
+            return False
+
+        effective.append(resolved)
+        indexing["project_memory_dirs"] = effective
+
+        _relativize_config_paths_in_place(existing)
+        _atomic_write_json(path, existing)
+        return True

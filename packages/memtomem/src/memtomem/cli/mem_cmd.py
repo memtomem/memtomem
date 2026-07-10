@@ -23,15 +23,16 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import get_args
+from typing import cast, get_args
 
 import click
 
 from memtomem.cli._errors import raise_cli_error
 
 from memtomem import privacy
-from memtomem.cli.context_cmd import _find_project_root
-from memtomem.config import TargetScope
+from memtomem.cli.context_cmd import _append_gitignore_marker, _find_project_root
+from memtomem.config import TargetScope, register_project_memory_dir
+from memtomem.memory_scope import resolve_memory_scope_dir
 
 
 _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
@@ -39,7 +40,7 @@ _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
 
 @click.group("mem")
 def mem() -> None:
-    """Audit and inspect stored memories."""
+    """Audit, inspect, and set up stored memories."""
 
 
 def _resolve_source_filter(source: str) -> tuple[Path | None, Path | None]:
@@ -63,6 +64,126 @@ def _resolve_source_filter(source: str) -> tuple[Path | None, Path | None]:
         f"--source is not a file or directory: {resolved}",
         param_hint="--source",
     )
+
+
+@mem.command("init")
+@click.option(
+    "--scope",
+    type=click.Choice(["project_local", "project_shared"]),
+    default="project_local",
+    show_default=True,
+    help=(
+        "Memory tier to initialize. project_local writes to the gitignored "
+        "<project>/.memtomem/memories.local/; project_shared writes to "
+        "<project>/.memtomem/memories/ (files written there will be "
+        "git-tracked) and requires --confirm-project-shared."
+    ),
+)
+@click.option(
+    "--confirm-project-shared",
+    is_flag=True,
+    default=False,
+    help=(
+        "Confirm initializing the project_shared tier: memories written "
+        "there land in git-tracked files. Required (or answered "
+        "interactively) when --scope=project_shared."
+    ),
+)
+def init_cmd(scope: str, confirm_project_shared: bool) -> None:
+    """Create and register the project memory tier for the current project.
+
+    ADR-0011 project-tier writes (``mm add`` / MCP ``mem_add`` with
+    ``scope=project_local|project_shared``) require the tier directory to
+    be registered in ``IndexingConfig.project_memory_dirs`` — a deliberate
+    trust gate so unregistered project trees are never silently picked up
+    by the indexer. This command is the explicit opt-in: it creates
+    ``<project>/.memtomem/memories[.local]`` and appends it to
+    ``indexing.project_memory_dirs`` in ``~/.memtomem/config.json``
+    (locked, atomic, idempotent).
+
+    Registration is an explicit trust operation, so a real project root
+    (``.git`` or ``pyproject.toml`` marker) is required — run ``git init``
+    first in a scratch directory. For ``project_local`` the ``.gitignore``
+    guard block is established *before* registration; a failed
+    ``.gitignore`` write aborts so the local tier is never registered
+    unprotected. Deliberately CLI-only: exposing registration over MCP
+    would let the same principal the gate blocks self-authorize (#1700).
+    """
+    root = _find_project_root()
+    has_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
+    if not has_signal:
+        raise click.ClickException(
+            f"mm mem init requires a project root (with .git or pyproject.toml); "
+            f"none found at or above {root}. Run `git init` first."
+        )
+
+    # Gate B — same disclosure as ``mm context init --scope=project_shared``
+    # (ADR-0011 §5). Registration only creates an empty directory, but it
+    # authorizes future git-tracked writes, so confirm up front.
+    if scope == "project_shared" and not confirm_project_shared:
+        prompt = (
+            f"\n--scope=project_shared: memories written under "
+            f"{root}/.memtomem/memories/ will be git-tracked. Continue?"
+        )
+        if not click.confirm(prompt, default=False):
+            raise click.Abort()
+
+    tier_dir = resolve_memory_scope_dir(cast(TargetScope, scope), root)
+
+    # project_local: git protection FIRST, registration last — if the
+    # ``.gitignore`` write fails we must not leave the local tier
+    # registered (and writable) without the guard block.
+    if scope == "project_local":
+        try:
+            wrote, msg = _append_gitignore_marker(root)
+        except OSError as exc:
+            raise click.ClickException(
+                f"could not append the .gitignore guard block at {root}/.gitignore: "
+                f"{exc}. Aborting before registration so the project_local tier "
+                "is never registered without git protection."
+            ) from exc
+        if wrote:
+            click.secho(
+                "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
+                fg="green",
+            )
+        elif msg == "no_git_repo_pyproject_only":
+            click.secho(
+                "  warning: project root resolved via pyproject.toml but `.git` "
+                "is missing — the project_local tier is NOT git-protected here. "
+                "Run `git init` to make the .gitignore guard meaningful.",
+                fg="yellow",
+            )
+
+    created = not tier_dir.exists()
+    tier_dir.mkdir(parents=True, exist_ok=True)
+    if created:
+        click.secho(f"  Created {tier_dir}", fg="green")
+
+    try:
+        newly_registered = register_project_memory_dir(tier_dir)
+    except TimeoutError as exc:
+        raise click.ClickException(
+            "another process holds the config lock (~/.memtomem/config.json); retry in a moment."
+        ) from exc
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if newly_registered:
+        click.secho(
+            "  Registered in indexing.project_memory_dirs (~/.memtomem/config.json)",
+            fg="green",
+        )
+        click.echo(
+            f'  You can now run `mm add "..." --scope {scope}` from inside '
+            f"{root}.\n"
+            "  note: a running MCP server / mm web picks up the new tier "
+            "after restart."
+        )
+    elif not created:
+        click.echo(f"Already initialized: {tier_dir} exists and is registered. Nothing to do.")
+    else:
+        click.echo(f"  {tier_dir} was already registered; directory recreated.")
 
 
 @mem.command("rescan")

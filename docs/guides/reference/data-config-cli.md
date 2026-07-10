@@ -239,6 +239,8 @@ mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
 ```bash
 # Setup
 mm init                                # preset picker; `--advanced` opens the full 10-step wizard (b: back, q: quit)
+mm mem init                            # opt this project into project-tier memory: creates .memtomem/memories.local/ and registers it (run from the project root; requires .git or pyproject.toml)
+mm mem init --scope project_shared --confirm-project-shared   # same for the shared tier (memories written there land in git-tracked files)
 
 # Core (daily use)
 mm search "deployment"                 # hybrid search (keywords + meaning)

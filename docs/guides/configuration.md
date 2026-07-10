@@ -360,7 +360,7 @@ running).
 | `MEMTOMEM_INDEXING__EXCLUDE_PATTERNS` | `[]` | Pathspec (gitignore-style) globs for files the indexer should skip |
 | `MEMTOMEM_INDEXING__STARTUP_BACKFILL` | `false` | When `true`, `mm web` runs a one-shot backfill scan over `memory_dirs` on boot to catch files added while the server was down. Off by default — multi-minute embed jobs blocked the server on a multi-GB memory_dir during 0.1.24 testing, so the wizard offers it as opt-in. `mm index <dir>` and the Web UI per-dir Reindex button cover ad-hoc backfills idempotently without flipping this. |
 | `MEMTOMEM_INDEXING__TARGET_CHUNK_TOKENS` | `384` | Pass-2 semantic-packing target chunk size; `0` disables packing |
-| `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments |
+| `MEMTOMEM_INDEXING__PROJECT_MEMORY_DIRS` | `[]` | Additional project-tier index roots (ADR-0011); APPEND-merged across `config.d/` fragments. Register per-project with `mm mem init` (run from the project root; a running server/web UI picks the new tier up after restart). Deliberately outside `mm config set`/`unset` — to deregister, edit `indexing.project_memory_dirs` in `~/.memtomem/config.json` directly |
 | `MEMTOMEM_INDEXING__AUTO_SUMMARIZE` | `false` | Generate a per-source LLM summary chunk at index time (requires LLM enabled) |
 | `MEMTOMEM_INDEXING__SUMMARY_LANGUAGE` | `en` | Language for auto-generated per-source summaries |
 | `MEMTOMEM_INDEXING__SUMMARY_MAX_INPUT_CHARS` | `3000` | Skip the per-source summary when the source body exceeds this many characters |

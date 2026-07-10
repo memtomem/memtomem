@@ -92,8 +92,10 @@ def project_tier_registration_error(target_dir: Path, scope: TargetScope) -> str
         "IndexingConfig.project_memory_dirs. Writing without registration "
         "would persist a row with the requested scope but the read "
         "surface and indexing watcher would not see it.\n"
-        f"Edit ~/.memtomem/config.json and add {target_dir} to "
-        f'indexing.project_memory_dirs, then retry with scope="{scope}".'
+        f"Run `mm mem init --scope={scope}` in a terminal from the project "
+        f'root, then retry with scope="{scope}". (Registration is CLI-only '
+        "by design; alternatively edit ~/.memtomem/config.json and add "
+        f"{target_dir} to indexing.project_memory_dirs.)"
     )
 
 
