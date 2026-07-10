@@ -980,6 +980,7 @@
   "settings.hooks.badge_out_of_sync": "out of sync",
   "settings.hooks.badge_error": "error",
 
+  "settings.config.title": "Configuration",
   "settings.config.desc": "Server settings: embedding provider, storage backend, search and indexing parameters.",
   "settings.config.guide_title": "Configuration Guide",
   "settings.config.guide_text": "Select a config section to see its documentation.",
@@ -1647,6 +1648,8 @@
   "settings.config.select.structured_mode.recursive": "Serialize via json.dumps, recursively split by sub-keys",
   "common.dismiss": "Dismiss",
   "sources.back_to_list": "Back to sources",
+  "index.advanced_options": "Advanced options",
+  "index.privacy_bypass_warning": "Privacy bypass can expose secrets. Use only after reviewing the files.",
   "settings.config.decay_status_active": "Score Decay: Active (half-life {days}d)",
   "settings.config.decay_status_inactive": "Score Decay: Inactive",
   "settings.config.ns_default": "Default NS: {ns}",

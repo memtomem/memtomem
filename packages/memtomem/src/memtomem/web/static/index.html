@@ -819,8 +819,14 @@
             <label><input type="checkbox" id="index-recursive" checked /> <span data-i18n="index.recursive">Recursive</span></label>
             <label><input type="checkbox" id="index-force" /> <span data-i18n="index.force">Force re-index</span></label>
             <label data-i18n-title="index.register_source_title" title="Add this path to memory_dirs so future changes are auto-indexed"><input type="checkbox" id="index-register-source" /> <span data-i18n="index.register_source">Register as source</span></label>
-            <label class="checkbox-warn" data-i18n-title="index.force_unsafe_title" title="Index files even if they contain secrets (API keys, tokens). Audit-logged. Git-tracked project_shared files are still blocked."><input type="checkbox" id="index-force-unsafe" /> <span data-i18n="index.force_unsafe">Index without privacy gate</span></label>
           </div>
+          <details class="index-risk-disclosure">
+            <summary data-i18n="index.advanced_options">Advanced options</summary>
+            <div class="index-risk-content">
+              <strong data-i18n="index.privacy_bypass_warning">Privacy bypass can expose secrets. Use only after reviewing the files.</strong>
+              <label class="checkbox-warn" data-i18n-title="index.force_unsafe_title" title="Index files even if they contain secrets (API keys, tokens). Audit-logged. Git-tracked project_shared files are still blocked."><input type="checkbox" id="index-force-unsafe" /> <span data-i18n="index.force_unsafe">Index without privacy gate</span></label>
+            </div>
+          </details>
           <button id="index-btn" class="btn-primary" data-i18n="index.index_btn">Index</button>
           <div id="index-msg" class="status-msg" hidden></div>
           <div id="index-progress" class="index-progress" hidden>
@@ -996,6 +1002,9 @@
 
         <!-- Config section -->
         <div class="settings-section active" id="settings-config">
+          <div class="settings-page-header">
+            <h2 data-i18n="settings.config.title">Configuration</h2>
+          </div>
           <p class="settings-section-desc" data-i18n="settings.config.desc">Server settings: embedding provider, storage backend, search and indexing parameters.</p>
           <div class="config-layout">
             <div class="config-main">

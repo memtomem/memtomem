@@ -61,3 +61,17 @@ def test_settings_mobile_navigation_is_horizontal_chip_row() -> None:
     assert "flex-direction: row" in mobile
     assert "overflow-x: auto" in mobile
     assert "max-height: none !important" in mobile
+
+
+def test_index_uses_segmented_work_card_and_guarded_risk_disclosure() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="index-mode-toggle" role="tablist"' in html
+    assert 'class="card index-panels"' in html
+    assert 'class="index-risk-disclosure"' in html
+    disclosure = html.split('class="index-risk-disclosure"', maxsplit=1)[1]
+    disclosure = disclosure.split("</details>", maxsplit=1)[0]
+    assert 'id="index-force-unsafe"' in disclosure
+    assert ".index-mode-toggle .btn-ghost.btn-active" in css
+    assert ".index-risk-content" in css
