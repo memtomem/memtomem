@@ -12,8 +12,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   --confirm-project-shared` for the shared tier) and registers it in
   `indexing.project_memory_dirs`, which previously required hand-editing
   `~/.memtomem/config.json`. Requires a project marker (`.git` /
-  `pyproject.toml`); for `project_local` the `.gitignore` guard block is
-  written **before** registration and a failed write aborts. The
+  `pyproject.toml`); `project_local` specifically requires a git repo (the
+  `.gitignore` guard block is written **before** registration and a failed
+  write aborts — a pyproject-only project is refused so a later `git init`
+  can't start tracking the draft tier). The
   registration append runs inside the config write lock (concurrent
   registrations can't clobber each other) and persists the fragment-merged
   aggregate list. Unregistered project-tier write refusals now point at the

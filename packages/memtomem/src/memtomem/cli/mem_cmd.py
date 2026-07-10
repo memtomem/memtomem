@@ -130,12 +130,22 @@ def init_cmd(scope: str, confirm_project_shared: bool) -> None:
 
     tier_dir = resolve_memory_scope_dir(cast(TargetScope, scope), root)
 
-    # project_local: git protection FIRST, registration last — if the
-    # ``.gitignore`` write fails we must not leave the local tier
-    # registered (and writable) without the guard block.
+    # project_local: git protection FIRST, registration last. A
+    # ``.gitignore`` is only meaningful inside a git working tree, so
+    # requiring ``.git`` here is a hard gate — registering the draft tier in
+    # a pyproject-only project would leave it exposed the moment the user
+    # runs ``git init`` (the guard block was skipped, so the local memories
+    # would be tracked). Refuse instead of warning-and-registering.
     if scope == "project_local":
+        if not (root / ".git").exists():
+            raise click.ClickException(
+                f"--scope=project_local needs a git repository at {root} so the "
+                "draft tier stays gitignored; without one a later `git init` "
+                "would start tracking it. Run `git init` first, then re-run "
+                "(or use --scope=project_shared for a git-tracked tier)."
+            )
         try:
-            wrote, msg = _append_gitignore_marker(root)
+            wrote, _msg = _append_gitignore_marker(root)
         except OSError as exc:
             raise click.ClickException(
                 f"could not append the .gitignore guard block at {root}/.gitignore: "
@@ -146,13 +156,6 @@ def init_cmd(scope: str, confirm_project_shared: bool) -> None:
             click.secho(
                 "  Appended .gitignore marker (.memtomem/*.local/, .memtomem/.staging/)",
                 fg="green",
-            )
-        elif msg == "no_git_repo_pyproject_only":
-            click.secho(
-                "  warning: project root resolved via pyproject.toml but `.git` "
-                "is missing — the project_local tier is NOT git-protected here. "
-                "Run `git init` to make the .gitignore guard meaningful.",
-                fg="yellow",
             )
 
     created = not tier_dir.exists()

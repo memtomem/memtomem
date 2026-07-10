@@ -2320,7 +2320,20 @@ def register_project_memory_dir(target_dir: Path, config_path: Path | None = Non
     import json as _json
 
     resolved = target_dir.expanduser().resolve()
-    if resolved.name not in ("memories", "memories.local") or resolved.parent.name != ".memtomem":
+    # Must be ``<project_root>/.memtomem/memories[.local]`` with a NON-EMPTY
+    # project root above ``.memtomem`` — the scope classifier only matches
+    # ``/.memtomem/...`` at a positive offset (something before the marker),
+    # so a root-level ``/.memtomem/memories`` would register but never
+    # classify as a project tier. ``project_root == project_root.parent`` is
+    # true only at the filesystem root.
+    memtomem_dir = resolved.parent
+    project_root = memtomem_dir.parent
+    if (
+        resolved.name not in ("memories", "memories.local")
+        or memtomem_dir.name != ".memtomem"
+        or not project_root.name
+        or project_root == project_root.parent
+    ):
         raise ValueError(
             f"not a project memory tier directory: {resolved} "
             "(expected <project>/.memtomem/memories or <project>/.memtomem/memories.local)"

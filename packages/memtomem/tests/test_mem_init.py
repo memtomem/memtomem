@@ -150,16 +150,31 @@ def test_init_gitignore_failure_aborts_before_registration(home: Path, project: 
     assert _loaded_config().indexing.project_memory_dirs == []
 
 
-def test_init_pyproject_only_discloses_unprotected(home: Path, tmp_path, monkeypatch) -> None:
+def test_init_project_local_pyproject_only_refused(home: Path, tmp_path, monkeypatch) -> None:
+    """project_local needs a git repo: a pyproject-only project cannot
+    gitignore the draft tier, so a later ``git init`` would track it.
+    Refuse rather than register-and-warn (Codex review of #1700)."""
     root = tmp_path / "pyproj"
     root.mkdir()
     (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
     monkeypatch.chdir(root)
     result = _invoke(["init"])
+    assert result.exit_code != 0
+    assert "git init" in result.output
+    assert not (root / ".memtomem").exists()
+    assert _loaded_config().indexing.project_memory_dirs == []
+
+
+def test_init_project_shared_pyproject_only_allowed(home: Path, tmp_path, monkeypatch) -> None:
+    """project_shared has no gitignore dependency (its tier is meant to be
+    tracked), so a pyproject-only project may still initialize it."""
+    root = tmp_path / "pyproj_shared"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    monkeypatch.chdir(root)
+    result = _invoke(["init", "--scope", "project_shared", "--confirm-project-shared"])
     assert result.exit_code == 0, result.output
-    assert "NOT git-protected" in result.output
-    # Still registers — disclosure, not refusal.
-    tier = root / ".memtomem" / "memories.local"
+    tier = root / ".memtomem" / "memories"
     assert is_project_tier_registered(tier, _loaded_config().indexing.project_memory_dirs)
 
 
@@ -187,6 +202,15 @@ def test_register_rejects_non_tier_paths(home: Path, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a project memory tier"):
         # Right leaf name, wrong parent.
         register_project_memory_dir(tmp_path / "memories")
+
+
+def test_register_rejects_root_level_memtomem(home: Path) -> None:
+    """A root-level ``/.memtomem/memories`` has the right leaf + parent
+    names but no project component above ``.memtomem`` — the scope
+    classifier (positive offset before ``/.memtomem``) would never match
+    it, so registration must reject it (Codex review of #1700)."""
+    with pytest.raises(ValueError, match="not a project memory tier"):
+        register_project_memory_dir(Path("/.memtomem/memories"))
 
 
 def test_register_returns_false_when_already_present(home: Path, tmp_path: Path) -> None:
