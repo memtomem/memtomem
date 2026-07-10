@@ -7,6 +7,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Runtime probe availability is now explicit** (#1692) — a failed
+  provider-client probe was previously wire-identical to "no runtimes".
+  `GET /api/context/runtimes` gains additive `runtimes_status`
+  (`"ok"`/`"unavailable"`) and `warnings` (reason code `status_unavailable`,
+  with a redacted message and `error_kind`); `GET /api/context/overview`
+  gains additive `detected_runtimes_unavailable`. The web Portal renders an
+  explicit "Runtime status unavailable" chip with Retry (and a single
+  unknown-state row light) instead of four grey "uninstalled" chips, and the
+  overview header shows a "Runtimes unavailable" badge instead of an empty
+  chip row. Existing fields, types, and per-entry `error_kind` semantics are
+  unchanged.
+
 - **`mm mem init` — project memory tier opt-in** (#1700) — creates
   `<project>/.memtomem/memories.local/` (default; `--scope project_shared
   --confirm-project-shared` for the shared tier) and registers it in

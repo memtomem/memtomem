@@ -212,6 +212,29 @@ class TestLocaleFiles:
                 f"the {{count}} placeholder"
             )
 
+    def test_runtime_probe_unavailable_keys_present(
+        self, en: dict[str, str], ko: dict[str, str]
+    ) -> None:
+        """The runtimes-unavailable chip (Portal) and badge (overview) from
+        #1692 PR 6 need their label + tooltip pairs in each locale (no
+        placeholders)."""
+        for name, data in [("en", en), ("ko", ko)]:
+            for key in (
+                "settings.ctx.portal_runtimes_unavailable",
+                "settings.ctx.portal_runtimes_unavailable_tip",
+                "settings.ctx.portal_runtimes_retry_aria",
+                "settings.ctx.overview_runtimes_unavailable",
+                "settings.ctx.overview_runtimes_unavailable_tip",
+            ):
+                assert key in data, f"{name}.json missing {key}"
+                assert data[key].strip(), f"{name}.json has empty {key}"
+            # The Retry aria-label names the scope so it is distinguishable from
+            # the registry / counts Retry controls on the same view.
+            assert "{label}" in data["settings.ctx.portal_runtimes_retry_aria"], (
+                f"{name}.json settings.ctx.portal_runtimes_retry_aria must carry "
+                f"the {{label}} placeholder"
+            )
+
 
 _STATIC_JS_DIR = _LOCALES_DIR.parent
 

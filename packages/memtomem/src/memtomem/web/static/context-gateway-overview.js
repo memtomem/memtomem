@@ -269,7 +269,7 @@ function _renderCtxOverview(data) {
     ? t('settings.ctx.user_canonical_path')
     : projectRoot;
   const undetectedTitle = escapeHtml(t('settings.ctx.runtime_undetected_tooltip'));
-  const chips = runtimes.map(rt => {
+  let chips = runtimes.map(rt => {
     const available = !!rt.available;
     const cls = available ? 'badge badge-success' : 'badge badge-gray';
     const title = available ? '' : ` title="${undetectedTitle}"`;
@@ -277,6 +277,18 @@ function _renderCtxOverview(data) {
     const label = escapeHtml(_ctxRuntimeLabel(rt.name || ''));
     return `<span class="${cls}"${title} data-runtime="${name}">${label}</span>`;
   }).join('');
+  // #1692 PR 6: a failed detection probe arrives as detected_runtimes: [] +
+  // detected_runtimes_unavailable: true — an empty chip row would read as "no
+  // runtimes", false-healthy. Strict === true so cached pre-add payloads
+  // replaying through langchange (and old servers) keep the legacy render.
+  // Structural mirror of the wiki-behind badge below: badge primitives only,
+  // no Retry (the overview header is non-interactive status; the panel's
+  // reload path is the recovery affordance).
+  if (data.detected_runtimes_unavailable === true) {
+    const unavailableTip = escapeHtml(t('settings.ctx.overview_runtimes_unavailable_tip'));
+    const unavailableLabel = escapeHtml(t('settings.ctx.overview_runtimes_unavailable'));
+    chips = `<span class="badge badge-danger ctx-overview-runtimes-unavailable" role="img" title="${unavailableTip}" aria-label="${unavailableLabel}: ${unavailableTip}">${unavailableLabel}</span>`;
+  }
 
   // Issue #832 / ADR-0009 §1.c: surface freshness as "Canonical updated: 5m
   // ago" sourced from canonical-source mtime. Issue #1076 follow-up: the

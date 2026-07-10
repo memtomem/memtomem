@@ -52,5 +52,6 @@
     "missing_target": "int",
     "error": "int",
     "status": "str"
-  }
+  },
+  "detected_runtimes_unavailable": "bool"
 }

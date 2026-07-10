@@ -422,11 +422,13 @@ async def context_overview(
             logger.exception("classify_status failed")
             wiki_installs = None
 
+        detected_runtimes_unavailable = False
         try:
             detected_runtimes = _compute_detected_runtimes(project_root)
         except Exception:
             logger.exception("_compute_detected_runtimes failed")
             detected_runtimes = []
+            detected_runtimes_unavailable = True
 
         try:
             last_synced_at = _compute_last_synced_at(project_root, target_scope)
@@ -441,6 +443,9 @@ async def context_overview(
             "last_synced_at": last_synced_at,
             "wiki_installs": wiki_installs,
             **result,
+            # Appended last: the wire goldens pin key positions, so additive
+            # fields never displace existing keys (#1692 PR 5 precedent).
+            "detected_runtimes_unavailable": detected_runtimes_unavailable,
         }
 
     # The whole aggregation — per-kind diffs (filesystem scans), the
@@ -464,15 +469,39 @@ async def context_runtimes(
     artifact fan-out chip strip). Read-only; returns no raw config contents
     (the registry's trust boundary returns only booleans, location kinds, and
     ``$HOME``-collapsed paths).
+
+    Availability envelope (#1692): per-client read failures ride in each
+    entry's ``error_kind`` (``probe_runtime`` never raises), so
+    ``runtimes_status: "unavailable"`` fires only when the probe machinery
+    itself raised — the two signals are disjoint, and ``unavailable`` only
+    ever coexists with ``runtimes: []``. The warning item mirrors the
+    ``GET /api/context/projects`` registry envelope (#1699), minus
+    ``skipped_rows`` (no row concept here).
     """
     from memtomem.context.runtime_registry import probe_all_runtimes
 
+    warnings: list[dict[str, object]] = []
     try:
         runtimes = [s.to_dict() for s in probe_all_runtimes(project_root)]
-    except Exception:
+        runtimes_status = "ok"
+    except Exception as exc:
         logger.exception("probe_all_runtimes failed")
         runtimes = []
-    return {"project_root": str(project_root), "runtimes": runtimes}
+        runtimes_status = "unavailable"
+        warnings.append(
+            {
+                "reason_code": "status_unavailable",
+                "error_kind": _classify_exception(exc),
+                "message": _redact_message(str(exc)),
+                "retryable": True,
+            }
+        )
+    return {
+        "project_root": str(project_root),
+        "runtimes": runtimes,
+        "runtimes_status": runtimes_status,
+        "warnings": warnings,
+    }
 
 
 # ── GET /context/status-all — cross-project drift aggregation (#1280) ────

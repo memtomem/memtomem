@@ -662,7 +662,10 @@ def test_app_js_pins_ui_mode_default_and_toast_copy() -> None:
         "context-gateway.js must not reintroduce a ``devOnly`` flag on the "
         "overview-tile types list; Custom Commands is prod now."
     )
-    assert "const chips = runtimes.map" in cg_js, (
+    # ``let`` (not ``const``) since #1692 PR 6 reassigns ``chips`` to the
+    # unavailable badge when ``detected_runtimes_unavailable`` is true; the
+    # guard's intent is that the tags still render from ``detected_runtimes``.
+    assert "chips = runtimes.map" in cg_js, (
         "Context Gateway runtime tags must render from detected_runtimes."
     )
     assert "ctx-overview-runtimes" in cg_js, (

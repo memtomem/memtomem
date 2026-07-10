@@ -67,6 +67,13 @@ let _ctxPortalHideUninit = true;
 // Map of scope_id -> runtimes list (one GET /api/context/runtimes per scope; the
 // endpoint resolves per-scope via resolve_scope_root's project_scope_id param).
 let _ctxPortalRuntimesMap = {};
+// Parallel availability map, keyed the same way: scope_ids whose runtimes
+// probe is UNKNOWN (#1692 PR 6) — the fetch failed, or the server reported
+// runtimes_status 'unavailable'. Kept separate so _ctxPortalRuntimesMap values
+// stay plain arrays for the filter and row lights. Unknown must not render as
+// four grey "uninstalled" chips (false-healthy); it gets its own chip + Retry.
+// Reset alongside the runtimes map on every fresh load.
+let _ctxPortalRuntimesUnavailable = {};
 // Set of scope_ids whose synced context has drifted from the Store, from the
 // deferred GET /api/context/status-all fetch (#1649). Kept out of the initial
 // render path: status-all shells out to git per project (sequential), so the
@@ -232,6 +239,13 @@ function _ctxPortalSetRuntimeFilter(runtime) {
 // hint — only the heading greyed chips open the guide).
 function _ctxPortalRowTrafficLightsHtml(scope) {
   if (scope.missing) return '';
+  // Unknown probe state (#1692 PR 6): four grey "uninstalled" dots would be
+  // false-healthy, so render a single explicit unavailable light. role=img +
+  // aria-label like the sibling dots — state is not conveyed by color alone.
+  if (_ctxPortalRuntimesUnavailable[scope.scope_id]) {
+    const label = `${t('settings.ctx.portal_runtimes_unavailable')}: ${t('settings.ctx.portal_runtimes_unavailable_tip')}`;
+    return `<div class="ctx-portal-row-lights"><span class="ctx-portal-row-light ctx-portal-row-light--unavailable" role="img" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></span></div>`;
+  }
   const runtimes = _ctxPortalRuntimesMap[scope.scope_id] || [];
   const lights = _CTX_PORTAL_RUNTIME_CLIENTS.map(name => {
     const r = runtimes.find(item => item.name === name);
@@ -260,7 +274,13 @@ function _ctxPortalRenderHeadingChips() {
   const container = document.getElementById('ctx-portal-heading-chips');
   if (!container) return;
 
-  const runtimes = _ctxPortalRuntimesMap[_ctxActiveScopeId] || _ctxPortalRuntimesMap[''] || [];
+  // The availability map mirrors the runtimes map's scope selection: an
+  // unavailable scope holds ``[]`` (truthy) in the runtimes map, so the ''
+  // fallback below only fires when the active scope has no entry at all.
+  const chipScopeId = Object.prototype.hasOwnProperty.call(_ctxPortalRuntimesMap, _ctxActiveScopeId)
+    ? _ctxActiveScopeId : '';
+  const runtimes = _ctxPortalRuntimesMap[chipScopeId] || [];
+  const runtimesUnavailable = !!_ctxPortalRuntimesUnavailable[chipScopeId];
 
   const runtimeChips = _CTX_PORTAL_RUNTIME_CLIENTS.map(name => {
     const r = runtimes.find(item => item.name === name);
@@ -301,6 +321,28 @@ function _ctxPortalRenderHeadingChips() {
     return `<span class="ctx-runtime-chip ${stateClass}" data-runtime="${escapeHtml(name)}" role="img" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(aria)}">${escapeHtml(displayName)}</span>`;
   }).join('');
 
+  // Unknown probe state (#1692 PR 6): the fetch failed or the server said
+  // runtimes_status 'unavailable'. Four grey chips would read as "nothing
+  // installed" — false-healthy — so render one explicit unavailable chip plus
+  // Retry instead (same affordance as the counts pill). role=img + aria-label
+  // keep the state off the color channel, matching the sibling chips.
+  let chipStripHtml = runtimeChips;
+  if (runtimesUnavailable) {
+    const unavailableLabel = t('settings.ctx.portal_runtimes_unavailable');
+    const unavailableTip = t('settings.ctx.portal_runtimes_unavailable_tip');
+    // Name the active scope in the Retry's accessible label: the same view can
+    // hold registry and per-project count Retry buttons, so a bare "Retry"
+    // would be indistinguishable to screen-reader users (mirrors the
+    // portal_counts_retry_aria convention).
+    const activeScope = _ctxPortalScopes.find((s) => s.scope_id === _ctxActiveScopeId);
+    const retryAria = t('settings.ctx.portal_runtimes_retry_aria', {
+      label: activeScope ? _ctxScopeDisplayLabel(activeScope) : '',
+    });
+    chipStripHtml =
+      `<span class="ctx-runtime-chip ctx-runtime-chip--unavailable" role="img" title="${escapeHtml(unavailableTip)}" aria-label="${escapeHtml(`${unavailableLabel}: ${unavailableTip}`)}">${escapeHtml(unavailableLabel)}</span>`
+      + `<button type="button" class="btn-ghost btn-xs ctx-portal-runtimes-retry" aria-label="${escapeHtml(retryAria)}">${escapeHtml(t('settings.ctx.retry'))}</button>`;
+  }
+
   const filterGroup = ['all', ..._CTX_PORTAL_RUNTIME_CLIENTS].map(name => {
     const active = (name === 'all' && !_ctxPortalRuntimeFilter) || (_ctxPortalRuntimeFilter === name);
     const label = name === 'all' ? t('settings.ctx.filter_all') : _ctxPortalRuntimeLabel(name);
@@ -325,7 +367,7 @@ function _ctxPortalRenderHeadingChips() {
   container.innerHTML = `
     <div class="ctx-portal-runtimes-row">
       <span class="ctx-portal-heading-label">${escapeHtml(t('settings.ctx.runtimes_label'))}</span>
-      <div class="ctx-portal-runtimes-list">${runtimeChips}</div>
+      <div class="ctx-portal-runtimes-list">${chipStripHtml}</div>
     </div>
     <div class="ctx-portal-filter-row">
       <span class="ctx-portal-heading-label" id="ctx-portal-filter-label">${escapeHtml(t('settings.ctx.filter_label'))}</span>
@@ -347,6 +389,11 @@ function _ctxPortalRenderHeadingChips() {
       }
     });
   });
+
+  // Whole-roster refetch, same recovery affordance as the counts pill and the
+  // registry banner (#1692): a repaired probe repopulates the chips.
+  const runtimesRetry = container.querySelector('.ctx-portal-runtimes-retry');
+  if (runtimesRetry) runtimesRetry.addEventListener('click', () => { loadCtxProjects(); });
 
   container.querySelectorAll('.ctx-portal-filter-group button').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -469,13 +516,15 @@ async function loadCtxProjects() {
     // is bounded to four workers so a large registry cannot create an N-request
     // burst or delay the first useful frame.
     _ctxPortalRuntimesMap = {};
+    _ctxPortalRuntimesUnavailable = {};
     _ctxPortalRenderHeadingChips();
     _ctxPortalRenderScaffold(listEl);
     _ctxPortalRenderRows();
 
     const enrichScope = async (scope) => {
       if (scope.missing) {
-        return { scopeId: scope.scope_id, runtimes: [] };
+        // Deliberate empty (missing root), not an unknown probe state.
+        return { scopeId: scope.scope_id, runtimes: [], unavailable: false };
       }
       // Counts detail and runtimes are fetched under separate try blocks so a
       // failure in one can't mask the other's result.
@@ -513,9 +562,19 @@ async function loadCtxProjects() {
         const res = await fetch(url, { signal });
         if (!res.ok) throw new Error();
         const rData = await res.json();
-        return { scopeId: scope.scope_id, runtimes: rData.runtimes || [] };
+        // Array.isArray (not ||): a truthy malformed ``runtimes`` would reach
+        // .find() in the renderers. Strict status check: an old server has no
+        // runtimes_status, which must read healthy, not unavailable.
+        return {
+          scopeId: scope.scope_id,
+          runtimes: Array.isArray(rData.runtimes) ? rData.runtimes : [],
+          unavailable: rData.runtimes_status === 'unavailable',
+        };
       } catch (err) {
-        return { scopeId: scope.scope_id, runtimes: [] };
+        // A failed fetch is UNKNOWN state, not "no clients" — but an aborted
+        // one belongs to a superseding load (same idiom as the counts catch
+        // above), whose own fetch owns the availability verdict.
+        return { scopeId: scope.scope_id, runtimes: [], unavailable: !_ctxIsAbortError(err) };
       }
     };
     const queue = scopes.slice();
@@ -527,6 +586,7 @@ async function loadCtxProjects() {
         runtimesResults.push(enriched);
         if (seq === _ctxProjectsSeq && requestedScope === _ctxTargetScope) {
           _ctxPortalRuntimesMap[enriched.scopeId] = enriched.runtimes;
+          if (enriched.unavailable) _ctxPortalRuntimesUnavailable[enriched.scopeId] = true;
           _ctxPortalRenderRows();
           // The heading chips read the ACTIVE scope's runtimes from the same
           // map — the roster-first paint rendered them from an empty map, so
@@ -539,8 +599,10 @@ async function loadCtxProjects() {
     if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return false;
 
     _ctxPortalRuntimesMap = {};
+    _ctxPortalRuntimesUnavailable = {};
     for (const result of runtimesResults) {
       _ctxPortalRuntimesMap[result.scopeId] = result.runtimes;
+      if (result.unavailable) _ctxPortalRuntimesUnavailable[result.scopeId] = true;
     }
 
     _ctxPortalRenderHeadingChips();
@@ -699,7 +761,9 @@ function _ctxPortalMatchedScopes() {
       })
     : all.slice();
 
-  // Apply provider client-side filter
+  // Apply provider client-side filter. Runtimes-unavailable scopes hold []
+  // and drop out of a filtered view — unknown ≠ registered (#1692 PR 6); the
+  // unfiltered board still shows their explicit unavailable light.
   if (_ctxPortalRuntimeFilter) {
     matched = matched.filter(s => {
       const runtimes = _ctxPortalRuntimesMap[s.scope_id] || [];

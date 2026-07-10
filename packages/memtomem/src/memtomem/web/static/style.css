@@ -4543,6 +4543,15 @@ button.ctx-runtime-chip--greyed:focus-visible {
   border: 1px solid rgba(76, 175, 125, 0.3);
   padding: 1px 7px;
 }
+/* Runtimes probe failed (#1692 PR 6): unknown, not "nothing installed" —
+   danger tone matching the counts-unavailable pill so it never reads as four
+   healthy grey chips. */
+.ctx-runtime-chip--unavailable {
+  background: rgba(224, 90, 90, 0.15);
+  color: var(--danger);
+  border: 1px solid rgba(224, 90, 90, 0.4);
+  padding: 1px 7px;
+}
 .ctx-portal-filter-group {
   display: inline-flex;
   align-items: center;
@@ -4591,6 +4600,11 @@ button.ctx-runtime-chip--greyed:focus-visible {
 }
 .ctx-portal-row-light--registered {
   background: var(--green);
+}
+/* Single unknown-state light replacing the four dots when the runtimes probe
+   failed for the row's scope (#1692 PR 6). */
+.ctx-portal-row-light--unavailable {
+  background: var(--danger);
 }
 .ctx-install-guide-body {
   margin: 15px 0;

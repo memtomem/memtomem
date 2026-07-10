@@ -72,6 +72,8 @@ async def test_runtimes_route_shape(client) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "project_root" in data
+    assert data["runtimes_status"] == "ok"
+    assert data["warnings"] == []
     names = [r["name"] for r in data["runtimes"]]
     assert names == ["claude", "antigravity", "codex", "kimi"]
     for r in data["runtimes"]:
@@ -84,6 +86,37 @@ async def test_runtimes_route_shape(client) -> None:
             "config_paths",
             "error_kind",
         }
+
+
+@pytest.mark.asyncio
+async def test_runtimes_route_probe_failure_envelope(client, monkeypatch) -> None:
+    """A probe-machinery failure must not be wire-identical to "no clients".
+
+    #1692 PR 6: the route used to collapse the exception to ``runtimes: []``
+    — indistinguishable from a healthy empty host. Patch at the definition
+    site (the route imports ``probe_all_runtimes`` function-locally).
+    """
+    # ``_redact_message`` collapses the import-time $HOME (frozen in
+    # ``_errors._HOME``), not the test's monkeypatched home — raise with the
+    # frozen value so the assertion exercises the real redaction chokepoint.
+    from memtomem.web.routes._errors import _HOME
+
+    def _boom(*args, **kwargs):
+        raise PermissionError(f"{_HOME}/secret denied")
+
+    monkeypatch.setattr("memtomem.context.runtime_registry.probe_all_runtimes", _boom)
+    resp = await client.get("/api/context/runtimes")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["runtimes"] == []
+    assert data["runtimes_status"] == "unavailable"
+    (warning,) = data["warnings"]
+    assert warning["reason_code"] == "status_unavailable"
+    assert warning["error_kind"] == "permission"
+    assert warning["retryable"] is True
+    # Privacy pin: the redacted message must not leak the absolute $HOME path.
+    assert _HOME not in warning["message"]
+    assert warning["message"] == "~/secret denied"
 
 
 @pytest.mark.asyncio
@@ -114,6 +147,28 @@ async def test_overview_detected_runtimes_enriched(client, home: Path) -> None:
     # gemini runtime entry reflects the Antigravity client (gemini->antigravity).
     assert runtimes["gemini"]["memtomem_registered"] is True
     assert runtimes["claude"]["memtomem_registered"] is False
+    # Healthy path: the #1692 PR 6 availability flag reads false.
+    assert resp.json()["detected_runtimes_unavailable"] is False
+
+
+@pytest.mark.asyncio
+async def test_overview_detected_runtimes_unavailable(client, monkeypatch) -> None:
+    """A failed detection probe must not read as "no runtimes" (#1692 PR 6).
+
+    ``compute_runtime_coverage`` is imported function-locally by the route's
+    ``_compute_detected_runtimes`` helper, so patch its definition site
+    (mirrors the PR 5 pattern in test_web_routes_context_projects.py).
+    """
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("coverage probe exploded")
+
+    monkeypatch.setattr("memtomem.context.runtime_coverage.compute_runtime_coverage", _boom)
+    resp = await client.get("/api/context/overview")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["detected_runtimes"] == []
+    assert data["detected_runtimes_unavailable"] is True
 
 
 # --- mem_context_detect(include_runtimes=True) --------------------------------
