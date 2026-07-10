@@ -37,9 +37,11 @@ from memtomem.context.projects import (
     _MARKER_DIRS,
     KnownProjectsCorruptError,
     KnownProjectsStore,
+    KnownProjectsLoadReport,
     ProjectScope,
     compute_scope_id,
     discover_project_scopes,
+    discover_project_scopes_with_report,
     has_runtime_marker,
 )
 from memtomem.context.mcp_servers import diff_mcp_servers, list_canonical_mcp_servers
@@ -77,6 +79,49 @@ def _discover_for(request: Request) -> list[ProjectScope]:
         experimental_claude_projects_scan=cfg.experimental_claude_projects_scan,
         auto_display_configured_projects=cfg.auto_display_configured_projects,
     )
+
+
+def _discover_with_report(
+    request: Request,
+) -> tuple[list[ProjectScope], KnownProjectsLoadReport]:
+    """:func:`_discover_for` plus the registry load report (#1692).
+
+    Used only by ``list_projects`` — the roster surface where a silently
+    degraded registry reads as false confidence. Selector resolution and
+    status-all keep :func:`_discover_for`.
+    """
+    cfg = _gateway_config(request)
+    cwd = _default_project_root(request)
+    return discover_project_scopes_with_report(
+        cwd,
+        Path(cfg.known_projects_path).expanduser(),
+        experimental_claude_projects_scan=cfg.experimental_claude_projects_scan,
+        auto_display_configured_projects=cfg.auto_display_configured_projects,
+    )
+
+
+def _registry_warnings(report: KnownProjectsLoadReport) -> list[dict]:
+    """Serialize the registry load report as wire warning items.
+
+    Item shape: ``{reason_code, error_kind, message, retryable, skipped_rows}``
+    — ``skipped_rows`` is non-null only for row-level degradation (document
+    parsed, some rows dropped). ``error_kind`` comes pre-classified from the
+    store report in the ``_classify_exception`` vocabulary (the store
+    classifies at the catch site so no live exception crosses the
+    context/web boundary).
+    """
+    if report.reason_code is None:
+        return []
+    error_kind = report.error_kind or "parse"
+    return [
+        {
+            "reason_code": report.reason_code,
+            "error_kind": error_kind,
+            "message": _redact_message(report.detail or ""),
+            "retryable": True,
+            "skipped_rows": report.skipped_rows or None,
+        }
+    ]
 
 
 def _default_project_root(request: Request) -> Path:
@@ -422,16 +467,27 @@ async def list_projects(
     Response shape (RFC §Decision 4, extended by ADR-0021 PR2):
 
     ``{target_scope, scopes: [{project_scope_id, scope_id, label, root, tier,
-    sources, missing, stale, experimental, enabled, sync_eligible, counts}]}``
+    sources, missing, stale, experimental, enabled, sync_eligible, counts}],
+    registry_status, warnings}``
     where ``counts`` is ``{skills, commands, agents, mcp-servers}`` only when
     ``?include=counts`` is requested (else ``null``). ``enabled`` is the
     known_projects sync-enrollment flag; ``sync_eligible`` is the derived
     server-cwd-OR-enrolled-and-enabled gate.
+
+    ``registry_status`` (#1692) is ``"unavailable"`` iff ``known_projects.json``
+    *exists* but was unusable (a missing file is the normal pre-registration
+    state and stays ``"ok"``); the response is still 200 and ``scopes`` still
+    carries server-cwd / scan rows. ``warnings`` items are
+    ``{reason_code, error_kind, message, retryable, skipped_rows}``;
+    ``skipped_rows`` is non-null only when the document parsed but rows were
+    dropped (``registry_status`` stays ``"ok"`` then). Warning items carry no
+    ``remediation_action`` by design (D3) — remediation presentation is owned
+    by the UI.
     """
     include_tokens = {tok.strip() for tok in include.split(",") if tok.strip()}
     with_counts = "counts" in include_tokens
     with_coverage = "runtime_coverage" in include_tokens
-    scopes = _discover_for(request)
+    scopes, registry_report = _discover_with_report(request)
 
     def _build() -> list[dict]:
         return [
@@ -453,6 +509,8 @@ async def list_projects(
     return {
         "target_scope": target_scope,
         "scopes": scope_dicts,
+        "registry_status": "ok" if registry_report.ok else "unavailable",
+        "warnings": _registry_warnings(registry_report),
     }
 
 

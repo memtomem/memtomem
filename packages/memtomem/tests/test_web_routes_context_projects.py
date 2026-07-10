@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -986,3 +987,136 @@ async def test_delete_over_corrupt_store_500_preserves_bytes(
     resp = await client.delete(f"/api/context/known-projects/{sid}")
     assert resp.status_code == 500, resp.text
     assert known_projects_path.read_bytes() == corrupt
+
+
+# ── GET /context/projects registry read-failure surfacing (#1692) ────────
+
+
+@pytest.mark.asyncio
+async def test_get_projects_registry_ok_when_missing_or_healthy(client, tmp_path: Path) -> None:
+    """Missing registry (pre-registration) and a healthy registered one both
+    report ok with no warnings — the degradation surface stays quiet."""
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["registry_status"] == "ok"
+    assert data["warnings"] == []
+
+    await _register(client, tmp_path / "healthy")
+    data = (await client.get("/api/context/projects")).json()
+    assert data["registry_status"] == "ok"
+    assert data["warnings"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt", CORRUPT_STORE_VARIANTS)
+async def test_get_projects_over_corrupt_registry_stays_200_with_warning(
+    client, known_projects_path: Path, tmp_path: Path, corrupt: bytes
+) -> None:
+    """A corrupt registry must not serve an empty roster as the truth: the
+    GET stays 200 (the read path is tolerant by design), the degradation is
+    surfaced as ``registry_status`` + a structured warning, and the
+    non-registry scopes (server cwd) still render."""
+    await _register(client, tmp_path / "registered")
+    known_projects_path.write_bytes(corrupt)
+
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["registry_status"] == "unavailable"
+    assert len(data["warnings"]) == 1
+    warning = data["warnings"][0]
+    assert warning["reason_code"] == "registry_corrupt"
+    assert warning["error_kind"] == "parse"
+    assert warning["retryable"] is True
+    assert warning["skipped_rows"] is None
+    assert "known_projects" in warning["message"]
+    # Degraded, not gone: the server-cwd row survives a broken registry.
+    assert [s for s in data["scopes"] if "server-cwd" in s["sources"]]
+
+
+@pytest.mark.asyncio
+async def test_get_projects_row_skip_reports_count_not_unavailable(
+    client, known_projects_path: Path, tmp_path: Path
+) -> None:
+    """Row-level degradation: the registry stays ok (the document parsed) and
+    the warning carries only the skip count — no row content leaks."""
+    good = tmp_path / "good"
+    good.mkdir()
+    known_projects_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [
+                    {"root": str(good)},
+                    "stray-string",
+                    {"label": "no-root", "note": "row-content-must-not-leak"},
+                ],
+            }
+        )
+    )
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["registry_status"] == "ok"
+    assert len(data["warnings"]) == 1
+    warning = data["warnings"][0]
+    assert warning["reason_code"] == "registry_corrupt"
+    assert warning["skipped_rows"] == 2
+    assert warning["retryable"] is True
+    # Count only — skipped row content must not appear in the message.
+    assert "stray-string" not in warning["message"]
+    assert "row-content-must-not-leak" not in warning["message"]
+    # The parsable row still made it into the roster.
+    assert any(s["label"] == "good" for s in data["scopes"])
+
+
+@pytest.mark.asyncio
+async def test_get_projects_unreadable_registry_classifies_os_error(
+    client, known_projects_path: Path
+) -> None:
+    """OSError-class degradation (not just parse): the registry path being a
+    directory makes ``read_bytes`` raise on every platform, and the warning's
+    ``error_kind`` carries the store-side classification (IsADirectoryError →
+    missing on POSIX, PermissionError → permission on Windows)."""
+    known_projects_path.mkdir()
+
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["registry_status"] == "unavailable"
+    warning = data["warnings"][0]
+    assert warning["reason_code"] == "registry_corrupt"
+    assert warning["error_kind"] in {"missing", "permission"}
+    assert warning["retryable"] is True
+    assert warning["skipped_rows"] is None
+    assert "unreadable" in warning["message"]
+    assert [s for s in data["scopes"] if "server-cwd" in s["sources"]]
+
+
+@pytest.mark.asyncio
+async def test_get_projects_permission_denied_registry_classifies_permission(
+    client, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A permission-denied read must be classified ``permission`` (not folded
+    into ``parse``/``internal``) so the operator knows it is a chmod problem,
+    not a corrupt document."""
+    known_projects_path.write_text(json.dumps({"version": 1, "projects": []}))
+    real_read_bytes = Path.read_bytes
+
+    def _deny(self: Path) -> bytes:
+        if self == known_projects_path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _deny)
+    resp = await client.get("/api/context/projects")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["registry_status"] == "unavailable"
+    warning = data["warnings"][0]
+    assert warning["reason_code"] == "registry_corrupt"
+    assert warning["error_kind"] == "permission"
+    assert warning["retryable"] is True
+    assert warning["skipped_rows"] is None
+    assert "unreadable" in warning["message"]

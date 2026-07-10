@@ -80,6 +80,12 @@ let _ctxPortalDriftMap = {};
 // alongside the drift map. Unlike drift, an error is not Sync-remediable, so
 // its badge offers no Sync affordance.
 let _ctxPortalErrorMap = {};
+// Registry read report from the last projects payload (#1692): null when the
+// registry read was clean, else {status: 'ok'|'unavailable', warnings: [...]}.
+// Drives the non-blocking banner above the board — the roster below still
+// renders (server-cwd / scan rows survive a degraded registry). Reset on every
+// fresh load so a repaired registry clears the banner on Retry.
+let _ctxPortalRegistryWarning = null;
 // Active runtime filter: null | 'claude' | 'antigravity' | 'codex' | 'kimi'
 let _ctxPortalRuntimeFilter = null;
 
@@ -430,6 +436,13 @@ async function loadCtxProjects() {
     // deferred fetch below (project_shared only) repopulates it.
     _ctxPortalDriftMap = {};
     _ctxPortalErrorMap = {};
+    // Registry read report (#1692). Warnings may be present while status stays
+    // "ok" (row-level skips), so gate on either signal.
+    const registryWarnings = Array.isArray(data.warnings) ? data.warnings : [];
+    _ctxPortalRegistryWarning =
+      data.registry_status === 'unavailable' || registryWarnings.length
+        ? { status: data.registry_status || 'ok', warnings: registryWarnings }
+        : null;
     if (!scopes.length) {
       // Server CWD is always present, so an empty roster means the load
       // failed — render the shared load-error + Retry (#1287; the helper
@@ -535,10 +548,36 @@ async function _ctxPortalLoadDrift(seq, requestedScope, signal) {
 // Header (search + sort) is painted once and kept across row repaints so the
 // search field never loses focus mid-type; only #ctx-projects-rows is rebuilt
 // on search/sort input.
+// Non-blocking registry read-failure banner (#1692). Unlike
+// _ctxScopesLoadError this never replaces the board — a degraded registry
+// only hides *registered* rows, so the roster (server-cwd / scan) still
+// renders below it. Message keys off registry_status: "unavailable" is the
+// whole-file failure; "ok"-with-warning is the row-skip case, whose count
+// rides in the warning item's skipped_rows.
+function _ctxPortalRegistryBannerHtml() {
+  const warn = _ctxPortalRegistryWarning;
+  if (!warn) return '';
+  const first = warn.warnings[0] || {};
+  const msg = warn.status === 'unavailable'
+    ? t('settings.ctx.portal_registry_unavailable')
+    : t('settings.ctx.portal_registry_rows_skipped', {
+        count: typeof first.skipped_rows === 'number' ? first.skipped_rows : 0,
+      });
+  const reason = first.message
+    ? `<div class="ctx-diagnostic-detail"><div class="ctx-diagnostic-reason">${escapeHtml(first.message)}</div></div>`
+    : '';
+  return `
+    <div class="ctx-portal-registry-banner" role="alert">
+      <div class="ctx-portal-registry-banner-msg">${escapeHtml(msg)}${reason}</div>
+      <button type="button" class="btn-ghost ctx-scopes-retry">${escapeHtml(t('settings.ctx.retry'))}</button>
+    </div>`;
+}
+
 function _ctxPortalRenderScaffold(listEl) {
   const sortName = escapeHtml(t('settings.ctx.portal_sort_name'));
   const sortItems = escapeHtml(t('settings.ctx.portal_sort_items'));
   listEl.innerHTML = `
+    ${_ctxPortalRegistryBannerHtml()}
     <div class="ctx-portal-toolbar">
       <input type="search" id="ctx-portal-search" class="ctx-portal-search"
              value="${escapeHtml(_ctxPortalSearch)}"
@@ -578,6 +617,10 @@ function _ctxPortalRenderScaffold(listEl) {
       _ctxPortalHideUninit = hideUninit.checked;
       _ctxPortalRenderRows();
     });
+  }
+  const registryRetry = listEl.querySelector('.ctx-portal-registry-banner .ctx-scopes-retry');
+  if (registryRetry) {
+    registryRetry.addEventListener('click', () => { loadCtxProjects(); });
   }
 }
 

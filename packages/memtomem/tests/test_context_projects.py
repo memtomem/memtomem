@@ -21,9 +21,11 @@ from memtomem.context.projects import (
     KnownProjectsStore,
     ProjectHealth,
     ProjectScope,
+    _classify_registry_os_error,
     annotate_project_health,
     compute_scope_id,
     discover_project_scopes,
+    discover_project_scopes_with_report,
     has_runtime_marker,
     sync_skip_reason,
 )
@@ -439,6 +441,129 @@ def test_store_projects_not_list_recovers_to_empty(tmp_path: Path) -> None:
 
     kp.write_text(json.dumps({"version": 1, "projects": 5}))
     assert store.load() == []
+
+
+# ── tolerant load report (#1692) ─────────────────────────────────────────
+
+
+def test_load_with_report_missing_file_is_ok(tmp_path: Path) -> None:
+    """A missing file is the normal pre-registration state — nothing to surface."""
+    report = KnownProjectsStore(tmp_path / "kp.json").load_with_report()
+    assert report.ok is True
+    assert report.reason_code is None
+    assert report.detail is None
+    assert report.skipped_rows == 0
+    assert report.entries == []
+
+
+def test_load_with_report_healthy_file_is_ok(tmp_path: Path) -> None:
+    project = tmp_path / "alpha"
+    project.mkdir()
+    store = KnownProjectsStore(tmp_path / "kp.json")
+    store.add(project)
+    report = store.load_with_report()
+    assert report.ok is True
+    assert report.reason_code is None
+    assert report.skipped_rows == 0
+    assert len(report.entries) == 1
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        pytest.param(b"not valid {json", id="invalid-json"),
+        pytest.param(b"\xff", id="invalid-utf8"),
+        pytest.param(b'{"version": 999, "projects": []}', id="future-version"),
+        pytest.param(b'{"version": 1, "projects": {"root": "/old"}}', id="projects-not-list"),
+    ],
+)
+def test_load_with_report_whole_file_degradation(tmp_path: Path, corrupt: bytes) -> None:
+    """Whole-file failures report not-ok with a ``registry_corrupt`` reason;
+    the entries stay the same ``[]`` fallback ``load(strict=False)`` returns."""
+    kp = tmp_path / "kp.json"
+    kp.write_bytes(corrupt)
+    store = KnownProjectsStore(kp)
+    report = store.load_with_report()
+    assert report.ok is False
+    assert report.reason_code == "registry_corrupt"
+    assert report.detail is not None and "known_projects" in report.detail
+    assert report.skipped_rows == 0
+    # Decode/version/shape refusals are document-contract violations.
+    assert report.error_kind == "parse"
+    assert report.entries == [] == store.load()
+
+
+def test_load_with_report_unreadable_file_classifies_error_kind(tmp_path: Path) -> None:
+    """An existing-but-unreadable path degrades with the OSError classified at
+    the catch site — no live exception rides in the report. A directory raises
+    from ``read_bytes`` on every platform (IsADirectoryError on POSIX,
+    PermissionError on Windows)."""
+    kp = tmp_path / "kp.json"
+    kp.mkdir()
+    report = KnownProjectsStore(kp).load_with_report()
+    assert report.ok is False
+    assert report.reason_code == "registry_corrupt"
+    assert report.error_kind in {"missing", "permission"}
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        pytest.param(PermissionError(13, "denied"), "permission", id="permission"),
+        pytest.param(IsADirectoryError(21, "is a directory"), "missing", id="is-a-directory"),
+        pytest.param(NotADirectoryError(20, "not a directory"), "missing", id="not-a-directory"),
+        pytest.param(OSError(5, "io error"), "internal", id="generic-oserror"),
+    ],
+)
+def test_classify_registry_os_error(exc: OSError, kind: str) -> None:
+    """The store-side OSError classifier mirrors the web layer's
+    ``_classify_exception`` mapping for the OSError subset, so the wire
+    ``error_kind`` is identical to what classifying the live exception would
+    have produced."""
+    assert _classify_registry_os_error(exc) == kind
+
+
+def test_load_with_report_row_skips_counted(tmp_path: Path) -> None:
+    """Row-level degradation: the document parses, bad rows are skipped and
+    counted, and the read is still ok (the registry itself was usable)."""
+    kp = tmp_path / "kp.json"
+    good = tmp_path / "good"
+    good.mkdir()
+    kp.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [
+                    {"root": str(good), "added_at": "2026-01-01T00:00:00Z"},
+                    "stray-string",
+                    {"label": "no-root"},
+                ],
+            }
+        )
+    )
+    report = KnownProjectsStore(kp).load_with_report()
+    assert report.ok is True
+    assert report.reason_code == "registry_corrupt"
+    assert report.skipped_rows == 2
+    assert report.error_kind == "parse"
+    assert [e.root for e in report.entries] == [good.resolve()]
+
+
+def test_discover_with_report_threads_registry_report(tmp_path: Path) -> None:
+    """``discover_project_scopes_with_report`` surfaces the registry report
+    while the scope list still carries the non-registry rows (server cwd)."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    kp = tmp_path / "kp.json"
+    kp.write_text("not valid {json")
+    scopes, report = discover_project_scopes_with_report(
+        cwd, kp, experimental_claude_projects_scan=False
+    )
+    assert report.ok is False
+    assert report.reason_code == "registry_corrupt"
+    assert [s.label for s in scopes if "server-cwd" in s.sources] != []
+    # The tolerant delegate returns the identical roster.
+    assert scopes == discover_project_scopes(cwd, kp, experimental_claude_projects_scan=False)
 
 
 # ── corrupt-file mutation refusal (#1247 id 16) ──────────────────────────
