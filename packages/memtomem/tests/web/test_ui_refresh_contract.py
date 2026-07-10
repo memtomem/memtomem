@@ -61,6 +61,7 @@ def test_settings_mobile_navigation_is_horizontal_chip_row() -> None:
     assert "flex-direction: row" in mobile
     assert "overflow-x: auto" in mobile
     assert "max-height: none !important" in mobile
+    assert ".settings-nav-btn.collapsed-member { display: flex; }" in mobile
 
 
 def test_index_uses_segmented_work_card_and_guarded_risk_disclosure() -> None:

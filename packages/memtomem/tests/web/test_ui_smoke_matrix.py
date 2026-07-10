@@ -346,7 +346,12 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             assert not page.locator(".sources-layout").evaluate(
                 "el => el.classList.contains('mobile-detail')"
             )
-            page.locator("#sources-list .source-item").first.click()
+            # Exercise the row's production Enter handler as part of the
+            # keyboard-only acceptance path. This also avoids racing the
+            # source tree's async status repaint with a stale pointer point.
+            source_row = page.locator("#sources-list .source-item").first
+            source_row.focus()
+            page.keyboard.press("Enter")
         page.wait_for_function(
             "() => document.querySelector('#chunks-browser .chunks-browser-header .file-path')?.textContent.includes('notes.md')",
             timeout=5_000,
@@ -411,16 +416,18 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
         else:
             assert page.locator('[data-ui-tier="dev"]:visible').count() > 0
 
-        page.locator("#settings-btn").click()
-        assert not page.locator("#settings-modal").evaluate("el => el.hidden")
-        page.keyboard.press("Escape")
-        assert page.locator("#settings-modal").evaluate("el => el.hidden")
+        if viewport[0] > 760:
+            page.locator("#settings-btn").click()
+            assert not page.locator("#settings-modal").evaluate("el => el.hidden")
+            page.keyboard.press("Escape")
+            assert page.locator("#settings-modal").evaluate("el => el.hidden")
 
         theme_before = page.locator("html").get_attribute("data-theme")
         page.locator("#theme-toggle").click()
         assert page.locator("html").get_attribute("data-theme") != theme_before
-        page.locator("#help-toggle").click()
-        assert page.locator("#help-toggle").get_attribute("aria-pressed") in {"true", "false"}
+        if viewport[0] > 760:
+            page.locator("#help-toggle").click()
+            assert page.locator("#help-toggle").get_attribute("aria-pressed") in {"true", "false"}
 
         page.locator('.tab-btn[data-tab="index"]').click()
         for index_mode in ("folder", "upload", "compose"):

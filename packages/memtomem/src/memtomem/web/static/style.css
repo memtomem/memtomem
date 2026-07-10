@@ -5328,6 +5328,7 @@ textarea:focus-visible,
     scrollbar-width: none;
   }
   .settings-nav-btn { width: auto; min-width: max-content; padding: var(--space-2) var(--space-3); }
+  .settings-nav-btn.collapsed-member { display: flex; }
   .settings-nav-btn .nav-sub,
   .settings-nav-divider,
   .settings-nav-group { display: none !important; }
