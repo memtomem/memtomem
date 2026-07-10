@@ -1,0 +1,41 @@
+{
+  "project_root": "str",
+  "runtimes": [
+    {
+      "name": "str",
+      "installed": "bool",
+      "memtomem_registered": "bool",
+      "mms_registered": "bool",
+      "registered_locations": [],
+      "config_paths": [],
+      "error_kind": "null"
+    },
+    {
+      "name": "str",
+      "installed": "bool",
+      "memtomem_registered": "bool",
+      "mms_registered": "bool",
+      "registered_locations": [],
+      "config_paths": [],
+      "error_kind": "null"
+    },
+    {
+      "name": "str",
+      "installed": "bool",
+      "memtomem_registered": "bool",
+      "mms_registered": "bool",
+      "registered_locations": [],
+      "config_paths": [],
+      "error_kind": "null"
+    },
+    {
+      "name": "str",
+      "installed": "bool",
+      "memtomem_registered": "bool",
+      "mms_registered": "bool",
+      "registered_locations": [],
+      "config_paths": [],
+      "error_kind": "null"
+    }
+  ]
+}
