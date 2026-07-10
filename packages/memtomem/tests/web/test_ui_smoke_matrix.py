@@ -342,10 +342,24 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
 
         page.locator('.tab-btn[data-tab="sources"]').click()
         assert page.locator(".sources-vendor-tab").count() >= 1
+        if viewport[0] <= 390:
+            assert not page.locator(".sources-layout").evaluate(
+                "el => el.classList.contains('mobile-detail')"
+            )
+            page.locator("#sources-list .source-item").first.click()
         page.wait_for_function(
             "() => document.querySelector('#chunks-browser .chunks-browser-header .file-path')?.textContent.includes('notes.md')",
             timeout=5_000,
         )
+        if viewport[0] <= 390:
+            assert page.locator(".sources-layout").evaluate(
+                "el => el.classList.contains('mobile-detail')"
+            )
+            assert page.locator(".sources-mobile-back").is_visible()
+            page.locator(".sources-mobile-back").click()
+            assert not page.locator(".sources-layout").evaluate(
+                "el => el.classList.contains('mobile-detail')"
+            )
         for vendor in ("user", "claude", "openai"):
             tab = page.locator(f'.sources-vendor-tab[data-vendor="{vendor}"]')
             if tab.count():

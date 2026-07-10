@@ -1646,6 +1646,7 @@
   "settings.config.select.structured_mode.original": "키별 원본 텍스트 줄 추출, 큰 구간은 줄 수로 분할",
   "settings.config.select.structured_mode.recursive": "json.dumps로 직렬화, 하위 키 기준 재귀 분할",
   "common.dismiss": "닫기",
+  "sources.back_to_list": "소스 목록으로",
   "settings.config.decay_status_active": "점수 감쇠: 활성 (반감기 {days}일)",
   "settings.config.decay_status_inactive": "점수 감쇠: 비활성",
   "settings.config.ns_default": "기본 NS: {ns}",

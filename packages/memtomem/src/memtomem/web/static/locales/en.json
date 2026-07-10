@@ -1646,6 +1646,7 @@
   "settings.config.select.structured_mode.original": "Extract original text lines per key, split large sections by line count",
   "settings.config.select.structured_mode.recursive": "Serialize via json.dumps, recursively split by sub-keys",
   "common.dismiss": "Dismiss",
+  "sources.back_to_list": "Back to sources",
   "settings.config.decay_status_active": "Score Decay: Active (half-life {days}d)",
   "settings.config.decay_status_inactive": "Score Decay: Inactive",
   "settings.config.ns_default": "Default NS: {ns}",
