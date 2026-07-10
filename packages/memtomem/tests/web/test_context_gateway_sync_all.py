@@ -1249,9 +1249,7 @@ def test_sync_all_confirm_shows_per_type_runtime_breakdown(page, mm_web_url: str
 # routing, and the deliberate fallback: a 200 without ``phases`` (older
 # server / generic test double) re-enters the legacy per-type loop.
 
-NOTHING_SYNCED_TOAST = (
-    "Nothing to sync yet — every section is empty. Create or import artifacts first."
-)  # settings.ctx.sync_all_nothing_synced
+NOTHING_SYNCED_TOAST = "Nothing to sync yet — every section is empty. Create or import artifacts first."  # settings.ctx.sync_all_nothing_synced
 
 
 def _batch_phase(phase_type: str, *, generated=(), skipped=(), status: str = "ok") -> dict:
@@ -1283,13 +1281,9 @@ def _run_sync_all(page, mm_web_url: str, overview_state: dict | None = None) -> 
     _open_context_gateway(page)
     pre_click_calls = overview_state["n"] if overview_state is not None else 0
     page.locator("#ctx-sync-all-btn").click()
-    page.wait_for_function(
-        "() => !document.getElementById('confirm-modal').hidden", timeout=2_000
-    )
+    page.wait_for_function("() => !document.getElementById('confirm-modal').hidden", timeout=2_000)
     page.locator("#confirm-ok-btn").click()
-    page.wait_for_function(
-        "() => document.getElementById('confirm-modal').hidden", timeout=2_000
-    )
+    page.wait_for_function("() => document.getElementById('confirm-modal').hidden", timeout=2_000)
     return pre_click_calls
 
 
@@ -1427,9 +1421,7 @@ def test_sync_all_batch_noop_emits_nothing_synced_info(page, mm_web_url: str) ->
     assert toast_text == NOTHING_SYNCED_TOAST, f"expected no-op toast, got {toast_text!r}"
 
 
-def test_sync_all_batch_unsupported_response_falls_back_to_legacy(
-    page, mm_web_url: str
-) -> None:
+def test_sync_all_batch_unsupported_response_falls_back_to_legacy(page, mm_web_url: str) -> None:
     """Batch-4: a 200 without ``phases`` (older server / generic double) falls
     back to the legacy per-type orchestration — five POSTs in phase order."""
     install_default_stubs(page)

@@ -56,6 +56,9 @@ const _CONFIG_META_FIELDS = new Set(['config_mtime_ns', 'config_reload_error']);
 const _CONFIG_SECTION_STORAGE_KEY = 'm2m-config-section';
 const _CONFIG_ALL_SECTION = '__all__';
 let _activeConfigSection = null;
+// Last section whose guide the filter pass surfaced — dedup so keystrokes /
+// dirty-mark re-renders don't re-assert the guide (see _applyConfigFilter).
+let _lastConfigGuideSection = null;
 const _dirtyConfigSections = new Set();
 
 function _configSectionName(section) {
@@ -91,7 +94,6 @@ function _renderConfigSectionSwitcher(sections) {
     button.type = 'button';
     button.className = 'config-section-chip';
     button.dataset.section = section;
-    button.setAttribute('role', 'tab');
     const label = section === _CONFIG_ALL_SECTION ? t('settings.config.section_all') : _configSectionName(section);
     button.append(document.createTextNode(label));
     if (_dirtyConfigSections.has(section)) {
@@ -127,10 +129,19 @@ function _applyConfigFilter() {
   document.querySelectorAll('.config-section-chip').forEach((button) => {
     const active = button.dataset.section === _activeConfigSection;
     button.classList.toggle('active', active);
-    button.setAttribute('aria-selected', String(active));
+    // Toggle-button semantics (``role=group`` host + ``aria-pressed``), not
+    // ARIA tabs — a real tablist demands roving tabindex + arrow-key wiring,
+    // and the axe smoke gate flags the half-done pattern.
+    button.setAttribute('aria-pressed', String(active));
   });
+  // Follow the guide panel only when the leading visible section actually
+  // changes — ``_applyConfigFilter`` also runs per keystroke and per dirty
+  // mark, and re-asserting the guide there would yank it mid-edit.
   const firstVisible = document.querySelector('.config-card[data-section]:not([hidden])');
-  if (firstVisible) _showConfigGuide(firstVisible.dataset.section);
+  if (firstVisible && firstVisible.dataset.section !== _lastConfigGuideSection) {
+    _lastConfigGuideSection = firstVisible.dataset.section;
+    _showConfigGuide(firstVisible.dataset.section);
+  }
 }
 
 qs('config-search')?.addEventListener('input', _applyConfigFilter);

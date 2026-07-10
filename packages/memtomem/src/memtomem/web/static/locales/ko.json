@@ -659,7 +659,6 @@
   "settings.ctx.simple_manage": "관리",
   "settings.ctx.simple_manage_aria": "{type} 고급 보기에서 관리",
   "settings.ctx.simple_empty_hint": "고급을 열어 항목을 추가하거나, 도구에서 가져오거나, 프로젝트 또는 저장소를 전환하세요.",
-  "settings.ctx.simple_empty_cta": "고급 열기",
   "settings.ctx.simple_empty_import": "도구에서 가져오기",
   "settings.ctx.simple_empty_create": "스킬 만들기",
   "settings.ctx.open_advanced": "고급 보기 열기",

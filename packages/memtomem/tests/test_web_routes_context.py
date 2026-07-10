@@ -1262,7 +1262,6 @@ class TestImportSkills:
         data = r.json()
         assert data["dry_run"] is True
         assert data["imported"][0]["source_runtime"] == "claude"
-        assert data["imported"][0]["selected_runtime"] == "claude"
         assert data["imported"][0]["duplicate_candidates"] == ["claude"]
         assert any(i["name"] == "from-claude" for i in data["imported"])
         # Disk is untouched by the preview.

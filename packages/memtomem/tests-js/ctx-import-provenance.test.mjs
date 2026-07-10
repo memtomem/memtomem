@@ -9,7 +9,6 @@ describe('Import provenance receipt', () => {
       imported: [{
         name: 'shared',
         source_runtime: 'claude',
-        selected_runtime: 'claude',
         duplicate_candidates: ['claude', 'gemini', 'codex'],
       }],
       skipped: [],

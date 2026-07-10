@@ -659,7 +659,6 @@
   "settings.ctx.simple_manage": "Manage",
   "settings.ctx.simple_manage_aria": "Manage {type} in advanced view",
   "settings.ctx.simple_empty_hint": "Open Advanced to add items, import from a tool, or switch project or store.",
-  "settings.ctx.simple_empty_cta": "Open Advanced",
   "settings.ctx.simple_empty_import": "Import from tools",
   "settings.ctx.simple_empty_create": "Create a skill",
   "settings.ctx.open_advanced": "Open Advanced",

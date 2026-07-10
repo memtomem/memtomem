@@ -451,7 +451,7 @@ function renderImportResult(data) {
     html += `<h4>${t('settings.ctx.import_success')}</h4>`;
     for (const item of data.imported) {
       const candidates = Array.isArray(item.duplicate_candidates) ? item.duplicate_candidates : [];
-      const source = item.selected_runtime || item.source_runtime;
+      const source = item.source_runtime;
       const provenance = source
         ? `<span class="ctx-import-source">${escapeHtml(t('settings.ctx.import_selected_runtime', { runtime: source }))}</span>`
         : '';

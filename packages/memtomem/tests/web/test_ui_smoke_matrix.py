@@ -492,9 +492,7 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
         # exempt from the page CSP. Only serious/critical findings fail the
         # broad smoke matrix; screenshots remain diagnostic artifacts rather
         # than pixel-diff assertions.
-        axe_source = (Path(__file__).with_name("vendor") / "axe.min.js").read_text(
-            encoding="utf-8"
-        )
+        axe_source = (Path(__file__).with_name("vendor") / "axe.min.js").read_text(encoding="utf-8")
         page.evaluate(f"() => {{ {axe_source} }}")
         axe_results = page.evaluate(
             """async () => await axe.run(document, {
