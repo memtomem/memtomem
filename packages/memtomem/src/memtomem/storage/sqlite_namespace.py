@@ -106,22 +106,26 @@ class NamespaceOps:
             (namespace,),
         ).fetchall()
 
-        if not rows:
-            return 0
-
+        # The metadata delete runs unconditionally, even when the namespace has
+        # no chunks: a metadata-only namespace (registered via
+        # set_namespace_meta but never written to) is still listed by
+        # list_namespace_meta, so an early return here would leave it
+        # undeletable through this API. Return value stays the chunk count, so
+        # deleting a wholly nonexistent namespace remains a 0 no-op.
         ids = [row[0] for row in rows]
         rowids = [row[1] for row in rows]
 
         try:
-            db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
-            db.execute(
-                f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
-            )
-            if self._has_vec_table():
+            if rows:
+                db.execute(f"DELETE FROM chunks WHERE id IN ({placeholders(len(ids))})", ids)
                 db.execute(
-                    f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})",
-                    rowids,
+                    f"DELETE FROM chunks_fts WHERE rowid IN ({placeholders(len(rowids))})", rowids
                 )
+                if self._has_vec_table():
+                    db.execute(
+                        f"DELETE FROM chunks_vec WHERE rowid IN ({placeholders(len(rowids))})",
+                        rowids,
+                    )
             db.execute("DELETE FROM namespace_metadata WHERE namespace=?", (namespace,))
             db.commit()
         except Exception as exc:

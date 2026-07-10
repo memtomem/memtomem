@@ -1098,3 +1098,48 @@ class TestSetNamespaceMetaAtomicity:
         meta = await storage.get_namespace_meta("shared")
         assert meta["description"] == "keep me"
         assert meta["color"] == "red"
+
+
+class TestDeleteByNamespaceMetadata:
+    """``delete_by_namespace`` must remove the ``namespace_metadata`` row even
+    when the namespace holds no chunks, otherwise a metadata-only namespace
+    (registered via ``set_namespace_meta`` but never written to) stays listed
+    by ``list_namespace_meta`` and is undeletable through this API — an
+    undeletable tombstone for scratch-namespace GC callers (#1705)."""
+
+    def _listed(self, metas):
+        return {m["namespace"] for m in metas}
+
+    @pytest.mark.asyncio
+    async def test_deletes_metadata_only_namespace(self, components):
+        """A namespace that exists only as metadata (zero chunks) is removed
+        and returns 0 (the chunk count), not left behind."""
+        storage = components.storage
+        await storage.set_namespace_meta("board-run:abc", description="scratch")
+        assert "board-run:abc" in self._listed(await storage.list_namespace_meta())
+
+        deleted = await storage.delete_by_namespace("board-run:abc")
+
+        assert deleted == 0
+        assert "board-run:abc" not in self._listed(await storage.list_namespace_meta())
+        assert await storage.get_namespace_meta("board-run:abc") is None
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_namespace_is_noop(self, components):
+        """Deleting a wholly unknown namespace stays a 0 no-op."""
+        storage = components.storage
+        assert await storage.delete_by_namespace("board-run:never") == 0
+
+    @pytest.mark.asyncio
+    async def test_deletes_chunks_and_metadata(self, components):
+        """The chunks+metadata path is unchanged: chunks are gone, the
+        metadata row is gone, and the return value is the chunk count."""
+        storage = components.storage
+        await storage.set_namespace_meta("work", description="real")
+        await storage.upsert_chunks([make_chunk(content="c1", namespace="work", source="a.md")])
+
+        deleted = await storage.delete_by_namespace("work")
+
+        assert deleted == 1
+        assert "work" not in self._listed(await storage.list_namespace_meta())
+        assert await storage.get_namespace_meta("work") is None
