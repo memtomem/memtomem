@@ -743,9 +743,11 @@ def test_memory_migrate_unregistered_target_tier_refused(monkeypatch, fake_proje
     # that command shape doesn't exist — ``mm config set`` rejects
     # ``project_memory_dirs`` because it's outside MUTABLE_FIELDS, and
     # the bracketed assignment isn't supported syntax). The hint must
-    # point at the only path that actually works: editing
-    # ``~/.memtomem/config.json`` directly.
+    # point at the paths that actually work: ``mm mem init`` (#1700)
+    # first, with editing ``~/.memtomem/config.json`` as the manual
+    # fallback.
     assert "mm config set" not in out
+    assert "mm mem init" in out
     assert "config.json" in out
     # Refusal must happen before any FS / DB mutation, including the
     # cheap ``count_chunks_by_source`` probe.

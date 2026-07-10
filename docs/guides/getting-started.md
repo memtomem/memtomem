@@ -479,6 +479,12 @@ nothing.
 2. To index a new folder, register it first — re-run `mm init` and set it at
    the *Memory directory* step (or add it to `indexing.memory_dirs` in
    `~/.memtomem/config.json`) — then `mm index ~/that-folder`.
+   For a **project** tier, run `mm mem init` from the project root instead: it
+   creates `.memtomem/memories.local/` (or `.memtomem/memories/` with
+   `--scope project_shared --confirm-project-shared`) and registers it in
+   `indexing.project_memory_dirs`, which also unlocks
+   `mm add --scope project_local|project_shared` there. `project_local`
+   requires a git repo (`git init` first) so the draft tier is gitignored.
 3. Make sure the folder has at least one supported file. Only these extensions
    are indexed (`.md`, `.json`, `.yaml`, `.py`, `.js`, `.ts`, …) — a folder of
    only `.pdf` or `.docx` files indexes nothing.
