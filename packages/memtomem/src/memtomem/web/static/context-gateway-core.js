@@ -656,10 +656,10 @@ function _ctxOpenInAdvanced(section) {
 // The toggle label and active chip are written with ``t()``, and this call
 // runs before ``I18N.init()``'s locale fetch resolves — so their first paint
 // is the raw-key fallback. ``init`` dispatches ``langchange`` once the cache
-// is populated, and the listener below re-renders them (and again on every
-// locale flip — neither element carries ``data-i18n``, so ``applyDOM`` can't).
+// is populated, and the gateway ``langchange`` listener (context-gateway-
+// overview.js) re-runs this renderer then and on every locale flip — neither
+// element carries ``data-i18n``, so ``applyDOM`` can't repair them.
 _ctxApplySimpleMode();
-window.addEventListener('langchange', _ctxApplySimpleMode);
 
 function _ctxTargetScopeParam(targetScope = _ctxTargetScope) {
   // ``targetScope`` defaults to the live global so existing single-shot

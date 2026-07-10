@@ -1086,6 +1086,14 @@ window.addEventListener('langchange', () => {
   // ``loadCtxList``) is re-rendered by the ``loadCtxList`` re-issue
   // below — no separate handling needed.
   _ctxRefreshWriteBlockedState();
+  // The Simple-mode toggle label + active chip are inline ``t()`` writes with
+  // no ``data-i18n`` (context-gateway-core.js) — their load-time paint runs
+  // before the locale cache exists, so the ``langchange`` that ``I18N.init``
+  // dispatches (and every later flip) must re-run the renderer. BEFORE the
+  // ``hostActive`` gate: the boot dispatch usually fires with another tab
+  // active, and the raw-key labels must be repaired before the user first
+  // opens the gateway.
+  _ctxApplySimpleMode();
   // Gateway sections now live under ``#tab-context-gateway`` (#962). Keep
   // the legacy ``#tab-settings`` check as a fallback so a partial revert
   // doesn't silently disable the langchange re-render — drop it once the
@@ -1589,6 +1597,13 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
       // regenerate-from-canonical, so the second pass is an idempotent no-op.
       for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'pending');
     }
+    // Re-bind the CSRF headers next to the legacy fan-out: the batch branch
+    // above pushed these fetches past the CSRF invariant's binding-lookback
+    // window (test_spa_api_fetch_threads_csrf_token), same rationale as the
+    // settings phase's inline binding below. ``csrf`` is the run-level token.
+    const legacyHeaders = csrf
+      ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
+      : { 'Content-Type': 'application/json' };
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;
@@ -1601,7 +1616,7 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
             scopeResolved: true,
             targetScope: syncAllTier,
           }),
-          { method: 'POST', headers },
+          { method: 'POST', headers: legacyHeaders },
         );
       } catch (err) {
         failed = { phase: typ, reason: err.message };

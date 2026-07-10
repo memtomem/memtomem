@@ -5,13 +5,14 @@ import { bootApp } from './setup/jsdom-app.mjs';
 // ``t()`` from ``_ctxApplySimpleMode``, which first runs at script-eval time —
 // BEFORE ``I18N.init()``'s locale fetch resolves — so their first paint is the
 // raw-key fallback. Neither element carries ``data-i18n`` (the label is
-// state-dependent), so ``applyDOM`` cannot repair them; the ``langchange``
-// listener registered next to the load-time call must. Regression: PR #1704
+// state-dependent), so ``applyDOM`` cannot repair them; the gateway
+// ``langchange`` listener (context-gateway-overview.js) must — hence the full
+// gateway sentinel boot. Regression: PR #1704
 // review — without the listener the default Context Gateway header showed
 // ``settings.ctx.open_advanced`` / ``settings.ctx.active_store_chip`` verbatim.
 describe('Simple-mode toggle/chip relocalization', () => {
   it('replaces the raw-key first paint once the locale cache loads', async () => {
-    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway-core.js'] });
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway.js'] });
     // ``init`` dispatches ``langchange`` after populating the cache — the
     // listener re-renders both elements from real translations.
     await dom.window.I18N.init();
@@ -26,7 +27,7 @@ describe('Simple-mode toggle/chip relocalization', () => {
   });
 
   it('re-translates both elements on a locale flip', async () => {
-    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway-core.js'] });
+    const dom = await bootApp({ scripts: ['i18n.js', 'app.js', 'context-gateway.js'] });
     await dom.window.I18N.init();
     await dom.window.I18N.setLang('ko');
 
