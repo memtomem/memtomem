@@ -1,0 +1,56 @@
+{
+  "target_scope": "str",
+  "project_root": "str",
+  "detected_runtimes": [
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    },
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    },
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    },
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    }
+  ],
+  "last_synced_at": "str",
+  "wiki_installs": {
+    "total": "int",
+    "behind": "int"
+  },
+  "skills": {
+    "total": "int"
+  },
+  "commands": {
+    "total": "int"
+  },
+  "agents": {
+    "total": "int",
+    "missing_target": "int"
+  },
+  "mcp_servers": {
+    "total": "int"
+  },
+  "settings": {
+    "total": "int",
+    "in_sync": "int",
+    "out_of_sync": "int",
+    "missing_target": "int",
+    "error": "int",
+    "status": "str"
+  }
+}
