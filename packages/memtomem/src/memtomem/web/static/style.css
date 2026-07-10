@@ -2857,7 +2857,8 @@ body.show-retrieval-debug .score-detail-row[data-tooltip-debug]:hover::after {
 }
 
 /* ── Sprint 4: Home Tab ── */
-.home-layout { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; }
+.home-layout { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; min-width: 0; }
+.home-layout > * { min-width: 0; max-width: 100%; }
 
 /* S2.3 — first-run orientation block (collapsible getting-started card). */
 .home-orientation {
@@ -3092,6 +3093,16 @@ body.dev-mode .home-stats-row { grid-template-columns: repeat(6, 1fr); }
 .home-source-row2 {
   font-size: 0.68rem; color: var(--muted); font-family: var(--mono); padding-left: 14px;
 }
+.home-source-row1,
+.home-source-row2 { min-width: 0; overflow: hidden; }
+.home-source-row1 .source-ns-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(32vw, 220px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.home-source-row1 > .badge-blue { flex-shrink: 0; }
 
 /* F. Quick Actions + Pinned bottom row */
 .home-bottom-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -5008,6 +5019,64 @@ button.ctx-runtime-chip--greyed:focus-visible {
      diff stays readable on narrow screens during the destructive
      Reload-vs-Force choice (was two ~225px columns side by side). */
   #ctx-conflict-preview-row { flex-direction: column; }
+
+  /* P0 mobile work areas: each Sources pane owns the full available height;
+     explicit row activation swaps panes and Back restores the active row. */
+  #tab-sources.active { overflow: hidden; }
+  #tab-search.active,
+  #tab-index.active { overflow: hidden; }
+  #tab-search .results-layout,
+  #tab-search #detail-panel {
+    min-height: 0;
+    height: 100%;
+  }
+  #tab-index .index-layout { flex: 1; min-height: 0; }
+  .sources-layout {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+  .sources-layout .sources-sidebar {
+    display: flex;
+    width: 100% !important;
+    height: 100%;
+    max-height: none;
+    min-height: 0;
+    border-bottom: 0;
+  }
+  .sources-layout .chunks-browser { display: none; }
+  .sources-layout.mobile-detail .sources-sidebar { display: none; }
+  .sources-layout.mobile-detail .chunks-browser {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+  .sources-mobile-back-btn { margin-bottom: 12px; }
+
+  /* Keep destructive/primary work actions reachable while their panel scrolls.
+     The panel padding reserves the same footprint so the final content is not
+     obscured by the sticky surface. */
+  #detail-view,
+  .index-panel { padding-bottom: 72px; }
+  .detail-actions,
+  .mobile-sticky-actions {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 0;
+    z-index: 20;
+    margin: 0;
+    padding: 10px 12px max(10px, env(safe-area-inset-bottom));
+    background: color-mix(in srgb, var(--bg) 94%, transparent);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -8px 18px rgba(0, 0, 0, 0.12);
+    backdrop-filter: blur(8px);
+  }
+  .mobile-sticky-actions { display: flex; }
+  .mobile-sticky-actions > .btn-primary { width: 100%; }
+  .index-panels { margin: 0 12px; }
 }
 
 /* ── Wiki browser (ADR-0008 PR-E, ctx-wiki) ─────────────────────────────── */

@@ -827,7 +827,9 @@
               <label class="checkbox-warn" data-i18n-title="index.force_unsafe_title" title="Index files even if they contain secrets (API keys, tokens). Audit-logged. Git-tracked project_shared files are still blocked."><input type="checkbox" id="index-force-unsafe" /> <span data-i18n="index.force_unsafe">Index without privacy gate</span></label>
             </div>
           </details>
-          <button id="index-btn" class="btn-primary" data-i18n="index.index_btn">Index</button>
+          <div class="mobile-sticky-actions index-primary-actions">
+            <button id="index-btn" class="btn-primary" data-i18n="index.index_btn">Index</button>
+          </div>
           <div id="index-msg" class="status-msg" hidden></div>
           <div id="index-progress" class="index-progress" hidden>
             <div class="progress-bar-wrap">
@@ -866,7 +868,9 @@
             <input id="upload-input" type="file" multiple accept=".md,.txt,.json,.yaml,.yml,.toml" hidden />
           </div>
           <div id="upload-file-list" class="upload-file-list" hidden></div>
-          <button id="upload-btn" class="btn-primary mt-10" disabled data-i18n="index.upload_btn">Upload &amp; Index</button>
+          <div class="mobile-sticky-actions index-primary-actions">
+            <button id="upload-btn" class="btn-primary" disabled data-i18n="index.upload_btn">Upload &amp; Index</button>
+          </div>
           <div id="upload-msg" class="status-msg" hidden></div>
           <div id="upload-result" class="upload-result" hidden></div>
           <p id="upload-usage" aria-live="polite" hidden>
@@ -890,7 +894,9 @@
           <label class="field-label" for="add-content" data-i18n="index.add_content_label">Content</label>
           <textarea id="add-content" spellcheck="false" data-i18n-placeholder="index.add_content_placeholder" placeholder="Write your memory here…"></textarea>
           <p class="panel-help-text" data-i18n="index.add_privacy_hint">Privacy guard scans for tokens, API keys, and private keys — not email or phone numbers.</p>
-          <button id="add-btn" class="btn-primary mt-10" data-i18n="index.add_btn">Add</button>
+          <div class="mobile-sticky-actions index-primary-actions">
+            <button id="add-btn" class="btn-primary" data-i18n="index.add_btn">Add</button>
+          </div>
           <div id="add-msg" class="status-msg" hidden></div>
         </div>
       </div>
@@ -1767,7 +1773,7 @@
   <script src="/app.js?v=148"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=14"></script>
-  <script src="/sources-memory-dirs.js?v=13"></script>
+  <script src="/sources-memory-dirs.js?v=14"></script>
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=12"></script>
   <script src="/settings-harness.js?v=5"></script>
