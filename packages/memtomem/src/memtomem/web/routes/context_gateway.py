@@ -507,10 +507,11 @@ def _status_all_entry(
 ) -> dict[str, Any]:
     """Serialize one executed project's ``ProjectStatus`` for the wire.
 
-    Entry ``status`` vocabulary: ``error`` (corrupt / version-mismatched
-    lockfile — the aggregate is kept but cannot be trusted as complete, the
-    single-status CLI's exit-1 condition), else ``drift``/``ok`` from the
-    shared predicate. Row ``reason`` strings can embed wiki paths and raw
+    Entry ``status`` vocabulary: ``error`` (a corrupt / version-mismatched
+    lockfile OR any per-kind diff probe that raised, #1692 — the aggregate is
+    kept but cannot be trusted as complete, the single-status CLI's exit-1
+    condition), else ``drift``/``ok`` from the shared predicate. Row ``reason``
+    strings can embed wiki paths and raw
     exception text (this is the first surface serializing ``StatusRow``),
     so they pass through ``sanitize_diff_reason`` — the established
     display-sanitize boundary; ``lockfile_error`` gets the same treatment.
@@ -524,7 +525,12 @@ def _status_all_entry(
     diff_counts: dict[str, Any] = dict(status.diff_counts)
     for kind, exc in status.diff_errors.items():
         diff_counts[kind] = _error_payload(exc, shape="status" if kind == "settings" else "total")
-    if status.lockfile_error:
+    # A failed lockfile read OR any per-kind diff probe that raised is an
+    # ``error`` — the check could not establish drift, so it must not read as
+    # Sync-remediable ``drift`` (#1692). The failing kind's error envelope is
+    # already in ``diff_counts[kind]`` above; the entry-level ``error`` object
+    # stays reserved for a total collector crash (see ``context_status_all``).
+    if status.lockfile_error or status.diff_errors:
         entry_status = "error"
     elif status.drift:
         entry_status = "drift"
@@ -579,9 +585,10 @@ async def context_status_all(
     whenever the loop ran; non-2xx only for the tier gate (400).
 
     Per-project entries: ``skipped`` (shared ``sync_skip_reason`` codes +
-    surface-local prose), ``error`` (corrupt lockfile, or the collector
-    raised — A-9's failed-entry envelope shape), else ``ok``/``drift`` via
-    the shared ``ProjectStatus.drift`` predicate. ``summary`` is counts
+    surface-local prose), ``error`` (corrupt lockfile, a per-kind diff probe
+    that raised (#1692), or the collector itself raised — A-9's failed-entry
+    envelope shape), else ``ok``/``drift`` via the shared
+    ``ProjectStatus.drift`` predicate. ``summary`` is counts
     only — deliberately NO roll-up status string: A-9's ``ok|partial|
     failed`` describe mutation success, while fleet health here is just
     ``drifted + errors == 0``, derivable; a third vocabulary would invite

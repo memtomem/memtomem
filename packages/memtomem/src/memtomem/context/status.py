@@ -577,9 +577,11 @@ class ProjectStatus:
     formats an error envelope, the CLI prints the message).
 
     ``drift`` is the shared roll-up predicate: any row state in
-    :data:`DRIFT_STATES`, any diff error, or any per-kind count outside the
-    kind's clean key set. ``lockfile_error`` does NOT imply drift — surfaces
-    report it as an error condition instead.
+    :data:`DRIFT_STATES`, or any per-kind count outside the kind's clean key
+    set. Neither ``lockfile_error`` NOR a per-kind ``diff_errors`` entry
+    implies drift — both are error conditions (the probe could not establish
+    the state), so surfaces report them as ``error``, not Sync-remediable
+    drift (#1692).
     """
 
     wiki_head: str | None
@@ -693,10 +695,14 @@ def collect_project_status(
     except Exception as exc:
         diff_errors["settings"] = exc
 
-    drift = (
-        any(row.state in DRIFT_STATES for row in rows)
-        or bool(diff_errors)
-        or any(True for _ in iter_kind_drift_counts(diff_counts))
+    # A per-kind diff scan that RAISED is an error condition, NOT drift (#1692):
+    # a failed probe means we could not establish the sync state, so calling it
+    # "drift" would report it as Sync-remediable when Sync cannot fix it. It
+    # rides in ``diff_errors`` and surfaces classify it alongside
+    # ``lockfile_error`` (web entry status ``error``, CLI exit 1). Only genuine
+    # row drift or a positive out-of-clean count sets ``drift``.
+    drift = any(row.state in DRIFT_STATES for row in rows) or any(
+        True for _ in iter_kind_drift_counts(diff_counts)
     )
     return ProjectStatus(
         wiki_head=wiki_head,

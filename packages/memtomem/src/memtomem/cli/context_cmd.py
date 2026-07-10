@@ -2713,8 +2713,10 @@ def _run_status_all_projects() -> None:
     Per-project failure isolation: one project's crash prints a red row and
     the batch continues. Exit mirrors the single-project contract — drift
     alone exits 0 (the cron chain ``status && sync`` stays viable); exit 1
-    iff any project had a corrupt/version-mismatched lockfile or its
-    collection crashed. Zero-eligible exits 0 informationally (the batch
+    iff any project had a corrupt/version-mismatched lockfile, a per-kind diff
+    probe that raised, or its collection crashed. A failed probe cannot
+    establish the sync state, so exit 0 would be actively misleading — it is an
+    error, not drift (#1692). Zero-eligible exits 0 informationally (the batch
     precedent).
     """
     cfg = _projects_gateway_cfg()
@@ -2759,13 +2761,15 @@ def _run_status_all_projects() -> None:
 def _render_project_status(status: ProjectStatus) -> bool:
     """Render one project's aggregate block; True when it counts as an error.
 
-    Detail rows render ONLY for :data:`DRIFT_STATES` — the aggregate answers
-    "which projects drifted", so clean/untracked inventory stays in the
-    header counts and the full row list remains the single-project verb's
-    job. The ``runtime drift:`` line enumerates the SAME
-    ``iter_kind_drift_counts`` stream the shared ``drift`` flag is computed
-    from, so the rendered table and the summary classification cannot
-    disagree.
+    An error is a corrupt/unreadable ``lock.json`` OR any per-kind diff probe
+    that raised (#1692): either means the sync state could not be established,
+    so the row is red and the batch exits 1 — not the yellow, exit-0 "drift"
+    class. Detail rows render ONLY for :data:`DRIFT_STATES` — the aggregate
+    answers "which projects drifted", so clean/untracked inventory stays in the
+    header counts and the full row list remains the single-project verb's job.
+    The ``runtime drift:`` line enumerates the SAME ``iter_kind_drift_counts``
+    stream the shared ``drift`` flag is computed from, so the rendered table and
+    the summary classification cannot disagree.
     """
     if status.lockfile_error is not None:
         click.secho(f"  ✗ lock.json: {status.lockfile_error}", fg="red")
@@ -2802,13 +2806,16 @@ def _render_project_status(status: ProjectStatus) -> bool:
         f"{kind.replace('_', '-')} {count} {key.replace('_', ' ')}"
         for kind, key, count in iter_kind_drift_counts(status.diff_counts)
     ]
-    for kind, exc in status.diff_errors.items():
-        runtime_bits.append(f"{kind.replace('_', '-')} diff failed ({exc})")
     if runtime_bits:
         click.secho("  runtime drift: " + "; ".join(runtime_bits), fg="yellow")
-    else:
+    elif not status.diff_errors:
         click.echo("  runtime: in sync")
-    return status.lockfile_error is not None
+    # Diff probe failures are an error condition, rendered red on their own line
+    # (not folded into the yellow "runtime drift" list): a failed probe means the
+    # state is unknown, so "in sync" above is suppressed and the row exits 1.
+    for kind, exc in status.diff_errors.items():
+        click.secho(f"  ✗ {kind.replace('_', '-')} diff failed: {exc}", fg="red")
+    return status.lockfile_error is not None or bool(status.diff_errors)
 
 
 # ── install --all (PR-D C3) ─────────────────────────────────────────────

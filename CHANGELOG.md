@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- **A failed status probe is now an error, not drift** (#1692) — in the
+  Context Gateway fleet view (`GET /api/context/status-all`) and
+  `mm context status --all-projects`, a per-kind diff scan that *raised* was
+  previously folded into the project's `drift` flag. A failed probe cannot
+  establish the sync state, so reporting it as (Sync-remediable) drift was
+  misleading. Such a project is now classified `error`: the web entry status
+  is `error` (its failing kind still carries the error envelope in
+  `diff_counts`), and **the CLI now exits 1** for it (mixed drift+error and
+  error-only both exit 1), where drift alone still exits 0. Scripts that keyed
+  off the previous exit-0 behavior for probe failures should treat the new
+  exit 1 as "could not determine sync state." A corrupt/unreadable `lock.json`
+  already behaved this way; this aligns diff-probe failures with it.
+
 ## [0.3.4] — 2026-07-05
 
 ### Deprecations

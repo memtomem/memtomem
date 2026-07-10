@@ -299,7 +299,9 @@ async def test_settings_diff_error_uses_status_shape_envelope(
     + ``error_kind``/``error_message``), not the artifact kinds'
     count-based ``{"total": 0, "error": true}`` shape — one client must
     not meet two incompatible settings error envelopes across the two
-    routes. The contained error still reads as drift."""
+    routes. A per-kind diff probe that raised makes the ENTRY ``error`` — the
+    check could not establish drift, so it must not read as Sync-remediable
+    ``drift`` (#1692)."""
 
     def _boom(project_root, *, scope):
         raise RuntimeError("settings diff exploded")
@@ -308,14 +310,18 @@ async def test_settings_diff_error_uses_status_shape_envelope(
 
     resp = await client.get("/api/context/status-all")
     assert resp.status_code == 200, resp.text
-    entry = _entry(resp.json(), cwd_root)
+    data = resp.json()
+    entry = _entry(data, cwd_root)
 
     settings_envelope = entry["diff_counts"]["settings"]
     assert settings_envelope["status"] == "error"
     assert settings_envelope["error_kind"] == "internal"
     assert "settings diff exploded" in settings_envelope["error_message"]
     assert "total" not in settings_envelope  # the count-shape marker must NOT leak in
-    assert entry["status"] == "drift"  # contained per-kind error == drift, not entry error
+    # #1692: a contained per-kind probe error classifies the entry as ``error``,
+    # NOT ``drift`` — and it lands in the summary's error column, not drifted.
+    assert entry["status"] == "error"
+    assert data["summary"]["errors"] >= 1
 
 
 @pytest.mark.asyncio

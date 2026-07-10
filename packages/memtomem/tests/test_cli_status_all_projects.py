@@ -258,6 +258,34 @@ def test_collector_crash_isolated_and_exits_one(
         assert isinstance(kwargs["wiki"], WikiStore)
 
 
+def test_diff_probe_error_exits_one_not_drift(
+    tmp_path: Path, fake_home: Path, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1692: a per-kind diff probe that RAISES is an error, not drift — the
+    row renders red, the batch exits 1, and it is counted under errors (not
+    drifted). A failed probe cannot establish the sync state, so the old exit-0
+    "drift" classification was actively misleading."""
+    a = _project(tmp_path, "proj-a")  # clean store, but its settings diff will explode
+    b = _project(tmp_path, "proj-b")  # genuinely clean sibling
+    _seed_known_projects(known_projects_path, [(a, True), (b, True)])
+    monkeypatch.chdir(a)
+
+    def _boom(project_root, *, scope):
+        if Path(project_root) == a:
+            raise RuntimeError("settings diff exploded")
+        return {}
+
+    monkeypatch.setattr("memtomem.context.settings.diff_settings", _boom)
+
+    result = CliRunner().invoke(context_group, ["status", "--all-projects"])
+
+    assert result.exit_code == 1, result.output
+    assert "settings diff failed: settings diff exploded" in result.output
+    assert f"{b}" in result.output  # sibling still rendered
+    # Counted as an error, NOT drift; drift stays 0 (no row drift, no count drift).
+    assert "Summary: 0 with drift, 1 clean, 1 error(s), 0 skipped." in result.output
+
+
 def test_zero_eligible_informational_exit_zero(
     tmp_path: Path, fake_home: Path, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

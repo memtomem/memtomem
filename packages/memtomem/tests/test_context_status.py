@@ -1374,6 +1374,30 @@ def test_collect_lockfile_error_keeps_partial_aggregate(
     assert status.drift is True
 
 
+def test_collect_diff_probe_error_is_not_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1692: a per-kind diff scan that RAISES lands in ``diff_errors`` and,
+    like ``lockfile_error``, does NOT by itself flip ``drift`` — a failed probe
+    could not establish the state, so surfaces classify it as an error, not
+    Sync-remediable drift. With no row drift and no positive out-of-clean
+    count, ``drift`` stays False."""
+    _collect_home(tmp_path, monkeypatch)
+    project = tmp_path / "proj"
+    (project / ".memtomem").mkdir(parents=True)
+
+    def _boom(project_root, *, scope):
+        raise RuntimeError("settings diff exploded")
+
+    monkeypatch.setattr("memtomem.context.settings.diff_settings", _boom)
+
+    status = collect_project_status(project)
+
+    assert "settings" in status.diff_errors
+    assert "settings" not in status.diff_counts  # a raised kind is absent from counts
+    assert status.drift is False  # diff error alone is NOT drift (#1692)
+
+
 def test_collect_target_scope_filters_draft_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
