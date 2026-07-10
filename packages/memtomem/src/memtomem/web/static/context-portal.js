@@ -74,6 +74,12 @@ let _ctxPortalRuntimesMap = {};
 // this resolves. Reset on every fresh load so a tier flip / refresh can't leave
 // a stale badge. project_shared tier only (the endpoint 400s on other tiers).
 let _ctxPortalDriftMap = {};
+// Parallel to the drift map, keyed the same way: projects whose status-all
+// entry is ``error`` — the per-project status check itself failed (corrupt
+// lockfile or a probe that raised), so drift is *unknown*, not clean. Reset
+// alongside the drift map. Unlike drift, an error is not Sync-remediable, so
+// its badge offers no Sync affordance.
+let _ctxPortalErrorMap = {};
 // Active runtime filter: null | 'claude' | 'antigravity' | 'codex' | 'kimi'
 let _ctxPortalRuntimeFilter = null;
 
@@ -423,6 +429,7 @@ async function loadCtxProjects() {
     // flip or refresh must not carry a stale badge into the new roster. The
     // deferred fetch below (project_shared only) repopulates it.
     _ctxPortalDriftMap = {};
+    _ctxPortalErrorMap = {};
     if (!scopes.length) {
       // Server CWD is always present, so an empty roster means the load
       // failed — render the shared load-error + Retry (#1287; the helper
@@ -512,10 +519,13 @@ async function _ctxPortalLoadDrift(seq, requestedScope, signal) {
   if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return;
   const projects = Array.isArray(data?.projects) ? data.projects : [];
   const driftMap = {};
+  const errorMap = {};
   for (const entry of projects) {
     if (entry?.status === 'drift') driftMap[entry.project_scope_id || ''] = true;
+    else if (entry?.status === 'error') errorMap[entry.project_scope_id || ''] = true;
   }
   _ctxPortalDriftMap = driftMap;
+  _ctxPortalErrorMap = errorMap;
   // Skip the immediate repaint while a row is in inline-rename mode — a full
   // repaint would discard the open input's typed value. The map is already set,
   // so the next natural repaint (save/cancel/langchange) shows the badges.
@@ -726,6 +736,14 @@ function _ctxPortalBadgesHtml(scope) {
   if (!scope.missing && _ctxPortalDriftMap[scope.scope_id || '']) {
     const tip = escapeHtml(t('settings.ctx.portal_drift_tip'));
     parts.push(`<span class="ctx-scope-badge ctx-scope-badge--drift" title="${tip}">${escapeHtml(t('settings.ctx.portal_drift_badge'))}</span>`);
+  } else if (!scope.missing && _ctxPortalErrorMap[scope.scope_id || '']) {
+    // Status check failed for this project (corrupt lockfile / probe raised):
+    // drift is unknown, so we cannot claim clean OR drift. Deliberately no Sync
+    // affordance in the tooltip — an error is not Sync-remediable; point at the
+    // CLI for the failure detail instead. ``else if`` because a status-all entry
+    // is exactly one status, so error and drift are mutually exclusive.
+    const tip = escapeHtml(t('settings.ctx.portal_status_error_tip'));
+    parts.push(`<span class="ctx-scope-badge ctx-scope-badge--status-error" title="${tip}">${escapeHtml(t('settings.ctx.portal_status_error_badge'))}</span>`);
   }
   return parts.join('');
 }
