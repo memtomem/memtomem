@@ -251,7 +251,7 @@ def _assert_active_panel(page, tab: str) -> None:
 
 
 @pytest.mark.parametrize("mode", ["prod", "dev"])
-@pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
+@pytest.mark.parametrize("viewport", [(1440, 1000), (1024, 768), (390, 844)])
 def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
     """Walk the main tabs and nested menus in prod/dev on desktop/mobile."""
     page.set_viewport_size({"width": viewport[0], "height": viewport[1]})

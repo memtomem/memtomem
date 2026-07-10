@@ -133,7 +133,7 @@ const STATE = {
   // Update toggle icon and finalize initialization on DOM ready
   document.addEventListener('DOMContentLoaded', async () => {
     const isDark = el.getAttribute('data-theme') !== 'light';
-    qs('theme-toggle').textContent = isDark ? '🌙' : '☀️';
+    qs('theme-toggle').dataset.themeState = isDark ? 'dark' : 'light';
     // Resolve UI mode + fetch locales in parallel. Both gate rendering.
     const uiModePromise = initUiMode();
     if (typeof I18N !== 'undefined') await I18N.init();
@@ -1768,7 +1768,7 @@ qs('theme-toggle').addEventListener('click', () => {
   const el = document.documentElement;
   const goLight = el.getAttribute('data-theme') !== 'light';
   el.setAttribute('data-theme', goLight ? 'light' : 'dark');
-  qs('theme-toggle').textContent = goLight ? '☀️' : '🌙';
+  qs('theme-toggle').dataset.themeState = goLight ? 'light' : 'dark';
   localStorage.setItem('m2m-theme', goLight ? 'light' : 'dark');
 });
 
