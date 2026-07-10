@@ -8,7 +8,8 @@
  *   (1) default is Simple — the ``.ctx-simple`` class is on and the verdict +
  *       per-type rows render (Advanced is one toggle click away);
  *   (2) the toggle flips the class + aria-pressed + persists the flag, and the
- *       Overview re-renders into the verdict + per-type rows (hooks excluded);
+ *       Overview re-renders into the verdict + per-type rows (hooks included —
+ *       a settings-only drift/error must reach the aggregate verdict);
  *   (3) the 3-state remap maps each type's raw counts to the right Simple state
  *       (display-only — no wire status string mutated);
  *   (4) an attention row's Manage button leaves Simple mode and deep-links into
@@ -42,7 +43,7 @@ const SCOPES = [
 
 // One artifact type per Simple state: skills→needs_sync, commands→in_tools,
 // agents→not_saved (runtime-only), mcp_servers→attention (parse error). The
-// settings/hooks slot stays out of the Simple rows (Advanced-only in P1a).
+// settings/hooks slot now participates too (in_sync here → a fifth in_tools row).
 const OVERVIEW = {
   skills: { total: 2, in_sync: 1, missing_target: 1 },
   commands: { total: 1, in_sync: 1 },
@@ -184,10 +185,10 @@ describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
 
     const simple = window.document.querySelector('.ctx-overview-simple');
     expect(simple).not.toBeNull();
-    // One row per artifact type (skills/commands/agents/mcp) — hooks excluded.
+    // One row per artifact type (skills/commands/agents/mcp) plus hooks/settings.
     const rows = simple.querySelectorAll('.ctx-simple-row');
-    expect(rows.length).toBe(4);
-    expect(simple.querySelector('[data-section="hooks-sync"]')).toBeNull();
+    expect(rows.length).toBe(5);
+    expect(simple.querySelector('[data-section="hooks-sync"]')).not.toBeNull();
     // Every row carries non-empty status text (never color-only — D-G).
     rows.forEach((r) => {
       expect(r.querySelector('.ctx-simple-status-text').textContent.trim().length).toBeGreaterThan(0);
@@ -403,9 +404,72 @@ describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
     await flush(window);
     const simple = window.document.querySelector('.ctx-overview-simple');
     expect(simple).not.toBeNull();
-    expect(simple.querySelectorAll('.ctx-simple-row').length).toBe(4);
+    expect(simple.querySelectorAll('.ctx-simple-row').length).toBe(5);
     expect(verdict()).toBe(window.t('settings.ctx.simple_verdict_attention'));
     expect(verdict()).not.toContain('attention');
     expect(skillsStatus()).toBe(window.t('settings.ctx.status_simple_needs_sync'));
+  });
+
+  it('settings-only drift is truthful: hooks row renders and the verdict is NOT all-clear', async () => {
+    // Every artifact type clean, but hooks/settings reports out_of_sync via its
+    // ``status`` field (not the count fields). Pre-fix this hid behind the
+    // all-clear verdict because settings was filtered out of the Simple rows.
+    const SETTINGS_DRIFT = {
+      skills: { total: 1, in_sync: 1 },
+      commands: { total: 1, in_sync: 1 },
+      agents: { total: 1, in_sync: 1 },
+      mcp_servers: { total: 1, in_sync: 1 },
+      settings: { total: 1, in_sync: 0, status: 'out_of_sync' },
+      detected_runtimes: [],
+      project_root: '/srv',
+      target_scope: 'project_shared',
+    };
+    const window = await boot(SETTINGS_DRIFT);
+    window._ctxSetSimpleMode(true);
+    await window.loadCtxOverview();
+    await flush(window);
+
+    const hooksRow = window.document.querySelector('.ctx-simple-row[data-section="hooks-sync"]');
+    expect(hooksRow).not.toBeNull();
+    expect(hooksRow.dataset.state).toBe('needs_sync');
+    // Settings has no inline sync/import route — it routes to Manage, not an
+    // inline action button.
+    expect(hooksRow.querySelector('[data-ctx-action]')).toBeNull();
+    expect(hooksRow.querySelector('.ctx-simple-manage')).not.toBeNull();
+    // The drift reaches the aggregate verdict instead of a false all-clear.
+    const verdict = window.document.querySelector('.ctx-simple-verdict').textContent;
+    expect(verdict).toBe(window.t('settings.ctx.simple_verdict_action'));
+    expect(verdict).not.toBe(window.t('settings.ctx.simple_verdict_clear'));
+  });
+
+  it('a project_local draft shows its own state and blocks the all-clear verdict', async () => {
+    // A canonical that exists but is a project_local draft (no runtime fan-out).
+    // Pre-fix it fell through to in_tools and earned a green check + all-clear.
+    const DRAFT_OVERVIEW = {
+      skills: { total: 1, in_sync: 1 },
+      commands: { total: 1, in_sync: 1 },
+      agents: { total: 1, in_sync: 1 },
+      mcp_servers: { total: 1, in_sync: 1 },
+      settings: { total: 1, in_sync: 1, status: 'in_sync' },
+      // total present, no issue counts, but a local_draft → intentional draft.
+      detected_runtimes: [],
+      project_root: '/srv',
+      target_scope: 'project_local',
+    };
+    DRAFT_OVERVIEW.skills = { total: 1, in_sync: 0, local_draft: 1 };
+    const window = await boot(DRAFT_OVERVIEW);
+    window._ctxSetSimpleMode(true);
+    await window.loadCtxOverview();
+    await flush(window);
+
+    const skillsRow = window.document.querySelector('.ctx-simple-row[data-section="ctx-skills"]');
+    expect(skillsRow.dataset.state).toBe('local_draft');
+    // No success check for a draft (D-G: never glyph-only, and never a false OK).
+    expect(skillsRow.querySelector('.ctx-simple-check')).toBeNull();
+    expect(skillsRow.querySelector('.ctx-simple-status-text').textContent.trim())
+      .toBe(window.t('settings.ctx.status_simple_local_draft'));
+    // Draft ranks below real actions but still blocks the all-clear verdict.
+    const verdict = window.document.querySelector('.ctx-simple-verdict').textContent;
+    expect(verdict).toBe(window.t('settings.ctx.simple_verdict_draft'));
   });
 });

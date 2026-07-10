@@ -128,10 +128,11 @@ def test_default_is_simple_verdict_and_rows_visible(page, mm_web_url: str) -> No
     assert page.locator("#ctx-control-bar").is_hidden()
     assert page.locator("#ctx-overview-content .ctx-overview-grid").is_hidden()
 
-    # One read-only row per artifact type (hooks excluded), each with text.
+    # One row per artifact type including hooks/settings (in_sync here → a fifth
+    # in_tools row), each with text — a settings-only drift must reach the verdict.
     rows = page.locator(".ctx-simple-row")
-    assert rows.count() == 4
-    assert page.locator(".ctx-simple-row[data-section='hooks-sync']").count() == 0
+    assert rows.count() == 5
+    assert page.locator(".ctx-simple-row[data-section='hooks-sync']").count() == 1
     needs_sync = page.locator(".ctx-simple-row[data-section='ctx-skills']")
     assert needs_sync.get_attribute("data-state") == "needs_sync"
     status_text = (needs_sync.locator(".ctx-simple-status-text").text_content() or "").strip()
@@ -172,7 +173,7 @@ def test_toggle_exits_to_advanced_then_back(page, mm_web_url: str) -> None:
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
     assert "ctx-simple" in (page.locator("#tab-context-gateway").get_attribute("class") or "")
     assert page.locator("#ctx-mode-toggle").get_attribute("aria-pressed") == "true"
-    assert page.locator(".ctx-simple-row").count() == 4
+    assert page.locator(".ctx-simple-row").count() == 5
 
 
 def test_toggle_is_keyboard_focusable(page, mm_web_url: str) -> None:
