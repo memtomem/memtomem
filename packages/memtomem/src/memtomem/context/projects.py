@@ -22,10 +22,10 @@ import os
 import re
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePath
-from typing import Literal
+from typing import Any, Literal
 
 from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_bytes
 
@@ -142,6 +142,12 @@ class ProjectScope:
 _KNOWN_PROJECTS_VERSION = 1
 
 
+# The row keys this build owns and renders explicitly in ``_write``. Anything
+# else in a row is an unknown field preserved verbatim via ``extra`` (#1692), so
+# a newer writer's row data survives a rewrite by this build.
+_KNOWN_ROW_KEYS = frozenset({"root", "added_at", "label", "enabled"})
+
+
 @dataclass(frozen=True)
 class _KnownProjectEntry:
     root: Path
@@ -149,11 +155,18 @@ class _KnownProjectEntry:
     label: str | None
     # Per-project sync enrollment. Additive field — the schema stays version 1:
     # legacy rows without the key read back as ``True`` (see ``load``), so old
-    # and new readers agree. Known downgrade hazard — an older writer that lacks
-    # this field drops it on rewrite, silently resuming a paused project;
-    # acceptable for single-user local use, revisit with unknown-field
-    # preservation if paused state must survive older tools.
+    # and new readers agree. A row written by a NEWER tool that adds further
+    # fields no longer loses them on rewrite here — they ride through in
+    # ``extra`` (#1692) — so paused state and any future per-row field survive a
+    # round-trip through this build.
     enabled: bool = True
+    # Unknown (forward-compat) row keys, preserved verbatim across a rewrite.
+    # ``compare=False`` keeps the frozen dataclass hashable (a dict field would
+    # otherwise make instances unhashable) and keeps identity root/label/enabled
+    # -derived — round-trip fidelity is asserted on the written bytes, not on
+    # entry equality. Never contains a :data:`_KNOWN_ROW_KEYS` name (filtered on
+    # load), so ``**extra`` in ``_write`` cannot shadow an authoritative field.
+    extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 class KnownProjectsStore:
@@ -186,18 +199,30 @@ class KnownProjectsStore:
         cannot persist the degraded list over the user's registrations
         (#1247 id 16).
         """
+        return self._load_doc(strict=strict)[0]
+
+    def _load_doc(self, *, strict: bool = False) -> tuple[list[_KnownProjectEntry], dict[str, Any]]:
+        """Like :meth:`load`, but also return unknown document-level keys.
+
+        The second element is every top-level key other than ``version`` /
+        ``projects`` — forward-compat fields a newer tool may have written.
+        Mutators thread it back through :meth:`_write` so a rewrite by this
+        build preserves them (#1692) rather than silently dropping them. It is
+        always ``{}`` on any degradation path (missing / corrupt file), so a
+        tolerant caller never resurrects partial document state.
+        """
         hint = "fix or remove it (e.g. restore it from version control), then retry"
         try:
             raw = self._path.read_bytes()
         except FileNotFoundError:
-            return []
+            return [], {}
         except OSError as exc:
             if strict:
                 raise KnownProjectsCorruptError(
                     f"known_projects file at {self._path} is unreadable ({exc}); {hint}"
                 ) from exc
             logger.warning("known_projects: read failed: %s", exc)
-            return []
+            return [], {}
 
         try:
             doc = json.loads(raw)
@@ -210,7 +235,7 @@ class KnownProjectsStore:
                     f"known_projects file at {self._path} is not valid JSON ({exc}); {hint}"
                 ) from exc
             logger.warning("known_projects: invalid JSON, ignoring file: %s", exc)
-            return []
+            return [], {}
 
         if not isinstance(doc, dict) or doc.get("version") != _KNOWN_PROJECTS_VERSION:
             version = doc.get("version") if isinstance(doc, dict) else None
@@ -220,7 +245,10 @@ class KnownProjectsStore:
                     f"{version!r} (this build writes version {_KNOWN_PROJECTS_VERSION}); {hint}"
                 )
             logger.warning("known_projects: unexpected version %r, ignoring", version)
-            return []
+            return [], {}
+
+        # Past the version gate: capture forward-compat document-level keys.
+        doc_extra = {k: v for k, v in doc.items() if k not in ("version", "projects")}
 
         # Shape guards below the version check: a row the parser drops here
         # is *destroyed* by the next mutation — unlike the lockfile store,
@@ -237,7 +265,7 @@ class KnownProjectsStore:
                     f"member ({type(projects_member).__name__}); {hint}"
                 )
             logger.warning("known_projects: 'projects' is not a list, ignoring file")
-            return []
+            return [], {}
 
         entries: list[_KnownProjectEntry] = []
         for item in projects_member:
@@ -269,9 +297,16 @@ class KnownProjectsStore:
                     # default to True — enrolled-but-unflagged means "participating",
                     # matching ``add``'s default. Only an explicit JSON ``false`` disables.
                     enabled=item.get("enabled") is not False,
+                    # Forward-compat: keep any keys this build doesn't own so a
+                    # rewrite preserves them (#1692). ``root`` is excluded (it is a
+                    # _KNOWN_ROW_KEY), so the canonicalized in-memory root above can
+                    # never leak back to disk through ``extra`` and a stale relative
+                    # root can't resurrect — only the authoritative ``root`` field is
+                    # rendered on write.
+                    extra={k: v for k, v in item.items() if k not in _KNOWN_ROW_KEYS},
                 )
             )
-        return entries
+        return entries, doc_extra
 
     def add(self, root: Path, label: str | None = None) -> _KnownProjectEntry:
         """Register *root*. Idempotent — re-registering an existing root is a no-op
@@ -307,7 +342,7 @@ class KnownProjectsStore:
         """
         normalized = Path(root).expanduser().resolve()
         with _file_lock(_lock_path_for(self._path)):
-            entries = self.load(strict=True)
+            entries, doc_extra = self._load_doc(strict=True)
             for existing in entries:
                 if _normalize_for_scope_id(existing.root) == _normalize_for_scope_id(normalized):
                     return existing, False
@@ -317,7 +352,7 @@ class KnownProjectsStore:
                 label=label,
                 enabled=True,
             )
-            self._write(entries + [new_entry])
+            self._write(entries + [new_entry], doc_extra=doc_extra)
             return new_entry, True
 
     def remove_by_scope_id(self, scope_id: str) -> bool:
@@ -328,11 +363,11 @@ class KnownProjectsStore:
         existence-derived.
         """
         with _file_lock(_lock_path_for(self._path)):
-            entries = self.load(strict=True)
+            entries, doc_extra = self._load_doc(strict=True)
             kept = [e for e in entries if compute_scope_id(e.root) != scope_id]
             if len(kept) == len(entries):
                 return False
-            self._write(kept)
+            self._write(kept, doc_extra=doc_extra)
             return True
 
     def update_entry_by_scope_id(
@@ -364,7 +399,7 @@ class KnownProjectsStore:
         resolved form, so duplicates never arise via the API.
         """
         with _file_lock(_lock_path_for(self._path)):
-            entries = self.load(strict=True)
+            entries, doc_extra = self._load_doc(strict=True)
             first_updated: _KnownProjectEntry | None = None
             new_entries: list[_KnownProjectEntry] = []
             for e in entries:
@@ -374,6 +409,9 @@ class KnownProjectsStore:
                         added_at=e.added_at,
                         label=label if set_label else e.label,
                         enabled=enabled if set_enabled else e.enabled,
+                        # Preserve forward-compat row keys across a PATCH — the
+                        # replacement rebuilds only the fields this build owns.
+                        extra=e.extra,
                     )
                     new_entries.append(replacement)
                     if first_updated is None:
@@ -382,7 +420,7 @@ class KnownProjectsStore:
                     new_entries.append(e)
             if first_updated is None:
                 return None
-            self._write(new_entries)
+            self._write(new_entries, doc_extra=doc_extra)
             return first_updated
 
     def update_label_by_scope_id(
@@ -404,7 +442,17 @@ class KnownProjectsStore:
         """
         return self.update_entry_by_scope_id(scope_id, enabled=enabled, set_enabled=True)
 
-    def _write(self, entries: list[_KnownProjectEntry]) -> None:
+    def _write(
+        self,
+        entries: list[_KnownProjectEntry],
+        *,
+        doc_extra: dict[str, Any] | None = None,
+    ) -> None:
+        # Known fields first, then ``**e.extra`` / ``**doc_extra`` for any
+        # forward-compat keys a newer tool wrote (#1692). ``extra`` never holds a
+        # _KNOWN_ROW_KEY and ``doc_extra`` never holds version/projects (both
+        # filtered on load), so the spreads cannot shadow an authoritative field
+        # and this build's values stay canonical.
         doc = {
             "version": _KNOWN_PROJECTS_VERSION,
             "projects": [
@@ -413,9 +461,11 @@ class KnownProjectsStore:
                     "added_at": e.added_at,
                     "label": e.label,
                     "enabled": e.enabled,
+                    **e.extra,
                 }
                 for e in entries
             ],
+            **(doc_extra or {}),
         }
         atomic_write_bytes(
             self._path,

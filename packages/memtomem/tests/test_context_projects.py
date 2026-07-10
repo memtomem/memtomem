@@ -513,6 +513,91 @@ def test_store_update_over_corrupt_file_refuses(tmp_path: Path) -> None:
     assert kp.read_bytes() == b"not valid {json"
 
 
+# ── forward-compat field preservation (#1692) ────────────────────────────
+
+
+def _seed_with_extras(tmp_path: Path) -> tuple[KnownProjectsStore, Path, Path]:
+    """Register a project via the API, then hand-inject forward-compat keys a
+    NEWER tool might have written: one document-level key and two row-level
+    keys the current build does not own. Returns ``(store, kp, project)``."""
+    project = tmp_path / "alpha"
+    project.mkdir()
+    kp = tmp_path / "kp.json"
+    store = KnownProjectsStore(kp)
+    store.add(project, label="Alpha")
+
+    doc = json.loads(kp.read_text(encoding="utf-8"))
+    doc["future_top_level"] = {"schema_ext": 7}
+    doc["projects"][0]["notes"] = "keep me"
+    doc["projects"][0]["color"] = "#abc"
+    kp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    return store, kp, project
+
+
+@pytest.mark.parametrize("mutate", ["add", "update", "remove"])
+def test_store_preserves_unknown_fields_across_mutation(tmp_path: Path, mutate: str) -> None:
+    """Any mutation must re-emit unknown document- and row-level keys verbatim,
+    so a rewrite by this build never silently drops a newer tool's data (#1692).
+    Pre-fix, ``_write`` rendered only the four known row fields + version/projects
+    and dropped everything else."""
+    store, kp, project = _seed_with_extras(tmp_path)
+    sid = compute_scope_id(project)
+
+    if mutate == "add":
+        second = tmp_path / "beta"
+        second.mkdir()
+        store.add(second)
+    elif mutate == "update":
+        store.set_enabled_by_scope_id(sid, False)
+    else:  # remove a DIFFERENT project so alpha's row (with extras) survives
+        second = tmp_path / "beta"
+        second.mkdir()
+        store.add(second)  # already preserves alpha's extras through this rewrite
+        store.remove_by_scope_id(compute_scope_id(second))
+
+    doc = json.loads(kp.read_text(encoding="utf-8"))
+    assert doc["future_top_level"] == {"schema_ext": 7}  # document-level survived
+    alpha_row = next(r for r in doc["projects"] if r["root"] == str(project))
+    assert alpha_row["notes"] == "keep me"  # row-level survived
+    assert alpha_row["color"] == "#abc"
+    # Known fields still authoritative and unshadowed.
+    assert alpha_row["label"] == "Alpha"
+    assert "version" in doc and doc["version"] == 1
+
+
+def test_store_add_heals_relative_root_without_leaking_via_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy relative ``root`` is canonicalized on rewrite, and preservation
+    must NOT reintroduce the stale relative value — ``root`` is excluded from
+    ``extra``, so only the healed absolute root is written (#1692 guard)."""
+    (tmp_path / "alpha").mkdir()
+    kp = tmp_path / "kp.json"
+    # Hand-write a legacy relative-root row (pre-#1644) plus an unknown key.
+    kp.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "projects": [{"root": "alpha", "added_at": "2026-01-01T00:00:00Z", "notes": "n"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    # ``resolve()`` of the relative "alpha" is cwd-relative, so pin the cwd.
+    monkeypatch.chdir(tmp_path)
+    store = KnownProjectsStore(kp)
+    # A mutation on a different project forces a rewrite of alpha's healed row.
+    second = tmp_path / "beta"
+    second.mkdir()
+    store.add(second)
+
+    doc = json.loads(kp.read_text(encoding="utf-8"))
+    alpha_row = next(r for r in doc["projects"] if r["root"].endswith("alpha"))
+    # Exactly one ``root`` key, and it is absolute (healed), never the relative form.
+    assert Path(alpha_row["root"]).is_absolute()
+    assert alpha_row["notes"] == "n"  # unknown key still preserved
+
+
 # ── atomic-write race (real OS-level concurrency, RFC bar) ───────────────
 
 
