@@ -53,6 +53,87 @@ const _HIDDEN_CONFIG_FIELDS = {
 // hot-reload state rather than user-editable config. Kept out of the
 // section iteration below so they don't render as empty cards.
 const _CONFIG_META_FIELDS = new Set(['config_mtime_ns', 'config_reload_error']);
+const _CONFIG_SECTION_STORAGE_KEY = 'm2m-config-section';
+const _CONFIG_ALL_SECTION = '__all__';
+let _activeConfigSection = null;
+const _dirtyConfigSections = new Set();
+
+function _configSectionName(section) {
+  const key = `settings.config.section.${section}`;
+  const localized = t(key);
+  return localized === key
+    ? section.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+    : localized;
+}
+
+function _readStoredConfigSection() {
+  try { return localStorage.getItem(_CONFIG_SECTION_STORAGE_KEY); }
+  catch { return null; }
+}
+
+function _storeConfigSection(section) {
+  try { localStorage.setItem(_CONFIG_SECTION_STORAGE_KEY, section); }
+  catch { /* localStorage is optional */ }
+}
+
+function _renderConfigSectionSwitcher(sections) {
+  const browser = qs('config-browser');
+  const switcher = qs('config-section-switcher');
+  if (!browser || !switcher || !sections.length) return;
+  const valid = new Set([_CONFIG_ALL_SECTION, ...sections]);
+  const stored = _readStoredConfigSection();
+  if (!_activeConfigSection || !valid.has(_activeConfigSection)) {
+    _activeConfigSection = valid.has(stored) ? stored : sections[0];
+  }
+  switcher.replaceChildren();
+  [_CONFIG_ALL_SECTION, ...sections].forEach((section) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'config-section-chip';
+    button.dataset.section = section;
+    button.setAttribute('role', 'tab');
+    const label = section === _CONFIG_ALL_SECTION ? t('settings.config.section_all') : _configSectionName(section);
+    button.append(document.createTextNode(label));
+    if (_dirtyConfigSections.has(section)) {
+      const dirty = document.createElement('span');
+      dirty.className = 'config-section-dirty';
+      dirty.setAttribute('aria-label', t('settings.config.unsaved'));
+      dirty.textContent = '•';
+      button.appendChild(dirty);
+    }
+    button.addEventListener('click', () => {
+      _activeConfigSection = section;
+      _storeConfigSection(section);
+      _applyConfigFilter();
+    });
+    switcher.appendChild(button);
+  });
+  show(browser);
+}
+
+function _applyConfigFilter() {
+  const query = (qs('config-search')?.value || '').trim().toLocaleLowerCase();
+  const searching = query.length > 0;
+  document.querySelectorAll('.config-card[data-section]').forEach((card) => {
+    const selected = _activeConfigSection === _CONFIG_ALL_SECTION || card.dataset.section === _activeConfigSection;
+    let rowMatch = false;
+    card.querySelectorAll('.config-table tr').forEach((row) => {
+      const matches = !searching || (row.dataset.searchText || '').includes(query);
+      row.hidden = !matches;
+      if (matches) rowMatch = true;
+    });
+    card.hidden = searching ? !rowMatch : !selected;
+  });
+  document.querySelectorAll('.config-section-chip').forEach((button) => {
+    const active = button.dataset.section === _activeConfigSection;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  const firstVisible = document.querySelector('.config-card[data-section]:not([hidden])');
+  if (firstVisible) _showConfigGuide(firstVisible.dataset.section);
+}
+
+qs('config-search')?.addEventListener('input', _applyConfigFilter);
 
 // Last-seen ``config_mtime_ns`` — used to detect when disk changed between
 // visibility changes (e.g., user ran ``mm config set`` in a terminal while
@@ -154,6 +235,11 @@ window.addEventListener('langchange', () => {
   // relocalize on the next tab render instead. Documented deferral, #1436.)
   _syncDecayStatus();
   _syncNamespaceInfo();
+  const configSections = Array.from(document.querySelectorAll('.config-card[data-section]'), (card) => card.dataset.section);
+  if (configSections.length) {
+    _renderConfigSectionSwitcher(configSections);
+    _applyConfigFilter();
+  }
 });
 
 // Compute the config-derived placeholder (no path entered yet). Pulled
@@ -392,9 +478,7 @@ async function loadConfig() {
       title.className = 'config-section-title';
       // Section header: localized name keyed by section id, with a title-cased
       // fallback for any unmapped section the server might add.
-      const fallbackTitle = section.charAt(0).toUpperCase() + section.slice(1);
-      const titleStr = t(`settings.config.section.${section}`);
-      title.textContent = titleStr === `settings.config.section.${section}` ? fallbackTitle : titleStr;
+      title.textContent = _configSectionName(section);
       header.appendChild(title);
       if (isReadonly) {
         const badge = document.createElement('span');
@@ -423,6 +507,7 @@ async function loadConfig() {
         const fieldReadonly = isReadonly || readonlyFields.has(key);
         const label = labelFields.has(key) ? t(`settings.config.label.${section}.${key}`) : key;
         const tr = document.createElement('tr');
+        tr.dataset.searchText = `${_configSectionName(section)} ${label}`.toLocaleLowerCase();
         tr.innerHTML = `<td class="config-key">${escapeHtml(label)}</td>`;
         const td = document.createElement('td');
         td.className = 'config-val';
@@ -476,6 +561,10 @@ async function loadConfig() {
       card.addEventListener('focusin', () => _showConfigGuide(section));
       contentEl.appendChild(card);
     });
+
+    const sections = Array.from(contentEl.querySelectorAll('.config-card[data-section]'), (card) => card.dataset.section);
+    _renderConfigSectionSwitcher(sections);
+    _applyConfigFilter();
 
     // Show first section guide by default (skip meta fields).
     const firstSection = Object.keys(STATE.serverConfig).find(
@@ -1192,6 +1281,10 @@ function _buildConfigInput(section, key, val) {
 }
 
 function _markConfigDirty(section) {
+  _dirtyConfigSections.add(section);
+  const sections = Array.from(document.querySelectorAll('.config-card[data-section]'), (card) => card.dataset.section);
+  _renderConfigSectionSwitcher(sections);
+  _applyConfigFilter();
   const btn = document.querySelector(`.config-save-btn[data-section="${section}"]`);
   if (btn) btn.disabled = false;
   // Keep each row's ↺ button in sync with the live value: disabled when
@@ -1365,6 +1458,10 @@ async function _saveSection(section) {
         const inp = _findFieldInput(sec, key);
         if (inp) inp.dataset.original = inp.type === 'checkbox' ? String(inp.checked) : inp.value;
       });
+      _dirtyConfigSections.delete(section);
+      const sections = Array.from(document.querySelectorAll('.config-card[data-section]'), (card) => card.dataset.section);
+      _renderConfigSectionSwitcher(sections);
+      _applyConfigFilter();
       // Re-sync all UI from updated config
       STATE.serverConfig = await api('GET', '/api/config');
       _syncConfigToUI();

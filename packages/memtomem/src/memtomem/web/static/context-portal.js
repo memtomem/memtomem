@@ -429,7 +429,7 @@ async function loadCtxProjects() {
     // ``_ctxProjectsCache`` / active scope (#1194). The board already renders
     // from its own post-guard ``_ctxPortalScopes`` snapshot; this extends the
     // same discipline to the shared cache the helper used to commit pre-guard.
-    const result = await _ctxFetchProjectsData({ targetScope: requestedScope, signal });
+    const result = await _ctxFetchProjectsData({ targetScope: requestedScope, signal, includeCounts: false });
     // Bail if a newer load started OR the tier flipped under us mid-fetch
     // (#972): counts in this payload were computed for ``requestedScope``.
     if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return false;
@@ -465,12 +465,31 @@ async function loadCtxProjects() {
       return true; // this invocation owned the (load-error) render — not a supersede
     }
 
-    // Now fetch runtimes for each scope in parallel to build the per-CLI traffic-lights (row UI)
-    const runtimePromises = scopes.map(async (scope) => {
+    // Paint the cheap roster before any per-project probes complete. Enrichment
+    // is bounded to four workers so a large registry cannot create an N-request
+    // burst or delay the first useful frame.
+    _ctxPortalRuntimesMap = {};
+    _ctxPortalRenderHeadingChips();
+    _ctxPortalRenderScaffold(listEl);
+    _ctxPortalRenderRows();
+
+    const enrichScope = async (scope) => {
       if (scope.missing) {
         return { scopeId: scope.scope_id, runtimes: [] };
       }
       try {
+        if (scope.counts == null) {
+          const detailUrl = _ctxWithTargetScope(
+            `/api/context/projects?scope_id=${encodeURIComponent(scope.scope_id)}&include=counts,runtime_coverage`,
+            { includeScope: false, targetScope: requestedScope },
+          );
+          const detailRes = await fetch(detailUrl, { signal });
+          if (detailRes.ok) {
+            const detail = await detailRes.json();
+            const enriched = detail.scopes?.find((item) => item.scope_id === scope.scope_id);
+            if (enriched) Object.assign(scope, enriched);
+          }
+        }
         const url = _ctxWithTargetScope('/api/context/runtimes', { scopeId: scope.scope_id });
         const res = await fetch(url, { signal });
         if (!res.ok) throw new Error();
@@ -479,9 +498,21 @@ async function loadCtxProjects() {
       } catch (err) {
         return { scopeId: scope.scope_id, runtimes: [] };
       }
-    });
-
-    const runtimesResults = await Promise.all(runtimePromises);
+    };
+    const queue = scopes.slice();
+    const runtimesResults = [];
+    const worker = async () => {
+      while (queue.length) {
+        const scope = queue.shift();
+        const enriched = await enrichScope(scope);
+        runtimesResults.push(enriched);
+        if (seq === _ctxProjectsSeq && requestedScope === _ctxTargetScope) {
+          _ctxPortalRuntimesMap[enriched.scopeId] = enriched.runtimes;
+          _ctxPortalRenderRows();
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
     if (seq !== _ctxProjectsSeq || requestedScope !== _ctxTargetScope) return false;
 
     _ctxPortalRuntimesMap = {};
@@ -489,8 +520,6 @@ async function loadCtxProjects() {
       _ctxPortalRuntimesMap[result.scopeId] = result.runtimes;
     }
 
-    _ctxPortalRenderHeadingChips();
-    _ctxPortalRenderScaffold(listEl);
     _ctxPortalRenderRows();
     // Fire-and-forget the cross-project drift check (#1649). Not awaited: the
     // board is already painted and status-all runs sequential per-project git

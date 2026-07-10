@@ -146,7 +146,8 @@ function _ctxSimpleOverviewBody(data, types) {
   if (!anyItems) {
     html += `<div class="ctx-simple-empty-hint">
         <span>${escapeHtml(t('settings.ctx.simple_empty_hint'))}</span>
-        <button type="button" class="btn-ghost ctx-simple-advanced-cta" data-ctx-advance>${escapeHtml(t('settings.ctx.simple_empty_cta'))}</button>
+        <button type="button" class="btn-ghost ctx-simple-advanced-cta" data-ctx-advance data-section="ctx-skills" data-focus-target=".ctx-import-btn">${escapeHtml(t('settings.ctx.simple_empty_import'))}</button>
+        <button type="button" class="btn-primary ctx-simple-advanced-cta" data-ctx-advance data-section="ctx-skills" data-focus-target=".ctx-create-btn">${escapeHtml(t('settings.ctx.simple_empty_create'))}</button>
       </div>`;
   }
   html += '</div>';
@@ -161,7 +162,11 @@ function _ctxSimpleOverviewBody(data, types) {
 // Overview in place on success. No-op in Advanced (neither selector matches).
 function _ctxWireSimpleRows(el) {
   el.querySelectorAll('[data-ctx-advance]').forEach(btn => {
-    btn.addEventListener('click', () => _ctxOpenInAdvanced(btn.dataset.section || ''));
+    btn.addEventListener('click', () => {
+      _ctxOpenInAdvanced(btn.dataset.section || '');
+      const target = btn.dataset.focusTarget;
+      if (target) requestAnimationFrame(() => document.querySelector(`#settings-ctx-skills ${target}`)?.focus());
+    });
   });
   el.querySelectorAll('[data-ctx-action]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1501,6 +1506,52 @@ document.getElementById('ctx-sync-all-btn')?.addEventListener('click', async () 
     const headers = csrf
       ? { 'Content-Type': 'application/json', 'X-Memtomem-CSRF': csrf }
       : { 'Content-Type': 'application/json' };
+    if (syncAllTier === 'project_shared') {
+      anyPhaseStarted = true;
+      for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'syncing');
+      const response = await fetch(
+        _ctxWithTargetScope('/api/context/sync-all', pinnedScopeOpts),
+        { method: 'POST', headers },
+      );
+      if (!response.ok) {
+        const reason = await _ctxErrorMessageFromResponse(
+          response, t('settings.ctx.sync_settings_failed_fallback'));
+        for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'failed');
+        showToast(t('toast.sync_failed', { error: reason }), 'error');
+        return;
+      }
+      const report = await response.json();
+      if (Array.isArray(report.phases)) {
+      for (const phase of report.phases) {
+        const counts = phase.type === 'settings'
+          ? undefined
+          : _ctxSyncArtifactCounts(phase);
+        const state = phase.status === 'failed'
+          ? 'failed'
+          : phase.status === 'needs_confirmation'
+            ? 'attention'
+            : 'done';
+        setPhase(phase.type, state, counts);
+      }
+      const failedPhases = report.phases.filter((phase) => phase.status === 'failed');
+      if (failedPhases.length) {
+        showToast(t('toast.sync_partial_failed', {
+          succeeded: report.phases.filter((phase) => phase.status === 'ok').map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
+          failed_phase: failedPhases.map((phase) => _ctxSyncPhaseLabel(phase.type)).join(', '),
+          reason: failedPhases[0].error?.message || t('settings.ctx.sync_settings_failed_fallback'),
+        }), 'error');
+      } else if (report.summary?.changed === false || report.summary?.outcome === 'noop') {
+        showToast(t('settings.ctx.sync_all_nothing_synced'), 'info');
+      } else {
+        showToast(t('settings.ctx.sync_success'));
+      }
+      return;
+      }
+      // An older proxy/test double can answer the new route with a generic
+      // object. Treat that as unsupported and retain the established per-type
+      // orchestration instead of leaving five rows stuck on “Syncing”.
+      for (const phase of _CTX_SYNC_PHASES) setPhase(phase, 'pending');
+    }
     const types = ['skills', 'commands', 'agents', 'mcp-servers'];
     for (const typ of types) {
       anyPhaseStarted = true;

@@ -200,6 +200,8 @@ async def test_empty_project_phase_order_and_benign_skip_shape(client) -> None:
     resp = await client.post("/api/context/sync-all")
     assert resp.status_code == 200, resp.text
     data = resp.json()
+    assert data["summary"]["changed"] is False
+    assert data["summary"]["outcome"] == "noop"
 
     assert [p["type"] for p in data["phases"]] == list(_SYNC_ALL_PHASES)
     for phase_type in ("skills", "commands", "agents", "mcp-servers"):
@@ -221,6 +223,8 @@ async def test_empty_project_phase_order_and_benign_skip_shape(client) -> None:
 
     assert data["summary"] == {
         "status": "ok",
+        "changed": False,
+        "outcome": "noop",
         "ok": 5,
         "failed": 0,
         "needs_confirmation": 0,
@@ -299,6 +303,8 @@ async def test_effect_parity_with_per_type_orchestration(
         len(per_type[t]["generated"]) for t in ("skills", "commands", "agents", "mcp-servers")
     )
     assert summary["generated_total"] > 0
+    assert summary["changed"] is True
+    assert summary["outcome"] == "changed"
 
 
 @pytest.mark.asyncio

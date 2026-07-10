@@ -177,6 +177,26 @@ async def test_get_projects_after_add(client, tmp_path: Path) -> None:
     assert labels[1] == "inflearn"
 
 
+@pytest.mark.asyncio
+async def test_get_projects_scope_id_filters_before_enrichment(client, tmp_path: Path) -> None:
+    other = tmp_path / "filtered"
+    other.mkdir()
+    (other / ".claude").mkdir()
+    added = await client.post("/api/context/known-projects", json={"root": str(other)})
+    scope_id = added.json()["scope_id"]
+
+    resp = await client.get(
+        "/api/context/projects",
+        params={"scope_id": scope_id, "include": "counts,runtime_coverage"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["target_scope"] == "project_shared"
+    assert [scope["scope_id"] for scope in data["scopes"]] == [scope_id]
+    assert data["scopes"][0]["counts"] is not None
+    assert data["scopes"][0]["runtime_coverage"] is not None
+
+
 # ── ?target_scope= on /context/projects (#936) ──────────────────────────
 
 

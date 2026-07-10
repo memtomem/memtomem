@@ -604,7 +604,17 @@ function _ctxApplySimpleMode() {
   const tab = document.getElementById('tab-context-gateway');
   if (tab) tab.classList.toggle('ctx-simple', _ctxSimpleMode);
   const toggle = document.getElementById('ctx-mode-toggle');
-  if (toggle) toggle.setAttribute('aria-pressed', _ctxSimpleMode ? 'true' : 'false');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', _ctxSimpleMode ? 'true' : 'false');
+    toggle.textContent = t(_ctxSimpleMode ? 'settings.ctx.open_advanced' : 'settings.ctx.back_to_simple');
+  }
+  const chip = document.getElementById('ctx-simple-active-chip');
+  if (chip) {
+    chip.textContent = t('settings.ctx.active_store_chip', {
+      project: _ctxScopeDisplayLabelById(_ctxActiveScopeId),
+      tier: t(`settings.ctx.tier_option_${_ctxTargetScope}`),
+    });
+  }
 }
 
 // Flip Simple mode, persist, and re-apply the class. Callers staying on the
@@ -833,8 +843,11 @@ async function _ctxFetchProjectsData(opts = {}) {
     // has NO caller since rank 2 removed its only consumer (the Project Scope
     // Matrix); leaving the gate means re-adding a coverage consumer is a
     // one-flag change. ``_ctxWithTargetScope`` appends ``&target_scope=``.
-    const include = opts.includeCoverage ? 'counts,runtime_coverage' : 'counts';
-    const res = await fetch(_ctxWithTargetScope(`/api/context/projects?include=${include}`, { includeScope: false, targetScope: opts.targetScope }), { signal: opts.signal });
+    const include = opts.includeCounts === false
+      ? ''
+      : (opts.includeCoverage ? 'counts,runtime_coverage' : 'counts');
+    const query = include ? `?include=${include}` : '';
+    const res = await fetch(_ctxWithTargetScope(`/api/context/projects${query}`, { includeScope: false, targetScope: opts.targetScope }), { signal: opts.signal });
     sawResponse = true;
     // Superseded after the request was issued but before its body was read
     // (#1286): skip the parse + classification entirely and return the benign

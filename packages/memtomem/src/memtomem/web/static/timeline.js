@@ -25,6 +25,7 @@ function resetTimelinePanel() {
 }
 
 qs('tl-load-btn').addEventListener('click', loadTimeline);
+qs('tl-empty-load-btn')?.addEventListener('click', loadTimeline);
 
 qs('tl-view-chunks').addEventListener('click', () => {
   if (tlViewMode === 'chunks') return;
