@@ -293,8 +293,9 @@ def test_empty_tier_names_items_in_another_tier(page, mm_web_url: str) -> None:
 
 
 def test_empty_state_shows_hint_and_open_advanced_cta(page, mm_web_url: str) -> None:
-    """An all-empty active tier surfaces the read-only empty hint + an
-    Open-Advanced CTA (D-D, light form); the CTA leaves Simple mode."""
+    """An all-empty active tier surfaces the read-only empty hint + the two
+    first-action CTAs (Import from tools / Create a skill); either one leaves
+    Simple mode and deep-links into the Advanced skills section."""
     _stub_overview(page, _EMPTY_OVERVIEW)
     page.goto(mm_web_url)
     _open_context_gateway(page)
@@ -303,12 +304,14 @@ def test_empty_state_shows_hint_and_open_advanced_cta(page, mm_web_url: str) -> 
     page.locator(".ctx-overview-simple").wait_for(timeout=3_000)
 
     assert page.locator(".ctx-simple-empty-hint").is_visible()
-    cta = page.locator(".ctx-simple-advanced-cta")
-    assert cta.is_visible()
+    ctas = page.locator(".ctx-simple-advanced-cta")
+    assert ctas.count() == 2, "empty state offers Import and Create CTAs"
+    labels = [(ctas.nth(i).text_content() or "").strip() for i in range(2)]
+    assert labels == ["Import from tools", "Create a skill"]
     verdict = (page.locator(".ctx-simple-verdict").text_content() or "").strip()
     assert verdict == "Nothing is stored for this project yet."
 
-    cta.click()
+    ctas.first.click()
     page.wait_for_function(
         "() => !document.getElementById('tab-context-gateway')"
         "        .classList.contains('ctx-simple')",

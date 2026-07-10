@@ -528,6 +528,10 @@ async function loadCtxProjects() {
         if (seq === _ctxProjectsSeq && requestedScope === _ctxTargetScope) {
           _ctxPortalRuntimesMap[enriched.scopeId] = enriched.runtimes;
           _ctxPortalRenderRows();
+          // The heading chips read the ACTIVE scope's runtimes from the same
+          // map — the roster-first paint rendered them from an empty map, so
+          // repaint once its data lands or they stay greyed for the run.
+          if (enriched.scopeId === _ctxActiveScopeId) _ctxPortalRenderHeadingChips();
         }
       }
     };
@@ -539,6 +543,7 @@ async function loadCtxProjects() {
       _ctxPortalRuntimesMap[result.scopeId] = result.runtimes;
     }
 
+    _ctxPortalRenderHeadingChips();
     _ctxPortalRenderRows();
     // Fire-and-forget the cross-project drift check (#1649). Not awaited: the
     // board is already painted and status-all runs sequential per-project git
