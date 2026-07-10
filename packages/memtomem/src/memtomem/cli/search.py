@@ -21,8 +21,15 @@ from memtomem.server.tools.search import (
     _resolve_project_context_root as _resolve_project_context_root_from_cwd,
 )
 
+SEARCH_EPILOG = """\
+Examples:
+  mm search "payment timeout"
+  mm search "onboarding flow" --tag-filter onboarding --top-k 5
+  mm search "incident" --scope project_shared --format context
+"""
 
-@click.command()
+
+@click.command(epilog=SEARCH_EPILOG)
 @click.argument("query")
 @click.option("--top-k", "-k", default=10, help="Number of results")
 @click.option("--source-filter", "-s", default=None, help="Source file filter")

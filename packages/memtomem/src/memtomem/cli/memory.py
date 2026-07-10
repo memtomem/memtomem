@@ -67,7 +67,15 @@ def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | No
     return f"[{_fmt(valid_from_unix)} → {_fmt(valid_to_unix)}]"
 
 
-@click.command()
+ADD_EPILOG = """\
+Examples:
+  mm add "Canary deploy froze at 14:02Z; rolled back." --tags incident,postmortem
+  mm add "Decision: standardize on uv for installs." --scope project_shared --confirm-project-shared
+  mm add "Quick note to self" --json
+"""
+
+
+@click.command(epilog=ADD_EPILOG)
 @click.argument("content")
 @click.option("--title", "-t", default=None, help="Entry title")
 @click.option("--tags", default=None, help="Comma-separated tags")
