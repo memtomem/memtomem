@@ -19,6 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from memtomem import __version__
 from memtomem.web.middleware.csrf import CSRFGuardMiddleware
+from memtomem.web.middleware.body_limit import UploadBodyLimitMiddleware
 from memtomem.web.routes import (
     chunks,
     context_agents,
@@ -282,6 +283,9 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
     # outermost on the request path. We want CSRFGuard *inside*
     # SecurityHeaders so a 403 from the gate still picks up nosniff /
     # frame-options / CSP on its way back to the client.
+    # Added before CSRF so Starlette's reverse middleware stacking places the
+    # limiter inside the authentication/CSRF boundary.
+    app.add_middleware(UploadBodyLimitMiddleware)
     app.add_middleware(CSRFGuardMiddleware)
 
     class SecurityHeadersMiddleware(BaseHTTPMiddleware):

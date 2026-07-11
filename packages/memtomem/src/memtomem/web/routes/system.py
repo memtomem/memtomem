@@ -182,8 +182,13 @@ async def get_session(request: Request) -> dict[str, str]:
     }
 
 
-@router.get("/health", response_model=None)
-async def health(
+@router.get("/health")
+async def health_liveness() -> dict[str, Any]:
+    return {"status": "ok", "checks": {"process": "ok"}}
+
+
+@router.post("/health", response_model=None)
+async def health_active(
     storage: Any = Depends(get_storage),
     embedder: Any = Depends(get_embedder),
 ) -> dict[str, Any] | JSONResponse:
@@ -1339,24 +1344,14 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
     )
 
 
-@router.get("/index/stream", dependencies=[Depends(require_configured)])
+@router.post("/index/stream", dependencies=[Depends(require_configured)])
 async def index_stream(
-    path: str = ".",
-    recursive: bool = True,
-    force: bool = False,
-    namespace: str | None = None,
+    req: IndexRequest,
     index_engine=Depends(get_index_engine),
     config=Depends(get_config),
 ) -> StreamingResponse:
-    """Stream indexing progress as Server-Sent Events.
-
-    No ``force_unsafe`` here by design (ADR-0006 PR-B): bypassing the
-    secret-redaction gate is a security downgrade, and a GET SSE stream is a
-    safe method the CSRF middleware does not token-gate (and ``EventSource``
-    cannot send the token header). The bypass runs through the CSRF-protected
-    ``POST /api/index`` instead — see ``trigger_index``.
-    """
-    resolved = Path(path).expanduser().resolve()
+    """Stream CSRF-protected indexing progress as Server-Sent Events."""
+    resolved = Path(req.path).expanduser().resolve()
     resolved_norm = Path(norm_path(resolved))
     memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.all_index_roots()]
     if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
@@ -1368,7 +1363,11 @@ async def index_stream(
     async def _generate():
         try:
             async for event in index_engine.index_path_stream(
-                resolved, recursive=recursive, force=force, namespace=namespace
+                resolved,
+                recursive=req.recursive,
+                force=req.force,
+                namespace=req.namespace,
+                force_unsafe=req.force_unsafe,
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
@@ -1390,6 +1389,11 @@ async def index_stream(
             "Connection": "keep-alive",
         },
     )
+
+
+@router.get("/index/stream")
+async def index_stream_get_disabled() -> None:
+    raise HTTPException(status_code=405, detail="Use POST /api/index/stream")
 
 
 @router.post("/index", response_model=IndexResponse, dependencies=[Depends(require_configured)])
@@ -1470,6 +1474,10 @@ async def preview_namespace(
 
 
 _ALLOWED_UPLOAD_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml"}
+_MAX_UPLOAD_FILES = 32
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+_MAX_UPLOAD_AGGREGATE_BYTES = 200 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 @router.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_configured)])
@@ -1485,15 +1493,31 @@ async def upload_files(
     (``error="redaction_blocked"``) and **not** persisted; ``force_unsafe=True``
     (query param) bypasses for the whole batch with audit logging.
     """
-    _MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-
     from memtomem import privacy
+    from memtomem.context._atomic import atomic_write_bytes
+
+    if len(files) > _MAX_UPLOAD_FILES:
+        raise HTTPException(status_code=413, detail="Too many upload files")
 
     upload_dir = Path("~/.memtomem/uploads").expanduser()
     upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(upload_dir, 0o700)
+
+    buffered: list[tuple[UploadFile, bytes]] = []
+    aggregate = 0
+    for file in files:
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+            size += len(chunk)
+            aggregate += len(chunk)
+            if size > _MAX_UPLOAD_BYTES or aggregate > _MAX_UPLOAD_AGGREGATE_BYTES:
+                raise HTTPException(status_code=413, detail="Upload size limit exceeded")
+            chunks.append(chunk)
+        buffered.append((file, b"".join(chunks)))
 
     results: list[UploadFileResult] = []
-    for file in files:
+    for file, content in buffered:
         fname = Path(file.filename or "upload").name
         if Path(fname).suffix.lower() not in _ALLOWED_UPLOAD_EXTS:
             results.append(
@@ -1509,17 +1533,6 @@ async def upload_files(
             stem, suffix = dest.stem, dest.suffix
             dest = upload_dir / f"{stem}_{dest.stat().st_mtime_ns}{suffix}"
         try:
-            content = await file.read()
-            if len(content) > _MAX_UPLOAD_BYTES:
-                results.append(
-                    UploadFileResult(
-                        filename=fname,
-                        indexed_chunks=0,
-                        error=f"File too large ({len(content)} bytes, max {_MAX_UPLOAD_BYTES})",
-                    )
-                )
-                continue
-
             # Decode text content for redaction scanning. The allowlist
             # above limits this branch to UTF-8 markdown / config files;
             # a decode failure here is a malformed file rather than a
@@ -1552,7 +1565,7 @@ async def upload_files(
                 )
                 continue
 
-            dest.write_bytes(content)
+            atomic_write_bytes(dest, content, mode=0o600)
             # Route-layer guard above already adjudicated this content
             # (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
             stats = await index_engine.index_file(dest, already_scanned=True)
@@ -1563,8 +1576,11 @@ async def upload_files(
                     path=str(dest),
                 )
             )
-        except Exception as exc:
-            results.append(UploadFileResult(filename=fname, indexed_chunks=0, error=str(exc)))
+        except Exception:
+            logger.exception("Upload processing failed for %s", fname)
+            results.append(
+                UploadFileResult(filename=fname, indexed_chunks=0, error="Upload processing failed")
+            )
 
     return UploadResponse(
         files=results,

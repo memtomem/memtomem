@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -297,18 +299,16 @@ async def client(app):
 
 
 class TestHealth:
-    async def test_health_ok(self, client: AsyncClient):
+    async def test_health_liveness_is_local_only(self, app, client: AsyncClient):
         resp = await client.get("/api/health")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "ok"
-        assert "checks" in data
-        assert data["checks"]["storage"] == "ok"
-        assert data["checks"]["embedding"] == "ok"
+        assert resp.json() == {"status": "ok", "checks": {"process": "ok"}}
+        app.state.storage.get_stats.assert_not_awaited()
+        app.state.embedder.embed_texts.assert_not_awaited()
 
-    async def test_health_degraded_when_storage_fails(self, app, client: AsyncClient):
+    async def test_active_health_degraded_when_storage_fails(self, app, client: AsyncClient):
         app.state.storage.get_stats.side_effect = RuntimeError("db down")
-        resp = await client.get("/api/health")
+        resp = await client.post("/api/health")
         assert resp.status_code == 503
         data = resp.json()
         assert data["status"] == "degraded"
@@ -322,7 +322,7 @@ class TestHealth:
 
         app.state.storage.get_stats.side_effect = RuntimeError("db down")
         with caplog.at_level(logging.WARNING, logger="memtomem.web.routes.system"):
-            await client.get("/api/health")
+            await client.post("/api/health")
         assert any("storage" in r.message for r in caplog.records)
 
 
@@ -3034,7 +3034,7 @@ class TestUnicodePaths:
         barbaz_dir.mkdir()
         app.state.config.indexing.memory_dirs = [bar_dir]
 
-        resp = await client.get("/api/index/stream", params={"path": str(barbaz_dir)})
+        resp = await client.post("/api/index/stream", json={"path": str(barbaz_dir)})
         assert resp.status_code == 403, resp.text
 
     async def test_index_stream_matches_nfd_memory_dir_with_nfc_query(
@@ -3053,7 +3053,7 @@ class TestUnicodePaths:
         app.state.index_engine.index_path_stream = _fake_stream
 
         nfc_path = tmp_path / self._nfc("내 드라이브") / "subdir"
-        resp = await client.get("/api/index/stream", params={"path": str(nfc_path)})
+        resp = await client.post("/api/index/stream", json={"path": str(nfc_path)})
         # Without normalization the route would 403 here; the streaming
         # response itself is short-circuited by ``_fake_stream``.
         assert resp.status_code == 200, resp.text
@@ -3146,13 +3146,10 @@ class TestBulkIndexForceUnsafe:
         assert resp.status_code == 200, resp.text
         assert app.state.index_engine.index_path.await_args.kwargs["force_unsafe"] is False
 
-    async def test_index_stream_has_no_force_unsafe_bypass(
+    async def test_index_stream_forwards_force_unsafe_bypass(
         self, app, client: AsyncClient, tmp_path
     ):
-        """The GET SSE stream is a token-exempt safe method, so it must not
-        thread a redaction bypass even if a caller appends ``force_unsafe=true``
-        to the query string — the param is not accepted and never reaches the
-        engine."""
+        """The POST SSE stream carries the reviewed bypass in its JSON body."""
         app.state.config.indexing.memory_dirs = [tmp_path]
         calls: list[dict] = []
 
@@ -3162,12 +3159,20 @@ class TestBulkIndexForceUnsafe:
 
         app.state.index_engine.index_path_stream = MagicMock(side_effect=_fake_stream)
 
-        resp = await client.get(
-            "/api/index/stream", params={"path": str(tmp_path), "force_unsafe": "true"}
+        resp = await client.post(
+            "/api/index/stream", json={"path": str(tmp_path), "force_unsafe": True}
         )
         assert resp.status_code == 200, resp.text
         assert calls, "index_path_stream was never called"
-        assert "force_unsafe" not in calls[0]
+        assert calls[0]["force_unsafe"] is True
+
+    async def test_legacy_get_stream_is_405_without_engine_work(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        app.state.index_engine.index_path_stream = MagicMock()
+        resp = await client.get("/api/index/stream", params={"path": str(tmp_path)})
+        assert resp.status_code == 405
+        app.state.index_engine.index_path_stream.assert_not_called()
 
     async def test_add_memory_dir_string_false_stays_false(
         self, app, client: AsyncClient, tmp_path
@@ -3251,7 +3256,7 @@ class TestIndexStreamErrorRedaction:
 
         app.state.index_engine.index_path_stream = _boom
 
-        resp = await client.get("/api/index/stream", params={"path": str(tmp_path)})
+        resp = await client.post("/api/index/stream", json={"path": str(tmp_path)})
         assert resp.status_code == 200, resp.text
         events = [
             json.loads(line.removeprefix("data: "))
@@ -3571,6 +3576,42 @@ class TestUploadRedaction:
         snap = privacy.snapshot()["by_tool"]["web_api_upload"]
         assert snap["bypassed"] == 1
 
+    async def test_file_count_overflow_is_413_before_any_write(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        set_home(monkeypatch, tmp_path)
+        files = [
+            ("files", (f"{idx}.md", b"safe", "text/markdown")) for idx in range(33)
+        ]
+        resp = await client.post("/api/upload", files=files)
+        assert resp.status_code == 413
+        assert not (tmp_path / ".memtomem" / "uploads").exists()
+
+    async def test_request_content_length_cap_is_413_before_parsing(
+        self, client: AsyncClient
+    ):
+        resp = await client.post(
+            "/api/upload",
+            content=b"x",
+            headers={"content-length": str(202 * 1024 * 1024)},
+        )
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "Upload request too large"}
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
+    async def test_saved_file_and_parent_are_owner_only(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        set_home(monkeypatch, tmp_path)
+        resp = await client.post(
+            "/api/upload",
+            files=[("files", ("safe.md", b"safe", "text/markdown"))],
+        )
+        assert resp.status_code == 200, resp.text
+        parent = tmp_path / ".memtomem" / "uploads"
+        assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE((parent / "safe.md").stat().st_mode) == 0o600
+
 
 # ---------------------------------------------------------------------------
 # POST /api/scratch/{key}/promote — redaction guard wire-in
@@ -3841,7 +3882,7 @@ class TestRequireConfigured:
     @pytest.mark.parametrize(
         "method,path,kwargs",
         [
-            ("get", "/api/index/stream", {"params": {"path": "/tmp/x"}}),
+            ("post", "/api/index/stream", {"json": {"path": "/tmp/x"}}),
             ("post", "/api/reindex", {}),
             (
                 "post",

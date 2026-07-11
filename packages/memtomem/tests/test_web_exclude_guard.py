@@ -99,7 +99,7 @@ async def test_index_stream_excluded_single_file_not_indexed(real_stack_app):
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/api/index/stream", params={"path": str(creds)})
+            resp = await client.post("/api/index/stream", json={"path": str(creds)})
     finally:
         comp.index_engine._registry.chunk_file = orig  # type: ignore[method-assign]
 

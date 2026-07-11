@@ -1143,38 +1143,11 @@ async function mdReindexOne(path, btn) {
     if (typeof loadSources === 'function') loadSources();
   };
 
-  // EventSource construction can throw synchronously (malformed URL, browser
-  // storage policy edge cases). Mirrors the defensive guard in
-  // ``runIndexStream`` (app.js) — without it a sync throw would leave the
-  // header indicator stuck on and block every subsequent reindex.
-  let es;
-  try {
-    const params = new URLSearchParams({ path, recursive: 'true', force: 'false' });
-    es = new EventSource(`/api/index/stream?${params}`);
-  } catch (err) {
-    showToast(t('toast.memory_dir.reindex_failed', { error: String(err) }), 'error');
-    _cleanup();
-    return;
-  }
-
-  let _sseFailCount = 0;
-  const _SSE_MAX_FAILS = 3;
   let _completed = false;
-
-  es.onmessage = (e) => {
-    let event;
-    try { event = JSON.parse(e.data); }
-    catch {
-      _sseFailCount++;
-      console.warn(`[memory-dir-reindex] malformed SSE (${_sseFailCount}/${_SSE_MAX_FAILS}):`, e.data);
-      if (_sseFailCount >= _SSE_MAX_FAILS) {
-        es.close();
-        showToast(t('toast.stream_fallback'), 'error');
-        _cleanup();
-      }
-      return;
-    }
-    _sseFailCount = 0;
+  try {
+    await fetchIndexStream(
+      { path, recursive: true, force: false, force_unsafe: false },
+      { onEvent: (event) => {
     if (event.type === 'progress') {
       // File boundary: reset chunk throttle so the next file's first
       // chunk renders immediately, and close the [big, small, ...]
@@ -1198,7 +1171,6 @@ async function mdReindexOne(path, btn) {
       }
     } else if (event.type === 'complete') {
       _completed = true;
-      es.close();
       const indexed = event.indexed_chunks || 0;
       const errs = Array.isArray(event.errors) ? event.errors : [];
       showToast(
@@ -1215,24 +1187,19 @@ async function mdReindexOne(path, btn) {
       _cleanup();
     } else if (event.type === 'error') {
       _completed = true;
-      es.close();
       showToast(
         t('toast.memory_dir.reindex_failed', { error: event.message || 'stream error' }),
         'error',
       );
       _cleanup();
     }
-  };
-
-  es.onerror = () => {
-    // ``onerror`` also fires when the server closes the stream cleanly after
-    // the last event in some browsers — only treat it as a failure if we
-    // didn't already see ``complete``/``error``.
+      } },
+    );
+  } catch (err) {
     if (_completed) return;
-    es.close();
-    showToast(t('toast.stream_fallback'), 'error');
+    showToast(t('toast.memory_dir.reindex_failed', { error: err?.message || 'stream error' }), 'error');
     _cleanup();
-  };
+  }
 }
 
 async function mdReindexAll(btn) {

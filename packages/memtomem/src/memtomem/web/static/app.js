@@ -444,6 +444,62 @@ async function api(method, path, body, opts = {}) {
   return res.json();
 }
 
+// CSRF-protected POST SSE transport. Fetch is required because EventSource
+// cannot carry either the CSRF header or the IndexRequest JSON body.
+async function fetchIndexStream(body, { signal, onEvent } = {}) {
+  const csrf = await ensureCsrfToken();
+  const headers = csrf
+    ? { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'X-Memtomem-CSRF': csrf }
+    : { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' };
+  const res = await fetch(API + '/api/index/stream', {
+    method: 'POST', headers, body: JSON.stringify(body), signal,
+  });
+  if (!res.ok) {
+    const err = new Error(`Index stream request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  if (!res.body?.getReader) throw new Error('Index stream response body is unavailable');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let malformed = 0;
+  let terminal = false;
+  const consumeFrame = (frame) => {
+    const data = frame.split(/\r?\n/)
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trimStart())
+      .join('\n');
+    if (!data) return;
+    let event;
+    try { event = JSON.parse(data); }
+    catch {
+      malformed += 1;
+      if (malformed >= 3) throw new Error('Index stream sent too many malformed events');
+      return;
+    }
+    malformed = 0;
+    if (event.type === 'complete' || event.type === 'error') terminal = true;
+    if (typeof onEvent === 'function') onEvent(event);
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() || '';
+      frames.forEach(consumeFrame);
+      if (done) break;
+    }
+    if (buffer.trim()) consumeFrame(buffer);
+    if (!terminal) throw new Error('Index stream ended before a terminal event');
+  } finally {
+    try { await reader.cancel(); } catch { /* already closed */ }
+  }
+}
+
 // Wraps ``api()`` for write surfaces guarded by the trust-boundary redaction
 // filter. On a 403, prompts the user via ``showConfirm`` with the matched
 // pattern count and the localized surface label, then re-issues the same
@@ -6735,12 +6791,6 @@ async function runIndexStream() {
   const namespace = qs('index-namespace').value.trim();
   const registerAsSource = qs('index-register-source')?.checked === true;
   const forceUnsafe = qs('index-force-unsafe')?.checked === true;
-  // Bypass runs go through the CSRF-protected POST, not this GET SSE stream
-  // (a safe method the CSRF middleware does not token-gate). ADR-0006 PR-B.
-  if (forceUnsafe) {
-    return _runIndexForceUnsafe({ path, recursive, force, namespace, registerAsSource });
-  }
-
   const progressEl = qs('index-progress');
   const barEl      = qs('index-progress-bar');
   const labelEl    = qs('index-progress-label');
@@ -6755,48 +6805,15 @@ async function runIndexStream() {
 
   btnLoading(btn, true);
 
-  // ``new EventSource`` can throw synchronously (malformed URL, browser
-  // storage policy edge cases). Without this guard a throw here would
-  // leave ``STATE.indexing`` stuck on ``true`` and the indicator
-  // permanently visible until page reload, blocking every subsequent
-  // indexing trigger across all surfaces.
-  let es;
-  try {
-    const paramObj = { path, recursive, force };
-    if (namespace) paramObj.namespace = namespace;
-    const params = new URLSearchParams(paramObj);
-    es = new EventSource(`/api/index/stream?${params}`);
-  } catch (err) {
-    console.error('[index-stream] failed to open stream:', err);
-    showToast(t('toast.stream_fallback'), 'error');
-    hide(progressEl);
-    btnLoading(btn, false);
-    _indexingEnd();
-    return;
-  }
-  let _sseFailCount = 0;
-  const _SSE_MAX_FAILS = 3;
   const _chunkProgress = makeChunkProgressRenderer({
     targetEl: fileEl,
     formatKey: 'common.file_chunk_progress',
   });
 
-  es.onmessage = (e) => {
-    let event;
-    try { event = JSON.parse(e.data); }
-    catch {
-      _sseFailCount++;
-      console.warn(`[index-stream] malformed SSE (${_sseFailCount}/${_SSE_MAX_FAILS}):`, e.data);
-      if (_sseFailCount >= _SSE_MAX_FAILS) {
-        es.close();
-        showToast(t('toast.stream_fallback'), 'error');
-        hide(progressEl);
-        btnLoading(btn, false);
-        _indexingEnd();
-      }
-      return;
-    }
-    _sseFailCount = 0;
+  const body = { path, recursive, force, force_unsafe: forceUnsafe };
+  if (namespace) body.namespace = namespace;
+  try {
+    await fetchIndexStream(body, { onEvent: (event) => {
     if (event.type === 'chunk_progress') {
       _chunkProgress.onChunk(event);
       return;
@@ -6812,23 +6829,23 @@ async function runIndexStream() {
       });
       fileEl.textContent  = basename(event.file);
     } else if (event.type === 'complete') {
-      es.close();
       barEl.style.width = '100%';
       labelEl.textContent = t('index.progress_done', { count: event.total_files });
       fileEl.textContent  = '';
       _renderIndexResult(event, { registerAsSource, path });
       btnLoading(btn, false);
       _indexingEnd();
+    } else if (event.type === 'error') {
+      throw new Error(event.message || 'Index stream error');
     }
-  };
-
-  es.onerror = () => {
-    es.close();
+    }});
+  } catch (err) {
+    console.error('[index-stream] stream failed:', err);
     showToast(t('toast.stream_fallback'), 'error');
     hide(progressEl);
     btnLoading(btn, false);
     _indexingEnd();
-  };
+  }
 }
 
 qs('index-btn').addEventListener('click', runIndexStream);

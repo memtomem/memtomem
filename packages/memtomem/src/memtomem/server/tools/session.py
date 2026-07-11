@@ -144,6 +144,7 @@ async def mem_session_start(
 @register("sessions")
 async def mem_session_end(
     summary: str | None = None,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """End the current episodic memory session.
@@ -255,6 +256,7 @@ async def mem_session_end(
                     agent_id=agent_id,
                     summary=effective_summary,
                     event_counts=event_counts,
+                    force_unsafe=force_unsafe,
                 )
             except Exception:
                 logger.warning(
@@ -413,6 +415,7 @@ async def _persist_session_summary_chunk(
     agent_id: str | None,
     summary: str,
     event_counts: dict[str, int],
+    force_unsafe: bool = False,
 ) -> tuple[str | None, UUID | None]:
     """Promote a session summary to a first-class chunk.
 
@@ -454,27 +457,25 @@ async def _persist_session_summary_chunk(
         summary=summary,
     )
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(target.write_text, content, "utf-8")
+    from memtomem.config import classify_scope
+    from memtomem.context._atomic import atomic_write_text
+    from memtomem.privacy import enforce_write_guard
 
-    # ADR-0006 PR-A: the session summary is un-adjudicated content, so the
-    # engine redaction gate is active. If it trips, the file is written but not
-    # indexed; surface that instead of reporting success.
-    from memtomem.indexing.engine import PrivacyRejection
-
-    try:
-        stats = await app.index_engine.index_file(target, namespace=namespace)
-    except PrivacyRejection as exc:
-        app.search_pipeline.invalidate_cache()
-        # Return the contracted (status_line, chunk_id) tuple — a bare string
-        # here would make the caller's ``line, id = await …`` unpack raise
-        # ValueError, swallowing this message under the generic except.
+    scope, _ = classify_scope(target, app.config.indexing.project_memory_dirs)
+    guard = enforce_write_guard(
+        content,
+        surface="mcp_session_end",
+        force_unsafe=force_unsafe,
+        scope=scope,
+        audit_context={"session_id": session_id},
+    )
+    if guard.decision.startswith("blocked"):
         return (
-            f"Session summary written to {target} but NOT indexed — blocked by the "
-            f"redaction guard ({exc.hit_count} secret-pattern hit(s)). Review the "
-            f"file; re-index with 'mm index --force-unsafe' if intended.",
+            "Session summary blocked by the redaction guard; no file was written.",
             None,
         )
+    await asyncio.to_thread(atomic_write_text, target, content, 0o600)
+    stats = await app.index_engine.index_file(target, namespace=namespace, already_scanned=True)
     app.search_pipeline.invalidate_cache()
 
     if not stats.indexed_chunks:

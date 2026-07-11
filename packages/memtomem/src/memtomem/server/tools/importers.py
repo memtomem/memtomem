@@ -17,6 +17,7 @@ async def mem_import_notion(
     path: str,
     namespace: str | None = None,
     tags: list[str] | None = None,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Import a Notion export (ZIP or directory) into memtomem.
@@ -42,8 +43,20 @@ async def mem_import_notion(
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
     output_dir = memory_dir / "_imported" / "notion"
 
-    imported = await import_notion(export_path, output_dir)
+    from memtomem.config import classify_scope
 
+    scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
+    blocked_paths: list[str] = []
+    imported = await import_notion(
+        export_path,
+        output_dir,
+        force_unsafe=force_unsafe,
+        scope=scope,
+        blocked_paths=blocked_paths,
+    )
+
+    if not imported and blocked_paths:
+        return f"Notion import blocked by redaction guard: {len(blocked_paths)} file(s)."
     if not imported:
         return "No markdown files found in the Notion export."
 
@@ -54,10 +67,12 @@ async def mem_import_notion(
 
     effective_ns = namespace or "notion"
     total_chunks = 0
-    blocked = 0
+    blocked = len(blocked_paths)
     for f in imported:
         try:
-            stats = await app.index_engine.index_file(f, namespace=effective_ns)
+            stats = await app.index_engine.index_file(
+                f, namespace=effective_ns, already_scanned=True
+            )
         except PrivacyRejection:
             blocked += 1
             continue
@@ -101,6 +116,7 @@ async def mem_import_obsidian(
     vault_path: str,
     namespace: str | None = None,
     tags: list[str] | None = None,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Import an Obsidian vault into memtomem.
@@ -126,8 +142,20 @@ async def mem_import_obsidian(
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
     output_dir = memory_dir / "_imported" / "obsidian"
 
-    imported = await import_obsidian(vault, output_dir)
+    from memtomem.config import classify_scope
 
+    scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
+    blocked_paths: list[str] = []
+    imported = await import_obsidian(
+        vault,
+        output_dir,
+        force_unsafe=force_unsafe,
+        scope=scope,
+        blocked_paths=blocked_paths,
+    )
+
+    if not imported and blocked_paths:
+        return f"Obsidian import blocked by redaction guard: {len(blocked_paths)} file(s)."
     if not imported:
         return "No markdown files found in the Obsidian vault."
 
@@ -138,10 +166,12 @@ async def mem_import_obsidian(
 
     effective_ns = namespace or "obsidian"
     total_chunks = 0
-    blocked = 0
+    blocked = len(blocked_paths)
     for f in imported:
         try:
-            stats = await app.index_engine.index_file(f, namespace=effective_ns)
+            stats = await app.index_engine.index_file(
+                f, namespace=effective_ns, already_scanned=True
+            )
         except PrivacyRejection:
             blocked += 1
             continue

@@ -140,6 +140,32 @@ class TestRescanRegistration:
         assert "--scope" in result.output
 
 
+class TestRescanFiles:
+    def test_historical_files_are_scanned_read_only(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Mem2MemConfig()
+        cfg.indexing.memory_dirs = [tmp_path]
+        monkeypatch.setattr("memtomem.config.Mem2MemConfig", lambda: cfg)
+        monkeypatch.setattr("memtomem.config.load_config_d", lambda *a, **k: None)
+        monkeypatch.setattr("memtomem.config.load_config_overrides", lambda *a, **k: None)
+        safe = tmp_path / "_fetched" / "safe.md"
+        blocked = tmp_path / "sessions" / "2026-07" / "blocked.md"
+        safe.parent.mkdir(parents=True)
+        blocked.parent.mkdir(parents=True)
+        safe.write_text(_SAFE_CONTENT)
+        blocked.write_text(_SECRET_CONTENT)
+        before = blocked.read_bytes()
+
+        result = runner.invoke(cli, ["mem", "rescan-files", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["scanned"] == 2
+        assert payload["violations"][0]["path"] == str(blocked)
+        assert blocked.read_bytes() == before
+
+
 class TestRescanBehaviour:
     """Privacy-only audit semantics."""
 

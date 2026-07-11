@@ -114,6 +114,8 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "system.add_memory",
         "system.add_memory_dir",
         "system.embed_text",
+        "system.health_active",
+        "system.index_stream",
         "system.open_memory_dir",
         "system.patch_config",
         "system.rebuild_fts",
@@ -187,6 +189,10 @@ _REDACTION_PROTECTED: frozenset[str] = frozenset(
 )
 
 _REDACTION_EXEMPT: dict[str, str] = {
+    "system.health_active": "active dependency checks only; no user content is persisted",
+    "system.index_stream": (
+        "path/options only; discovered file content is guarded by the indexing engine"
+    ),
     # Delete-only / no body content.
     "chunks.delete_chunk": "delete-only, no payload",
     "context_agents.delete_agent": "delete-only, no payload",

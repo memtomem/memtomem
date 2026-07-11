@@ -312,6 +312,63 @@ def rescan_cmd(
         raise SystemExit(1)
 
 
+@mem.command("rescan-files")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def rescan_files_cmd(as_json: bool) -> None:
+    """Read-only privacy scan of historical imported/fetched/session files."""
+    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+    cfg = Mem2MemConfig()
+    load_config_d(cfg, quiet=True)
+    load_config_overrides(cfg)
+
+    scanned = 0
+    violations: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    for root_raw in cfg.indexing.all_index_roots():
+        root = Path(root_raw).expanduser().resolve()
+        for managed in ("_imported", "_fetched", "sessions"):
+            base = root / managed
+            if not base.is_dir():
+                continue
+            for path in sorted(p for p in base.rglob("*") if p.is_file() and not p.is_symlink()):
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    errors.append({"path": str(path), "error": "read_failed"})
+                    continue
+                scanned += 1
+                hits = privacy.scan(text)
+                if hits:
+                    violations.append(
+                        {
+                            "path": str(path),
+                            "hits": len(hits),
+                            "patterns": sorted({hit.pattern_index for hit in hits}),
+                        }
+                    )
+
+    payload = {"scanned": scanned, "violations": violations, "errors": errors}
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for row in violations:
+            click.echo(f"BLOCKED {row['path']} ({row['hits']} hit(s))")
+        for row in errors:
+            click.echo(f"ERROR {row['path']} ({row['error']})")
+        click.echo(
+            f"Summary: {len(violations)} violation(s), {len(errors)} read error(s), "
+            f"{scanned} file(s) scanned; no files changed."
+        )
+    if violations or errors:
+        raise SystemExit(1)
+
+
 async def _rescan(
     *,
     scope: TargetScope,

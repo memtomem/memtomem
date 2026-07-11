@@ -18,6 +18,7 @@ async def mem_fetch(
     url: str,
     tags: list[str] | None = None,
     namespace: str | None = None,
+    force_unsafe: bool = False,
     ctx: CtxType = None,
 ) -> str:
     """Fetch a URL, convert to markdown, and index it for search.
@@ -42,8 +43,14 @@ async def mem_fetch(
     memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
     output_dir = memory_dir / "_fetched"
 
+    from memtomem.config import classify_scope
+    from memtomem.indexing.url_fetcher import FetchPrivacyError
+
+    scope, _ = classify_scope(output_dir, app.config.indexing.project_memory_dirs)
     try:
-        file_path = await fetch_url(url, output_dir)
+        file_path = await fetch_url(url, output_dir, force_unsafe=force_unsafe, scope=scope)
+    except FetchPrivacyError:
+        return "Fetch blocked by the redaction guard; no file was written."
     except Exception as exc:
         return f"Error fetching URL: {exc}"
 
@@ -54,7 +61,9 @@ async def mem_fetch(
 
     effective_ns = namespace or _resolve_agent_namespace(app, None)
     try:
-        stats = await app.index_engine.index_file(file_path, namespace=effective_ns)
+        stats = await app.index_engine.index_file(
+            file_path, namespace=effective_ns, already_scanned=True
+        )
     except PrivacyRejection as exc:
         app.search_pipeline.invalidate_cache()
         return (

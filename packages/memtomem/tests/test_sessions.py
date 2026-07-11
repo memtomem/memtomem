@@ -842,14 +842,7 @@ class TestSessionSummaryPhaseB:
 
 
 class TestSessionSummaryRedactionGate:
-    """ADR-0006 PR-A: a secret in the session summary makes the engine redaction
-    gate raise ``PrivacyRejection``. The blocked branch of
-    ``_persist_session_summary_chunk`` must return the contracted
-    ``(status_line, chunk_id)`` tuple — a bare string would make the caller's
-    ``line, id = await …`` unpack raise ``ValueError``, which the generic
-    ``except`` swallows, so the user never sees the "written but NOT indexed"
-    message.
-    """
+    """A blocked summary is rejected before its archive file is persisted."""
 
     @pytest.mark.asyncio
     async def test_blocked_summary_returns_tuple_with_message(self, bm25_only_components):
@@ -868,5 +861,7 @@ class TestSessionSummaryRedactionGate:
         )
 
         assert chunk_id is None
-        assert line is not None and "NOT indexed" in line
+        assert line is not None and "no file was written" in line
         assert secret not in line  # no matched bytes echoed
+        memory_dir = Path(comp.config.indexing.memory_dirs[0])
+        assert not list((memory_dir / "sessions").rglob("redactiontest.md"))

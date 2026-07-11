@@ -28,21 +28,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { bootApp } from './setup/jsdom-app.mjs';
 
-function installFakeEventSource(window) {
-  const instances = [];
-  class FakeEventSource {
-    constructor(url) {
-      this.url = url;
-      this.onmessage = null;
-      this.onerror = null;
-      this.closed = false;
-      instances.push(this);
-    }
-    close() { this.closed = true; }
-    emit(obj) { if (this.onmessage) this.onmessage({ data: JSON.stringify(obj) }); }
-  }
-  window.EventSource = FakeEventSource;
-  return instances;
+function streamResponse(event) {
+  const bytes = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+  let sent = false;
+  return {
+    ok: true, status: 200,
+    body: { getReader: () => ({
+      read: async () => sent ? { done: true } : (sent = true, { value: bytes, done: false }),
+      cancel: async () => {},
+    }) },
+  };
 }
 
 function spyToasts(window) {
@@ -76,7 +71,6 @@ function indexResult(overrides = {}) {
 describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
   let window;
   let document;
-  let streams;
   let toasts;
   let capturedIndex;
   let postResult;
@@ -85,9 +79,9 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
     const dom = await bootApp({ scripts: ['i18n.js', 'app.js'] });
     window = dom.window;
     document = window.document;
+    window.TextDecoder = TextDecoder;
     await window.I18N.init(); // real English strings so t() != raw key
 
-    streams = installFakeEventSource(window);
     toasts = spyToasts(window);
 
     // Capture the force_unsafe POST /api/index; other fetches fall through.
@@ -97,9 +91,9 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
     const origFetch = window.fetch;
     window.fetch = async function fetchSpy(input, init) {
       const url = typeof input === 'string' ? input : input?.url;
-      if (url === '/api/index') {
+      if (url === '/api/index/stream') {
         capturedIndex.push({ method: init?.method, body: init?.body ? JSON.parse(init.body) : null });
-        return { ok: true, status: 200, json: async () => postResult, text: async () => '{}' };
+        return streamResponse(postResult);
       }
       return origFetch(input, init);
     };
@@ -120,19 +114,17 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
     return flush();
   }
 
-  it('toggle OFF → GET SSE stream, no force_unsafe on the URL, no POST', async () => {
+  it('toggle OFF → POST SSE stream with force_unsafe:false', async () => {
     document.getElementById('index-force-unsafe').checked = false;
     await clickIndex();
-    expect(streams).toHaveLength(1);
-    expect(streams[0].url).toContain('/api/index/stream?');
-    expect(streams[0].url).not.toContain('force_unsafe');
-    expect(capturedIndex).toHaveLength(0);
+    expect(capturedIndex).toHaveLength(1);
+    expect(capturedIndex[0].method).toBe('POST');
+    expect(capturedIndex[0].body.force_unsafe).toBe(false);
   });
 
-  it('toggle ON → CSRF-protected POST /api/index with force_unsafe:true, no EventSource', async () => {
+  it('toggle ON → CSRF-protected POST SSE with force_unsafe:true', async () => {
     document.getElementById('index-force-unsafe').checked = true;
     await clickIndex();
-    expect(streams).toHaveLength(0); // the token-exempt GET stream is not used
     expect(capturedIndex).toHaveLength(1);
     expect(capturedIndex[0].method).toBe('POST');
     expect(capturedIndex[0].body.force_unsafe).toBe(true);
@@ -141,13 +133,12 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
 
   it('SSE complete with blocked_files>0 renders the Blocked row + bypassable toast', async () => {
     document.getElementById('index-force-unsafe').checked = false;
-    await clickIndex();
-    streams[0].emit(indexResult({
+    window.__setPostResult(indexResult({
       blocked_files: 1,
       blocked_paths: ['/tmp/memories/leak.md'],
       blocked_project_shared_files: 0,
     }));
-    await flush(1);
+    await clickIndex();
 
     expect(document.getElementById('r-blocked-row').hidden).toBe(false);
     const cell = document.getElementById('r-blocked').textContent;
@@ -161,13 +152,12 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
 
   it('project_shared block fires the cannot-bypass toast, not the bypassable one', async () => {
     document.getElementById('index-force-unsafe').checked = false;
-    await clickIndex();
-    streams[0].emit(indexResult({
+    window.__setPostResult(indexResult({
       blocked_files: 1,
       blocked_paths: ['/tmp/memories/shared.md'],
       blocked_project_shared_files: 1,
     }));
-    await flush(1);
+    await clickIndex();
 
     const msgs = toasts.filter((t) => t.type === 'error').map((t) => t.message);
     expect(msgs).toContain(window.t('toast.index_blocked_project_shared', { count: 1 }));
@@ -191,9 +181,8 @@ describe('Index tab — force_unsafe toggle + blocked surfacing', () => {
 
   it('clean SSE run keeps the Blocked row hidden and fires no blocked toast', async () => {
     document.getElementById('index-force-unsafe').checked = false;
+    window.__setPostResult(indexResult());
     await clickIndex();
-    streams[0].emit(indexResult());
-    await flush(1);
 
     expect(document.getElementById('r-blocked-row').hidden).toBe(true);
     const msgs = toasts.map((t) => t.message);

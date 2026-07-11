@@ -8,6 +8,9 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
+from memtomem.context._atomic import atomic_write_text
+from memtomem.privacy import enforce_write_guard
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,7 +110,14 @@ def safe_extract_zip(
             zf.extract(info, dest_root)
 
 
-async def import_notion(export_path: Path, output_dir: Path) -> list[Path]:
+async def import_notion(
+    export_path: Path,
+    output_dir: Path,
+    *,
+    force_unsafe: bool = False,
+    scope: str = "user",
+    blocked_paths: list[str] | None = None,
+) -> list[Path]:
     """Import a Notion export (ZIP or directory) into markdown files.
 
     Notion exports come as a ZIP with markdown files + nested folders.
@@ -120,48 +130,83 @@ async def import_notion(export_path: Path, output_dir: Path) -> list[Path]:
     Returns:
         List of imported file paths.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    source_dir = export_path
-
-    # Extract ZIP if needed
-    if export_path.suffix == ".zip":
-        extract_dir = output_dir / "_notion_extract"
-        extract_dir.mkdir(parents=True, exist_ok=True)
-        # Notion exports bundle markdown + attachments (images, PDFs, …); the
-        # importer only consumes ``*.md`` (see the rglob below), so extract just
-        # those — skipping arbitrarily large attachments instead of extracting
-        # them (the bomb vector) or rejecting the whole export over them.
-        safe_extract_zip(
-            export_path, extract_dir, member_filter=lambda n: n.lower().endswith(".md")
-        )
-        source_dir = extract_dir
-
     imported: list[Path] = []
+    sources: list[tuple[Path, str, str]] = []
+    if export_path.suffix == ".zip":
+        # Validate resource/traversal limits, then read markdown members
+        # directly. No temporary plaintext extraction tree is created.
+        safe_extract_zip(export_path, Path("/tmp"), member_filter=lambda _: False)
+        with zipfile.ZipFile(export_path, "r") as zf:
+            infos = sorted(
+                (i for i in zf.infolist() if not i.is_dir() and i.filename.lower().endswith(".md")),
+                key=lambda i: i.filename,
+            )
+            total = sum(info.file_size for info in infos)
+            total_compressed = sum(info.compress_size for info in infos)
+            if total > _ZIP_MAX_TOTAL_BYTES:
+                raise UnsafeArchiveError("archive exceeds aggregate size cap")
+            if (
+                total_compressed > 0
+                and total > _ZIP_RATIO_FLOOR_BYTES
+                and total / total_compressed > _ZIP_MAX_RATIO
+            ):
+                raise UnsafeArchiveError("archive compression ratio exceeds cap")
+            for info in infos:
+                if info.file_size > _ZIP_MAX_MEMBER_BYTES:
+                    raise UnsafeArchiveError(f"member {info.filename!r} exceeds size cap")
+                raw = zf.open(info).read(_ZIP_MAX_MEMBER_BYTES + 1)
+                sources.append(
+                    (
+                        Path(info.filename),
+                        Path(info.filename).name,
+                        raw.decode("utf-8", errors="replace"),
+                    )
+                )
+    else:
+        sources = [
+            (p.relative_to(export_path), p.name, p.read_text(encoding="utf-8", errors="replace"))
+            for p in sorted(export_path.rglob("*.md"))
+        ]
 
-    for md_file in sorted(source_dir.rglob("*.md")):
-        content = md_file.read_text(encoding="utf-8", errors="replace")
-
+    for rel, original_name, content in sources:
         # Clean Notion-specific artifacts
         content = _clean_notion_markdown(content)
 
         # Clean filename (remove Notion UUID suffix)
-        clean_name = _clean_notion_filename(md_file.stem) + ".md"
+        clean_name = _clean_notion_filename(Path(original_name).stem) + ".md"
 
         # Preserve directory structure
-        rel = md_file.relative_to(source_dir)
         target = output_dir / rel.parent / clean_name
-        target.parent.mkdir(parents=True, exist_ok=True)
 
         # Add source metadata
-        header = f"---\nimported_from: notion\noriginal_file: {md_file.name}\n---\n\n"
-        target.write_text(header + content, encoding="utf-8")
+        header = f"---\nimported_from: notion\noriginal_file: {original_name}\n---\n\n"
+        final = header + content
+        guard = enforce_write_guard(
+            final,
+            surface="mcp_import_notion",
+            force_unsafe=force_unsafe,
+            scope=scope,
+            audit_context={"filename": original_name},
+        )
+        if guard.decision.startswith("blocked"):
+            if blocked_paths is not None:
+                blocked_paths.append(rel.as_posix())
+            continue
+        atomic_write_text(target, final, mode=0o600)
         imported.append(target)
 
     logger.info("Imported %d files from Notion export", len(imported))
     return imported
 
 
-async def import_obsidian(vault_path: Path, output_dir: Path) -> list[Path]:
+async def import_obsidian(
+    vault_path: Path,
+    output_dir: Path,
+    *,
+    force_unsafe: bool = False,
+    scope: str = "user",
+    blocked_paths: list[str] | None = None,
+) -> list[Path]:
     """Import an Obsidian vault into memtomem-compatible markdown.
 
     Converts Obsidian-specific syntax:
@@ -177,7 +222,6 @@ async def import_obsidian(vault_path: Path, output_dir: Path) -> list[Path]:
     Returns:
         List of imported file paths.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
     imported: list[Path] = []
 
     for md_file in sorted(vault_path.rglob("*.md")):
@@ -192,11 +236,21 @@ async def import_obsidian(vault_path: Path, output_dir: Path) -> list[Path]:
         content = _convert_obsidian_syntax(content)
 
         target = output_dir / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-
         # Add source metadata
         header = f"---\nimported_from: obsidian\noriginal_file: {rel}\n---\n\n"
-        target.write_text(header + content, encoding="utf-8")
+        final = header + content
+        guard = enforce_write_guard(
+            final,
+            surface="mcp_import_obsidian",
+            force_unsafe=force_unsafe,
+            scope=scope,
+            audit_context={"filename": rel.as_posix()},
+        )
+        if guard.decision.startswith("blocked"):
+            if blocked_paths is not None:
+                blocked_paths.append(rel.as_posix())
+            continue
+        atomic_write_text(target, final, mode=0o600)
         imported.append(target)
 
     logger.info("Imported %d files from Obsidian vault", len(imported))

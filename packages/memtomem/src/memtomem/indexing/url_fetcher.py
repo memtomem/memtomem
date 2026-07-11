@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import ParseResult, urljoin, urlparse, urlunparse
 
+from memtomem.context._atomic import atomic_write_text
+from memtomem.privacy import enforce_write_guard
+
 if TYPE_CHECKING:
     import httpx
 
@@ -21,6 +24,10 @@ _MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 _MAX_REDIRECTS = 5
 _REQUEST_TIMEOUT = 30.0
+
+
+class FetchPrivacyError(ValueError):
+    """Fetched content was rejected before persistence."""
 
 
 def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -312,7 +319,14 @@ async def _send_pinned_chain(
     return body_bytes, final_resp, url
 
 
-async def fetch_url(url: str, output_dir: Path, *, client: httpx.AsyncClient | None = None) -> Path:
+async def fetch_url(
+    url: str,
+    output_dir: Path,
+    *,
+    client: httpx.AsyncClient | None = None,
+    force_unsafe: bool = False,
+    scope: str = "user",
+) -> Path:
     """Fetch a URL, convert HTML to markdown, and save to a file.
 
     DNS-pinning: hostname is resolved once at validation time and the resulting
@@ -370,11 +384,22 @@ async def fetch_url(url: str, output_dir: Path, *, client: httpx.AsyncClient | N
         markdown = f"```\n{body}\n```"
 
     slug = _url_to_slug(saved_url)
-    output_dir.mkdir(parents=True, exist_ok=True)
     file_path = output_dir / f"{slug}.md"
 
     header = f"---\nsource: {saved_url}\n---\n\n"
-    file_path.write_text(header + markdown, encoding="utf-8")
+    final = header + markdown
+    guard = enforce_write_guard(
+        final,
+        surface="mcp_fetch",
+        force_unsafe=force_unsafe,
+        scope=scope,
+        audit_context={"host": urlparse(saved_url).hostname or ""},
+    )
+    if guard.decision.startswith("blocked"):
+        raise FetchPrivacyError(
+            "Fetched content was blocked by the redaction guard before persistence"
+        )
+    atomic_write_text(file_path, final, mode=0o600)
 
     return file_path
 
