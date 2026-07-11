@@ -5,7 +5,74 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-07-11
+
 ### Added
+
+- **`mm wiki <kind> promote` — import a project canonical into the wiki**
+  (#1686) — the wiki ↔ context-gateway lifecycle was one-way: `mm context
+  install` / `update` snapshot wiki assets into a project, but nothing moved
+  a project asset back into the wiki. `mm wiki {skill,agent,command} promote
+  <name>` is the inbound verb for all three kinds: it reads the project's
+  `project_shared` canonical (the `untracked` rows `mm context status`
+  reports), runs the `enforce_write_guard` privacy chokepoint at
+  `scope=project_shared` (a Gate A hit hard-refuses with no bypass — the wiki
+  is host-global git history that can be pushed), then under the shared wiki
+  commit lock re-checks the asset is absent, copies it in (preserving the
+  exec bit), lints, and commits the in-memory scanned bytes so the scan set
+  equals the commit set. Holding one lock across absent-check → copy → lint →
+  commit serializes concurrent same-name promotes. The project copy is left
+  untouched; `mm context install <kind> <name>` snapshots it back as a
+  lockfile-tracked asset. Options: `--project`, `--message`.
+
+- **`mm context adopt` — lockfile-track a canonical that already matches wiki
+  HEAD** (#1687) — a `project_shared` canonical whose bytes already equal the
+  wiki HEAD asset previously could only become lockfile-tracked by
+  mv-aside + reinstall (deleting and rewriting identical bytes).
+  `mm context adopt {skill,agent,command} <name>` is the explicit, verifying
+  fill for install's dest-exists-no-lock refusal: it runs install's own
+  reproducible-pin gates, compares dest bytes file-by-file against the HEAD
+  manifest (with the copier's skip filters on both sides, including the
+  all-skipped parity case), and refuses any difference with a per-file
+  categorized report (`differs` / `only on disk` / `only at HEAD` /
+  `unreadable`). It deliberately has **no `--force`** — no dest byte is ever
+  written or moved — and runs Gate A over the pinned bytes only on full
+  equality before recording the install-shaped lockfile entry.
+
+- **The Claude Code plugin now bundles the MCP server** (#1680) — installing
+  the plugin previously shipped skills, hooks, and the curator agent but
+  still required a separate `claude mcp add`. A plugin-root `.mcp.json`
+  (`uvx --from memtomem memtomem-server`, the supported bundle contract) now
+  ships so one `/plugin install` activates everything, and the
+  `.claude-plugin/` marketplace manifest is no longer gitignored. Every
+  skill/agent allowed-tools list is dual-namespaced
+  (`mcp__plugin_memtomem_memtomem__*` and `mcp__memtomem__*`) because Claude
+  Code suppresses the plugin-managed server when a manually-configured server
+  has the same command signature — a single-namespace allowlist would break
+  skills for existing `claude mcp add` users. Also corrects the hook
+  timeouts from `5000/10000/3000` (interpreted as ~83 minutes) to the
+  intended `5/10/3` seconds. Plugin version `0.1.0` → `0.2.0`.
+
+- **Empty-state hint on `mm search` / `mm recall`** (#1675) — a zero-result
+  query in `table` or `plain` format now prints a yellow stderr hint
+  pointing at `mm status` to confirm the index has chunks. JSON stdout stays
+  byte-clean (`[]`), and the `context` format is unaffected.
+
+- **`known_projects.json` read failures now surface on the projects wire**
+  (#1699) — `GET /api/context/projects` gains additive `registry_status`
+  (`"ok"` / `"unavailable"`, `"unavailable"` only when the registry itself
+  can't be read) and a top-level `warnings` list, so a corrupt/unreadable
+  registry is no longer wire-identical to "no projects." The web Portal
+  renders the warning with a Retry affordance instead of a blank board.
+
+- **Failed count/coverage probes are distinguished from a real zero** (#1692
+  PR 5) — per-project entries on `GET /api/context/projects` gain additive
+  `counts_unavailable` (the list of kind keys whose count probe raised;
+  `counts` stays `null` for those, preserving the wire null convention) and
+  `runtime_coverage_unavailable` (bool). A failed per-scope counts probe
+  previously left `counts` null and rendered no chips at all — a silent
+  variant of the state #1692 made visible; the Portal now stamps the
+  unavailable badge + Retry instead.
 
 - **`mm context update --force-head` — follow a deliberate wiki rollback**
   (#1689) — the forward-only guard (#1685) refuses to move a project's pin
@@ -46,7 +113,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   chip row. Existing fields, types, and per-entry `error_kind` semantics are
   unchanged.
 
-- **`mm mem init` — project memory tier opt-in** (#1700) — creates
+- **`mm mem init` — project memory tier opt-in** (#1701) — creates
   `<project>/.memtomem/memories.local/` (default; `--scope project_shared
   --confirm-project-shared` for the shared tier) and registers it in
   `indexing.project_memory_dirs`, which previously required hand-editing
@@ -64,6 +131,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   picks up the new tier after restart.
 
 ### Changed
+
+- **`mm context update` is now forward-only** (#1685) — `mm context update
+  <type> <name>` used to advance the lockfile pin to wiki HEAD whenever HEAD
+  differed from the recorded pin, without checking HEAD descends from it, so
+  a wiki `reset` / force-pull to older-or-divergent history silently moved
+  the pin **backward** (a downgrade). Update now records the new commit as
+  the pin only when the recorded pin is an ancestor of the exact commit being
+  recorded (the ancestry target is that commit, not a freshly-resolved
+  symbolic HEAD, closing a TOCTOU race); missing / unreachable / divergent
+  pins all refuse, mirroring `classify_status`'s `stale-pin`. The single wet
+  path and `--dry-run` exit non-zero; `--all` skips each stale-pin row
+  (counted as a failure → non-zero exit) while forward siblings still update.
+  The web update route maps to a fixed `409 pin_not_ancestor` envelope (no
+  host-path leak). Deliberately not `--force`-able — the remedy is to fix the
+  wiki, or use the `--force-head` escape hatch (#1689).
+
+- **Refreshed `mm web` UI system** (#1698) — a unified visual refresh across
+  the core memory, index, and settings workspaces, with hardened mobile
+  workspace navigation. No wire changes; the primary flows keep their
+  contracts.
+
+- **Remaining UI and Context Gateway UX improvements** (#1704) — completes
+  the UI refresh and exposes import provenance. Re-localizes the Simple-mode
+  toggle/chip (they painted raw i18n keys when `_ctxApplySimpleMode` ran
+  before `I18N.init()` resolved) by registering the renderer on `langchange`
+  and re-rendering the active-store chip after project commit. Restores the
+  client-side attention-skip demotion in the batch sync-all report path (a
+  `parse_error` / `duplicate_name` skip had regressed to rendering as done +
+  "Sync completed"), mirroring the legacy toast severity ladder. Splits the
+  counts/runtimes portal fetches so one failure can't mask the other, and
+  stamps `counts_unavailable` on probe failure so the Retry badge renders.
 
 - **Missing-pin update refusals now report `pin_missing`, not
   `pin_not_ancestor`** (#1689) — a lockfile entry with no usable `wiki_commit`
@@ -90,6 +188,50 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   off the previous exit-0 behavior for probe failures should treat the new
   exit 1 as "could not determine sync state." A corrupt/unreadable `lock.json`
   already behaved this way; this aligns diff-probe failures with it.
+
+### Fixed
+
+- **`config.json` section overrides are re-validated against cross-field
+  validators** (#1682) — overriding a config section via `config.json` took
+  the `setattr` path, which skips the cross-field Pydantic validators
+  (Langfuse key pairing, chunk-token range, rerank pool bounds) and does not
+  surface user-triggered deprecations. Each overridden section is now
+  re-validated; an invalid section reverts to its pre-override baseline. The
+  check is validation-only (no coerced model assign-back), so `config.json`
+  field types stay as-is and Windows `str()` output is unaffected.
+
+- **Simple-view verdict is truthful for settings drift and local drafts**
+  (#1691) — the Context Gateway Simple-view header could report an "all
+  good" verdict while settings drift or a local draft was pending; the
+  verdict now reflects those states.
+
+- **Context Gateway projects whose status check failed are badged** (#1694) —
+  a project whose status probe raised previously rendered indistinguishably
+  from a clean one on the Portal board; it now carries an explicit
+  failed-status badge instead of a misleading clean/drift state.
+
+- **Unknown `known_projects.json` fields are preserved across rewrites**
+  (#1695) — a rewrite of the project registry used to drop any field the
+  current schema didn't recognize, silently discarding data written by a
+  newer version or an external tool. Unknown keys are now round-tripped
+  through the rewrite untouched.
+
+- **Mobile primary workflows stabilized** (#1702) — layout and interaction
+  fixes so the core `mm web` workflows are usable on narrow / mobile
+  viewports.
+
+- **`namespace_metadata` row is deleted even when the namespace has no
+  chunks** (#1706) — deleting a namespace with zero chunks left its
+  `namespace_metadata` row behind, so the namespace could still appear in
+  listings / metadata after deletion. The metadata row is now removed
+  regardless of chunk count.
+
+- **`mm init` next-steps hint points at valid commands** (#1690) — when the
+  setup wizard detected memory dirs it could not auto-register, its "next
+  steps" output recommended `mm config set indexing.memory_dirs` — not a
+  settable field, so following the hint failed. It now points at re-running
+  `mm init`, setting `MEMTOMEM_INDEXING__MEMORY_DIRS`, or adding them in the
+  Web UI.
 
 ## [0.3.4] — 2026-07-05
 
