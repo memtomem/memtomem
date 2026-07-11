@@ -554,7 +554,15 @@ def _write_local_jsonl(
             flags |= os.O_NOFOLLOW
         fd = os.open(jsonl_path, flags, 0o600)
         try:
-            os.fchmod(fd, 0o600)
+            # ``os.open(..., 0o600)`` already sets the mode; the ``fchmod`` is
+            # belt-and-suspenders against a permissive umask. Windows Python
+            # < 3.13 lacks ``os.fchmod`` (POSIX-only), so guard it the same way
+            # ``provenance.py`` and ``context/_atomic.py`` do — otherwise the
+            # trace write raises ``AttributeError`` and every trace silently
+            # fails on Windows. NTFS ignores POSIX modes beyond the read-only
+            # bit anyway, so skipping ``fchmod`` there loses nothing.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as f:
                 fd = -1
                 f.write(json.dumps(row, default=str) + "\n")
