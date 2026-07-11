@@ -1,0 +1,29 @@
+{
+  "status": "str",
+  "confirm": "str",
+  "reason": "str",
+  "host_targets": [
+    "str"
+  ],
+  "plan": {
+    "imported": [
+      {
+        "name": "str",
+        "canonical_path": "str",
+        "source_runtime": "str",
+        "duplicate_candidates": [
+          "str"
+        ]
+      }
+    ],
+    "skipped": [],
+    "project_root": "str",
+    "scanned_dirs": [
+      "str",
+      "str",
+      "str",
+      "str"
+    ],
+    "dry_run": "bool"
+  }
+}

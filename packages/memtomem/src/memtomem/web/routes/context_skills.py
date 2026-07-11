@@ -53,6 +53,7 @@ from memtomem.web.routes.context_projects import (
     resolve_scope_root_cascade_gated,
     resolve_writable_scope_root,
 )
+from memtomem.web.schemas.context import ContextImportNeedsConfirmation, ContextImportReport
 
 # Flat list of project-relative runtime scan paths reported on list / import
 # responses so the web UI's empty-state hint can name the exact directories
@@ -747,7 +748,12 @@ def _import_payload(
     return payload
 
 
-@router.post("/context/skills/import")
+@router.post(
+    "/context/skills/import",
+    response_model=ContextImportReport | ContextImportNeedsConfirmation,
+    # exclude_unset: dry_run is omitted (not null) when the builder gets None.
+    response_model_exclude_unset=True,
+)
 async def import_skills(
     body: ImportRequest | None = None,
     project_root: Path = Depends(resolve_scope_root),
@@ -823,7 +829,11 @@ async def import_skills(
     return _import_payload(result, project_root, target_scope, dry_run=dry_run)
 
 
-@router.post("/context/skills/{name}/import")
+@router.post(
+    "/context/skills/{name}/import",
+    response_model=ContextImportReport | ContextImportNeedsConfirmation,
+    response_model_exclude_unset=True,
+)
 async def import_skill(
     name: str,
     body: ImportRequest | None = None,
@@ -894,7 +904,11 @@ async def import_skill(
     return _import_payload(result, project_root, target_scope, dry_run=None)
 
 
-@router.post("/context/skills/{name}/import-to-user")
+@router.post(
+    "/context/skills/{name}/import-to-user",
+    response_model=ContextImportReport | ContextImportNeedsConfirmation,
+    response_model_exclude_unset=True,
+)
 async def import_skill_to_user(
     name: str,
     body: ImportRequest | None = None,

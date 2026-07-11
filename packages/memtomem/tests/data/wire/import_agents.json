@@ -1,0 +1,27 @@
+{
+  "imported": [
+    {
+      "name": "str",
+      "canonical_path": "str",
+      "source_runtime": "str",
+      "duplicate_candidates": [
+        "str"
+      ]
+    }
+  ],
+  "skipped": [
+    {
+      "name": "str",
+      "reason": "str",
+      "reason_code": "str"
+    }
+  ],
+  "project_root": "str",
+  "scanned_dirs": [
+    "str",
+    "str",
+    "str",
+    "str"
+  ],
+  "dry_run": "bool"
+}

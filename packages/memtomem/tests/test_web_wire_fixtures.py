@@ -20,9 +20,9 @@ Regenerate after an intentional wire change with::
 
 and review the golden diff like any other contract change.
 
-The two POST report endpoints (Sync All, Import) are pinned separately when
-they gain typed models — their goldens need seeded-mutation setups this
-read-only file deliberately avoids.
+The POST report endpoints (Sync All, Import) are pinned in the sibling
+``test_web_wire_fixtures_reports.py`` — their goldens need seeded-mutation
+setups this read-only file deliberately avoids.
 """
 
 from __future__ import annotations

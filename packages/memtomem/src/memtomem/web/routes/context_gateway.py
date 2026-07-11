@@ -25,6 +25,11 @@ from memtomem.context.status import (
 from memtomem.wiki.store import WikiStore
 from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
 from memtomem.web.routes.context_projects import _discover_for, resolve_scope_root
+from memtomem.web.schemas.context import (
+    ContextOverviewResponse,
+    ContextRuntimesResponse,
+    ContextStatusAllResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +310,13 @@ def _error_payload(exc: BaseException, *, shape: str = "total") -> dict:
     return {"total": 0, "error": True, "error_kind": kind, "error_message": message}
 
 
-@router.get("/context/overview")
+@router.get(
+    "/context/overview",
+    response_model=ContextOverviewResponse,
+    # exclude_unset: detected_runtimes entries conditionally OMIT
+    # installed/memtomem_registered (runtime_coverage.py) — absent ≠ null.
+    response_model_exclude_unset=True,
+)
 async def context_overview(
     project_root: Path = Depends(resolve_scope_root),
     target_scope: TargetScope = Query(
@@ -457,7 +468,7 @@ async def context_overview(
     return await asyncio.to_thread(_collect)
 
 
-@router.get("/context/runtimes")
+@router.get("/context/runtimes", response_model=ContextRuntimesResponse)
 async def context_runtimes(
     project_root: Path = Depends(resolve_scope_root),
 ) -> dict:
@@ -592,7 +603,7 @@ def _status_all_entry(
     }
 
 
-@router.get("/context/status-all")
+@router.get("/context/status-all", response_model=ContextStatusAllResponse)
 async def context_status_all(
     request: Request,
     target_scope: TargetScope = Query(

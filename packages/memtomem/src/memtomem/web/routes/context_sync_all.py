@@ -97,6 +97,7 @@ from memtomem.web.routes.context_mcp_servers import _sync_mcp_servers_core
 from memtomem.web.routes.context_projects import _discover_for, resolve_writable_scope_root
 from memtomem.web.routes.context_skills import _sync_skills_core
 from memtomem.web.routes.settings_sync import _sync_settings_core
+from memtomem.web.schemas.context import ContextSyncAllProjectsReport, ContextSyncAllReport
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +290,7 @@ def _reject_ineligible_tier(target_scope: TargetScope) -> None:
         )
 
 
-@router.post("/context/sync-all")
+@router.post("/context/sync-all", response_model=ContextSyncAllReport)
 async def sync_all_context(
     project_root: Path = Depends(resolve_writable_scope_root),
     target_scope: TargetScope = Query(
@@ -401,7 +402,7 @@ def _summarize_projects(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-@router.post("/context/sync-all-projects")
+@router.post("/context/sync-all-projects", response_model=ContextSyncAllProjectsReport)
 async def sync_all_projects_context(
     request: Request,
     target_scope: TargetScope = Query(
@@ -486,10 +487,14 @@ async def sync_all_projects_context(
                     **base,
                     "status": "failed",
                     "phases": phases,
+                    # Key order matches the timeout envelope above and
+                    # ``_phase_error_envelope`` (error_kind, http_status,
+                    # message) — one order for every batch failure envelope
+                    # so the typed model serializes all of them verbatim.
                     "error": {
                         "error_kind": _classify_exception(exc),
-                        "message": _redact_message(str(exc)),
                         "http_status": 500,
+                        "message": _redact_message(str(exc)),
                     },
                 }
             )
