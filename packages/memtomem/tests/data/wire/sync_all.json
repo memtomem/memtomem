@@ -1,0 +1,129 @@
+{
+  "phases": [
+    {
+      "type": "str",
+      "status": "str",
+      "generated": [],
+      "skipped": [
+        {
+          "runtime": "str",
+          "reason": "str",
+          "reason_code": "str"
+        }
+      ],
+      "canonical_root": "str"
+    },
+    {
+      "type": "str",
+      "status": "str",
+      "generated": [],
+      "dropped": [],
+      "skipped": [
+        {
+          "runtime": "str",
+          "reason": "str",
+          "reason_code": "str"
+        }
+      ],
+      "canonical_root": "str"
+    },
+    {
+      "type": "str",
+      "status": "str",
+      "generated": [
+        {
+          "runtime": "str",
+          "path": "str"
+        },
+        {
+          "runtime": "str",
+          "path": "str"
+        },
+        {
+          "runtime": "str",
+          "path": "str"
+        },
+        {
+          "runtime": "str",
+          "path": "str"
+        }
+      ],
+      "dropped": [
+        {
+          "runtime": "str",
+          "name": "str",
+          "fields": [
+            "str"
+          ]
+        },
+        {
+          "runtime": "str",
+          "name": "str",
+          "fields": [
+            "str"
+          ]
+        }
+      ],
+      "skipped": [],
+      "canonical_root": "str"
+    },
+    {
+      "type": "str",
+      "status": "str",
+      "generated": [],
+      "skipped": [
+        {
+          "runtime": "str",
+          "reason": "str",
+          "reason_code": "str"
+        }
+      ],
+      "canonical_root": "str"
+    },
+    {
+      "type": "str",
+      "status": "str",
+      "results": [
+        {
+          "name": "str",
+          "status": "str",
+          "reason": "str",
+          "warnings": [],
+          "target": "null"
+        },
+        {
+          "name": "str",
+          "status": "str",
+          "reason": "str",
+          "warnings": [],
+          "target": "null"
+        },
+        {
+          "name": "str",
+          "status": "str",
+          "reason": "str",
+          "warnings": [],
+          "target": "null"
+        },
+        {
+          "name": "str",
+          "status": "str",
+          "reason": "str",
+          "warnings": [],
+          "target": "null"
+        }
+      ],
+      "duplicate_tier_warnings": []
+    }
+  ],
+  "summary": {
+    "status": "str",
+    "changed": "bool",
+    "outcome": "str",
+    "ok": "int",
+    "failed": "int",
+    "needs_confirmation": "int",
+    "generated_total": "int",
+    "skipped_total": "int"
+  }
+}

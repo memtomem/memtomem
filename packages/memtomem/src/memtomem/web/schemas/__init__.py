@@ -5,6 +5,7 @@ from memtomem.web.schemas.search import *  # noqa: F403
 from memtomem.web.schemas.sources import *  # noqa: F403
 from memtomem.web.schemas.memory import *  # noqa: F403
 from memtomem.web.schemas.config import *  # noqa: F403
+from memtomem.web.schemas.context import *  # noqa: F403
 from memtomem.web.schemas.tags import *  # noqa: F403
 from memtomem.web.schemas.dedup import *  # noqa: F403
 from memtomem.web.schemas.decay import *  # noqa: F403

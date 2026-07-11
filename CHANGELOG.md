@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Typed response models on the Context Gateway wire** (#1692) — the
+  Overview, Projects, Runtimes, Status All, Sync All (single + cross-project
+  batch), and Import (all seven artifact-import routes) responses are now
+  validated against Pydantic models (`Context*` components in
+  `/openapi.json`) instead of returned as unchecked dicts. The wire shapes
+  are unchanged — golden wire fixtures pin key sets, key order, and value
+  types before/after, now including the two POST report endpoints — but
+  shape drift in a handler now fails loudly (HTTP 500) instead of silently
+  changing the wire. One key-order normalization ships along: the batch
+  sync's crash-path `error` envelope now orders `error_kind, http_status,
+  message` like its timeout sibling and the per-phase envelope (same keys,
+  same values).
+
 - **Runtime probe availability is now explicit** (#1692) — a failed
   provider-client probe was previously wire-identical to "no runtimes".
   `GET /api/context/runtimes` gains additive `runtimes_status`

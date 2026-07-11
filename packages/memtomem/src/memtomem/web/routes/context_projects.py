@@ -49,6 +49,7 @@ from memtomem.context.skills import diff_skills, list_canonical_skills
 from memtomem.config import TargetScope
 from memtomem.web.deps import get_project_root
 from memtomem.web.routes._errors import _error, _redact_message
+from memtomem.web.schemas.context import ContextProjectsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -472,7 +473,13 @@ def _scope_to_dict(
     }
 
 
-@router.get("/context/projects")
+@router.get(
+    "/context/projects",
+    response_model=ContextProjectsResponse,
+    # exclude_unset: runtime_coverage entries conditionally OMIT
+    # installed/memtomem_registered (runtime_coverage.py) — absent ≠ null.
+    response_model_exclude_unset=True,
+)
 async def list_projects(
     request: Request,
     scope_id: str | None = Query(
