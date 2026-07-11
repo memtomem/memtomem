@@ -107,18 +107,16 @@ def test_locale_toggle_mid_stream_flips_chunk_progress_template(page, mm_web_url
           // is populated before we proceed.
           await I18N.setLang('ko');
 
-          let esInstance = null;
-          class FakeEventSource {
-            constructor(url) {
-              this.url = String(url);
-              this.onmessage = null;
-              this.onerror = null;
-              this.closed = false;
-              esInstance = this;
-            }
-            close() { this.closed = true; }
-          }
-          window.EventSource = FakeEventSource;
+          // Fake the CSRF-protected POST SSE transport
+          // (``app.js:fetchIndexStream``). ``mdReindexOne`` no longer opens an
+          // ``EventSource``; it calls the global ``fetchIndexStream`` and gets
+          // already-parsed event objects via ``onEvent``, which we drive here.
+          let capturedOnEvent = null;
+          let streamResolve = () => {};
+          window.fetchIndexStream = (body, opts = {}) => {
+            capturedOnEvent = (opts && opts.onEvent) || null;
+            return new Promise((resolve) => { streamResolve = resolve; });
+          };
 
           const group = document.createElement('details');
           group.className = 'source-group';
@@ -132,10 +130,13 @@ def test_locale_toggle_mid_stream_flips_chunk_progress_template(page, mm_web_url
           document.body.appendChild(group);
 
           const reindexPromise = mdReindexOne('/tmp/memories', btn);
-          await new Promise((r) => setTimeout(r, 0));
+          for (let i = 0; i < 100 && capturedOnEvent === null; i++) {
+            await new Promise((r) => setTimeout(r, 5));
+          }
 
           const emit = (event) => {
-            esInstance.onmessage({ data: JSON.stringify(event) });
+            capturedOnEvent(event);
+            if (event.type === 'complete' || event.type === 'error') streamResolve();
           };
 
           // Final-tick (chunks_done >= chunks_total) bypasses the 100ms

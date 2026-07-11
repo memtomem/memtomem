@@ -86,7 +86,7 @@ def _goto_after_i18n_ready(page, mm_web_url: str) -> None:
 
 
 def _driver(event_script_body: str) -> str:
-    """Build a ``page.evaluate`` script that sets up a fake EventSource,
+    """Build a ``page.evaluate`` script that fakes the index-stream transport,
     drives ``mdReindexOne`` against a synthetic ``.source-group`` row,
     and runs the per-test event injection ``event_script_body``.
 
@@ -99,18 +99,20 @@ def _driver(event_script_body: str) -> str:
     return (
         """
   async () => {
-    let esInstance = null;
-    class FakeEventSource {
-      constructor(url) {
-        this.url = String(url);
-        this.onmessage = null;
-        this.onerror = null;
-        this.closed = false;
-        esInstance = this;
-      }
-      close() { this.closed = true; }
-    }
-    window.EventSource = FakeEventSource;
+    // Fake the CSRF-protected POST SSE transport (``app.js:fetchIndexStream``).
+    // The consumer no longer opens an ``EventSource``; ``mdReindexOne`` calls
+    // the global ``fetchIndexStream`` and receives already-parsed event objects
+    // through ``onEvent``. We capture that callback and drive events by hand;
+    // ``streamResolve`` ends the awaited transport once a terminal event lands.
+    let capturedOnEvent = null;
+    let streamClosed = false;
+    let streamResolve = () => {};
+    window.fetchIndexStream = (body, opts = {}) => {
+      capturedOnEvent = (opts && opts.onEvent) || null;
+      return new Promise((resolve) => {
+        streamResolve = () => { streamClosed = true; resolve(); };
+      });
+    };
 
     const group = document.createElement('details');
     group.className = 'source-group';
@@ -123,13 +125,17 @@ def _driver(event_script_body: str) -> str:
     group.appendChild(btn);
     document.body.appendChild(group);
 
-    // Kick the reindex but do NOT await — it only resolves on stream
-    // close. Yield once so the SSE wiring is up.
+    // Kick the reindex but do NOT await — it only resolves once the stream
+    // ends. Poll until the transport hook is installed: ``mdReindexOne`` runs
+    // an async ``STATE.indexing`` preflight before it calls the transport.
     const reindexPromise = mdReindexOne('/tmp/memories', btn);
-    await new Promise((r) => setTimeout(r, 0));
+    for (let i = 0; i < 100 && capturedOnEvent === null; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
 
     const emit = (event) => {
-      esInstance.onmessage({ data: JSON.stringify(event) });
+      capturedOnEvent(event);
+      if (event.type === 'complete' || event.type === 'error') streamResolve();
     };
 
     const observed = {};
@@ -143,7 +149,7 @@ def _driver(event_script_body: str) -> str:
       finalBtn: btn.textContent,
       btnDisabled: btn.disabled,
       stateIndexing: STATE.indexing,
-      sseClosed: esInstance.closed,
+      sseClosed: streamClosed,
     };
   }
 """

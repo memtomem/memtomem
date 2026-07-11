@@ -59,16 +59,18 @@ def test_sources_reindex_retries_when_local_indexing_flag_is_stale(page, mm_web_
 
     constructed = page.evaluate(
         """async () => {
-          let eventSourceUrl = '';
-          class FakeEventSource {
-            constructor(url) {
-              eventSourceUrl = String(url);
-              this.onmessage = null;
-              this.onerror = null;
-            }
-            close() {}
-          }
-          window.EventSource = FakeEventSource;
+          // Fake the CSRF-protected POST SSE transport
+          // (``app.js:fetchIndexStream``). ``mdReindexOne`` no longer opens an
+          // ``EventSource`` with the path in the query string — it POSTs
+          // ``fetchIndexStream({ path, ... })``. Capture the request body and
+          // keep the stream in-flight (the returned promise never resolves) so
+          // the post-preflight indexing / disabled-button state stays
+          // observable instead of being torn down by cleanup.
+          let streamBody = null;
+          window.fetchIndexStream = (body, opts = {}) => {
+            streamBody = body;
+            return new Promise(() => {});
+          };
           STATE.indexing = true;
 
           const group = document.createElement('details');
@@ -82,16 +84,21 @@ def test_sources_reindex_retries_when_local_indexing_flag_is_stale(page, mm_web_
           group.appendChild(btn);
           document.body.appendChild(group);
 
-          await mdReindexOne('/tmp/memories', btn);
+          // Do NOT await — the transport promise never resolves. Poll until the
+          // stale ``STATE.indexing`` preflight clears and the POST is issued.
+          mdReindexOne('/tmp/memories', btn);
+          for (let i = 0; i < 100 && streamBody === null; i++) {
+            await new Promise((r) => setTimeout(r, 5));
+          }
+
           return {
-            eventSourceUrl,
+            streamPath: streamBody ? streamBody.path : null,
             stateIndexing: STATE.indexing,
             buttonDisabled: btn.disabled,
           };
         }"""
     )
 
-    assert constructed["eventSourceUrl"].startswith("/api/index/stream?")
-    assert "path=%2Ftmp%2Fmemories" in constructed["eventSourceUrl"]
+    assert constructed["streamPath"] == "/tmp/memories"
     assert constructed["stateIndexing"] is True
     assert constructed["buttonDisabled"] is True
