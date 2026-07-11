@@ -389,6 +389,97 @@ async def test_update_stale_pin_is_409(client, seeded_wiki: Path, project_root: 
 
 
 @pytest.mark.asyncio
+async def test_update_force_head_follows_rollback(
+    client, seeded_wiki: Path, project_root: Path
+) -> None:
+    """``force_head: true`` (#1689) follows the rollback: 200 + backward pin.
+
+    The 2-step web flow is the pre-write warning channel: the first attempt's
+    409 names the rollback, the explicit re-POST opts in. The success payload
+    reports ``pin_moved_backward: true`` (a client cannot derive direction
+    from two SHAs); a plain forward update reports ``false``.
+    """
+    assert (await client.post("/api/context/skills/alpha/install")).status_code == 200
+    base = WikiStore.at_default().current_commit()
+    _advance_wiki(seeded_wiki)
+    forward = await client.post("/api/context/skills/alpha/update")
+    assert forward.status_code == 200
+    assert forward.json()["pin_moved_backward"] is False  # forward baseline
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "reset", "--hard", base], check=True, capture_output=True
+    )
+
+    resp = await client.post("/api/context/skills/alpha/update", json={"force_head": True})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["was_no_op"] is False
+    assert data["pin_moved_backward"] is True
+    assert data["new_wiki_commit"] == base
+    assert _lock_entry(project_root, "skills", "alpha")["wiki_commit"] == base
+    # The rolled-back bytes landed.
+    landed = project_root / ".memtomem" / "skills" / "alpha" / "SKILL.md"
+    assert "Upstream change." not in landed.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_update_missing_pin_is_409_pin_missing(
+    client, seeded_wiki: Path, project_root: Path
+) -> None:
+    """A missing pin returns 409 ``pin_missing`` — flag or no flag (#1689).
+
+    Split from ``pin_not_ancestor`` (whose fixed "diverged history / would
+    move backward" message is false here); the accurate envelope points at
+    re-install/adopt and says ``force_head`` cannot bypass.
+    """
+    assert (await client.post("/api/context/skills/alpha/install")).status_code == 200
+    Lockfile.at(project_root).upsert_entry(
+        "skills", "alpha", wiki_commit="", installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _advance_wiki(seeded_wiki)
+
+    for body in (None, {"force_head": True}):
+        resp = await client.post("/api/context/skills/alpha/update", json=body)
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["reason_code"] == "pin_missing"
+        assert "diverged" not in detail["message"]
+        assert "backward" not in detail["message"]
+        assert str(seeded_wiki) not in resp.text  # no host-path leak
+    assert _lock_entry(project_root, "skills", "alpha")["wiki_commit"] == ""
+
+
+@pytest.mark.asyncio
+async def test_update_force_head_and_force_are_orthogonal(
+    client, seeded_wiki: Path, project_root: Path
+) -> None:
+    """``force_head`` is wiki-side only: a dirty dest still needs ``force`` (#1689)."""
+    assert (await client.post("/api/context/skills/alpha/install")).status_code == 200
+    base = WikiStore.at_default().current_commit()
+    _advance_wiki(seeded_wiki)
+    assert (await client.post("/api/context/skills/alpha/update")).status_code == 200
+    subprocess.run(
+        ["git", "-C", str(seeded_wiki), "reset", "--hard", base], check=True, capture_output=True
+    )
+    landed = project_root / ".memtomem" / "skills" / "alpha" / "SKILL.md"
+    landed.write_text(_SKILL_BODY + "\nLocal edit.\n", encoding="utf-8")
+
+    resp = await client.post("/api/context/skills/alpha/update", json={"force_head": True})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason_code"] == "stale_install"
+
+    both = await client.post(
+        "/api/context/skills/alpha/update", json={"force": True, "force_head": True}
+    )
+    assert both.status_code == 200, both.text
+    data = both.json()
+    assert data["pin_moved_backward"] is True
+    assert data["bak_file_count"] >= 1
+    assert _lock_entry(project_root, "skills", "alpha")["wiki_commit"] == base
+    bak = landed.with_suffix(".md.bak")
+    assert "Local edit." in bak.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_update_never_installed_is_404(client, seeded_wiki) -> None:
     resp = await client.post("/api/context/skills/alpha/update")
     assert resp.status_code == 404

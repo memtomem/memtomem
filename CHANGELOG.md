@@ -7,6 +7,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`mm context update --force-head` — follow a deliberate wiki rollback**
+  (#1689) — the forward-only guard (#1685) refuses to move a project's pin
+  backward after a wiki reset / force-pull, and `--force` deliberately does
+  not bypass it. `--force-head` is the explicit escape hatch: it records the
+  current wiki HEAD even when it does not descend from the recorded pin,
+  warning on stderr **before** anything is written (single asset and `--all`;
+  the `--all` preview table tags affected rows `[moves pin BACKWARD]`).
+  Orthogonal to `--force` (wiki-side history vs project-side edits — a
+  backward move onto locally edited files needs both), and it never bypasses
+  the wiki-dirty gate or a lockfile entry with no recorded pin. The web
+  update route gains the matching `force_head` request field plus an additive
+  `pin_moved_backward` response field (a client cannot derive direction from
+  the two commit SHAs).
+
 - **Typed response models on the Context Gateway wire** (#1692) — the
   Overview, Projects, Runtimes, Status All, Sync All (single + cross-project
   batch), and Import (all seven artifact-import routes) responses are now
@@ -50,6 +64,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   picks up the new tier after restart.
 
 ### Changed
+
+- **Missing-pin update refusals now report `pin_missing`, not
+  `pin_not_ancestor`** (#1689) — a lockfile entry with no usable `wiki_commit`
+  pin used to surface as the forward-only guard's 409 `pin_not_ancestor`,
+  whose fixed message claims the wiki history "diverged" and the pin "would
+  move backward" — neither is true when no pin exists. The engine now raises
+  `PinMissingError` (a `PinNotAncestorError` subclass, so existing Python
+  catch sites are unaffected) and the web route returns
+  `409 reason_code="pin_missing"` with an accurate message (re-install or
+  adopt; `force_head` cannot bypass). HTTP status and envelope shape are
+  unchanged; clients branching on `pin_not_ancestor` for this rare case will
+  observe the corrected discriminator. Both reason codes are pinned by route
+  tests.
 
 - **A failed status probe is now an error, not drift** (#1692) — in the
   Context Gateway fleet view (`GET /api/context/status-all`) and

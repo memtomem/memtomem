@@ -76,6 +76,7 @@ __all__ = [
     "CommitNotFoundError",
     "InstallResult",
     "NotInstalledError",
+    "PinMissingError",
     "PinNotAncestorError",
     "ProjectInstallClassification",
     "StaleInstallError",
@@ -176,8 +177,26 @@ class PinNotAncestorError(RuntimeError):
     Deliberately NOT bypassed by ``--force`` — that flag overrides project-side
     dest edits, never wiki-side history (the same asymmetry the wiki-dirty gate
     keeps). The remedy is to investigate the wiki: advance HEAD past the pin, or
-    re-install at the intended commit. A degraded ``--force-head`` escape hatch
-    is deferred, mirroring the ``install --all`` orphan handling.
+    re-install at the intended commit — or, for a *deliberate* wiki rollback,
+    pass ``--force-head`` (#1689), which follows HEAD backward for a recorded
+    pin (see :func:`_has_recorded_pin`; a missing pin raises
+    :class:`PinMissingError` instead and is never force-able). The analogous
+    degraded fallback for ``install --all`` orphans remains deferred.
+    """
+
+
+class PinMissingError(PinNotAncestorError):
+    """Raised when the lockfile entry has no usable ``wiki_commit`` pin (#1689).
+
+    The forward-only guard (#1685) needs a recorded pin to prove an update is
+    forward; a missing/non-string/empty ``wiki_commit`` (hand-edited or legacy
+    lockfile) proves nothing — there is no pin to move backward, so the
+    "diverged history" narrative of :class:`PinNotAncestorError` would be
+    false. Neither ``--force`` nor ``--force-head`` bypasses this: the remedy
+    is ``mm context adopt`` (#1684) or a re-install, which records a real pin.
+    Subclasses :class:`PinNotAncestorError` so every existing catch site keeps
+    working; the web route catches this first to return the accurate
+    ``pin_missing`` reason code instead of ``pin_not_ancestor``.
     """
 
 
@@ -243,6 +262,10 @@ class UpdateResult:
       #1247) — ``installed_at`` was re-captured after the copy, and any
       dirty files were preserved at the listed ``.bak`` paths (only
       populated when ``--force`` was used against a dirty asset).
+    - ``pin_moved_backward=True`` only when ``--force-head`` recorded a
+      commit that does not descend from the old pin (#1689) — the
+      deliberate-rollback escape hatch; always ``False`` on forward
+      updates and no-ops.
     """
 
     asset_type: Literal["skills", "agents", "commands"]
@@ -255,6 +278,7 @@ class UpdateResult:
     dest: Path
     files_written: int
     files_removed: tuple[Path, ...] = ()
+    pin_moved_backward: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,10 +305,15 @@ class ProjectClassification:
     - ``"stale-pin"`` — wiki HEAD ≠ lockfile pin AND HEAD does not
       descend from the pin (wiki reset / force-pull past the pin, #1685).
       Advancing would move the pin BACKWARD, so this row is skipped
-      per-project (never force-able — the write-path counterpart of the
-      ``mm context status`` ``stale-pin`` state, see
+      per-project (not bypassed by ``--force``; the write-path
+      counterpart of the ``mm context status`` ``stale-pin`` state, see
       :func:`_pin_backward_reason`); ``dirty_report`` stays ``None``
-      because the dirty walk is short-circuited before it runs.
+      because the dirty walk is short-circuited before it runs. Under
+      ``--force-head`` (#1689) the recorded-pin sub-cases (unreachable /
+      divergent) reclassify through the normal dirty walk to
+      ``"update"``/``"refuse"`` with ``pin_backward=True``; a missing
+      pin stays ``"stale-pin"`` (there is no pin to move backward — see
+      :class:`PinMissingError`).
     - ``"error"`` — the project's lockfile is corrupt or unreadable;
       ``reason`` carries the detail. Propagates as a row-level failure
       in the execute summary.
@@ -292,7 +321,9 @@ class ProjectClassification:
     ``lock_entry`` is the live lockfile entry (carries ``installed_at``
     and ``wiki_commit``). ``dirty_report`` is populated only for
     ``"update"`` and ``"refuse"`` states — the two cases where the
-    dirty walk actually ran.
+    dirty walk actually ran. ``pin_backward=True`` marks a row whose
+    write would move the pin backward and was made actionable by
+    ``force_head`` — the preview table and the batch WARNING key off it.
     """
 
     project_root: Path
@@ -300,6 +331,7 @@ class ProjectClassification:
     reason: str | None
     lock_entry: dict[str, Any] | None
     dirty_report: DirtyReport | None
+    pin_backward: bool = False
 
 
 def install_skill(
@@ -1068,6 +1100,8 @@ def update_skill(
     *,
     wiki: WikiStore | None = None,
     force: bool = False,
+    force_head: bool = False,
+    pinned_commit: str | None = None,
     lock_timeout: float | None = None,
     surface: str = "cli_context_update",
 ) -> UpdateResult:
@@ -1085,6 +1119,13 @@ def update_skill(
     (#1246/#1248 real-ingress rule): the CLI keeps the default, the web
     route passes ``"web_context_update"`` so a browser-triggered block is
     not misattributed to a CLI event.
+
+    ``force_head`` (#1689) follows a deliberate wiki rollback: the recorded
+    pin advances (backward) to the target commit even when that commit does
+    not descend from it. ``pinned_commit`` pins the target commit explicitly
+    instead of resolving HEAD here — the CLI passes the commit its
+    pre-write WARNING was computed against, so the warned-about commit and
+    the recorded commit are the same by construction.
     """
     return _update_asset(
         project_root,
@@ -1092,6 +1133,8 @@ def update_skill(
         name,
         wiki=wiki,
         force=force,
+        force_head=force_head,
+        pinned_commit=pinned_commit,
         lock_timeout=lock_timeout,
         surface=surface,
     )
@@ -1103,6 +1146,8 @@ def update_agent(
     *,
     wiki: WikiStore | None = None,
     force: bool = False,
+    force_head: bool = False,
+    pinned_commit: str | None = None,
     lock_timeout: float | None = None,
     surface: str = "cli_context_update",
 ) -> UpdateResult:
@@ -1113,6 +1158,8 @@ def update_agent(
         name,
         wiki=wiki,
         force=force,
+        force_head=force_head,
+        pinned_commit=pinned_commit,
         lock_timeout=lock_timeout,
         surface=surface,
     )
@@ -1124,6 +1171,8 @@ def update_command(
     *,
     wiki: WikiStore | None = None,
     force: bool = False,
+    force_head: bool = False,
+    pinned_commit: str | None = None,
     lock_timeout: float | None = None,
     surface: str = "cli_context_update",
 ) -> UpdateResult:
@@ -1134,6 +1183,8 @@ def update_command(
         name,
         wiki=wiki,
         force=force,
+        force_head=force_head,
+        pinned_commit=pinned_commit,
         lock_timeout=lock_timeout,
         surface=surface,
     )
@@ -1184,6 +1235,20 @@ def _pin_backward_reason(wiki: WikiStore, pin: object, new_commit: str) -> str |
     )
 
 
+def _has_recorded_pin(pin: object) -> bool:
+    """True when the lockfile entry actually records a ``wiki_commit`` pin (#1689).
+
+    Gates which :func:`_pin_backward_reason` refusals ``--force-head`` may
+    override: the flag follows wiki history that moved out from under a
+    *recorded* pin (unreachable / divergent — including a malformed pin
+    string, which classifies as unreachable and has the same remedy: record
+    the current commit). A missing/non-string/empty pin proves nothing and
+    has nothing to move backward — that case raises
+    :class:`PinMissingError` regardless of the flag.
+    """
+    return isinstance(pin, str) and bool(pin)
+
+
 def _update_asset(
     project_root: Path | str,
     asset_type: str,
@@ -1191,6 +1256,8 @@ def _update_asset(
     *,
     wiki: WikiStore | None,
     force: bool = False,
+    force_head: bool = False,
+    pinned_commit: str | None = None,
     lock_timeout: float | None = None,
     surface: str = "cli_context_update",
 ) -> UpdateResult:
@@ -1201,7 +1268,11 @@ def _update_asset(
     1. Validate ``name`` and project root.
     2. Read the existing lockfile entry — ``NotInstalledError`` if absent.
     3. Pin wiki HEAD as ``new_commit`` once (concurrent ``git pull`` in the
-       wiki cannot make the recorded commit drift mid-update).
+       wiki cannot make the recorded commit drift mid-update). When the
+       caller supplies ``pinned_commit`` (#1689: the CLI ``--force-head``
+       preflight), that commit IS the snapshot — no second HEAD read —
+       so the commit a pre-write WARNING was computed against and the
+       commit every gate checks and records are the same string.
     4. **True no-op short-circuit**: when ``new_commit`` matches the lockfile
        pin, return early *without touching the lockfile*. ``installed_at``
        is echoed from the existing entry; ``was_no_op=True``. The no-op
@@ -1249,7 +1320,7 @@ def _update_asset(
             f"run `mm context install {asset_type_singular} {validated}` first"
         )
 
-    new_commit = wiki.current_commit()
+    new_commit = pinned_commit if pinned_commit is not None else wiki.current_commit()
     dest = project_root / ".memtomem" / asset_type / validated
 
     if lock_entry.get("wiki_commit") == new_commit:
@@ -1290,11 +1361,18 @@ def _update_asset(
     # downgrade. Runs BEFORE the dirty gate (the pin is stale regardless of
     # worktree state) and AFTER HEAD-presence (so it mirrors
     # `_classify_for_all_update`, whose HEAD-presence gate fires batch-global up
-    # front). NOT force-able — same wiki-side/project-side asymmetry the dirty
-    # gate keeps; the remedy is to fix the wiki, not to clobber the pin.
-    backward = _pin_backward_reason(wiki, lock_entry.get("wiki_commit"), new_commit)
+    # front). NOT bypassed by ``force`` — same wiki-side/project-side asymmetry
+    # the dirty gate keeps. ``force_head`` (#1689) deliberately overrides the
+    # recorded-pin sub-cases (unreachable/divergent — a wiki rollback the user
+    # chose to follow); a missing pin raises PinMissingError regardless (there
+    # is no pin to move backward — the remedy is adopt/re-install, #1684).
+    pin = lock_entry.get("wiki_commit")
+    backward = _pin_backward_reason(wiki, pin, new_commit)
     if backward is not None:
-        raise PinNotAncestorError(f"{asset_type}/{validated}: {backward}")
+        if not _has_recorded_pin(pin):
+            raise PinMissingError(f"{asset_type}/{validated}: {backward}")
+        if not force_head:
+            raise PinNotAncestorError(f"{asset_type}/{validated}: {backward}")
 
     # Same-asset dirty gate (#1652): worktree state must equal HEAD for THIS
     # asset — otherwise the user-visible wiki bytes and the refreshed bytes
@@ -1320,6 +1398,7 @@ def _update_asset(
         wiki_commit=new_commit,
         lock_entry=lock_entry,
         force=force,
+        pin_moved_backward=backward is not None,
         surface=surface,
         lock_timeout=lock_timeout,
     )
@@ -1335,6 +1414,7 @@ def _apply_update(
     wiki_commit: str,
     lock_entry: dict[str, Any],
     force: bool,
+    pin_moved_backward: bool = False,
     surface: str = "cli_context_update",
     lock_timeout: float | None = None,
 ) -> UpdateResult:
@@ -1344,6 +1424,11 @@ def _apply_update(
     (:meth:`WikiStore.copy_asset_at_commit`), never from the wiki working
     tree, so the lockfile's ``wiki_commit``/``digests`` claims below are
     literally true — pin==bytes holds by construction.
+
+    ``pin_moved_backward`` is caller-derived display state (#1689): the
+    guard that proved ``wiki_commit`` does not descend from the old pin
+    lives in the callers (``_update_asset`` / the ``--all`` classifier),
+    so they pass the verdict down to be echoed on the result.
 
     Pre-conditions enforced by callers (``_update_asset`` for the single-
     asset path, ``mm context update --all`` orchestration for the batch
@@ -1558,6 +1643,7 @@ def _apply_update(
         dest=dest,
         files_written=len(digest_map),
         files_removed=files_removed,
+        pin_moved_backward=pin_moved_backward,
     )
 
 
@@ -1567,6 +1653,7 @@ def _classify_for_all_update(
     *,
     wiki: WikiStore,
     projects: list[Path],
+    force_head: bool = False,
 ) -> tuple[str, list[ProjectClassification]]:
     """Classify ``asset_type/name`` across many project roots in one pass.
 
@@ -1575,6 +1662,15 @@ def _classify_for_all_update(
     caller is expected to thread ``new_commit`` into each subsequent
     :func:`_apply_update` invocation so the execute phase writes against
     the same snapshot the user confirmed.
+
+    ``force_head`` (#1689) reclassifies a would-be ``stale-pin`` row whose
+    pin IS recorded (unreachable / divergent — a wiki rollback the user
+    chose to follow) through the normal dirty walk: it becomes ``update``
+    or ``refuse`` like any other stale row, carrying ``pin_backward=True``
+    so the preview table and the batch WARNING can mark it. Missing-pin
+    rows stay ``stale-pin`` regardless (see :class:`PinMissingError`), and
+    dest-side orthogonality is preserved for free — a backward move onto a
+    dirty dest still classifies ``refuse`` and demands ``--force``.
 
     Used by ``mm context update --all``. The wiki state is read **once**
     up front: ``wiki.current_commit()`` and the HEAD-presence gate
@@ -1689,21 +1785,29 @@ def _classify_for_all_update(
         # silent downgrade. Mirrors the single-asset _update_asset guard so the
         # --all preview agrees with what the wet run would refuse. Checked
         # BEFORE the dirty walk (the pin is stale regardless of dest state);
-        # a non-force-able per-project skip, not a batch-blocking refuse.
-        backward = _pin_backward_reason(wiki, lock_entry.get("wiki_commit"), new_commit)
+        # a per-project skip not bypassed by --force. Under force_head (#1689)
+        # a recorded-pin row falls through to the dirty walk below instead —
+        # the write becomes actionable, but dest dirt still gates it.
+        pin = lock_entry.get("wiki_commit")
+        backward = _pin_backward_reason(wiki, pin, new_commit)
+        pin_backward = False
         if backward is not None:
-            out.append(
-                ProjectClassification(
-                    project_root=project_root,
-                    state="stale-pin",
-                    reason=backward,
-                    lock_entry=lock_entry,
-                    dirty_report=None,
+            if force_head and _has_recorded_pin(pin):
+                pin_backward = True
+            else:
+                out.append(
+                    ProjectClassification(
+                        project_root=project_root,
+                        state="stale-pin",
+                        reason=backward,
+                        lock_entry=lock_entry,
+                        dirty_report=None,
+                    )
                 )
-            )
-            continue
+                continue
 
-        # Wiki advanced — classify dirty/clean for this project.
+        # Wiki advanced (or force_head follows it backward) — classify
+        # dirty/clean for this project.
         report = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
         dest = project_root / ".memtomem" / asset_type / name
         flat_path, flat_dirty = (
@@ -1742,6 +1846,7 @@ def _classify_for_all_update(
                 reason=reason,
                 lock_entry=lock_entry,
                 dirty_report=report,
+                pin_backward=pin_backward,
             )
         )
 

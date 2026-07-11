@@ -32,6 +32,7 @@ from memtomem.context.install import (
     AssetNotFoundError,
     InstallResult,
     NotInstalledError,
+    PinMissingError,
     PinNotAncestorError,
     ProjectRootMissingError,
     StaleInstallError,
@@ -82,9 +83,15 @@ class UpdateAssetRequest(BaseModel):
     ``force`` mirrors the CLI ``--force``: overwrite a dirty dest, preserving
     each locally edited file as a ``.bak`` sibling first. Install takes no body
     (a fresh install can never clobber — it refuses if the dest already exists).
+
+    ``force_head`` mirrors the CLI ``--force-head`` (#1689): follow a deliberate
+    wiki rollback, recording a HEAD that does not descend from the recorded pin
+    (moves the pin BACKWARD). Orthogonal to ``force``, which only overrides
+    project-side edits — a backward move onto a dirty dest needs both.
     """
 
     force: bool = False
+    force_head: bool = False
 
 
 def _safe_rel(p: Path, project_root: Path) -> str:
@@ -233,9 +240,15 @@ async def update_asset(
     local edits would be clobbered; the client re-POSTs
     ``{"force": true}`` to overwrite (each dirty file kept as a ``.bak``
     sibling). An asset with no lockfile entry → 404 ``not_installed``.
+    Forward-only (#1685): a wiki rollback refuses with 409
+    ``pin_not_ancestor``; the client re-POSTs ``{"force_head": true}`` to
+    deliberately follow it backward (#1689) — the success payload then
+    reports ``pin_moved_backward: true``. A lockfile entry with no usable
+    pin refuses with 409 ``pin_missing`` regardless of ``force_head``.
     """
     _validate_name_or_error(asset_type, name)
     force = body.force if body is not None else False
+    force_head = body.force_head if body is not None else False
     updater = _UPDATERS[asset_type]
 
     def _run() -> UpdateResult:
@@ -246,6 +259,7 @@ async def update_asset(
             name,
             wiki=WikiStore.at_default(),
             force=force,
+            force_head=force_head,
             lock_timeout=_INSTALL_LOCK_BUDGET_S,
             surface="web_context_update",
         )
@@ -292,18 +306,34 @@ async def update_asset(
             f"`mm wiki <type> commit <name> --canonical` — and retry",
             reason_code="wiki_uncommitted",
         ) from exc
+    except PinMissingError as exc:
+        # Ordered BEFORE its parent PinNotAncestorError (#1689): a lockfile
+        # entry with no usable wiki_commit pin proves nothing about direction,
+        # so the "diverged history / would move backward" narrative below
+        # would be false remediation guidance. Not bypassed by force_head —
+        # there is no pin to move backward; the remedy records a real pin.
+        raise _error(
+            409,
+            "conflict",
+            f"{asset_type}/{name}: no usable wiki_commit pin is recorded for this "
+            f"asset, so the update cannot be proven forward; re-install or adopt "
+            f"it to record a pin (force_head cannot bypass this)",
+            reason_code="pin_missing",
+        ) from exc
     except PinNotAncestorError as exc:
         # Forward-only gate (#1685): wiki HEAD does not descend from this
         # project's pin (wiki reset / force-pull), so update would move the pin
         # backward. Fixed message (the engine text names the pinned SHA only,
         # not a host path, but keep the envelope contract uniform); NOT
-        # force-able — the remedy is to fix the wiki, not to re-run with force.
+        # bypassed by force — for a deliberate rollback the client re-POSTs
+        # with force_head: true (#1689) to follow the wiki backward.
         raise _error(
             409,
             "conflict",
             f"{asset_type}/{name}: the wiki history diverged from this project's "
             f"pin (reset or force-pull past it); update would move the pin "
-            f"backward. Investigate the wiki before retrying",
+            f"backward. Retry with force_head: true to deliberately follow the "
+            f"rollback, or fix the wiki",
             reason_code="pin_not_ancestor",
         ) from exc
     except PrivacyScanError as exc:
@@ -339,4 +369,5 @@ async def update_asset(
         "files_removed": [_safe_rel(p, project_root) for p in result.files_removed],
         "bak_file_count": len(result.bak_files_written),
         "bak_files": [_safe_rel(p, project_root) for p in result.bak_files_written],
+        "pin_moved_backward": result.pin_moved_backward,
     }

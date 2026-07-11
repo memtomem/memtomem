@@ -29,6 +29,7 @@ from memtomem.context.install import (
     AlreadyInstalledError,
     AssetNotFoundError,
     NotInstalledError,
+    PinMissingError,
     PinNotAncestorError,
     StaleInstallError,
     UncommittedAssetError,
@@ -221,6 +222,271 @@ def test_pin_backward_reason_allows_forward_and_noop(wiki_root: Path, tmp_path: 
     assert _pin_backward_reason(wiki, "0" * 40, commit2) is not None  # unreachable
     assert _pin_backward_reason(wiki, "", commit2) is not None  # missing pin
     assert _pin_backward_reason(wiki, None, commit2) is not None  # non-str pin
+
+
+# ── --force-head escape hatch (#1689) ───────────────────────────────────
+
+
+def test_update_force_head_follows_wiki_rollback(wiki_root: Path, tmp_path: Path) -> None:
+    """``force_head=True`` follows a deliberate rollback: the pin moves BACKWARD.
+
+    The flipped mirror of ``test_update_refuses_when_wiki_reset_behind_pin`` —
+    same setup, but the escape hatch records the rolled-back HEAD, restores the
+    older bytes, and reports ``pin_moved_backward=True`` (#1689).
+    """
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+
+    commit2 = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project, "foo")  # pin forward to commit2
+    _reset_wiki_hard(wiki_root, commit1)  # HEAD now behind the pin
+
+    result = update_skill(project, "foo", force_head=True)
+
+    assert result.was_no_op is False
+    assert result.old_wiki_commit == commit2
+    assert result.new_wiki_commit == commit1
+    assert result.pin_moved_backward is True
+    assert (project / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == commit1
+
+
+def test_update_force_head_follows_unreachable_pin(wiki_root: Path, tmp_path: Path) -> None:
+    """A recorded-but-unreachable pin (history rewrite) is also force_head-able."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    Lockfile.at(project).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    new_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    result = update_skill(project, "foo", force_head=True)
+
+    assert result.pin_moved_backward is True
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == new_commit
+
+
+def test_update_force_head_follows_malformed_pin(wiki_root: Path, tmp_path: Path) -> None:
+    """A non-empty malformed pin string classifies unreachable → force_head-able.
+
+    Distinct from the valid-but-unreachable SHA case above (Codex R2): a
+    garbage recorded pin is still a *recorded* pin — the remedy (record the
+    current commit) is identical, so the flag covers it.
+    """
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    Lockfile.at(project).upsert_entry(
+        "skills", "foo", wiki_commit="not-a-sha", installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    new_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    with pytest.raises(PinNotAncestorError):
+        update_skill(project, "foo")  # without the flag: refuse
+
+    result = update_skill(project, "foo", force_head=True)
+    assert result.pin_moved_backward is True
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == new_commit
+
+
+def test_update_missing_pin_raises_pin_missing_error(wiki_root: Path, tmp_path: Path) -> None:
+    """A lockfile entry with no usable pin raises PinMissingError even unflagged (#1689).
+
+    The split is observable independently of ``force_head`` — the old
+    ``PinNotAncestorError`` "diverged history" narrative was false for this
+    case. The subclass keeps every existing ``except PinNotAncestorError``
+    working.
+    """
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    Lockfile.at(project).upsert_entry(
+        "skills", "foo", wiki_commit="", installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    with pytest.raises(PinMissingError) as exc:
+        update_skill(project, "foo")
+    assert isinstance(exc.value, PinNotAncestorError)  # catch-site compatibility
+    assert "no wiki_commit pin" in str(exc.value)
+
+
+def test_update_force_head_missing_pin_still_refuses(wiki_root: Path, tmp_path: Path) -> None:
+    """``force_head`` never bypasses a missing pin — there is nothing to move backward."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    Lockfile.at(project).upsert_entry(
+        "skills", "foo", wiki_commit="", installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    with pytest.raises(PinMissingError):
+        update_skill(project, "foo", force_head=True)
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == ""
+
+
+def test_update_pinned_commit_recorded_despite_head_advance(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """``pinned_commit`` anchors gate AND record to the caller's snapshot (#1689).
+
+    The CLI --force-head preflight computes its pre-write WARNING against a
+    commit and threads that commit here; a HEAD move in between must not make
+    the engine gate/record a different commit (Codex R2 race: preflight sees
+    forward, engine snapshot sees backward → unwarned backward write).
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+
+    commit2 = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    # HEAD advances AFTER the caller captured commit2 (the race window).
+    commit3 = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v3\n"})
+    assert commit2 != commit3
+
+    result = update_skill(project, "foo", pinned_commit=commit2)
+
+    # Ancestry was checked against and the record made at the CAPTURED commit.
+    assert result.new_wiki_commit == commit2
+    assert result.pin_moved_backward is False
+    assert (project / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
+    lock_doc = json.loads((project / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == commit2
+
+
+def test_update_force_head_forward_update_not_marked_backward(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """The flag on a normal forward update is a no-op: nothing marked backward."""
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    result = update_skill(project, "foo", force_head=True)
+
+    assert result.pin_moved_backward is False
+
+
+def test_update_force_head_dirty_dest_still_needs_force(wiki_root: Path, tmp_path: Path) -> None:
+    """Orthogonality (#1689): force_head is wiki-side only — dest dirt still needs force."""
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project, "foo")
+    _reset_wiki_hard(wiki_root, commit1)
+
+    edited = project / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local edit\n")
+    _bump_mtime(edited)
+
+    with pytest.raises(StaleInstallError):
+        update_skill(project, "foo", force_head=True)
+
+    result = update_skill(project, "foo", force=True, force_head=True)
+    assert result.pin_moved_backward is True
+    bak = edited.with_suffix(edited.suffix + ".bak")
+    assert bak.read_bytes() == b"local edit\n"
+    assert edited.read_bytes() == b"v1\n"
+
+
+def test_update_force_head_does_not_bypass_uncommitted_gate(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """force_head overrides pin ancestry only — wiki worktree dirt still refuses."""
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    project = tmp_path
+    install_skill(project, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project, "foo")
+    _reset_wiki_hard(wiki_root, commit1)
+
+    # Uncommitted wiki edit on the SAME asset — the commit-true gate (#1652)
+    # fires after the (overridden) forward-only gate.
+    (wiki_root / "skills" / "foo" / "SKILL.md").write_bytes(b"uncommitted\n")
+
+    with pytest.raises(UncommittedAssetError):
+        update_skill(project, "foo", force_head=True)
+
+
+def test_classify_for_all_update_force_head_reclassifies_stale_pin(
+    wiki_root: Path, tmp_path: Path
+) -> None:
+    """Under force_head a recorded-pin stale row runs the dirty walk (#1689).
+
+    Recorded-but-unreachable pin → ``update`` with ``pin_backward=True`` and a
+    populated ``dirty_report``; a missing-pin row stays ``stale-pin``.
+    """
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    wiki = WikiStore.at_default()
+
+    proj_forward = tmp_path / "forward"
+    proj_forward.mkdir()
+    install_skill(proj_forward, "foo")
+
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+
+    proj_unpinned = tmp_path / "unpinned"
+    proj_unpinned.mkdir()
+    install_skill(proj_unpinned, "foo")
+    Lockfile.at(proj_unpinned).upsert_entry(
+        "skills", "foo", wiki_commit="", installed_at="2030-01-01T00:00:00.000000Z"
+    )
+
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    _, rows = _classify_for_all_update(
+        "skills",
+        "foo",
+        wiki=wiki,
+        projects=[proj_forward, proj_stale, proj_unpinned],
+        force_head=True,
+    )
+    by_root = {r.project_root: r for r in rows}
+
+    fwd = by_root[proj_forward]
+    assert (fwd.state, fwd.pin_backward) == ("update", False)
+
+    stale = by_root[proj_stale]
+    assert (stale.state, stale.pin_backward) == ("update", True)
+    assert stale.dirty_report is not None  # the dirty walk ran — orthogonality intact
+
+    unpinned = by_root[proj_unpinned]
+    assert (unpinned.state, unpinned.pin_backward) == ("stale-pin", False)
+    assert unpinned.dirty_report is None
 
 
 def test_dirty_refuse_without_force(wiki_root: Path, tmp_path: Path) -> None:
@@ -449,7 +715,15 @@ def test_cli_update_dispatches_to_correct_wrapper(
     calls: list[tuple[str, str]] = []
 
     def _fake(asset_type: str):
-        def _impl(root: Path, name: str, *, wiki: object = None, force: bool = False) -> object:
+        def _impl(
+            root: Path,
+            name: str,
+            *,
+            wiki: object = None,
+            force: bool = False,
+            force_head: bool = False,
+            pinned_commit: str | None = None,
+        ) -> object:
             calls.append((asset_type, name))
             # Return a sentinel UpdateResult — minimal fields the CLI prints.
             from memtomem.context.install import UpdateResult
@@ -548,6 +822,124 @@ def test_cli_update_dry_run_stale_pin_exits_nonzero(
     assert "backward" in result.output
 
 
+# ── CLI: --force-head (#1689) ───────────────────────────────────────────
+
+
+def test_cli_update_force_head_follows_rollback_with_warning(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """``--force-head`` follows the rollback; the WARNING precedes the write.
+
+    Ordering pin (Codex R1/R2): the red stderr WARNING must appear BEFORE the
+    "Updated" success line — a post-write warning cannot inform the downgrade
+    it warns about. The success line carries the backward note from the
+    authoritative ``pin_moved_backward``.
+    """
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project_cwd, "foo")  # pin forward to commit2
+    _reset_wiki_hard(wiki_root, commit1)  # HEAD now behind the pin
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--force-head"])
+
+    assert result.exit_code == 0, result.output
+    assert "WARNING" in result.output
+    assert "BACKWARD" in result.output
+    assert result.output.index("WARNING") < result.output.index("Updated")
+    assert "(pin moved BACKWARD)" in result.output
+    lock_doc = json.loads((project_cwd / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == commit1
+    assert (project_cwd / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v1\n"
+
+
+def test_cli_update_force_head_missing_pin_still_refuses(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """CLI ``--force-head`` cannot bypass a missing pin (PinMissingError, #1689)."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    Lockfile.at(project_cwd).upsert_entry(
+        "skills", "foo", wiki_commit="", installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--force-head"])
+
+    assert result.exit_code != 0
+    assert "no wiki_commit pin" in result.output
+    lock_doc = json.loads((project_cwd / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == ""
+
+
+def test_cli_update_force_head_preflight_wiki_vanish_defers_to_engine(
+    wiki_root: Path,
+    project_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wiki that vanishes during the --force-head preflight defers to the engine.
+
+    The preflight is advisory (#1689): if the wiki disappears in the TOCTOU
+    window after ``require_exists()``, its read failure must NOT escape raw —
+    it defers to the engine call, which re-raises the canonical error through
+    ``_translate_to_click`` (a clean Click error + non-zero exit, no traceback).
+    """
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+
+    from memtomem.wiki.store import WikiNotFoundError
+
+    def _vanish(self: WikiStore) -> str:
+        raise WikiNotFoundError("wiki vanished mid-run")
+
+    monkeypatch.setattr(WikiStore, "current_commit", _vanish)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--force-head"])
+
+    # The preflight swallows the read failure and defers to the engine, whose
+    # own current_commit re-raises → _translate_to_click surfaces a clean Click
+    # error. Without the WikiNotFoundError catch, the preflight would let the
+    # raw exception escape (CliRunner would capture it as result.exception).
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_cli_update_dry_run_force_head_previews_backward(
+    wiki_root: Path,
+    project_cwd: Path,
+) -> None:
+    """``--dry-run --force-head`` previews the backward move and writes nothing."""
+    _initialized_wiki(wiki_root)
+    commit1 = _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    install_skill(project_cwd, "foo")
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+    update_skill(project_cwd, "foo")
+    lock_doc = json.loads((project_cwd / ".memtomem" / "lock.json").read_text())
+    pinned = lock_doc["skills"]["foo"]["wiki_commit"]
+    _reset_wiki_hard(wiki_root, commit1)
+
+    runner = CliRunner()
+    result = runner.invoke(context_group, ["update", "skill", "foo", "--dry-run", "--force-head"])
+
+    assert result.exit_code == 0, result.output
+    assert "[moves pin BACKWARD]" in result.output  # table marker
+    assert "moving the pin BACKWARD (--force-head)" in result.output  # summary note
+    # Nothing written — pin and bytes untouched.
+    lock_doc = json.loads((project_cwd / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == pinned
+    assert (project_cwd / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
+
+
 # ── coverage: silence unused-import warnings on agent/command wrappers ──
 
 
@@ -558,6 +950,8 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     seen: list[str] = []
     timeouts: list[float | None] = []
     surfaces: list[str] = []
+    force_heads: list[object] = []
+    pinned_commits: list[object] = []
 
     def _fake_update_asset(
         project_root: object,
@@ -567,14 +961,18 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
         wiki: object,
         force: bool,
         lock_timeout: float | None = None,
-        # Sentinel default (NOT "cli_context_update") so a wrapper that stops
-        # forwarding surface= fails the assertions below instead of the fake's
-        # own default masking the dropped kwarg (mutation-style pin).
+        # Sentinel defaults (NOT the wrappers' real defaults) so a wrapper
+        # that stops forwarding a kwarg fails the assertions below instead of
+        # the fake's own default masking the dropped kwarg (mutation-style pin).
+        force_head: object = "<force-head-not-forwarded>",
+        pinned_commit: object = "<pinned-commit-not-forwarded>",
         surface: str = "<surface-not-forwarded>",
     ) -> object:
         seen.append(asset_type)
         timeouts.append(lock_timeout)
         surfaces.append(surface)
+        force_heads.append(force_head)
+        pinned_commits.append(pinned_commit)
         from memtomem.context.install import UpdateResult
 
         return UpdateResult(
@@ -595,11 +993,12 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
     update_command(Path("/tmp/p"), "c")
     update_skill(Path("/tmp/p"), "s")
     update_skill(Path("/tmp/p"), "s", surface="web_context_update")
+    update_skill(Path("/tmp/p"), "s", force_head=True, pinned_commit="a" * 40)
 
-    assert seen == ["agents", "commands", "skills", "skills"]
+    assert seen == ["agents", "commands", "skills", "skills", "skills"]
     # The wrappers forward lock_timeout verbatim; callers that omit it (the
     # CLI / direct Python use) get the unbounded default (None).
-    assert timeouts == [None, None, None, None]
+    assert timeouts == [None, None, None, None, None]
     # surface= forwards verbatim: the CLI default when omitted, the caller's
     # audit surface (e.g. the web route's) when given.
     assert surfaces == [
@@ -607,7 +1006,12 @@ def test_update_agent_command_wrappers_dispatch(monkeypatch: pytest.MonkeyPatch)
         "cli_context_update",
         "cli_context_update",
         "web_context_update",
+        "cli_context_update",
     ]
+    # force_head / pinned_commit (#1689) forward verbatim: the real defaults
+    # when omitted, the caller's values when given.
+    assert force_heads == [False, False, False, False, True]
+    assert pinned_commits == [None, None, None, None, "a" * 40]
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1069,6 +1473,184 @@ def test_cli_update_all_dry_run_reports_stale_pin(
     assert "stale pin" in result.output  # summary line
     stale_lock = json.loads((proj_stale / ".memtomem" / "lock.json").read_text())
     assert stale_lock["skills"]["foo"]["wiki_commit"] == "0" * 40
+
+
+# ── CLI --all: --force-head (#1689) ─────────────────────────────────────
+
+
+def test_cli_update_all_force_head_updates_stale_row_and_marks_table(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all --force-head`` makes the stale row actionable, marked in the table.
+
+    The flipped mirror of the stale-pin skip test: the recorded-but-unreachable
+    row updates (pin moves to the batch snapshot), the table tags it
+    ``[moves pin BACKWARD]``, the WARNING fires before execution, and the batch
+    exits 0 — no failure rows left.
+    """
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+
+    proj_forward = tmp_path / "forward"
+    proj_forward.mkdir()
+    install_skill(proj_forward, "foo")
+
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+
+    new_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_forward, proj_stale])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        context_group, ["update", "skill", "foo", "--all", "--yes", "--force-head"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[moves pin BACKWARD]" in result.output  # preview table marker
+    assert "WARNING: --force-head" in result.output
+    assert "(pin moved BACKWARD)" in result.output  # per-row success note
+    # Both rows updated to the batch snapshot.
+    for proj in (proj_forward, proj_stale):
+        lock_doc = json.loads((proj / ".memtomem" / "lock.json").read_text())
+        assert lock_doc["skills"]["foo"]["wiki_commit"] == new_commit
+        assert (proj / ".memtomem" / "skills" / "foo" / "SKILL.md").read_bytes() == b"v2\n"
+
+
+def test_cli_update_all_dry_run_force_head_counts_backward(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all --dry-run --force-head`` counts the backward bucket, writes nothing."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_stale])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        context_group, ["update", "skill", "foo", "--all", "--dry-run", "--force-head"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "would move the pin BACKWARD (--force-head)" in result.output
+    assert "[moves pin BACKWARD]" in result.output
+    stale_lock = json.loads((proj_stale / ".memtomem" / "lock.json").read_text())
+    assert stale_lock["skills"]["foo"]["wiki_commit"] == "0" * 40
+
+
+def test_cli_update_all_yes_force_head_warns_without_prompt(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--yes --force-head`` three-way invariant: WARNING + no prompt + executed."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj_stale = tmp_path / "stale"
+    proj_stale.mkdir()
+    install_skill(proj_stale, "foo")
+    Lockfile.at(proj_stale).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2030-01-01T00:00:00.000000Z"
+    )
+    new_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj_stale])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        context_group, ["update", "skill", "foo", "--all", "--yes", "--force-head"]
+    )
+
+    assert result.exit_code == 0, result.output
+    # 1. WARNING printed (regardless of --yes — the automation log needs it).
+    assert "WARNING: --force-head" in result.output
+    # 2. Prompt skipped.
+    assert "Continue?" not in result.output
+    # 3. Batch executed — the pin moved.
+    stale_lock = json.loads((proj_stale / ".memtomem" / "lock.json").read_text())
+    assert stale_lock["skills"]["foo"]["wiki_commit"] == new_commit
+
+
+def test_cli_update_all_force_head_backward_dirty_row_still_needs_force(
+    wiki_root: Path,
+    project_cwd: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orthogonality in the batch: a backward row with dest dirt still needs --force."""
+    from memtomem.context.lockfile import Lockfile
+
+    _initialized_wiki(wiki_root)
+    _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
+    proj = tmp_path / "stale_dirty"
+    proj.mkdir()
+    install_skill(proj, "foo")
+    # PAST installed_at (unlike the other stale-pin fixtures' 2030 sentinel):
+    # the mtime-based dirty walk must see the local edit as newer.
+    Lockfile.at(proj).upsert_entry(
+        "skills", "foo", wiki_commit="0" * 40, installed_at="2020-01-01T00:00:00.000000Z"
+    )
+    edited = proj / ".memtomem" / "skills" / "foo" / "SKILL.md"
+    edited.write_bytes(b"local\n")
+    _bump_mtime(edited)
+    new_commit = _modify_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v2\n"})
+
+    known = tmp_path / "known.json"
+    _seed_known_projects(known, [proj])
+    _patch_known_projects_path(monkeypatch, known)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        context_group, ["update", "skill", "foo", "--all", "--yes", "--force-head"]
+    )
+
+    # --force-head alone: the row classifies refuse → batch refuses, no write.
+    assert result.exit_code != 0, result.output
+    assert "--force" in result.output
+    lock_doc = json.loads((proj / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == "0" * 40
+
+    forced = runner.invoke(
+        context_group,
+        ["update", "skill", "foo", "--all", "--yes", "--force", "--force-head"],
+    )
+    assert forced.exit_code == 0, forced.output
+    bak = edited.with_suffix(edited.suffix + ".bak")
+    assert bak.read_bytes() == b"local\n"
+    assert edited.read_bytes() == b"v2\n"
+    lock_doc = json.loads((proj / ".memtomem" / "lock.json").read_text())
+    assert lock_doc["skills"]["foo"]["wiki_commit"] == new_commit
 
 
 # ── CLI --all: --yes invariants (no WARN unless --force) ────────────────

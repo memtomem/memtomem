@@ -53,6 +53,8 @@ from memtomem.context.install import (
     _classify_for_all_update,
     _classify_for_install_all,
     _commit_hint,
+    _has_recorded_pin,
+    _pin_backward_reason,
     adopt_agent,
     adopt_command,
     adopt_skill,
@@ -93,7 +95,7 @@ from memtomem.context.projects import (
     resolve_project_selector,
     sync_skip_reason,
 )
-from memtomem.context.lockfile import LockfileError
+from memtomem.context.lockfile import Lockfile, LockfileError
 from memtomem.context.status import (
     DRIFT_STATES,
     ProjectStatus,
@@ -2038,6 +2040,17 @@ def _dirty_asset_refusal_text(
     help="Overwrite local edits; each dirty file is preserved as <file>.bak.",
 )
 @click.option(
+    "--force-head",
+    "force_head",
+    is_flag=True,
+    help=(
+        "Follow a deliberate wiki rollback: record the current wiki HEAD even "
+        "when it does NOT descend from the recorded pin (moves the pin "
+        "BACKWARD). Orthogonal to --force, which only overrides project-side "
+        "edits — a backward move onto locally edited files needs both."
+    ),
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     help=(
@@ -2053,6 +2066,7 @@ def update_cmd(
     all_projects: bool,
     yes: bool,
     force: bool,
+    force_head: bool,
     dry_run: bool,
 ) -> None:
     """Refresh an installed wiki asset from the wiki HEAD.
@@ -2064,6 +2078,15 @@ def update_cmd(
     in the wiki never blocks. A no-op (pin already at HEAD) still
     succeeds and prints an asset-scoped note when the asset has
     uncommitted wiki edits.
+
+    Update is forward-only (#1685): when the wiki was reset / force-pulled
+    so HEAD no longer descends from the recorded pin, it refuses rather
+    than silently downgrading — and ``--force`` does not bypass that
+    either. ``--force-head`` (#1689) is the deliberate escape hatch: it
+    follows the rollback and moves the pin BACKWARD, warning on stderr
+    before anything is written. It never bypasses the wiki-dirty gate,
+    the project-side dirty gate (still ``--force``), or a lockfile entry
+    with no recorded pin (remedy: ``mm context adopt`` or re-install).
 
     Without ``--all``: refresh in the current project only. No-op when
     the wiki commit pinned in ``.memtomem/lock.json`` already matches
@@ -2101,12 +2124,50 @@ def update_cmd(
         raise click.ClickException(str(exc)) from exc
 
     if all_projects:
-        _run_update_all(asset_type, name, root, wiki=wiki, yes=yes, force=force, dry_run=dry_run)
+        _run_update_all(
+            asset_type,
+            name,
+            root,
+            wiki=wiki,
+            yes=yes,
+            force=force,
+            force_head=force_head,
+            dry_run=dry_run,
+        )
         return
 
     if dry_run:
-        _run_update_dry_run_single(asset_type, name, root, wiki=wiki)
+        _run_update_dry_run_single(asset_type, name, root, wiki=wiki, force_head=force_head)
         return
+
+    # --force-head pre-write WARNING (#1689): resolve the target commit HERE
+    # and thread it into the engine as pinned_commit, so the commit this
+    # warning is computed against and the commit the engine gates on and
+    # records are the same string — a HEAD move between the two reads can't
+    # produce an unwarned backward write. Preflight read errors are ignored:
+    # the engine raises the canonical error moments later (pinned_commit
+    # stays None, so it resolves HEAD itself).
+    pinned_commit: str | None = None
+    if force_head:
+        try:
+            pinned_commit = wiki.current_commit()
+            entry = Lockfile.at(root).read_entry(f"{asset_type}s", name) or {}
+            pin = entry.get("wiki_commit")
+            if _has_recorded_pin(pin) and _pin_backward_reason(wiki, pin, pinned_commit):
+                click.secho(
+                    f"WARNING: --force-head will move the {asset_type}s/{name} pin "
+                    f"BACKWARD ({str(pin)[:12]} → {pinned_commit[:12]}) to follow the "
+                    f"wiki rollback.",
+                    fg="red",
+                    err=True,
+                )
+        except (WikiNotFoundError, WikiUnbornHeadError, LockfileError, OSError):
+            # Preflight is advisory: any read failure (incl. a wiki that
+            # vanished after the require_exists() above — TOCTOU) defers to the
+            # engine call below, which re-raises the canonical error through
+            # _translate_to_click. pinned_commit stays None → engine resolves
+            # HEAD itself and surfaces the same error a non-force-head run would.
+            pinned_commit = None
 
     # PrivacyScanError here is a Gate A refusal (ADR-0011 §5, #1247).
     with _translate_to_click(
@@ -2122,11 +2183,32 @@ def update_cmd(
         PrivacyScanError,
     ):
         if asset_type == "skill":
-            result = update_skill(root, name, wiki=wiki, force=force)
+            result = update_skill(
+                root,
+                name,
+                wiki=wiki,
+                force=force,
+                force_head=force_head,
+                pinned_commit=pinned_commit,
+            )
         elif asset_type == "agent":
-            result = update_agent(root, name, wiki=wiki, force=force)
+            result = update_agent(
+                root,
+                name,
+                wiki=wiki,
+                force=force,
+                force_head=force_head,
+                pinned_commit=pinned_commit,
+            )
         elif asset_type == "command":
-            result = update_command(root, name, wiki=wiki, force=force)
+            result = update_command(
+                root,
+                name,
+                wiki=wiki,
+                force=force,
+                force_head=force_head,
+                pinned_commit=pinned_commit,
+            )
         else:  # pragma: no cover — guarded by click.Choice
             raise click.ClickException(f"unknown asset type: {asset_type}")
 
@@ -2138,9 +2220,10 @@ def update_cmd(
         _maybe_hint_dirty_noop(wiki, result.asset_type, result.name)
         return
 
+    backward_note = " (pin moved BACKWARD)" if result.pin_moved_backward else ""
     click.secho(
         f"Updated {result.asset_type}/{result.name} "
-        f"({result.old_wiki_commit[:12]} → {result.new_wiki_commit[:12]})",
+        f"({result.old_wiki_commit[:12]} → {result.new_wiki_commit[:12]}){backward_note}",
         fg="green",
     )
     rel_dest = result.dest.relative_to(root) if result.dest.is_relative_to(root) else result.dest
@@ -2164,6 +2247,7 @@ def _run_update_dry_run_single(
     root: Path,
     *,
     wiki: WikiStore,
+    force_head: bool = False,
 ) -> None:
     """Read-only preview for the single-project ``update --dry-run`` path.
 
@@ -2185,6 +2269,7 @@ def _run_update_dry_run_single(
             name,
             wiki=wiki,
             projects=[root],
+            force_head=force_head,
         )
 
     if not classifications:
@@ -2205,8 +2290,9 @@ def _run_update_dry_run_single(
     # Forward-only gate (#1685): a stale pin (HEAD does not descend from it)
     # exits non-zero like the real run's PinNotAncestorError. Checked BEFORE
     # the wiki-dirty gate to mirror _update_asset's order (ancestry precedes
-    # the dirty gate). Non-force-able — the reason names the wiki-history fix,
-    # not --force.
+    # the dirty gate). Not bypassed by --force; under --force-head only the
+    # missing-pin case still classifies stale-pin (PinMissingError parity) —
+    # the reason names the wiki-history fix.
     if row.state == "stale-pin":
         raise click.ClickException(f"{asset_type_plural}/{name}: {row.reason}")
 
@@ -2223,7 +2309,11 @@ def _run_update_dry_run_single(
     if row.state == "update":
         old = (row.lock_entry or {}).get("wiki_commit", "")
         old_abbr = old[:12] if isinstance(old, str) and old else "(unpinned)"
-        click.echo(f"\nDry run — nothing written; would update {old_abbr} → {new_commit[:12]}.")
+        backward_note = " — moving the pin BACKWARD (--force-head)" if row.pin_backward else ""
+        click.echo(
+            f"\nDry run — nothing written; would update "
+            f"{old_abbr} → {new_commit[:12]}{backward_note}."
+        )
     elif row.state == "unchanged":
         click.echo("\nDry run — nothing written; already up to date.")
         _maybe_hint_dirty_noop(wiki, asset_type_plural, name)
@@ -2244,6 +2334,7 @@ def _run_update_all(
     wiki: WikiStore,
     yes: bool,
     force: bool,
+    force_head: bool = False,
     dry_run: bool = False,
 ) -> None:
     """Orchestrate ``mm context update <type> <name> --all``.
@@ -2308,6 +2399,7 @@ def _run_update_all(
             name,
             wiki=wiki,
             projects=project_roots,
+            force_head=force_head,
         )
 
     if not classifications:
@@ -2323,6 +2415,7 @@ def _run_update_all(
     needs_force = [c for c in classifications if c.state == "refuse"]
     stale_pins = [c for c in classifications if c.state == "stale-pin"]
     has_errors = [c for c in classifications if c.state == "error"]
+    backward_rows = [c for c in classifications if c.pin_backward]
 
     if not needs_update and not needs_force and not stale_pins and not has_errors:
         click.echo("\nAll projects are up to date.")
@@ -2360,6 +2453,8 @@ def _run_update_all(
         # even with refuse/error rows (the table already shows them; the
         # refusal exit belongs to the run that actually intends to write).
         parts = [f"{len(needs_update)} would update"]
+        if backward_rows:
+            parts.append(f"{len(backward_rows)} would move the pin BACKWARD (--force-head)")
         if needs_force:
             parts.append(f"{len(needs_force)} would refuse without --force")
         if stale_pins:
@@ -2388,6 +2483,18 @@ def _run_update_all(
             err=True,
         )
 
+    # --force-head pre-write WARNING (#1689): fires only when a row will
+    # ACTUALLY move its pin backward (an all-forward batch with the flag is
+    # a silent no-op), and regardless of --yes — it must inform the confirm
+    # prompt and the automation log alike, before anything is written.
+    if backward_rows:
+        click.secho(
+            f"WARNING: --force-head will move {len(backward_rows)} project pin(s) "
+            f"BACKWARD to follow the wiki rollback.",
+            fg="red",
+            err=True,
+        )
+
     if not yes:
         click.confirm("\nContinue?", abort=True)
 
@@ -2404,9 +2511,10 @@ def _run_update_all(
         if c.state == "stale-pin":
             # Forward-only gate (#1685): HEAD does not descend from this
             # project's pin — advancing would downgrade it. Per-project skip
-            # (never force-able), counted as a failure so the batch exits
-            # non-zero: the user asked to update and this one could not be
-            # safely advanced. Siblings that ARE forward keep updating.
+            # (not bypassed by --force; under --force-head only missing-pin
+            # rows still land here, #1689), counted as a failure so the batch
+            # exits non-zero: the user asked to update and this one could not
+            # be safely advanced. Siblings that ARE forward keep updating.
             click.secho(f"  ⚠ {c.project_root}: {c.reason}", fg="red")
             failures += 1
             continue
@@ -2428,6 +2536,7 @@ def _run_update_all(
                 wiki_commit=new_commit,
                 lock_entry=c.lock_entry,
                 force=force,
+                pin_moved_backward=c.pin_backward,
                 surface="cli_context_update_all",
             )
         except StaleInstallError as exc:
@@ -2453,7 +2562,8 @@ def _run_update_all(
             removed_note = (
                 f" ({len(upd.files_removed)} file(s) removed)" if upd.files_removed else ""
             )
-            click.secho(f"  ✓ {c.project_root}: updated{removed_note}", fg="green")
+            backward_note = " (pin moved BACKWARD)" if upd.pin_moved_backward else ""
+            click.secho(f"  ✓ {c.project_root}: updated{removed_note}{backward_note}", fg="green")
             successes += 1
 
     click.echo(
@@ -2478,6 +2588,9 @@ def _print_classification_table(
 
     Columns: state · project root (relative when possible) · reason
     (only shown for ``refuse`` and ``error`` rows where it carries info).
+    A row made actionable by ``--force-head`` (#1689) is forced red and
+    tagged ``[moves pin BACKWARD]`` — the downgrade must be visible in the
+    table the user confirms against, not only in the stderr WARNING.
     """
     click.echo(
         f"\n{asset_type_plural}/{name} — wiki HEAD {new_commit[:12]} — "
@@ -2491,10 +2604,12 @@ def _print_classification_table(
         "error": "red",
     }
     for c in classifications:
-        color = state_color[c.state]
+        color = "red" if c.pin_backward else state_color[c.state]
         line = f"  {c.state:10s}  {c.project_root}"
         if c.reason:
             line += f"  ({c.reason})"
+        if c.pin_backward:
+            line += "  [moves pin BACKWARD]"
         click.secho(line, fg=color)
 
 
