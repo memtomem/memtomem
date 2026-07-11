@@ -10,6 +10,7 @@ server to start; the model downloads once on first use.
 | 01 | [`01_hello_memory.ipynb`](./01_hello_memory.ipynb) | Initialise components, add a few memories, run your first hybrid search. The minimum viable tour. | ~5 min |
 | 02 | [`02_index_and_filter.ipynb`](./02_index_and_filter.ipynb) | Bulk-index a directory; scope searches with `source` / `tag` / `namespace` filters; inspect BM25-vs-dense via `rrf_weights`; switch to the `kiwipiepy` tokenizer for Korean. | ~15 min |
 | 03 | [`03_agent_memory_patterns.ipynb`](./03_agent_memory_patterns.ipynb) | Agent-style memory: sessions, events, scratch (working memory), and time-based recall. | ~10 min |
+| 04 | [`04_multi_agent_mcp_memory.ipynb`](./04_multi_agent_mcp_memory.ipynb) | Multi-agent memory coordination: registration, session management, private-vs-shared namespaces, and LangGraph flow orchestration. | ~15 min |
 
 ## Setup
 
