@@ -14,7 +14,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
 _DOCKER_RE = re.compile(r"^docker://[^\s@]+@sha256:[0-9a-f]{64}$")
 _USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)")
-_PLUGIN_CORE_MAP = {"0.2.2": "0.3.6"}
+_PLUGIN_CORE_MAP = {"0.2.3": "0.3.7"}
 
 
 def _assert_pinned_ref(reference: str) -> None:
