@@ -28,9 +28,12 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
+import tomllib
 import types
 import typing
 from pathlib import Path
+from urllib.parse import unquote
 
 import click
 import pydantic
@@ -43,12 +46,29 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GUIDES = _REPO_ROOT / "docs" / "guides"
 _INTEGRATIONS = _GUIDES / "integrations"
 _README = _REPO_ROOT / "README.md"
+_PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
+_PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
+_NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
 _SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
 _PLUGIN_HOOKS_JSON = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "hooks" / "hooks.json"
 _HOOKS_SNIPPET_ANCHOR = "Add the following to `~/.claude/settings.json`:"
 
 _ASTERISK_TOOLS = ("mem_config", "mem_embedding_reset", "mem_reset")
 _FOOTNOTE_PREFIX = r"\* Requires `MEMTOMEM_TOOL_MODE=full`"
+
+
+def _public_markdown() -> list[Path]:
+    """Tracked public docs whose links and command examples are contractual."""
+    roots = [
+        _README,
+        _PYPI_README,
+        _PLUGIN_README,
+        _NOTEBOOKS_README,
+        _REPO_ROOT / "SECURITY.md",
+        _REPO_ROOT / "CONTRIBUTING.md",
+        _REPO_ROOT / "CLA.md",
+    ]
+    return sorted([*roots, *_GUIDES.rglob("*.md")])
 
 
 def _read(path: Path) -> str:
@@ -230,6 +250,18 @@ def _commands_by_event_matcher(hooks_doc: dict) -> dict[tuple[str, str], dict]:
     return out
 
 
+@pytest.fixture(scope="module")
+def plugin_commands() -> dict[tuple[str, str], dict]:
+    plugin_hooks = json.loads(_PLUGIN_HOOKS_JSON.read_text(encoding="utf-8"))
+    return _commands_by_event_matcher(plugin_hooks)
+
+
+@pytest.fixture(scope="module")
+def docs_commands(claude_code: str) -> dict[tuple[str, str], dict]:
+    snippet = _extract_hooks_snippet(claude_code)
+    return _commands_by_event_matcher(snippet)
+
+
 class TestPluginHooksDocsParity:
     """The hooks.json snippet in claude-code.md must declare byte-identical
     ``command`` strings to the plugin's shipped hooks.json for every
@@ -238,16 +270,6 @@ class TestPluginHooksDocsParity:
     copy-paste recipe tight), so we iterate over the docs entries and
     require each to match the plugin file — not the other way around.
     """
-
-    @pytest.fixture(scope="class")
-    def plugin_commands(self) -> dict[tuple[str, str], dict]:
-        plugin_hooks = json.loads(_PLUGIN_HOOKS_JSON.read_text(encoding="utf-8"))
-        return _commands_by_event_matcher(plugin_hooks)
-
-    @pytest.fixture(scope="class")
-    def docs_commands(self, claude_code: str) -> dict[tuple[str, str], dict]:
-        snippet = _extract_hooks_snippet(claude_code)
-        return _commands_by_event_matcher(snippet)
 
     def test_docs_snippet_is_subset_of_plugin(
         self,
@@ -388,6 +410,8 @@ def _doc_mm_paths(text: str) -> set[tuple[str, ...]]:
     """
     paths: set[tuple[str, ...]] = set()
     for line, in_fence in _iter_code_context(text):
+        if not in_fence and "no top-level" in line.lower():
+            continue
         segments: list[str] = []
         if in_fence:
             segments = re.findall(r"(?<![\w-])(?:uv run )?mm ([a-z][^\n`#]*)", line)
@@ -407,17 +431,7 @@ def _doc_mm_paths(text: str) -> set[tuple[str, ...]]:
     return paths
 
 
-_CLI_DOCS = (
-    _README,
-    _GUIDES / "getting-started.md",
-    _GUIDES / "reference.md",
-    _GUIDES / "reference" / "core-memory-tools.md",
-    _GUIDES / "reference" / "organization-maintenance.md",
-    _GUIDES / "reference" / "automation.md",
-    _GUIDES / "reference" / "data-config-cli.md",
-    _GUIDES / "reference" / "operations.md",
-    _GUIDES / "configuration.md",
-)
+_CLI_DOCS = tuple(_public_markdown())
 
 
 class TestDocumentedCliExists:
@@ -445,6 +459,45 @@ class TestDocumentedCliExists:
         assert not offenders, (
             "Docs reference CLI commands/subcommands that no longer exist in "
             "memtomem.cli (fix the doc or the command):\n  " + "\n  ".join(sorted(set(offenders)))
+        )
+
+    def test_documented_mm_flags_resolve(self) -> None:
+        """Flags shown on one-line or backslash-continued calls exist live."""
+        offenders: list[str] = []
+        for doc in _CLI_DOCS:
+            text = _read(doc).replace("\\\n", " ")
+            for line, in_fence in _iter_code_context(text):
+                segments: list[str] = []
+                if in_fence:
+                    segments = re.findall(r"(?<![\w-])(?:uv run )?mm ([^\n`#;|&]+)", line)
+                else:
+                    if "future" in line.lower():
+                        continue
+                    for span in re.findall(r"`([^`]+)`", line):
+                        segments.extend(re.findall(r"(?<![\w-])(?:uv run )?mm ([^;|&]+)", span))
+                for segment in segments:
+                    try:
+                        tokens = shlex.split(segment)
+                    except ValueError:
+                        continue
+                    node: click.Command = _CLI
+                    walked: list[str] = []
+                    for token in tokens:
+                        if token.startswith("-"):
+                            opt = token.split("=", 1)[0]
+                            if opt in {"--", "--help", "-h"}:
+                                continue
+                            live = {o for param in node.params for o in param.opts}
+                            if opt not in live:
+                                command = " ".join(["mm", *walked])
+                                offenders.append(f"{doc.name}: `{command} {opt}`")
+                            continue
+                        if isinstance(node, click.Group) and token in node.commands:
+                            node = node.commands[token]
+                            walked.append(token)
+        assert not offenders, (
+            "Docs reference flags that do not exist on the resolved live CLI command:\n  "
+            + "\n  ".join(sorted(set(offenders)))
         )
 
 
@@ -519,6 +572,16 @@ class TestDocumentedEnvVarsExist:
             f"(typo, removed, or missing from _ENV_ONLY_VARS?): {sorted(unknown)}"
         )
 
+    def test_every_settings_leaf_is_documented(self) -> None:
+        expected = _pydantic_env_vars(Mem2MemConfig)
+        used = set(re.findall(r"MEMTOMEM_[A-Z0-9_]+", _read(_GUIDES / "configuration.md")))
+        missing = expected - used
+        assert not missing, (
+            "configuration.md must name every pydantic settings leaf, including "
+            "deprecated compatibility fields (mark them deprecated rather than "
+            f"silently omitting them): {sorted(missing)}"
+        )
+
 
 def _slug(text: str) -> str:
     """GitHub-style heading anchor slug (no collapse of repeated separators)."""
@@ -545,13 +608,22 @@ def _anchors(md_text: str) -> set[str]:
 
 
 _LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_GITHUB_BLOB_PREFIX = "https://github.com/memtomem/memtomem/blob/main/"
+_GITHUB_TREE_PREFIX = "https://github.com/memtomem/memtomem/tree/main/"
+
+
+def _same_repo_absolute_target(raw: str) -> str | None:
+    for prefix in (_GITHUB_BLOB_PREFIX, _GITHUB_TREE_PREFIX):
+        if raw.startswith(prefix):
+            return raw.removeprefix(prefix)
+    return None
 
 
 class TestInternalDocLinksResolve:
     """Internal markdown links and #anchors across the guides must resolve."""
 
     def test_links_and_anchors_resolve(self) -> None:
-        docs = sorted(_GUIDES.rglob("*.md")) + [_README]
+        docs = _public_markdown()
         anchor_cache: dict[Path, set[str]] = {}
         offenders: list[str] = []
         for doc in docs:
@@ -564,11 +636,23 @@ class TestInternalDocLinksResolve:
                 line = re.sub(r"`[^`]*`", "", line)
                 for raw in _LINK.findall(line):
                     target = raw.strip().strip("<>")
-                    if target.startswith(("http://", "https://", "mailto:", "tel:")):
+                    same_repo = _same_repo_absolute_target(target)
+                    if same_repo is not None:
+                        target = same_repo
+                    elif target.startswith(("http://", "https://", "mailto:", "tel:")):
                         continue
                     file_part, _, anchor = target.partition("#")
                     if file_part:
-                        tgt = (doc.parent / file_part).resolve()
+                        tgt = (
+                            (_REPO_ROOT / unquote(file_part)).resolve()
+                            if same_repo is not None
+                            else (doc.parent / unquote(file_part)).resolve()
+                        )
+                        try:
+                            tgt.relative_to(_REPO_ROOT)
+                        except ValueError:
+                            offenders.append(f"{doc.name}: target escapes repository -> {target}")
+                            continue
                         if not tgt.exists():
                             offenders.append(f"{doc.name}: missing target -> {target}")
                             continue
@@ -581,3 +665,132 @@ class TestInternalDocLinksResolve:
                         if anchor.lower() not in anchor_cache[anchor_src]:
                             offenders.append(f"{doc.name}: broken anchor -> {target}")
         assert not offenders, "Broken internal doc links/anchors:\n  " + "\n  ".join(offenders)
+
+    def test_no_duplicate_generated_heading_slugs(self) -> None:
+        offenders: list[str] = []
+        for doc in _public_markdown():
+            text = _read(doc)
+            seen: set[str] = set()
+            for line, in_fence in _iter_code_context(text):
+                if in_fence:
+                    continue
+                match = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line)
+                if not match:
+                    continue
+                slug = _slug(match.group(1))
+                if slug in seen:
+                    offenders.append(f"{doc.relative_to(_REPO_ROOT)}: {slug}")
+                seen.add(slug)
+        assert not offenders, (
+            "Duplicate public heading slugs make generated anchors ambiguous:\n  "
+            + "\n  ".join(offenders)
+        )
+
+    def test_restructured_entrypoints_keep_compatibility_anchors(self) -> None:
+        required = {
+            _README: {"3-use", "4-web-ui-optional"},
+            _GUIDES / "README.md": {
+                "set-up",
+                "tune",
+                "power-features",
+                "reference--lifecycle",
+            },
+            _GUIDES / "getting-started.md": {
+                "pick-an-embedding-path-optional",
+                "choose-your-setup",
+                "claude-code",
+                "cursor-windsurf-claude-desktop-antigravity-cli-gemini-cli",
+                "verify-connection",
+                "1-index-your-notes",
+                "2-search",
+                "3-add-a-memory",
+                "4-recall-recent-memories",
+            },
+            _GUIDES / "mcp-clients.md": {
+                "verify-connection",
+                "verify-connection-1",
+                "verify-connection-2",
+            },
+        }
+        for doc, expected in required.items():
+            missing = expected - _anchors(_read(doc))
+            assert not missing, f"{doc.name} lost compatibility anchors: {sorted(missing)}"
+
+
+def _quick_start(text: str) -> str:
+    match = re.search(r"^## Quick Start\s*$\n(.*?)(?=^##\s)", text, re.MULTILINE | re.DOTALL)
+    assert match is not None, "README lost its `## Quick Start` section"
+    return match.group(1)
+
+
+def _fenced_blocks(text: str, language: str) -> list[str]:
+    return re.findall(rf"```{language}\n(.*?)\n```", text, re.DOTALL)
+
+
+class TestPublicReadmeAndExamples:
+    _QUICK_START_COMMANDS = (
+        "mm init",
+        "mm status",
+        'mm add "Deployment checklist uses blue-green rollout" --tags ops',
+        'mm search "blue-green"',
+    )
+
+    @pytest.mark.parametrize("readme", [_README, _PYPI_README])
+    def test_readmes_share_quick_start_contract(self, readme: Path) -> None:
+        section = _quick_start(_read(readme))
+        positions = [section.find(command) for command in self._QUICK_START_COMMANDS]
+        assert all(position >= 0 for position in positions), (
+            f"{readme.name} must contain the shared deterministic Quick Start: "
+            f"{self._QUICK_START_COMMANDS}"
+        )
+        assert positions == sorted(positions), f"{readme.name} Quick Start command order drifted"
+
+    @pytest.mark.parametrize("readme", [_README, _PYPI_README])
+    def test_readmes_state_hook_and_stm_boundaries(self, readme: Path) -> None:
+        text = _read(readme).lower()
+        assert "hook-free by default" in text
+        assert "memtomem-stm" in text
+        assert "optional" in text
+
+    def test_pypi_readme_uses_absolute_markdown_links(self) -> None:
+        offenders = []
+        for raw in _LINK.findall(_read(_PYPI_README)):
+            target = raw.strip().strip("<>")
+            file_part = target.partition("#")[0]
+            if file_part.endswith(".md") and not target.startswith("https://"):
+                offenders.append(target)
+        assert not offenders, f"PyPI README has relative Markdown links: {offenders}"
+
+    def test_normal_mcp_examples_do_not_override_saved_memory_dirs(self) -> None:
+        mcp_clients = _read(_GUIDES / "mcp-clients.md")
+        ordinary, marker, overrides = mcp_clients.partition("## 10. Environment Variable Overrides")
+        assert marker
+        assert "MEMTOMEM_INDEXING__MEMORY_DIRS" not in ordinary
+        assert "MEMTOMEM_INDEXING__MEMORY_DIRS" in overrides
+        for name in ("claude-code.md", "cursor.md", "claude-desktop.md"):
+            assert "MEMTOMEM_INDEXING__MEMORY_DIRS" not in _read(_INTEGRATIONS / name)
+
+    def test_mcp_json_and_toml_examples_parse(self) -> None:
+        docs = [_GUIDES / "mcp-clients.md", *_INTEGRATIONS.glob("*.md")]
+        for doc in docs:
+            for index, block in enumerate(_fenced_blocks(_read(doc), "json"), start=1):
+                try:
+                    json.loads(block)
+                except json.JSONDecodeError as exc:
+                    pytest.fail(f"{doc.name} JSON block {index} is not copy-paste valid: {exc}")
+            for index, block in enumerate(_fenced_blocks(_read(doc), "toml"), start=1):
+                try:
+                    tomllib.loads(block)
+                except tomllib.TOMLDecodeError as exc:
+                    pytest.fail(f"{doc.name} TOML block {index} is not copy-paste valid: {exc}")
+
+    def test_hidden_qa_commands_stay_out_of_public_docs(self) -> None:
+        blob = "\n".join(_read(doc) for doc in _public_markdown())
+        assert "mm context seed-validation" not in blob
+        assert "mm agent debug-resolve" not in blob
+
+    def test_add_file_help_matches_scope_aware_path_resolution(self) -> None:
+        add = _CLI.commands["add"]
+        file_param = next(param for param in add.params if param.name == "file_name")
+        assert "selected scope's memory directory" in (file_param.help or "")
+        assert "~/.memtomem/memories" not in (file_param.help or "")

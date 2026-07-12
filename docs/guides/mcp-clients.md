@@ -16,6 +16,11 @@
 
 > **Common mistake**: Using `memtomem` instead of `memtomem-server` in your MCP config will fail.
 
+Normal registrations contain only the server command. The server reads the
+configuration written by `mm init` from `~/.memtomem/config.json`. Add an
+`env` block only when you deliberately want that client to override the saved
+configuration; environment variables have the highest precedence.
+
 ---
 
 **Jump to your editor**
@@ -85,10 +90,7 @@ For a team-shared setup, create a `.mcp.json` at the project root:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -97,7 +99,8 @@ For a team-shared setup, create a `.mcp.json` at the project root:
 Teammates see this server after approving Claude Code's workspace-trust
 prompt on first use.
 
-### Verify Connection
+<a id="verify-connection"></a>
+### Verify Claude Code
 
 In Claude Code (or run `/memtomem:status` with the plugin):
 ```
@@ -115,17 +118,15 @@ Create or edit the `~/.cursor/mcp.json` file:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
 ```
 
 Restart Cursor after configuration.
-### Verify Connection
+<a id="verify-connection-1"></a>
+### Verify Cursor
 
 In Cursor's AI chat:
 ```
@@ -143,10 +144,7 @@ Create or edit the `~/.codeium/windsurf/mcp_config.json` file:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -165,10 +163,7 @@ Edit the `~/Library/Application Support/Claude/claude_desktop_config.json` (macO
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -195,10 +190,7 @@ Create or edit the `~/.gemini/settings.json` file:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -244,9 +236,6 @@ memtomem:
 [mcp_servers.memtomem]
 command = "uvx"
 args = ["--from", "memtomem", "memtomem-server"]
-
-[mcp_servers.memtomem.env]
-MEMTOMEM_INDEXING__MEMORY_DIRS = '["~/memories"]'
 ```
 
 Restart Codex CLI after configuration.
@@ -259,7 +248,8 @@ Restart Codex CLI after configuration.
 > [Codex config reference](https://developers.openai.com/codex/config-reference)
 > for the full schema.
 
-### Verify Connection
+<a id="verify-connection-2"></a>
+### Verify Codex CLI
 
 In Codex CLI:
 
@@ -292,10 +282,7 @@ files — register memtomem in whichever you actually use:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"/path/to/notes\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -329,10 +316,7 @@ Create or edit that file:
     "memtomem": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -445,7 +429,10 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 ## 10. Environment Variable Overrides
 
-You can override settings by adding environment variables to the `env` block.
+You can override settings for one client by adding environment variables to
+the `env` block. This is an advanced, explicit override: these values win over
+`config.d/` and `config.json`. For ordinary setup, omit the block and manage
+settings with `mm init`, `mm config`, or the Web UI.
 
 > **List-typed settings must be JSON-encoded.** `MEMTOMEM_INDEXING__MEMORY_DIRS`
 > is a list, so pass it as a JSON array literal string: `"[\"~/memories\"]"`

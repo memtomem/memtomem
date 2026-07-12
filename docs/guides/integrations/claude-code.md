@@ -122,12 +122,7 @@ For a team-shared setup, commit a `.mcp.json` at the project root:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-
-      "env": {
-        "MEMTOMEM_STORAGE__SQLITE_PATH": "~/.memtomem/memtomem.db",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/notes\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -136,6 +131,10 @@ For a team-shared setup, commit a `.mcp.json` at the project root:
 Teammates see this server after approving the workspace-trust prompt on
 first use. To run against personal credentials without touching the
 shared file, add a `-s local` entry with the same name — local wins.
+
+The server reads `~/.memtomem/config.json`. Add a client `env` block only for
+an intentional highest-precedence override; see the
+[MCP client configuration guide](../mcp-clients.md#10-environment-variable-overrides).
 
 ---
 

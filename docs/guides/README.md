@@ -1,42 +1,60 @@
 # memtomem guides
 
-Every guide stands on its own, but if you're picking up memtomem for the first
-time this is the suggested reading order — get set up, tune to taste, then reach
-for the reference as you need it.
+Start with one successful memory round trip, then pick the task you need. The
+guides are organized by outcome rather than by feature name.
 
-## Set up
+<a id="set-up"></a>
+## Start here
 
-1. **[Getting Started](getting-started.md)** — install, the setup wizard, and
-   your first memories. A working setup in under five minutes.
-2. **[MCP Client Setup](mcp-clients.md)** — connect any MCP editor — Claude Code,
-   Cursor, Codex CLI, Antigravity, Windsurf, Claude Desktop, Gemini / Kimi CLI.
-   New here? Claude Code is the one-command setup. Per-editor deep dives:
+1. **[Getting Started](getting-started.md)** — install memtomem, run setup,
+   save one memory, and find it again in under five minutes.
+2. **[MCP Client Setup](mcp-clients.md)** — connect Claude Code, Cursor,
+   Codex CLI, Antigravity, Windsurf, Claude Desktop, Gemini CLI, or Kimi CLI.
+   Client-specific deep dives:
    - [Claude Code](integrations/claude-code.md)
    - [Cursor](integrations/cursor.md)
    - [Claude Desktop](integrations/claude-desktop.md)
 
-## Tune
+## Work with memories
 
-3. **[Configuration](configuration.md)** — every `MEMTOMEM_*` setting and how the
-   config layers (`config.json`, `config.d/` fragments, environment variables)
-   merge.
-4. **[Embeddings](embeddings.md)** — embedding providers and the model matrix:
-   BM25-only (the default), ONNX, Ollama, and OpenAI.
-5. **[LLM Providers](llm-providers.md)** — enable the LLM-powered features (query
-   expansion, fact extraction): Ollama, OpenAI, Anthropic, and compatible
-   endpoints.
+- **Save and search** — [Core memory tools](reference/core-memory-tools.md)
+  covers `mm add`, `mm index`, `mm search`, `mem_add`, and `mem_search`.
+- **Bring in existing tool memory** — [Data, config & CLI](reference/data-config-cli.md)
+  covers `mm ingest` for Claude, Codex, Gemini/Antigravity, Obsidian, and
+  Notion sources.
+- **Organize and maintain** — [Organization & maintenance](reference/organization-maintenance.md)
+  covers namespaces, deduplication, decay, tagging, and memory health.
+- **Automate upkeep** — [Automation](reference/automation.md) covers policies
+  and scheduled jobs.
 
-## Power features
+<a id="tune"></a>
+## Improve search quality
 
-6. **[Context Gateway](context-gateway.md)** — keep one Store of Skills,
-   Commands, and Subagents and sync it to your AI tools (each artifact type's
-   supported runtimes).
-7. **[Multi-device sync](multi-device-sync.md)** — sync your markdown memories
-   across personal devices via a private git repo.
+- **[Embeddings](embeddings.md)** — choose BM25-only, ONNX, Ollama, or OpenAI
+  and switch models safely.
+- **[LLM Providers](llm-providers.md)** — enable optional query expansion,
+  extraction, auto-tagging, and summaries.
+- **[Configuration](configuration.md)** — understand config files,
+  precedence, environment variables, and advanced tuning.
 
-## Reference & lifecycle
+<a id="power-features"></a>
+## Share and sync
 
-8. **[Reference](reference.md)** — the complete reference for every action, tool,
-   and pattern. Reach for it once you're set up.
-9. **[Uninstalling memtomem](uninstall.md)** — clean removal, with `--keep-data`
-   to preserve your memories.
+- **[Context Gateway](context-gateway.md)** — keep one Store of Skills,
+  Commands, and Subagents and sync it to supported AI runtimes.
+- **[Multi-device sync](multi-device-sync.md)** — sync markdown memories
+  across your own machines with a private git repository.
+
+## Operate and recover
+
+- **[Operations & troubleshooting](reference/operations.md)** — run the Web
+  UI, diagnose indexing/search issues, audit historical content, and recover
+  safely.
+- **[Uninstalling memtomem](uninstall.md)** — remove the runtime while keeping
+  or deleting stored data explicitly.
+
+<a id="reference--lifecycle"></a>
+## Reference
+
+- **[Reference index](reference.md)** — concepts, tool modes, MCP tools, and
+  links to every topic reference.

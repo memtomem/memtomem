@@ -1,12 +1,14 @@
 # Operations & troubleshooting
 
-Running the Web UI, fixing common problems, optional STM proactive surfacing, and uninstalling.
+Running the Web UI, auditing managed content, fixing common problems, optional
+STM proactive surfacing, and uninstalling.
 
 [← memtomem Reference](../reference.md)
 
 **On this page**
 
 - [Web UI](#web-ui)
+- [Privacy audits](#privacy-audits)
 - [Troubleshooting](#troubleshooting)
 - [STM: Proactive Memory Surfacing (Optional)](#stm-proactive-memory-surfacing-optional)
 - [Uninstalling memtomem](#uninstalling-memtomem)
@@ -58,6 +60,38 @@ mm web --host 0.0.0.0 --allow-remote-ui \
 Requests whose `Origin`/`Referer` or `Host` headers are not on the allow-list are rejected by the three-layer request guard — see [SECURITY.md](../../../SECURITY.md#csrf--origin--host-guard-rfc-787) for the full model and the `MEMTOMEM_WEB__CSRF_ENFORCE` rollback valve.
 
 **Anything beyond a trusted LAN needs an authenticating reverse proxy** — TLS plus auth in front, with memtomem still bound to loopback behind it. The [authenticated reverse proxy recipe](../mcp-clients.md#authenticated-reverse-proxy-required-for-public-exposure) (nginx, TLS + Basic auth) applies to the Web UI the same way it does to MCP network transports.
+
+---
+
+## Privacy audits
+
+memtomem applies its redaction guard before managed writes, but historical
+content may predate the current patterns. The audit commands below are
+read-only: they report findings without deleting, quarantining, rewriting, or
+re-embedding anything.
+
+```bash
+# Stored database chunks in one explicit memory tier
+mm mem rescan --scope user --json
+mm mem rescan --scope project_shared --json
+mm mem rescan --scope project_local --json
+
+# Historical files under managed _imported/, _fetched/, and sessions/ trees
+mm mem rescan-files --json
+
+# Canonical Context Gateway artifacts in one explicit tier
+mm context rescan --scope project_shared --json
+```
+
+Each command exits `0` when the scan is clean and `1` when it finds a
+violation. `mm mem rescan` accepts `--source` to narrow the database scan to
+one file or directory. `mm context rescan` requires a scope so CI and audit
+logs never rely on an implicit tier.
+
+Review every reported path or chunk before remediation. Move secrets out of
+git-tracked content, rotate exposed credentials, and then use the ordinary
+edit/delete/re-index workflow appropriate to that source. The audit commands
+intentionally have no automatic `--fix` mode.
 
 ---
 

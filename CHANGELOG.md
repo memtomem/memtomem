@@ -9,6 +9,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - Claude plugin 0.2.3 now maps to the verified core 0.3.7 release (#1727).
 
+### Documentation
+
+- **Public docs now lead with a deterministic first memory round trip.** The
+  GitHub and PyPI READMEs, Getting Started guide, and guide index share the
+  same `mm init` → `mm status` → `mm add` → `mm search` journey before
+  branching into editor setup, existing-note indexing, Context Gateway, and
+  operations. Configuration and MCP examples now reflect `config.json` / env
+  precedence, recent privacy and Wiki lifecycle commands are discoverable,
+  and docs tests pin public links, Quick Start parity, and the runnable smoke
+  path.
+
 ## [0.3.7] — 2026-07-12
 
 ### Security

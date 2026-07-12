@@ -241,6 +241,8 @@ mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
 mm init                                # preset picker; `--advanced` opens the full 10-step wizard (b: back, q: quit)
 mm mem init                            # opt this project into project-tier memory: creates .memtomem/memories.local/ and registers it (run from the project root; requires .git or pyproject.toml)
 mm mem init --scope project_shared --confirm-project-shared   # same for the shared tier (memories written there land in git-tracked files)
+mm mem rescan --scope user             # read-only privacy re-scan of stored user-scope chunks (exit 1 on findings)
+mm mem rescan-files                    # read-only scan of historical imported/fetched/session files
 
 # Core (daily use)
 mm search "deployment"                 # hybrid search (keywords + meaning)
@@ -293,6 +295,8 @@ cd <your project>                      # wiki is global; install/status are proj
 mm context install skill <name>        # snapshot the wiki asset (at HEAD; commit-true — refuses if the asset has uncommitted wiki changes)
 mm context update skill <name>         # re-snapshot at HEAD (commit-true — refuses if the asset has uncommitted wiki changes; --all, --force, --yes)
 mm context status                      # installed wiki assets + drift (reads the CURRENT project)
+mm wiki skill promote <name>           # project_shared Store → new Wiki asset + isolated commit (privacy-scanned)
+mm context adopt skill <name>          # lockfile-track Store bytes only when they match Wiki HEAD exactly
 
 # Add-on — seed a vendor override (only when a runtime needs a divergent render):
 mm wiki skill override <name> --vendor claude --editor  # writes overrides/claude.md (+ .bak under --force)
@@ -325,6 +329,7 @@ mm context init --include=skills --only my-skill   # import ONE named runtime ar
 mm context generate --agent all        # generate all agent files
 mm context generate --include=agents --label production # generate files using the 'production' labeled snapshot (agents/commands only)
 mm context diff                        # check sync status
+mm context rescan --scope project_shared  # read-only privacy scan of canonical artifacts in one explicit tier
 mm context status                      # installed wiki assets + their drift state (read-only)
 mm context status --all-projects       # aggregated drift across enrolled on-disk projects (read-only; same data as GET /api/context/status-all)
 mm context sync                        # sync context.md → agent files (project_shared default)
@@ -335,6 +340,7 @@ mm context sync --include=agents,commands --label production # sync using the 'p
 mm context sync --all-projects --yes   # batch over every enrolled on-disk project (project_shared only, ADR-0025)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
+mm context update skill <name> --force-head  # deliberately follow older/divergent Wiki HEAD; use --force separately for local edits
 
 # Context Versioning (ADR-0022)
 mm context version create agents my-agent --note "stable"          # snapshot the current working canonical as a new immutable version

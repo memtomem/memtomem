@@ -2,7 +2,7 @@
 
 > 🚧 **Alpha** — APIs, defaults, and on-disk config surfaces may still change between `0.x` releases. Feedback and issue reports are especially welcome at [github.com/memtomem/memtomem/issues](https://github.com/memtomem/memtomem/issues).
 
-Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + semantic search across your notes, docs, and code via the Model Context Protocol.
+Markdown-first long-term memory infrastructure for AI agents. Core usage is hook-free by default: your files remain the source of truth, and memory changes happen only when you or your agent explicitly call memtomem. Optional client hooks are separate, visible integrations.
 
 **Core philosophy**: `.md` files are the source of truth and the vector database is a derived cache. Manage memories as plain text files — memtomem makes them instantly searchable.
 
@@ -14,81 +14,35 @@ Markdown-first long-term memory infrastructure for AI agents. Hybrid keyword + s
 ## Quick Start
 
 ```bash
-# 1. Install memtomem with all features (requires Python 3.12+)
+# 1. Install memtomem with all features (Python 3.12+)
 uv tool install 'memtomem[all]'  # or: pipx install 'memtomem[all]'
-mm --version                     # verify — if stale, re-run with --refresh
+mm --version
 
-# 2. Run the setup (preset picker → memory_dir + MCP)
-mm init    # on PATH after `uv tool install` — no `uv run` needed
+# 2. Configure storage, search, and optional MCP registration
+mm init
+
+# 3. Verify a complete memory round trip
+mm status
+mm add "Deployment checklist uses blue-green rollout" --tags ops
+mm search "blue-green"
 ```
 
-`[all]` pulls in ONNX dense embeddings, Korean tokenizer, Ollama / OpenAI SDKs, code chunker, and the Web UI. Skip it (`uv tool install memtomem` bare) for a BM25-only install (~40 MB); opt in later with `uv tool install --reinstall 'memtomem[onnx,web]'` or similar.
+The search should return the sentence you just added. `mm add` writes to your configured user memory directory and indexes the entry immediately, so this path works without an existing notes directory or a connected editor.
 
-> `uv` caches PyPI metadata. If `mm --version` doesn't match the [latest release](https://github.com/memtomem/memtomem/releases) right after install, re-run with `uv tool install 'memtomem[all]' --refresh` or clear the cache: `uv cache clean memtomem`.
+Choose **Minimal** in the setup picker for a no-model-download first proof;
+rerun `mm init` later to add semantic search.
 
-> **`mm: command not found`?** `uv` installs the shim to `~/.local/bin` — add it to `$PATH` with `uv tool update-shell`, then open a new shell.
-
-The picker offers three presets and an Advanced fallback:
-
-| Preset | Embedding | Reranker | Tokenizer |
-|---|---|---|---|
-| Minimal | BM25 only (no download) | — | unicode61 |
-| English (Recommended) | ONNX `bge-small-en-v1.5` (~67 MB, 384d) | English (`ms-marco-MiniLM-L-6-v2`) | unicode61 |
-| Korean-optimized | ONNX `bge-m3` (~2.3 GB, 1024d) | Multilingual (`jina-reranker-v2`) | `kiwipiepy` |
-| Advanced | — | — | — (full 10-step wizard, all options) |
-
-Pick a preset interactively, or use `mm init --non-interactive` (minimal), `mm init --preset korean --non-interactive`, or `mm init --advanced` for scripted runs. See [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) for the full model matrix.
-
-> **Claude Code — indexing vs. discovery:** the memory folders `mm init` indexes are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Custom Commands, and Subagents — see [Configuration → Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md#context-gateway) for the opt-in behavior and lossy-slug caveats.
-
-Then in your AI editor, ask:
-
-```
-"Call the mem_status tool"   →  confirms the server is connected
-"Index my notes folder"      →  mem_index(path="~/notes")
-"Search for deployment"      →  mem_search(query="deployment checklist")
-"Remember this insight"      →  mem_add(content="...", tags=["ops"])
-```
-
-> Prefer the terminal? `mm status` is a CLI mirror of `mem_status` — same output, no editor needed. Add `--json` (or `--format json`) for machine-readable output in scripts and CI.
-
-That's it. Your agent now has a long-term memory built from plain markdown files.
-
-For full setup, OpenAI configuration, and troubleshooting, see the [Getting Started guide](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md).
-
-<details>
-<summary><b>Prefer no install? (uvx direct, MCP only)</b></summary>
-
-If you'd rather skip the CLI install, `uvx` will download and run memtomem on demand. `~/.memtomem/memories` is always indexed; for AI tool memory folders (Claude Code per-project memory, Claude plans, Codex memories), run `mm init` once and pick the surfaces you want indexed — nothing is added silently. Set `MEMTOMEM_INDEXING__MEMORY_DIRS` to add custom paths.
+To index existing files next:
 
 ```bash
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+mm index /path/to/your/notes
 ```
 
-Or add the following to your MCP client config file — the path depends on
-the editor: `~/.cursor/mcp.json` (Cursor),
-`~/.codeium/windsurf/mcp_config.json` (Windsurf),
-`~/Library/Application Support/Claude/claude_desktop_config.json`
-(Claude Desktop), `~/.gemini/antigravity-cli/mcp_config.json`
-(Antigravity CLI — entries also carry `"type": "stdio"`),
-`~/.gemini/settings.json` (Gemini CLI, deprecated 2026-06-18), or
-`~/.kimi/mcp.json` (Kimi CLI):
+If `mm init` registered an MCP client, ask it to `Call the mem_status tool`. See [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) for install alternatives and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) for manual registration.
 
-```json
-{
-  "mcpServers": {
-    "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      "env": {
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"/path/to/your/notes\"]"
-      }
-    }
-  }
-}
-```
+`[all]` includes local ONNX embeddings, the Korean tokenizer, provider SDKs, code chunking, and the Web UI. Install bare `memtomem` for BM25-only usage. If `mm` is not on PATH, run `uv tool update-shell` and open a new shell. If an install appears stale, re-run it with `--refresh`.
 
-</details>
+> memtomem is the long-term-memory store. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional MCP proxy for automatic surfacing, compression, and caching.
 
 ## Key Features
 
@@ -99,7 +53,7 @@ the editor: `~/.cursor/mcp.json` (Cursor),
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
-- **🧭 Context Gateway** — author canonical Skills, Commands, and Subagents once in a wiki-backed Store (`mm wiki …`), then sync them to your AI tools (each artifact type's supported runtimes); a Projects portal in the Web UI tracks per-project drift
+- **🧭 Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable Wiki assets, then sync them to supported runtimes
 - **⚙️ Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips cold-start
 - **🛠️ 87 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing all registered actions in `core` mode (default) for minimal context usage
 
@@ -109,12 +63,14 @@ Full documentation lives in the [memtomem GitHub repo](https://github.com/memtom
 
 | Guide | Topic |
 |-------|-------|
-| [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) | **Start here** — install, setup wizard, first use |
-| [Reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference.md) | Complete feature reference — all tools and patterns |
-| [Configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
+| [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) | **Start here** — install, configure, save and find your first memory |
+| [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) | Connect Claude Code, Cursor, Codex, and other clients |
+| [Core memory tools](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
+| [Configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md) | Supported config files, precedence, and environment variables |
 | [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI providers, model dimensions, switching models |
 | [Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/context-gateway.md) | Author and sync canonical Skills, Commands, and Subagents to each type's supported AI tools |
-| [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) | Editor-specific configuration |
+| [Operations & troubleshooting](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/operations.md) | Web UI, privacy audits, diagnostics, and recovery |
+| [Reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference.md) | Complete feature reference — all tools and patterns |
 | [memtomem-stm](https://github.com/memtomem/memtomem-stm) | Optional STM proxy for proactive memory surfacing (separate package) |
 
 ## License

@@ -7,10 +7,10 @@ on the storage layer — no ``AppContext`` required.
 The summary is deterministic and chunk-type aware. Keyword-boosted regex
 (reused from ``entity_extraction``) picks decision/action lines over a plain
 first-sentence fallback, and checklist chunks are rendered as item counts
-rather than truncated prose. See ``docs/guides/user-guide.md`` "Consolidation"
-section and ``feedback_compression_priority.md`` for the rationale: nothing
-is lost, originals kept by default, source hash embedded for idempotent
-re-runs.
+rather than truncated prose. See
+``docs/guides/reference/automation.md`` (``auto_consolidate``) and
+``feedback_compression_priority.md`` for the rationale: nothing is lost,
+originals are kept by default, and a source hash makes re-runs idempotent.
 """
 
 from __future__ import annotations
