@@ -50,7 +50,7 @@ jobs:
       - name: Validate tag, package, lock, and changelog versions
         id: contract
         run: >-
-          python3 tools/release_preflight.py contract
+          uv run --no-project --python 3.12 python tools/release_preflight.py contract
           --tag "$GITHUB_REF_NAME"
           --repo-root .
           --github-output "$GITHUB_OUTPUT"
@@ -63,7 +63,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          python3 tools/release_preflight.py wait-ci
+          uv run --no-project --python 3.12 python tools/release_preflight.py wait-ci
           --repository "$GITHUB_REPOSITORY"
           --sha "$GITHUB_SHA"
           --timeout-seconds 2400
@@ -73,7 +73,7 @@ jobs:
         run: uv build packages/memtomem --out-dir preflight-dist
       - name: Validate wheel and sdist metadata
         run: >-
-          python3 tools/release_preflight.py artifacts
+          uv run --no-project --python 3.12 python tools/release_preflight.py artifacts
           --dist preflight-dist
           --version "${{ steps.contract.outputs.version }}"
       - name: Verify isolated base, all-extras, and sdist installs
@@ -114,8 +114,10 @@ jobs:
       - name: Revalidate publish artifacts
         run: |
           set -euo pipefail
-          version=$(python3 tools/release_preflight.py contract --tag "$GITHUB_REF_NAME" --repo-root .)
-          python3 tools/release_preflight.py artifacts --dist dist --version "$version"
+          version=$(uv run --no-project --python 3.12 python tools/release_preflight.py \
+            contract --tag "$GITHUB_REF_NAME" --repo-root .)
+          uv run --no-project --python 3.12 python tools/release_preflight.py \
+            artifacts --dist dist --version "$version"
       - name: Publish to PyPI
         if: ${{ !startsWith(github.ref_name, 'test-') }}
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
