@@ -180,6 +180,9 @@ const STATE = {
         // active tab stays; surface *why* the link didn't open so the user can
         // flip to Advanced. (No dev main-tabs exist, so the advanced copy fits.)
         showToast(t('toast.advanced_only_section'), 'info');
+        activateTab(_visibleMainTabs()[0] || 'home', { historyMode: 'replace' });
+      } else {
+        activateTab(_visibleMainTabs()[0] || 'home', { historyMode: 'replace' });
       }
     }
   });
@@ -432,9 +435,11 @@ async function api(method, path, body, opts = {}) {
     // (e.g. structured 4xx that isn't redaction_blocked).
     const msg = typeof err.detail === 'string'
       ? err.detail
-      : (err.detail && typeof err.detail === 'object' && typeof err.detail.detail === 'string'
-        ? err.detail.detail
-        : res.statusText);
+      : (err.detail && typeof err.detail === 'object' && typeof err.detail.message === 'string'
+        ? err.detail.message
+        : (err.detail && typeof err.detail === 'object' && typeof err.detail.detail === 'string'
+          ? err.detail.detail
+          : res.statusText));
     // Thrown errors expose `.status` so callers can branch on HTTP code
     // (e.g. 404 → mark resource missing instead of generic toast).
     const apiErr = new Error(msg);
@@ -1495,6 +1500,7 @@ function activateTab(tabName, opts = {}) {
   //   * history mutation uses replaceState so cycling N tabs does not push
   //     N entries the user has to press Back through to escape
   const fromKeyboard = opts.fromKeyboard === true;
+  const historyMode = opts.historyMode || (fromKeyboard ? 'replace' : 'push');
   // Redirect to the first visible tab when the target is hidden by EITHER
   // visibility axis (dev-only in prod, or advanced-only in Simple mode) instead
   // of showing a panel whose tab button is off-screen. This single guard catches
@@ -1557,11 +1563,19 @@ function activateTab(tabName, opts = {}) {
   // History API — enable back button and deep linking. Arrow-nav uses
   // replaceState so a cycle through siblings produces one history entry
   // instead of N (otherwise Back becomes unusable).
-  if (location.hash !== `#${tabName}`) {
-    if (fromKeyboard) {
-      history.replaceState({ tab: tabName }, '', `#${tabName}`);
+  if (historyMode !== 'none') {
+    const targetHash = `#${tabName}`;
+    if (location.hash === targetHash) {
+      // Direct hash entry has a null history.state. Seed the existing entry
+      // so the next Back/Forward traversal can restore the panel as well as
+      // the URL.
+      if (history.state?.tab !== tabName) {
+        history.replaceState({ tab: tabName }, '', targetHash);
+      }
+    } else if (historyMode === 'replace') {
+      history.replaceState({ tab: tabName }, '', targetHash);
     } else {
-      history.pushState({ tab: tabName }, '', `#${tabName}`);
+      history.pushState({ tab: tabName }, '', targetHash);
     }
   }
 
@@ -1896,12 +1910,22 @@ qs('mobile-back-btn').addEventListener('click', () => {
 
 // ── History API: back/forward navigation + hash deep link ──
 window.addEventListener('popstate', (e) => {
-  const tab = e.state?.tab;
+  const tab = e.state?.tab || location.hash.slice(1);
   // Gate on current visibility (mirrors the boot-hash dispatch): a history
   // entry pushed while Tags/Timeline were visible must not replay
   // activateTab('timeline') after the user flipped to Simple — that would strand
   // them on a panel with no active tab button. Staying put is the safe floor.
-  if (tab && _visibleMainTabs().includes(tab)) activateTab(tab);
+  if (tab && _visibleMainTabs().includes(tab)) {
+    activateTab(tab, { historyMode: 'none' });
+  } else {
+    activateTab(_visibleMainTabs()[0] || 'home', { historyMode: 'replace' });
+  }
+});
+window.addEventListener('hashchange', () => {
+  const tab = location.hash.slice(1);
+  if (tab && _visibleMainTabs().includes(tab)) {
+    activateTab(tab, { historyMode: 'none' });
+  }
 });
 // Note: initial hash-based activateTab dispatch moved into the i18n init
 // handler above so ``t()``-backed JS widgets (Sources tab's Memory Dirs
@@ -2776,6 +2800,8 @@ function _hasSearchAxis() {
     qs('search-input').value.trim()
     || qs('tag-filter').value.trim()
     || _getSelectedSourceFilters().length
+    || qs('chunk-type-filter')?.value
+    || qs('date-range-preset')?.value
   );
 }
 
@@ -2790,7 +2816,14 @@ function _buildSearchParams(topK) {
   const ctxWin = parseInt((qs('context-window') || {}).value || '0', 10);
   if (ctxWin > 0) params.set('context_window', ctxWin);
   const selectedSources = _getSelectedSourceFilters();
-  if (selectedSources.length) params.set('source_filter', selectedSources.join(','));
+  selectedSources.forEach(source => params.append('source_exact', source));
+  const chunkType = qs('chunk-type-filter')?.value || '';
+  if (chunkType) params.append('chunk_type', chunkType);
+  const dateRange = _getDateRange();
+  if (dateRange) {
+    if (dateRange.from) params.set('created_from', new Date(dateRange.from).toISOString());
+    if (dateRange.to) params.set('created_before', new Date(dateRange.to).toISOString());
+  }
   return params;
 }
 
@@ -3241,20 +3274,9 @@ function renderResults(results, retrievalStats) {
   if (STATE.currentSortMode === 'date-desc') display.sort((a, b) => new Date(b.chunk.created_at) - new Date(a.chunk.created_at));
   else if (STATE.currentSortMode === 'date-asc') display.sort((a, b) => new Date(a.chunk.created_at) - new Date(b.chunk.created_at));
   else if (STATE.currentSortMode === 'source') display.sort((a, b) => (a.chunk.source_file || '').localeCompare(b.chunk.source_file || ''));
-  const typeFilter = (qs('chunk-type-filter') || {}).value || '';
-  const selectedSources = _getSelectedSourceFilters();
-  let filtered = typeFilter ? display.filter(r => r.chunk.chunk_type === typeFilter) : display;
-  if (selectedSources.length) filtered = filtered.filter(r => selectedSources.includes(r.chunk.source_file));
+  let filtered = display;
   if (STATE.scoreMin > 0) {
     filtered = filtered.filter(r => (_scoreViewForResult(r).percent / 100) >= STATE.scoreMin);
-  }
-  // Date range filter
-  const dateRange = _getDateRange();
-  if (dateRange) {
-    filtered = filtered.filter(r => {
-      const t = new Date(r.chunk.created_at).getTime();
-      return t >= dateRange.from && t <= dateRange.to;
-    });
   }
   const list = qs('results-list');
   const empty = qs('results-empty');
@@ -7293,6 +7315,7 @@ document.addEventListener('keydown', e => {
 qs('chunk-type-filter').addEventListener('change', () => {
   _updateFilterCountBadge();
   renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
 });
 qs('ns-filter').addEventListener('change', () => {
   _updateFilterCountBadge();
@@ -7701,7 +7724,7 @@ function _getDateRange() {
     const fromVal = qs('date-from').value;
     const toVal = qs('date-to').value;
     const from = fromVal ? new Date(fromVal).getTime() : 0;
-    const to = toVal ? new Date(toVal + 'T23:59:59').getTime() : now;
+    const to = toVal ? new Date(toVal + 'T00:00:00').getTime() + dayMs : now;
     return { from, to };
   }
   return null;
@@ -7712,14 +7735,17 @@ qs('date-range-preset').addEventListener('change', () => {
   custom.hidden = qs('date-range-preset').value !== 'custom';
   _updateFilterCountBadge();
   if (STATE.lastResults.length) renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
 });
 qs('date-from').addEventListener('change', () => {
   _updateFilterCountBadge();
   if (STATE.lastResults.length) renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
 });
 qs('date-to').addEventListener('change', () => {
   _updateFilterCountBadge();
   if (STATE.lastResults.length) renderResults(STATE.lastResults);
+  if (_hasSearchAxis()) doSearch();
 });
 
 // ---------------------------------------------------------------------------

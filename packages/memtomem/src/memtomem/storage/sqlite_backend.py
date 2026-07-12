@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import logging
@@ -17,8 +18,13 @@ from uuid import UUID
 import sqlite_vec
 
 from memtomem.config import StorageConfig
-from memtomem.errors import StorageError
-from memtomem.storage.base import ChunkAuditRow
+from memtomem.errors import (
+    EmbeddingDimensionMismatchError,
+    SchemaDowngradeError,
+    StorageError,
+    StorageStartupError,
+)
+from memtomem.storage.base import ChunkAuditRow, SearchMetadataFilter
 from memtomem.models import (
     Chunk,
     ChunkMetadata,
@@ -77,6 +83,73 @@ _REBUILD_FTS_BATCH_SIZE = 1000
 _AI_SUMMARY_KEY_PREFIX = "ai_summary:"
 
 
+def _classify_startup_error(exc: BaseException, stage: str) -> StorageStartupError:
+    sqlite_code = getattr(exc, "sqlite_errorcode", None)
+    base_code = sqlite_code & 0xFF if isinstance(sqlite_code, int) else None
+    os_errno = getattr(exc, "errno", None)
+
+    if (
+        isinstance(exc, PermissionError)
+        or os_errno in {errno.EACCES, errno.EPERM}
+        or base_code == sqlite3.SQLITE_READONLY
+    ):
+        reason = "storage_permission_denied"
+    elif base_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        reason = "storage_locked"
+    elif (
+        isinstance(exc, (FileNotFoundError, NotADirectoryError))
+        or os_errno in {errno.ENOENT, errno.ENOTDIR}
+        or base_code in {sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_IOERR}
+    ):
+        reason = "storage_path_unavailable"
+    else:
+        # Some Python/SQLite builds omit ``sqlite_errorcode``. Keep a narrow
+        # compatibility fallback without exposing the original message.
+        text = str(exc).lower()
+        if "readonly" in text or "permission denied" in text:
+            reason = "storage_permission_denied"
+        elif "database is locked" in text or "database table is locked" in text:
+            reason = "storage_locked"
+        elif "unable to open database" in text or "disk i/o" in text:
+            reason = "storage_path_unavailable"
+        else:
+            reason = "storage_unavailable"
+
+    return StorageStartupError(
+        reason_code=reason,
+        stage=stage,
+        retryable=reason == "storage_locked",
+        sqlite_code=sqlite_code if isinstance(sqlite_code, int) else None,
+    )
+
+
+def _metadata_filter_sql(
+    metadata_filter: SearchMetadataFilter | None,
+    *,
+    column_alias: str = "",
+) -> tuple[str, list[object]]:
+    if metadata_filter is None:
+        return "", []
+    conditions: list[str] = []
+    params: list[object] = []
+    if metadata_filter.source_exact:
+        values = [norm_path(Path(value)) for value in metadata_filter.source_exact]
+        conditions.append(f"{column_alias}source_file IN ({placeholders(len(values))})")
+        params.extend(values)
+    if metadata_filter.chunk_types:
+        conditions.append(
+            f"{column_alias}chunk_type IN ({placeholders(len(metadata_filter.chunk_types))})"
+        )
+        params.extend(metadata_filter.chunk_types)
+    if metadata_filter.created_from is not None:
+        conditions.append(f"{column_alias}created_at >= ?")
+        params.append(metadata_filter.created_from.isoformat())
+    if metadata_filter.created_before is not None:
+        conditions.append(f"{column_alias}created_at < ?")
+        params.append(metadata_filter.created_before.isoformat())
+    return " AND ".join(conditions), params
+
+
 def _ai_summary_key(source_file: Path) -> str:
     return f"{_AI_SUMMARY_KEY_PREFIX}{norm_path(source_file)}"
 
@@ -131,6 +204,9 @@ class SqliteBackend(
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
         self._in_transaction: bool = False
+        self._read_pool: list[sqlite3.Connection] = []
+        self._read_pool_idx = 0
+        self._read_pool_lock = threading.Lock()
         # In-process serialization for tag-management read-modify-write
         # paths (rename / delete / merge) and ``auto_tag_storage`` so they
         # can't interleave on the same chunks.tags column. Cross-process
@@ -145,15 +221,19 @@ class SqliteBackend(
 
     async def initialize(self) -> None:
         db_path = Path(self._config.sqlite_path).expanduser()
-        db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        stage = "parent"
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-        self._db = sqlite3.connect(str(db_path), timeout=10)
-        # Restrict DB file to owner-only access
-        try:
-            db_path.chmod(0o600)
-        except OSError:
-            pass  # May fail on some filesystems
-        try:
+            stage = "open"
+            self._db = sqlite3.connect(str(db_path), timeout=10)
+            # Restrict DB file to owner-only access
+            try:
+                db_path.chmod(0o600)
+            except OSError:
+                pass  # May fail on some filesystems
+
+            stage = "extension"
             self._db.enable_load_extension(True)
             sqlite_vec.load(self._db)
             self._db.enable_load_extension(False)
@@ -161,33 +241,28 @@ class SqliteBackend(
             # below mutate the DB file, and a refused open (newer DB, older
             # binary) must leave it byte-identical for the newer release.
             check_schema_downgrade(self._db)
-        except Exception:
-            self._db.close()
-            self._db = None
-            raise
 
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA wal_autocheckpoint=1000")
-        self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.execute("PRAGMA foreign_keys=ON")
+            stage = "journal"
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA wal_autocheckpoint=1000")
+            self._db.execute("PRAGMA synchronous=NORMAL")
+            self._db.execute("PRAGMA foreign_keys=ON")
 
-        # Read-only connection pool for concurrent search operations
-        self._read_pool: list[sqlite3.Connection] = []
-        self._read_pool_idx = 0
-        self._read_pool_lock = threading.Lock()
-        for _ in range(3):
-            rconn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
-            rconn.execute("PRAGMA journal_mode=WAL")
-            rconn.execute("PRAGMA query_only=ON")
-            try:
-                rconn.enable_load_extension(True)
-                sqlite_vec.load(rconn)
-                rconn.enable_load_extension(False)
-            except Exception as exc:
-                logger.warning("Failed to load sqlite-vec for read pool connection: %s", exc)
-            self._read_pool.append(rconn)
+            # Read-only connection pool for concurrent search operations
+            stage = "read_pool"
+            for _ in range(3):
+                rconn = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
+                rconn.execute("PRAGMA journal_mode=WAL")
+                rconn.execute("PRAGMA query_only=ON")
+                try:
+                    rconn.enable_load_extension(True)
+                    sqlite_vec.load(rconn)
+                    rconn.enable_load_extension(False)
+                except Exception as exc:
+                    logger.warning("Failed to load sqlite-vec for read pool connection: %s", exc)
+                self._read_pool.append(rconn)
 
-        try:
+            stage = "schema"
             self._meta = MetaManager(self._get_db)
             self._ns = NamespaceOps(self._get_db, lambda: self._has_vec_table)
 
@@ -205,9 +280,29 @@ class SqliteBackend(
                 ).fetchone()
                 is not None
             )
-        except Exception:
-            await self.close()
+        except (EmbeddingDimensionMismatchError, SchemaDowngradeError):
+            self._discard_partial_connections()
             raise
+        except BaseException as exc:
+            self._discard_partial_connections()
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise
+            raise _classify_startup_error(exc, stage) from exc
+
+    def _discard_partial_connections(self) -> None:
+        """Close a failed initialization without checkpointing/mutating the DB."""
+        for conn in self._read_pool:
+            try:
+                conn.close()
+            except Exception:
+                logger.debug("Failed to close partial read connection", exc_info=True)
+        self._read_pool.clear()
+        if self._db is not None:
+            try:
+                self._db.close()
+            except Exception:
+                logger.debug("Failed to close partial write connection", exc_info=True)
+            self._db = None
 
     def _get_db(self) -> sqlite3.Connection:
         if self._db is None:
@@ -1154,6 +1249,7 @@ class SqliteBackend(
         namespace_filter: NamespaceFilter | None = None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[SearchResult]:
         db = self._get_read_db()
         try:
@@ -1172,6 +1268,10 @@ class SqliteBackend(
             )
             scope_clause = f"AND ({scope_frag})"
             tie_break = scope_sort_priority_case("c.")
+            metadata_frag, metadata_params = _metadata_filter_sql(
+                metadata_filter, column_alias="c."
+            )
+            metadata_clause = f"AND ({metadata_frag})" if metadata_frag else ""
 
             # ADR-0011 §6 + PR-D review #2: filter must run *inside* the
             # FTS candidate selection, not after a post-LIMIT join. With
@@ -1191,19 +1291,22 @@ class SqliteBackend(
             sql = f"""SELECT c.*, fts.rank
                    FROM chunks_fts fts
                    JOIN chunks c ON c.rowid = fts.rowid
-                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause}
+                   WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause}
                    ORDER BY fts.rank, {tie_break}
                    LIMIT ?"""
 
             # Try AND first (default FTS5 behaviour)
             fts_query = _fts.tokenize_for_fts(query, for_query=True)
-            rows = db.execute(sql, [fts_query] + ns_params + scope_params + [top_k]).fetchall()
+            rows = db.execute(
+                sql, [fts_query] + ns_params + scope_params + metadata_params + [top_k]
+            ).fetchall()
 
             # Fall back to OR if AND returns nothing and query has multiple terms
             if not rows and " " in query.strip():
                 fts_query_or = _fts.tokenize_for_fts(query, for_query=True, use_or=True)
                 rows = db.execute(
-                    sql, [fts_query_or] + ns_params + scope_params + [top_k]
+                    sql,
+                    [fts_query_or] + ns_params + scope_params + metadata_params + [top_k],
                 ).fetchall()
 
         except sqlite3.OperationalError:
@@ -1226,6 +1329,7 @@ class SqliteBackend(
         namespace_filter: NamespaceFilter | None = None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[SearchResult]:
         # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
         # early instead of raising OperationalError that the search pipeline
@@ -1247,6 +1351,8 @@ class SqliteBackend(
         )
         scope_clause = f"AND ({scope_frag})"
         tie_break = scope_sort_priority_case("c.")
+        metadata_frag, metadata_params = _metadata_filter_sql(metadata_filter, column_alias="c.")
+        metadata_clause = f"AND ({metadata_frag})" if metadata_frag else ""
 
         import sqlite3 as _sqlite3
 
@@ -1275,7 +1381,7 @@ class SqliteBackend(
                    ORDER BY distance
                    LIMIT ?
                ) sub
-               JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause}
+               JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause} {metadata_clause}
                ORDER BY sub.distance, {tie_break}
                LIMIT ?"""
 
@@ -1300,7 +1406,11 @@ class SqliteBackend(
             try:
                 rows = db.execute(
                     sql,
-                    [serialize_f32(embedding), inner_k] + ns_params + scope_params + [top_k],
+                    [serialize_f32(embedding), inner_k]
+                    + ns_params
+                    + scope_params
+                    + metadata_params
+                    + [top_k],
                 ).fetchall()
             except _sqlite3.OperationalError as exc:
                 if "Dimension mismatch" in str(exc):
@@ -1549,6 +1659,7 @@ class SqliteBackend(
         tag_filter: str | None = None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[Chunk]:
         db = self._get_read_db()
         conditions: list[str] = []
@@ -1581,6 +1692,11 @@ class SqliteBackend(
                     f"WHERE json_each.value IN ({placeholders}))"
                 )
                 params.extend(tags)
+
+        metadata_frag, metadata_params = _metadata_filter_sql(metadata_filter)
+        if metadata_frag:
+            conditions.append(metadata_frag)
+            params.extend(metadata_params)
 
         # ADR-0011 §6: always-on scope-context fragment.
         scope_frag, scope_params = scope_context_sql(scope_filter, project_context_root)

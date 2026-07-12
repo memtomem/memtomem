@@ -195,6 +195,8 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         redoc_url=None,
     )
     app.state.web_mode = mode
+    app.state.startup_state = "not_started"
+    app.state.startup_reason_code = None
 
     # Per-process CSRF token (RFC #787). Generated fresh on every
     # ``create_app`` so token rotation is just a restart; never persisted.
@@ -332,97 +334,127 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     from memtomem.indexing.watcher import FileWatcher
     from memtomem.server.component_factory import close_components, create_components
+    from memtomem.web import hot_reload
 
-    comp = await create_components()
-
-    from memtomem.search.dedup import DedupScanner
-    from memtomem.context.scope_resolver import find_project_root
-
-    # Walk up to the project root (.git / pyproject.toml) so launching
-    # ``mm web`` from a subdirectory resolves the same canonical .memtomem tree
-    # the CLI/MCP write to — not ``<subdir>/.memtomem``. Single shared helper.
-    app.state.project_root = find_project_root()
-    app.state.config = comp.config
-    app.state.storage = comp.storage
-    app.state.embedder = comp.embedder
-    app.state.search_pipeline = comp.search_pipeline
-    app.state.index_engine = comp.index_engine
-    app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
-    # Per-source AI summary regeneration job state (singleton, in-memory).
-    # ``None`` when no job has run; otherwise a counter dict mutated by the
-    # background task and read by ``GET /api/sources/regenerate-status``.
-    app.state.summary_regen = None
-    # Shared LLM provider (or ``None``) — exposed for the bulk-regenerate
-    # endpoint, which mirrors the indexing engine's per-source flow.
-    app.state.llm = comp.llm
-
-    # Sync config to match DB-stored embedding info (prevents mismatch banner).
-    # Skipped when the server entered degraded mode (issue #349) — in the
-    # dim=0 / real-provider case the stored "embedding" is NoopEmbedder
-    # (provider=none, dim=0), so an auto-sync would silently downgrade the
-    # user's configured onnx/bge-m3 to BM25-only and swallow the broken
-    # state instead of surfacing it. The banner + ``/api/embedding-reset``
-    # flow recovers explicitly; soft-syncing would defeat it.
-    stored_info = getattr(comp.storage, "stored_embedding_info", None)
-    if stored_info and comp.embedding_broken is None:
-        cfg = comp.config.embedding
-        if cfg.model != stored_info["model"] or cfg.dimension != stored_info["dimension"]:
-            logger.info(
-                "Syncing config to DB embedding: %s/%s (%dd)",
-                stored_info["provider"],
-                stored_info["model"],
-                stored_info["dimension"],
-            )
-            cfg.model = stored_info["model"]
-            cfg.dimension = stored_info["dimension"]
-            if stored_info.get("provider"):
-                cfg.provider = stored_info["provider"]
-            # Clear mismatch flags since config now matches DB
-            comp.storage.clear_embedding_mismatch()
-
-    # Ensure memory_dirs exist
-    for d in comp.config.indexing.memory_dirs:
-        Path(d).expanduser().resolve().mkdir(parents=True, exist_ok=True)
-
-    # P2 cron Phase A footgun: ``mm web`` does not run the schedule
-    # dispatcher (HealthWatchdog is wired only in the MCP server lifespan,
-    # see server/context.py). Mirror the warning emitted there so users who
-    # register schedules against a web-only entry get a loud signal at
-    # startup instead of silently null ``last_run_status``.
-    if comp.config.scheduler.enabled:
-        logger.warning(
-            "scheduler.enabled=true but ``mm web`` does not dispatch schedules — "
-            "run ``memtomem-server`` (MCP) for the watchdog tick that fires registered jobs"
-        )
-    if comp.config.policy.enabled:
-        logger.warning(
-            "policy.enabled=true but ``mm web`` does not run the policy scheduler — "
-            "run ``memtomem-server`` (MCP) for the lifespan that starts PolicyScheduler"
-        )
-
-    # File watcher: monitors memory_dirs for fs-event-driven re-indexing
-    # and runs a one-shot startup backfill so files added while ``mm web``
-    # was down (or before the dir was registered) get indexed without the
-    # user clicking Reindex. Skipped in degraded mode (broken embedding) —
-    # the indexer would crash on the missing chunks_vec table; recovery
-    # via ``mem_embedding_reset``. Mirrors the wiring in
-    # ``server/context.py``; without this ``mm web`` ran with no fs
-    # watcher at all.
+    comp = None
     watcher: FileWatcher | None = None
-    if comp.embedding_broken is None:
-        watcher = FileWatcher(comp.index_engine, comp.config.indexing)
-        await watcher.start()
-        app.state.file_watcher = watcher
+    published = False
+    failed = False
+    app.state.startup_state = "starting"
+    app.state.startup_reason_code = None
 
     try:
+        comp = await create_components()
+
+        from memtomem.context.scope_resolver import find_project_root
+        from memtomem.search.dedup import DedupScanner
+
+        project_root = find_project_root()
+
+        # Sync config to match DB-stored embedding info (prevents mismatch banner).
+        # Skipped when the server entered degraded mode (issue #349) — in the
+        # dim=0 / real-provider case the stored "embedding" is NoopEmbedder
+        # (provider=none, dim=0), so an auto-sync would silently downgrade the
+        # user's configured onnx/bge-m3 to BM25-only and swallow the broken
+        # state instead of surfacing it. The banner + ``/api/embedding-reset``
+        # flow recovers explicitly; soft-syncing would defeat it.
+        stored_info = getattr(comp.storage, "stored_embedding_info", None)
+        if stored_info and comp.embedding_broken is None:
+            cfg = comp.config.embedding
+            if cfg.model != stored_info["model"] or cfg.dimension != stored_info["dimension"]:
+                logger.info(
+                    "Syncing config to DB embedding: %s/%s (%dd)",
+                    stored_info["provider"],
+                    stored_info["model"],
+                    stored_info["dimension"],
+                )
+                cfg.model = stored_info["model"]
+                cfg.dimension = stored_info["dimension"]
+                if stored_info.get("provider"):
+                    cfg.provider = stored_info["provider"]
+                comp.storage.clear_embedding_mismatch()
+
+        # Ensure memory_dirs exist
+        for d in comp.config.indexing.memory_dirs:
+            Path(d).expanduser().resolve().mkdir(parents=True, exist_ok=True)
+
+        # P2 cron Phase A footgun: ``mm web`` does not run the schedule
+        # dispatcher (HealthWatchdog is wired only in the MCP server lifespan,
+        # see server/context.py). Mirror the warning emitted there so users who
+        # register schedules against a web-only entry get a loud signal at
+        # startup instead of silently null ``last_run_status``.
+        if comp.config.scheduler.enabled:
+            logger.warning(
+                "scheduler.enabled=true but ``mm web`` does not dispatch schedules — "
+                "run ``memtomem-server`` (MCP) for the watchdog tick that fires registered jobs"
+            )
+        if comp.config.policy.enabled:
+            logger.warning(
+                "policy.enabled=true but ``mm web`` does not run the policy scheduler — "
+                "run ``memtomem-server`` (MCP) for the lifespan that starts PolicyScheduler"
+            )
+
+        # File watcher: monitors memory_dirs for fs-event-driven re-indexing
+        # and runs a one-shot startup backfill so files added while ``mm web``
+        # was down (or before the dir was registered) get indexed without the
+        # user clicking Reindex. Skipped in degraded mode (broken embedding) —
+        # the indexer would crash on the missing chunks_vec table; recovery
+        # via ``mem_embedding_reset``. Mirrors the wiring in
+        # ``server/context.py``; without this ``mm web`` ran with no fs
+        # watcher at all.
+        if comp.embedding_broken is None:
+            watcher = FileWatcher(comp.index_engine, comp.config.indexing)
+            await watcher.start()
+
+        # Publish one coherent state only after every startup step succeeded.
+        app.state.project_root = project_root
+        app.state.config = comp.config
+        app.state.storage = comp.storage
+        app.state.embedder = comp.embedder
+        app.state.search_pipeline = comp.search_pipeline
+        app.state.index_engine = comp.index_engine
+        app.state.dedup_scanner = DedupScanner(comp.storage, comp.embedder)
+        app.state.summary_regen = None
+        app.state.llm = comp.llm
+        if watcher is not None:
+            app.state.file_watcher = watcher
+        hot_reload.initialize_reload_state(app)
+        published = True
+        app.state.startup_state = "ready"
         yield
+    except BaseException as exc:
+        failed = True
+        app.state.startup_state = "failed"
+        app.state.startup_reason_code = getattr(exc, "reason_code", "startup_unavailable")
+        raise
     finally:
         if watcher is not None:
             try:
                 await watcher.stop()
-            except Exception as exc:
+            except BaseException as exc:
                 logger.warning("file watcher stop failed: %s", exc)
-        await close_components(comp)
+        if comp is not None:
+            await close_components(comp)
+        if published:
+            for name in (
+                "project_root",
+                "config",
+                "storage",
+                "embedder",
+                "search_pipeline",
+                "index_engine",
+                "dedup_scanner",
+                "summary_regen",
+                "llm",
+                "file_watcher",
+                "config_signature",
+                "last_reload_error",
+            ):
+                if hasattr(app.state, name):
+                    delattr(app.state, name)
+        if not failed:
+            app.state.startup_state = "not_started"
+            app.state.startup_reason_code = None
 
 
 _app_singleton: FastAPI | None = None

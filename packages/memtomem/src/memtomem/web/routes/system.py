@@ -42,6 +42,7 @@ from memtomem.web.deps import (
     get_config,
     get_embedder,
     get_index_engine,
+    get_project_root,
     get_search_pipeline,
     get_storage,
     require_configured,
@@ -187,6 +188,20 @@ async def health_liveness() -> dict[str, Any]:
     return {"status": "ok", "checks": {"process": "ok"}}
 
 
+@router.get("/readiness")
+async def readiness(request: Request) -> JSONResponse:
+    state = getattr(request.app.state, "startup_state", "not_started")
+    ready = state == "ready"
+    content: dict[str, Any] = {"ready": ready, "state": state}
+    if not ready:
+        content["reason_code"] = "startup_unavailable"
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content=content,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.post("/health", response_model=None)
 async def health_active(
     storage: Any = Depends(get_storage),
@@ -302,7 +317,12 @@ def _build_config_response(
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config_endpoint(request: Request) -> ConfigResponse:
+async def get_config_endpoint(
+    request: Request,
+    config=Depends(get_config),
+    storage=Depends(get_storage),
+    search_pipeline=Depends(get_search_pipeline),
+) -> ConfigResponse:
     # Read-through reload is opportunistic and lock-free: if a write is in
     # flight, the writer will serve the fresh view on its own return. This
     # keeps the common GET path cheap while still catching CLI-side edits.
@@ -310,13 +330,13 @@ async def get_config_endpoint(request: Request) -> ConfigResponse:
     try:
         await _hot_reload.reload_if_stale(
             app,
-            storage=getattr(app.state, "storage", None),
-            search_pipeline=getattr(app.state, "search_pipeline", None),
+            storage=storage,
+            search_pipeline=search_pipeline,
         )
     except Exception:
         logger.warning("reload_if_stale raised unexpectedly during GET /config", exc_info=True)
 
-    cfg = app.state.config
+    cfg = app.state.config if getattr(app.state, "config", None) is not None else config
     err = _hot_reload.get_reload_error(app)
     return _build_config_response(
         cfg,
@@ -738,11 +758,23 @@ async def add_memory_dir(
     except TimeoutError:
         raise HTTPException(503, "memory-dirs/add timed out — another update may be in progress")
 
+    watcher = getattr(request.app.state, "file_watcher", None)
+    if watcher is not None:
+        try:
+            await watcher.reconfigure(config.indexing)
+        except Exception as exc:
+            logger.error("Failed to activate memory directory watcher", exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="Directory was registered, but watcher activation failed. Retry or restart mm web.",
+            ) from exc
+
     # Index outside the config lock so a slow scan doesn't block other
     # config writers (the watcher invariant — path inside ``memory_dirs``
     # — is already satisfied by the register block above, so
     # ``index_path`` will pass its own validation).
     indexed: dict[str, object] | None = None
+    index_status = "not_requested"
     if auto_index:
         try:
             stats = await index_engine.index_path(
@@ -760,8 +792,18 @@ async def add_memory_dir(
                 "blocked_paths": list(stats.blocked_paths),
                 "blocked_project_shared_files": stats.blocked_project_shared_files,
             }
-        except Exception as err:  # pragma: no cover — surface partial result
-            indexed = {"error": str(err)}
+            has_issues = bool(stats.errors or stats.blocked_files)
+            has_processed_chunks = (stats.indexed_chunks + stats.skipped_chunks) > 0
+            if not has_issues:
+                index_status = "success"
+            elif has_processed_chunks:
+                index_status = "partial"
+            else:
+                index_status = "failed"
+        except Exception:  # pragma: no cover — surface partial result
+            logger.exception("Initial indexing failed for newly registered memory directory")
+            indexed = {"error": "Initial indexing failed"}
+            index_status = "failed"
 
     return {
         "ok": True,
@@ -769,6 +811,7 @@ async def add_memory_dir(
         "memory_dirs": memory_dirs_snapshot,
         "kind": kind,
         "indexed": indexed,
+        "index_status": index_status,
     }
 
 
@@ -848,6 +891,10 @@ async def remove_memory_dir(
                         source_path = row[0]
                         if norm_path(source_path).startswith(prefix):
                             deleted_chunks += await storage.delete_by_source(source_path)
+
+                watcher = getattr(request.app.state, "file_watcher", None)
+                if watcher is not None:
+                    await watcher.reconfigure(config.indexing)
 
                 return {
                     "ok": True,
@@ -1136,6 +1183,7 @@ async def get_model_readiness(
     request: Request,
     embedder=Depends(get_embedder),
     config=Depends(get_config),
+    pipeline=Depends(get_search_pipeline),
 ) -> ModelReadinessResponse:
     """Snapshot the load state of the embedder + reranker (issue #696).
 
@@ -1157,7 +1205,6 @@ async def get_model_readiness(
     # always exists (lifespan creates it), but ``_reranker`` is None when
     # ``config.rerank.enabled is False`` — skip the readiness check then.
     rerank_cfg = config.rerank
-    pipeline = getattr(request.app.state, "search_pipeline", None)
     reranker_holder = getattr(pipeline, "_reranker", None) if pipeline else None
     reranker_component = _component_for(
         provider=rerank_cfg.provider,
@@ -1637,6 +1684,7 @@ async def add_memory(
     index_engine=Depends(get_index_engine),
     storage=Depends(get_storage),
     config=Depends(get_config),
+    server_project_root=Depends(get_project_root),
 ) -> AddMemoryResponse:
     from datetime import datetime, timezone
 
@@ -1763,7 +1811,7 @@ async def add_memory(
         pmdirs = config.indexing.project_memory_dirs
         project_root = _resolve_project_context_from_dirs(pmdirs)
         if project_root is None:
-            project_root = Path(request.app.state.project_root)
+            project_root = Path(server_project_root)
         try:
             base = resolve_memory_scope_dir(req.scope, project_root, user_base=user_base)
         except MemoryScopeError as exc:

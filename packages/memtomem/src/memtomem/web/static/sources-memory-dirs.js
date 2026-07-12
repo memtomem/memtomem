@@ -135,19 +135,7 @@ function _buildMemoryDirsPanel(initialDirs) {
       if (resp && Array.isArray(resp.memory_dirs)) {
         refreshDirs(resp.memory_dirs);
       }
-      const stats = resp && resp.indexed;
-      if (stats && typeof stats.indexed_chunks === 'number') {
-        showToast(
-          t('toast.memory_dir.added_indexed', {
-            path: trimmed,
-            chunks: stats.indexed_chunks,
-            files: stats.total_files,
-          }),
-          'success',
-        );
-      } else {
-        showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
-      }
+      _showMemoryDirAddOutcome(resp, trimmed);
     } catch (err) {
       showToast(t('toast.memory_dir.add_failed', { error: _apiErrorText(err) }), 'error');
     }
@@ -994,6 +982,48 @@ function _mdApiErrorText(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
+function _showMemoryDirAddOutcome(resp, path) {
+  const stats = resp && resp.indexed;
+  const status = resp && resp.index_status;
+  if (status === 'failed') {
+    showToast(
+      t('toast.memory_dir.added_index_failed', { path }),
+      'error',
+      { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } },
+    );
+    return;
+  }
+  if (status === 'partial') {
+    showToast(
+      t('toast.memory_dir.added_index_partial', {
+        path,
+        chunks: stats?.indexed_chunks || 0,
+        files: stats?.total_files || 0,
+      }),
+      'warning',
+      { action: { label: t('common.retry'), onClick: () => mdReindexOne(path, null) } },
+    );
+    return;
+  }
+  if (status === 'not_requested') {
+    showToast(t('toast.memory_dir.added', { path }), 'info');
+    return;
+  }
+  if (stats && typeof stats.indexed_chunks === 'number') {
+    showToast(
+      t('toast.memory_dir.added_indexed', {
+        path,
+        chunks: stats.indexed_chunks,
+        files: stats.total_files,
+      }),
+      'success',
+    );
+    return;
+  }
+  // Backward-compatible fallback for an older server without index_status.
+  showToast(t('toast.memory_dir.added', { path }), 'success');
+}
+
 async function mdAdd(path, opts = {}) {
   const trimmed = (path || '').trim();
   if (!trimmed) return;
@@ -1011,18 +1041,7 @@ async function mdAdd(path, opts = {}) {
       STATE.memoryDirs = [...resp.memory_dirs];
     }
     const stats = resp && resp.indexed;
-    if (stats && typeof stats.indexed_chunks === 'number') {
-      showToast(
-        t('toast.memory_dir.added_indexed', {
-          path: trimmed,
-          chunks: stats.indexed_chunks,
-          files: stats.total_files,
-        }),
-        'success',
-      );
-    } else {
-      showToast(t('toast.memory_dir.added', { path: trimmed }), 'success');
-    }
+    _showMemoryDirAddOutcome(resp, trimmed);
     // ADR-0006 PR-B: surface files the redaction gate skipped during
     // auto-index (silent before PR-B — the dir registered, some files dropped).
     if (stats && typeof _blockedIndexToast === 'function') {

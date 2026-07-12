@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import inspect
 import logging
 
 from memtomem.chunking.base import Chunker
@@ -25,6 +26,21 @@ if TYPE_CHECKING:
     from memtomem.llm.base import LLMProvider
 
 _log = logging.getLogger(__name__)
+
+
+async def _close_resource(resource: object | None, label: str) -> None:
+    """Best-effort close used by both startup rollback and normal shutdown."""
+    if resource is None:
+        return
+    close = getattr(resource, "close", None)
+    if not callable(close):
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except BaseException:
+        _log.warning("Failed to close %s", label, exc_info=True)
 
 
 @dataclass
@@ -61,6 +77,9 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
     storage = create_storage(config)
     embedder: EmbeddingProvider | None = None
     embedding_broken: dict | None = None
+    reranker: object | None = None
+    llm: LLMProvider | None = None
+    search_pipeline: SearchPipeline | None = None
     try:
         embedder = create_embedder(config.embedding)
         await storage.initialize()
@@ -104,91 +123,94 @@ async def create_components(config: Mem2MemConfig | None = None) -> Components:
         raise
     assert embedder is not None
 
-    # Build chunker registry with optional code chunkers
-    chunkers: list[Chunker] = [
-        MarkdownChunker(indexing_config=config.indexing),
-        StructuredChunker(indexing_config=config.indexing),
-        ReStructuredTextChunker(),
-    ]
     try:
-        from memtomem.chunking.python_code import PythonChunker
+        # Build chunker registry with optional code chunkers
+        chunkers: list[Chunker] = [
+            MarkdownChunker(indexing_config=config.indexing),
+            StructuredChunker(indexing_config=config.indexing),
+            ReStructuredTextChunker(),
+        ]
+        try:
+            from memtomem.chunking.python_code import PythonChunker
 
-        chunkers.append(PythonChunker())
-    except Exception:
-        _log.warning(
-            "PythonChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
-            exc_info=True,
+            chunkers.append(PythonChunker())
+        except Exception:
+            _log.warning(
+                "PythonChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
+                exc_info=True,
+            )
+        try:
+            from memtomem.chunking.javascript import JavaScriptChunker
+
+            chunkers.append(JavaScriptChunker())
+        except Exception:
+            _log.warning(
+                "JavaScriptChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
+                exc_info=True,
+            )
+        registry = ChunkerRegistry(chunkers)
+
+        if config.rerank.enabled:
+            from memtomem.search.reranker.factory import create_reranker
+
+            reranker = create_reranker(config.rerank)
+
+        # One shared LLM client serves indexing and search.
+        if config.llm.enabled:
+            from memtomem.llm.factory import create_llm
+
+            llm = create_llm(config.llm)
+
+        index_engine = IndexEngine(
+            storage=storage,
+            embedder=embedder,
+            config=config.indexing,
+            registry=registry,
+            namespace_config=config.namespace,
+            progress_threshold=config.embedding.progress_threshold,
+            llm=llm,
         )
-    try:
-        from memtomem.chunking.javascript import JavaScriptChunker
 
-        chunkers.append(JavaScriptChunker())
-    except Exception:
-        _log.warning(
-            "JavaScriptChunker unavailable — install memtomem[all] to enable tree-sitter code chunking",
-            exc_info=True,
+        search_pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=config.search,
+            decay_config=config.decay,
+            mmr_config=config.mmr,
+            access_config=config.access,
+            reranker=reranker,
+            rerank_config=config.rerank,
+            expansion_config=config.query_expansion,
+            importance_config=config.importance,
+            context_window_config=config.context_window,
+            llm_provider=llm,
+            session_summary_config=config.session_summary,
         )
-    registry = ChunkerRegistry(chunkers)
 
-    # Create optional reranker
-    reranker = None
-    if config.rerank.enabled:
-        from memtomem.search.reranker.factory import create_reranker
-
-        reranker = create_reranker(config.rerank)
-
-    # Create optional LLM provider once and share it with both the index
-    # engine (per-source AI summary) and the search pipeline. Created
-    # before ``IndexEngine`` so the engine can hold the same instance —
-    # one shared client keeps connection-pool / rate-limit behaviour
-    # consistent across the two consumers.
-    llm: LLMProvider | None = None
-    if config.llm.enabled:
-        from memtomem.llm.factory import create_llm
-
-        llm = create_llm(config.llm)
-
-    index_engine = IndexEngine(
-        storage=storage,
-        embedder=embedder,
-        config=config.indexing,
-        registry=registry,
-        namespace_config=config.namespace,
-        progress_threshold=config.embedding.progress_threshold,
-        llm=llm,
-    )
-
-    search_pipeline = SearchPipeline(
-        storage=storage,
-        embedder=embedder,
-        config=config.search,
-        decay_config=config.decay,
-        mmr_config=config.mmr,
-        access_config=config.access,
-        reranker=reranker,
-        rerank_config=config.rerank,
-        expansion_config=config.query_expansion,
-        importance_config=config.importance,
-        context_window_config=config.context_window,
-        llm_provider=llm,
-        session_summary_config=config.session_summary,
-    )
-
-    return Components(
-        config=config,
-        storage=storage,
-        embedder=embedder,
-        index_engine=index_engine,
-        search_pipeline=search_pipeline,
-        llm=llm,
-        embedding_broken=embedding_broken,
-    )
+        return Components(
+            config=config,
+            storage=storage,
+            embedder=embedder,
+            index_engine=index_engine,
+            search_pipeline=search_pipeline,
+            llm=llm,
+            embedding_broken=embedding_broken,
+        )
+    except BaseException:
+        # Once SearchPipeline exists it owns the reranker. Before that point
+        # the factory owns and closes a standalone reranker itself.
+        await _close_resource(search_pipeline, "search pipeline")
+        if search_pipeline is None:
+            await _close_resource(reranker, "reranker")
+        await _close_resource(llm, "LLM provider")
+        await _close_resource(embedder, "embedder")
+        await _close_resource(storage, "storage")
+        raise
 
 
 async def close_components(comp: Components) -> None:
-    """Shut down components in reverse order."""
-    if comp.llm is not None:
-        await comp.llm.close()
-    await comp.search_pipeline.close()
-    await comp.embedder.close()
-    await comp.storage.close()
+    """Shut down every component even when an earlier close fails."""
+    await _close_resource(comp.search_pipeline, "search pipeline")
+    await _close_resource(comp.llm, "LLM provider")
+    await _close_resource(comp.embedder, "embedder")
+    await _close_resource(comp.storage, "storage")

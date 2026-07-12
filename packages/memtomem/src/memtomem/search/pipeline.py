@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -58,6 +59,8 @@ from memtomem.config import (
 )
 from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
+from memtomem.storage.base import SearchMetadataFilter
+from memtomem.storage.sqlite_helpers import norm_path
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +172,27 @@ def match_source_filter_glob(filter_str: str, source_path: str) -> bool:
     return fnmatch(source_path.replace("\\", "/"), filter_str.replace("\\", "/"))
 
 
+def _matches_metadata(result: SearchResult, metadata_filter: SearchMetadataFilter | None) -> bool:
+    if metadata_filter is None:
+        return True
+    chunk = result.chunk
+    if metadata_filter.source_exact:
+        allowed = {norm_path(Path(value)) for value in metadata_filter.source_exact}
+        if norm_path(chunk.metadata.source_file) not in allowed:
+            return False
+    if metadata_filter.chunk_types:
+        if str(chunk.metadata.chunk_type) not in set(metadata_filter.chunk_types):
+            return False
+    if metadata_filter.created_from is not None and chunk.created_at < metadata_filter.created_from:
+        return False
+    if (
+        metadata_filter.created_before is not None
+        and chunk.created_at >= metadata_filter.created_before
+    ):
+        return False
+    return True
+
+
 def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list[SearchResult]:
     """Drop chunks whose temporal-validity window excludes ``as_of_unix``.
 
@@ -276,6 +300,7 @@ class SearchPipeline:
         context_window: int | None = None,
         scope: str | list[str] | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> str:
         import hashlib
 
@@ -299,6 +324,7 @@ class SearchPipeline:
             f"|ctx_win={ctx_win}"
             f"|rerank={rerank_signal}"
             f"|scope={scope_signal}"
+            f"|metadata={metadata_filter}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -406,6 +432,7 @@ class SearchPipeline:
         use_dense: bool,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
 
@@ -426,6 +453,9 @@ class SearchPipeline:
         # Cast a slightly wider net so source filtering still leaves a
         # useful candidate pool. Bounded by existing candidate caps.
         oversample = max(top_k, self._config.bm25_candidates)
+        metadata_kwargs = (
+            {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
+        )
 
         async def _bm25_leg() -> list[SearchResult]:
             if not use_bm25:
@@ -437,6 +467,7 @@ class SearchPipeline:
                     namespace_filter=None,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
+                    **metadata_kwargs,
                 )
             except Exception:
                 _log_rescue_failure("bm25_leg", "rescue bm25 leg failed")
@@ -453,6 +484,7 @@ class SearchPipeline:
                     namespace_filter=None,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
+                    **metadata_kwargs,
                 )
             except Exception:
                 _log_rescue_failure("dense_leg", "rescue dense leg failed")
@@ -530,6 +562,7 @@ class SearchPipeline:
         as_of_unix: int | None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         """Empty-query path (#750): enumerate by filter, skip retrievers.
 
@@ -564,14 +597,25 @@ class SearchPipeline:
         # workflow; revisit if a "show me old-but-important by tag" need
         # surfaces.
         candidate_limit = max(top_k * 5, 100)
-        chunks = await self._storage.recall_chunks(
-            source_filter=source_filter,
-            tag_filter=tag_filter,
-            namespace_filter=ns_filter,
-            scope_filter=scope_filter,
-            project_context_root=project_context_root,
-            limit=candidate_limit,
-        )
+        if metadata_filter is not None:
+            chunks = await self._storage.recall_chunks(
+                source_filter=source_filter,
+                tag_filter=tag_filter,
+                namespace_filter=ns_filter,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
+                limit=candidate_limit,
+                metadata_filter=metadata_filter,
+            )
+        else:
+            chunks = await self._storage.recall_chunks(
+                source_filter=source_filter,
+                tag_filter=tag_filter,
+                namespace_filter=ns_filter,
+                scope_filter=scope_filter,
+                project_context_root=project_context_root,
+                limit=candidate_limit,
+            )
 
         fused: list[SearchResult] = [
             SearchResult(chunk=c, score=1.0, rank=i + 1, source="recall")
@@ -644,6 +688,10 @@ class SearchPipeline:
         as_of_unix: int | None = None,
         scope: str | list[str] | None = None,
         project_context_root: Path | None = None,
+        source_exact: list[str] | tuple[str, ...] | None = None,
+        chunk_types: list[str] | tuple[str, ...] | None = None,
+        created_from: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # #750: tag/source-only branch — no keyword to rank by, so the
         # filter takes over as the primary selector. We enumerate via
@@ -652,9 +700,25 @@ class SearchPipeline:
         # importance, ctx-window) still apply so ranking reflects
         # recency × access × importance.
         scope_filter = ScopeFilter.parse(scope)
+        metadata_candidate = SearchMetadataFilter(
+            source_exact=tuple(sorted(set(source_exact or ()))),
+            chunk_types=tuple(sorted(set(chunk_types or ()))),
+            created_from=created_from,
+            created_before=created_before,
+        )
+        metadata_filter: SearchMetadataFilter | None = metadata_candidate
+        if not any(
+            (
+                metadata_candidate.source_exact,
+                metadata_candidate.chunk_types,
+                metadata_candidate.created_from,
+                metadata_candidate.created_before,
+            )
+        ):
+            metadata_filter = None
         query = (query or "").strip()
         if not query:
-            if not (tag_filter or source_filter):
+            if not (tag_filter or source_filter or metadata_filter):
                 return [], RetrievalStats()
             return await self._filter_only_search(
                 top_k=top_k,
@@ -665,6 +729,7 @@ class SearchPipeline:
                 as_of_unix=as_of_unix,
                 scope_filter=scope_filter,
                 project_context_root=project_context_root,
+                metadata_filter=metadata_filter,
             )
 
         top_k = self._config.default_top_k if top_k is None else top_k
@@ -688,6 +753,7 @@ class SearchPipeline:
             context_window,
             scope=scope,
             project_context_root=project_context_root,
+            metadata_filter=metadata_filter,
         )
         version_at_start = self._cache_version
         ttl_snapshot = self._cache_ttl
@@ -718,6 +784,9 @@ class SearchPipeline:
 
         use_bm25 = self._config.enable_bm25
         use_dense = self._config.enable_dense
+        metadata_kwargs = (
+            {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
+        )
 
         # Stage 0: Query expansion
         if self._expansion_config and getattr(self._expansion_config, "enabled", False):
@@ -777,6 +846,7 @@ class SearchPipeline:
                     namespace_filter=ns_filter,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
+                    **metadata_kwargs,
                 )
             )
         dense_error: str | None = None
@@ -789,6 +859,7 @@ class SearchPipeline:
                     namespace_filter=ns_filter,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
+                    **metadata_kwargs,
                 )
             except Exception as exc:
                 logger.warning("Dense search unavailable: %s", exc)
@@ -844,6 +915,7 @@ class SearchPipeline:
                         use_dense=use_dense,
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
+                        metadata_filter=metadata_filter,
                     )
                     rescue_chunk_ids = {r.chunk.id for r in rescue_results}
             except Exception:
@@ -944,6 +1016,9 @@ class SearchPipeline:
             required = {t.strip() for t in tag_filter.split(",") if t.strip()}
             fused = [r for r in fused if required & set(r.chunk.metadata.tags)]
 
+        if metadata_filter is not None:
+            fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
+
         # Stage β': temporal-validity filter (RFC §Pipeline integration).
         # AND-combined with source/tag filter via sequential application —
         # a chunk must pass both to survive. Default ``as_of`` is the
@@ -1004,6 +1079,8 @@ class SearchPipeline:
         ctx_win = self._resolve_context_window(context_window)
         if ctx_win > 0 and fused:
             fused = await self._expand_context(fused, ctx_win)
+            if metadata_filter is not None:
+                fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
 
         # Re-stamp ``via_session_summary`` for any chunk that came in
         # via the rescue leg. Downstream stages (decay, MMR, access,

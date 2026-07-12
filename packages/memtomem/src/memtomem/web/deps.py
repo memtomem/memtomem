@@ -26,32 +26,45 @@ if TYPE_CHECKING:
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 
+_STARTUP_UNAVAILABLE = {
+    "reason_code": "startup_unavailable",
+    "message": "Web backend startup is unavailable.",
+}
+
+
+def _require_app_state(request: Request, name: str):
+    try:
+        return getattr(request.app.state, name)
+    except AttributeError as exc:
+        raise HTTPException(status_code=503, detail=_STARTUP_UNAVAILABLE) from exc
+
+
 def get_storage(request: Request) -> SqliteBackend:
-    return request.app.state.storage
+    return _require_app_state(request, "storage")
 
 
 def get_search_pipeline(request: Request) -> SearchPipeline:
-    return request.app.state.search_pipeline
+    return _require_app_state(request, "search_pipeline")
 
 
 def get_index_engine(request: Request) -> IndexEngine:
-    return request.app.state.index_engine
+    return _require_app_state(request, "index_engine")
 
 
 def get_embedder(request: Request) -> EmbeddingProvider:
-    return request.app.state.embedder
+    return _require_app_state(request, "embedder")
 
 
 def get_config(request: Request) -> Mem2MemConfig:
-    return request.app.state.config
+    return _require_app_state(request, "config")
 
 
 def get_dedup_scanner(request: Request):
-    return request.app.state.dedup_scanner
+    return _require_app_state(request, "dedup_scanner")
 
 
 def get_project_root(request: Request) -> Path:
-    return request.app.state.project_root
+    return _require_app_state(request, "project_root")
 
 
 def get_hooks_target_scope(request: Request) -> str:
@@ -62,7 +75,7 @@ def get_hooks_target_scope(request: Request) -> str:
     automatically pick up scope changes without a server restart
     (mirrors :func:`get_config`).
     """
-    return request.app.state.config.hooks.target_scope
+    return get_config(request).hooks.target_scope
 
 
 def require_configured() -> None:

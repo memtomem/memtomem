@@ -2,13 +2,16 @@
 
 import dataclasses
 import unicodedata
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from helpers import make_chunk as _make_chunk
-from memtomem.models import Chunk, ChunkMetadata
+from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.storage.base import SearchMetadataFilter
+from memtomem.storage.sqlite_backend import _classify_startup_error
 from memtomem.storage.sqlite_helpers import norm_path
 
 
@@ -33,6 +36,57 @@ class TestChunkCRUD:
     async def test_get_nonexistent(self, storage):
         result = await storage.get_chunk(uuid4())
         assert result is None
+
+
+class TestSearchMetadataFilters:
+    @pytest.mark.asyncio
+    async def test_bm25_applies_exact_source_type_and_date_before_limit(self, storage):
+        now = datetime.now(UTC)
+        excluded = _make_chunk("shared marker", source="outside,comma.md")
+        included = _make_chunk("shared marker", source="inside.md")
+        excluded.metadata = dataclasses.replace(excluded.metadata, chunk_type=ChunkType.RAW_TEXT)
+        included.metadata = dataclasses.replace(
+            included.metadata, chunk_type=ChunkType.MARKDOWN_SECTION
+        )
+        excluded.created_at = now - timedelta(days=30)
+        included.created_at = now
+        await storage.upsert_chunks([excluded, included])
+
+        results = await storage.bm25_search(
+            "shared",
+            top_k=1,
+            metadata_filter=SearchMetadataFilter(
+                source_exact=(str(included.metadata.source_file),),
+                chunk_types=(ChunkType.MARKDOWN_SECTION.value,),
+                created_from=now - timedelta(days=1),
+                created_before=now + timedelta(days=1),
+            ),
+        )
+
+        assert [result.chunk.id for result in results] == [included.id]
+
+
+class TestStorageStartupClassification:
+    @pytest.mark.parametrize(
+        ("error", "stage", "reason", "retryable"),
+        [
+            (PermissionError("denied"), "parent", "storage_permission_denied", False),
+            (RuntimeError("database is locked"), "journal", "storage_locked", True),
+            (
+                RuntimeError("unable to open database file"),
+                "open",
+                "storage_path_unavailable",
+                False,
+            ),
+            (RuntimeError("boom"), "schema", "storage_unavailable", False),
+        ],
+    )
+    def test_classifies_without_leaking_original_detail(self, error, stage, reason, retryable):
+        classified = _classify_startup_error(error, stage)
+        assert classified.reason_code == reason
+        assert classified.stage == stage
+        assert classified.retryable is retryable
+        assert "boom" not in str(classified)
 
 
 class TestChunkUniqueness:

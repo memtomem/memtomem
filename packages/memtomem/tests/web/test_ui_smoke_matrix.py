@@ -112,7 +112,7 @@ def _api_payload(url: str, mode: str) -> dict[str, object]:
     if path == "/api/system/model-readiness":
         return {"ready": True}
     if path == "/api/session":
-        return {"csrf_token": "smoke-token"}
+        return {"csrf": "smoke-token", "mode": mode}
     if path == "/api/config":
         return {
             "embedding": {"provider": "none", "model": "none", "dimension": 0},
@@ -547,3 +547,26 @@ def test_direct_hash_entry_populates_header_stats(page, route: str) -> None:
         captured_errors = page.evaluate("() => window.__smokeErrors || []")
 
     assert captured_errors == []
+
+
+def test_hash_history_back_forward_keeps_url_tab_and_panel_in_sync(page) -> None:
+    page.set_viewport_size({"width": 1440, "height": 900})
+    _install_error_capture(page)
+    _install_smoke_stubs(page, "prod")
+
+    with _web_server("prod") as base_url:
+        page.goto(f"{base_url}/#search", wait_until="domcontentloaded")
+        page.wait_for_selector('.tab-btn[data-tab="search"].active')
+        page.click('.tab-btn[data-tab="sources"]')
+        page.wait_for_selector('.tab-btn[data-tab="sources"].active')
+
+        page.go_back()
+        page.wait_for_selector('.tab-btn[data-tab="search"].active')
+        assert page.url.endswith("#search")
+        assert page.locator("#tab-search").is_visible()
+        assert page.locator("#search-input").bounding_box()["height"] > 0
+
+        page.go_forward()
+        page.wait_for_selector('.tab-btn[data-tab="sources"].active')
+        assert page.url.endswith("#sources")
+        assert page.locator("#tab-sources").is_visible()

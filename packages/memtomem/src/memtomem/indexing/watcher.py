@@ -13,7 +13,7 @@ from watchdog.observers import Observer
 from memtomem.config import IndexingConfig
 
 if TYPE_CHECKING:
-    from watchdog.observers.api import BaseObserver
+    from watchdog.observers.api import BaseObserver, ObservedWatch
 
     from memtomem.indexing.engine import IndexEngine
 
@@ -123,10 +123,14 @@ class FileWatcher:
         self._queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_WATCHER_QUEUE_MAXSIZE)
         self._task: asyncio.Task[None] | None = None
         self._backfill_task: asyncio.Task[None] | None = None
+        self._handler: _MarkdownEventHandler | None = None
+        self._watches: dict[Path, ObservedWatch] = {}
+        self._reconfigure_lock = asyncio.Lock()
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
         handler = _MarkdownEventHandler(self._queue, loop, self._config.supported_extensions)
+        self._handler = handler
         self._observer = Observer()
 
         watched: list[Path] = []
@@ -137,7 +141,8 @@ class FileWatcher:
         for watch_dir in self._config.all_index_roots():
             expanded = Path(watch_dir).expanduser().resolve()
             if expanded.exists():
-                self._observer.schedule(handler, str(expanded), recursive=True)
+                watch = self._observer.schedule(handler, str(expanded), recursive=True)
+                self._watches[expanded] = watch
                 logger.info("Watching %s for changes", expanded)
                 watched.append(expanded)
 
@@ -145,6 +150,41 @@ class FileWatcher:
         self._task = asyncio.create_task(self._process_events())
         if watched and self._config.startup_backfill:
             self._backfill_task = asyncio.create_task(self._backfill_existing(watched))
+
+    async def reconfigure(self, config: IndexingConfig) -> None:
+        """Reconcile live watchdog roots after a successful config change."""
+        async with self._reconfigure_lock:
+            observer = self._observer
+            handler = self._handler
+            if observer is None or handler is None:
+                self._config = config
+                return
+
+            desired = {
+                Path(path).expanduser().resolve()
+                for path in config.all_index_roots()
+                if Path(path).expanduser().resolve().exists()
+            }
+            current = set(self._watches)
+            added: list[Path] = []
+            try:
+                for path in sorted(desired - current):
+                    watch = observer.schedule(handler, str(path), recursive=True)
+                    self._watches[path] = watch
+                    added.append(path)
+                for path in sorted(current - desired):
+                    observer.unschedule(self._watches.pop(path))
+            except Exception:
+                for path in added:
+                    rollback_watch = self._watches.pop(path, None)
+                    if rollback_watch is not None:
+                        try:
+                            observer.unschedule(rollback_watch)
+                        except Exception:
+                            logger.debug("Failed to rollback watcher schedule", exc_info=True)
+                raise
+            handler._supported = config.supported_extensions
+            self._config = config
 
     async def stop(self) -> None:
         if self._backfill_task is not None and not self._backfill_task.done():
@@ -174,6 +214,11 @@ class FileWatcher:
         if self._observer:
             self._observer.stop()
             self._observer.join()
+        self._observer = None
+        self._handler = None
+        self._watches.clear()
+        self._task = None
+        self._backfill_task = None
 
     async def _backfill_existing(self, dirs: list[Path]) -> None:
         """Index pre-existing files the observer can't see.
