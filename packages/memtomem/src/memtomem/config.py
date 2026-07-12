@@ -1392,10 +1392,11 @@ def _dedup_key(item: object) -> object:
 def load_config_d(config: Mem2MemConfig, *, quiet: bool = False) -> None:
     """Apply fragments from ``~/.memtomem/config.d/*.json`` (if dir exists).
 
-    Intended for integration-installed fragments (``mm init <client>`` drops
-    one file, ``mm uninstall <client>`` removes it). Each fragment is a
-    partial ``Mem2MemConfig`` JSON. Fragments are applied in lexicographic
-    filename order. For each field:
+    Intended for administrator-managed or external integration fragments that
+    need a reversible layer. ``mm init`` itself writes ``config.json`` and
+    does not create client fragments. Each fragment is a partial
+    ``Mem2MemConfig`` JSON. Fragments are applied in lexicographic filename
+    order. For each field:
 
     - If ``MEMTOMEM_<SECTION>__<FIELD>`` env var is set → skip (env wins).
     - If scalar → last fragment wins.

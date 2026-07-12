@@ -129,6 +129,9 @@ docs, and the bind-time banner to keep the misconfiguration probability low.
 - **No unsafe deserialization**: No pickle, no unsafe YAML loading
 - **No command injection**: No subprocess/eval/exec with user input
 - **Path validation**: CLI uses `Path.relative_to()` for directory containment checks
+- **Pre-write privacy guard**: Managed memory, import, fetch, upload, session-summary, and Context Gateway write paths scan content before persistence. Git-tracked `project_shared` writes cannot bypass a finding.
+- **Restricted persistence**: Managed files use owner-only directories/files and atomic promotion. Web uploads are streamed into an owner-only disk quarantine, capped by file count and per-file/aggregate byte limits, and promoted only after the full batch passes multipart, filename/type, UTF-8, and privacy adjudication; accepted files are then indexed.
+- **Historical audits**: `mm mem rescan --scope <tier>`, `mm mem rescan-files`, and `mm context rescan --scope <tier>` are read-only checks that exit `1` on findings. See [Operations → Privacy audits](docs/guides/reference/operations.md#privacy-audits).
 
 ## Best Practices
 

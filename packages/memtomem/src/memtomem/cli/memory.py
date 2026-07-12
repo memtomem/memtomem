@@ -72,7 +72,10 @@ def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | No
 @click.option("--title", "-t", default=None, help="Entry title")
 @click.option("--tags", default=None, help="Comma-separated tags")
 @click.option(
-    "--file", "file_name", default=None, help="Target file (relative to ~/.memtomem/memories/)"
+    "--file",
+    "file_name",
+    default=None,
+    help="Target file relative to the selected scope's memory directory.",
 )
 @click.option(
     "--force-unsafe",

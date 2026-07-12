@@ -1,6 +1,6 @@
 # memtomem
 
-> Markdown-first long-term memory for AI coding agents — your data, your quota, no hooks.
+> Markdown-first long-term memory for AI coding agents — your files stay yours, and core usage is hook-free by default.
 
 [![PyPI](https://img.shields.io/pypi/v/memtomem)](https://pypi.org/project/memtomem/)
 [![Downloads](https://img.shields.io/pypi/dm/memtomem)](https://pypi.org/project/memtomem/)
@@ -36,7 +36,7 @@ flowchart LR
 | Keyword search misses related content | Hybrid search: exact keywords + meaning-based similarity |
 | Notes scattered across tools | One searchable index for markdown, JSON, YAML, Python, JS/TS |
 | Vendor lock-in | Your `.md` files are the source of truth. The DB is a rebuildable cache |
-| Hook-based capture chains can recurse | Captures fire only on explicit MCP tool calls — no auto-fire on every prompt or session-end |
+| Hidden automation is hard to reason about | Core memory operations run only when you call them; optional client hooks are explicit, removable integrations |
 
 ---
 
@@ -63,6 +63,9 @@ mm init                               # preset picker, then memory_dir + MCP
 
 The interactive picker starts with three presets — **Minimal** (BM25, no downloads), **English (Recommended)** (ONNX `bge-small-en-v1.5` + English reranker + auto-discover providers), **Korean-optimized** (ONNX `bge-m3` + `kiwipiepy` tokenizer + multilingual reranker) — plus an **Advanced** entry that opens the full 10-step wizard. Preset paths only ask about the memory directory and MCP registration; everything else is set from the preset.
 
+Choose **Minimal** for the fastest no-download first proof; rerun `mm init`
+later when you are ready to add semantic search.
+
 > **Indexing vs. discovery (Claude Code):** provider memory folders that setup auto-discovers (e.g. `~/.claude/projects/*/memory/`) are added to the search *index*. That is separate from the Web UI's opt-in Context Gateway scan of `~/.claude/projects/`, which discovers project *roots* for Skills, Custom Commands, and Subagents — see [Configuration → Context Gateway](docs/guides/configuration.md#context-gateway) for the distinction and the lossy-slug caveats.
 
 For automation / CI:
@@ -75,18 +78,35 @@ mm init --advanced                          # force the full 10-step wizard
 
 See [Embeddings](docs/guides/embeddings.md) for the full model/provider matrix.
 
-### 3. Use
+<a id="3-use"></a>
+### 3. Verify a complete memory round trip
 
+The first success path does not require an existing notes directory or a connected editor:
+
+```bash
+mm status
+mm add "Deployment checklist uses blue-green rollout" --tags ops
+mm search "blue-green"
 ```
-"Call the mem_status tool"   →  confirms the server is connected
-"Index my notes folder"      →  mem_index(path="~/notes")
-"Search for deployment"      →  mem_search(query="deployment checklist")
-"Remember this insight"      →  mem_add(content="...", tags=["ops"])
+
+`mm add` writes to your configured user memory directory and indexes the entry immediately. The final command should return the sentence you just added.
+
+Then verify the editor connection:
+
+```text
+"Call the mem_status tool"
 ```
 
-> Prefer the terminal? `mm status` is a CLI mirror of `mem_status` — same output, no editor needed. Add `--json` (or `--format json`) for machine-readable output in scripts and CI.
+To bring existing notes into the same index, point `mm index` at a directory that already exists:
 
-### 4. Web UI (optional)
+```bash
+mm index /path/to/your/notes
+```
+
+`mm status --json` (or `--format json`) provides the same status as machine-readable output for scripts and CI.
+
+<a id="4-web-ui-optional"></a>
+### 4. Open the Web UI (optional)
 
 ```bash
 mm web                # polished dashboard on http://127.0.0.1:8080
@@ -134,9 +154,9 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 - **Namespaces** — organize memories into scoped groups with auto-derivation from folder names; review and label them (colour, description) from Settings → Namespaces in the Web UI
 - **Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
 - **Web UI** — visual dashboard for search, sources, tags, timeline, dedup, and more (`mm web --dev` for the full maintainer surface)
-- **Context Gateway** — author canonical Skills, Commands, and Subagents once in a wiki-backed Store, then sync them to your AI tools (each artifact type's supported runtimes); a Projects portal in the Web UI tracks per-project drift. See [Context Gateway](docs/guides/context-gateway.md).
+- **Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable assets from a separate Wiki, then sync them to supported AI runtimes. See [Context Gateway](docs/guides/context-gateway.md).
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
-- **Predictable surface** — memory operations fire only on explicit MCP tool calls (`mem_add`, `mem_index`, etc.), not from background hooks attached to every prompt or session-end. Less magic, fewer surprises.
+- **Predictable core** — memory operations run on explicit CLI/MCP calls (`mm add`, `mem_add`, `mem_index`, etc.). Optional client hooks are installed and removed separately rather than being a hidden runtime default.
 - **Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips the cold-start cost
 - **Scheduled jobs** — `mm schedule add/list/run-now/delete` (or `mem_do(action="schedule_*")`) for cron-driven compaction, importance decay, dead-link cleanup, and dedup scans
 
@@ -157,15 +177,17 @@ Hosted at **[memtomem.com](https://memtomem.com)** — also available as Markdow
 
 | Guide | Description |
 |-------|-------------|
-| [Getting Started](docs/guides/getting-started.md) | Install, setup wizard, first use |
+| [Getting Started](docs/guides/getting-started.md) | Install, configure, save and find your first memory |
 | [Example notebooks](examples/notebooks/) | Runnable Python-API walkthrough (start with `01_hello_memory.ipynb`, local ONNX — no server) |
 | [MCP Client Setup](docs/guides/mcp-clients.md) | Editor-specific configuration |
-| [Configuration](docs/guides/configuration.md) | All `MEMTOMEM_*` environment variables |
+| [Core memory tools](docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
+| [Configuration](docs/guides/configuration.md) | Supported config files, precedence, and `MEMTOMEM_*` variables |
 | [Embeddings](docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI embedding providers |
 | [LLM Providers](docs/guides/llm-providers.md) | Ollama, OpenAI, Anthropic, and compatible endpoints |
 | [Context Gateway](docs/guides/context-gateway.md) | Share Skills, Commands, and Subagents across your AI tools from one Store |
 | [Multi-device sync](docs/guides/multi-device-sync.md) | Sync markdown memories across personal devices via a private git repo |
-| [Reference](docs/guides/reference.md) | Complete feature reference for all tools and patterns |
+| [Operations & troubleshooting](docs/guides/reference/operations.md) | Web UI, privacy audits, diagnostics, and recovery |
+| [Reference](docs/guides/reference.md) | Complete tool and workflow reference |
 | [Uninstalling memtomem](docs/guides/uninstall.md) | Clean removal steps |
 
 ---

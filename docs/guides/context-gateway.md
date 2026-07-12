@@ -20,6 +20,7 @@ environment variables; it does not re-document those here.
 **On this page**
 
 - [Prerequisites](#prerequisites)
+- [First success — put one skill under Store control](#first-success--put-one-skill-under-store-control)
 - [The model — Store, Runtimes, Sync, Import](#the-model--store-runtimes-sync-import)
 - [Where copies live — the "Stored in" tiers](#where-copies-live--the-stored-in-tiers)
 - [The wiki — a separate global library, not the Store](#the-wiki--a-separate-global-library-not-the-store)
@@ -42,6 +43,55 @@ uv tool install --reinstall 'memtomem[web]'   # or 'memtomem[all]'
 
 A search-only minimal install (without the `web` extra) has the CLI but no
 `mm web`. Either path operates on the same Store, so you can mix them.
+
+Run project-scoped commands from the project they should manage:
+
+```bash
+cd /path/to/your/project
+```
+
+The directory must have a project marker such as `.git/` or `pyproject.toml`.
+
+## First success — put one skill under Store control
+
+Choose the path that matches where the skill exists today.
+
+### Import a skill that already exists in an AI runtime
+
+For a skill named `reviewer` already present in Claude, Codex, Kimi, or another
+supported runtime:
+
+```bash
+mm context detect --include=skills
+mm context init --include=skills --only reviewer \
+  --scope project_shared --confirm-project-shared
+mm context diff --include=skills --scope project_shared
+mm context sync --include=skills --scope project_shared
+```
+
+`init --only` imports exactly one runtime artifact into the git-tracked
+project Store. Review and commit `.memtomem/skills/reviewer/` after the privacy
+gate passes. From then on, edit the Store copy and use `sync`; do not keep
+editing generated runtime copies.
+
+### Create a reusable skill from an empty state
+
+The CLI authoring path uses the optional global Wiki as an upstream library,
+then installs a committed snapshot into this project's Store:
+
+```bash
+mm wiki init
+mm wiki skill new reviewer --editor
+mm wiki skill lint reviewer
+mm wiki skill commit reviewer --canonical
+mm context install skill reviewer
+mm context diff --include=skills --scope project_shared
+mm context sync --include=skills --scope project_shared
+```
+
+Success means the final `diff` no longer reports missing or out-of-sync
+runtime copies. The Wiki is not a Store tier and never syncs directly to
+runtimes; `context install` is the explicit Wiki → project Store step.
 
 ## The model — Store, Runtimes, Sync, Import
 
@@ -122,9 +172,11 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
   pin, update refuses rather than moving the pin **backward** (a silent
   downgrade) — the same drift `mm context status` reports as `stale-pin`;
   `--force` does not bypass this either (it overrides project-side edits, not
-  wiki history). Add `--dry-run` to print the would-update / unchanged /
-  refuse / stale-pin preview without writing anything (also works with
-  `--all`, where it prints the batch table and skips the confirm prompt; a
+  wiki history). Use `--force-head` only when you deliberately want to follow
+  the rollback; a backward move over project-side edits needs both
+  `--force-head` and `--force`. Add `--dry-run` to print the would-update /
+  unchanged / refuse / stale-pin preview without writing anything. This also
+  works with `--all`, where it prints the batch table and skips the confirm prompt; a
   stale-pin row there is skipped per-project while forward siblings still
   update).
 
@@ -154,6 +206,20 @@ file, then record it with `mm wiki <type> commit <name>` — while the asset has
 no vendor overrides, the commit defaults to the canonical, so no flags are
 needed; in scripts, keep the explicit `mm wiki <type> commit <name>
 --canonical` form.
+
+Three recovery/round-trip commands cover states that ordinary install/update
+deliberately refuse:
+
+- **Project Store → Wiki:** `mm wiki <type> promote <name>` imports an
+  untracked `project_shared` canonical into an absent Wiki asset, privacy
+  scans and lints it, and records one isolated Wiki commit. The project copy
+  remains unchanged.
+- **Existing Store bytes → lockfile:** `mm context adopt <type> <name>` records
+  provenance only when the untracked Store bytes exactly match the asset at
+  Wiki HEAD. It never modifies the destination and has no `--force` option.
+- **Deliberate Wiki rollback:** `mm context update <type> <name> --force-head`
+  follows an older or divergent Wiki HEAD after the normal forward-only check
+  refuses.
 
 In the Web UI the wiki panel is **read-only** (browse + Install); authoring
 canonical or vendor-override files is done with the `mm wiki …` CLI (or the

@@ -1507,10 +1507,12 @@ async def upload_files(
 ) -> UploadResponse:
     """Upload one or more files, save to ~/.memtomem/uploads/, and index them.
 
-    Each file's text content passes through the trust-boundary redaction
-    guard before being written to disk. A flagged file is rejected
-    (``error="redaction_blocked"``) and **not** persisted; ``force_unsafe=True``
-    (query param) bypasses for the whole batch with audit logging.
+    Multipart parts first stream into an owner-only temporary disk quarantine.
+    Each file's text content then passes through the trust-boundary redaction
+    guard before durable promotion into ``uploads/``. A flagged file is
+    rejected (``error="redaction_blocked"``) and only the quarantine copy
+    exists until context cleanup; ``force_unsafe=True`` (query param) bypasses
+    for the whole batch with audit logging.
     """
     from memtomem import privacy
     from memtomem.web.upload_quarantine import (

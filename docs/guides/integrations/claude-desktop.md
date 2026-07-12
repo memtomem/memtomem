@@ -35,12 +35,7 @@ Edit the `~/Library/Application Support/Claude/claude_desktop_config.json` file:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      
-      "env": {
-        "MEMTOMEM_STORAGE__SQLITE_PATH": "~/.memtomem/memtomem.db",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/notes\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -55,12 +50,7 @@ Edit the `%APPDATA%\Claude\claude_desktop_config.json` file:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      
-      "env": {
-        "MEMTOMEM_STORAGE__SQLITE_PATH": "%USERPROFILE%\\.memtomem\\memtomem.db",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"%USERPROFILE%\\\\notes\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -69,6 +59,9 @@ Edit the `%APPDATA%\Claude\claude_desktop_config.json` file:
 Restart Claude Desktop after configuring.
 
 > **If you already have `mcpServers`**: Simply add the `"memtomem"` key to the existing object.
+>
+> The server reads `~/.memtomem/config.json`. Add an `env` block only when
+> this client should intentionally override saved settings.
 
 ---
 

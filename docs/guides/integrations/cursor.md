@@ -33,12 +33,7 @@ Create or edit the `~/.cursor/mcp.json` file:
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
-      
-      "env": {
-        "MEMTOMEM_STORAGE__SQLITE_PATH": "~/.memtomem/memtomem.db",
-        "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/notes\"]"
-      }
+      "args": ["--from", "memtomem", "memtomem-server"]
     }
   }
 }
@@ -47,6 +42,10 @@ Create or edit the `~/.cursor/mcp.json` file:
 Restart Cursor after configuring.
 
 > **If you already have `mcpServers`**: Simply add the `"memtomem"` key to the existing object.
+>
+> The server reads `~/.memtomem/config.json`. Use an `env` block only for an
+> intentional client-specific override; environment variables take highest
+> precedence.
 
 ---
 

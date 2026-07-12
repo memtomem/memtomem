@@ -1,6 +1,11 @@
 # Configuration Reference
 
-memtomem reads configuration from environment variables. All variables use the `MEMTOMEM_` prefix, with nested sections separated by `__` (double underscore). Unprefixed names are never read, with one documented exception: the Langfuse SDK credentials described in [Session Trace](#session-trace).
+memtomem resolves supported user settings from built-in defaults,
+`config.d/` fragments, `config.json`, and environment variables. Environment
+variables use the `MEMTOMEM_` prefix with nested sections separated by `__`
+(double underscore). Unprefixed names are never read, with one documented
+exception: the Langfuse SDK credentials described in
+[Session Trace](#session-trace).
 
 ```bash
 # Example: switch from Ollama to OpenAI
@@ -50,10 +55,10 @@ of increasing priority:
 
 1. **Built-in defaults** — the values in `config.py`.
 2. **`~/.memtomem/config.d/*.json`** — drop-in fragments, applied in
-   lexicographic filename order. Intended for integration installers
-   (`mm init <client>` drops one fragment; removing the file reverses
-   the change). For `list[*]` fields, each fragment respects a per-field
-   merge strategy (see below).
+   lexicographic filename order. Intended for administrators and external
+   integration installers that need reversible layered settings. `mm init`
+   does not create client fragments; it writes `config.json`. For `list[*]`
+   fields, each fragment respects a per-field merge strategy (see below).
 3. **`~/.memtomem/config.json`** — the user-managed override layer that
    `mm init` writes to. Every key here replaces whatever earlier layers
    produced for that field (REPLACE semantics across the board).
@@ -474,6 +479,10 @@ True) that silently appended provider home directories on every startup.
 That flag is now **deprecated** and serves only as a one-shot migration
 trigger:
 
+The corresponding compatibility environment variable is
+`MEMTOMEM_INDEXING__AUTO_DISCOVER`. Do not add it to new configurations; use
+`mm init --include-provider ...` or explicit `memory_dirs` instead.
+
 - If your existing `~/.memtomem/config.json` carries `auto_discover: true`
   (or omits it, in which case it defaults True), the next CLI/server
   startup converts the canonical provider memory dirs that exist on your
@@ -596,6 +605,7 @@ The composite score (0–1) maps to a boost of `[1.0, max_boost]`. Runs as Stage
 |----------|---------|-------------|
 | `MEMTOMEM_NAMESPACE__DEFAULT_NAMESPACE` | `default` | Default namespace for new chunks |
 | `MEMTOMEM_NAMESPACE__ENABLE_AUTO_NS` | `false` | Auto-derive namespace from folder name |
+| `MEMTOMEM_NAMESPACE__RULES` | `[]` | Ordered path rules as a JSON array of objects, e.g. `[{"path_glob":"~/notes/**","namespace":"notes"}]` |
 
 `enable_auto_ns=true` uses the file's **immediate parent folder name** as
 the namespace, except for files sitting directly in a `memory_dirs` root
