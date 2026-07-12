@@ -138,3 +138,8 @@ def test_manual_backfill_workflow_is_restricted_to_main() -> None:
     workflow = (_ROOT / ".github/workflows/release-sbom.yml").read_text(encoding="utf-8")
     assert '"$GITHUB_EVENT_NAME" == "workflow_dispatch"' in workflow
     assert '"$GITHUB_REF" != "refs/heads/main"' in workflow
+
+
+def test_release_upload_names_repository_without_root_checkout() -> None:
+    workflow = (_ROOT / ".github/workflows/release-sbom.yml").read_text(encoding="utf-8")
+    assert "GH_REPO: ${{ github.repository }}" in workflow
