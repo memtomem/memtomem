@@ -5,6 +5,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-07-12
+
+### Security
+
+- **Web uploads are quarantined on disk before adjudication or promotion** (#1722, #1725). The upload route now invokes an explicit multipart parser capped at 32 files and zero text fields, streams every part into an owner-only temporary quarantine, and enforces per-file and aggregate byte limits while copying. Only a fully quarantined batch proceeds to UTF-8 decoding and the privacy guard; accepted files are atomically hard-linked into the upload directory without overwriting concurrent same-name uploads. Parser spools and quarantine artifacts are cleaned on limits, malformed input, decode or privacy rejection, indexing failure, cancellation, and unexpected errors.
+
+- **Release supply-chain checks are now blocking and reproducible** (#1718, #1719). Release preflight validates tag, package, lock, changelog, dependency floors, and built artifacts; production releases publish separate CycloneDX core and all-extras SBOMs. CI enforces OSV exception schema and expiry, full-SHA GitHub Actions pins, plugin mapping consistency, Bandit findings, and dependency scans before release.
+
+### Fixed
+
+- **Historical managed-file rescans fail closed** (#1721). Unreadable files and scan failures are reported as violations instead of allowing a privacy audit to appear successful.
+
+- **SBOM uploads resolve the repository explicitly** (#1723), so release assets are attached correctly when workflow context does not provide an implicit repository.
+
+### Changed
+
+- **Windows tests are split into deterministic shards** (#1724), including both pytest discovery patterns (`test_*.py` and `*_test.py`) so suffix-style tests cannot be silently omitted.
+
+- **Claude plugin 0.2.2 maps to the verified core 0.3.6 release** (#1720). The plugin pin remains on the already-published core until the 0.3.7 production provenance is independently verified.
+
 ## [0.3.6] — 2026-07-12
 
 ### Security
