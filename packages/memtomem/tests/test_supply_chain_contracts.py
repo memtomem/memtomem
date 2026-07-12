@@ -114,10 +114,10 @@ def test_plugin_manifest_marketplace_and_core_pin_match_reviewed_mapping() -> No
 def test_plugin_mapping_guard_rejects_drift(drift: str) -> None:
     manifest, marketplace, mcp = map(copy.deepcopy, _plugin_documents())
     if drift == "marketplace":
-        marketplace["plugins"][0]["version"] = "0.2.2"
+        marketplace["plugins"][0]["version"] = "0.0.0"
     elif drift == "mcp":
         mcp["mcpServers"]["memtomem"]["args"][1] = "memtomem>=0.3.5"
     else:
-        manifest["version"] = "0.2.2"
+        manifest["version"] = "0.0.0"
     with pytest.raises(AssertionError):
         _validate_plugin_documents(manifest, marketplace, mcp)
