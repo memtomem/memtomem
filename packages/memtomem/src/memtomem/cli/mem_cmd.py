@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import stat
 from pathlib import Path
+from collections.abc import Iterator
 from typing import cast, get_args
 
 import click
@@ -36,6 +38,18 @@ from memtomem.memory_scope import resolve_memory_scope_dir
 
 
 _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
+
+
+def _iter_audit_files_fail_closed(root: Path) -> Iterator[Path]:
+    """Yield regular non-symlink files and propagate every walk/stat error."""
+    for entry in sorted(root.iterdir()):
+        entry_stat = entry.lstat()
+        if stat.S_ISLNK(entry_stat.st_mode):
+            continue
+        if stat.S_ISDIR(entry_stat.st_mode):
+            yield from _iter_audit_files_fail_closed(entry)
+        elif stat.S_ISREG(entry_stat.st_mode):
+            yield entry
 
 
 @click.group("mem")
@@ -327,13 +341,42 @@ def rescan_files_cmd(as_json: bool) -> None:
     errors: list[dict[str, str]] = []
     seen: set[Path] = set()
     for root_raw in cfg.indexing.all_index_roots():
-        root = Path(root_raw).expanduser().resolve()
+        root_candidate = Path(root_raw).expanduser()
+        try:
+            root = root_candidate.resolve()
+        except OSError:
+            errors.append({"path": str(root_candidate), "error": "root_resolution_failed"})
+            continue
         for managed in ("_imported", "_fetched", "sessions"):
             base = root / managed
-            if not base.is_dir():
+            try:
+                base_stat = base.lstat()
+            except FileNotFoundError:
                 continue
-            for path in sorted(p for p in base.rglob("*") if p.is_file() and not p.is_symlink()):
-                resolved = path.resolve()
+            except OSError:
+                errors.append({"path": str(base), "error": "enumeration_failed"})
+                continue
+            if stat.S_ISLNK(base_stat.st_mode):
+                errors.append({"path": str(base), "error": "base_symlink"})
+                continue
+            if not stat.S_ISDIR(base_stat.st_mode):
+                continue
+            try:
+                base_resolved = base.resolve(strict=True)
+                paths = list(_iter_audit_files_fail_closed(base))
+            except OSError as exc:
+                bad_path = Path(exc.filename) if exc.filename else base
+                errors.append({"path": str(bad_path), "error": "enumeration_failed"})
+                continue
+            for path in paths:
+                try:
+                    resolved = path.resolve(strict=True)
+                except OSError:
+                    errors.append({"path": str(path), "error": "read_failed"})
+                    continue
+                if not resolved.is_relative_to(base_resolved):
+                    errors.append({"path": str(path), "error": "containment_failed"})
+                    continue
                 if resolved in seen:
                     continue
                 seen.add(resolved)

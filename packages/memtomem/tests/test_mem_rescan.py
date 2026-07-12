@@ -141,14 +141,18 @@ class TestRescanRegistration:
 
 
 class TestRescanFiles:
-    def test_historical_files_are_scanned_read_only(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
+    @staticmethod
+    def _configure(monkeypatch: pytest.MonkeyPatch, roots: list[Path]) -> None:
         cfg = Mem2MemConfig()
-        cfg.indexing.memory_dirs = [tmp_path]
+        cfg.indexing.memory_dirs = roots
         monkeypatch.setattr("memtomem.config.Mem2MemConfig", lambda: cfg)
         monkeypatch.setattr("memtomem.config.load_config_d", lambda *a, **k: None)
         monkeypatch.setattr("memtomem.config.load_config_overrides", lambda *a, **k: None)
+
+    def test_historical_files_are_scanned_read_only(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._configure(monkeypatch, [tmp_path])
         safe = tmp_path / "_fetched" / "safe.md"
         blocked = tmp_path / "sessions" / "2026-07" / "blocked.md"
         safe.parent.mkdir(parents=True)
@@ -164,6 +168,106 @@ class TestRescanFiles:
         assert payload["scanned"] == 2
         assert payload["violations"][0]["path"] == str(blocked)
         assert blocked.read_bytes() == before
+        assert _SECRET_CONTENT not in result.output
+
+    def test_all_managed_roots_are_scanned_once_when_root_repeats(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._configure(monkeypatch, [tmp_path, tmp_path])
+        files = []
+        for managed in ("_imported", "_fetched", "sessions"):
+            path = tmp_path / managed / f"{managed}.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(_SAFE_CONTENT)
+            files.append(path)
+        before = {path: path.read_bytes() for path in files}
+
+        result = runner.invoke(cli, ["mem", "rescan-files", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"errors": [], "scanned": 3, "violations": []}
+        assert {path: path.read_bytes() for path in files} == before
+
+    def test_enumeration_error_is_reported_fail_closed(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._configure(monkeypatch, [tmp_path])
+        base = tmp_path / "_fetched"
+        base.mkdir()
+
+        def fail_walk(root: Path):
+            raise OSError(13, "denied", str(root / "unreadable"))
+
+        monkeypatch.setattr("memtomem.cli.mem_cmd._iter_audit_files_fail_closed", fail_walk)
+        result = runner.invoke(cli, ["mem", "rescan-files", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["scanned"] == 0
+        assert payload["errors"] == [
+            {"path": str(base / "unreadable"), "error": "enumeration_failed"}
+        ]
+
+    def test_read_error_is_reported_without_counting_file(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._configure(monkeypatch, [tmp_path])
+        unreadable = tmp_path / "sessions" / "unreadable.md"
+        unreadable.parent.mkdir()
+        unreadable.write_text(_SAFE_CONTENT)
+        original_read_text = Path.read_text
+
+        def fail_selected(path: Path, *args, **kwargs):
+            if path == unreadable:
+                raise OSError("simulated read failure")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_selected)
+        result = runner.invoke(cli, ["mem", "rescan-files", "--json"])
+
+        assert result.exit_code == 1
+        assert json.loads(result.output) == {
+            "errors": [{"path": str(unreadable), "error": "read_failed"}],
+            "scanned": 0,
+            "violations": [],
+        }
+
+    @pytest.mark.requires_symlinks
+    def test_managed_base_symlink_is_rejected_without_scanning_target(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        root, external = tmp_path / "root", tmp_path / "external"
+        root.mkdir()
+        external.mkdir()
+        (external / "blocked.md").write_text(_SECRET_CONTENT)
+        (root / "_imported").symlink_to(external, target_is_directory=True)
+        self._configure(monkeypatch, [root])
+
+        result = runner.invoke(cli, ["mem", "rescan-files", "--json"])
+
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["scanned"] == 0
+        assert payload["violations"] == []
+        assert payload["errors"] == [{"path": str(root / "_imported"), "error": "base_symlink"}]
+
+    @pytest.mark.requires_symlinks
+    def test_nested_symlinks_are_skipped_and_never_escape_base(
+        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        base, external = tmp_path / "_imported", tmp_path / "external"
+        base.mkdir()
+        external.mkdir()
+        (base / "safe.md").write_text(_SAFE_CONTENT)
+        (external / "blocked.md").write_text(_SECRET_CONTENT)
+        (base / "linked").symlink_to(external, target_is_directory=True)
+        (base / "linked-file.md").symlink_to(external / "blocked.md")
+        self._configure(monkeypatch, [tmp_path])
+
+        result = runner.invoke(cli, ["mem", "rescan-files", "--json"])
+
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"errors": [], "scanned": 1, "violations": []}
 
 
 class TestRescanBehaviour:
