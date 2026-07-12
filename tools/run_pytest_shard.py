@@ -10,11 +10,17 @@ from pathlib import Path
 
 
 def test_files(repo_root: Path) -> list[Path]:
-    """Return the regular pytest files covered by the cross-platform suite."""
+    """Return the regular pytest files covered by the cross-platform suite.
+
+    Matches both patterns pytest collects by default (``test_*.py`` and
+    ``*_test.py``); globbing only the first would let a suffix-style test pass
+    on Linux/macOS while being silently dropped from the Windows shards. The
+    dedicated golden-path suite runs in its own job, so it is excluded here to
+    mirror the ``--ignore`` the cross-platform ``test`` job applies.
+    """
     tests_root = repo_root / "packages" / "memtomem" / "tests"
-    return [
-        path for path in sorted(tests_root.rglob("test_*.py")) if path.name != "test_golden_path.py"
-    ]
+    matches = {*tests_root.rglob("test_*.py"), *tests_root.rglob("*_test.py")}
+    return sorted(path for path in matches if path.name != "test_golden_path.py")
 
 
 def shard_files(files: list[Path], *, index: int, count: int) -> list[Path]:

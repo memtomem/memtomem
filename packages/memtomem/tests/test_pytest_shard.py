@@ -44,3 +44,15 @@ def test_repository_discovery_excludes_golden_path() -> None:
     assert files
     assert all(path.name != "test_golden_path.py" for path in files)
     assert files == sorted(files)
+
+
+def test_discovery_matches_both_pytest_patterns(tmp_path: Path) -> None:
+    tests_root = tmp_path / "packages" / "memtomem" / "tests"
+    tests_root.mkdir(parents=True)
+    for name in ("test_prefix.py", "example_test.py", "test_golden_path.py", "conftest.py"):
+        (tests_root / name).touch()
+
+    names = {path.name for path in sharder.test_files(tmp_path)}
+
+    # Both default pytest patterns are covered; golden-path and non-tests are not.
+    assert names == {"test_prefix.py", "example_test.py"}
