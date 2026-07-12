@@ -27,6 +27,12 @@ from memtomem.models import Chunk, ChunkMetadata, IndexingStats, SearchResult
 from memtomem.search.pipeline import RetrievalStats
 from memtomem.web.app import create_app
 from .helpers import set_home
+from .web.test_upload_quarantine import (
+    TestUploadQuarantineBoundaries,  # noqa: F401
+    TestUploadQuarantineLifecycle,  # noqa: F401
+    test_body_limit_without_content_length_exact_and_plus_one,  # noqa: F401
+    test_upload_openapi_keeps_multipart_file_array_contract,  # noqa: F401
+)
 
 
 # ---------------------------------------------------------------------------

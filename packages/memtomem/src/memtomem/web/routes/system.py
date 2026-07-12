@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from memtomem.config import (
@@ -1474,15 +1474,34 @@ async def preview_namespace(
 
 
 _ALLOWED_UPLOAD_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".toml"}
-_MAX_UPLOAD_FILES = 32
-_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-_MAX_UPLOAD_AGGREGATE_BYTES = 200 * 1024 * 1024
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
-@router.post("/upload", response_model=UploadResponse, dependencies=[Depends(require_configured)])
+@router.post(
+    "/upload",
+    response_model=UploadResponse,
+    dependencies=[Depends(require_configured)],
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["files"],
+                        "properties": {
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string", "format": "binary"},
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
 async def upload_files(
-    files: list[UploadFile] = File(...),
+    request: Request,
     force_unsafe: bool = False,
     index_engine=Depends(get_index_engine),
 ) -> UploadResponse:
@@ -1494,98 +1513,91 @@ async def upload_files(
     (query param) bypasses for the whole batch with audit logging.
     """
     from memtomem import privacy
-    from memtomem.context._atomic import atomic_write_bytes
-
-    if len(files) > _MAX_UPLOAD_FILES:
-        raise HTTPException(status_code=413, detail="Too many upload files")
+    from memtomem.web.upload_quarantine import (
+        UploadQuarantineError,
+        QuarantinedUpload,
+        promote_no_overwrite,
+        quarantine_uploads,
+    )
 
     upload_dir = Path("~/.memtomem/uploads").expanduser()
-    upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(upload_dir, 0o700)
 
-    buffered: list[tuple[UploadFile, bytes]] = []
-    aggregate = 0
-    for file in files:
-        chunks: list[bytes] = []
-        size = 0
-        while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
-            size += len(chunk)
-            aggregate += len(chunk)
-            if size > _MAX_UPLOAD_BYTES or aggregate > _MAX_UPLOAD_AGGREGATE_BYTES:
-                raise HTTPException(status_code=413, detail="Upload size limit exceeded")
-            chunks.append(chunk)
-        buffered.append((file, b"".join(chunks)))
+    try:
+        async with quarantine_uploads(request, upload_dir) as quarantined:
+            decisions: list[tuple[QuarantinedUpload, str, bool, str | None]] = []
+            for item in quarantined:
+                fname = item.filename
+                suffix = Path(fname).suffix.lower()
+                if suffix not in _ALLOWED_UPLOAD_EXTS:
+                    decisions.append((item, fname, False, f"Unsupported type: {suffix}"))
+                    continue
+                try:
+                    content = await _asyncio.to_thread(item.path.read_bytes)
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    decisions.append((item, fname, False, f"Decode failed: {exc}"))
+                    continue
+                except Exception:
+                    logger.exception("Upload adjudication failed for %s", fname)
+                    decisions.append((item, fname, False, "Upload processing failed"))
+                    continue
 
-    results: list[UploadFileResult] = []
-    for file, content in buffered:
-        fname = Path(file.filename or "upload").name
-        if Path(fname).suffix.lower() not in _ALLOWED_UPLOAD_EXTS:
-            results.append(
-                UploadFileResult(
-                    filename=fname,
-                    indexed_chunks=0,
-                    error=f"Unsupported type: {Path(fname).suffix}",
-                )
-            )
-            continue
-        dest = upload_dir / fname
-        if dest.exists():
-            stem, suffix = dest.stem, dest.suffix
-            dest = upload_dir / f"{stem}_{dest.stat().st_mtime_ns}{suffix}"
-        try:
-            # Decode text content for redaction scanning. The allowlist
-            # above limits this branch to UTF-8 markdown / config files;
-            # a decode failure here is a malformed file rather than a
-            # privacy bypass, so we surface it as a per-file error.
-            try:
-                text = content.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                results.append(
-                    UploadFileResult(
-                        filename=fname,
-                        indexed_chunks=0,
-                        error=f"Decode failed: {exc}",
+                try:
+                    guard = privacy.enforce_write_guard(
+                        text,
+                        surface="web_api_upload",
+                        force_unsafe=force_unsafe,
+                        audit_context={"filename": fname},
                     )
-                )
-                continue
-
-            guard = privacy.enforce_write_guard(
-                text,
-                surface="web_api_upload",
-                force_unsafe=force_unsafe,
-                audit_context={"filename": fname},
-            )
-            if guard.decision == "blocked":
-                results.append(
-                    UploadFileResult(
-                        filename=fname,
-                        indexed_chunks=0,
-                        error=f"redaction_blocked (hits={len(guard.hits)})",
+                except Exception:
+                    logger.exception("Upload privacy check failed for %s", fname)
+                    decisions.append((item, fname, False, "Upload processing failed"))
+                    continue
+                if guard.decision == "blocked":
+                    decisions.append(
+                        (item, fname, False, f"redaction_blocked (hits={len(guard.hits)})")
                     )
-                )
-                continue
+                else:
+                    decisions.append((item, fname, True, None))
 
-            atomic_write_bytes(dest, content, mode=0o600)
-            # Route-layer guard above already adjudicated this content
-            # (``enforce_write_guard``); skip the engine gate (ADR-0006 PR-A).
-            stats = await index_engine.index_file(dest, already_scanned=True)
-            results.append(
-                UploadFileResult(
-                    filename=fname,
-                    indexed_chunks=stats.indexed_chunks,
-                    path=str(dest),
-                )
-            )
-        except Exception:
-            logger.exception("Upload processing failed for %s", fname)
-            results.append(
-                UploadFileResult(filename=fname, indexed_chunks=0, error="Upload processing failed")
-            )
+            results: list[UploadFileResult] = []
+            for item, fname, accepted, error in decisions:
+                if not accepted:
+                    results.append(UploadFileResult(filename=fname, indexed_chunks=0, error=error))
+                    continue
+                dest: Path | None = None
+                try:
+                    dest = promote_no_overwrite(item.path, upload_dir, fname)
+                    stats = await index_engine.index_file(dest, already_scanned=True)
+                    results.append(
+                        UploadFileResult(
+                            filename=fname,
+                            indexed_chunks=stats.indexed_chunks,
+                            path=str(dest),
+                        )
+                    )
+                except Exception:
+                    logger.exception("Upload processing failed for %s", fname)
+                    results.append(
+                        UploadFileResult(
+                            filename=fname,
+                            indexed_chunks=0,
+                            path=str(dest) if dest is not None and dest.exists() else None,
+                            error="Upload processing failed",
+                        )
+                    )
 
-    return UploadResponse(
-        files=results,
-        total_indexed=sum(r.indexed_chunks for r in results),
-    )
+            return UploadResponse(
+                files=results,
+                total_indexed=sum(r.indexed_chunks for r in results),
+            )
+    except UploadQuarantineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except BaseException as exc:
+        if isinstance(exc, _asyncio.CancelledError):
+            raise
+        logger.exception("Upload batch processing failed")
+        raise HTTPException(status_code=500, detail="Upload processing failed") from exc
 
 
 @router.get("/uploads/usage", response_model=UploadUsageResponse)
