@@ -132,3 +132,9 @@ def test_pair_rejects_wrong_root_version(tmp_path: Path) -> None:
             all_out=tmp_path / "out-all.json",
             version="0.3.6",
         )
+
+
+def test_manual_backfill_workflow_is_restricted_to_main() -> None:
+    workflow = (_ROOT / ".github/workflows/release-sbom.yml").read_text(encoding="utf-8")
+    assert '"$GITHUB_EVENT_NAME" == "workflow_dispatch"' in workflow
+    assert '"$GITHUB_REF" != "refs/heads/main"' in workflow
