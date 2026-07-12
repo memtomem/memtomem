@@ -10,11 +10,10 @@ name: Publish
 # Both paths share the same `pypi` GitHub environment, gated to tag
 # pushes matching `v*` and `test-v*` only.
 #
-# Build and publish run in a single job — actions/upload-artifact@v4
-# scopes artifacts per run-attempt, so a partial rerun cannot reuse the
-# previous attempt's build artifact. Keeping everything in one job means
-# every (re)run rebuilds locally and avoids the cross-attempt artifact
-# lookup entirely.
+# The OIDC publish job builds and publishes in one job — no distribution
+# artifact crosses jobs or run-attempts. A read-only preflight independently
+# verifies the exact main CI run, package contract, and isolated installs;
+# the production-only SBOM job independently describes the immutable tag.
 #
 # `uv build` is given an explicit source path AND --out-dir so the
 # resulting dist/ lands at the workspace root regardless of monorepo
@@ -33,9 +32,74 @@ env:
   UV_VERSION: "0.11.16"
 
 jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Validate tag, package, lock, and changelog versions
+        id: contract
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py contract
+          --tag "$GITHUB_REF_NAME"
+          --repo-root .
+          --github-output "$GITHUB_OUTPUT"
+      - name: Require the tag commit to be on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Require the exact main-push CI run to succeed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py wait-ci
+          --repository "$GITHUB_REPOSITORY"
+          --sha "$GITHUB_SHA"
+          --timeout-seconds 2400
+          --interval-seconds 15
+      - run: uv lock --check
+      - name: Build preflight distributions
+        run: uv build packages/memtomem --out-dir preflight-dist
+      - name: Validate wheel and sdist metadata
+        run: >-
+          uv run --no-project --python 3.12 python tools/release_preflight.py artifacts
+          --dist preflight-dist
+          --version "${{ steps.contract.outputs.version }}"
+          --repo-root .
+      - name: Verify isolated base, all-extras, and sdist installs
+        run: |
+          set -euo pipefail
+          wheel=$(find preflight-dist -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find preflight-dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          uv venv --python 3.12 "$RUNNER_TEMP/release-base"
+          uv pip install --python "$RUNNER_TEMP/release-base/bin/python" "$wheel"
+          uv pip check --python "$RUNNER_TEMP/release-base/bin/python"
+          "$RUNNER_TEMP/release-base/bin/mm" --version
+          uv venv --python 3.12 "$RUNNER_TEMP/release-all"
+          uv pip install --python "$RUNNER_TEMP/release-all/bin/python" "${wheel}[all]"
+          uv pip check --python "$RUNNER_TEMP/release-all/bin/python"
+          "$RUNNER_TEMP/release-all/bin/python" -c \
+            'import fastapi, fastembed, kiwipiepy, langfuse, ollama, openai, tree_sitter, urllib3'
+          uv venv --python 3.12 "$RUNNER_TEMP/release-sdist"
+          uv pip install --python "$RUNNER_TEMP/release-sdist/bin/python" "$sdist"
+          uv pip check --python "$RUNNER_TEMP/release-sdist/bin/python"
+
   publish:
     name: Build and publish to ${{ startsWith(github.ref_name, 'test-') && 'TestPyPI' || 'PyPI' }}
+    needs: preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: pypi
       url: ${{ startsWith(github.ref_name, 'test-') && 'https://test.pypi.org/p/memtomem' || 'https://pypi.org/p/memtomem' }}
@@ -48,6 +112,13 @@ jobs:
           version: ${{ env.UV_VERSION }}
       - name: Build distribution
         run: uv build packages/memtomem --out-dir dist
+      - name: Revalidate publish artifacts
+        run: |
+          set -euo pipefail
+          version=$(uv run --no-project --python 3.12 python tools/release_preflight.py \
+            contract --tag "$GITHUB_REF_NAME" --repo-root .)
+          uv run --no-project --python 3.12 python tools/release_preflight.py \
+            artifacts --dist dist --version "$version" --repo-root .
       - name: Publish to PyPI
         if: ${{ !startsWith(github.ref_name, 'test-') }}
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
@@ -61,3 +132,13 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
           skip-existing: true
+
+  sbom:
+    name: Publish production SBOMs
+    needs: publish
+    if: ${{ !startsWith(github.ref_name, 'test-') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-sbom.yml
+    with:
+      release_tag: ${{ github.ref_name }}
