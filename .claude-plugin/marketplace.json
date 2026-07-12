@@ -17,7 +17,7 @@
         "path": "packages/memtomem-claude-plugin"
       },
       "description": "Semantic memory with hybrid BM25 + dense search",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "author": { "name": "memtomem" },
       "repository": "https://github.com/memtomem/memtomem",
       "license": "Apache-2.0",

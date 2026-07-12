@@ -1,6 +1,6 @@
 {
   "name": "memtomem",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Markdown-first semantic memory for AI agents — hybrid BM25 + dense search across your markdown files",
   "author": {
     "name": "memtomem",

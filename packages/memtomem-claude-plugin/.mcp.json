@@ -2,7 +2,7 @@
   "mcpServers": {
     "memtomem": {
       "command": "uvx",
-      "args": ["--from", "memtomem==0.3.7", "memtomem-server"]
+      "args": ["--from", "memtomem==0.3.8", "memtomem-server"]
     }
   }
 }

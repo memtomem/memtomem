@@ -5,9 +5,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.8] — 2026-07-13
+
+### Added
+
+- **Web search accepts exact source, type, and date filters** (#1729). The
+  search endpoint gains `source_exact`, `chunk_type`, `created_from`, and
+  `created_before` query parameters, applied as exact matches inside the
+  backend query instead of post-filtering results. Date bounds must be
+  timezone-aware and are rejected with a 422 when naive or when
+  `created_from` is not before `created_before`.
+- **Web startup exposes readiness and missing-state contracts** (#1729).
+  Storage startup failures are now classified and partially initialized
+  components are cleaned up; the server reports readiness, returns 503 while
+  it is not yet ready or its state is missing, reconfigures the file watcher
+  on change, and surfaces truthful initial-index outcomes — partial and
+  failed indexing are reported as such rather than always as success.
+- **Web export accepts a `namespace` filter** (#1729), matching the search
+  endpoint's namespace scoping.
+
 ### Changed
 
-- Claude plugin 0.2.3 now maps to the verified core 0.3.7 release (#1727).
+- Claude plugin 0.2.4 now maps to the verified core 0.3.8 release.
+
+### Fixed
+
+- **Hash-based history navigation is repaired** in the web UI (#1729).
 
 ### Documentation
 
