@@ -5,6 +5,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.6] — 2026-07-12
+
+### Security
+
+- **All managed-ingress writers now pass the redaction chokepoint before persistence.** The Notion/Obsidian importers, URL fetcher, and MCP `mem_session_end` summary writer previously wrote to disk and relied on the downstream engine gate to catch secrets — leaving a plaintext file behind on a block. They now call `enforce_write_guard` (scope classified via `classify_scope`) *before* writing: on a `blocked` decision no file is created and the tool reports the block, and all four accept a `force_unsafe` valve. Adjudicated content is then written with `atomic_write_text`/`atomic_write_bytes` at mode `0o600` and indexed with `already_scanned=True` (no double scan). Notion ZIP import no longer extracts a temporary plaintext tree — it validates aggregate/member-size and compression-ratio caps, then reads `*.md` members directly from the archive.
+
+- **Web upload endpoint hardened.** A new `UploadBodyLimitMiddleware` (mounted inside the CSRF boundary) rejects `POST /api/upload` bodies over 201 MiB with a `413` — via `Content-Length` and by counting streamed bytes — before multipart parsing completes. The handler adds a 32-file count cap, a 100 MiB per-file cap, and a 200 MiB aggregate cap, reading each file in 1 MiB chunks; accepted files are written with `atomic_write_bytes` at `0o600`, the upload dir is forced to `0o700`, and failures now log server-side and return a generic `"Upload processing failed"` instead of echoing the exception string.
+
+- **Indexing SSE stream moved to a CSRF-protected POST.** `GET /api/index/stream` is retired (now returns `405`); `POST /api/index/stream` takes an `IndexRequest` body and threads `force_unsafe` through the token-gated path, closing the prior split where bypass runs used a separate route. The front end replaces `EventSource` with a `fetch`-based SSE reader (`fetchIndexStream`) that sends the `X-Memtomem-CSRF` header, tolerates ≤3 malformed frames, and requires a terminal event. `GET /api/health` is split into a dependency-free liveness probe and a `POST /api/health` active check.
+
+- **`mm mem rescan-files` — read-only privacy audit of historical managed files.** New CLI command scans `_imported/`, `_fetched/`, and `sessions/` under every index root against the redaction patterns, reports violations/read-errors (with `--json`), changes no files, and exits `1` on any hit.
+
+- **Config secret masking centralized and broadened.** A new `secret_masking` module (`is_secret_key` / recursive `mask_secrets`) replaces the two hardcoded field checks in `mm config show/set` and the MCP `mem_config` tool; any `api_key`, `secret`, or `*_secret_key` field at any depth is now masked to `***`, not just `embedding.api_key` and `langfuse_secret_key`.
+
+- **Session-trace JSONL written with restrictive permissions.** The trace writer now `os.open`s with `O_NOFOLLOW` at mode `0o600` inside a `0o700` parent directory (previously a plain append under the ambient umask).
+
+- **Shipped dependency floors raised for supply-chain posture.** Runtime minimums added/bumped: `cryptography>=48.0.1`, `starlette>=1.3.1`, `idna>=3.15`, `pyjwt>=2.13.0`, `python-multipart>=0.0.27`, plus `urllib3>=2.7.0` on the `onnx`/`langfuse` extras.
+
+- **Notion archive traversal & entry-count guards; asserts replaced with real guards.** Notion ZIP import now rejects archives exceeding an entry-count cap and any member with an absolute path or `..` component before reading. Defensive `assert` statements on the locked chunk edit/delete paths, artifact-diff routes, and `mem_agent_share` idempotency replay were converted to real `raise`/`HTTPException`/error-return branches so the checks survive `python -O` (which strips asserts) instead of silently passing.
+
+### Fixed
+
+- **Windows session traces no longer silently fail** (#1716) — the trace hardening added an unguarded `os.fchmod(fd, 0o600)`, which is POSIX-only and raises `AttributeError` on Windows Python, aborting the write and leaving an empty JSONL file. It is now guarded by `hasattr(os, "fchmod")` (mirroring `provenance.py` and `context/_atomic.py`); `os.open(..., 0o600)` already sets the mode, so nothing is lost on Windows, and POSIX behavior is unchanged.
+
+### Changed
+
+- **Dependency updates** — runtime `python-minor-patch` lockfile group refreshed across 5 packages (#1714); test/CI toolchain bumps for `jsdom` (dev-only, #1713) and the `astral-sh/setup-uv` GitHub Action (#1712).
+
 ## [0.3.5] — 2026-07-11
 
 ### Added
