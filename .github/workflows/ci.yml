@@ -144,7 +144,7 @@ jobs:
       - run: npm test
 
   vendored-assets:
-    name: vendored-assets (OSV advisory)
+    name: vendored-assets (OSV blocking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -160,20 +160,18 @@ jobs:
       - run: uv run python tools/check_vendored_advisories.py
 
   python-deps:
-    name: python-deps (OSV advisory)
+    name: python-deps (OSV blocking — Python + JavaScript)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Advisory-tier: the deps locked in uv.lock currently carry known OSV
-    # advisories (triaged/bumped in #1331), so a *blocking* gate here would
-    # wedge every PR until the backlog clears. The scan step is
-    # `continue-on-error` — it reports findings, never blocks. The install step
-    # is NOT continue-on-error, so the job goes red if the pinned binary fails
-    # to download (a transient releases outage, after retries) or fails its
-    # checksum (a tampered asset — fail closed). This job is not a required
-    # check, so even that red does not block merges.
+    # Both shipped Python resolution metadata and the JavaScript test-tool lock
+    # are blocking. A reviewed exception must use the canonical owner/reason/
+    # expiry schema; CI converts it to OSV Scanner's stricter native schema.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
       # Hand-maintained pin: Dependabot sees no release-asset URL, so on a bump
       # update OSV_VERSION and the matching osv-scanner_linux_amd64 SHA-256 from
       # the release's osv-scanner_SHA256SUMS together.
@@ -187,17 +185,23 @@ jobs:
             "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64"
           echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
           chmod +x osv-scanner
+      - name: Validate reviewed OSV exceptions
+        run: >-
+          uv run --no-project --python 3.12 python tools/check_osv_exceptions.py
+          --output "$RUNNER_TEMP/osv-scanner.toml"
       # osv-scanner queries OSV.dev live, so the pinned binary never goes stale
-      # on advisory data. `--lockfile` targets uv.lock only (the npm lockfile
-      # under tests-js is out of scope here). The markdown output surfaces
-      # findings in the run's job summary / Checks tab.
-      - name: OSV advisory scan (uv.lock — blocking)
+      # on advisory data. Scan both lockfiles in one invocation so an exception
+      # cannot accidentally make only one ecosystem blocking.
+      - name: OSV scan (uv.lock + package-lock.json — blocking)
         run: |
           set -o pipefail
           rc=0
-          ./osv-scanner scan source --lockfile=uv.lock \
+          ./osv-scanner scan source \
+            --config="$RUNNER_TEMP/osv-scanner.toml" \
+            --lockfile=uv.lock \
+            --lockfile=packages/memtomem/tests-js/package-lock.json \
             --format markdown --verbosity error | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
-          # rc 0 = clean, 1 = advisories found (expected — listed above). Higher
+          # rc 0 = clean, 1 = advisories found. Higher
           # means the scan itself errored (e.g. OSV.dev unreachable), so the
           # short/empty summary must NOT be read as "clean".
           if [ "$rc" -gt 1 ]; then
@@ -206,7 +210,7 @@ jobs:
           exit "$rc"
 
   bandit:
-    name: bandit (security lint — advisory)
+    name: bandit (security lint — blocking)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -215,9 +219,8 @@ jobs:
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: ${{ env.UV_VERSION }}
-      # Advisory-tier: bandit compares against a committed baseline and reports
-      # only *new* findings, so routine runs stay quiet and a freshly-introduced
-      # smell stands out. Scoped to shipped source (src/). Regenerate the
+      # Bandit compares against a committed baseline and blocks only *new*
+      # findings. Scoped to shipped source (src/). Regenerate the
       # baseline after an intentional change with:
       #   uvx bandit@1.9.4 -r packages/memtomem/src -f json -o tools/bandit-baseline.json
       # (A no-op regen only rewrites the generated_at timestamp — that diff is benign.)
@@ -225,3 +228,25 @@ jobs:
         run: >-
           uvx bandit@1.9.4 -r packages/memtomem/src
           -b tools/bandit-baseline.json -q
+
+  security-gates:
+    name: security-gates
+    if: ${{ always() }}
+    needs: [test-js, vendored-assets, python-deps, bandit]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require every security dependency to succeed
+        env:
+          JS_RESULT: ${{ needs.test-js.result }}
+          VENDORED_RESULT: ${{ needs.vendored-assets.result }}
+          OSV_RESULT: ${{ needs.python-deps.result }}
+          BANDIT_RESULT: ${{ needs.bandit.result }}
+        run: |
+          set -euo pipefail
+          for result in "$JS_RESULT" "$VENDORED_RESULT" "$OSV_RESULT" "$BANDIT_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "security dependency did not succeed: $result" >&2
+              exit 1
+            fi
+          done
