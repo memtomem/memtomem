@@ -1,0 +1,14 @@
+# Reviewed, time-boxed exceptions for the Python and JavaScript lockfile OSV gate.
+#
+# EMPTY BY DEFAULT. Prefer upgrading a dependency over adding an exception.
+# OSV Scanner does not accept the reviewer-only `owner` key, so
+# tools/check_osv_exceptions.py validates this canonical file and emits a
+# scanner-native temporary config for CI.
+#
+# Schema (all keys required; ignoreUntil is a bare TOML date):
+#
+# [[exceptions]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# owner = "github-handle"
+# reason = "No fixed release; affected path is not reachable"
+# ignoreUntil = 2026-08-01
