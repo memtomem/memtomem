@@ -46,6 +46,9 @@ class _ClosingMultiPartParser(MultiPartParser):
         try:
             return await super().parse()
         except BaseException:
+            # Starlette keeps incomplete parser-owned spools in this private
+            # list. Keep this access explicit so an upstream rename fails
+            # loudly in the cleanup-path tests instead of leaking temp files.
             for spool in self._files_to_close_on_error:
                 spool.close()
             raise
