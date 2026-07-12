@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Changed
+
+- Claude plugin 0.2.3 now maps to the verified core 0.3.7 release (#1727).
+
 ## [0.3.7] — 2026-07-12
 
 ### Security
