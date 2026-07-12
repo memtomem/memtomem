@@ -27,11 +27,30 @@ def _load_tool() -> ModuleType:
 rp = _load_tool()
 
 
-def _repo(tmp_path: Path, *, version: str = "0.3.6", lock_version: str | None = None) -> Path:
+def _repo(
+    tmp_path: Path,
+    *,
+    version: str = "0.3.6",
+    lock_version: str | None = None,
+    cryptography: str = ">=48.0.1",
+    urllib3: str = ">=2.7.0",
+) -> Path:
     package = tmp_path / "packages" / "memtomem"
     package.mkdir(parents=True)
     (package / "pyproject.toml").write_text(
-        f'[project]\nname = "memtomem"\nversion = "{version}"\n', encoding="utf-8"
+        f'[project]\nname = "memtomem"\nversion = "{version}"\n'
+        "dependencies = [\n"
+        f'  "cryptography{cryptography}",\n'
+        '  "starlette>=1.3.1",\n'
+        '  "idna>=3.15",\n'
+        '  "pyjwt>=2.13.0",\n'
+        '  "python-multipart>=0.0.27",\n'
+        "]\n\n"
+        "[project.optional-dependencies]\n"
+        f'onnx = ["fastembed>=0.8,<0.9", "urllib3{urllib3}"]\n'
+        f'langfuse = ["langfuse>=4.0", "urllib3{urllib3}"]\n'
+        'all = ["memtomem[onnx,langfuse]"]\n',
+        encoding="utf-8",
     )
     (tmp_path / "uv.lock").write_text(
         "version = 1\n\n"
@@ -45,16 +64,21 @@ def _repo(tmp_path: Path, *, version: str = "0.3.6", lock_version: str | None = 
     return tmp_path
 
 
-def _metadata(version: str = "0.3.6") -> bytes:
+def _metadata(
+    version: str = "0.3.6",
+    *,
+    cryptography: str = ">=48.0.1",
+    urllib3: str = ">=2.7.0",
+) -> bytes:
     requirements = [
-        "cryptography>=48.0.1",
+        f"cryptography{cryptography}",
         "starlette>=1.3.1",
         "idna>=3.15",
         "pyjwt>=2.13.0",
         "python-multipart>=0.0.27",
-        'urllib3>=2.7.0; extra == "all"',
-        'urllib3>=2.7.0; extra == "onnx"',
-        'urllib3>=2.7.0; extra == "langfuse"',
+        f'urllib3{urllib3}; extra == "all"',
+        f'urllib3{urllib3}; extra == "onnx"',
+        f'urllib3{urllib3}; extra == "langfuse"',
     ]
     lines = ["Metadata-Version: 2.4", "Name: memtomem", f"Version: {version}"]
     lines.extend(f"Requires-Dist: {requirement}" for requirement in requirements)
@@ -107,21 +131,30 @@ def test_contract_rejects_missing_changelog_heading(tmp_path: Path) -> None:
 
 
 def test_artifacts_accept_wheel_and_sdist_contract(tmp_path: Path) -> None:
-    wheel, sdist = rp.validate_artifacts(_dist(tmp_path), "0.3.6")
+    repo = _repo(tmp_path)
+    wheel, sdist = rp.validate_artifacts(_dist(tmp_path), "0.3.6", repo)
     assert wheel.suffix == ".whl"
     assert sdist.name.endswith(".tar.gz")
 
 
 def test_artifacts_reject_missing_floor(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
     body = _metadata().replace(b"Requires-Dist: starlette>=1.3.1\n", b"")
     with pytest.raises(rp.ReleaseCheckError, match="direct floors"):
-        rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6")
+        rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
 
 
 def test_artifacts_reject_missing_extra_marker(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
     body = _metadata().replace(b'Requires-Dist: urllib3>=2.7.0; extra == "onnx"\n', b"")
     with pytest.raises(rp.ReleaseCheckError, match="urllib3"):
-        rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6")
+        rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
+
+
+def test_artifacts_accept_raised_project_floors(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, cryptography=">=48.0.2", urllib3=">=2.8.0")
+    body = _metadata(cryptography=">=48.0.2", urllib3=">=2.8.0")
+    rp.validate_artifacts(_dist(tmp_path, metadata=body), "0.3.6", repo)
 
 
 class _Clock:

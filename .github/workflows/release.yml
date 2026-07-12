@@ -76,6 +76,7 @@ jobs:
           uv run --no-project --python 3.12 python tools/release_preflight.py artifacts
           --dist preflight-dist
           --version "${{ steps.contract.outputs.version }}"
+          --repo-root .
       - name: Verify isolated base, all-extras, and sdist installs
         run: |
           set -euo pipefail
@@ -117,7 +118,7 @@ jobs:
           version=$(uv run --no-project --python 3.12 python tools/release_preflight.py \
             contract --tag "$GITHUB_REF_NAME" --repo-root .)
           uv run --no-project --python 3.12 python tools/release_preflight.py \
-            artifacts --dist dist --version "$version"
+            artifacts --dist dist --version "$version" --repo-root .
       - name: Publish to PyPI
         if: ${{ !startsWith(github.ref_name, 'test-') }}
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

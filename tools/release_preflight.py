@@ -22,12 +22,12 @@ from typing import Any, Callable
 
 _PROD_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+)$")
 _TEST_TAG_RE = re.compile(r"^test-v(?P<version>\d+\.\d+\.\d+)a\d+$")
-_REQUIRED_DIRECT = {
-    "cryptography>=48.0.1",
-    "starlette>=1.3.1",
-    "idna>=3.15",
-    "pyjwt>=2.13.0",
-    "python-multipart>=0.0.27",
+_SECURITY_DIRECT_NAMES = {
+    "cryptography",
+    "starlette",
+    "idna",
+    "pyjwt",
+    "python-multipart",
 }
 _REQUIRED_URLLIB3_EXTRAS = {"all", "langfuse", "onnx"}
 _TERMINAL_FAILURES = {"action_required", "cancelled", "failure", "stale", "timed_out"}
@@ -121,7 +121,58 @@ def _normalized_requirement(value: str) -> str:
     return re.sub(r"\s+", "", value).lower()
 
 
-def _validate_metadata(message: email.message.Message, expected: str, label: str) -> None:
+def _requirement_name(value: str) -> str:
+    match = re.match(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*", value, re.IGNORECASE)
+    if match is None:
+        raise ReleaseCheckError(f"cannot determine requirement name from {value!r}")
+    return match.group(0).lower().replace("_", "-").replace(".", "-")
+
+
+def security_metadata_contract(repo_root: Path) -> tuple[set[str], dict[str, str]]:
+    """Derive security-sensitive artifact requirements from project metadata."""
+    pyproject = repo_root / "packages" / "memtomem" / "pyproject.toml"
+    project = _load_toml(pyproject).get("project", {})
+    dependencies = project.get("dependencies", [])
+    if not isinstance(dependencies, list) or not all(
+        isinstance(item, str) for item in dependencies
+    ):
+        raise ReleaseCheckError(f"project.dependencies in {pyproject} must be a list of strings")
+    by_name = {_requirement_name(item): _normalized_requirement(item) for item in dependencies}
+    missing_direct = _SECURITY_DIRECT_NAMES - by_name.keys()
+    if missing_direct:
+        raise ReleaseCheckError(
+            f"{pyproject} misses security-sensitive direct dependencies: {sorted(missing_direct)}"
+        )
+
+    optional = project.get("optional-dependencies", {})
+    if not isinstance(optional, dict):
+        raise ReleaseCheckError(f"project.optional-dependencies in {pyproject} must be a table")
+    urllib3_by_extra: dict[str, str] = {}
+    for extra in {"onnx", "langfuse"}:
+        values = optional.get(extra, [])
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            raise ReleaseCheckError(f"optional dependency {extra!r} in {pyproject} must be a list")
+        matches = [item for item in values if _requirement_name(item) == "urllib3"]
+        if len(matches) != 1:
+            raise ReleaseCheckError(
+                f"optional dependency {extra!r} in {pyproject} must declare urllib3 exactly once"
+            )
+        urllib3_by_extra[extra] = _normalized_requirement(matches[0])
+    if len(set(urllib3_by_extra.values())) != 1:
+        raise ReleaseCheckError(f"urllib3 requirements for onnx and langfuse differ in {pyproject}")
+    urllib3_by_extra["all"] = urllib3_by_extra["onnx"]
+    return {
+        _normalized_requirement(by_name[name]) for name in _SECURITY_DIRECT_NAMES
+    }, urllib3_by_extra
+
+
+def _validate_metadata(
+    message: email.message.Message,
+    expected: str,
+    label: str,
+    direct_contract: set[str],
+    urllib3_contract: dict[str, str],
+) -> None:
     if message.get("Name", "").lower() != "memtomem":
         raise ReleaseCheckError(f"{label} metadata has unexpected Name: {message.get('Name')!r}")
     if message.get("Version") != expected:
@@ -131,26 +182,29 @@ def _validate_metadata(message: email.message.Message, expected: str, label: str
     requirements = {
         _normalized_requirement(value) for value in message.get_all("Requires-Dist", [])
     }
-    missing_direct = {
-        requirement for requirement in _REQUIRED_DIRECT if requirement.lower() not in requirements
-    }
+    missing_direct = direct_contract - requirements
     if missing_direct:
         raise ReleaseCheckError(f"{label} metadata misses direct floors: {sorted(missing_direct)}")
-    urllib3_extras: set[str] = set()
+    urllib3_extras: dict[str, str] = {}
     for requirement in requirements:
-        if not requirement.startswith("urllib3>=2.7.0;"):
+        requirement_value, separator, marker = requirement.partition(";")
+        if _requirement_name(requirement_value) != "urllib3" or not separator:
             continue
-        match = re.search(r"extra==[\'\"]([^\'\"]+)[\'\"]", requirement)
+        match = re.search(r"extra==[\'\"]([^\'\"]+)[\'\"]", marker)
         if match:
-            urllib3_extras.add(match.group(1))
-    missing_extras = _REQUIRED_URLLIB3_EXTRAS - urllib3_extras
+            urllib3_extras[match.group(1)] = requirement_value
+    missing_extras = {
+        extra
+        for extra in _REQUIRED_URLLIB3_EXTRAS
+        if urllib3_extras.get(extra) != urllib3_contract[extra]
+    }
     if missing_extras:
         raise ReleaseCheckError(
-            f"{label} metadata misses urllib3>=2.7.0 extras: {sorted(missing_extras)}"
+            f"{label} metadata misses expected urllib3 extras: {sorted(missing_extras)}"
         )
 
 
-def validate_artifacts(dist: Path, expected: str) -> tuple[Path, Path]:
+def validate_artifacts(dist: Path, expected: str, repo_root: Path) -> tuple[Path, Path]:
     """Validate exactly one wheel and sdist plus their published metadata contract."""
     wheels = sorted(dist.glob("memtomem-*.whl"))
     sdists = sorted(dist.glob("memtomem-*.tar.gz"))
@@ -158,8 +212,13 @@ def validate_artifacts(dist: Path, expected: str) -> tuple[Path, Path]:
         raise ReleaseCheckError(
             f"expected one wheel and one sdist in {dist}; found {len(wheels)} and {len(sdists)}"
         )
-    _validate_metadata(_metadata_from_wheel(wheels[0]), expected, "wheel")
-    _validate_metadata(_metadata_from_sdist(sdists[0]), expected, "sdist")
+    direct_contract, urllib3_contract = security_metadata_contract(repo_root)
+    _validate_metadata(
+        _metadata_from_wheel(wheels[0]), expected, "wheel", direct_contract, urllib3_contract
+    )
+    _validate_metadata(
+        _metadata_from_sdist(sdists[0]), expected, "sdist", direct_contract, urllib3_contract
+    )
     return wheels[0], sdists[0]
 
 
@@ -261,6 +320,7 @@ def _build_parser() -> argparse.ArgumentParser:
     artifacts = subparsers.add_parser("artifacts")
     artifacts.add_argument("--dist", type=Path, required=True)
     artifacts.add_argument("--version", required=True)
+    artifacts.add_argument("--repo-root", type=Path, default=Path.cwd())
 
     wait_ci = subparsers.add_parser("wait-ci")
     wait_ci.add_argument("--repository", required=True)
@@ -278,7 +338,9 @@ def main(argv: list[str] | None = None) -> int:
             _write_github_output(args.github_output, "version", version)
             print(version)
         elif args.command == "artifacts":
-            wheel, sdist = validate_artifacts(args.dist.resolve(), args.version)
+            wheel, sdist = validate_artifacts(
+                args.dist.resolve(), args.version, args.repo_root.resolve()
+            )
             print(f"validated {wheel.name} and {sdist.name}")
         else:
             token = os.environ.get("GITHUB_TOKEN", "")
