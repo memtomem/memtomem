@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -10,7 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from memtomem.config import ContextWindowConfig, SearchConfig
-from memtomem.models import Chunk, ChunkMetadata, ContextInfo, SearchResult
+from memtomem.models import Chunk, ChunkMetadata, ChunkType, ContextInfo, SearchResult
 from memtomem.search.pipeline import SearchPipeline
 from memtomem.server.formatters import _format_single_result
 
@@ -488,3 +489,23 @@ class TestPipelineIntegration:
         assert len(ctx.window_after) == 2
         assert ctx.chunk_position == 3
         assert ctx.total_chunks_in_file == 5
+
+    async def test_chunk_type_filter_keeps_different_type_context_neighbors(self):
+        chunks = _make_file_chunks("/tmp/doc.md", 3)
+        chunks[0].metadata = dataclasses.replace(chunks[0].metadata, chunk_type=ChunkType.RAW_TEXT)
+        chunks[1].metadata = dataclasses.replace(
+            chunks[1].metadata, chunk_type=ChunkType.MARKDOWN_SECTION
+        )
+        chunks[2].metadata = dataclasses.replace(chunks[2].metadata, chunk_type=ChunkType.RAW_TEXT)
+        pipeline = _make_pipeline(
+            {Path("/tmp/doc.md"): chunks},
+            bm25_results=[SearchResult(chunk=chunks[1], score=0.9, rank=1, source="bm25")],
+            context_window_config=ContextWindowConfig(enabled=True, window_size=1),
+        )
+
+        results, _ = await pipeline.search("test", chunk_types=[ChunkType.MARKDOWN_SECTION.value])
+
+        assert len(results) == 1
+        assert results[0].context is not None
+        assert results[0].context.window_before == (chunks[0],)
+        assert results[0].context.window_after == (chunks[2],)

@@ -269,6 +269,7 @@ def app():
     cfg.indexing.project_memory_dirs = []
     application.state.config = cfg
     application.state.dedup_scanner = dedup_scanner
+    application.state.project_root = Path.cwd()
 
     # Pin the hot-reload signature to the current on-disk state so these
     # FakeConfig-based tests don't get their state.config swapped out for a
@@ -305,6 +306,30 @@ async def client(app):
 
 
 class TestHealth:
+    async def test_lifespan_free_readiness_and_missing_component_contract(self):
+        bare_app = create_app(lifespan=None, mode="prod")
+        async with AsyncClient(
+            transport=ASGITransport(app=bare_app), base_url="http://test"
+        ) as bare_client:
+            ready = await bare_client.get("/api/readiness")
+            assert ready.status_code == 503
+            assert ready.json() == {
+                "ready": False,
+                "state": "not_started",
+                "reason_code": "startup_unavailable",
+            }
+            stats = await bare_client.get("/api/stats")
+            assert stats.status_code == 503
+            assert stats.json() == {
+                "detail": {
+                    "reason_code": "startup_unavailable",
+                    "message": "Web backend startup is unavailable.",
+                }
+            }
+            assert (await bare_client.get("/api/health")).status_code == 200
+            assert (await bare_client.get("/api/session")).status_code == 200
+            assert (await bare_client.get("/api/config/defaults")).status_code == 200
+
     async def test_health_liveness_is_local_only(self, app, client: AsyncClient):
         resp = await client.get("/api/health")
         assert resp.status_code == 200
@@ -858,6 +883,37 @@ class TestSearch:
             params={"q": "test", "top_k": 5, "namespace": "work"},
         )
         assert resp.status_code == 200
+
+    async def test_search_threads_repeatable_exact_metadata_filters(self, app, client: AsyncClient):
+        app.state.search_pipeline.search.reset_mock()
+        resp = await client.get(
+            "/api/search",
+            params=[
+                ("source_exact", "/tmp/a,comma.md"),
+                ("source_exact", "/tmp/b.md"),
+                ("chunk_type", "markdown_section"),
+                ("created_from", "2026-07-01T00:00:00+09:00"),
+                ("created_before", "2026-07-13T00:00:00+09:00"),
+            ],
+        )
+        assert resp.status_code == 200, resp.text
+        kwargs = app.state.search_pipeline.search.await_args.kwargs
+        assert kwargs["source_exact"] == ["/tmp/a,comma.md", "/tmp/b.md"]
+        assert kwargs["chunk_types"] == ["markdown_section"]
+        assert kwargs["created_from"].tzinfo is not None
+        assert kwargs["created_before"] > kwargs["created_from"]
+
+    async def test_search_rejects_naive_or_reversed_date_bounds(self, client: AsyncClient):
+        naive = await client.get("/api/search", params={"created_from": "2026-07-01T00:00:00"})
+        assert naive.status_code == 422
+        reversed_range = await client.get(
+            "/api/search",
+            params={
+                "created_from": "2026-07-02T00:00:00Z",
+                "created_before": "2026-07-01T00:00:00Z",
+            },
+        )
+        assert reversed_range.status_code == 422
 
     async def test_search_pipeline_error_returns_500(self, app, client: AsyncClient):
         app.state.search_pipeline.search.side_effect = RuntimeError("search failed")
@@ -2930,6 +2986,7 @@ class TestUnicodePaths:
         assert body["indexed"] is not None
         assert body["indexed"]["indexed_chunks"] == 2
         assert body["indexed"]["total_files"] == 1
+        assert body["index_status"] == "success"
         # ``index_path`` was called with the resolved path of the dir we
         # just added — watcher invariant naturally satisfied.
         called_args, _ = app.state.index_engine.index_path.call_args
@@ -2980,6 +3037,7 @@ class TestUnicodePaths:
         assert resp.status_code == 200
         body = resp.json()
         assert body["indexed"] is None
+        assert body["index_status"] == "not_requested"
         assert app.state.index_engine.index_path.call_count == 0
 
     async def test_add_memory_dir_explicit_null_skips_index(
@@ -3006,7 +3064,27 @@ class TestUnicodePaths:
         assert resp.status_code == 200
         body = resp.json()
         assert body["indexed"] is None
+        assert body["index_status"] == "not_requested"
         assert app.state.index_engine.index_path.call_count == 0
+
+    async def test_add_memory_dir_reports_failed_index_without_lying_about_registration(
+        self, app, client: AsyncClient, tmp_path
+    ):
+        memory_dir = tmp_path / "memories"
+        memory_dir.mkdir()
+        app.state.config.indexing.memory_dirs = []
+        app.state.index_engine.index_path.side_effect = RuntimeError("/private/secret/path failed")
+
+        with patch("memtomem.web.routes.system.save_config_overrides"):
+            resp = await client.post(
+                "/api/memory-dirs/add",
+                json={"path": str(memory_dir), "auto_index": True},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["index_status"] == "failed"
+        assert "/private/secret" not in body["indexed"]["error"]
 
     async def test_remove_memory_dir_matches_nfd_and_nfc(self, app, client: AsyncClient, tmp_path):
         # Config has the target dir in NFD form plus a second entry (the

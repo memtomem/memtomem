@@ -43,6 +43,7 @@ async def export_stats(
     source: str | None = Query(None),
     tag: str | None = Query(None),
     since: datetime | None = Query(None),
+    namespace: str | None = Query(None),
     storage=Depends(get_storage),
 ) -> ExportStatsResponse:
     """Return chunk count that would be exported (without downloading)."""
@@ -51,7 +52,12 @@ async def export_stats(
     # Count-only preview: skip provenance signing so this read endpoint neither
     # creates the per-install key file nor fails on a key-file problem.
     bundle = await export_chunks(
-        storage, source_filter=source, tag_filter=tag, since=since, stamp_provenance=False
+        storage,
+        source_filter=source,
+        tag_filter=tag,
+        since=since,
+        namespace_filter=namespace,
+        stamp_provenance=False,
     )
     return ExportStatsResponse(total_chunks=bundle.total_chunks)
 

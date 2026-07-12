@@ -114,6 +114,7 @@ def _patch_web_stack(server_mock: MagicMock):
         patch("uvicorn.Server", return_value=server_mock),
         patch("memtomem.web.app.create_app", return_value=MagicMock()),
         patch("memtomem.web.app._lifespan", MagicMock()),
+        patch("memtomem.cli.web._readiness_ok", return_value=True),
     ]
 
 
@@ -162,10 +163,9 @@ def test_web_open_timeout_warns_and_skips_browser() -> None:
                 ["--host", "127.0.0.1", "--port", "9999", "--open", "--timeout", "1"],
             )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     mock_browser.assert_not_called()
-    assert "Warning" in result.output
-    assert "timeout" in result.output.lower()
+    assert "failed during startup" in result.output.lower()
 
 
 def test_web_open_zero_timeout_shows_warning() -> None:
@@ -435,7 +435,7 @@ def test_web_background_spawns_internal_foreground_child(
         return FakeChild()
 
     monkeypatch.setattr(web_cmd.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(web_cmd, "_wait_for_tcp", lambda *args, **kwargs: True)
+    monkeypatch.setattr(web_cmd, "_wait_for_readiness", lambda *args, **kwargs: True)
 
     runner = CliRunner()
     with patch("memtomem.cli.web._missing_web_deps", return_value=None):

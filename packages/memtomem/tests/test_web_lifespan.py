@@ -292,8 +292,12 @@ async def test_lifespan_starts_and_stops_file_watcher():
         async with _lifespan(app):
             assert fake_watcher.start.await_count == 1
             assert app.state.file_watcher is fake_watcher
+            assert app.state.startup_state == "ready"
+            assert app.state.config_signature is not None
+            assert app.state.last_reload_error is None
 
     assert fake_watcher.stop.await_count == 1
+    assert app.state.startup_state == "not_started"
 
 
 async def test_lifespan_skips_watcher_in_degraded_mode():

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -2441,6 +2441,60 @@ class TestFileWatcher:
             debounce_ms=2000,
         )
         assert watcher._debounce_s == 2.0
+
+    async def test_reconfigure_reconciles_added_and_removed_roots(self, components, tmp_path):
+        from memtomem.config import IndexingConfig
+        from memtomem.indexing.watcher import FileWatcher
+
+        old_root = tmp_path / "old"
+        new_root = tmp_path / "new"
+        old_root.mkdir()
+        new_root.mkdir()
+        watcher = FileWatcher(components.index_engine, IndexingConfig(memory_dirs=[old_root]))
+        observer = MagicMock()
+        old_watch = object()
+        new_watch = object()
+        observer.schedule.return_value = new_watch
+        handler = MagicMock()
+        watcher._observer = observer
+        watcher._handler = handler
+        watcher._watches = {old_root.resolve(): old_watch}
+
+        config = IndexingConfig(memory_dirs=[new_root], supported_extensions=frozenset({".md"}))
+        await watcher.reconfigure(config)
+
+        observer.schedule.assert_called_once_with(handler, str(new_root.resolve()), recursive=True)
+        observer.unschedule.assert_called_once_with(old_watch)
+        assert watcher._watches == {new_root.resolve(): new_watch}
+        assert handler._supported == frozenset({".md"})
+        assert watcher._config is config
+
+    async def test_reconfigure_rolls_back_added_root_when_removal_fails(self, components, tmp_path):
+        from memtomem.config import IndexingConfig
+        from memtomem.indexing.watcher import FileWatcher
+
+        old_root = tmp_path / "old"
+        new_root = tmp_path / "new"
+        old_root.mkdir()
+        new_root.mkdir()
+        original_config = IndexingConfig(memory_dirs=[old_root])
+        watcher = FileWatcher(components.index_engine, original_config)
+        observer = MagicMock()
+        old_watch = object()
+        new_watch = object()
+        observer.schedule.return_value = new_watch
+        observer.unschedule.side_effect = [RuntimeError("remove failed"), None]
+        handler = MagicMock()
+        watcher._observer = observer
+        watcher._handler = handler
+        watcher._watches = {old_root.resolve(): old_watch}
+
+        with pytest.raises(RuntimeError, match="remove failed"):
+            await watcher.reconfigure(IndexingConfig(memory_dirs=[new_root]))
+
+        assert watcher._watches == {old_root.resolve(): old_watch}
+        assert observer.unschedule.call_args_list[1].args == (new_watch,)
+        assert watcher._config is original_config
 
     async def test_startup_backfill_default_off_skips_walk(self, components, memory_dir):
         """``startup_backfill`` defaults to False — guards against the

@@ -138,11 +138,11 @@ describe('App-level Simple/Advanced (S2.2)', () => {
     // dropped back to Simple — must be swallowed, not re-activated.
     window.dispatchEvent(new window.PopStateEvent('popstate', { state: { tab: 'timeline' } }));
     expect(calls).not.toContain('timeline');
-    expect(calls).toHaveLength(0);
+    expect(calls).toEqual(['home']);
 
     // A visible tab still navigates on Back/Forward.
     window.dispatchEvent(new window.PopStateEvent('popstate', { state: { tab: 'sources' } }));
-    expect(calls).toEqual(['sources']);
+    expect(calls).toEqual(['home', 'sources']);
   });
 
   it('the Cmd+K palette omits advanced commands in Simple, lists them in Advanced', async () => {

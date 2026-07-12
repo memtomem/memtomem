@@ -9,6 +9,27 @@ class StorageError(Mem2MemError):
     """Storage backend error."""
 
 
+class StorageStartupError(StorageError):
+    """Classified, path-safe storage initialization failure."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        stage: str,
+        retryable: bool = False,
+        sqlite_code: int | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.stage = stage
+        self.retryable = retryable
+        self.sqlite_code = sqlite_code
+        super().__init__(
+            f"Storage startup failed ({reason_code}, stage={stage}). "
+            "Check the configured database directory and its SQLite WAL/SHM permissions."
+        )
+
+
 class EmbeddingDimensionMismatchError(StorageError):
     """Raised when stored embedding dimension is 0 but a real provider is configured.
 

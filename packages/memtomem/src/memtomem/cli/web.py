@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import http.client
 import json
 import os
 import signal
@@ -252,7 +253,11 @@ def _run_foreground(config: _WebRunConfig) -> None:
         f"Starting memtomem Web UI at http://{config.host}:{config.port} (mode={resolved_mode})"
     )
 
-    async def after_started(server: uvicorn.Server, timeout: float) -> None:
+    async def after_started(
+        server: uvicorn.Server,
+        serve_task: asyncio.Task[None],
+        timeout: float,
+    ) -> None:
         if not config.open_browser:
             return
 
@@ -265,9 +270,19 @@ def _run_foreground(config: _WebRunConfig) -> None:
         else:
             deadline = time.monotonic() + timeout
         while not server.started:
+            if serve_task.done():
+                return
             if time.monotonic() >= deadline:
                 click.secho(
                     "Warning: Web server did not start within the timeout period; not opening browser.",
+                    fg="yellow",
+                )
+                return
+            await asyncio.sleep(0.1)
+        while not await asyncio.to_thread(_readiness_ok, config.host, config.port):
+            if serve_task.done() or time.monotonic() >= deadline:
+                click.secho(
+                    "Warning: Web backend did not become ready; not opening browser.",
                     fg="yellow",
                 )
                 return
@@ -294,10 +309,13 @@ def _run_foreground(config: _WebRunConfig) -> None:
         )
         web_server = uvicorn.Server(web_config)
 
-        await asyncio.gather(
-            web_server.serve(),
-            after_started(web_server, timeout=float(config.timeout)),
+        serve_task = asyncio.create_task(web_server.serve())
+        opener_task = asyncio.create_task(
+            after_started(web_server, serve_task, timeout=float(config.timeout))
         )
+        await asyncio.gather(serve_task, opener_task)
+        if not web_server.started:
+            raise click.ClickException("Web UI failed during startup. See the startup log above.")
 
     with _web_pid_lock(config.port):
         asyncio.run(start_server())
@@ -330,6 +348,36 @@ def _wait_for_tcp(host: str, port: int, *, timeout: float, child: subprocess.Pop
                 return True
         except OSError:
             time.sleep(0.1)
+    return False
+
+
+def _readiness_ok(host: str, port: int) -> bool:
+    conn = http.client.HTTPConnection(_connect_host(host), port, timeout=0.5)
+    try:
+        conn.request("GET", "/api/readiness")
+        response = conn.getresponse()
+        response.read()
+        return response.status == 200
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
+def _wait_for_readiness(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    child: subprocess.Popen[bytes],
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            return False
+        if _readiness_ok(host, port):
+            return True
+        time.sleep(0.1)
     return False
 
 
@@ -407,11 +455,19 @@ def _spawn_background(config: _WebRunConfig, log_file: Path | None) -> None:
         )
 
     timeout = float(config.timeout if config.timeout > 0 else 30)
-    if not _wait_for_tcp(config.host, port, timeout=timeout, child=child):
+    if not _wait_for_readiness(config.host, port, timeout=timeout, child=child):
         tail = _tail_file(log_path)
         if child.poll() is None:
             with contextlib.suppress(OSError):
                 child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    child.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(timeout=2)
+        _remove_stale_web_files()
         message = f"Web UI did not start within {timeout:g}s. See log: {log_path}"
         if tail:
             message = f"{message}\n\nLast log output:\n{tail.rstrip()}"

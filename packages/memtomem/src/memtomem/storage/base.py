@@ -32,6 +32,16 @@ class ChunkAuditRow:
     project_root: Path | None
 
 
+@dataclass(frozen=True, slots=True)
+class SearchMetadataFilter:
+    """Exact metadata constraints applied before retrieval limits."""
+
+    source_exact: tuple[str, ...] = ()
+    chunk_types: tuple[str, ...] = ()
+    created_from: datetime | None = None
+    created_before: datetime | None = None
+
+
 class StorageBackend(Protocol):
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
@@ -72,6 +82,7 @@ class StorageBackend(Protocol):
         namespace_filter: NamespaceFilter | None = None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[SearchResult]: ...
     async def dense_search(
         self,
@@ -80,6 +91,7 @@ class StorageBackend(Protocol):
         namespace_filter: NamespaceFilter | None = None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[SearchResult]: ...
 
     # Metadata
@@ -108,6 +120,7 @@ class StorageBackend(Protocol):
         tag_filter: str | None = None,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        metadata_filter: SearchMetadataFilter | None = None,
     ) -> list[Chunk]: ...
 
     # Audit enumeration (independent of search / recall paths)

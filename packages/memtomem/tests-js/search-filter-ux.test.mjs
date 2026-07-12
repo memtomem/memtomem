@@ -77,15 +77,34 @@ describe('Search filters - add/remove UX', () => {
 
   it('runs source-only search from the Search tab', async () => {
     addSourceOption('/repo/docs/cache.md');
+    addSourceOption('/repo/docs/other,comma.md');
 
     await window.doSearch();
     await flush();
 
     expect(searchUrls).toHaveLength(1);
     const params = new URL(`http://localhost${searchUrls[0]}`).searchParams;
-    expect(params.get('source_filter')).toBe('/repo/docs/cache.md');
+    expect(params.getAll('source_exact')).toEqual([
+      '/repo/docs/cache.md',
+      '/repo/docs/other,comma.md',
+    ]);
     expect(params.get('q')).toBeNull();
     expect(params.get('tag_filter')).toBeNull();
+  });
+
+  it('runs type/date-only search as server-side metadata bounds', async () => {
+    document.getElementById('chunk-type-filter').value = 'markdown_section';
+    document.getElementById('date-range-preset').value = 'today';
+
+    await window.doSearch();
+    await flush();
+
+    expect(searchUrls).toHaveLength(1);
+    const params = new URL(`http://localhost${searchUrls[0]}`).searchParams;
+    expect(params.get('q')).toBeNull();
+    expect(params.getAll('chunk_type')).toEqual(['markdown_section']);
+    expect(params.get('created_from')).toMatch(/T/);
+    expect(params.get('created_before')).toMatch(/T/);
   });
 
   it('preserves server-side filters when loading more results', async () => {
@@ -107,7 +126,7 @@ describe('Search filters - add/remove UX', () => {
     expect(params.get('top_k')).toBe('20');
     expect(params.get('namespace')).toBe('work');
     expect(params.get('context_window')).toBe('2');
-    expect(params.get('source_filter')).toBe('/repo/docs/cache.md');
+    expect(params.getAll('source_exact')).toEqual(['/repo/docs/cache.md']);
   });
 
   it('shows reranked results with rank percentile instead of raw negative score', () => {

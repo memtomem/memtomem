@@ -151,6 +151,12 @@ def commit_writer_signature(app: FastAPI) -> None:
     _set_last_signature(app, current_signature())
 
 
+def initialize_reload_state(app: FastAPI) -> None:
+    """Seed the lifespan-loaded config as the current on-disk view."""
+    _set_last_signature(app, current_signature())
+    _set_reload_error(app, None)
+
+
 # ---------------------------------------------------------------------------
 # Reload
 # ---------------------------------------------------------------------------
@@ -260,6 +266,17 @@ async def reload_if_stale(
 
     old_cfg = getattr(app.state, "config", None)
     app.state.config = new_cfg
+    index_engine = getattr(app.state, "index_engine", None)
+    if index_engine is not None:
+        # Routes resolve the engine before calling ``reload_if_stale``. Update
+        # the existing object in place so that request-local dependency still
+        # validates against the freshly installed indexing roots.
+        index_engine._config = new_cfg.indexing
+    watcher = getattr(app.state, "file_watcher", None)
+    if watcher is not None:
+        reconfigured = watcher.reconfigure(new_cfg.indexing)
+        if inspect.isawaitable(reconfigured):
+            await reconfigured
     _set_last_signature(app, sig)
     _set_reload_error(app, None)
 
