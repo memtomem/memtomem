@@ -1,0 +1,118 @@
+name: Release SBOM
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Immutable production tag to describe
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing production tag to backfill
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  UV_VERSION: "0.11.16"
+
+jobs:
+  sbom:
+    name: Build and attach CycloneDX SBOMs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # The tooling checkout is the caller commit for future tags and main for
+      # workflow_dispatch backfills. The release checkout always remains the
+      # immutable tag whose lock graph the SBOM describes.
+      - name: Check out trusted SBOM tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+      - name: Check out immutable release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.release_tag }}
+          path: release
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Validate production tag contract
+        id: contract
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "SBOM backfill requires an exact production tag, got: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          python3 tooling/tools/release_preflight.py contract \
+            --tag "$RELEASE_TAG" \
+            --repo-root release \
+            --github-output "$GITHUB_OUTPUT"
+          echo "release_sha=$(git -C release rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Export locked core and all-extras graphs
+        env:
+          CORE_RAW: ${{ runner.temp }}/memtomem-core.raw.json
+          ALL_RAW: ${{ runner.temp }}/memtomem-all.raw.json
+        working-directory: release
+        run: |
+          set -euo pipefail
+          uv export --quiet --frozen --preview-features sbom-export \
+            --format cyclonedx1.5 --package memtomem --no-dev -o "$CORE_RAW"
+          uv export --quiet --frozen --preview-features sbom-export \
+            --format cyclonedx1.5 --package memtomem --no-dev --all-extras -o "$ALL_RAW"
+      - name: Normalize and validate SBOM contract
+        env:
+          VERSION: ${{ steps.contract.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 tooling/tools/release_sbom.py \
+            --core-raw "$RUNNER_TEMP/memtomem-core.raw.json" \
+            --all-raw "$RUNNER_TEMP/memtomem-all.raw.json" \
+            --core-out "$RUNNER_TEMP/memtomem-${VERSION}-core.cdx.json" \
+            --all-out "$RUNNER_TEMP/memtomem-${VERSION}-all.cdx.json" \
+            --version "$VERSION"
+      - name: Create release if needed and upload missing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ steps.contract.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
+          for name in \
+            "memtomem-${VERSION}-core.cdx.json" \
+            "memtomem-${VERSION}-all.cdx.json"
+          do
+            generated="$RUNNER_TEMP/$name"
+            if gh release view "$RELEASE_TAG" --json assets \
+              --jq '.assets[].name' | grep -Fxq "$name"
+            then
+              existing_dir="$RUNNER_TEMP/existing-$name"
+              mkdir -p "$existing_dir"
+              gh release download "$RELEASE_TAG" --pattern "$name" --dir "$existing_dir"
+              if ! cmp -s "$generated" "$existing_dir/$name"; then
+                echo "refusing to overwrite differing release asset: $name" >&2
+                exit 1
+              fi
+              echo "$name already exists with identical bytes"
+            else
+              gh release upload "$RELEASE_TAG" "$generated"
+            fi
+            sha256sum "$generated" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo "Release tag: $RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release commit: ${{ steps.contract.outputs.release_sha }}" >> "$GITHUB_STEP_SUMMARY"
