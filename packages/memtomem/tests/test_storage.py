@@ -9,7 +9,8 @@ from uuid import uuid4
 import pytest
 
 from helpers import make_chunk as _make_chunk
-from memtomem.models import Chunk, ChunkMetadata, ChunkType
+from memtomem.models import Chunk, ChunkMetadata, ChunkType, SearchResult
+from memtomem.search.pipeline import _matches_metadata
 from memtomem.storage.base import SearchMetadataFilter
 from memtomem.storage.sqlite_backend import _classify_startup_error
 from memtomem.storage.sqlite_helpers import norm_path
@@ -39,6 +40,20 @@ class TestChunkCRUD:
 
 
 class TestSearchMetadataFilters:
+    def test_post_filter_treats_legacy_naive_timestamp_as_utc(self):
+        created_at = datetime(2026, 7, 12, 12, 0)
+        chunk = _make_chunk("legacy timestamp")
+        chunk.created_at = created_at
+        result = SearchResult(chunk=chunk, score=1.0, rank=1, source="bm25")
+
+        assert _matches_metadata(
+            result,
+            SearchMetadataFilter(
+                created_from=datetime(2026, 7, 12, 11, 0, tzinfo=UTC),
+                created_before=datetime(2026, 7, 12, 13, 0, tzinfo=UTC),
+            ),
+        )
+
     @pytest.mark.asyncio
     async def test_bm25_applies_exact_source_type_and_date_before_limit(self, storage):
         now = datetime.now(UTC)

@@ -41,6 +41,7 @@ const STATE = {
   viewMode: 'card',
   scoreMin: 0,
   currentSortMode: 'score',
+  showRetrievalDebug: false,
   maxResultScore: 0,
   resultScoreViews: {},
   sourcesBrowserStale: false,
@@ -174,14 +175,12 @@ const STATE = {
     if (hash) {
       if (_visibleMainTabs().includes(hash)) {
         activateTab(hash);
-      } else if (document.querySelector(`.tab-btn[data-tab="${hash}"]`)) {
-        // A real tab that the current mode hides (e.g. a deep-link to #timeline
-        // while in Simple). Don't strand on an empty panel — the statically
-        // active tab stays; surface *why* the link didn't open so the user can
-        // flip to Advanced. (No dev main-tabs exist, so the advanced copy fits.)
-        showToast(t('toast.advanced_only_section'), 'info');
-        activateTab(_visibleMainTabs()[0] || 'home', { historyMode: 'replace' });
       } else {
+        if (document.querySelector(`.tab-btn[data-tab="${hash}"]`)) {
+          // A real tab that the current mode hides (e.g. a deep-link to #timeline
+          // while in Simple). Explain the redirect so the user can switch modes.
+          showToast(t('toast.advanced_only_section'), 'info');
+        }
         activateTab(_visibleMainTabs()[0] || 'home', { historyMode: 'replace' });
       }
     }
@@ -1914,7 +1913,7 @@ window.addEventListener('popstate', (e) => {
   // Gate on current visibility (mirrors the boot-hash dispatch): a history
   // entry pushed while Tags/Timeline were visible must not replay
   // activateTab('timeline') after the user flipped to Simple — that would strand
-  // them on a panel with no active tab button. Staying put is the safe floor.
+  // them on a panel with no active tab button. Redirect to the first visible tab.
   if (tab && _visibleMainTabs().includes(tab)) {
     activateTab(tab, { historyMode: 'none' });
   } else {
@@ -1923,7 +1922,8 @@ window.addEventListener('popstate', (e) => {
 });
 window.addEventListener('hashchange', () => {
   const tab = location.hash.slice(1);
-  if (tab && _visibleMainTabs().includes(tab)) {
+  const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+  if (tab && tab !== activeTab && _visibleMainTabs().includes(tab)) {
     activateTab(tab, { historyMode: 'none' });
   }
 });

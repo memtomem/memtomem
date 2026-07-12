@@ -339,8 +339,10 @@ def test_ui_smoke_matrix(page, mode: str, viewport: tuple[int, int]) -> None:
             "() => document.querySelectorAll('#results-list .result-item').length > 0",
             timeout=5_000,
         )
-        assert page.locator("#results-list .result-debug-meta").first.evaluate(
-            "el => getComputedStyle(el).display === 'none'"
+        page.wait_for_function(
+            "() => getComputedStyle(document.querySelector("
+            "'#results-list .result-debug-meta')).display === 'none'",
+            timeout=2_000,
         )
         assert (
             page.locator("#results-list .results-debug-details summary").inner_text()

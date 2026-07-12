@@ -141,6 +141,9 @@ def _metadata_filter_sql(
             f"{column_alias}chunk_type IN ({placeholders(len(metadata_filter.chunk_types))})"
         )
         params.extend(metadata_filter.chunk_types)
+    # ``chunks.created_at`` is stored as a UTC ISO-8601 string. Bounds from
+    # the web route are normalized to UTC too, so lexical ordering is temporal
+    # ordering for this column.
     if metadata_filter.created_from is not None:
         conditions.append(f"{column_alias}created_at >= ?")
         params.append(metadata_filter.created_from.isoformat())

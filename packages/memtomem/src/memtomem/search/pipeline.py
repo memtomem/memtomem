@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -183,12 +183,17 @@ def _matches_metadata(result: SearchResult, metadata_filter: SearchMetadataFilte
     if metadata_filter.chunk_types:
         if str(chunk.metadata.chunk_type) not in set(metadata_filter.chunk_types):
             return False
-    if metadata_filter.created_from is not None and chunk.created_at < metadata_filter.created_from:
+    created_at = chunk.created_at
+    if created_at.tzinfo is None:
+        # Legacy/imported rows may carry an offset-less ISO timestamp. The
+        # storage contract has always treated those values as UTC, so preserve
+        # that meaning before comparing with the route's aware UTC bounds.
+        created_at = created_at.replace(tzinfo=UTC)
+    else:
+        created_at = created_at.astimezone(UTC)
+    if metadata_filter.created_from is not None and created_at < metadata_filter.created_from:
         return False
-    if (
-        metadata_filter.created_before is not None
-        and chunk.created_at >= metadata_filter.created_before
-    ):
+    if metadata_filter.created_before is not None and created_at >= metadata_filter.created_before:
         return False
     return True
 
@@ -597,25 +602,15 @@ class SearchPipeline:
         # workflow; revisit if a "show me old-but-important by tag" need
         # surfaces.
         candidate_limit = max(top_k * 5, 100)
-        if metadata_filter is not None:
-            chunks = await self._storage.recall_chunks(
-                source_filter=source_filter,
-                tag_filter=tag_filter,
-                namespace_filter=ns_filter,
-                scope_filter=scope_filter,
-                project_context_root=project_context_root,
-                limit=candidate_limit,
-                metadata_filter=metadata_filter,
-            )
-        else:
-            chunks = await self._storage.recall_chunks(
-                source_filter=source_filter,
-                tag_filter=tag_filter,
-                namespace_filter=ns_filter,
-                scope_filter=scope_filter,
-                project_context_root=project_context_root,
-                limit=candidate_limit,
-            )
+        chunks = await self._storage.recall_chunks(
+            source_filter=source_filter,
+            tag_filter=tag_filter,
+            namespace_filter=ns_filter,
+            scope_filter=scope_filter,
+            project_context_root=project_context_root,
+            limit=candidate_limit,
+            metadata_filter=metadata_filter,
+        )
 
         fused: list[SearchResult] = [
             SearchResult(chunk=c, score=1.0, rank=i + 1, source="recall")
@@ -1079,8 +1074,14 @@ class SearchPipeline:
         ctx_win = self._resolve_context_window(context_window)
         if ctx_win > 0 and fused:
             fused = await self._expand_context(fused, ctx_win)
-            if metadata_filter is not None:
-                fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
+            if metadata_filter is not None and metadata_filter.source_exact:
+                # Context neighbors belong to the selected source but may have
+                # a different chunk type or timestamp. Keep that surrounding
+                # context while preserving the exact-source boundary.
+                allowed_sources = {norm_path(Path(value)) for value in metadata_filter.source_exact}
+                fused = [
+                    r for r in fused if norm_path(r.chunk.metadata.source_file) in allowed_sources
+                ]
 
         # Re-stamp ``via_session_summary`` for any chunk that came in
         # via the rescue leg. Downstream stages (decay, MMR, access,

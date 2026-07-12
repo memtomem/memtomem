@@ -167,13 +167,16 @@ class FileWatcher:
             }
             current = set(self._watches)
             added: list[Path] = []
+            removed: list[Path] = []
             try:
                 for path in sorted(desired - current):
                     watch = observer.schedule(handler, str(path), recursive=True)
                     self._watches[path] = watch
                     added.append(path)
                 for path in sorted(current - desired):
-                    observer.unschedule(self._watches.pop(path))
+                    observer.unschedule(self._watches[path])
+                    self._watches.pop(path)
+                    removed.append(path)
             except Exception:
                 for path in added:
                     rollback_watch = self._watches.pop(path, None)
@@ -182,6 +185,11 @@ class FileWatcher:
                             observer.unschedule(rollback_watch)
                         except Exception:
                             logger.debug("Failed to rollback watcher schedule", exc_info=True)
+                for path in removed:
+                    try:
+                        self._watches[path] = observer.schedule(handler, str(path), recursive=True)
+                    except Exception:
+                        logger.error("Failed to restore watcher during rollback: %s", path)
                 raise
             handler._supported = config.supported_extensions
             self._config = config
