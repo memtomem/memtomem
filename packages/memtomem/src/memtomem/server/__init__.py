@@ -122,6 +122,7 @@ from memtomem.server.tools.pinned import (
 from memtomem.server.tools.formation import (
     mem_candidate_list,
     mem_candidate_recover,
+    mem_candidate_propose,
     mem_candidate_review,
     mem_formation_scan,
 )

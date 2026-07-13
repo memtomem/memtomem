@@ -237,3 +237,11 @@ class TestMemVersion:
         assert "compact" in formats
         assert "verbose" in formats
         assert "structured" in formats
+
+    async def test_capabilities_stm_bridge(self):
+        parsed = json.loads(await mem_version())
+        capabilities = parsed["capabilities"]
+        assert capabilities["context_compose"] == {"schema_version": 1}
+        assert capabilities["candidate_propose"] == {"schema_version": 1}
+        assert "context_compose" in ACTIONS
+        assert "candidate_propose" in ACTIONS

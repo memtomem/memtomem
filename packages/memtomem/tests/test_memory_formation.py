@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 
-from memtomem.formation import scan_session_candidates
+from memtomem.formation import propose_memory_candidate, scan_session_candidates
 
 
 @pytest.mark.asyncio
@@ -46,6 +46,40 @@ async def test_scan_does_not_promote_generic_declarative_sentences(storage):
     await storage.add_session_event("session", "note", "The service is available")
     await storage.add_session_event("session", "note", "서비스입니다")
     assert await scan_session_candidates(storage, "session") == []
+
+
+@pytest.mark.asyncio
+async def test_external_candidate_proposal_is_pending_and_idempotent(storage):
+    first, first_duplicate = await propose_memory_candidate(
+        storage,
+        "Decision: use blue-green deployment",
+        source="memtomem-stm",
+        source_ref="docs/read_file/trace-1",
+        idempotency_key="stable-key",
+    )
+    second, second_duplicate = await propose_memory_candidate(
+        storage,
+        "Decision: use blue-green deployment",
+        source="memtomem-stm",
+        source_ref="docs/read_file/trace-1",
+        idempotency_key="stable-key",
+    )
+    assert first_duplicate is False
+    assert second_duplicate is True
+    assert second["id"] == first["id"]
+    assert (await storage.get_memory_candidate(first["id"]))["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_external_candidate_proposal_rejects_sensitive_content(storage):
+    with pytest.raises(ValueError, match="sensitive"):
+        await propose_memory_candidate(
+            storage,
+            "Decision: api_key=sk-secret-value",
+            source="memtomem-stm",
+            source_ref="trace",
+            idempotency_key="key",
+        )
 
 
 @pytest.mark.asyncio
