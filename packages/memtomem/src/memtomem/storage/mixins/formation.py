@@ -304,6 +304,39 @@ class FormationMixin:
         db.commit()
         return cursor.rowcount > 0
 
+    async def resolve_uncertain_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reviewer: str,
+        reason: str,
+    ) -> bool:
+        """Atomically close a quarantined candidate without another write."""
+        if not reviewer.strip():
+            raise ValueError("write_uncertain resolution reviewer cannot be empty")
+        if not reason.strip():
+            raise ValueError("write_uncertain resolution reason cannot be empty")
+        db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        cursor = db.execute(
+            "UPDATE memory_candidates SET status='rejected', reviewer=?, "
+            "decision_reason=?, decided_at=?, claim_started_at=NULL "
+            "WHERE id=? AND status='write_uncertain'",
+            (reviewer, reason, now, candidate_id),
+        )
+        if cursor.rowcount > 0:
+            self._record_candidate_transition(
+                db,
+                candidate_id,
+                "write_uncertain",
+                "rejected",
+                reviewer,
+                reason,
+                now,
+            )
+        db.commit()
+        return cursor.rowcount > 0
+
     async def list_memory_candidate_transitions(self, candidate_id: str) -> list[dict[str, Any]]:
         db = self._get_db()
         rows = db.execute(

@@ -117,15 +117,44 @@ async def mem_candidate_review(
     """Approve or reject a candidate; only approval writes durable memory."""
     app = await _get_app_initialized(ctx)
     candidate = await app.storage.get_memory_candidate(candidate_id)
-    if candidate is None or candidate["status"] != "pending":
-        return json.dumps({"ok": False, "reason": "candidate not pending"})
+    if candidate is None:
+        return json.dumps({"ok": False, "reason": "candidate not found"})
     if decision == "reject":
+        if candidate["status"] == "write_uncertain":
+            if not reviewer.strip():
+                return json.dumps({"ok": False, "reason": "reviewer cannot be empty"})
+            if not reason.strip():
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "reason": (
+                            "resolving write_uncertain requires a reason after "
+                            "inspecting the durable destination"
+                        ),
+                    }
+                )
+            changed = await app.storage.resolve_uncertain_memory_candidate(
+                candidate_id, reviewer=reviewer, reason=reason
+            )
+            return json.dumps(
+                {
+                    "ok": changed,
+                    "status": "rejected" if changed else "state_changed",
+                    "resolved_from": "write_uncertain",
+                }
+            )
+        if candidate["status"] != "pending":
+            return json.dumps(
+                {"ok": False, "reason": f"candidate not pending ({candidate['status']})"}
+            )
         changed = await app.storage.decide_memory_candidate(
             candidate_id, "rejected", reviewer, reason
         )
         return json.dumps({"ok": changed, "status": "rejected"})
     if decision != "approve":
         return json.dumps({"ok": False, "reason": "decision must be approve or reject"})
+    if candidate["status"] != "pending":
+        return json.dumps({"ok": False, "reason": f"candidate not pending ({candidate['status']})"})
 
     claimed = await app.storage.claim_memory_candidate(candidate_id, reviewer, reason)
     if claimed is None:

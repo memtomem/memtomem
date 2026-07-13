@@ -27,7 +27,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   timestamps receive a one-time grace-period backfill; recovery supports
   older SQLite versions without `UPDATE ... RETURNING`, and a completed write
   that loses finalization is quarantined as `write_uncertain` to prevent blind
-  duplicate approval.
+  duplicate approval. Operators can close that quarantine through the normal
+  CLI/MCP reject action with a required reviewer and reason; resolution writes
+  no additional durable memory and records an audited transition.
 - **STM capability bridge** — `mem_do(action="version")` advertises versioned
   `context_compose` and `candidate_propose` contracts. External proposals are
   privacy-gated, idempotently queued as pending review candidates, and never
