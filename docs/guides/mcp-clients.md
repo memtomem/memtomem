@@ -79,7 +79,10 @@ claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 
 Both write to `~/.claude.json` — no need to edit that file by hand.
 
-For the full plugin experience (bundled MCP server, slash commands, automation hooks, memory curator agent — one `/plugin install memtomem@memtomem`), see the [Claude Code integration guide](integrations/claude-code.md).
+For the safe plugin experience (bundled MCP server plus six focused skills),
+install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
+indexing are a separate opt-in `/plugin install memtomem-automation@memtomem`.
+See the [Claude Code integration guide](integrations/claude-code.md).
 
 ### Project scope — commit a `.mcp.json`
 
@@ -228,7 +231,21 @@ Restart Kimi CLI after configuration.
 
 ## 7. Codex CLI
 
-Codex CLI reads MCP servers from `~/.codex/config.toml` under the
+### Option A: Install the memtomem plugin
+
+The repository marketplace bundles the exact-pinned MCP server and six Codex
+skills:
+
+```bash
+codex plugin marketplace add /path/to/memtomem
+codex plugin add memtomem@memtomem
+```
+
+Start a new thread after installation. See the [Codex integration guide](integrations/codex.md).
+
+### Option B: Register only the MCP server
+
+Codex CLI reads manually registered MCP servers from `~/.codex/config.toml` under the
 `[mcp_servers.<id>]` section header — TOML, not JSON. Add a section for
 memtomem:
 

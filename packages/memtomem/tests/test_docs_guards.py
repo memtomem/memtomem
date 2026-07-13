@@ -12,11 +12,8 @@ These guards protect invariants that code cannot enforce directly:
   tool group in both ``reference.md`` and ``mcp-clients.md``; both files
   must mark them with the ``\\*`` + ``MEMTOMEM_TOOL_MODE=full`` footnote,
   or users reading one file won't know they are gated.
-- The ``hooks.json`` snippet rendered in ``claude-code.md`` Hooks
-  Automation Setup must declare byte-identical ``command`` strings to
-  the plugin's shipped ``hooks.json`` for every event the snippet
-  covers. Drift between the two sites silently ships an outdated
-  user-facing recipe.
+- The Claude guide must describe automation as a separate opt-in plugin and
+  must not reintroduce shell interpolation of hook event fields.
 - Public guides must not use `````jsonc`` fences for
   ``config.d`` examples — the fragment loader at
   ``packages/memtomem/src/memtomem/config.py:1157`` calls strict
@@ -50,8 +47,9 @@ _PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
 _PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
 _NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
 _SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
-_PLUGIN_HOOKS_JSON = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "hooks" / "hooks.json"
-_HOOKS_SNIPPET_ANCHOR = "Add the following to `~/.claude/settings.json`:"
+_AUTOMATION_HOOKS_JSON = (
+    _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "hooks" / "hooks.json"
+)
 
 _ASTERISK_TOOLS = ("mem_config", "mem_embedding_reset", "mem_reset")
 _FOOTNOTE_PREFIX = r"\* Requires `MEMTOMEM_TOOL_MODE=full`"
@@ -211,127 +209,25 @@ class TestWebRemoteAccessDocs:
         assert "0029-mcp-network-transport-auth-stance.md" in operations
 
 
-def _extract_hooks_snippet(claude_code_md: str) -> dict:
-    """Extract the ``Add the following to ~/.claude/settings.json`` JSON
-    block from claude-code.md. Returns the parsed dict.
+class TestOptionalClaudeAutomationDocs:
+    def test_guide_names_the_separate_automation_plugin(self, claude_code: str) -> None:
+        assert "/plugin install memtomem-automation@memtomem" in claude_code
+        assert "separate opt-in" in claude_code or "second plugin" in claude_code
 
-    The Hooks Automation Setup section embeds a fenced ``json`` block that
-    users copy-paste into their Claude Code settings; this helper returns
-    that block as the parsed dict so parity tests can compare commands
-    against the plugin's shipped hooks.json.
-    """
-    anchor_idx = claude_code_md.find(_HOOKS_SNIPPET_ANCHOR)
-    if anchor_idx == -1:
-        pytest.fail(f"claude-code.md lost its hooks-snippet anchor: {_HOOKS_SNIPPET_ANCHOR!r}")
-    fence_re = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
-    match = fence_re.search(claude_code_md, anchor_idx)
-    if match is None:
-        pytest.fail("claude-code.md has the hooks-snippet anchor but no ```json fence after it")
-    return json.loads(match.group(1))
+    def test_guide_does_not_publish_broken_shell_interpolation(self, claude_code: str) -> None:
+        assert "${prompt}" not in claude_code
+        assert "${tool_input" not in claude_code
+        assert "mm session end --auto" not in claude_code
 
-
-def _commands_by_event_matcher(hooks_doc: dict) -> dict[tuple[str, str], dict]:
-    """Flatten a hooks.json shape into ``{(event, matcher): hook_dict}``
-    where ``hook_dict`` is the single inner hook (``command``, ``timeout``…).
-
-    Only entries with a single command are included; multi-command entries
-    fail loudly because the parity test isn't designed for them yet.
-    """
-    out: dict[tuple[str, str], dict] = {}
-    for event, entries in hooks_doc.get("hooks", {}).items():
-        for entry in entries:
-            matcher = entry.get("matcher", "")
-            commands = entry.get("hooks", [])
-            assert len(commands) == 1, (
-                f"hooks parity helper expected exactly one command per entry, "
-                f"got {len(commands)} at {event}/{matcher!r}"
-            )
-            out[(event, matcher)] = commands[0]
-    return out
-
-
-@pytest.fixture(scope="module")
-def plugin_commands() -> dict[tuple[str, str], dict]:
-    plugin_hooks = json.loads(_PLUGIN_HOOKS_JSON.read_text(encoding="utf-8"))
-    return _commands_by_event_matcher(plugin_hooks)
-
-
-@pytest.fixture(scope="module")
-def docs_commands(claude_code: str) -> dict[tuple[str, str], dict]:
-    snippet = _extract_hooks_snippet(claude_code)
-    return _commands_by_event_matcher(snippet)
-
-
-class TestPluginHooksDocsParity:
-    """The hooks.json snippet in claude-code.md must declare byte-identical
-    ``command`` strings to the plugin's shipped hooks.json for every
-    (event, matcher) pair the docs cover. The docs intentionally show a
-    subset (the ``activity log`` PostToolUse entry is omitted to keep the
-    copy-paste recipe tight), so we iterate over the docs entries and
-    require each to match the plugin file — not the other way around.
-    """
-
-    def test_docs_snippet_is_subset_of_plugin(
-        self,
-        plugin_commands: dict[tuple[str, str], dict],
-        docs_commands: dict[tuple[str, str], dict],
-    ) -> None:
-        missing = [k for k in docs_commands if k not in plugin_commands]
-        assert not missing, (
-            f"claude-code.md hooks snippet declares (event, matcher) entries "
-            f"that the plugin hooks.json does not ship: {missing}. Either add "
-            f"them to packages/memtomem-claude-plugin/hooks/hooks.json or "
-            f"remove them from the docs."
-        )
-
-    def test_docs_snippet_commands_match_plugin(
-        self,
-        plugin_commands: dict[tuple[str, str], dict],
-        docs_commands: dict[tuple[str, str], dict],
-    ) -> None:
-        diffs = [
-            (event_matcher, plugin_commands[event_matcher]["command"], docs_cmd["command"])
-            for event_matcher, docs_cmd in docs_commands.items()
-            if plugin_commands.get(event_matcher, {}).get("command") != docs_cmd["command"]
-        ]
-        assert not diffs, (
-            "claude-code.md hooks snippet drifted from the plugin's "
-            "hooks.json. The two sites must declare byte-identical commands "
-            "for every (event, matcher) the docs render. Diffs:\n"
-            + "\n".join(f"  {em}:\n    plugin: {p}\n    docs:   {d}" for em, p, d in diffs)
-        )
-
-    def test_docs_snippet_timeouts_match_plugin(
-        self,
-        plugin_commands: dict[tuple[str, str], dict],
-        docs_commands: dict[tuple[str, str], dict],
-    ) -> None:
-        """Claude Code hook ``timeout`` is in seconds; the plugin once
-        shipped millisecond values (5000 → ~83 min hang cap) while the docs
-        said 5. Pin the two sites to identical timeout values so a
-        unit-confusion regression on either side fails loudly."""
-        diffs = [
-            (em, plugin_commands[em].get("timeout"), docs_cmd.get("timeout"))
-            for em, docs_cmd in docs_commands.items()
-            if em in plugin_commands
-            and plugin_commands[em].get("timeout") != docs_cmd.get("timeout")
-        ]
-        assert not diffs, (
-            "hooks timeout drifted between claude-code.md and the plugin "
-            "hooks.json (values are SECONDS — never milliseconds):\n"
-            + "\n".join(f"  {em}: plugin={p} docs={d}" for em, p, d in diffs)
-        )
-
-    def test_plugin_hook_timeouts_are_seconds(
-        self, plugin_commands: dict[tuple[str, str], dict]
-    ) -> None:
-        """Any timeout over 120 almost certainly means someone wrote
-        milliseconds again (Claude Code interprets the field as seconds)."""
-        bad = {em: h["timeout"] for em, h in plugin_commands.items() if h.get("timeout", 0) > 120}
-        assert not bad, (
-            f"plugin hooks.json has timeout values that look like "
-            f"milliseconds (unit is seconds): {bad}"
-        )
+    def test_automation_hooks_use_dispatcher_and_second_timeouts(self) -> None:
+        hooks = json.loads(_AUTOMATION_HOOKS_JSON.read_text(encoding="utf-8"))["hooks"]
+        assert set(hooks) == {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"}
+        for event, rules in hooks.items():
+            for rule in rules:
+                for handler in rule["hooks"]:
+                    assert handler["command"] == "python3"
+                    assert handler["args"][-1] == event
+                    assert 0 < handler["timeout"] <= 120
 
 
 class TestNoJsoncFenceInPublicGuides:

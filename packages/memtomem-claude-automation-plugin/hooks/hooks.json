@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py", "SessionStart"],
+            "timeout": 5,
+            "statusMessage": "memtomem · checking automation dependency"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py", "UserPromptSubmit"],
+            "timeout": 5,
+            "statusMessage": "memtomem · searching relevant memories"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py", "PostToolUse"],
+            "timeout": 10,
+            "statusMessage": "memtomem · queueing changed file"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/hook_dispatch.py", "Stop"],
+            "timeout": 10,
+            "statusMessage": "memtomem · flushing index queue"
+          }
+        ]
+      }
+    ]
+  }
+}

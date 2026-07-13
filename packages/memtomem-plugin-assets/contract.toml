@@ -1,0 +1,91 @@
+[core]
+version = "0.3.8"
+tool_mode = "core"
+
+[plugins]
+claude_version = "0.3.0"
+codex_version = "0.1.0"
+automation_version = "0.1.0"
+
+[[workflows]]
+id = "search"
+codex_name = "memtomem-search"
+title = "Search memories"
+description = "Search indexed memtomem memories by topic. Use for past decisions, notes, findings, or project context that may exist in the memory index."
+tools = ["mem_search"]
+effect = "read"
+implicit = true
+argument_hint = "[query]"
+input_kind = "search query"
+ui_name = "memtomem Search"
+ui_description = "Search indexed memories by topic"
+default_prompt = "Use $memtomem-search to find past decisions about authentication."
+
+[[workflows]]
+id = "recall"
+codex_name = "memtomem-recall"
+title = "Recall memories"
+description = "Recall memtomem memories created in a date range. Use for recent memories or requests scoped by day, week, month, source, or namespace."
+tools = ["mem_recall"]
+effect = "read"
+implicit = true
+argument_hint = "[date range]"
+input_kind = "date range or recent-memory request"
+ui_name = "memtomem Recall"
+ui_description = "Recall memories from a date range"
+default_prompt = "Use $memtomem-recall to show memories created last week."
+
+[[workflows]]
+id = "status"
+codex_name = "memtomem-status"
+title = "Check memory status"
+description = "Check memtomem configuration, storage, index counts, dense coverage, and warnings. Use when search is empty, degraded, or needs diagnosis."
+tools = ["mem_status"]
+effect = "read"
+implicit = true
+input_kind = "status request"
+ui_name = "memtomem Status"
+ui_description = "Check memory index health and coverage"
+default_prompt = "Use $memtomem-status to inspect the current memory index."
+
+[[workflows]]
+id = "remember"
+codex_name = "memtomem-remember"
+title = "Remember information"
+description = "Save an explicit user-requested memory with memtomem. Use only when the user clearly asks to remember, record, or persist information for later."
+tools = ["mem_add"]
+effect = "write"
+implicit = false
+argument_hint = "[content to remember]"
+input_kind = "content to remember"
+ui_name = "memtomem Remember"
+ui_description = "Save an explicit memory entry safely"
+default_prompt = "Use $memtomem-remember to save this decision for later."
+
+[[workflows]]
+id = "index"
+codex_name = "memtomem-index"
+title = "Index memory files"
+description = "Index or re-index an explicitly selected file or directory with memtomem. Use for initial ingestion or intentional refresh after file changes."
+tools = ["mem_index"]
+effect = "write"
+implicit = false
+argument_hint = "[path]"
+input_kind = "file or directory path"
+ui_name = "memtomem Index"
+ui_description = "Index an explicitly selected path"
+default_prompt = "Use $memtomem-index to index the notes directory."
+
+[[workflows]]
+id = "setup"
+codex_name = "memtomem-setup"
+title = "Set up memtomem"
+description = "Set up and verify a first memtomem memory source. Use for onboarding, choosing an index path, or confirming that search works."
+tools = ["mem_status", "mem_index", "mem_search"]
+effect = "mixed"
+implicit = false
+argument_hint = "[path]"
+input_kind = "memory source path"
+ui_name = "memtomem Setup"
+ui_description = "Set up and verify memory search"
+default_prompt = "Use $memtomem-setup to configure a first searchable directory."

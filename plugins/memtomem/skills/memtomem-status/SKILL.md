@@ -1,7 +1,6 @@
 ---
-name: status
+name: memtomem-status
 description: Check memtomem configuration, storage, index counts, dense coverage, and warnings. Use when search is empty, degraded, or needs diagnosis.
-allowed-tools: mcp__plugin_memtomem_memtomem__mem_status, mcp__memtomem__mem_status
 ---
 
 # Check memory status

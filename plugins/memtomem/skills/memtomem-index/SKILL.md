@@ -1,14 +1,11 @@
 ---
-name: index
+name: memtomem-index
 description: Index or re-index an explicitly selected file or directory with memtomem. Use for initial ingestion or intentional refresh after file changes.
-argument-hint: [path]
-allowed-tools: mcp__plugin_memtomem_memtomem__mem_index, mcp__memtomem__mem_index
-disable-model-invocation: true
 ---
 
 # Index memory files
 
-Use `$ARGUMENTS` as the file or directory path.
+Derive the file or directory path from the current user request.
 If it does not provide a usable file or directory path, ask before calling a tool.
 Require an explicit file or directory path before calling `mem_index`; never rely on its `.` default. Resolve ambiguity with the user before indexing a broad directory.
 

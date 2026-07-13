@@ -12,6 +12,7 @@ guides are organized by outcome rather than by feature name.
    Codex CLI, Antigravity, Windsurf, Claude Desktop, Gemini CLI, or Kimi CLI.
    Client-specific deep dives:
    - [Claude Code](integrations/claude-code.md)
+   - [Codex](integrations/codex.md)
    - [Cursor](integrations/cursor.md)
    - [Claude Desktop](integrations/claude-desktop.md)
 3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool
