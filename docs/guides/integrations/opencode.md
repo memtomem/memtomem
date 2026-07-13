@@ -34,7 +34,7 @@ Restart OpenCode, then verify:
 
 | Surface | Included behavior |
 |---|---|
-| MCP | `uvx --from memtomem==0.3.8 memtomem-server`, core tool mode |
+| MCP | `uvx --from memtomem==0.3.9 memtomem-server`, core tool mode |
 | Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup` |
 | Skills | Read-only `search`, `recall`, and `status` |
 
