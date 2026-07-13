@@ -5,6 +5,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Public synthetic retrieval benchmark** — a privacy-audited 48-file,
+  192-chunk English/Korean corpus, 100-query portfolio, reproducible 0.3.8
+  baseline manifest, and blocking quality-floor CI check.
+- **LangGraph `BaseStore` adapter** — `MemtomemBaseStore` provides
+  file-backed tuple-namespace JSON CRUD, filters, batching, namespace
+  listing, and semantic/lexical search via the new `langgraph` extra.
+- **Pinned Context** — `mm pinned` and `mem_do` actions manage small,
+  privacy-gated Markdown blocks that are composed before retrieved memory
+  with deterministic agent/scope shadowing and character budgets.
+- **Review-first memory formation** — `mm review` and `mem_do` actions create
+  evidence-linked candidates from exact session events and write durable
+  memory only after approval. Additive temporal assertion tables preserve
+  direction and multiple `supersedes`/`contradicts`/`supports` edges.
+
 ## [0.3.8] — 2026-07-13
 
 ### Added

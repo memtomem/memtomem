@@ -112,6 +112,18 @@ from memtomem.server.tools.cross_ref import mem_link, mem_unlink, mem_related
 from memtomem.server.tools.session import mem_session_start, mem_session_end, mem_session_list
 from memtomem.server.tools.scratch import mem_scratch_set, mem_scratch_get, mem_scratch_promote
 from memtomem.server.tools.procedure import mem_procedure_save, mem_procedure_list
+from memtomem.server.tools.pinned import (
+    mem_context_compose,
+    mem_pinned_delete,
+    mem_pinned_get,
+    mem_pinned_list,
+    mem_pinned_set,
+)
+from memtomem.server.tools.formation import (
+    mem_candidate_list,
+    mem_candidate_review,
+    mem_formation_scan,
+)
 from memtomem.server.tools.multi_agent import mem_agent_register, mem_agent_search, mem_agent_share
 from memtomem.server.tools.evaluation import mem_eval
 from memtomem.server.tools.consolidation import mem_consolidate, mem_consolidate_apply

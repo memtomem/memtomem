@@ -33,6 +33,8 @@ class TestToolRegistry:
             "context",
             "search",
             "schedule",
+            "pinned",
+            "formation",
         }
         assert categories == expected
 

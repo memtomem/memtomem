@@ -5,7 +5,7 @@
 <!-- primary: security/secrets -->
 <!-- secondary: ci_cd/pipeline, security/incident -->
 
-2023년 11월 12일 14:30 KST, GitHub Actions 빌드 로그를 통해 하드코딩된 AWS 액세스 키(`AKIAIOSFODNN7EXAMPLE`)가 노출되는 보안 사고가 발생했습니다. 조사 결과, 개발 환경 CI/CD 파이프라인에서 환경 변수를 마스킹하지 않아 발생한 유출로 확인되었습니다. 즉시 해당 키를 폐기(Revoke)하고 임시 자격 증명 기반의 OIDC를 도입하여 문제를 완화했습니다. 현재는 모든 워크플로우를 업데이트하여 `aws-actions/configure-aws-credentials@v4` 액션만 사용하도록 강제하고 있습니다.
+2023년 11월 12일 14:30 KST, GitHub Actions 빌드 로그를 통해 하드코딩된 AWS 액세스 키 식별자(`<SYNTHETIC_AWS_KEY_ID>`)가 노출되는 가상 보안 사고가 발생했습니다. 조사 결과, 개발 환경 CI/CD 파이프라인에서 환경 변수를 마스킹하지 않아 발생한 유출로 확인되었습니다. 즉시 해당 키를 폐기(Revoke)하고 임시 자격 증명 기반의 OIDC를 도입하여 문제를 완화했습니다. 현재는 모든 워크플로우를 업데이트하여 `aws-actions/configure-aws-credentials@v4` 액션만 사용하도록 강제하고 있습니다.
 
 ## 2024-02-08 운영 네임스페이스 삭제 — cluster-admin 잔존 권한
 

@@ -87,7 +87,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **87 MCP tools** organized into categories:
+memtomem provides **95 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -102,6 +102,8 @@ memtomem provides **87 MCP tools** organized into categories:
 | **Relations** | `mem_link`, `mem_unlink`, `mem_related` | Cross-reference links between chunks |
 | **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* | Monitor and configure |
+| **Pinned Context** | `mem_pinned_list/get/set/delete`, `mem_context_compose` | Keep bounded instructions ahead of retrieved memory |
+| **Formation** | `mem_formation_scan`, `mem_candidate_list/review` | Review proposed memories before durable writes |
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
@@ -141,4 +143,4 @@ The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skill
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 87 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 95 tools with parameters

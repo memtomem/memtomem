@@ -1,13 +1,14 @@
-# corpus_v2 — multilingual regression test fixtures
+# corpus_v2 — public synthetic multilingual retrieval benchmark
 
-Synthetic technical documentation chunks used by
-`test_multilingual_regression.py` to measure search pipeline quality
-regressions across topics, genres, and languages.
+Public, synthetic technical-documentation chunks used to measure search
+pipeline quality regressions across topics, genres, and languages. The
+dataset contains no customer records, user memories, private conversations,
+or internal company documents.
 
 ## Provenance
 
 Chunks in this directory were drafted by **Google Gemini** using the
-prompt template in `docs/planning/b2-v2-gemini-template.md` with
+public generation specification in [`GENERATION.md`](GENERATION.md) with
 closed-set subtopic vocabulary and genre style constraints, then
 **curated and normalized by a human maintainer** (subtopic drift
 correction, format conversion to markdown, deduplication) before
@@ -30,10 +31,20 @@ for:
 Chunks that failed review were rejected or regenerated with adjusted
 prompts.
 
+Every committed revision is checked by
+`tools/retrieval-eval/audit_public_corpus.py`. The audit fails if the corpus
+contains a value caught by memtomem's secret scanner, an email outside the
+reserved `example.*` domains, or a globally routable literal IP address. It
+also pins the 48-file / 192-chunk / 100-query shape and emits content hashes
+for benchmark manifests.
+
 ## Synthetic content disclaimer
 
-All chunks are synthetic fiction for search-ranking regression
-testing. **Do not use as operational runbooks, incident response
+All names, organizations, incidents, and timelines are synthetic fiction for
+search-ranking regression testing. Credential-shaped examples use explicit
+`<SYNTHETIC_...>` placeholders; secret-detector canaries live in separate
+privacy tests and are not part of this retrieval corpus. **Do not use this
+dataset as operational runbooks, incident response
 guides, or architecture guidance without independent verification.**
 Specific commands, config syntax, version numbers, and default
 behaviors described here are plausible but not validated against
