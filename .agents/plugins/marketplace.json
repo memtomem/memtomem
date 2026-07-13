@@ -1,0 +1,20 @@
+{
+  "name": "memtomem",
+  "interface": {
+    "displayName": "memtomem"
+  },
+  "plugins": [
+    {
+      "name": "memtomem",
+      "source": {
+        "source": "local",
+        "path": "./plugins/memtomem"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -40,21 +40,21 @@ The most powerful automation pipeline is achieved when combined with Claude Code
 
 ## MCP Server Setup
 
-### Option A: Install the plugin (one step)
+### Option A: Install the safe base plugin
 
-The memtomem plugin bundles the MCP server, slash commands
-(`/memtomem:status`, `/memtomem:remember`, …), automation hooks, and the
-memory-curator agent in a single install:
+The memtomem plugin bundles the exact-pinned MCP server and six focused slash
+commands. Read workflows can be selected automatically; write and setup
+workflows require direct invocation.
 
 ```
 /plugin marketplace add memtomem/memtomem
 /plugin install memtomem@memtomem
 ```
 
-The plugin launches the server via `uvx --from memtomem memtomem-server`,
-so [uv](https://docs.astral.sh/uv/) must be on your PATH — no separate
-`pip install` needed for the MCP server itself. Hooks additionally need
-the CLI installed (see [Hooks Automation Setup](#hooks-automation-setup)).
+The plugin launches the server via an exact reviewed `uvx --from
+memtomem==<version>` pin, so [uv](https://docs.astral.sh/uv/) must be on your
+PATH. BM25 works with the default `embedding.provider=none`; embeddings are
+optional.
 
 > **Already registered via `claude mcp add`?** Nothing runs twice —
 > Claude Code detects that the plugin bundles the same server command
@@ -67,12 +67,12 @@ the CLI installed (see [Hooks Automation Setup](#hooks-automation-setup)).
 > claude mcp remove memtomem
 > ```
 >
-> Either way the bundled slash commands and curator agent work — their
-> allowlists cover both tool namespaces. If your own settings
+> Either way the bundled slash commands work — their allowlists cover both
+> tool namespaces. If your own settings
 > allowlist `mcp__memtomem__mem_*`, update it when you remove the
 > manual entry.
 
-Prefer manual registration (no skills/hooks, finer scope control)? Use
+Prefer manual registration without shipped skills? Use
 Option B below.
 
 ### Option B: Register the MCP server manually
@@ -202,62 +202,26 @@ mem_index(path="~/notes", recursive=True)
 
 ## Hooks Automation Setup
 
-> **Plugin users**: Hooks are included in the plugin. You only need to install the CLI for them to activate:
-> ```bash
-> uv tool install 'memtomem[all]'   # or: pipx install 'memtomem[all]'
-> ```
-> Skip to [Tool Usage Guidelines](#tool-usage-guidelines-add-to-claudemd) if you're using the plugin.
+Automation is intentionally a second plugin because it reads every submitted
+prompt and indexes files after successful Write/Edit tool calls. Install it
+only when those side effects are wanted:
 
-You can automate memtomem using Claude Code's hooks system.
-Add the following to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "mm session start --idempotent --auto-end-stale 24h --agent-id claude-code 2>>/tmp/mm-hook.log || true",
-        "timeout": 5
-      }]
-    }],
-    "UserPromptSubmit": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "P=$(printf '%s' \"${prompt}\" | head -c 500); [ ${#P} -gt 20 ] && mm search \"$P\" --top-k 3 --format context 2>>/tmp/mm-hook.log || true",
-        "timeout": 5
-      }]
-    }],
-    "PostToolUse": [{
-      "matcher": "Write",
-      "hooks": [{
-        "type": "command",
-        "command": "FP=\"${tool_input.file_path}\"; case \"$FP\" in *.md|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.rs|*.rb|*.java|*.kt|*.swift|*.c|*.cpp|*.h|*.hpp|*.sh|*.toml|*.yaml|*.yml|*.json) ;; *) exit 0 ;; esac; case \"$FP\" in node_modules/*|*/node_modules/*|dist/*|*/dist/*|build/*|*/build/*|target/*|*/target/*|.next/*|*/.next/*|.nuxt/*|*/.nuxt/*|__pycache__/*|*/__pycache__/*|.git/*|*/.git/*|.venv/*|*/.venv/*|venv/*|*/venv/*|coverage/*|*/coverage/*|.cache/*|*/.cache/*) exit 0 ;; esac; mm index --debounce-window 5 \"$FP\" 2>>/tmp/mm-hook.log || true",
-        "timeout": 10
-      }]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "mm index --flush 2>>/tmp/mm-hook.log; mm session end --auto 2>>/tmp/mm-hook.log || true",
-        "timeout": 10
-      }]
-    }]
-  }
-}
+```text
+/plugin install memtomem-automation@memtomem
 ```
 
-> **Hook `timeout` is in seconds.** Claude Code (and Codex) interpret a hook's
-> `timeout` as **seconds** (the default is 60), so the values above are 5 s and
-> 10 s — generous headroom over the 100–500 ms a search takes, while still
-> capping a hung command. Don't use millisecond values like `5000` here: Claude
-> reads that as 5000 **seconds** (~83 min), which defeats the cap. When
-> `mm context sync` fans these out to Gemini (whose hook timeouts are in
-> milliseconds) it converts the unit for you — author the canonical value in
-> seconds.
+Install the exact CLI version expected by the automation bundle:
+
+```bash
+uv tool install 'memtomem==0.3.8'
+```
+
+The bundled dispatcher reads Claude's hook JSON from stdin; it never expands
+prompt or tool fields as shell variables. It validates the `mm` version at
+session start and fails open when input or dependencies are invalid. Logs live
+under `${CLAUDE_PLUGIN_DATA}/hook.log` and contain command status, not prompt
+content. The dispatcher runs through `uv`, including on Windows where a
+`python3` alias may not exist.
 
 <details>
 <summary>Which settings file gets written? (hook tiers)</summary>
@@ -281,21 +245,19 @@ Add the following to `~/.claude/settings.json`:
 
 | Hook Event | Trigger Timing | memtomem Action |
 |------------|---------------|----------------|
-| `SessionStart` | When a Claude Code session starts | `mm session start --idempotent --auto-end-stale 24h` → Resume the active session for `claude-code`, or open a new one and close orphans older than 24h |
-| `UserPromptSubmit` | When a prompt is submitted | `mm search` → Automatically inject relevant memory into context |
-| `PostToolUse` (Write) | After new file creation | `mm index --debounce-window 5` → Record the file in the debounce queue and drain entries silent ≥5s; rapid consecutive writes restart the window so a burst is indexed once at the end |
-| `Stop` | When the agent stops | `mm index --flush; mm session end --auto` → Synchronously flush any pending debounced files, then close the session with a structured summary |
+| `SessionStart` | When a Claude Code session starts | Validate the exact `mm` dependency; do not create an episodic session |
+| `UserPromptSubmit` | Before a prompt is processed | Search prompts longer than 20 characters and return up to three results as `additionalContext` |
+| `PostToolUse` (`Write|Edit`) | After a Write/Edit tool call | Validate the path and queue supported source files with a 5-second debounce window |
+| `Stop` | After each completed response | Flush the index queue; never close the memtomem session |
 
 ### Important Caveats
 
-- **Short prompt guard**: Prompts under 20 characters are skipped to avoid noise from "yes", "ok", etc.
-- **Input sanitization**: `printf '%s'` + `head -c 500` prevent shell injection and cap query length.
-- **Error logging**: `2>>/tmp/mm-hook.log` preserves errors for debugging. Avoid `2>/dev/null` which hides real failures.
-- **Stop hook = session close**: Use `mm session end --auto` in the Stop hook to close the active session with a structured summary. Don't use a Stop hook to call `mm add` with raw timestamps — those pollute search.
-- **SessionStart hook = idempotent resume**: `mm session start --idempotent` resumes the active session for the same `--agent-id` instead of creating a new row, so a Claude Code restart inherits the previous session's `mm activity log` writes. `--auto-end-stale 24h` closes any active session older than 24h before the idempotency check — this is how orphans from a crashed previous run get cleaned up. The 24h cutoff also means that resuming Claude Code the morning after deliberately ends the prior day's session and starts fresh; lower the cutoff (e.g. `30m`) if you want shorter resume windows, raise it (e.g. `7d`) if you want sessions to span breaks. The idempotent path is single-process safe but not concurrency-safe — two parallel SessionStart hooks could both create new sessions; Claude Code's hook runner fires them serially per session, which is the supported case.
-- **Write only**: `Edit` is excluded from PostToolUse — edited files are already indexed, so re-indexing on every edit is redundant.
-- **Allowlist + blocklist**: `PostToolUse[Write]` only indexes canonical source extensions (`md`, `py`, `ts`/`tsx`, `js`/`jsx`, `go`, `rs`, `rb`, `java`, `kt`, `swift`, `c`/`cpp`/`h`/`hpp`, `sh`, `toml`, `yaml`/`yml`, `json`) and skips build / cache / VCS paths (`node_modules`, `dist`, `build`, `target`, `.next`, `.nuxt`, `__pycache__`, `.git`, `.venv`/`venv`, `coverage`, `.cache`) inline. Patterns include both leading-segment (`node_modules/*`) and any-segment (`*/node_modules/*`) forms for both absolute and relative `tool_input.file_path` values. Extension matching is case-sensitive — `*.MD` / `*.JS` would skip the allowlist; rename or extend the patterns if your repo uses uppercase. Adjust the `case` statements in `hooks.json` for project-specific needs — they are inline, easy to extend.
-- **Debounce mechanics**: `mm index --debounce-window 5` records the file in `~/.memtomem/index_debounce_queue.json` (flock-protected) and drains entries that have been silent ≥5 seconds. Each Write hook fire restarts the window for that path, so a codegen burst indexes the final state once after the burst ends rather than once per Write. The Stop hook chains `mm index --flush` (synchronous drain — blocks until every queued file is indexed) before `mm session end --auto` to ensure session-end indexing isn't deferred. `mm index --status` prints a snapshot of the queue (depth + oldest entry) for telemetry; it's race-prone and not a correctness primitive — for "is the queue empty?" use `--flush`. RFC-B (PreCompact, deferred — needs Claude Code's PreCompact payload contract) will use a future `mm index --flush --paths <list>` for selective drain at checkpoint time.
+- **Short prompt guard**: Prompts of 20 characters or fewer are skipped to avoid noise from "yes", "ok", etc.
+- **Input safety**: JSON is parsed without invoking a shell and queries are capped at 500 characters.
+- **Error logging**: diagnostics are isolated in `${CLAUDE_PLUGIN_DATA}/hook.log`.
+- **No session lifecycle automation**: `Stop` fires after every response, not when the Claude session exits. Session start/end tracking remains manual.
+- **Allowlist + blocklist**: Write and Edit hooks accept supported source extensions case-insensitively and skip build, cache, virtualenv, dependency, and VCS directories.
+- **Debounce mechanics**: changed paths enter the memtomem queue and `Stop` performs the final synchronous flush.
 - **STM proxy overlap**: If using [memtomem-stm](https://github.com/memtomem/memtomem-stm) (separate package), hooks are redundant — the proxy already handles surfacing and indexing.
 
 ### Detecting duplicate hooks across tiers
@@ -402,9 +364,9 @@ When users ask about past records or decisions ("previously", "what was decided"
 
 ## Usage Scenarios
 
-### Scenario A: Fully Automated Hooks Pipeline
+### Scenario A: Optional Automation Pipeline
 
-With hooks configured, tools operate automatically without manual invocation by the developer.
+With `memtomem-automation` installed, retrieval and indexing run automatically.
 
 ```
 User: "Refactor the auth middleware"
@@ -412,7 +374,7 @@ User: "Refactor the auth middleware"
 1. UserPromptSubmit hook auto-executes
    → mem_search("auth middleware refactoring") → 3 related previous decisions injected
 2. Claude analyzes existing code and performs refactoring
-3. Claude creates new files → PostToolUse hook auto-indexes them
+3. Claude writes or edits source files → PostToolUse queues them for indexing
 4. Claude saves key decisions via mem_add (agent-driven, not automated)
 ```
 
@@ -466,7 +428,7 @@ Agent:
 |---------|---------------------|---------|
 | Semantic search | None (full loading or filename-based) | Hybrid search: keyword (BM25) + semantic (vector), fused with RRF |
 | Auto memory | MEMORY.md 200-line limit | Unlimited semantic search |
-| Hooks integration | Event emission only | Hooks + CLI for automation (SessionStart, UserPromptSubmit, PostToolUse, Stop) |
+| Hooks integration | Event emission only | Optional plugin for UserPromptSubmit, PostToolUse, and Stop flush |
 
 *New to these terms? **BM25** is keyword search, **dense (vector)** is meaning-based search, and **RRF** (Reciprocal Rank Fusion) merges the two — see the [Reference glossary](../reference.md#glossary).*
 
@@ -478,7 +440,7 @@ Agent:
 No. memtomem operates as separate MCP tools (`mem_search`, etc.) and coexists independently with the existing system. Continue using CLAUDE.md for project instructions as before.
 
 **Q: Do hooks slow down Claude Code?**
-Searches typically complete within 100–500ms depending on the embedding provider. The `timeout: 5` setting (Claude hook timeouts are in **seconds**) ensures hooks don't block the session. Errors are logged to `/tmp/mm-hook.log` instead of discarded, so you can diagnose issues without disrupting the session.
+Only the optional automation plugin installs hooks. Prompt search runs before Claude processes the prompt and has a five-second cap; failures are fail-open. Diagnostics are written under `${CLAUDE_PLUGIN_DATA}/hook.log`.
 
 **Q: It doesn't work after changing `.mcp.json`.**
 Restart Claude Code or use the `/mcp` command to reconnect to MCP servers. Old processes may be using cached modules.

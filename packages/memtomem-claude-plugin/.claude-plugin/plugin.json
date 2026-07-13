@@ -1,7 +1,7 @@
 {
   "name": "memtomem",
-  "version": "0.2.4",
-  "description": "Markdown-first semantic memory for AI agents — hybrid BM25 + dense search across your markdown files",
+  "version": "0.3.0",
+  "description": "Safe, explicit memory search and persistence workflows backed by the memtomem MCP server",
   "author": {
     "name": "memtomem",
     "url": "https://github.com/memtomem/memtomem"

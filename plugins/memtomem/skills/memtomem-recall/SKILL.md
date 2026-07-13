@@ -1,13 +1,11 @@
 ---
-name: recall
+name: memtomem-recall
 description: Recall memtomem memories created in a date range. Use for recent memories or requests scoped by day, week, month, source, or namespace.
-argument-hint: [date range]
-allowed-tools: mcp__plugin_memtomem_memtomem__mem_recall, mcp__memtomem__mem_recall
 ---
 
 # Recall memories
 
-Use `$ARGUMENTS` as the date range or recent-memory request.
+Derive the date range or recent-memory request from the current user request.
 If the request does not clearly specify the date range or recent-memory request, ask before calling a tool.
 Translate relative dates such as “last week” into `since` and `until` values when possible, then call `mem_recall`. Preserve any source, namespace, scope, or result-limit constraint from the request.
 

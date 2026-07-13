@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -14,7 +14,6 @@ _ROOT = Path(__file__).resolve().parents[3]
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$")
 _DOCKER_RE = re.compile(r"^docker://[^\s@]+@sha256:[0-9a-f]{64}$")
 _USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)")
-_PLUGIN_CORE_MAP = {"0.2.4": "0.3.8"}
 
 
 def _assert_pinned_ref(reference: str) -> None:
@@ -37,19 +36,26 @@ def _workflow_files(root: Path) -> list[Path]:
     return sorted(result)
 
 
-def _validate_plugin_documents(manifest: dict, marketplace: dict, mcp: dict) -> None:
-    plugin_version = manifest.get("version")
-    assert isinstance(plugin_version, str) and re.fullmatch(r"\d+\.\d+\.\d+", plugin_version)
-    entries = [row for row in marketplace.get("plugins", []) if row.get("name") == "memtomem"]
-    assert len(entries) == 1
-    entry = entries[0]
-    assert entry.get("version") == plugin_version
-    assert entry.get("source", {}).get("path") == "packages/memtomem-claude-plugin"
-    expected_core = _PLUGIN_CORE_MAP.get(plugin_version)
-    assert expected_core is not None, f"unreviewed plugin release mapping: {plugin_version}"
-    server = mcp.get("mcpServers", {}).get("memtomem", {})
+def _json(path: str) -> dict:
+    return json.loads((_ROOT / path).read_text(encoding="utf-8"))
+
+
+def _contract() -> dict:
+    with (_ROOT / "packages/memtomem-plugin-assets/contract.toml").open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def _assert_mcp_pin(document: dict, version: str, tool_mode: str) -> None:
+    server = document.get("mcpServers", {}).get("memtomem", {})
     assert server.get("command") == "uvx"
-    assert server.get("args") == ["--from", f"memtomem=={expected_core}", "memtomem-server"]
+    assert server.get("args") == ["--from", f"memtomem=={version}", "memtomem-server"]
+    assert server.get("env") == {"MEMTOMEM_TOOL_MODE": tool_mode}
+
+
+def _marketplace_entry(marketplace: dict, name: str) -> dict:
+    entries = [row for row in marketplace.get("plugins", []) if row.get("name") == name]
+    assert len(entries) == 1
+    return entries[0]
 
 
 def test_every_external_workflow_action_is_immutable() -> None:
@@ -97,27 +103,50 @@ def test_local_and_immutable_action_refs_are_allowed() -> None:
     _assert_pinned_ref("docker://alpine@sha256:" + "b" * 64)
 
 
-def _plugin_documents() -> tuple[dict, dict, dict]:
-    manifest = json.loads(
-        (_ROOT / "packages/memtomem-claude-plugin/.claude-plugin/plugin.json").read_text()
+def test_claude_plugins_match_contract_and_marketplace() -> None:
+    contract = _contract()
+    versions = contract["plugins"]
+    marketplace = _json(".claude-plugin/marketplace.json")
+
+    base = _json("packages/memtomem-claude-plugin/.claude-plugin/plugin.json")
+    base_entry = _marketplace_entry(marketplace, "memtomem")
+    assert base["version"] == versions["claude_version"]
+    assert base_entry["version"] == base["version"]
+    assert base_entry["source"] == "./packages/memtomem-claude-plugin"
+
+    automation = _json("packages/memtomem-claude-automation-plugin/.claude-plugin/plugin.json")
+    automation_entry = _marketplace_entry(marketplace, "memtomem-automation")
+    assert automation["version"] == versions["automation_version"]
+    assert automation_entry["version"] == automation["version"]
+    assert automation_entry["source"] == "./packages/memtomem-claude-automation-plugin"
+
+    _assert_mcp_pin(
+        _json("packages/memtomem-claude-plugin/.mcp.json"),
+        contract["core"]["version"],
+        contract["core"]["tool_mode"],
     )
-    marketplace = json.loads((_ROOT / ".claude-plugin/marketplace.json").read_text())
-    mcp = json.loads((_ROOT / "packages/memtomem-claude-plugin/.mcp.json").read_text())
-    return manifest, marketplace, mcp
 
 
-def test_plugin_manifest_marketplace_and_core_pin_match_reviewed_mapping() -> None:
-    _validate_plugin_documents(*_plugin_documents())
+def test_codex_plugin_matches_contract_and_marketplace() -> None:
+    contract = _contract()
+    manifest = _json("plugins/memtomem/.codex-plugin/plugin.json")
+    marketplace = _json(".agents/plugins/marketplace.json")
+    entry = _marketplace_entry(marketplace, "memtomem")
+
+    assert manifest["version"] == contract["plugins"]["codex_version"]
+    assert entry["source"] == {"source": "local", "path": "./plugins/memtomem"}
+    assert entry["policy"] == {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+    }
+    _assert_mcp_pin(
+        _json("plugins/memtomem/.mcp.json"),
+        contract["core"]["version"],
+        contract["core"]["tool_mode"],
+    )
 
 
-@pytest.mark.parametrize("drift", ["marketplace", "mcp", "manifest"])
-def test_plugin_mapping_guard_rejects_drift(drift: str) -> None:
-    manifest, marketplace, mcp = map(copy.deepcopy, _plugin_documents())
-    if drift == "marketplace":
-        marketplace["plugins"][0]["version"] = "0.0.0"
-    elif drift == "mcp":
-        mcp["mcpServers"]["memtomem"]["args"][1] = "memtomem>=0.3.5"
-    else:
-        manifest["version"] = "0.0.0"
-    with pytest.raises(AssertionError):
-        _validate_plugin_documents(manifest, marketplace, mcp)
+def test_every_plugin_version_is_semver() -> None:
+    contract = _contract()
+    for version in contract["plugins"].values():
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version)

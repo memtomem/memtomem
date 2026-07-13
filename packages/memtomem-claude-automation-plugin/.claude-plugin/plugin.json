@@ -1,0 +1,12 @@
+{
+  "name": "memtomem-automation",
+  "version": "0.1.0",
+  "description": "Opt-in prompt retrieval and write-time indexing automation for memtomem",
+  "author": {
+    "name": "memtomem",
+    "url": "https://github.com/memtomem"
+  },
+  "repository": "https://github.com/memtomem/memtomem",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "hooks", "automation", "indexing"]
+}
