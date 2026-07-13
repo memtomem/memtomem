@@ -328,6 +328,7 @@ class SearchPipeline:
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         exclude_source_roots: tuple[Path, ...] = (),
+        effective_rrf_weights: list[float] | tuple[float, ...] | None = None,
     ) -> str:
         import hashlib
 
@@ -341,11 +342,16 @@ class SearchPipeline:
         # key. Two callers from different projects must not share a cache slot
         # — the always-on context-boundary fragment differs.
         scope_signal = f"{scope}|{project_context_root}"
+        cache_rrf_weights = (
+            tuple(effective_rrf_weights)
+            if effective_rrf_weights is not None
+            else tuple(self._config.rrf_weights)
+        )
         raw = (
             f"{query}|{top_k}|{source_filter}|{tag_filter}|{namespace}"
             f"|bm25={self._config.enable_bm25}:{self._config.bm25_candidates}"
             f"|dense={self._config.enable_dense}:{self._config.dense_candidates}"
-            f"|rrf_k={self._config.rrf_k}|w={tuple(self._config.rrf_weights)}"
+            f"|rrf_k={self._config.rrf_k}|w={cache_rrf_weights}"
             f"|decay={self._decay_config.enabled}:{self._decay_config.half_life_days}"
             f"|mmr={self._mmr_config.enabled}:{self._mmr_config.lambda_param}"
             f"|ctx_win={ctx_win}"
@@ -785,6 +791,7 @@ class SearchPipeline:
             project_context_root=project_context_root,
             metadata_filter=metadata_filter,
             exclude_source_roots=normalized_exclusion_roots,
+            effective_rrf_weights=effective_weights,
         )
         version_at_start = self._cache_version
         ttl_snapshot = self._cache_ttl

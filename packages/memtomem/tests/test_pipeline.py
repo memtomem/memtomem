@@ -519,6 +519,28 @@ class TestRerankCandidatePool:
 
         assert len({key_off, key_default, key_oversample, key_min, key_max}) == 5
 
+    def test_cache_key_distinguishes_per_call_rrf_weights(self):
+        pipeline = self._make_pipeline([], reranker=None, rerank_config=None)
+
+        bm25_only = pipeline._cache_key(
+            "same query",
+            10,
+            None,
+            None,
+            None,
+            effective_rrf_weights=[1.0, 0.0],
+        )
+        dense_only = pipeline._cache_key(
+            "same query",
+            10,
+            None,
+            None,
+            None,
+            effective_rrf_weights=[0.0, 1.0],
+        )
+
+        assert bm25_only != dense_only
+
     def test_legacy_top_k_migrates_to_min_pool_with_deprecation(self):
         """``{rerank.top_k: 30}`` in legacy configs must warn and forward to min_pool."""
         import warnings
