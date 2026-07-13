@@ -36,6 +36,14 @@ updates:
     groups:
       opencode-plugin:
         patterns: ["*"]
+    # TypeScript 7.x is the native (Go) port `tsgo`: it drops the `tsserver`
+    # bin and changes @types default inclusion, which broke `tsc` build here
+    # (TS2591 on `node:*` imports) — see the closed dependabot PR #1742. Stay
+    # on the 5.x classic compiler until the native port stabilizes; revisit by
+    # dropping this ignore when we intentionally adopt tsgo.
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # uv workspace: the single root uv.lock holds everything (member runtime deps
   # are declared in packages/memtomem/pyproject.toml but resolved/locked here;
