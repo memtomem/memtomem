@@ -4,7 +4,8 @@
 Runs every query in `query_portfolio.py` against the indexed 6-topic
 corpus, measures recall@10 / MRR@10 / nDCG@10 per query, and aggregates
 per `(lang, type)` to produce floor values (`round(mean × factor, 2)`,
-factor defaults to 0.9).
+factor defaults to 0.85). The 15% margin absorbs observed cross-platform
+ONNX numeric variation while still catching material retrieval regressions.
 
 Usage:
     PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \\
@@ -466,8 +467,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--factor",
         type=float,
-        default=0.9,
-        help="floor factor (default 0.9 → floor = round(mean × 0.9, 2))",
+        default=0.85,
+        help="floor factor (default 0.85 → floor = round(mean × 0.85, 2))",
     )
     parser.add_argument(
         "--json",

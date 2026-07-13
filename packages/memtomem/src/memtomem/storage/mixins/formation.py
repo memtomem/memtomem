@@ -175,28 +175,28 @@ class FormationMixin:
         as_of: str | None = None,
     ) -> list[dict[str, Any]]:
         db = self._get_db()
-        clauses = ["e.canonical_name=?", "a.status='active'"]
-        params: list[Any] = [canonical_name]
-        if predicate:
-            clauses.append("a.predicate=?")
-            params.append(predicate)
-        if as_of:
-            clauses.extend(
-                [
-                    "(a.valid_from IS NULL OR a.valid_from <= ?)",
-                    "(a.valid_to IS NULL OR a.valid_to > ?)",
-                    "a.recorded_at <= ?",
-                ]
-            )
-            params.extend([as_of, as_of, as_of])
         rows = db.execute(
             "SELECT a.id, e.canonical_name, e.entity_type, a.predicate, a.object_value, "
             "a.source_chunk_id, a.recorded_at, a.valid_from, a.valid_to, a.confidence "
             "FROM memory_assertions a JOIN canonical_entities e "
-            "ON e.id=a.subject_entity_id WHERE "
-            + " AND ".join(clauses)
-            + " ORDER BY a.recorded_at DESC",
-            params,
+            "ON e.id=a.subject_entity_id "
+            "WHERE e.canonical_name=? AND a.status='active' "
+            "AND (? IS NULL OR a.predicate=?) "
+            "AND (? IS NULL OR a.valid_from IS NULL OR a.valid_from <= ?) "
+            "AND (? IS NULL OR a.valid_to IS NULL OR a.valid_to > ?) "
+            "AND (? IS NULL OR a.recorded_at <= ?) "
+            "ORDER BY a.recorded_at DESC",
+            (
+                canonical_name,
+                predicate,
+                predicate,
+                as_of,
+                as_of,
+                as_of,
+                as_of,
+                as_of,
+                as_of,
+            ),
         ).fetchall()
         keys = (
             "id",

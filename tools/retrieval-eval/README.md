@@ -39,6 +39,8 @@ values can differ across CPU architecture and runner load.
 
 - Recall@10 and MRR@10 use primary-tag binary relevance.
 - nDCG@10 uses primary `1.0` and secondary `0.5` graded relevance.
-- Per-language/query-type floor = `round(10-run mean * 0.9, 2)`.
+- Per-language/query-type floor = `round(10-run mean * 0.85, 2)`. The 15%
+  margin covers observed cross-platform ONNX numeric variation while retaining
+  a blocking threshold for material retrieval regressions.
 - A calibration run is invalid unless all 48 files and 192 chunks index with
   zero privacy blocks and zero errors.
