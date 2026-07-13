@@ -38,6 +38,14 @@ async def test_scan_skips_secret_and_routes_procedure_to_pinned(storage):
 
 
 @pytest.mark.asyncio
+async def test_scan_does_not_promote_generic_declarative_sentences(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "The service is available")
+    await storage.add_session_event("session", "note", "서비스입니다")
+    assert await scan_session_candidates(storage, "session") == []
+
+
+@pytest.mark.asyncio
 async def test_candidate_state_machine(storage):
     await storage.create_session("session", "agent", "default")
     await storage.add_session_event("session", "note", "Preference: concise responses")
@@ -48,6 +56,32 @@ async def test_candidate_state_machine(storage):
     approved = await storage.get_memory_candidate(candidate["id"])
     assert approved["status"] == "approved"
     assert approved["reviewer"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_candidate_claim_is_atomic_and_releasable(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: retain one copy")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+
+    claimed = await storage.claim_memory_candidate(candidate["id"], "alice")
+    assert claimed is not None
+    assert claimed["status"] == "writing"
+    assert await storage.claim_memory_candidate(candidate["id"], "bob") is None
+    assert await storage.release_memory_candidate(candidate["id"])
+    assert await storage.claim_memory_candidate(candidate["id"], "bob") is not None
+    assert await storage.finalize_memory_candidate(candidate["id"])
+    assert (await storage.get_memory_candidate(candidate["id"]))["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_get_candidate_is_not_limited_by_queue_size(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: direct lookup")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+    found = await storage.get_memory_candidate(candidate["id"])
+    assert found is not None
+    assert found["id"] == candidate["id"]
 
 
 @pytest.mark.asyncio
@@ -115,3 +149,26 @@ async def test_assertion_edges_are_directional_multi_type(storage):
         (first, second),
     ).fetchall()
     assert {row[0] for row in rows} == {"contradicts", "supports"}
+
+
+@pytest.mark.asyncio
+async def test_assertion_reuses_existing_entity_id(storage):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    first_entity, ignored_entity = str(uuid4()), str(uuid4())
+    first_assertion, second_assertion = str(uuid4()), str(uuid4())
+    for assertion_id, entity_id, value in (
+        (first_assertion, first_entity, "one"),
+        (second_assertion, ignored_entity, "two"),
+    ):
+        await storage.add_assertion(
+            assertion_id=assertion_id,
+            entity_id=entity_id,
+            canonical_name="same entity",
+            entity_type="concept",
+            predicate="value",
+            object_value=value,
+            source_chunk_id=None,
+            recorded_at=now,
+        )
+    rows = await storage.query_assertions("same entity", "value")
+    assert {row["object"] for row in rows} == {"one", "two"}

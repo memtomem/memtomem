@@ -59,6 +59,12 @@ If `mm init` registered an MCP client, ask it to `Call the mem_status tool`. See
 - **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
 - **🕸️ LangGraph Store** — optional `MemtomemBaseStore` supplies tuple-namespace JSON persistence and search
 
+The 95-tool surface includes the new Pinned Context actions
+(`mem_pinned_list/get/set/delete`, `mem_context_compose`) and review-first
+formation actions (`mem_formation_scan`, `mem_candidate_list/review`). See the
+[complete MCP table](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md#available-mcp-tools-95)
+for every category.
+
 ## Documentation
 
 Full documentation lives in the [memtomem GitHub repo](https://github.com/memtomem/memtomem):

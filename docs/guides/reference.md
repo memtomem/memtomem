@@ -102,6 +102,8 @@ memtomem provides **95 MCP tools** organized into categories:
 | **Relations** | `mem_link`, `mem_unlink`, `mem_related` | Cross-reference links between chunks |
 | **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* | Monitor and configure |
+| **Pinned Context** | `mem_pinned_list/get/set/delete`, `mem_context_compose` | Keep bounded instructions ahead of retrieved memory |
+| **Formation** | `mem_formation_scan`, `mem_candidate_list/review` | Review proposed memories before durable writes |
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 

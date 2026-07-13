@@ -8,6 +8,7 @@ import json
 import math
 import re
 import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, cast
@@ -70,7 +71,7 @@ def _read_path(value: Any, path: str) -> list[Any]:
 def _projection(value: dict[str, Any], index: bool | list[str] | None) -> str:
     if index is False:
         return ""
-    fields = ["$"] if index is None else index
+    fields = ["$"] if index is None or index is True else index
     parts: list[str] = []
     for field in fields:
         for found in _read_path(value, field):
@@ -172,7 +173,8 @@ class MemtomemBaseStore(BaseStore):
         self.force_unsafe = force_unsafe
         self._embedding_config = embedding or config.embedding
         self._embedder: EmbeddingProvider | None = None
-        self._embedding_cache: dict[str, list[float]] = {}
+        self._embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._embedding_cache_limit = 1024
         self._lock = threading.RLock()
 
     def _path(self, namespace: tuple[str, ...], key: str) -> Path:
@@ -182,10 +184,10 @@ class MemtomemBaseStore(BaseStore):
     def _read_record(self, path: Path) -> dict[str, Any] | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict) or not isinstance(payload.get("value"), dict):
-            raise ValueError(f"invalid LangGraph store record: {path}")
+            return None
         return payload
 
     def _records(self) -> list[dict[str, Any]]:
@@ -277,10 +279,18 @@ class MemtomemBaseStore(BaseStore):
             return [0.0] * len(records)
         query_vector = await embedder.embed_query(query)
         projections = [record.get("projection", "") for record in records]
-        missing = [text for text in projections if text and text not in self._embedding_cache]
+        missing = list(
+            dict.fromkeys(
+                text for text in projections if text and text not in self._embedding_cache
+            )
+        )
         if missing:
             vectors = await embedder.embed_texts(missing)
-            self._embedding_cache.update(zip(missing, vectors))
+            for text, vector in zip(missing, vectors):
+                self._embedding_cache[text] = vector
+                self._embedding_cache.move_to_end(text)
+                if len(self._embedding_cache) > self._embedding_cache_limit:
+                    self._embedding_cache.popitem(last=False)
         scores: list[float] = []
         qnorm = math.sqrt(sum(value * value for value in query_vector)) or 1.0
         for text in projections:
@@ -288,6 +298,7 @@ class MemtomemBaseStore(BaseStore):
             if not vector:
                 scores.append(0.0)
                 continue
+            self._embedding_cache.move_to_end(text)
             vnorm = math.sqrt(sum(value * value for value in vector)) or 1.0
             scores.append(sum(a * b for a, b in zip(query_vector, vector)) / (qnorm * vnorm))
         return scores

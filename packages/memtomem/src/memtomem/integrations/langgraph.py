@@ -22,11 +22,9 @@ Multi-agent usage — bind a session to an agent identity once and let
     await store.add("our cache strategy", tags=["arch"])  # → agent-runtime:planner
     hits = await store.search("cache", include_shared=True)  # → planner + shared
 
-This adapter intentionally does **not** implement LangGraph's
-``BaseStore`` (``aput`` / ``aget`` / ``alist_namespaces``). Adding a
-full ``BaseStore`` with the same multi-agent awareness is tracked as a
-follow-up; for now the multi-agent helpers live on
-``start_agent_session`` and ``search(include_shared=...)`` only.
+The optional ``MemtomemBaseStore`` adapter implements LangGraph's tuple-
+namespace ``BaseStore`` contract. It is imported lazily so the dependency-free
+``MemtomemStore`` remains available in minimal installations.
 """
 
 from __future__ import annotations
@@ -43,14 +41,20 @@ from memtomem.constants import (
     validate_namespace,
 )
 
-# Separate class: the existing ``MemtomemStore`` CRUD signatures predate and
-# conflict with LangGraph's tuple-namespace BaseStore contract.
-from memtomem.integrations.langgraph_store import MemtomemBaseStore
-
 __all__ = ["MemtomemBaseStore", "MemtomemStore"]
 
 if TYPE_CHECKING:
+    from memtomem.integrations.langgraph_store import MemtomemBaseStore
     from memtomem.server.component_factory import Components
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose adapters that require optional dependencies."""
+    if name == "MemtomemBaseStore":
+        from memtomem.integrations.langgraph_store import MemtomemBaseStore
+
+        return MemtomemBaseStore
+    raise AttributeError(name)
 
 
 class MemtomemStore:

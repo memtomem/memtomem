@@ -28,7 +28,9 @@ async def _scan(session_id: str) -> None:
 
     async with cli_components() as comp:
         candidates = await scan_session_candidates(comp.storage, session_id)
-        click.echo(json.dumps({"created": len(candidates), "candidates": candidates}))
+        click.echo(
+            json.dumps({"created": len(candidates), "candidates": candidates}, ensure_ascii=False)
+        )
 
 
 @review.command("list")
@@ -86,29 +88,54 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
             )
             if guard.decision != "pass":
                 raise click.ClickException("Candidate now fails the privacy gate")
-            if candidate["destination"] == "pinned":
-                PinnedContextStore(
-                    comp.config, project_root=_resolve_project_context_root(comp)
-                ).set(
-                    f"candidate-{candidate_id[:8]}",
-                    candidate["content"],
-                    description=f"Approved {candidate['kind']} candidate",
-                )
-            else:
-                base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
-                target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
-                append_entry(
-                    target,
-                    candidate["content"],
-                    title=f"Approved {candidate['kind']}",
-                    tags=["formation-approved", candidate["kind"]],
-                )
-                await comp.index_engine.index_file(target, already_scanned=True)
-        changed = await comp.storage.decide_memory_candidate(
-            candidate_id, decision, reviewer, reason
-        )
-        if not changed:
-            raise click.ClickException("Candidate state changed concurrently")
+            claimed = await comp.storage.claim_memory_candidate(candidate_id, reviewer, reason)
+            if claimed is None:
+                raise click.ClickException("Candidate state changed concurrently")
+            try:
+                if candidate["destination"] == "pinned":
+                    PinnedContextStore(
+                        comp.config, project_root=_resolve_project_context_root(comp)
+                    ).set(
+                        f"candidate-{candidate_id[:8]}",
+                        candidate["content"],
+                        description=f"Approved {candidate['kind']} candidate",
+                    )
+                else:
+                    from memtomem.context._atomic import (
+                        _CRUD_SIDECAR_LOCK_BUDGET_S,
+                        _lock_path_for,
+                        async_file_lock,
+                    )
+
+                    base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
+                    target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
+                    async with async_file_lock(
+                        _lock_path_for(target), timeout=_CRUD_SIDECAR_LOCK_BUDGET_S
+                    ):
+                        await asyncio.to_thread(
+                            append_entry,
+                            target,
+                            candidate["content"],
+                            title=f"Approved {candidate['kind']}",
+                            tags=["formation-approved", candidate["kind"]],
+                        )
+                        await comp.index_engine.index_file(
+                            target, already_scanned=True, lock_held=True
+                        )
+            except asyncio.CancelledError:
+                await comp.storage.release_memory_candidate(candidate_id)
+                raise
+            except Exception:
+                await comp.storage.release_memory_candidate(candidate_id)
+                raise
+            if not await comp.storage.finalize_memory_candidate(candidate_id):
+                raise click.ClickException("Candidate claim was lost before finalization")
+        else:
+            changed = await comp.storage.decide_memory_candidate(
+                candidate_id, decision, reviewer, reason
+            )
+            if not changed:
+                raise click.ClickException("Candidate state changed concurrently")
         click.echo(json.dumps({"ok": True, "status": decision}))
 
 

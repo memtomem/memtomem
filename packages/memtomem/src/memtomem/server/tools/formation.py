@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from memtomem.formation import scan_session_candidates
@@ -19,7 +20,7 @@ async def mem_formation_scan(session_id: str, ctx: CtxType = None) -> str:
     """Generate review candidates from one exact session's events; writes no long-term memory."""
     app = await _get_app_initialized(ctx)
     candidates = await scan_session_candidates(app.storage, session_id)
-    return json.dumps({"created": len(candidates), "candidates": candidates})
+    return json.dumps({"created": len(candidates), "candidates": candidates}, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -28,7 +29,10 @@ async def mem_formation_scan(session_id: str, ctx: CtxType = None) -> str:
 async def mem_candidate_list(status: str = "pending", limit: int = 100, ctx: CtxType = None) -> str:
     """List memory-formation review candidates."""
     app = await _get_app_initialized(ctx)
-    return json.dumps(await app.storage.list_memory_candidates(status=status, limit=limit))
+    return json.dumps(
+        await app.storage.list_memory_candidates(status=status, limit=limit),
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -54,28 +58,47 @@ async def mem_candidate_review(
     if decision != "approve":
         return json.dumps({"ok": False, "reason": "decision must be approve or reject"})
 
-    if candidate["destination"] == "pinned":
-        from memtomem.server.tools.search import _resolve_project_context_root
+    claimed = await app.storage.claim_memory_candidate(candidate_id, reviewer, reason)
+    if claimed is None:
+        return json.dumps({"ok": False, "reason": "candidate state changed concurrently"})
+    try:
+        if candidate["destination"] == "pinned":
+            from memtomem.server.tools.search import _resolve_project_context_root
 
-        store = PinnedContextStore(app.config, project_root=_resolve_project_context_root(app))
-        block = store.set(
-            f"candidate-{candidate_id[:8]}",
-            candidate["content"],
-            description=f"Approved {candidate['kind']} candidate",
-        )
-        write_result: object = block.as_dict()
-    else:
-        from memtomem.server.tools.memory_crud import mem_add
+            store = PinnedContextStore(app.config, project_root=_resolve_project_context_root(app))
+            block = store.set(
+                f"candidate-{candidate_id[:8]}",
+                candidate["content"],
+                description=f"Approved {candidate['kind']} candidate",
+            )
+            write_result: object = block.as_dict()
+        else:
+            from memtomem.server.tools.memory_crud import _mem_add_core
 
-        write_result = await mem_add(
-            content=candidate["content"],
-            title=f"Approved {candidate['kind']}",
-            tags=["formation-approved", candidate["kind"]],
-            ctx=ctx,
-        )
-        if isinstance(write_result, str) and (
-            "blocked" in write_result.lower() or "error" in write_result.lower()
-        ):
-            return json.dumps({"ok": False, "reason": write_result})
-    changed = await app.storage.decide_memory_candidate(candidate_id, "approved", reviewer, reason)
-    return json.dumps({"ok": changed, "status": "approved", "write": write_result})
+            message, stats = await _mem_add_core(
+                content=candidate["content"],
+                title=f"Approved {candidate['kind']}",
+                tags=["formation-approved", candidate["kind"]],
+                file=None,
+                namespace=None,
+                template=None,
+                ctx=ctx,
+            )
+            if stats is None:
+                await app.storage.release_memory_candidate(candidate_id)
+                return json.dumps({"ok": False, "reason": message}, ensure_ascii=False)
+            write_result = {
+                "message": message,
+                "new_chunk_ids": [str(chunk_id) for chunk_id in stats.new_chunk_ids],
+            }
+    except asyncio.CancelledError:
+        await app.storage.release_memory_candidate(candidate_id)
+        raise
+    except Exception:
+        await app.storage.release_memory_candidate(candidate_id)
+        raise
+    changed = await app.storage.finalize_memory_candidate(candidate_id)
+    return json.dumps(
+        {"ok": changed, "status": "approved", "write": write_result},
+        ensure_ascii=False,
+    )

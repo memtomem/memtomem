@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 
 import pytest
+
+pytest.importorskip("langgraph")
+
 from langgraph.store.base import GetOp, PutOp, SearchOp
 
 from memtomem.config import EmbeddingConfig
@@ -34,6 +37,14 @@ def test_sync_crud_preserves_created_at_and_file_truth(store):
     assert json.loads(records[0].read_text())["value"] == {"food": "pasta"}
     store.delete(("users", "alice"), "prefs")
     assert store.get(("users", "alice"), "prefs") is None
+
+
+def test_search_skips_corrupt_records(store):
+    store.put(("users", "alice"), "good", {"food": "pizza"})
+    corrupt = store.root / "corrupt.json"
+    corrupt.write_text("{not-json", encoding="utf-8")
+    results = store.search(("users",), query="pizza")
+    assert [result.key for result in results] == ["good"]
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import get_args
 
@@ -19,15 +20,16 @@ def pinned() -> None:
     """Manage durable context included before retrieved memories."""
 
 
-async def _with_store():
+@asynccontextmanager
+async def _store_context():
     from memtomem.cli._bootstrap import cli_components
     from memtomem.pinned import PinnedContextStore
     from memtomem.server.tools.search import _resolve_project_context_root
 
-    components = cli_components()
-    comp = await components.__aenter__()
-    store = PinnedContextStore(comp.config, project_root=_resolve_project_context_root(comp))
-    return components, comp, store
+    async with AsyncExitStack() as stack:
+        comp = await stack.enter_async_context(cli_components())
+        store = PinnedContextStore(comp.config, project_root=_resolve_project_context_root(comp))
+        yield comp, store
 
 
 @pinned.command("list")
@@ -39,8 +41,7 @@ def list_blocks(agent_id: str | None, as_json: bool) -> None:
 
 
 async def _list_blocks(agent_id: str | None, as_json: bool) -> None:
-    components, _, store = await _with_store()
-    try:
+    async with _store_context() as (_, store):
         blocks = store.list(agent_id=agent_id)
         if as_json:
             click.echo(json.dumps([block.as_dict() for block in blocks], ensure_ascii=False))
@@ -50,8 +51,6 @@ async def _list_blocks(agent_id: str | None, as_json: bool) -> None:
         for block in blocks:
             target = f" agent={block.agent_id}" if block.agent_id else ""
             click.echo(f"{block.block_id} [{block.scope}{target}] {block.description}")
-    finally:
-        await components.__aexit__(None, None, None)
 
 
 @pinned.command("get")
@@ -64,14 +63,11 @@ def get_block(block_id: str, scope: TargetScope, agent_id: str | None) -> None:
 
 
 async def _get_block(block_id: str, scope: TargetScope, agent_id: str | None) -> None:
-    components, _, store = await _with_store()
-    try:
+    async with _store_context() as (_, store):
         block = store.get(block_id, scope=scope, agent_id=agent_id)
         if block is None:
             raise click.ClickException("Pinned Context block not found")
         click.echo(block.content)
-    finally:
-        await components.__aexit__(None, None, None)
 
 
 @pinned.command("set")
@@ -128,8 +124,7 @@ async def _set_block(
     confirm_project_shared: bool,
     force_unsafe: bool,
 ) -> None:
-    components, _, store = await _with_store()
-    try:
+    async with _store_context() as (_, store):
         try:
             block = store.set(
                 block_id,
@@ -144,8 +139,6 @@ async def _set_block(
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
         click.echo(block.source_path)
-    finally:
-        await components.__aexit__(None, None, None)
 
 
 @pinned.command("delete")
@@ -169,8 +162,7 @@ async def _delete_block(
     agent_id: str | None,
     confirm_project_shared: bool,
 ) -> None:
-    components, _, store = await _with_store()
-    try:
+    async with _store_context() as (_, store):
         try:
             deleted = store.delete(
                 block_id,
@@ -181,8 +173,6 @@ async def _delete_block(
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
         click.echo("Deleted." if deleted else "Not found.")
-    finally:
-        await components.__aexit__(None, None, None)
 
 
 @pinned.command("compose")
@@ -198,11 +188,8 @@ def compose(query: str | None, agent_id: str | None, max_chars: int, top_k: int)
 async def _compose(query: str | None, agent_id: str | None, max_chars: int, top_k: int) -> None:
     from memtomem.pinned import ContextAssembler
 
-    components, comp, store = await _with_store()
-    try:
+    async with _store_context() as (comp, store):
         bundle = await ContextAssembler(store, comp.search_pipeline).compose(
             query, agent_id=agent_id, max_chars=max_chars, top_k=top_k
         )
         click.echo(json.dumps(bundle.as_dict(), ensure_ascii=False))
-    finally:
-        await components.__aexit__(None, None, None)

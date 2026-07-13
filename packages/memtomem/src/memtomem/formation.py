@@ -12,22 +12,37 @@ from memtomem import privacy
 
 EXTRACTOR_VERSION = "heuristic-v1"
 _KIND_PATTERNS = (
-    ("decision", re.compile(r"(?i)\b(decision|decided|chosen)\b|결정|채택")),
-    ("preference", re.compile(r"(?i)\b(prefer|preference)\b|선호")),
-    ("procedure", re.compile(r"(?i)\b(procedure|workflow|steps?)\b|절차|워크플로")),
-    ("action", re.compile(r"(?i)\b(todo|action item|follow[- ]?up)\b|할 일|후속 조치")),
-    ("fact", re.compile(r"(?i)\b(fact|uses?|is|are|runs?)\b|사실|사용|이다|입니다")),
+    ("decision", 0.95, re.compile(r"(?i)\b(decision|decided|chosen)\b|결정|채택")),
+    ("preference", 0.9, re.compile(r"(?i)\b(prefer|preference)\b|선호")),
+    ("procedure", 0.9, re.compile(r"(?i)\b(procedure|workflow|steps?)\b|절차|워크플로")),
+    ("action", 0.85, re.compile(r"(?i)\b(todo|action item|follow[- ]?up)\b|할 일|후속 조치")),
+    (
+        "fact",
+        0.75,
+        re.compile(
+            r"(?i)(?:^|[.!?]\s*)fact\s*:|\b(?:runs on|depends on|uses .{1,40} for)\b|"
+            r"(?:^|[.!?]\s*)사실\s*:|에서 실행된다|에 의존한다|을 사용한다|를 사용한다"
+        ),
+    ),
 )
 _SUPERSEDE_RE = re.compile(r"(?i)\b(replaced|supersedes|changed from)\b|대체|변경")
 
 
-def _classify(content: str) -> tuple[str, str, str] | None:
-    kind = next((name for name, pattern in _KIND_PATTERNS if pattern.search(content)), None)
-    if kind is None:
+def _classify(content: str) -> tuple[str, str, str, float] | None:
+    match = next(
+        (
+            (name, confidence)
+            for name, confidence, pattern in _KIND_PATTERNS
+            if pattern.search(content)
+        ),
+        None,
+    )
+    if match is None:
         return None
+    kind, confidence = match
     operation = "supersede" if _SUPERSEDE_RE.search(content) else "add"
     destination = "pinned" if kind == "procedure" else "memory"
-    return kind, operation, destination
+    return kind, operation, destination, confidence
 
 
 async def scan_session_candidates(storage: Any, session_id: str) -> list[dict[str, Any]]:
@@ -40,7 +55,7 @@ async def scan_session_candidates(storage: Any, session_id: str) -> list[dict[st
         classification = _classify(content)
         if not content or classification is None or privacy.scan(content):
             continue
-        kind, operation, destination = classification
+        kind, operation, destination, confidence = classification
         fingerprint = hashlib.sha256(
             f"{kind}\0{operation}\0{destination}\0{content.casefold()}".encode()
         ).hexdigest()
@@ -59,7 +74,7 @@ async def scan_session_candidates(storage: Any, session_id: str) -> list[dict[st
                 }
             ],
             "matched_existing_ids": [],
-            "confidence": 0.8,
+            "confidence": confidence,
             "sensitivity": "normal",
             "proposed_diff": f"+ {content[:2000]}",
             "extractor_version": EXTRACTOR_VERSION,
