@@ -108,7 +108,7 @@ async def propose_memory_candidate(
         raise ValueError("source and idempotency_key are required")
     ref = source_ref.strip()
     if privacy.scan(body) or (ref and privacy.scan(ref)):
-        raise ValueError("content contains sensitive data")
+        raise ValueError("content or source_ref contains sensitive data")
 
     classification = _classify(body)
     kind, operation, destination, confidence = classification or (

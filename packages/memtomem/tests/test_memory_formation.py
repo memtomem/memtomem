@@ -157,6 +157,9 @@ async def test_external_candidate_rejects_idempotency_key_content_mismatch(stora
         ("x" * 2001, "memtomem-stm", "", "key", "2000"),
         ("valid", "s" * 129, "", "key", "size limit"),
         ("valid", "memtomem-stm", "r" * 513, "key", "size limit"),
+        ("valid", "memtomem-stm", "", "k" * 257, "size limit"),
+        ("valid", " ", "", "key", "required"),
+        ("valid", "memtomem-stm", "", " ", "required"),
         ("valid", "memtomem-stm", "api_key=sk-secret-value", "key", "sensitive"),
     ],
 )
