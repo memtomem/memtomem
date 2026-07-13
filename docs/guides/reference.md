@@ -87,7 +87,7 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **87 MCP tools** organized into categories:
+memtomem provides **95 MCP tools** organized into categories:
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -141,4 +141,4 @@ The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skill
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 87 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All 95 tools with parameters

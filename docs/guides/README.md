@@ -14,6 +14,8 @@ guides are organized by outcome rather than by feature name.
    - [Claude Code](integrations/claude-code.md)
    - [Cursor](integrations/cursor.md)
    - [Claude Desktop](integrations/claude-desktop.md)
+3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool
+   developers, individual knowledge bases, and teams.
 
 ## Work with memories
 
@@ -26,6 +28,8 @@ guides are organized by outcome rather than by feature name.
   covers namespaces, deduplication, decay, tagging, and memory health.
 - **Automate upkeep** — [Automation](reference/automation.md) covers policies
   and scheduled jobs.
+- **Pin and review context** — [Pinned Context](pinned-context.md) covers
+  pinned-first composition, the approval queue, and LangGraph `BaseStore`.
 
 <a id="tune"></a>
 ## Improve search quality

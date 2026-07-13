@@ -130,6 +130,13 @@ jobs:
           key: ${{ runner.os }}-fastembed-multilingual-minilm-l12
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_golden_path.py --tb=short -q
+      - name: Audit public synthetic retrieval corpus
+        run: uv run python tools/retrieval-eval/audit_public_corpus.py
+      - name: Check public retrieval quality floors
+        env:
+          PYTHONHASHSEED: "0"
+          OMP_NUM_THREADS: "1"
+        run: uv run python tools/retrieval-eval/check_baseline.py --runs 1
 
   test-llm-nightly:
     name: llm-nightly (optional)

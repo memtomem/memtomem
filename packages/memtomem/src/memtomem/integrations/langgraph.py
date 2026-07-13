@@ -43,6 +43,12 @@ from memtomem.constants import (
     validate_namespace,
 )
 
+# Separate class: the existing ``MemtomemStore`` CRUD signatures predate and
+# conflict with LangGraph's tuple-namespace BaseStore contract.
+from memtomem.integrations.langgraph_store import MemtomemBaseStore
+
+__all__ = ["MemtomemBaseStore", "MemtomemStore"]
+
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
 

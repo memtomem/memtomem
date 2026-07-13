@@ -36,6 +36,7 @@ dependencies = [
     "idna>=3.15",
     "pyjwt>=2.13.0",
     "python-multipart>=0.0.27",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -54,7 +55,8 @@ web = [
     "uvicorn[standard]>=0.49.0",
 ]
 langfuse = ["langfuse>=4.0", "urllib3>=2.7.0"]
-all = ["memtomem[onnx,ollama,openai,korean,code,web,langfuse]"]
+langgraph = ["langgraph>=1.0,<2"]
+all = ["memtomem[onnx,ollama,openai,korean,code,web,langfuse,langgraph]"]
 
 [project.scripts]
 memtomem = "memtomem.cli:cli"

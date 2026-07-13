@@ -563,6 +563,76 @@ def create_tables(
         "CREATE INDEX IF NOT EXISTS idx_entities_type_value ON chunk_entities(entity_type, entity_value)"
     )
 
+    # --- Review-first automatic memory formation ---
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS memory_candidates (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            content TEXT NOT NULL,
+            evidence TEXT NOT NULL DEFAULT '[]',
+            matched_existing_ids TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL,
+            sensitivity TEXT NOT NULL DEFAULT 'normal',
+            proposed_diff TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            extractor_version TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            reviewer TEXT,
+            decision_reason TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            decided_at TEXT,
+            UNIQUE(session_id, fingerprint)
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_candidates_status "
+        "ON memory_candidates(status, created_at)"
+    )
+
+    # --- Provenance-bearing temporal assertions (derived, rebuildable index) ---
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS canonical_entities (
+            id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            aliases TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            UNIQUE(canonical_name, entity_type)
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS memory_assertions (
+            id TEXT PRIMARY KEY,
+            subject_entity_id TEXT NOT NULL REFERENCES canonical_entities(id) ON DELETE CASCADE,
+            predicate TEXT NOT NULL,
+            object_value TEXT NOT NULL,
+            source_chunk_id TEXT REFERENCES chunks(id) ON DELETE SET NULL,
+            recorded_at TEXT NOT NULL,
+            valid_from TEXT,
+            valid_to TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            extractor_version TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_assertions_lookup "
+        "ON memory_assertions(subject_entity_id, predicate, status)"
+    )
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS assertion_edges (
+            source_assertion_id TEXT NOT NULL REFERENCES memory_assertions(id) ON DELETE CASCADE,
+            target_assertion_id TEXT NOT NULL REFERENCES memory_assertions(id) ON DELETE CASCADE,
+            edge_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (source_assertion_id, target_assertion_id, edge_type)
+        )
+    """)
+
     # --- Memory policies table ---
     db.execute("""
         CREATE TABLE IF NOT EXISTS memory_policies (

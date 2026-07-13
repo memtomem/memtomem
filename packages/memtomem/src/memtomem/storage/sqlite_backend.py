@@ -54,6 +54,7 @@ from memtomem.storage.sqlite_scope import scope_context_sql, scope_sort_priority
 from memtomem.storage.mixins import (
     AnalyticsMixin,
     EntityMixin,
+    FormationMixin,
     HistoryMixin,
     IdempotencyMixin,
     PolicyMixin,
@@ -180,6 +181,7 @@ class SqliteBackend(
     EntityMixin,
     PolicyMixin,
     ScheduleMixin,
+    FormationMixin,
 ):
     def __init__(
         self,

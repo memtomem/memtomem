@@ -143,6 +143,16 @@ class TestConsumerRegressionPin:
         "memtomem/cli/context_cmd.py",
         # LangGraph adapter resolves user-tier write target.
         "memtomem/integrations/langgraph.py",
+        # LangGraph BaseStore uses the primary user-tier directory as the
+        # canonical default store root; explicit project scopes still pass
+        # through the normal scope resolver and confirmation gate.
+        "memtomem/integrations/langgraph_store.py",
+        # Pinned context anchors user-scoped blocks in the primary user-tier
+        # directory, then resolves project-local/shared scopes explicitly.
+        "memtomem/pinned.py",
+        # Approved review candidates follow ``mm mem add`` and default to the
+        # primary user-tier durable-memory directory.
+        "memtomem/cli/review_cmd.py",
         # Session / URL / importer / memory_crud tools all derive a
         # user-tier write target (mem_add default). PR-D refactors
         # these to honor ``--scope`` and route through Gate B.

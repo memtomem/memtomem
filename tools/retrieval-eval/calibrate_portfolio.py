@@ -25,11 +25,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import importlib.util
+import importlib.metadata
 import json
+import platform
 import shutil
 import statistics
+import struct
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -191,8 +196,12 @@ async def _calibrate_once(
     # Key: (lang, expected_genre, observed_top_1_genre) → count across queries.
     confusion: dict[tuple[str, str, str], int] = defaultdict(int)
     per_query: list[dict] = []
+    latencies_ms: list[float] = []
     for q in queries:
+        started = time.perf_counter()
         res, _ = await comp.search_pipeline.search(q.text, top_k=10, rrf_weights=[1.0, 1.0])
+        latency_ms = (time.perf_counter() - started) * 1000
+        latencies_ms.append(latency_ms)
         retrieved_keys = [_retrieved_key(r) for r in res]
         primary, graded = build_relevance(tagged, q.targets, q.lang)
         relevance = {f"{k[0]}|{k[1]}": v for k, v in graded.items()}
@@ -225,9 +234,30 @@ async def _calibrate_once(
                 "mrr@10": mrr_at_10,
                 "ndcg@10": ndcg_at_10,
                 "relevant_primary_count": len(primary),
+                "latency_ms": round(latency_ms, 3),
             }
         )
-    return {"samples": samples, "confusion": confusion, "per_query": per_query}
+    return {
+        "samples": samples,
+        "confusion": confusion,
+        "per_query": per_query,
+        "latencies_ms": latencies_ms,
+    }
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * percentile)))
+    return ordered[index]
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 async def calibrate(runs: int = 3, factor: float = 0.9) -> dict[str, Any]:
@@ -241,6 +271,7 @@ async def calibrate(runs: int = 3, factor: float = 0.9) -> dict[str, Any]:
     - `index_stats`: chunks_indexed / files_indexed
     """
     portfolio = _load_sibling("query_portfolio")
+    corpus_audit = _load_sibling("audit_public_corpus").audit()
     # Ensure drift_validator is loaded for tagged-chunk collection.
     tagged = collect_tagged_chunks()
 
@@ -273,7 +304,23 @@ async def calibrate(runs: int = 3, factor: float = 0.9) -> dict[str, Any]:
 
     comp = await create_components(config)
     try:
+        # Public benchmark completeness is load-bearing: a privacy block or
+        # parser regression must fail calibration instead of silently
+        # producing metrics from a smaller corpus.
         stats = await comp.index_engine.index_path(mem_dir, recursive=True)
+        observed = (
+            stats.total_files,
+            stats.total_chunks,
+            stats.indexed_chunks,
+            stats.blocked_files,
+            len(stats.errors),
+        )
+        expected = (48, 192, 192, 0, 0)
+        if observed != expected:
+            raise RuntimeError(
+                "public corpus indexing incomplete: "
+                f"expected files/chunks/indexed/blocked/errors={expected}, observed={observed}"
+            )
         # Reparent tagged source_file keys to match the temp-copied corpus.
         # search results report the *temp* source_file; rewrite our
         # tagged keys to that temp path so the (source_file, heading)
@@ -296,15 +343,25 @@ async def calibrate(runs: int = 3, factor: float = 0.9) -> dict[str, Any]:
             )
 
         ir_metrics = _load_ir_metrics()
+        fingerprint_vector = await comp.embedder.embed_query(
+            "memtomem public synthetic retrieval benchmark fingerprint v1"
+        )
+        fingerprint_bytes = b"".join(struct.pack("<f", value) for value in fingerprint_vector)
         all_samples: dict[tuple[str, str, str], list[float]] = defaultdict(list)
         confusion_total: dict[tuple[str, str, str], int] = defaultdict(int)
+        all_latencies_ms: list[float] = []
+        run_aggregate_means: list[dict[str, float]] = []
         last_per_query: list[dict] = []
         for _ in range(runs):
             result = await _calibrate_once(comp, portfolio.QUERIES, tagged_rewritten, ir_metrics)
+            one_run_means: dict[str, float] = {}
             for key, values in result["samples"].items():
                 all_samples[key].extend(values)
+                one_run_means[f"{key[0]}|{key[1]}|{key[2]}"] = round(statistics.fmean(values), 6)
+            run_aggregate_means.append(one_run_means)
             for key, count in result["confusion"].items():
                 confusion_total[key] += count
+            all_latencies_ms.extend(result["latencies_ms"])
             last_per_query = result["per_query"]
 
         floors = compute_floors(all_samples, factor=factor)
@@ -312,15 +369,59 @@ async def calibrate(runs: int = 3, factor: float = 0.9) -> dict[str, Any]:
             key: round(statistics.fmean(values), 3) if values else 0.0
             for key, values in all_samples.items()
         }
+        run_spreads = {
+            key: round(
+                max(run[key] for run in run_aggregate_means)
+                - min(run[key] for run in run_aggregate_means),
+                6,
+            )
+            for key in run_aggregate_means[0]
+        }
 
         return {
+            "schema_version": 1,
             "runs": runs,
             "factor": factor,
+            "environment": {
+                "python": platform.python_version(),
+                "platform": platform.platform(),
+                "memtomem": _package_version("memtomem"),
+                "fastembed": _package_version("fastembed"),
+                "onnxruntime": _package_version("onnxruntime"),
+                "sqlite_vec": _package_version("sqlite-vec"),
+            },
+            "corpus": {
+                "files": corpus_audit.files,
+                "chunks": corpus_audit.chunks,
+                "queries": corpus_audit.queries,
+                "corpus_sha256": corpus_audit.corpus_sha256,
+                "query_sha256": corpus_audit.query_sha256,
+            },
+            "embedding": {
+                "provider": config.embedding.provider,
+                "model": config.embedding.model,
+                "dimension": config.embedding.dimension,
+                "vector_fingerprint_sha256": hashlib.sha256(fingerprint_bytes).hexdigest(),
+            },
+            "search": {
+                "rrf_weights": [1.0, 1.0],
+                "top_k": 10,
+                "tokenizer": config.search.tokenizer,
+            },
             "index_stats": {
                 "chunks_indexed": stats.indexed_chunks,
                 "files_indexed": stats.total_files,
+                "duration_ms": round(stats.duration_ms, 3),
+                "db_size_bytes": db_path.stat().st_size,
+            },
+            "latency_ms": {
+                "p50": round(_percentile(all_latencies_ms, 0.50), 3),
+                "p95": round(_percentile(all_latencies_ms, 0.95), 3),
             },
             "aggregate_means": {f"{k[0]}|{k[1]}|{k[2]}": v for k, v in means.items()},
+            "run_aggregate_means": run_aggregate_means,
+            "max_run_spread": max(run_spreads.values(), default=0.0),
+            "run_spreads": run_spreads,
             "floors": {f"{k[0]}|{k[1]}|{k[2]}": v for k, v in floors.items()},
             "genre_confusion": {f"{k[0]}|{k[1]}|{k[2]}": v for k, v in confusion_total.items()},
             "per_query": last_per_query,
@@ -373,12 +474,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="emit full JSON report (for CI) instead of the formatted table",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="write the full JSON report to this path (implies JSON output)",
+    )
     args = parser.parse_args(argv)
 
     report = asyncio.run(calibrate(runs=args.runs, factor=args.factor))
 
-    if args.json:
-        print(json.dumps(report, indent=2, default=str))
+    if args.json or args.output:
+        payload = json.dumps(report, indent=2, sort_keys=True, default=str) + "\n"
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(payload, encoding="utf-8")
+            print(args.output)
+        else:
+            print(payload, end="")
     else:
         print(_format_report(report))
     return 0

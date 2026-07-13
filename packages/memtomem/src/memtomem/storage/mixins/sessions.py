@@ -173,17 +173,18 @@ class SessionMixin:
     async def get_session_events(self, session_id: str) -> list[dict]:
         db = self._get_db()
         rows = db.execute(
-            "SELECT event_type, content, chunk_ids, created_at, metadata"
+            "SELECT id, event_type, content, chunk_ids, created_at, metadata"
             " FROM session_events WHERE session_id = ? ORDER BY id",
             (session_id,),
         ).fetchall()
         return [
             {
-                "event_type": r[0],
-                "content": r[1],
-                "chunk_ids": json.loads(r[2]),
-                "created_at": r[3],
-                "metadata": json.loads(r[4]) if r[4] else {},
+                "id": r[0],
+                "event_type": r[1],
+                "content": r[2],
+                "chunk_ids": json.loads(r[3]),
+                "created_at": r[4],
+                "metadata": json.loads(r[5]) if r[5] else {},
             }
             for r in rows
         ]
