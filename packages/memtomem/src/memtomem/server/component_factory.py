@@ -60,13 +60,24 @@ class Components:
     embedding_broken: dict | None = None
 
 
-async def create_components(config: Mem2MemConfig | None = None) -> Components:
-    """Create and initialise all core components."""
+async def create_components(
+    config: Mem2MemConfig | None = None,
+    *,
+    load_ambient_config: bool = True,
+) -> Components:
+    """Create and initialise all core components.
+
+    ``load_ambient_config=False`` is reserved for callers that have already
+    resolved the complete configuration precedence chain.  The default keeps
+    the existing server and CLI behaviour of loading ``config.d``, persisted
+    overrides, and environment variables before constructing components.
+    """
     from memtomem.config import load_config_d, load_config_overrides
 
     config = config or Mem2MemConfig()
-    load_config_d(config)
-    load_config_overrides(config)
+    if load_ambient_config:
+        load_config_d(config)
+        load_config_overrides(config)
 
     # Initialize FTS tokenizer from config
     from memtomem.storage.fts_tokenizer import set_tokenizer

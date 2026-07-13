@@ -56,7 +56,7 @@ class TestConfigOverridesStrict:
         import memtomem.config as _cfg
         import memtomem.server.component_factory as _factory
 
-        async def _fake_create(_):
+        async def _fake_create(_, **_kwargs):
             return MagicMock()
 
         async def _fake_close(_):
@@ -112,6 +112,41 @@ class TestConfigOverridesStrict:
         store = MemtomemStore(config_overrides={"storage": {"sqlite_path": "/tmp/x.db"}})
         # Should complete without raising.
         await store._ensure_init()
+
+    @pytest.mark.asyncio
+    async def test_programmatic_override_wins_over_ambient_config(self, monkeypatch, tmp_path):
+        """Constructor overrides are the final config precedence layer.
+
+        This guards isolated integrators from silently writing to a user's
+        ambient ``~/.memtomem`` database or memory directories.
+        """
+        import memtomem.config as _cfg
+        import memtomem.server.component_factory as _factory
+        from memtomem.integrations.langgraph import MemtomemStore
+
+        isolated_db = tmp_path / "isolated.db"
+        ambient_db = tmp_path / "ambient.db"
+        captured = {}
+
+        def _ambient(config):
+            config.storage.sqlite_path = ambient_db
+
+        async def _fake_create(config, *, load_ambient_config=True):
+            captured["sqlite_path"] = config.storage.sqlite_path
+            captured["load_ambient_config"] = load_ambient_config
+            return MagicMock()
+
+        monkeypatch.setattr(_cfg, "load_config_d", _ambient)
+        monkeypatch.setattr(_cfg, "load_config_overrides", lambda config: None)
+        monkeypatch.setattr(_factory, "create_components", _fake_create)
+
+        store = MemtomemStore(config_overrides={"storage": {"sqlite_path": isolated_db}})
+        await store._ensure_init()
+
+        assert captured == {
+            "sqlite_path": isolated_db,
+            "load_ambient_config": False,
+        }
 
 
 class TestResolveSearchNamespace:
@@ -917,7 +952,7 @@ class TestCloseAndContextManager:
         comp = MagicMock()
         closed = []
 
-        async def _fake_create(_config):
+        async def _fake_create(_config, **_kwargs):
             return comp
 
         async def _fake_close(c):
