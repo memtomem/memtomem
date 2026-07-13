@@ -28,6 +28,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   older SQLite versions without `UPDATE ... RETURNING`, and a completed write
   that loses finalization is quarantined as `write_uncertain` to prevent blind
   duplicate approval.
+- **STM capability bridge** — `mem_do(action="version")` advertises versioned
+  `context_compose` and `candidate_propose` contracts. External proposals are
+  privacy-gated, idempotently queued as pending review candidates, and never
+  write durable memory before approval. Proposal content remains only in the
+  review queue and is not indexed as retrievable chunks.
 
 ## [0.3.8] — 2026-07-13
 

@@ -6,7 +6,11 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
-from memtomem.formation import DEFAULT_STALE_CLAIM_MINUTES, scan_session_candidates
+from memtomem.formation import (
+    DEFAULT_STALE_CLAIM_MINUTES,
+    propose_memory_candidate,
+    scan_session_candidates,
+)
 from memtomem.pinned import PinnedContextStore
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
@@ -22,6 +26,37 @@ async def mem_formation_scan(session_id: str, ctx: CtxType = None) -> str:
     app = await _get_app_initialized(ctx)
     candidates = await scan_session_candidates(app.storage, session_id)
     return json.dumps({"created": len(candidates), "candidates": candidates}, ensure_ascii=False)
+
+
+@mcp.tool()
+@tool_handler
+@register("formation")
+async def mem_candidate_propose(
+    content: str,
+    source: str,
+    source_ref: str,
+    idempotency_key: str,
+    ctx: CtxType = None,
+) -> str:
+    """Queue an explicit pending candidate; never write durable memory."""
+    app = await _get_app_initialized(ctx)
+    candidate, duplicate = await propose_memory_candidate(
+        app.storage,
+        content,
+        source=source,
+        source_ref=source_ref,
+        idempotency_key=idempotency_key,
+    )
+    return json.dumps(
+        {
+            "ok": True,
+            "candidate_id": candidate["id"],
+            "status": candidate["status"],
+            "created_at": candidate["created_at"],
+            "duplicate": duplicate,
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()

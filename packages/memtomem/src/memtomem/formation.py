@@ -86,3 +86,73 @@ async def scan_session_candidates(storage: Any, session_id: str) -> list[dict[st
         if await storage.add_memory_candidate(candidate):
             created.append(candidate)
     return created
+
+
+async def propose_memory_candidate(
+    storage: Any,
+    content: str,
+    *,
+    source: str,
+    source_ref: str,
+    idempotency_key: str,
+) -> tuple[dict[str, Any], bool]:
+    """Queue one explicit external proposal for review without promoting it."""
+    body = content.strip()
+    if not body:
+        raise ValueError("content cannot be empty")
+    if len(body) > 2000:
+        raise ValueError("content exceeds 2000 characters")
+    if len(source) > 128 or len(source_ref) > 512 or len(idempotency_key) > 256:
+        raise ValueError("proposal metadata exceeds size limit")
+    if not source.strip() or not idempotency_key.strip():
+        raise ValueError("source and idempotency_key are required")
+    ref = source_ref.strip()
+    if privacy.scan(body) or (ref and privacy.scan(ref)):
+        raise ValueError("content or source_ref contains sensitive data")
+
+    classification = _classify(body)
+    kind, operation, destination, confidence = classification or (
+        "proposed",
+        "add",
+        "memory",
+        0.5,
+    )
+    now = datetime.now(timezone.utc)
+    fingerprint = hashlib.sha256(
+        f"external\0{source.strip()}\0{idempotency_key.strip()}".encode()
+    ).hexdigest()
+    external_session_id = f"external:{source.strip()}:{fingerprint[:24]}"
+    await storage.create_session(
+        external_session_id,
+        source.strip(),
+        "formation",
+        metadata={"source_ref": ref, "external_proposal": True},
+    )
+    candidate = {
+        "id": str(uuid4()),
+        "session_id": external_session_id,
+        "kind": kind,
+        "operation": operation,
+        "destination": destination,
+        "content": body,
+        "evidence": [{"source": source.strip(), "source_ref": ref}],
+        "matched_existing_ids": [],
+        "confidence": confidence,
+        "sensitivity": "normal",
+        "proposed_diff": f"+ {body}",
+        "extractor_version": "external-proposal-v1",
+        "fingerprint": fingerprint,
+        "status": "pending",
+        "created_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + timedelta(days=30)).isoformat(timespec="seconds"),
+    }
+    created = await storage.add_memory_candidate(candidate)
+    if created:
+        return candidate, False
+
+    existing = await storage.get_memory_candidate_by_fingerprint(external_session_id, fingerprint)
+    if existing is None:
+        raise RuntimeError("idempotent candidate insert was ignored but no row exists")
+    if existing["content"] != body:
+        raise ValueError("idempotency_key was already used with different content")
+    return existing, True
