@@ -21,11 +21,20 @@ default composed bundle to 12,000. A block is never cut in the middle; omitted
 ids are returned explicitly.
 
 `mem_context_compose` schema 2 accepts the same optional `namespace` and
-`context_window` retrieval controls used by search. Pinned files remain
-searchable through legacy `mem_search`, but the composed path excludes every
-file under the active user and project `pinned/` roots from its retrieved leg,
+`context_window` retrieval controls used by search. Schema 3 additionally
+returns adjacent chunks under each retrieved item's optional `context` object.
+Matched hits retain schema 2 budget priority; de-duplicated adjacent chunks use
+only the remaining composed bundle character budget, selected globally by
+distance with hit rank and before/after as deterministic tie-breakers. Pinned
+files remain searchable through legacy `mem_search`, but the composed path
+excludes every file under the active user and project `pinned/` roots from its retrieved leg,
 including shadowed, agent-specific, and malformed blocks. This prevents pinned
 content from appearing a second time as an ordinary search result.
+
+Schema 3 is a new capability instead of an in-place schema 2 change because
+schema 2 shipped in memtomem 0.3.9 without adjacent chunks in its response.
+Keeping that released contract immutable lets clients distinguish scoped
+composition from composition that also preserves visible context windows.
 
 ## Review-first candidates
 
