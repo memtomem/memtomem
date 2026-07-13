@@ -32,11 +32,11 @@ configuration; environment variables have the highest precedence.
 - [5. Gemini CLI](#5-gemini-cli)
 - [6. Kimi CLI](#6-kimi-cli)
 - [7. Codex CLI](#7-codex-cli)
-- [OpenCode](#opencode)
-- [8. Antigravity](#8-antigravity)
-- [9. Verifying Your Connection](#9-verifying-your-connection)
-- [10. Environment Variable Overrides](#10-environment-variable-overrides)
-- [11. Network transports (advanced)](#11-network-transports-advanced)
+- [8. OpenCode](#8-opencode)
+- [9. Antigravity](#9-antigravity)
+- [10. Verifying Your Connection](#10-verifying-your-connection)
+- [11. Environment Variable Overrides](#11-environment-variable-overrides)
+- [12. Network transports (advanced)](#12-network-transports-advanced)
 - [Troubleshooting](#troubleshooting)
 - [Next Steps](#next-steps)
 
@@ -182,10 +182,10 @@ Restart Claude Desktop after configuration.
 ## 5. Gemini CLI
 
 > **Deprecated upstream.** Google is transitioning Gemini CLI to the
-> Antigravity CLI (see [§8](#8-antigravity)). Gemini CLI stopped serving
+> Antigravity CLI (see [§9](#9-antigravity)). Gemini CLI stopped serving
 > free/Pro/Ultra individual tiers on **2026-06-18** (enterprise Gemini Code
 > Assist Standard/Enterprise keep it). New setups should prefer the
-> **Antigravity CLI (`agy`)** instructions in §8.
+> **Antigravity CLI (`agy`)** instructions in §9.
 
 Create or edit the `~/.gemini/settings.json` file:
 
@@ -277,7 +277,7 @@ Call mem_status to check the memtomem connection status
 
 ---
 
-## OpenCode
+## 8. OpenCode
 
 Install the configuration-only npm plugin:
 
@@ -292,7 +292,7 @@ permission, platform, and development-install details.
 
 ---
 
-## 8. Antigravity
+## 9. Antigravity
 
 "Antigravity" ships as two distinct surfaces with **separate** MCP config
 files — register memtomem in whichever you actually use:
@@ -362,7 +362,7 @@ working unchanged.
 
 ---
 
-## 9. Verifying Your Connection
+## 10. Verifying Your Connection
 
 These verification methods work across all clients.
 
@@ -462,7 +462,7 @@ The STM proxy is distributed as a separate package: **[memtomem-stm](https://git
 
 ---
 
-## 10. Environment Variable Overrides
+## 11. Environment Variable Overrides
 
 You can override settings for one client by adding environment variables to
 the `env` block. This is an advanced, explicit override: these values win over
@@ -533,7 +533,7 @@ ollama pull bge-m3
 
 ---
 
-## 11. Network transports (advanced)
+## 12. Network transports (advanced)
 
 Every editor section above launches `memtomem-server` over **stdio** — the
 MCP client spawns the server as a subprocess and talks to it on stdin/stdout.
@@ -744,7 +744,7 @@ section in the reference guide.
 
 > Running `uvx --from memtomem memtomem-server` bare in a terminal prints
 > a setup hint (MCP client configuration plus the network-transport
-> examples from §11) and exits — it is **not** a "does it serve?" smoke
+> examples from §12) and exits — it is **not** a "does it serve?" smoke
 > test because no MCP client is connected. To test stdio, configure your
 > editor and call `mem_status` from there; to test a network transport,
 > start the server with `--transport http|sse` and connect a client.

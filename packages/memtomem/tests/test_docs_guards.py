@@ -660,7 +660,7 @@ class TestPublicReadmeAndExamples:
 
     def test_normal_mcp_examples_do_not_override_saved_memory_dirs(self) -> None:
         mcp_clients = _read(_GUIDES / "mcp-clients.md")
-        ordinary, marker, overrides = mcp_clients.partition("## 10. Environment Variable Overrides")
+        ordinary, marker, overrides = mcp_clients.partition("## 11. Environment Variable Overrides")
         assert marker
         assert "MEMTOMEM_INDEXING__MEMORY_DIRS" not in ordinary
         assert "MEMTOMEM_INDEXING__MEMORY_DIRS" in overrides

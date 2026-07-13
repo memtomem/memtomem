@@ -292,7 +292,7 @@ Open a new shell after updating PATH. Project/source installs require
 ### Tools don't appear in my editor
 
 Confirm `mm status` works in a terminal, then restart the client and follow
-[MCP Client Setup → Verifying Your Connection](mcp-clients.md#9-verifying-your-connection).
+[MCP Client Setup → Verifying Your Connection](mcp-clients.md#10-verifying-your-connection).
 
 ### Install and upgrade issues
 

@@ -1,6 +1,6 @@
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Config, PluginInput, PluginModule } from "@opencode-ai/plugin";
@@ -47,6 +47,10 @@ function mergePermissions(existing?: PermissionConfig): Record<string, Permissio
   const memtomem: Record<string, PermissionValue> = {};
   for (const [pattern, value] of Object.entries(existing ?? {})) {
     (pattern.startsWith("memtomem_") ? memtomem : generic)[pattern] = value;
+  }
+  if (generic["*"] === "deny") return { ...generic, ...memtomem };
+  if (generic["*"] === "ask") {
+    return { ...generic, memtomem_mem_do: "deny", ...memtomem };
   }
   return { ...generic, ...SAFE_PERMISSIONS, ...memtomem };
 }
@@ -96,8 +100,8 @@ async function hasUserSkill(
 
   for (const configured of configuredPaths) {
     const absolute = resolve(configured);
-    if (absolute.startsWith(packageRoot)) continue;
-    if (absolute.endsWith(name) && await exists(join(absolute, "SKILL.md"))) return true;
+    if (absolute === packageRoot || absolute.startsWith(`${packageRoot}${sep}`)) continue;
+    if (basename(absolute) === name && await exists(join(absolute, "SKILL.md"))) return true;
     roots.add(absolute);
   }
   for (const root of roots) {

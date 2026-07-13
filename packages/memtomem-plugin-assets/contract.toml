@@ -10,7 +10,6 @@ opencode_version = "0.1.0"
 
 [opencode]
 package = "opencode-memtomem"
-minimum_version = "1.17.18"
 version_range = ">=1.17.18 <2"
 mcp_timeout_ms = 60000
 

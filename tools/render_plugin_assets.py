@@ -94,25 +94,19 @@ def _openai_yaml(workflow: dict) -> str:
     )
 
 
-def _opencode_body(body: str) -> str:
-    for tool in (
-        "mem_search",
-        "mem_add",
-        "mem_index",
-        "mem_recall",
-        "mem_status",
-    ):
+def _opencode_body(body: str, tools: list[str]) -> str:
+    for tool in tools:
         body = body.replace(f"`{tool}`", f"`memtomem_{tool}`")
     return body
 
 
-def _opencode_skill(workflow: dict, body: str) -> str:
+def _opencode_skill(workflow: dict, body: str, version_range: str) -> str:
     lines = [
         "---",
         f"name: {workflow['codex_name']}",
         f"description: {workflow['description']}",
         "license: Apache-2.0",
-        "compatibility: OpenCode >=1.17.18 <2",
+        f"compatibility: OpenCode {version_range}",
         "metadata:",
         "  provider: memtomem",
         "---",
@@ -128,14 +122,14 @@ def _opencode_skill(workflow: dict, body: str) -> str:
                 "",
             ]
         )
-    return "\n".join(lines) + _opencode_body(body).strip() + "\n"
+    return "\n".join(lines) + _opencode_body(body, workflow["tools"]).strip() + "\n"
 
 
 def _opencode_generated(contract: dict) -> str:
     commands = {}
     for workflow in contract["workflows"]:
         body = (ASSETS / "workflows" / f"{workflow['id']}.md").read_text(encoding="utf-8")
-        prompt = _opencode_body(body).strip()
+        prompt = _opencode_body(body, workflow["tools"]).strip()
         prefix = f"Use the memtomem {workflow['id']} workflow."
         if workflow["id"] != "status":
             prompt = f"{prefix}\n\nUser input: $ARGUMENTS\n\n{prompt}"
@@ -191,9 +185,9 @@ def expected_files() -> dict[Path, str]:
         files[codex_dir / "SKILL.md"] = _codex_skill(workflow, body)
         files[codex_dir / "agents" / "openai.yaml"] = _openai_yaml(workflow)
         if workflow["implicit"] and workflow["effect"] == "read":
-            files[
-                OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"
-            ] = _opencode_skill(workflow, body)
+            files[OPENCODE_ROOT / "skills" / workflow["codex_name"] / "SKILL.md"] = _opencode_skill(
+                workflow, body, contract["opencode"]["version_range"]
+            )
     return files
 
 

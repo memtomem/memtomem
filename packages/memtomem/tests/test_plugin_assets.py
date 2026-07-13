@@ -44,9 +44,7 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
     assert {path.parent.name for path in codex} == {row["codex_name"] for row in workflows}
     opencode = _skill_files(_ROOT / "packages/opencode-memtomem/skills")
     assert {path.parent.name for path in opencode} == {
-        row["codex_name"]
-        for row in workflows
-        if row["effect"] == "read" and row["implicit"]
+        row["codex_name"] for row in workflows if row["effect"] == "read" and row["implicit"]
     }
 
 
@@ -73,7 +71,7 @@ def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
     assert "memtomem_mem_search" in opencode_text
     assert "memtomem_mem_recall" in opencode_text
     assert "memtomem_mem_status" in opencode_text
-    assert "`mem_search`" not in opencode_text
+    assert re.search(r"`mem_[a-z_]+`", opencode_text) is None
     assert "$ARGUMENTS" not in opencode_text
 
 

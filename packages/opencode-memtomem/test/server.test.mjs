@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import plugin from "../dist/server.js";
@@ -50,6 +51,12 @@ test("merges scalar and object permissions without weakening explicit rules", as
   assert.equal(allowed.permission["memtomem_*"], "ask");
   assert.equal(allowed.permission.memtomem_mem_do, "deny");
 
+  const objectDenied = await apply({ permission: { "*": "deny" } });
+  assert.deepEqual(objectDenied.permission, { "*": "deny" });
+
+  const objectAsked = await apply({ permission: { "*": "ask" } });
+  assert.deepEqual(objectAsked.permission, { "*": "ask", memtomem_mem_do: "deny" });
+
   const explicit = await apply({
     permission: { "*": "allow", memtomem_mem_search: "deny", memtomem_mem_add: "allow" },
   });
@@ -66,4 +73,23 @@ test("does not shadow a project skill with the same name", async () => {
   const config = await apply({}, { directory: project, worktree: project });
   assert.equal(config.skills.paths.some((path) => path.endsWith("memtomem-search")), false);
   assert.equal(config.skills.paths.length, 2);
+});
+
+test("uses path component boundaries when checking configured skills", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memtomem-boundary-"));
+  const suffix = join(root, "my-memtomem-search");
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const siblingRoot = `${packageRoot}-sibling-test`;
+  const siblingSkill = join(siblingRoot, "memtomem-recall");
+  for (const path of [suffix, siblingSkill]) {
+    await mkdir(path, { recursive: true });
+    await writeFile(join(path, "SKILL.md"), "---\nname: unrelated\n---\n");
+  }
+  try {
+    const config = await apply({ skills: { paths: [suffix, siblingSkill] } });
+    assert.equal(config.skills.paths.filter((path) => basename(path) === "memtomem-search").length, 1);
+    assert.equal(config.skills.paths.filter((path) => basename(path) === "memtomem-recall").length, 1);
+  } finally {
+    await rm(siblingRoot, { recursive: true, force: true });
+  }
 });
