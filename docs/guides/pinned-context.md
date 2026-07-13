@@ -20,6 +20,13 @@ One block is limited to 2,000 characters, all pinned blocks to 6,000, and a
 default composed bundle to 12,000. A block is never cut in the middle; omitted
 ids are returned explicitly.
 
+`mem_context_compose` schema 2 accepts the same optional `namespace` and
+`context_window` retrieval controls used by search. Pinned files remain
+searchable through legacy `mem_search`, but the composed path excludes every
+file under the active user and project `pinned/` roots from its retrieved leg,
+including shadowed, agent-specific, and malformed blocks. This prevents pinned
+content from appearing a second time as an ordinary search result.
+
 ## Review-first candidates
 
 Candidate generation is explicit and never writes long-term memory by itself.

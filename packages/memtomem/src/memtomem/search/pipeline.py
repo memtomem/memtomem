@@ -198,6 +198,27 @@ def _matches_metadata(result: SearchResult, metadata_filter: SearchMetadataFilte
     return True
 
 
+def _normalize_source_roots(roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
+    if not roots:
+        return ()
+    return tuple(sorted({root.expanduser().resolve(strict=False) for root in roots}, key=str))
+
+
+def _source_is_excluded(source_file: Path, roots: tuple[Path, ...]) -> bool:
+    if not roots:
+        return False
+    source = Path(source_file).expanduser().resolve(strict=False)
+    return any(source == root or source.is_relative_to(root) for root in roots)
+
+
+def _exclude_source_roots(
+    results: list[SearchResult], roots: tuple[Path, ...]
+) -> list[SearchResult]:
+    if not roots:
+        return results
+    return [r for r in results if not _source_is_excluded(r.chunk.metadata.source_file, roots)]
+
+
 def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list[SearchResult]:
     """Drop chunks whose temporal-validity window excludes ``as_of_unix``.
 
@@ -306,6 +327,7 @@ class SearchPipeline:
         scope: str | list[str] | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        exclude_source_roots: tuple[Path, ...] = (),
     ) -> str:
         import hashlib
 
@@ -330,6 +352,7 @@ class SearchPipeline:
             f"|rerank={rerank_signal}"
             f"|scope={scope_signal}"
             f"|metadata={metadata_filter}"
+            f"|exclude_roots={tuple(str(root) for root in exclude_source_roots)}"
         )
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -568,6 +591,7 @@ class SearchPipeline:
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        exclude_source_roots: tuple[Path, ...] = (),
     ) -> tuple[list[SearchResult], RetrievalStats]:
         """Empty-query path (#750): enumerate by filter, skip retrievers.
 
@@ -616,6 +640,7 @@ class SearchPipeline:
             SearchResult(chunk=c, score=1.0, rank=i + 1, source="recall")
             for i, c in enumerate(chunks)
         ]
+        fused = _exclude_source_roots(fused, exclude_source_roots)
         stats = RetrievalStats(fused_total=len(fused))
 
         effective_as_of = as_of_unix if as_of_unix is not None else int(time.time())
@@ -656,6 +681,7 @@ class SearchPipeline:
         ctx_win = self._resolve_context_window(context_window)
         if ctx_win > 0 and fused:
             fused = await self._expand_context(fused, ctx_win)
+            fused = _exclude_source_roots(fused, exclude_source_roots)
 
         stats.final_total = len(fused)
 
@@ -687,6 +713,7 @@ class SearchPipeline:
         chunk_types: list[str] | tuple[str, ...] | None = None,
         created_from: datetime | None = None,
         created_before: datetime | None = None,
+        exclude_source_roots: tuple[Path, ...] | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # #750: tag/source-only branch — no keyword to rank by, so the
         # filter takes over as the primary selector. We enumerate via
@@ -702,6 +729,7 @@ class SearchPipeline:
             created_before=created_before,
         )
         metadata_filter: SearchMetadataFilter | None = metadata_candidate
+        normalized_exclusion_roots = _normalize_source_roots(exclude_source_roots)
         if not any(
             (
                 metadata_candidate.source_exact,
@@ -725,6 +753,7 @@ class SearchPipeline:
                 scope_filter=scope_filter,
                 project_context_root=project_context_root,
                 metadata_filter=metadata_filter,
+                exclude_source_roots=normalized_exclusion_roots,
             )
 
         top_k = self._config.default_top_k if top_k is None else top_k
@@ -749,6 +778,7 @@ class SearchPipeline:
             scope=scope,
             project_context_root=project_context_root,
             metadata_filter=metadata_filter,
+            exclude_source_roots=normalized_exclusion_roots,
         )
         version_at_start = self._cache_version
         ttl_snapshot = self._cache_ttl
@@ -868,6 +898,9 @@ class SearchPipeline:
                 bm25_results = []
                 bm25_error = str(exc)
 
+        bm25_results = _exclude_source_roots(bm25_results, normalized_exclusion_roots)
+        dense_results = _exclude_source_roots(dense_results, normalized_exclusion_roots)
+
         stats = RetrievalStats(
             bm25_candidates=len(bm25_results),
             dense_candidates=len(dense_results),
@@ -934,6 +967,7 @@ class SearchPipeline:
 
         # Mark rescue-leg results so fusion can OR-propagate the flag.
         if rescue_results:
+            rescue_results = _exclude_source_roots(rescue_results, normalized_exclusion_roots)
             rescue_results = [
                 dataclass_replace(r, via_session_summary=True) for r in rescue_results
             ]
@@ -1074,6 +1108,7 @@ class SearchPipeline:
         ctx_win = self._resolve_context_window(context_window)
         if ctx_win > 0 and fused:
             fused = await self._expand_context(fused, ctx_win)
+            fused = _exclude_source_roots(fused, normalized_exclusion_roots)
             if metadata_filter is not None and metadata_filter.source_exact:
                 # Context neighbors belong to the selected source but may have
                 # a different chunk type or timestamp. Keep that surrounding

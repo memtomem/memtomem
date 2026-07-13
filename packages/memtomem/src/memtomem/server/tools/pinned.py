@@ -104,11 +104,18 @@ async def mem_context_compose(
     agent_id: str | None = None,
     max_chars: int = 12_000,
     top_k: int = 10,
+    namespace: str | list[str] | None = None,
+    context_window: int | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Compose Pinned Context first, then fill the remaining budget by retrieval."""
     app, store = await _store(ctx)
     bundle = await ContextAssembler(store, app.search_pipeline).compose(
-        query, agent_id=agent_id, max_chars=max_chars, top_k=top_k
+        query,
+        agent_id=agent_id,
+        max_chars=max_chars,
+        top_k=top_k,
+        namespace=namespace,
+        context_window=context_window,
     )
     return json.dumps(bundle.as_dict())

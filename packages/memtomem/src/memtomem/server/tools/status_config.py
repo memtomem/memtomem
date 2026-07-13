@@ -637,7 +637,7 @@ async def mem_version(
             "version": __version__,
             "capabilities": {
                 "search_formats": ["compact", "verbose", "structured"],
-                "context_compose": {"schema_version": 1},
+                "context_compose": {"schema_version": 2},
                 "candidate_propose": {"schema_version": 1},
             },
         },

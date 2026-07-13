@@ -364,6 +364,45 @@ class TestRerankCandidatePool:
         assert len(results) == 10
 
     @pytest.mark.asyncio
+    async def test_excluded_roots_are_removed_before_top_k_truncation(self, tmp_path):
+        pinned_root = tmp_path / "memories" / "pinned"
+
+        def result(content: str, rank: int, source: Path) -> SearchResult:
+            return SearchResult(
+                chunk=Chunk(
+                    content=content,
+                    metadata=ChunkMetadata(source_file=source),
+                    id=uuid4(),
+                    embedding=[],
+                ),
+                score=1.0 / rank,
+                rank=rank,
+                source="bm25",
+            )
+
+        pinned = [
+            result(f"pin{i}", i + 1, pinned_root / "agents" / "other" / f"{i}.md") for i in range(2)
+        ]
+        normal = [result(f"normal{i}", i + 3, tmp_path / "memories" / f"{i}.md") for i in range(2)]
+
+        pipeline = self._make_pipeline([*pinned, *normal], reranker=None, rerank_config=None)
+        results, _ = await pipeline.search("anything", top_k=2, exclude_source_roots=(pinned_root,))
+
+        assert [result.chunk.content for result in results] == ["normal0", "normal1"]
+
+    def test_exclusion_uses_path_boundaries_and_participates_in_cache_key(self, tmp_path):
+        from memtomem.search.pipeline import _source_is_excluded
+
+        root = (tmp_path / "pinned").resolve()
+        assert _source_is_excluded(root / "general" / "policy.md", (root,)) is True
+        assert _source_is_excluded(tmp_path / "pinned-other" / "policy.md", (root,)) is False
+
+        pipeline = self._make_pipeline([], reranker=None, rerank_config=None)
+        without = pipeline._cache_key("q", 10, None, None, None)
+        with_root = pipeline._cache_key("q", 10, None, None, None, exclude_source_roots=(root,))
+        assert without != with_root
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "top_k,oversample,min_pool,max_pool,expected_pool",
         [

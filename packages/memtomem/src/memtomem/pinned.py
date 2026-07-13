@@ -89,6 +89,15 @@ class PinnedContextStore:
     def _base(self, scope: TargetScope) -> Path:
         return resolve_memory_scope_dir(scope, self.project_root, self.user_base) / "pinned"
 
+    def search_exclusion_roots(self) -> tuple[Path, ...]:
+        """Return every in-scope pinned root, independent of parsing or shadowing."""
+        scopes: tuple[TargetScope, ...] = (
+            ("user", "project_shared", "project_local")
+            if self.project_root is not None
+            else ("user",)
+        )
+        return tuple(self._base(scope).resolve(strict=False) for scope in scopes)
+
     def _path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
         block_id = _validate_id(block_id, "block id")
         if agent_id is not None:
@@ -231,6 +240,8 @@ class ContextAssembler:
         agent_id: str | None = None,
         max_chars: int = CONTEXT_BUNDLE_MAX_CHARS,
         top_k: int = 10,
+        namespace: str | list[str] | None = None,
+        context_window: int | None = None,
     ) -> ContextBundle:
         pinned: list[PinnedBlock] = []
         omitted: list[str] = []
@@ -248,7 +259,10 @@ class ContextAssembler:
             results, _ = await self.search_pipeline.search(
                 query=query,
                 top_k=top_k,
+                namespace=namespace,
+                context_window=context_window,
                 project_context_root=self.store.project_root,
+                exclude_source_roots=self.store.search_exclusion_roots(),
             )
             for result in results:
                 content = result.chunk.content
@@ -259,6 +273,7 @@ class ContextAssembler:
                         "id": str(result.chunk.id),
                         "content": content,
                         "source": str(result.chunk.metadata.source_file),
+                        "namespace": str(result.chunk.metadata.namespace),
                         "score": result.score,
                     }
                 )

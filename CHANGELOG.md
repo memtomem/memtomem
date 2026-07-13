@@ -3,7 +3,7 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
-## [Unreleased]
+## [0.3.9] — 2026-07-13
 
 ### Added
 
@@ -35,6 +35,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   privacy-gated, idempotently queued as pending review candidates, and never
   write durable memory before approval. Proposal content remains only in the
   review queue and is not indexed as retrievable chunks.
+
+### Fixed
+
+- **Context composition preserves retrieval scope without duplicating pinned
+  files** — schema 2 accepts namespace and context-window inputs, returns each
+  retrieved chunk's namespace, and excludes every in-scope `pinned/` source
+  before ranking truncation and context expansion. Legacy `mem_search` remains
+  unchanged.
 
 ## [0.3.8] — 2026-07-13
 
