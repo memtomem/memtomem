@@ -38,7 +38,7 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
 # whenever create_tables gains a migration an older binary must not run
 # under. Same-or-older stored versions always pass (migrations stay
 # additive + idempotent); only stored > SCHEMA_VERSION is fatal.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 _SCHEMA_VERSION_KEY = "schema_version"
 
@@ -594,6 +594,16 @@ def create_tables(
     except sqlite3.OperationalError as e:
         if "duplicate column" not in str(e).lower():
             raise
+    # Existing ``writing`` rows predate claim timestamps. Stamp them at
+    # upgrade time rather than treating them as immediately stale: a still
+    # running old process gets the full recovery grace period, while a truly
+    # stranded row becomes recoverable after the documented threshold. This
+    # is idempotent because only NULL timestamps are touched.
+    db.execute(
+        "UPDATE memory_candidates SET claim_started_at=? "
+        "WHERE status='writing' AND claim_started_at IS NULL",
+        (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
+    )
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_memory_candidates_status "
         "ON memory_candidates(status, created_at)"

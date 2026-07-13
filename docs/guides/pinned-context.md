@@ -49,6 +49,12 @@ The equivalent MCP action is `mem_candidate_recover`. Recovery is atomic with
 approval finalization, does not touch fresh claims, and records a persistent
 `writing → pending` transition with the operator and reason.
 
+If a recovered claim's original process later reports that its durable write
+already completed, memtomem moves the candidate to `write_uncertain` and
+reports the destination. Do not approve it again: inspect the Markdown or
+Pinned Context block first, then resolve the candidate manually. This
+quarantine prevents a blind retry from duplicating the persisted content.
+
 ## LangGraph
 
 Install the optional adapter and pass it to a graph as its store:

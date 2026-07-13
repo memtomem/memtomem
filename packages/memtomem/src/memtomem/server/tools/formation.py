@@ -132,7 +132,26 @@ async def mem_candidate_review(
         await app.storage.release_memory_candidate(candidate_id)
         raise
     changed = await app.storage.finalize_memory_candidate(candidate_id)
+    if not changed:
+        warning = (
+            "Durable write completed, but the approval claim was recovered concurrently. "
+            "The write already persists; inspect the returned write details before taking "
+            "further action and do not re-approve this candidate."
+        )
+        quarantined = await app.storage.mark_memory_candidate_write_uncertain(
+            candidate_id, actor="mcp-finalizer", reason=warning
+        )
+        return json.dumps(
+            {
+                "ok": False,
+                "status": "write_uncertain" if quarantined else "state_changed",
+                "durable_write_persisted": True,
+                "reason": warning,
+                "write": write_result,
+            },
+            ensure_ascii=False,
+        )
     return json.dumps(
-        {"ok": changed, "status": "approved", "write": write_result},
+        {"ok": True, "status": "approved", "write": write_result},
         ensure_ascii=False,
     )

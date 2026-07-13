@@ -215,30 +215,73 @@ class FormationMixin:
             raise ValueError("stale_before must include a timezone")
         normalized_cutoff = cutoff.astimezone(timezone.utc).isoformat(timespec="seconds")
         db = self._get_db()
-        rows = db.execute(
-            "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
-            "decision_reason=NULL, claim_started_at=NULL "
-            "WHERE id IN (SELECT id FROM memory_candidates "
-            "WHERE status='writing' AND claim_started_at IS NOT NULL "
-            "AND claim_started_at <= ? ORDER BY claim_started_at LIMIT ?) "
-            "AND status='writing' RETURNING id",
-            (normalized_cutoff, limit),
-        ).fetchall()
-        recovered = [str(row[0]) for row in rows]
+        recovered: list[str] = []
+        try:
+            # Serialize selection and updates across processes without relying
+            # on SQLite 3.35's ``UPDATE ... RETURNING`` extension.
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT id FROM memory_candidates "
+                "WHERE status='writing' AND claim_started_at IS NOT NULL "
+                "AND claim_started_at <= ? ORDER BY claim_started_at, id LIMIT ?",
+                (normalized_cutoff, limit),
+            ).fetchall()
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            reason = f"stale approval claim recovered (claim_started_at <= {normalized_cutoff})"
+            for row in rows:
+                candidate_id = str(row[0])
+                cursor = db.execute(
+                    "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
+                    "decision_reason=NULL, claim_started_at=NULL "
+                    "WHERE id=? AND status='writing'",
+                    (candidate_id,),
+                )
+                if cursor.rowcount == 0:
+                    continue
+                recovered.append(candidate_id)
+                self._record_candidate_transition(
+                    db,
+                    candidate_id,
+                    "writing",
+                    "pending",
+                    actor,
+                    reason,
+                    now,
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return recovered
+
+    async def mark_memory_candidate_write_uncertain(
+        self,
+        candidate_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> bool:
+        """Quarantine a recovered claim after its durable write completed."""
+        db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        reason = f"stale approval claim recovered (claim_started_at <= {normalized_cutoff})"
-        for candidate_id in recovered:
+        cursor = db.execute(
+            "UPDATE memory_candidates SET status='write_uncertain', reviewer=?, "
+            "decision_reason=?, decided_at=?, claim_started_at=NULL "
+            "WHERE id=? AND status='pending'",
+            (actor, reason, now, candidate_id),
+        )
+        if cursor.rowcount > 0:
             self._record_candidate_transition(
                 db,
                 candidate_id,
-                "writing",
                 "pending",
+                "write_uncertain",
                 actor,
                 reason,
                 now,
             )
         db.commit()
-        return recovered
+        return cursor.rowcount > 0
 
     async def list_memory_candidate_transitions(self, candidate_id: str) -> list[dict[str, Any]]:
         db = self._get_db()

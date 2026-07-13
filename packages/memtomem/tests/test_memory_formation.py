@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -125,6 +128,59 @@ async def test_recovery_and_finalize_are_mutually_exclusive(storage):
 
 
 @pytest.mark.asyncio
+async def test_recovered_completed_write_is_quarantined_from_reapproval(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: write completed")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+    assert await storage.claim_memory_candidate(candidate["id"], "alice") is not None
+    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds")
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET claim_started_at=? WHERE id=?",
+        (old, candidate["id"]),
+    )
+    storage._get_db().commit()
+    assert await storage.recover_stale_memory_candidates(
+        stale_before=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    ) == [candidate["id"]]
+
+    # Simulate the original writer returning after its durable write landed.
+    assert await storage.mark_memory_candidate_write_uncertain(
+        candidate["id"], actor="test-finalizer", reason="write already persisted"
+    )
+    assert await storage.claim_memory_candidate(candidate["id"], "bob") is None
+    row = await storage.get_memory_candidate(candidate["id"])
+    assert row["status"] == "write_uncertain"
+    assert "already persisted" in row["decision_reason"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_limit_returns_oldest_claims_first(storage):
+    await storage.create_session("session", "agent", "default")
+    for content in (
+        "Decision: oldest claim",
+        "Decision: middle claim",
+        "Decision: newest claim",
+    ):
+        await storage.add_session_event("session", "note", content)
+    candidates = await scan_session_candidates(storage, "session")
+    for candidate in candidates:
+        assert await storage.claim_memory_candidate(candidate["id"], "alice") is not None
+    base = datetime.now(timezone.utc) - timedelta(minutes=40)
+    for offset, candidate in enumerate(candidates):
+        claimed_at = (base + timedelta(minutes=offset * 5)).isoformat(timespec="seconds")
+        storage._get_db().execute(
+            "UPDATE memory_candidates SET claim_started_at=? WHERE id=?",
+            (claimed_at, candidate["id"]),
+        )
+    storage._get_db().commit()
+    recovered = await storage.recover_stale_memory_candidates(
+        stale_before=datetime.now(timezone.utc).isoformat(timespec="seconds"), limit=2
+    )
+    assert recovered == [candidates[0]["id"], candidates[1]["id"]]
+    assert (await storage.get_memory_candidate(candidates[2]["id"]))["status"] == "writing"
+
+
+@pytest.mark.asyncio
 async def test_recovery_requires_timezone_and_operator_identity(storage):
     with pytest.raises(ValueError, match="timezone"):
         await storage.recover_stale_memory_candidates(
@@ -146,6 +202,57 @@ def test_review_recovery_cli_and_mcp_action_are_public():
     assert result.exit_code == 0
     assert "--stale-after-minutes" in result.output
     assert "candidate_recover" in ACTIONS
+
+
+@pytest.mark.asyncio
+async def test_mcp_recovery_validation_returns_structured_errors():
+    from memtomem.server.tools.formation import mem_candidate_recover
+
+    invalid_age = json.loads(await mem_candidate_recover(stale_after_minutes=0))
+    invalid_limit = json.loads(await mem_candidate_recover(limit=0))
+    invalid_actor = json.loads(await mem_candidate_recover(actor=""))
+    assert invalid_age == {
+        "ok": False,
+        "reason": "stale_after_minutes must be between 1 and 1440",
+    }
+    assert invalid_limit == {"ok": False, "reason": "limit must be between 1 and 1000"}
+    assert invalid_actor == {"ok": False, "reason": "actor cannot be empty"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_review_reports_persisted_write_after_concurrent_recovery(monkeypatch):
+    from memtomem.server.tools.formation import mem_candidate_review
+
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            return_value={
+                "id": "candidate-1",
+                "status": "pending",
+                "destination": "memory",
+                "content": "Decision: persisted once",
+                "kind": "decision",
+            }
+        ),
+        claim_memory_candidate=AsyncMock(return_value={"status": "writing"}),
+        release_memory_candidate=AsyncMock(),
+        finalize_memory_candidate=AsyncMock(return_value=False),
+        mark_memory_candidate_write_uncertain=AsyncMock(return_value=True),
+    )
+    app = SimpleNamespace(storage=storage, ensure_initialized=AsyncMock())
+    ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+    monkeypatch.setattr(
+        "memtomem.server.tools.memory_crud._mem_add_core",
+        AsyncMock(return_value=("saved", SimpleNamespace(new_chunk_ids=[]))),
+    )
+
+    result = json.loads(
+        await mem_candidate_review("candidate-1", "approve", reviewer="alice", ctx=ctx)
+    )
+    assert result["ok"] is False
+    assert result["status"] == "write_uncertain"
+    assert result["durable_write_persisted"] is True
+    assert "do not re-approve" in result["reason"]
+    storage.mark_memory_candidate_write_uncertain.assert_awaited_once()
 
 
 @pytest.mark.asyncio
