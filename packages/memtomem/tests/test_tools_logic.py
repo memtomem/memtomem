@@ -1226,29 +1226,23 @@ def _fake_ctx(components):
     """Minimal ctx stub that mimics what _get_app_initialized() unwraps.
 
     The production MCP context is ``ctx.request_context.lifespan_context``.
-    We fabricate a SimpleNamespace matching that shape, filled with real
-    services from the ``components`` fixture plus the few AppContext fields
-    the tools access (``current_namespace``, ``webhook_manager``).
+    We wrap a real :class:`AppContext` (built via ``from_components`` — the
+    same builder CLI commands and the concurrency tests use) in that shape,
+    so the tools see the full AppContext contract rather than a partial
+    hand-rolled stub. That includes ``get_memory_file_lock`` (per-file
+    ``asyncio.Lock`` keyed by canonical path — #1570), which the file-first
+    write path in ``_mem_add_core`` acquires; a bare ``SimpleNamespace``
+    used to omit it and raised ``AttributeError`` (#1731).
 
-    ``ensure_initialized`` is a no-op AsyncMock: handlers now call
-    ``await _get_app_initialized(ctx)`` which awaits it before reading
-    storage/embedder, so the stub has to be awaitable. The fake is already
-    populated with the real services — nothing to initialize.
+    ``from_components`` leaves ``_components`` already populated, so
+    ``ensure_initialized`` (awaited by ``_get_app_initialized``) returns
+    them immediately without re-running the lifespan.
     """
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
-    app = SimpleNamespace(
-        config=components.config,
-        storage=components.storage,
-        embedder=components.embedder,
-        index_engine=components.index_engine,
-        search_pipeline=components.search_pipeline,
-        current_namespace=None,
-        current_agent_id=None,
-        webhook_manager=None,
-        ensure_initialized=AsyncMock(),
-    )
+    from memtomem.server.context import AppContext
+
+    app = AppContext.from_components(components)
     return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
 
 
