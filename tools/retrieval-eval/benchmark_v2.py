@@ -342,14 +342,15 @@ def _combine_track_runs(reports: list[dict[str, Any]]) -> dict[str, Any]:
         for key in keys
     }
     combined["runs"] = len(reports)
-    combined["max_run_spread"] = max(
-        (
+    combined["run_spreads"] = {
+        key: round(
             max(report["aggregate"][key] for report in reports)
-            - min(report["aggregate"][key] for report in reports)
-            for key in keys
-        ),
-        default=0.0,
-    )
+            - min(report["aggregate"][key] for report in reports),
+            6,
+        )
+        for key in keys
+    }
+    combined["max_run_spread"] = max(combined["run_spreads"].values(), default=0.0)
     combined["zero_hit_count"] = max(report["zero_hit_count"] for report in reports)
     combined["latency_ms"] = {
         metric: max(report["latency_ms"][metric] for report in reports) for metric in ("p50", "p95")

@@ -64,6 +64,13 @@ def compare(
                     f"quality floor failed for {track_name}|{key}: "
                     f"floor {floor}, observed {observed}"
                 )
+        for key, ceiling in baseline["quality_ceilings"][track_name].items():
+            observed = report_track["aggregate"].get(key)
+            if observed is None or float(observed) > float(ceiling):
+                failures.append(
+                    f"quality ceiling failed for {track_name}|{key}: "
+                    f"ceiling {ceiling}, observed {observed}"
+                )
         cap = int(baseline["zero_hit_caps"][track_name])
         observed_zero = int(report_track["zero_hit_count"])
         if observed_zero > cap:

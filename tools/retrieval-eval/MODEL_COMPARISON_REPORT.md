@@ -147,7 +147,8 @@ path.
   cross-language queries.
 - Model comparison artifact: contains 4 profiles and 3 comparison deltas, and
   passed JSON-structure validation.
-- Targeted regression tests: **65 passed**.
+- Targeted regression tests: **68 passed** after adding per-metric spread,
+  directional ceiling, and committed-baseline parity coverage.
 - Ruff check and format check: passed.
 - `git diff --check`: passed.
 - The broader non-LLM suite stopped in an earlier run at about the 32% mark with

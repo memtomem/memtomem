@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
-from copy import deepcopy
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -69,11 +70,81 @@ def test_v2_baseline_compare_checks_hashes_models_floors_and_zero_hits():
     }
     baseline = deepcopy(report)
     baseline["quality_floors"] = {"english": {"en|direct|recall@10": 0.7}}
+    baseline["quality_ceilings"] = {"english": {}}
     baseline["zero_hit_caps"] = {"english": 1}
     assert checker.compare(report, baseline) == []
     report["portfolio"]["qrel_sha256"] = "changed"
     report["tracks"]["english"]["zero_hit_count"] = 2
     assert len(checker.compare(report, baseline)) == 2
+
+
+def test_v2_run_spreads_and_directional_quality_bounds():
+    benchmark = _load("benchmark_v2_spreads", "tools/retrieval-eval/benchmark_v2.py")
+    tuner = _load("tune_rrf_v2_bounds", "tools/retrieval-eval/tune_rrf_v2.py")
+    reports = [
+        {
+            "aggregate": {
+                "ko|direct|recall@10": 0.6,
+                "ko|negation|hard_negative_hits@10": 0.8,
+            },
+            "zero_hit_count": 2,
+            "latency_ms": {"p50": 3.0, "p95": 4.0},
+        },
+        {
+            "aggregate": {
+                "ko|direct|recall@10": 0.5,
+                "ko|negation|hard_negative_hits@10": 1.2,
+            },
+            "zero_hit_count": 1,
+            "latency_ms": {"p50": 2.0, "p95": 3.0},
+        },
+    ]
+    combined = benchmark._combine_track_runs(reports)
+    assert combined["run_spreads"] == {
+        "ko|direct|recall@10": 0.1,
+        "ko|negation|hard_negative_hits@10": 0.4,
+    }
+    floors, ceilings = tuner._quality_bounds(combined)
+    assert floors == {"ko|direct|recall@10": 0.395}
+    assert ceilings == {"ko|negation|hard_negative_hits@10": 1.5}
+
+
+def test_v2_baseline_compare_treats_hard_negative_hits_as_a_ceiling():
+    checker = _load("check_baseline_v2_ceiling", "tools/retrieval-eval/check_baseline_v2.py")
+    track = {
+        "embedding": {"provider": "onnx", "model": "model", "dimension": 384},
+        "aggregate": {"ko|negation|hard_negative_hits@10": 0.5},
+        "zero_hit_count": 0,
+        "latency_ms": {"p95": 10.0},
+    }
+    report = {
+        "schema_version": 2,
+        "methodology": "v2",
+        "portfolio": {"query_sha256": "q", "qrel_sha256": "r"},
+        "corpus": {"corpus_sha256": "c"},
+        "tracks": {"korean": track},
+    }
+    baseline = deepcopy(report)
+    baseline["quality_floors"] = {"korean": {}}
+    baseline["quality_ceilings"] = {"korean": {"ko|negation|hard_negative_hits@10": 1.0}}
+    baseline["zero_hit_caps"] = {"korean": 0}
+    assert checker.compare(report, baseline) == []
+    report["tracks"]["korean"]["aggregate"]["ko|negation|hard_negative_hits@10"] = 1.1
+    assert checker.compare(report, baseline) == [
+        "quality ceiling failed for korean|ko|negation|hard_negative_hits@10: "
+        "ceiling 1.0, observed 1.1"
+    ]
+
+
+def test_v2_committed_quality_bounds_match_generation_formula():
+    tuner = _load("tune_rrf_v2_parity", "tools/retrieval-eval/tune_rrf_v2.py")
+    baseline = json.loads(
+        (ROOT / "tools/retrieval-eval/baseline_v2.json").read_text(encoding="utf-8")
+    )
+    for track_name, track in baseline["tracks"].items():
+        floors, ceilings = tuner._quality_bounds(track)
+        assert baseline["quality_floors"][track_name] == floors
+        assert baseline["quality_ceilings"][track_name] == ceilings
 
 
 def test_model_comparison_uses_multilingual_reranker_and_1024_dim_bge_m3():

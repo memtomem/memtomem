@@ -20,6 +20,7 @@ WEAK_METRICS = (
     ("paraphrase", "ndcg@10"),
 )
 GENERIC_METRICS = ("recall@10", "mrr@10", "ndcg@10")
+LOWER_IS_BETTER_SUFFIXES = ("|hard_negative_hits@10",)
 
 
 def _load_benchmark() -> Any:
@@ -137,6 +138,21 @@ def _compact(report: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _quality_bounds(track: dict[str, Any]) -> tuple[dict[str, float], dict[str, float]]:
+    """Return metric-specific lower floors and lower-is-better ceilings."""
+    floors: dict[str, float] = {}
+    ceilings: dict[str, float] = {}
+    spreads = track.get("run_spreads", {})
+    for key, value in track["aggregate"].items():
+        spread = float(spreads.get(key, 0.0) or 0.0)
+        mean = float(value)
+        if key.endswith(LOWER_IS_BETTER_SUFFIXES):
+            ceilings[key] = round(mean * 1.10 + spread, 6)
+        else:
+            floors[key] = max(0.0, round(mean * 0.90 - spread, 6))
+    return floors, ceilings
+
+
 async def tune(*, baseline_runs: int = 10) -> dict[str, Any]:
     benchmark_module = _load_benchmark()
     reports: dict[tuple[float, float], dict[str, Any]] = {}
@@ -163,20 +179,14 @@ async def tune(*, baseline_runs: int = 10) -> dict[str, Any]:
             for weights, _report, assessment in assessed
         },
     }
+    bounds = {
+        track_name: _quality_bounds(track) for track_name, track in selected["tracks"].items()
+    }
     selected["quality_floors"] = {
-        track_name: {
-            # 90% of the multi-run mean, then subtract the track's worst
-            # run-to-run spread so a single-run CI check (check_baseline_v2 runs
-            # --runs 1) cannot dip below the floor on a high-variance track:
-            # Korean MiniLM spreads ~0.07 from tie-break nondeterminism while
-            # English bge-small spreads 0.0. Clamped at 0.
-            key: max(
-                0.0,
-                round(float(value) * 0.90 - float(track.get("max_run_spread", 0.0) or 0.0), 6),
-            )
-            for key, value in track["aggregate"].items()
-        }
-        for track_name, track in selected["tracks"].items()
+        track_name: track_bounds[0] for track_name, track_bounds in bounds.items()
+    }
+    selected["quality_ceilings"] = {
+        track_name: track_bounds[1] for track_name, track_bounds in bounds.items()
     }
     selected["zero_hit_caps"] = {
         track_name: int(track["zero_hit_count"]) for track_name, track in selected["tracks"].items()

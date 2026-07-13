@@ -54,8 +54,8 @@ The v2 gate deliberately separates model and language effects:
 - Cross-language track: combined corpus and the same multilingual model
 
 `baseline_v2.json` pins the query, qrel, and corpus hashes; explicit portable
-qrels; per-track model identity; variance-aware quality floors; and zero-hit
-caps. It also records the preregistered RRF grid result. No candidate met all
+qrels; per-track model identity; variance-aware quality floors and ceilings;
+and zero-hit caps. It also records the preregistered RRF grid result. No candidate met all
 weak-slice improvement and no-regression gates, so the product default remains
 the balanced `[1.0, 1.0]` BM25/dense weighting.
 
@@ -67,13 +67,14 @@ the balanced `[1.0, 1.0]` BM25/dense weighting.
   per-language/query-type floor to `round(10-run mean * 0.85, 2)`. The 15%
   margin covers observed cross-platform ONNX numeric variation while retaining
   a blocking threshold for material retrieval regressions.
-- The v2 holdout (`baseline_v2.json`) instead sets each floor to
-  `max(0, round(10-run mean * 0.90 - track_spread, 6))`, where `track_spread`
-  is that track's worst run-to-run aggregate spread. The 10% haircut plus the
-  measured spread keeps a single-run CI check (`check_baseline_v2.py` runs
-  `--runs 1`) above the floor even on a high-variance track — Korean MiniLM
-  spreads ~0.07 from tie-break nondeterminism, while English `bge-small` spreads
-  0.0, so only the volatile tracks are widened.
+- The v2 holdout (`baseline_v2.json`) instead sets each higher-is-better floor
+  to `max(0, round(10-run mean * 0.90 - metric_spread, 6))`. Lower-is-better
+  `hard_negative_hits@10` uses the ceiling
+  `round(10-run mean * 1.10 + metric_spread, 6)`. Each `metric_spread` is that
+  metric's observed maximum minus minimum across the calibration runs, so a
+  volatile slice does not weaken stable metrics. These bounds cover the
+  observed calibration variance; they do not guarantee all future hardware or
+  tie-break behavior.
 - A calibration run is invalid unless all 48 files and 192 chunks index with
   zero privacy blocks and zero errors.
 
