@@ -108,6 +108,27 @@ class FormationMixin:
         ).fetchone()
         return self._candidate_row(row) if row is not None else None
 
+    async def get_memory_candidate_by_fingerprint(
+        self, session_id: str, fingerprint: str
+    ) -> dict[str, Any] | None:
+        """Return a candidate in any state for an idempotent proposal lookup."""
+        db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        db.execute(
+            "UPDATE memory_candidates SET status='expired' "
+            "WHERE session_id=? AND fingerprint=? AND status='pending' AND expires_at <= ?",
+            (session_id, fingerprint, now),
+        )
+        db.commit()
+        row = db.execute(
+            "SELECT id, session_id, kind, operation, destination, content, evidence, "
+            "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
+            "extractor_version, reviewer, decision_reason, created_at, expires_at, decided_at "
+            "FROM memory_candidates WHERE session_id=? AND fingerprint=?",
+            (session_id, fingerprint),
+        ).fetchone()
+        return self._candidate_row(row) if row is not None else None
+
     async def claim_memory_candidate(
         self, candidate_id: str, reviewer: str, reason: str = ""
     ) -> dict[str, Any] | None:
