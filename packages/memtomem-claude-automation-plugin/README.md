@@ -14,6 +14,9 @@ The hooks use the memtomem CLI, pinned to the same reviewed core release:
 uv tool install 'memtomem==0.3.8'
 ```
 
+The dispatcher is launched through `uv`, so it does not depend on a
+platform-specific `python3` command alias.
+
 The plugin searches prompts longer than 20 characters, queues changed Write or
 Edit targets for indexing, and flushes that queue when a response stops. It
 does not create or close episodic sessions. Disable or uninstall this plugin

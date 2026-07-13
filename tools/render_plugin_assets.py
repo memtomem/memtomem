@@ -53,7 +53,7 @@ def _claude_skill(workflow: dict, body: str) -> str:
         frontmatter.extend(
             [
                 f"Use `$ARGUMENTS` as the {workflow['input_kind']}.",
-                f"If it does not provide a usable {workflow['input_kind']}, ask before calling a tool.",
+                f"If the request does not clearly specify the {workflow['input_kind']}, ask before calling a tool.",
                 "",
             ]
         )
@@ -74,7 +74,7 @@ def _codex_skill(workflow: dict, body: str) -> str:
         lines.extend(
             [
                 f"Derive the {workflow['input_kind']} from the current user request.",
-                f"If it does not provide a usable {workflow['input_kind']}, ask before calling a tool.",
+                f"If the request does not clearly specify the {workflow['input_kind']}, ask before calling a tool.",
                 "",
             ]
         )

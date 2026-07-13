@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -71,12 +72,23 @@ def test_generated_plugin_assets_are_in_sync() -> None:
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_core_version_is_single_sourced_across_automation_assets() -> None:
+    version = _contract()["core"]["version"]
+    dispatcher = _DISPATCHER.read_text(encoding="utf-8")
+    match = re.search(r'^CORE_VERSION = "([^"]+)"$', dispatcher, re.MULTILINE)
+    assert match and match.group(1) == version
+    for path in (
+        _ROOT / "packages/memtomem-claude-automation-plugin/README.md",
+        _ROOT / "docs/guides/integrations/claude-code.md",
+    ):
+        assert f"memtomem=={version}" in path.read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def fake_mm(tmp_path: Path) -> tuple[dict[str, str], Path]:
-    executable = tmp_path / "mm"
-    executable.write_text(
-        """#!/usr/bin/env python3
-import json
+    script = tmp_path / "fake_mm.py"
+    script.write_text(
+        """import json
 import os
 import sys
 from pathlib import Path
@@ -86,11 +98,26 @@ with Path(os.environ["FAKE_MM_LOG"]).open("a", encoding="utf-8") as handle:
 if sys.argv[1:] == ["--version"]:
     print(os.environ.get("FAKE_MM_VERSION", "mm, version 0.3.8"))
 elif sys.argv[1:2] == ["search"]:
+    if os.environ.get("FAKE_MM_SEARCH_FAIL"):
+        print(sys.argv[2], file=sys.stderr)
+        raise SystemExit(2)
     print("trusted memory context")
 """,
         encoding="utf-8",
     )
-    executable.chmod(0o755)
+    if os.name == "nt":
+        executable = tmp_path / "mm.bat"
+        executable.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        executable = tmp_path / "mm"
+        executable.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
     log = tmp_path / "mm.log"
     env = os.environ.copy()
     env.update(
@@ -100,6 +127,8 @@ elif sys.argv[1:2] == ["search"]:
             "FAKE_MM_LOG": str(log),
         }
     )
+    if os.name == "nt":
+        env["PATHEXT"] = f".BAT{os.pathsep}{env.get('PATHEXT', '')}"
     return env, log
 
 
@@ -179,9 +208,33 @@ def test_automation_fails_open_on_invalid_input(
 
 
 def test_automation_reports_incompatible_dependency(fake_mm: tuple[dict[str, str], Path]) -> None:
-    env, _ = fake_mm
+    env, log = fake_mm
     env["FAKE_MM_VERSION"] = "mm, version 9.9.9"
     result = _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
     assert result.returncode == 0
     output = json.loads(result.stdout)
     assert "requires mm 0.3.8" in output["hookSpecificOutput"]["additionalContext"]
+    _dispatch(
+        "UserPromptSubmit",
+        {"hook_event_name": "UserPromptSubmit", "prompt": "A sufficiently long prompt"},
+        env,
+    )
+    assert _calls(log) == [["--version"]]
+
+
+def test_automation_failure_log_does_not_store_prompt(
+    fake_mm: tuple[dict[str, str], Path],
+) -> None:
+    env, log = fake_mm
+    _dispatch("SessionStart", {"hook_event_name": "SessionStart"}, env)
+    env["FAKE_MM_SEARCH_FAIL"] = "1"
+    prompt = "private prompt text that must not reach the hook log"
+    result = _dispatch(
+        "UserPromptSubmit",
+        {"hook_event_name": "UserPromptSubmit", "prompt": prompt},
+        env,
+    )
+    assert result.returncode == 0
+    hook_log = (log.parent / "data" / "hook.log").read_text(encoding="utf-8")
+    assert prompt not in hook_log
+    assert "command search returned 2" in hook_log

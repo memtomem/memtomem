@@ -225,7 +225,8 @@ class TestOptionalClaudeAutomationDocs:
         for event, rules in hooks.items():
             for rule in rules:
                 for handler in rule["hooks"]:
-                    assert handler["command"] == "python3"
+                    assert handler["command"] == "uv"
+                    assert handler["args"][:3] == ["run", "--no-project", "python"]
                     assert handler["args"][-1] == event
                     assert 0 < handler["timeout"] <= 120
 

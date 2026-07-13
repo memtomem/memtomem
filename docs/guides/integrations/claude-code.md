@@ -219,7 +219,9 @@ uv tool install 'memtomem==0.3.8'
 The bundled dispatcher reads Claude's hook JSON from stdin; it never expands
 prompt or tool fields as shell variables. It validates the `mm` version at
 session start and fails open when input or dependencies are invalid. Logs live
-under `${CLAUDE_PLUGIN_DATA}/hook.log`.
+under `${CLAUDE_PLUGIN_DATA}/hook.log` and contain command status, not prompt
+content. The dispatcher runs through `uv`, including on Windows where a
+`python3` alias may not exist.
 
 <details>
 <summary>Which settings file gets written? (hook tiers)</summary>
@@ -245,12 +247,12 @@ under `${CLAUDE_PLUGIN_DATA}/hook.log`.
 |------------|---------------|----------------|
 | `SessionStart` | When a Claude Code session starts | Validate the exact `mm` dependency; do not create an episodic session |
 | `UserPromptSubmit` | Before a prompt is processed | Search prompts longer than 20 characters and return up to three results as `additionalContext` |
-| `PostToolUse` (`Write|Edit`) | After a file write succeeds | Validate the path and queue supported source files with a 5-second debounce window |
+| `PostToolUse` (`Write|Edit`) | After a Write/Edit tool call | Validate the path and queue supported source files with a 5-second debounce window |
 | `Stop` | After each completed response | Flush the index queue; never close the memtomem session |
 
 ### Important Caveats
 
-- **Short prompt guard**: Prompts under 20 characters are skipped to avoid noise from "yes", "ok", etc.
+- **Short prompt guard**: Prompts of 20 characters or fewer are skipped to avoid noise from "yes", "ok", etc.
 - **Input safety**: JSON is parsed without invoking a shell and queries are capped at 500 characters.
 - **Error logging**: diagnostics are isolated in `${CLAUDE_PLUGIN_DATA}/hook.log`.
 - **No session lifecycle automation**: `Stop` fires after every response, not when the Claude session exits. Session start/end tracking remains manual.

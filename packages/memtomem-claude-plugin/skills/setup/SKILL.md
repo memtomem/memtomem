@@ -9,7 +9,7 @@ disable-model-invocation: true
 # Set up memtomem
 
 Use `$ARGUMENTS` as the memory source path.
-If it does not provide a usable memory source path, ask before calling a tool.
+If the request does not clearly specify the memory source path, ask before calling a tool.
 1. Call `mem_status` and treat the default `provider=none` BM25-only configuration as healthy.
 2. Obtain an explicit notes or memory directory from the request; ask for one when absent.
 3. Call `mem_index` on that path with `force=false` and `auto_tag=false`.

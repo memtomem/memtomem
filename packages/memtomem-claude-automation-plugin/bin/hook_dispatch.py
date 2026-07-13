@@ -111,29 +111,33 @@ def _probe_mm() -> tuple[str | None, str | None]:
     return executable, _version_from(completed.stdout + completed.stderr)
 
 
-def _compatible_mm(*, refresh: bool = False) -> str | None:
+def _mm_probe(*, refresh: bool = False) -> tuple[str | None, str | None]:
     cache = _data_dir() / "compat.json"
     if not refresh:
         try:
             value = json.loads(cache.read_text(encoding="utf-8"))
             executable = value.get("executable")
-            if value.get("version") == CORE_VERSION and executable and Path(executable).is_file():
-                return str(executable)
-        except (OSError, json.JSONDecodeError, AttributeError):
+            version = value.get("version")
+            if value.get("checked") is True:
+                if executable and not Path(executable).is_file():
+                    executable = None
+                return executable, version
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
             pass
 
     executable, version = _probe_mm()
     try:
         cache.write_text(
-            json.dumps({"executable": executable, "version": version}) + "\n",
+            json.dumps({"checked": True, "executable": executable, "version": version}) + "\n",
             encoding="utf-8",
         )
     except OSError:
         pass
-    return executable if executable and version == CORE_VERSION else None
+    return executable, version
 
 
 def _run(mm: str, args: list[str], timeout: float) -> subprocess.CompletedProcess[str] | None:
+    subcommand = args[0] if args else "unknown"
     try:
         completed = subprocess.run(
             [mm, *args],
@@ -143,12 +147,10 @@ def _run(mm: str, args: list[str], timeout: float) -> subprocess.CompletedProces
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        _log(f"command failed to run: {args!r}: {exc}")
+        _log(f"command {subcommand} failed to run: {type(exc).__name__}")
         return None
     if completed.returncode != 0:
-        _log(
-            f"command returned {completed.returncode}: {args!r}: {completed.stderr.strip()[:1000]}"
-        )
+        _log(f"command {subcommand} returned {completed.returncode}")
     return completed
 
 
@@ -163,10 +165,9 @@ def _emit_context(event: str, context: str) -> None:
 
 
 def _session_start() -> None:
-    mm = _compatible_mm(refresh=True)
-    if mm:
+    executable, version = _mm_probe(refresh=True)
+    if executable and version == CORE_VERSION:
         return
-    executable, version = _probe_mm()
     if not executable:
         detail = f"Install the optional automation dependency with `uv tool install memtomem=={CORE_VERSION}`."
     else:
@@ -213,10 +214,11 @@ def main() -> int:
         _session_start()
         return 0
 
-    mm = _compatible_mm()
-    if not mm:
+    executable, version = _mm_probe()
+    if not executable or version != CORE_VERSION:
         _log(f"skipped {event}: compatible mm {CORE_VERSION} not available")
         return 0
+    mm = executable
     if event == "UserPromptSubmit":
         _user_prompt(payload, mm)
     elif event == "PostToolUse":

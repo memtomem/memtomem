@@ -23,6 +23,8 @@ coverage.json
 !.mcp.json.example
 # The Claude Code plugin ships its MCP server declaration — keep it tracked
 !packages/memtomem-claude-plugin/.mcp.json
+# The Codex plugin also ships its MCP server declaration
+!plugins/memtomem/.mcp.json
 
 # Claude Code
 .claude/
