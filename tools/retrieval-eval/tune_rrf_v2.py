@@ -165,7 +165,16 @@ async def tune(*, baseline_runs: int = 10) -> dict[str, Any]:
     }
     selected["quality_floors"] = {
         track_name: {
-            key: round(float(value) * 0.90, 6) for key, value in track["aggregate"].items()
+            # 90% of the multi-run mean, then subtract the track's worst
+            # run-to-run spread so a single-run CI check (check_baseline_v2 runs
+            # --runs 1) cannot dip below the floor on a high-variance track:
+            # Korean MiniLM spreads ~0.07 from tie-break nondeterminism while
+            # English bge-small spreads 0.0. Clamped at 0.
+            key: max(
+                0.0,
+                round(float(value) * 0.90 - float(track.get("max_run_spread", 0.0) or 0.0), 6),
+            )
+            for key, value in track["aggregate"].items()
         }
         for track_name, track in selected["tracks"].items()
     }

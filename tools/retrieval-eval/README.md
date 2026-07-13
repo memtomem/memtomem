@@ -54,7 +54,7 @@ The v2 gate deliberately separates model and language effects:
 - Cross-language track: combined corpus and the same multilingual model
 
 `baseline_v2.json` pins the query, qrel, and corpus hashes; explicit portable
-qrels; per-track model identity; 90%-of-baseline quality floors; and zero-hit
+qrels; per-track model identity; variance-aware quality floors; and zero-hit
 caps. It also records the preregistered RRF grid result. No candidate met all
 weak-slice improvement and no-regression gates, so the product default remains
 the balanced `[1.0, 1.0]` BM25/dense weighting.
@@ -63,9 +63,17 @@ the balanced `[1.0, 1.0]` BM25/dense weighting.
 
 - Recall@10 and MRR@10 use primary-tag binary relevance.
 - nDCG@10 uses primary `1.0` and secondary `0.5` graded relevance.
-- Per-language/query-type floor = `round(10-run mean * 0.85, 2)`. The 15%
+- The original 100-query portfolio (`baseline_v0.3.8.json`) sets each
+  per-language/query-type floor to `round(10-run mean * 0.85, 2)`. The 15%
   margin covers observed cross-platform ONNX numeric variation while retaining
   a blocking threshold for material retrieval regressions.
+- The v2 holdout (`baseline_v2.json`) instead sets each floor to
+  `max(0, round(10-run mean * 0.90 - track_spread, 6))`, where `track_spread`
+  is that track's worst run-to-run aggregate spread. The 10% haircut plus the
+  measured spread keeps a single-run CI check (`check_baseline_v2.py` runs
+  `--runs 1`) above the floor even on a high-variance track — Korean MiniLM
+  spreads ~0.07 from tie-break nondeterminism, while English `bge-small` spreads
+  0.0, so only the volatile tracks are widened.
 - A calibration run is invalid unless all 48 files and 192 chunks index with
   zero privacy blocks and zero errors.
 
