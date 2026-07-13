@@ -84,12 +84,19 @@ class MemtomemStore:
     async def _ensure_init(self) -> Components:
         """Initialize components on first call; return the cached instance."""
         if self._components is None:
-            from memtomem.config import Mem2MemConfig
+            from memtomem.config import (
+                Mem2MemConfig,
+                load_config_d,
+                load_config_overrides,
+            )
             from memtomem.server.component_factory import create_components
 
             config = Mem2MemConfig()
+            load_config_d(config)
+            load_config_overrides(config)
 
-            # Apply overrides. Unknown sections / keys raise immediately:
+            # Apply programmatic overrides after ambient config. Unknown
+            # sections / keys raise immediately:
             # ``config_overrides`` is a programmatic constructor argument, so
             # a typo like ``{"storge": ...}`` or ``{"storage":
             # {"sqlite_pat": ...}}`` would otherwise fall back to the default
@@ -117,7 +124,11 @@ class MemtomemStore:
                         )
                     setattr(section_obj, key, value)
 
-            self._components = await create_components(config)
+            # Ambient config was resolved above so the constructor arguments
+            # remain the final, highest-precedence layer. Loading it again in
+            # the factory would overwrite an isolated sqlite_path or
+            # memory_dirs with ~/.memtomem settings.
+            self._components = await create_components(config, load_ambient_config=False)
         return self._components
 
     async def close(self) -> None:
