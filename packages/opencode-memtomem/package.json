@@ -1,0 +1,46 @@
+{
+  "name": "opencode-memtomem",
+  "version": "0.1.0",
+  "description": "Safe memtomem MCP, commands, and read skills for OpenCode",
+  "type": "module",
+  "sideEffects": false,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/memtomem/memtomem.git",
+    "directory": "packages/opencode-memtomem"
+  },
+  "homepage": "https://github.com/memtomem/memtomem/tree/main/packages/opencode-memtomem",
+  "bugs": "https://github.com/memtomem/memtomem/issues",
+  "engines": {
+    "node": ">=20",
+    "opencode": ">=1.17.18 <2"
+  },
+  "exports": {
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.17.18",
+    "@types/node": "22.15.3",
+    "typescript": "5.8.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

@@ -140,7 +140,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
 ```
 
-See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi CLI.
+See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi CLI.
 
 </details>
 
@@ -169,6 +169,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for Cursor / Windsurf / Claud
 | Package | Description |
 |---------|-------------|
 | [**memtomem**](https://pypi.org/project/memtomem/) | Core — MCP server, CLI, Web UI, hybrid search, storage |
+| [**opencode-memtomem**](packages/opencode-memtomem/) | OpenCode — exact-pinned MCP, commands, read skills, safe permissions |
 | [**memtomem-stm**](https://github.com/memtomem/memtomem-stm) | STM proxy — proactive memory surfacing via tool interception |
 
 ---

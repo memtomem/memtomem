@@ -42,6 +42,10 @@ def test_workflow_contract_is_safe_and_matches_runtime_assets() -> None:
     codex = _skill_files(_ROOT / "plugins/memtomem/skills")
     assert {path.parent.name for path in claude} == {row["id"] for row in workflows}
     assert {path.parent.name for path in codex} == {row["codex_name"] for row in workflows}
+    opencode = _skill_files(_ROOT / "packages/opencode-memtomem/skills")
+    assert {path.parent.name for path in opencode} == {
+        row["codex_name"] for row in workflows if row["effect"] == "read" and row["implicit"]
+    }
 
 
 def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
@@ -59,6 +63,16 @@ def test_generated_assets_have_no_cross_runtime_or_legacy_leaks() -> None:
     assert "Ollama is the default" not in combined
     assert "$ARGUMENTS" not in codex_text
     assert "mcp__plugin_memtomem" not in codex_text
+
+    opencode_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in _skill_files(_ROOT / "packages/opencode-memtomem/skills")
+    )
+    assert "memtomem_mem_search" in opencode_text
+    assert "memtomem_mem_recall" in opencode_text
+    assert "memtomem_mem_status" in opencode_text
+    assert re.search(r"`mem_[a-z_]+`", opencode_text) is None
+    assert "$ARGUMENTS" not in opencode_text
 
 
 def test_generated_plugin_assets_are_in_sync() -> None:

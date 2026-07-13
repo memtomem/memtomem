@@ -134,7 +134,7 @@ shared file, add a `-s local` entry with the same name — local wins.
 
 The server reads `~/.memtomem/config.json`. Add a client `env` block only for
 an intentional highest-precedence override; see the
-[MCP client configuration guide](../mcp-clients.md#10-environment-variable-overrides).
+[MCP client configuration guide](../mcp-clients.md#11-environment-variable-overrides).
 
 ---
 

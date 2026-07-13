@@ -6,6 +6,12 @@ tool_mode = "core"
 claude_version = "0.3.0"
 codex_version = "0.1.0"
 automation_version = "0.1.0"
+opencode_version = "0.1.0"
+
+[opencode]
+package = "opencode-memtomem"
+version_range = ">=1.17.18 <2"
+mcp_timeout_ms = 60000
 
 [[workflows]]
 id = "search"
