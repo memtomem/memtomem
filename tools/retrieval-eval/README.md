@@ -92,9 +92,9 @@ profiles: language-specific embeddings, those embeddings plus the multilingual
 Jina reranker, BGE-M3, and BGE-M3 plus the reranker. The reranker receives the
 top 20 fused candidates.
 
-The full Korean verification record includes the measured Mac hardware,
-software versions, commands, pass/fail evidence, result tables, and limitations:
-[`MODEL_COMPARISON_REPORT_KO.md`](./MODEL_COMPARISON_REPORT_KO.md).
+The full verification record includes the measured Mac hardware, software
+versions, commands, pass/fail evidence, result tables, and limitations:
+[`MODEL_COMPARISON_REPORT.md`](./MODEL_COMPARISON_REPORT.md).
 
 - BGE-M3 vs language-specific embeddings improved Korean macro Recall/MRR/nDCG
   by `+0.128/+0.110/+0.131` and cross-language by
