@@ -123,11 +123,11 @@ jobs:
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: ${{ env.UV_VERSION }}
-      - name: Cache fastembed model (paraphrase-multilingual-MiniLM-L12-v2, ~220 MB)
+      - name: Cache retrieval models (English bge-small + multilingual MiniLM)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.FASTEMBED_CACHE_PATH }}
-          key: ${{ runner.os }}-fastembed-multilingual-minilm-l12
+          key: ${{ runner.os }}-fastembed-retrieval-v2-bge-small-en-multilingual-minilm
       - run: uv sync --frozen
       - run: uv run pytest packages/memtomem/tests/test_golden_path.py --tb=short -q
       - name: Audit public synthetic retrieval corpus
@@ -137,6 +137,11 @@ jobs:
           PYTHONHASHSEED: "0"
           OMP_NUM_THREADS: "1"
         run: uv run python tools/retrieval-eval/check_baseline.py --runs 1
+      - name: Check language-separated retrieval v2 floors
+        env:
+          PYTHONHASHSEED: "0"
+          OMP_NUM_THREADS: "1"
+        run: uv run python tools/retrieval-eval/check_baseline_v2.py
 
   test-llm-nightly:
     name: llm-nightly (optional)

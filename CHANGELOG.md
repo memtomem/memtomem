@@ -13,6 +13,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   globally by distance. Schema 2 remains
   the immutable scoped-composition contract released in 0.3.9; clients can use
   the integer capability to distinguish visible context-window support.
+- **Language-separated retrieval benchmark v2** — a frozen 120-query bilingual
+  holdout now measures English with `bge-small-en-v1.5`, Korean with a
+  Korean-capable multilingual MiniLM model, and cross-language retrieval as a
+  separate track. Explicit qrels add genre, negation/contrast, multi-intent,
+  zero-hit, and language-mix gates.
+- **Embedding/reranker comparison artifact** — the v2 holdout now records
+  before/after results for a multilingual cross-encoder reranker and BGE-M3
+  across independent English, Korean, and cross-language tracks.
+
+### Fixed
+
+- Per-call RRF overrides now participate in search cache keys, preventing
+  BM25-only and dense-only sensitivity probes from sharing stale rankings.
 
 ## [0.3.9] — 2026-07-13
 

@@ -12,9 +12,9 @@ Methodology canonical references:
   § "Formal definitions" (fixed across 14 topics, no post-hoc redef)
 - Query-body overlap rule: ibid. + `compute_idf_baseline.py`
   pre-measurement step
-- Anchor reproduction: postgres should produce 0/8 divergence + 7/8
-  BM25 top-1 + 7/8 dense top-1 (byte-identical across 2 consecutive
-  runs)
+- Historical anchor numbers were invalidated after discovering that per-call
+  RRF overrides shared a cache slot. This tool now forces fresh-cache legs;
+  compare its current output instead of relying on the old 0/8 claim.
 
 Usage:
     uv run python tools/retrieval-eval/measure_sensitivity.py \
@@ -39,11 +39,9 @@ from tempfile import mkdtemp
 
 
 # Canonical simple queries — topic-prefix + genre-anchor vocabulary.
-# These are the queries used for the Phase 2b postgres anchor
-# verification (0/8 divergence) and Phase 2c cost_optimization
-# measurement (0/8 divergence, counter-prediction). Changing query
-# text breaks comparability with historical numbers — treat as
-# stable reference; add new query sets as separate named constants.
+# These are the queries used for the historical Phase 2b/2c measurements.
+# Keep their text stable so corrected fresh-cache results remain comparable;
+# add new query sets as separately named constants.
 QUERIES = {
     "postgres": [
         ("postgres 절차 접속 CONFIG SET 수행", "ko", "runbook"),
@@ -103,11 +101,9 @@ QUERIES = {
 }
 
 # Strengthened queries (proper-noun-rich) — held in reserve. Per
-# `b2-v2-phase2b-ledger.md` § "Sensitivity spot-check outcome" the
-# simple queries above already produce 0/8 for both tested topics.
-# Strengthened-query experiments are contingent on security showing
-# unexpected results (see § "Security pre-registration" joint
-# matrix).
+# `b2-v2-phase2b-ledger.md` records pre-fix observations; do not reuse those
+# numbers without rerunning this corrected tool. Strengthened-query experiments
+# remain separate from this stable query set.
 
 
 FIXTURE_ROOT = Path("packages/memtomem/tests/fixtures/corpus_v2")
@@ -157,7 +153,10 @@ async def measure_topic(topic: str) -> None:
         print()
         print(f"{'lang':4} {'genre':16} {'BM25':18} {'dense':18} diverge  query")
         for q, lang, expected in QUERIES[topic]:
+            # Measure each leg independently even if cache behavior changes.
+            comp.search_pipeline.invalidate_cache()
             bm25_res, _ = await comp.search_pipeline.search(q, top_k=3, rrf_weights=[1.0, 0.0])
+            comp.search_pipeline.invalidate_cache()
             dense_res, _ = await comp.search_pipeline.search(q, top_k=3, rrf_weights=[0.0, 1.0])
 
             bm25_ids = [str(r.chunk.id) for r in bm25_res]
