@@ -118,8 +118,33 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
 
     async with cli_components() as comp:
         candidate = await comp.storage.get_memory_candidate(candidate_id)
-        if candidate is None or candidate["status"] != "pending":
-            raise click.ClickException("Candidate is not pending")
+        if candidate is None:
+            raise click.ClickException("Candidate not found")
+        if decision == "rejected" and candidate["status"] == "write_uncertain":
+            if not reviewer.strip():
+                raise click.ClickException("Resolution reviewer cannot be empty")
+            if not reason.strip():
+                raise click.ClickException(
+                    "Resolving write_uncertain requires --reason after inspecting "
+                    "the durable destination"
+                )
+            changed = await comp.storage.resolve_uncertain_memory_candidate(
+                candidate_id, reviewer=reviewer, reason=reason
+            )
+            if not changed:
+                raise click.ClickException("Candidate state changed concurrently")
+            click.echo(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "status": "rejected",
+                        "resolved_from": "write_uncertain",
+                    }
+                )
+            )
+            return
+        if candidate["status"] != "pending":
+            raise click.ClickException(f"Candidate is not pending (status={candidate['status']})")
         if decision == "approved":
             from memtomem import privacy
 
@@ -210,5 +235,5 @@ def approve(candidate_id: str, reviewer: str, reason: str) -> None:
 @click.option("--reviewer", default="user")
 @click.option("--reason", default="")
 def reject(candidate_id: str, reviewer: str, reason: str) -> None:
-    """Reject a candidate without writing durable memory."""
+    """Reject without writing; uncertain writes require --reason."""
     asyncio.run(_decide(candidate_id, "rejected", reviewer, reason))

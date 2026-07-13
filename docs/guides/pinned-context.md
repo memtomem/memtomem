@@ -52,8 +52,17 @@ approval finalization, does not touch fresh claims, and records a persistent
 If a recovered claim's original process later reports that its durable write
 already completed, memtomem moves the candidate to `write_uncertain` and
 reports the destination. Do not approve it again: inspect the Markdown or
-Pinned Context block first, then resolve the candidate manually. This
-quarantine prevents a blind retry from duplicating the persisted content.
+Pinned Context block first, then close the quarantine without another write:
+
+```bash
+mm review reject CANDIDATE_ID \
+  --reviewer alice \
+  --reason "confirmed the durable entry already exists"
+```
+
+The same `mem_candidate_review` MCP action accepts `decision="reject"` with a
+non-empty reviewer and reason. The atomic `write_uncertain → rejected`
+transition is audit-recorded; direct re-approval remains blocked.
 
 ## LangGraph
 

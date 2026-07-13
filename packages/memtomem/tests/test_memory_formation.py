@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -152,6 +153,31 @@ async def test_recovered_completed_write_is_quarantined_from_reapproval(storage)
     assert row["status"] == "write_uncertain"
     assert "already persisted" in row["decision_reason"]
 
+    assert await storage.resolve_uncertain_memory_candidate(
+        candidate["id"],
+        reviewer="operator-alice",
+        reason="confirmed the durable entry already exists",
+    )
+    assert not await storage.resolve_uncertain_memory_candidate(
+        candidate["id"], reviewer="operator-bob", reason="second attempt"
+    )
+    resolved = await storage.get_memory_candidate(candidate["id"])
+    assert resolved["status"] == "rejected"
+    transitions = await storage.list_memory_candidate_transitions(candidate["id"])
+    assert transitions[-1]["from_status"] == "write_uncertain"
+    assert transitions[-1]["to_status"] == "rejected"
+    assert transitions[-1]["actor"] == "operator-alice"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_resolution_requires_reviewer_and_reason(storage):
+    with pytest.raises(ValueError, match="reviewer"):
+        await storage.resolve_uncertain_memory_candidate(
+            "candidate", reviewer="", reason="inspected"
+        )
+    with pytest.raises(ValueError, match="reason"):
+        await storage.resolve_uncertain_memory_candidate("candidate", reviewer="alice", reason="")
+
 
 @pytest.mark.asyncio
 async def test_recovery_limit_returns_oldest_claims_first(storage):
@@ -253,6 +279,66 @@ async def test_mcp_review_reports_persisted_write_after_concurrent_recovery(monk
     assert result["durable_write_persisted"] is True
     assert "do not re-approve" in result["reason"]
     storage.mark_memory_candidate_write_uncertain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mcp_resolves_write_uncertain_without_another_write():
+    from memtomem.server.tools.formation import mem_candidate_review
+
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            return_value={"id": "candidate-1", "status": "write_uncertain"}
+        ),
+        resolve_uncertain_memory_candidate=AsyncMock(return_value=True),
+    )
+    app = SimpleNamespace(storage=storage, ensure_initialized=AsyncMock())
+    ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
+
+    missing_reason = json.loads(
+        await mem_candidate_review("candidate-1", "reject", reviewer="alice", reason="", ctx=ctx)
+    )
+    assert missing_reason["ok"] is False
+    assert "requires a reason" in missing_reason["reason"]
+    resolved = json.loads(
+        await mem_candidate_review(
+            "candidate-1",
+            "reject",
+            reviewer="alice",
+            reason="confirmed durable write",
+            ctx=ctx,
+        )
+    )
+    assert resolved == {
+        "ok": True,
+        "status": "rejected",
+        "resolved_from": "write_uncertain",
+    }
+    storage.resolve_uncertain_memory_candidate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cli_uncertain_resolution_requires_reason_and_reports_success(monkeypatch, capsys):
+    import click
+
+    from memtomem.cli.review_cmd import _decide
+
+    storage = SimpleNamespace(
+        get_memory_candidate=AsyncMock(
+            return_value={"id": "candidate-1", "status": "write_uncertain"}
+        ),
+        resolve_uncertain_memory_candidate=AsyncMock(return_value=True),
+    )
+
+    @asynccontextmanager
+    async def fake_components():
+        yield SimpleNamespace(storage=storage)
+
+    monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", fake_components)
+    with pytest.raises(click.ClickException, match="requires --reason"):
+        await _decide("candidate-1", "rejected", "alice", "")
+    await _decide("candidate-1", "rejected", "alice", "confirmed durable write")
+    assert json.loads(capsys.readouterr().out)["resolved_from"] == "write_uncertain"
+    storage.resolve_uncertain_memory_candidate.assert_awaited_once()
 
 
 @pytest.mark.asyncio
