@@ -213,7 +213,7 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.3.9'
+uv tool install 'memtomem==0.3.10'
 ```
 
 The bundled dispatcher reads Claude's hook JSON from stdin; it never expands
