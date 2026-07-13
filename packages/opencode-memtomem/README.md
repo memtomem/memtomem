@@ -12,7 +12,7 @@ opencode plugin add opencode-memtomem@0.1.0
 
 Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
 `uvx` must be available on `PATH`; the plugin starts
-`memtomem==0.3.8` on demand.
+`memtomem==0.3.9` on demand.
 
 The plugin supports macOS, Linux, and Windows through WSL. Native Windows has
 not been verified.

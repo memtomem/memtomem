@@ -1,4 +1,4 @@
-# memtomem 0.3.8 use cases
+# memtomem 0.3.9 use cases
 
 These runnable scenarios show where the current release is useful. Start with
 `mm init` and `mm status`, and use personal or synthetic data for evaluation.

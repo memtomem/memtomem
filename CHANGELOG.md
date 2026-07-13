@@ -3,12 +3,12 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
-## [Unreleased]
+## [0.3.9] — 2026-07-13
 
 ### Added
 
 - **OpenCode plugin 0.1.0** — a configuration-only npm plugin for OpenCode
-  `>=1.17.18 <2` adds an exact-pinned memtomem 0.3.8 MCP server, six slash
+  `>=1.17.18 <2` adds an exact-pinned memtomem 0.3.9 MCP server, six slash
   commands, three read-only skills, and conservative merge-aware permissions.
   Existing MCP, commands, same-name user skills, and memtomem-specific rules
   remain authoritative; no automation hooks are installed.
