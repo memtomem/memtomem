@@ -32,6 +32,7 @@ configuration; environment variables have the highest precedence.
 - [5. Gemini CLI](#5-gemini-cli)
 - [6. Kimi CLI](#6-kimi-cli)
 - [7. Codex CLI](#7-codex-cli)
+- [OpenCode](#opencode)
 - [8. Antigravity](#8-antigravity)
 - [9. Verifying Your Connection](#9-verifying-your-connection)
 - [10. Environment Variable Overrides](#10-environment-variable-overrides)
@@ -273,6 +274,21 @@ In Codex CLI:
 ```
 Call mem_status to check the memtomem connection status
 ```
+
+---
+
+## OpenCode
+
+Install the configuration-only npm plugin:
+
+```bash
+opencode plugin add opencode-memtomem@0.1.0
+```
+
+It supplies the exact-pinned MCP server, six commands, three read-only skills,
+and conservative tool permissions. Run `/memtomem-status` after restarting.
+See the [OpenCode integration guide](integrations/opencode.md) for precedence,
+permission, platform, and development-install details.
 
 ---
 

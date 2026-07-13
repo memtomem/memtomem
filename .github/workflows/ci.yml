@@ -177,6 +177,23 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  test-opencode-plugin:
+    name: OpenCode plugin (build + unit + pack)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/opencode-memtomem
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: packages/opencode-memtomem/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run pack:check
+
   vendored-assets:
     name: vendored-assets (OSV blocking)
     runs-on: ubuntu-latest
@@ -198,8 +215,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # Both shipped Python resolution metadata and the JavaScript test-tool lock
-    # are blocking. A reviewed exception must use the canonical owner/reason/
+    # Both shipped Python resolution metadata and the JavaScript lockfiles are
+    # blocking. A reviewed exception must use the canonical owner/reason/
     # expiry schema; CI converts it to OSV Scanner's stricter native schema.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -226,7 +243,7 @@ jobs:
       # osv-scanner queries OSV.dev live, so the pinned binary never goes stale
       # on advisory data. Scan both lockfiles in one invocation so an exception
       # cannot accidentally make only one ecosystem blocking.
-      - name: OSV scan (uv.lock + package-lock.json — blocking)
+      - name: OSV scan (Python + JavaScript lockfiles — blocking)
         run: |
           set -o pipefail
           rc=0
@@ -234,6 +251,7 @@ jobs:
             --config="$RUNNER_TEMP/osv-scanner.toml" \
             --lockfile=uv.lock \
             --lockfile=packages/memtomem/tests-js/package-lock.json \
+            --lockfile=packages/opencode-memtomem/package-lock.json \
             --format markdown --verbosity error | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
           # rc 0 = clean, 1 = advisories found. Higher
           # means the scan itself errored (e.g. OSV.dev unreachable), so the
@@ -266,19 +284,20 @@ jobs:
   security-gates:
     name: security-gates
     if: ${{ always() }}
-    needs: [test-js, vendored-assets, python-deps, bandit]
+    needs: [test-js, test-opencode-plugin, vendored-assets, python-deps, bandit]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: Require every security dependency to succeed
         env:
           JS_RESULT: ${{ needs.test-js.result }}
+          OPENCODE_RESULT: ${{ needs.test-opencode-plugin.result }}
           VENDORED_RESULT: ${{ needs.vendored-assets.result }}
           OSV_RESULT: ${{ needs.python-deps.result }}
           BANDIT_RESULT: ${{ needs.bandit.result }}
         run: |
           set -euo pipefail
-          for result in "$JS_RESULT" "$VENDORED_RESULT" "$OSV_RESULT" "$BANDIT_RESULT"; do
+          for result in "$JS_RESULT" "$OPENCODE_RESULT" "$VENDORED_RESULT" "$OSV_RESULT" "$BANDIT_RESULT"; do
             if [ "$result" != "success" ]; then
               echo "security dependency did not succeed: $result" >&2
               exit 1

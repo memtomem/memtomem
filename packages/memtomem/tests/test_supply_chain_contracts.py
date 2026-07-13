@@ -146,6 +146,22 @@ def test_codex_plugin_matches_contract_and_marketplace() -> None:
     )
 
 
+def test_opencode_plugin_matches_contract() -> None:
+    contract = _contract()
+    package = _json("packages/opencode-memtomem/package.json")
+    generated = (_ROOT / "packages/opencode-memtomem/src/generated.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert package["name"] == contract["opencode"]["package"]
+    assert package["version"] == contract["plugins"]["opencode_version"]
+    assert package["engines"]["opencode"] == contract["opencode"]["version_range"]
+    assert package["license"] == "Apache-2.0"
+    assert package.get("dependencies", {}) == {}
+    assert f'CORE_VERSION = "{contract["core"]["version"]}"' in generated
+    assert f'MCP_TIMEOUT_MS = {contract["opencode"]["mcp_timeout_ms"]}' in generated
+
+
 def test_every_plugin_version_is_semver() -> None:
     contract = _contract()
     for version in contract["plugins"].values():

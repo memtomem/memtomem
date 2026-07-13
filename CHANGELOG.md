@@ -7,6 +7,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **OpenCode plugin 0.1.0** — a configuration-only npm plugin for OpenCode
+  `>=1.17.18 <2` adds an exact-pinned memtomem 0.3.8 MCP server, six slash
+  commands, three read-only skills, and conservative merge-aware permissions.
+  Existing MCP, commands, same-name user skills, and memtomem-specific rules
+  remain authoritative; no automation hooks are installed.
 - **Public synthetic retrieval benchmark** — a privacy-audited 48-file,
   192-chunk English/Korean corpus, 100-query portfolio, reproducible 0.3.8
   baseline manifest, and blocking quality-floor CI check.

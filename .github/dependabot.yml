@@ -29,6 +29,14 @@ updates:
       js-tests:
         patterns: ["*"]
 
+  - package-ecosystem: "npm"
+    directory: "/packages/opencode-memtomem"
+    schedule:
+      interval: "weekly"
+    groups:
+      opencode-plugin:
+        patterns: ["*"]
+
   # uv workspace: the single root uv.lock holds everything (member runtime deps
   # are declared in packages/memtomem/pyproject.toml but resolved/locked here;
   # dev deps live in the root [dependency-groups]). directory:"/" is where
