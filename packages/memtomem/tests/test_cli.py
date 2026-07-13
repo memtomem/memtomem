@@ -73,6 +73,9 @@ class TestCLIGroup:
             "web",
             "shell",
             "init",
+            "mem",
+            "pinned",
+            "review",
             "version",
         ):
             assert cmd in result.output, f"'{cmd}' not found in help output"

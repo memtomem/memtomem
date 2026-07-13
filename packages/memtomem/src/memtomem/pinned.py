@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,18 @@ class ContextBundle:
             "omitted_block_ids": list(self.omitted_block_ids),
             "warnings": list(self.warnings),
         }
+
+
+@dataclass(slots=True)
+class _ContextWindowSelection:
+    """Mutable schema-3 selection state for one matched result."""
+
+    context: Any
+    item: dict[str, Any]
+    before: tuple[Any, ...]
+    after: tuple[Any, ...]
+    selected_before: list[Any] = field(default_factory=list)
+    selected_after: list[Any] = field(default_factory=list)
 
 
 def _validate_id(value: str, kind: str) -> str:
@@ -264,20 +276,83 @@ class ContextAssembler:
                 project_context_root=self.store.project_root,
                 exclude_source_roots=self.store.search_exclusion_roots(),
             )
+            # Preserve the schema-2 matched-hit budget before spending any
+            # remaining capacity on schema-3 context windows.  This keeps
+            # adjacent chunks additive and prevents a high-ranked hit's
+            # neighbors from crowding out a lower-ranked hit.
+            matched: list[tuple[Any, dict[str, Any]]] = []
+            emitted_chunk_ids: set[str] = set()
             for result in results:
                 content = result.chunk.content
                 if used + len(content) > max_chars:
                     continue
-                retrieved.append(
-                    {
-                        "id": str(result.chunk.id),
-                        "content": content,
-                        "source": str(result.chunk.metadata.source_file),
-                        "namespace": str(result.chunk.metadata.namespace),
-                        "score": result.score,
-                    }
-                )
+                chunk_id = str(result.chunk.id)
+                item: dict[str, Any] = {
+                    "id": chunk_id,
+                    "content": content,
+                    "source": str(result.chunk.metadata.source_file),
+                    "namespace": str(result.chunk.metadata.namespace),
+                    "score": result.score,
+                }
                 used += len(content)
+                retrieved.append(item)
+                matched.append((result, item))
+                emitted_chunk_ids.add(chunk_id)
+
+            context_windows: list[_ContextWindowSelection] = []
+            for result, item in matched:
+                context = getattr(result, "context", None)
+                if context is not None:
+                    context_windows.append(
+                        _ContextWindowSelection(
+                            context=context,
+                            item=item,
+                            before=tuple(context.window_before),
+                            after=tuple(context.window_after),
+                        )
+                    )
+
+            max_distance = max(
+                (max(len(window.before), len(window.after)) for window in context_windows),
+                default=0,
+            )
+            # Allocate context globally by distance. Search rank breaks ties,
+            # then the before side precedes the after side deterministically.
+            for distance in range(max_distance):
+                for window in context_windows:
+                    candidates = (
+                        (window.selected_before, window.before[-(distance + 1)])
+                        if distance < len(window.before)
+                        else None,
+                        (window.selected_after, window.after[distance])
+                        if distance < len(window.after)
+                        else None,
+                    )
+                    for candidate in candidates:
+                        if candidate is None:
+                            continue
+                        destination, chunk = candidate
+                        chunk_id = str(chunk.id)
+                        if chunk_id in emitted_chunk_ids:
+                            continue
+                        if used + len(chunk.content) <= max_chars:
+                            destination.append(chunk)
+                            used += len(chunk.content)
+                            emitted_chunk_ids.add(chunk_id)
+
+            for window in context_windows:
+                if window.selected_before or window.selected_after:
+                    window.item["context"] = {
+                        "before": [
+                            self._context_chunk_payload(chunk)
+                            for chunk in reversed(window.selected_before)
+                        ],
+                        "after": [
+                            self._context_chunk_payload(chunk) for chunk in window.selected_after
+                        ],
+                        "chunk_position": window.context.chunk_position,
+                        "total_chunks_in_file": window.context.total_chunks_in_file,
+                    }
         warnings = (
             ("Pinned Context blocks omitted because the character budget was exhausted",)
             if omitted
@@ -291,3 +366,13 @@ class ContextAssembler:
             omitted_block_ids=tuple(omitted),
             warnings=warnings,
         )
+
+    @staticmethod
+    def _context_chunk_payload(chunk: Any) -> dict[str, str]:
+        """Serialize one adjacent chunk without changing the matched-hit contract."""
+        return {
+            "id": str(chunk.id),
+            "content": chunk.content,
+            "source": str(chunk.metadata.source_file),
+            "namespace": str(chunk.metadata.namespace),
+        }

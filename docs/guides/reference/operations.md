@@ -151,7 +151,15 @@ Running both `memtomem-server` (MCP) and `memtomem-web` simultaneously is suppor
 
 ## STM: Proactive Memory Surfacing (Optional)
 
-The **[memtomem-stm](https://github.com/memtomem/memtomem-stm)** package adds a proxy that sits between your AI agent and other MCP servers. It automatically recalls relevant memories when your agent uses any tool. STM is distributed as a separate package; it communicates with memtomem core entirely through the MCP protocol — no direct code coupling. Enhanced composition is negotiated from `mem_do(action="version").capabilities`, not inferred from an installed package version: `context_compose` schema 2 enables scoped Pinned Context composition, while `candidate_propose` schema 1 independently enables review-first proposals.
+The **[memtomem-stm](https://github.com/memtomem/memtomem-stm)** package adds a
+proxy that sits between your AI agent and other MCP servers. It automatically
+recalls relevant memories when your agent uses any tool. STM is distributed as
+a separate package; it communicates with memtomem core entirely through the MCP
+protocol — no direct code coupling. Enhanced composition is negotiated from
+`mem_do(action="version").capabilities`, not inferred from an installed package
+version: `context_compose` schema 2 enables scoped Pinned Context composition,
+schema 3 additionally preserves adjacent context-window chunks, and
+`candidate_propose` schema 1 independently enables review-first proposals.
 
 ### How it works
 

@@ -3,6 +3,17 @@
 All notable changes will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
+## [Unreleased]
+
+### Added
+
+- **Context Compose schema 3** — composed retrieval results can include
+  de-duplicated adjacent chunks with source and namespace metadata after all
+  matched hits claim their schema 2 budget; remaining context is selected
+  globally by distance. Schema 2 remains
+  the immutable scoped-composition contract released in 0.3.9; clients can use
+  the integer capability to distinguish visible context-window support.
+
 ## [0.3.9] — 2026-07-13
 
 ### Added
