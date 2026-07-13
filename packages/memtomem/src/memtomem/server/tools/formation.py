@@ -51,7 +51,7 @@ async def mem_candidate_propose(
         {
             "ok": True,
             "candidate_id": candidate["id"],
-            "status": "pending",
+            "status": candidate["status"],
             "created_at": candidate["created_at"],
             "duplicate": duplicate,
         },

@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from memtomem.formation import propose_memory_candidate, scan_session_candidates
+from memtomem.server.tools import formation as formation_tools
 
 
 @pytest.mark.asyncio
@@ -80,6 +81,118 @@ async def test_external_candidate_proposal_rejects_sensitive_content(storage):
             source_ref="trace",
             idempotency_key="key",
         )
+
+
+@pytest.mark.asyncio
+async def test_external_candidate_reproposal_returns_actual_decided_status(storage):
+    first, _ = await propose_memory_candidate(
+        storage,
+        "Preference: concise responses",
+        source="memtomem-stm",
+        source_ref="trace",
+        idempotency_key="decided-key",
+    )
+    assert await storage.decide_memory_candidate(first["id"], "rejected", "reviewer")
+    existing, duplicate = await propose_memory_candidate(
+        storage,
+        "Preference: concise responses",
+        source="memtomem-stm",
+        source_ref="trace",
+        idempotency_key="decided-key",
+    )
+    assert duplicate is True
+    assert existing["id"] == first["id"]
+    assert existing["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_external_candidate_reproposal_returns_expired_status(storage):
+    first, _ = await propose_memory_candidate(
+        storage,
+        "Fact: service uses SQLite",
+        source="memtomem-stm",
+        source_ref="trace",
+        idempotency_key="expired-key",
+    )
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+        (first["id"],),
+    )
+    storage._get_db().commit()
+    existing, duplicate = await propose_memory_candidate(
+        storage,
+        "Fact: service uses SQLite",
+        source="memtomem-stm",
+        source_ref="trace",
+        idempotency_key="expired-key",
+    )
+    assert duplicate is True
+    assert existing["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_external_candidate_rejects_idempotency_key_content_mismatch(storage):
+    await propose_memory_candidate(
+        storage,
+        "Decision: use blue-green",
+        source="memtomem-stm",
+        source_ref="trace",
+        idempotency_key="reused-key",
+    )
+    with pytest.raises(ValueError, match="different content"):
+        await propose_memory_candidate(
+            storage,
+            "Decision: use canary",
+            source="memtomem-stm",
+            source_ref="trace",
+            idempotency_key="reused-key",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "source", "source_ref", "key", "match"),
+    [
+        (" ", "memtomem-stm", "", "key", "empty"),
+        ("x" * 2001, "memtomem-stm", "", "key", "2000"),
+        ("valid", "s" * 129, "", "key", "size limit"),
+        ("valid", "memtomem-stm", "r" * 513, "key", "size limit"),
+        ("valid", "memtomem-stm", "api_key=sk-secret-value", "key", "sensitive"),
+    ],
+)
+async def test_external_candidate_validation(
+    storage, content: str, source: str, source_ref: str, key: str, match: str
+):
+    with pytest.raises(ValueError, match=match):
+        await propose_memory_candidate(
+            storage,
+            content,
+            source=source,
+            source_ref=source_ref,
+            idempotency_key=key,
+        )
+
+
+@pytest.mark.asyncio
+async def test_candidate_propose_tool_returns_actual_response_shape(storage, monkeypatch):
+    monkeypatch.setattr(
+        formation_tools,
+        "_get_app_initialized",
+        AsyncMock(return_value=SimpleNamespace(storage=storage)),
+    )
+    result = json.loads(
+        await formation_tools.mem_candidate_propose(
+            "Unclassified external note",
+            "memtomem-stm",
+            "trace",
+            "tool-key",
+        )
+    )
+    assert set(result) == {"ok", "candidate_id", "status", "created_at", "duplicate"}
+    assert result["status"] == "pending"
+    stored = await storage.get_memory_candidate(result["candidate_id"])
+    assert stored is not None
+    assert stored["confidence"] == 0.5
 
 
 @pytest.mark.asyncio

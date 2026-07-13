@@ -31,7 +31,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - **STM capability bridge** — `mem_do(action="version")` advertises versioned
   `context_compose` and `candidate_propose` contracts. External proposals are
   privacy-gated, idempotently queued as pending review candidates, and never
-  write durable memory before approval.
+  write durable memory before approval. Their synthetic sessions use the
+  reserved `formation` namespace and are excluded from normal retrieval scope.
 
 ## [0.3.8] — 2026-07-13
 

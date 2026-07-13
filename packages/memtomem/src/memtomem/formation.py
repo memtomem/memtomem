@@ -106,7 +106,8 @@ async def propose_memory_candidate(
         raise ValueError("proposal metadata exceeds size limit")
     if not source.strip() or not idempotency_key.strip():
         raise ValueError("source and idempotency_key are required")
-    if privacy.scan(body):
+    ref = source_ref.strip()
+    if privacy.scan(body) or (ref and privacy.scan(ref)):
         raise ValueError("content contains sensitive data")
 
     classification = _classify(body)
@@ -114,7 +115,7 @@ async def propose_memory_candidate(
         "proposed",
         "add",
         "memory",
-        1.0,
+        0.5,
     )
     now = datetime.now(timezone.utc)
     fingerprint = hashlib.sha256(
@@ -125,7 +126,7 @@ async def propose_memory_candidate(
         external_session_id,
         source.strip(),
         "formation",
-        metadata={"source_ref": source_ref.strip(), "external_proposal": True},
+        metadata={"source_ref": ref, "external_proposal": True},
     )
     candidate = {
         "id": str(uuid4()),
@@ -134,13 +135,14 @@ async def propose_memory_candidate(
         "operation": operation,
         "destination": destination,
         "content": body,
-        "evidence": [{"source": source.strip(), "source_ref": source_ref.strip()}],
+        "evidence": [{"source": source.strip(), "source_ref": ref}],
         "matched_existing_ids": [],
         "confidence": confidence,
         "sensitivity": "normal",
         "proposed_diff": f"+ {body}",
         "extractor_version": "external-proposal-v1",
         "fingerprint": fingerprint,
+        "status": "pending",
         "created_at": now.isoformat(timespec="seconds"),
         "expires_at": (now + timedelta(days=30)).isoformat(timespec="seconds"),
     }
@@ -148,9 +150,9 @@ async def propose_memory_candidate(
     if created:
         return candidate, False
 
-    pending = await storage.list_memory_candidates(status="pending", limit=1000)
-    duplicate = next(
-        (item for item in pending if item.get("session_id") == candidate["session_id"]),
-        None,
-    )
-    return duplicate or candidate, True
+    existing = await storage.get_memory_candidate_by_fingerprint(external_session_id, fingerprint)
+    if existing is None:
+        raise RuntimeError("idempotent candidate insert was ignored but no row exists")
+    if existing["content"] != body:
+        raise ValueError("idempotency_key was already used with different content")
+    return existing, True
