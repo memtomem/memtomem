@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -72,6 +72,80 @@ async def test_candidate_claim_is_atomic_and_releasable(storage):
     assert await storage.claim_memory_candidate(candidate["id"], "bob") is not None
     assert await storage.finalize_memory_candidate(candidate["id"])
     assert (await storage.get_memory_candidate(candidate["id"]))["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_recovery_skips_fresh_claim_and_records_transition(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: stale candidate")
+    await storage.add_session_event("session", "note", "Preference: fresh candidate")
+    stale, fresh = await scan_session_candidates(storage, "session")
+    assert await storage.claim_memory_candidate(stale["id"], "alice") is not None
+    assert await storage.claim_memory_candidate(fresh["id"], "bob") is not None
+
+    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds")
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat(timespec="seconds")
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET claim_started_at=? WHERE id=?",
+        (old, stale["id"]),
+    )
+    storage._get_db().commit()
+
+    recovered = await storage.recover_stale_memory_candidates(
+        stale_before=cutoff, actor="operator-alice"
+    )
+    assert recovered == [stale["id"]]
+    assert (await storage.get_memory_candidate(stale["id"]))["status"] == "pending"
+    assert (await storage.get_memory_candidate(fresh["id"]))["status"] == "writing"
+    transitions = await storage.list_memory_candidate_transitions(stale["id"])
+    assert transitions[-1]["from_status"] == "writing"
+    assert transitions[-1]["to_status"] == "pending"
+    assert transitions[-1]["actor"] == "operator-alice"
+    assert "stale approval claim recovered" in transitions[-1]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_and_finalize_are_mutually_exclusive(storage):
+    await storage.create_session("session", "agent", "default")
+    await storage.add_session_event("session", "note", "Decision: recover or finalize")
+    candidate = (await scan_session_candidates(storage, "session"))[0]
+    assert await storage.claim_memory_candidate(candidate["id"], "alice") is not None
+    old = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds")
+    storage._get_db().execute(
+        "UPDATE memory_candidates SET claim_started_at=? WHERE id=?",
+        (old, candidate["id"]),
+    )
+    storage._get_db().commit()
+
+    recovered = await storage.recover_stale_memory_candidates(
+        stale_before=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    )
+    assert recovered == [candidate["id"]]
+    assert not await storage.finalize_memory_candidate(candidate["id"])
+
+
+@pytest.mark.asyncio
+async def test_recovery_requires_timezone_and_operator_identity(storage):
+    with pytest.raises(ValueError, match="timezone"):
+        await storage.recover_stale_memory_candidates(
+            stale_before="2026-07-13T00:00:00", actor="alice"
+        )
+    with pytest.raises(ValueError, match="actor"):
+        await storage.recover_stale_memory_candidates(
+            stale_before="2026-07-13T00:00:00+00:00", actor=""
+        )
+
+
+def test_review_recovery_cli_and_mcp_action_are_public():
+    from click.testing import CliRunner
+
+    from memtomem.cli.review_cmd import review
+    from memtomem.server.tool_registry import ACTIONS
+
+    result = CliRunner().invoke(review, ["recover", "--help"])
+    assert result.exit_code == 0
+    assert "--stale-after-minutes" in result.output
+    assert "candidate_recover" in ACTIONS
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from uuid import uuid4
 from memtomem import privacy
 
 EXTRACTOR_VERSION = "heuristic-v1"
+DEFAULT_STALE_CLAIM_MINUTES = 15
 _KIND_PATTERNS = (
     ("decision", 0.95, re.compile(r"(?i)\b(decision|decided|chosen)\b|결정|채택")),
     ("preference", 0.9, re.compile(r"(?i)\b(prefer|preference)\b|선호")),

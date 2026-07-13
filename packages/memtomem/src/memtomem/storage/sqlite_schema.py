@@ -38,7 +38,7 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
 # whenever create_tables gains a migration an older binary must not run
 # under. Same-or-older stored versions always pass (migrations stay
 # additive + idempotent); only stored > SCHEMA_VERSION is fatal.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_VERSION_KEY = "schema_version"
 
@@ -585,12 +585,37 @@ def create_tables(
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             decided_at TEXT,
+            claim_started_at TEXT,
             UNIQUE(session_id, fingerprint)
         )
     """)
+    try:
+        db.execute("ALTER TABLE memory_candidates ADD COLUMN claim_started_at TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_memory_candidates_status "
         "ON memory_candidates(status, created_at)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_candidates_stale_claim "
+        "ON memory_candidates(status, claim_started_at)"
+    )
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS memory_candidate_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id TEXT NOT NULL REFERENCES memory_candidates(id) ON DELETE CASCADE,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_candidate_transitions_candidate "
+        "ON memory_candidate_transitions(candidate_id, created_at)"
     )
 
     # --- Provenance-bearing temporal assertions (derived, rebuildable index) ---

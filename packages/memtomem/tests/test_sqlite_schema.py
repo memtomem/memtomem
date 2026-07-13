@@ -333,3 +333,29 @@ class TestIdempotencyLedgerSchema:
             assert n == 1
         finally:
             db.close()
+
+
+class TestFormationClaimRecoverySchema:
+    def test_legacy_candidate_table_gains_claim_column_and_audit_table(self) -> None:
+        db = _connect_with_vec()
+        try:
+            db.execute(
+                "CREATE TABLE memory_candidates ("
+                "id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            create_tables(
+                db,
+                MetaManager(lambda: db),
+                dimension=0,
+                embedding_provider="none",
+                embedding_model="",
+            )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(memory_candidates)")}
+            assert "claim_started_at" in columns
+            transition_table = db.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='memory_candidate_transitions'"
+            ).fetchone()
+            assert transition_table is not None
+        finally:
+            db.close()

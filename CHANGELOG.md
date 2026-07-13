@@ -20,6 +20,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   evidence-linked candidates from exact session events and write durable
   memory only after approval. Additive temporal assertion tables preserve
   direction and multiple `supersedes`/`contradicts`/`supports` edges.
+- **Interrupted approval recovery** — `mm review recover` and
+  `mem_candidate_recover` atomically return stale `writing` candidates to the
+  pending queue after a conservative threshold and persist an audited status
+  transition without reclaiming fresh approvals.
 
 ## [0.3.8] — 2026-07-13
 

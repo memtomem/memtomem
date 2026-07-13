@@ -103,6 +103,9 @@ mm review approve CANDIDATE_ID --reviewer alice
 Decisions, preferences, procedures, action items, and narrowly signalled facts
 enter a review queue with evidence. Rejection writes no long-term memory;
 approval rechecks privacy and atomically claims the candidate before writing.
+After an abnormal process termination, operators can inspect
+`mm review list --status writing` and run `mm review recover`; fresh claims are
+left untouched and every recovery is audit-recorded.
 
 ## Public evaluation corpus
 

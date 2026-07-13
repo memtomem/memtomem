@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
+
+from memtomem.formation import DEFAULT_STALE_CLAIM_MINUTES
 
 
 @click.group("review")
@@ -68,6 +70,44 @@ async def _show(candidate_id: str) -> None:
         if candidate is None:
             raise click.ClickException("Candidate not found")
         click.echo(json.dumps(candidate, ensure_ascii=False, indent=2))
+
+
+@review.command("recover")
+@click.option(
+    "--stale-after-minutes",
+    type=click.IntRange(min=1, max=1440),
+    default=DEFAULT_STALE_CLAIM_MINUTES,
+    show_default=True,
+)
+@click.option("--limit", type=click.IntRange(min=1, max=1000), default=100)
+@click.option("--actor", default="cli-operator")
+def recover(stale_after_minutes: int, limit: int, actor: str) -> None:
+    """Return stale interrupted approval claims to the pending queue."""
+    asyncio.run(_recover(stale_after_minutes, limit, actor))
+
+
+async def _recover(stale_after_minutes: int, limit: int, actor: str) -> None:
+    from memtomem.cli._bootstrap import cli_components
+
+    if not actor.strip():
+        raise click.ClickException("Recovery actor cannot be empty")
+    stale_before = datetime.now(timezone.utc) - timedelta(minutes=stale_after_minutes)
+    async with cli_components() as comp:
+        recovered = await comp.storage.recover_stale_memory_candidates(
+            stale_before=stale_before.isoformat(timespec="seconds"),
+            actor=actor,
+            limit=limit,
+        )
+        click.echo(
+            json.dumps(
+                {
+                    "ok": True,
+                    "recovered": len(recovered),
+                    "candidate_ids": recovered,
+                    "stale_before": stale_before.isoformat(timespec="seconds"),
+                }
+            )
+        )
 
 
 async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) -> None:

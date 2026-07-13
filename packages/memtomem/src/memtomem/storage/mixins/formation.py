@@ -27,6 +27,7 @@ class FormationMixin:
         "created_at",
         "expires_at",
         "decided_at",
+        "claim_started_at",
     )
 
     @classmethod
@@ -81,7 +82,8 @@ class FormationMixin:
         rows = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
-            "extractor_version, reviewer, decision_reason, created_at, expires_at, decided_at "
+            "extractor_version, reviewer, decision_reason, created_at, expires_at, "
+            "decided_at, claim_started_at "
             "FROM memory_candidates WHERE status=? ORDER BY created_at LIMIT ?",
             (status, limit),
         ).fetchall()
@@ -99,7 +101,8 @@ class FormationMixin:
         row = db.execute(
             "SELECT id, session_id, kind, operation, destination, content, evidence, "
             "matched_existing_ids, confidence, sensitivity, proposed_diff, status, "
-            "extractor_version, reviewer, decision_reason, created_at, expires_at, decided_at "
+            "extractor_version, reviewer, decision_reason, created_at, expires_at, "
+            "decided_at, claim_started_at "
             "FROM memory_candidates WHERE id=?",
             (candidate_id,),
         ).fetchone()
@@ -110,29 +113,59 @@ class FormationMixin:
     ) -> dict[str, Any] | None:
         """Atomically claim a pending candidate before any durable write."""
         db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cursor = db.execute(
-            "UPDATE memory_candidates SET status='writing', reviewer=?, decision_reason=? "
+            "UPDATE memory_candidates SET status='writing', reviewer=?, decision_reason=?, "
+            "claim_started_at=? "
             "WHERE id=? AND status='pending' AND expires_at > ?",
             (
                 reviewer,
                 reason,
+                now,
                 candidate_id,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                now,
             ),
         )
+        if cursor.rowcount > 0:
+            self._record_candidate_transition(
+                db,
+                candidate_id,
+                "pending",
+                "writing",
+                reviewer,
+                reason or "approval claim",
+                now,
+            )
         db.commit()
         if cursor.rowcount == 0:
             return None
         return await self.get_memory_candidate(candidate_id)
 
-    async def release_memory_candidate(self, candidate_id: str) -> bool:
+    async def release_memory_candidate(
+        self,
+        candidate_id: str,
+        *,
+        actor: str = "system",
+        reason: str = "durable write failed or was cancelled",
+    ) -> bool:
         """Release a failed write claim so the candidate can be retried."""
         db = self._get_db()
         cursor = db.execute(
             "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
-            "decision_reason=NULL WHERE id=? AND status='writing'",
+            "decision_reason=NULL, claim_started_at=NULL "
+            "WHERE id=? AND status='writing'",
             (candidate_id,),
         )
+        if cursor.rowcount > 0:
+            self._record_candidate_transition(
+                db,
+                candidate_id,
+                "writing",
+                "pending",
+                actor,
+                reason,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
         db.commit()
         return cursor.rowcount > 0
 
@@ -141,12 +174,98 @@ class FormationMixin:
         db = self._get_db()
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         cursor = db.execute(
-            "UPDATE memory_candidates SET status='approved', decided_at=? "
+            "UPDATE memory_candidates SET status='approved', decided_at=?, claim_started_at=NULL "
             "WHERE id=? AND status='writing'",
             (now, candidate_id),
         )
+        if cursor.rowcount > 0:
+            self._record_candidate_transition(
+                db,
+                candidate_id,
+                "writing",
+                "approved",
+                "system",
+                "durable write completed",
+                now,
+            )
         db.commit()
         return cursor.rowcount > 0
+
+    async def recover_stale_memory_candidates(
+        self,
+        *,
+        stale_before: str,
+        actor: str = "operator",
+        limit: int = 100,
+    ) -> list[str]:
+        """Atomically return stale ``writing`` claims to ``pending``.
+
+        A concurrent finalize and this recovery update serialize in SQLite;
+        only the operation that first matches ``status='writing'`` succeeds.
+        """
+        if limit < 1 or limit > 1000:
+            raise ValueError("recovery limit must be between 1 and 1000")
+        if not actor.strip():
+            raise ValueError("recovery actor cannot be empty")
+        try:
+            cutoff = datetime.fromisoformat(stale_before)
+        except ValueError as exc:
+            raise ValueError("stale_before must be an ISO-8601 datetime") from exc
+        if cutoff.tzinfo is None:
+            raise ValueError("stale_before must include a timezone")
+        normalized_cutoff = cutoff.astimezone(timezone.utc).isoformat(timespec="seconds")
+        db = self._get_db()
+        rows = db.execute(
+            "UPDATE memory_candidates SET status='pending', reviewer=NULL, "
+            "decision_reason=NULL, claim_started_at=NULL "
+            "WHERE id IN (SELECT id FROM memory_candidates "
+            "WHERE status='writing' AND claim_started_at IS NOT NULL "
+            "AND claim_started_at <= ? ORDER BY claim_started_at LIMIT ?) "
+            "AND status='writing' RETURNING id",
+            (normalized_cutoff, limit),
+        ).fetchall()
+        recovered = [str(row[0]) for row in rows]
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        reason = f"stale approval claim recovered (claim_started_at <= {normalized_cutoff})"
+        for candidate_id in recovered:
+            self._record_candidate_transition(
+                db,
+                candidate_id,
+                "writing",
+                "pending",
+                actor,
+                reason,
+                now,
+            )
+        db.commit()
+        return recovered
+
+    async def list_memory_candidate_transitions(self, candidate_id: str) -> list[dict[str, Any]]:
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT from_status, to_status, actor, reason, created_at "
+            "FROM memory_candidate_transitions WHERE candidate_id=? ORDER BY id",
+            (candidate_id,),
+        ).fetchall()
+        keys = ("from_status", "to_status", "actor", "reason", "created_at")
+        return [dict(zip(keys, row)) for row in rows]
+
+    @staticmethod
+    def _record_candidate_transition(
+        db: Any,
+        candidate_id: str,
+        from_status: str,
+        to_status: str,
+        actor: str,
+        reason: str,
+        created_at: str,
+    ) -> None:
+        db.execute(
+            "INSERT INTO memory_candidate_transitions "
+            "(candidate_id, from_status, to_status, actor, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (candidate_id, from_status, to_status, actor, reason, created_at),
+        )
 
     async def decide_memory_candidate(
         self, candidate_id: str, status: str, reviewer: str, reason: str = ""
@@ -160,6 +279,16 @@ class FormationMixin:
             "WHERE id=? AND status='pending'",
             (status, reviewer, reason, now, candidate_id),
         )
+        if cursor.rowcount > 0:
+            self._record_candidate_transition(
+                db,
+                candidate_id,
+                "pending",
+                status,
+                reviewer,
+                reason or f"candidate {status}",
+                now,
+            )
         db.commit()
         return cursor.rowcount > 0
 
