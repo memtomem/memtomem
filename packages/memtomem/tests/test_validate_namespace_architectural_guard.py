@@ -94,6 +94,7 @@ DEFERRED_NS_SURFACES: frozenset[tuple[str, str, str]] = frozenset(
         ("evaluation.py", "mem_eval", "namespace"),
         ("export_import.py", "mem_export", "namespace"),
         ("importance.py", "mem_importance_scan", "namespace"),
+        ("pinned.py", "mem_context_compose", "namespace"),
         ("recall.py", "mem_recall", "namespace"),
         ("reflection.py", "mem_reflect", "namespace"),
         ("search.py", "mem_search", "namespace"),

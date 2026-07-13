@@ -625,6 +625,12 @@ class SearchPipeline:
         # signal we have to cap on. Acceptable for the click-the-pill
         # workflow; revisit if a "show me old-but-important by tag" need
         # surfaces.
+        #
+        # Exclusions are applied after this bounded enumeration. A large set
+        # of newer excluded sources can therefore consume the candidate
+        # budget and leave fewer than ``top_k`` eligible results. Increasing
+        # the storage query limit dynamically would require source-root
+        # filtering in storage; keep this bounded behavior explicit for now.
         candidate_limit = max(top_k * 5, 100)
         chunks = await self._storage.recall_chunks(
             source_filter=source_filter,
@@ -901,6 +907,9 @@ class SearchPipeline:
         bm25_results = _exclude_source_roots(bm25_results, normalized_exclusion_roots)
         dense_results = _exclude_source_roots(dense_results, normalized_exclusion_roots)
 
+        # Candidate counts describe the eligible inputs entering fusion, not
+        # the raw retriever hit counts. This keeps compose telemetry aligned
+        # with the pool that can actually surface after source exclusion.
         stats = RetrievalStats(
             bm25_candidates=len(bm25_results),
             dense_candidates=len(dense_results),

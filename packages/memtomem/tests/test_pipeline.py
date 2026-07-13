@@ -262,10 +262,15 @@ class TestRerankCandidatePool:
     """
 
     @staticmethod
-    def _make_result(content: str, rank: int, score: float | None = None) -> SearchResult:
+    def _make_result(
+        content: str,
+        rank: int,
+        score: float | None = None,
+        source_file: Path | None = None,
+    ) -> SearchResult:
         chunk = Chunk(
             content=content,
-            metadata=ChunkMetadata(source_file=Path(f"/tmp/{content}.md")),
+            metadata=ChunkMetadata(source_file=source_file or Path(f"/tmp/{content}.md")),
             id=uuid4(),
             embedding=[],
         )
@@ -389,6 +394,54 @@ class TestRerankCandidatePool:
         results, _ = await pipeline.search("anything", top_k=2, exclude_source_roots=(pinned_root,))
 
         assert [result.chunk.content for result in results] == ["normal0", "normal1"]
+
+    @pytest.mark.asyncio
+    async def test_filter_only_search_excludes_roots(self, tmp_path):
+        pinned_root = tmp_path / "memories" / "pinned"
+        pinned = self._make_result(
+            "pinned", rank=1, source_file=pinned_root / "general" / "policy.md"
+        ).chunk
+        normal = self._make_result(
+            "normal", rank=2, source_file=tmp_path / "memories" / "normal.md"
+        ).chunk
+
+        pipeline = self._make_pipeline([], reranker=None, rerank_config=None)
+        pipeline._storage.recall_chunks.return_value = [pinned, normal]
+
+        results, _ = await pipeline.search(
+            "",
+            top_k=2,
+            tag_filter="policy",
+            exclude_source_roots=(pinned_root,),
+        )
+
+        assert [result.chunk.content for result in results] == ["normal"]
+
+    @pytest.mark.asyncio
+    async def test_excluded_roots_are_reapplied_after_context_expansion(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        pinned_root = tmp_path / "memories" / "pinned"
+        normal = self._make_result(
+            "normal", rank=1, source_file=tmp_path / "memories" / "normal.md"
+        )
+        pinned_neighbor = self._make_result(
+            "pinned-neighbor",
+            rank=2,
+            source_file=pinned_root / "general" / "policy.md",
+        )
+
+        pipeline = self._make_pipeline([normal], reranker=None, rerank_config=None)
+        pipeline._expand_context = AsyncMock(return_value=[normal, pinned_neighbor])
+
+        results, _ = await pipeline.search(
+            "anything",
+            top_k=2,
+            context_window=1,
+            exclude_source_roots=(pinned_root,),
+        )
+
+        assert [result.chunk.content for result in results] == ["normal"]
 
     def test_exclusion_uses_path_boundaries_and_participates_in_cache_key(self, tmp_path):
         from memtomem.search.pipeline import _source_is_excluded
