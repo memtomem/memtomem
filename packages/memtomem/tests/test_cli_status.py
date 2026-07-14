@@ -402,12 +402,13 @@ class TestStatusTextPin:
 
         text = asyncio.run(format_status_report(AppContext.from_components(comp)))
 
-        # str(Path(...)) so the DB-path line survives Windows separators.
+        # Resolve exactly like collect_status_report so Windows includes the
+        # drive prefix while POSIX keeps the absolute /opt path.
         expected = f"""\
 memtomem Status
 ==============
 Storage:   sqlite
-DB path:   {Path("/opt/mm/memtomem.db").expanduser()}
+DB path:   {Path("/opt/mm/memtomem.db").expanduser().resolve()}
 Embedding: onnx / bge-m3
 Dimension: 1024
 Top-K:     10
