@@ -3,9 +3,21 @@
 The native Codex plugin bundles an exact-pinned memtomem MCP server and six
 skills. BM25 is enabled by default; an embedding provider is optional.
 
+Prefer a short Korean first-success path? Follow the [Claude Code·Codex CLI
+vibe-coding quickstart](../vibe-coding-getting-started-ko.md), then return here
+for the complete skill reference.
+
 ## Install
 
-From a local checkout:
+From the GitHub marketplace:
+
+```bash
+codex plugin marketplace add memtomem/memtomem
+codex plugin add memtomem@memtomem
+```
+
+For local marketplace development, replace `memtomem/memtomem` with the path
+to the checkout:
 
 ```bash
 codex plugin marketplace add /path/to/memtomem
@@ -34,7 +46,7 @@ use the broad `mem_do` gateway.
 Ask Codex:
 
 ```text
-Use memtomem-status to inspect my memory index.
+Use $memtomem-status to inspect my memory index.
 ```
 
 For MCP-only registration or advanced timeout and parallel-call settings, see

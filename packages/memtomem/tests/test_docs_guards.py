@@ -48,6 +48,8 @@ _README = _REPO_ROOT / "README.md"
 _PYPI_README = _REPO_ROOT / "packages" / "memtomem" / "README.md"
 _PLUGIN_README = _REPO_ROOT / "packages" / "memtomem-claude-plugin" / "README.md"
 _NOTEBOOKS_README = _REPO_ROOT / "examples" / "notebooks" / "README.md"
+_PLUGIN_CONTRACT = _REPO_ROOT / "packages" / "memtomem-plugin-assets" / "contract.toml"
+_VIBE_GUIDE = _GUIDES / "vibe-coding-getting-started-ko.md"
 _SRC = _REPO_ROOT / "packages" / "memtomem" / "src" / "memtomem"
 _AUTOMATION_HOOKS_JSON = (
     _REPO_ROOT / "packages" / "memtomem-claude-automation-plugin" / "hooks" / "hooks.json"
@@ -74,6 +76,11 @@ def _public_markdown() -> list[Path]:
 def _read(path: Path) -> str:
     assert path.exists(), f"Doc file missing: {path}"
     return path.read_text(encoding="utf-8")
+
+
+def _plugin_contract() -> dict:
+    with _PLUGIN_CONTRACT.open("rb") as handle:
+        return tomllib.load(handle)
 
 
 @pytest.fixture(scope="module")
@@ -661,6 +668,7 @@ class TestPublicReadmeAndExamples:
                 offenders.append(target)
         assert not offenders, f"PyPI README has relative Markdown links: {offenders}"
 
+
     def test_normal_mcp_examples_do_not_override_saved_memory_dirs(self) -> None:
         mcp_clients = _read(_GUIDES / "mcp-clients.md")
         ordinary, marker, overrides = mcp_clients.partition("## 11. Environment Variable Overrides")
@@ -694,6 +702,63 @@ class TestPublicReadmeAndExamples:
         file_param = next(param for param in add.params if param.name == "file_name")
         assert "selected scope's memory directory" in (file_param.help or "")
         assert "~/.memtomem/memories" not in (file_param.help or "")
+
+
+class TestVibeCodingQuickstart:
+    def test_public_entrypoints_link_quickstart(self) -> None:
+        relative = "vibe-coding-getting-started-ko.md"
+        entrypoints = (
+            _README,
+            _PYPI_README,
+            _GUIDES / "README.md",
+            _GUIDES / "getting-started.md",
+            _GUIDES / "reference.md",
+            _INTEGRATIONS / "claude-code.md",
+            _INTEGRATIONS / "codex.md",
+        )
+        for entrypoint in entrypoints:
+            assert relative in _read(entrypoint), (
+                f"{entrypoint.relative_to(_REPO_ROOT)} must link the Korean vibe-coding quickstart"
+            )
+        assert (
+            "https://github.com/memtomem/memtomem/blob/main/docs/guides/"
+            f"{relative}"
+        ) in _read(_PYPI_README)
+
+    def test_plugin_install_commands_match_supported_public_flow(self) -> None:
+        guide = _read(_VIBE_GUIDE)
+        commands = (
+            "/plugin marketplace add memtomem/memtomem",
+            "/plugin install memtomem@memtomem",
+            "codex plugin marketplace add memtomem/memtomem",
+            "codex plugin add memtomem@memtomem",
+        )
+        for command in commands:
+            assert command in guide
+
+    def test_first_success_workflows_match_plugin_contract(self) -> None:
+        guide = _read(_VIBE_GUIDE)
+        workflows = {row["id"]: row for row in _plugin_contract()["workflows"]}
+        for workflow_id in ("status", "remember", "search"):
+            row = workflows[workflow_id]
+            assert f"/memtomem:{workflow_id}" in guide
+            assert f"${row['codex_name']}" in guide
+        assert workflows["remember"]["effect"] == "write"
+        assert workflows["remember"]["implicit"] is False
+        assert workflows["status"]["effect"] == "read"
+        assert workflows["search"]["effect"] == "read"
+
+    def test_public_quickstart_keeps_beginner_scope_and_safety_boundaries(self) -> None:
+        guide = _read(_VIBE_GUIDE)
+        for required in ("BM25-only", "클라우드 동기화", "API key", "명시적"):
+            assert required in guide
+        for advanced_or_private in (
+            "docs/reports/",
+            "project_shared",
+            "mm ingest codex-memory",
+            "memtomem-automation",
+        ):
+            assert advanced_or_private not in guide
 
 
 class TestRegistryAndInstallDocs:

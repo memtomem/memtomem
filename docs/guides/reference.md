@@ -3,7 +3,7 @@
 **Audience**: Users who have completed the [Getting Started](getting-started.md) guide
 **Prerequisites**: memtomem installed, MCP server connected to your AI editor
 
-> **New to memtomem?** Start with [Getting Started](getting-started.md) first. This guide is a complete reference for all features.
+> **New to memtomem?** Start with [Getting Started](getting-started.md), or use the [Korean Claude Code/Codex quickstart](vibe-coding-getting-started-ko.md) for a plugin-first path. This guide is a complete reference for all features.
 
 **On this page**
 
@@ -140,6 +140,7 @@ The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skill
 
 ## Next Steps
 
+- [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md) — Claude Code·Codex CLI plugin-first onboarding
 - [Configuration](configuration.md) — All `MEMTOMEM_*` environment variables
 - [Embeddings](embeddings.md) — ONNX, Ollama, OpenAI providers
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)

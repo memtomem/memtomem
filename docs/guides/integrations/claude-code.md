@@ -4,6 +4,10 @@
 **Prerequisites**: memtomem installation complete ([Quick Start](../getting-started.md)), Claude Code installed
 **Estimated Time**: About 15 minutes
 
+Prefer a short Korean first-success path? Follow the [Claude Code·Codex CLI
+vibe-coding quickstart](../vibe-coding-getting-started-ko.md), then return here
+for automation and advanced setup.
+
 **On this page**
 
 - [Overview](#overview)

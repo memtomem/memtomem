@@ -357,6 +357,7 @@ database or remove client registrations and project artifacts.
 
 ## Next steps
 
+- [한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md) — Claude Code·Codex CLI 플러그인으로 첫 기억을 저장·검색하세요.
 - [MCP Client Setup](mcp-clients.md) — connect an editor.
 - [Core memory tools](reference/core-memory-tools.md) — index and search real data.
 - [Embeddings](embeddings.md) — improve semantic search quality.

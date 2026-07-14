@@ -8,14 +8,16 @@ guides are organized by outcome rather than by feature name.
 
 1. **[Getting Started](getting-started.md)** — install memtomem, run setup,
    save one memory, and find it again in under five minutes.
-2. **[MCP Client Setup](mcp-clients.md)** — connect Claude Code, Cursor,
+2. **[한국어 바이브코딩 빠른 시작](vibe-coding-getting-started-ko.md)** — Claude Code
+   또는 Codex CLI 플러그인으로 기억 하나를 저장하고 다시 찾습니다.
+3. **[MCP Client Setup](mcp-clients.md)** — connect Claude Code, Cursor,
    Codex CLI, Antigravity, Windsurf, Claude Desktop, Gemini CLI, or Kimi CLI.
    Client-specific deep dives:
    - [Claude Code](integrations/claude-code.md)
    - [Codex](integrations/codex.md)
    - [Cursor](integrations/cursor.md)
    - [Claude Desktop](integrations/claude-desktop.md)
-3. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool
+4. **[Use cases](use-cases.md)** — nine runnable scenarios for multi-tool
    developers, individual knowledge bases, and teams.
 
 ## Work with memories
