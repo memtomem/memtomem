@@ -3,10 +3,9 @@
 The three write-shaped commands (``add``, ``reset``, ``purge``) gained
 ``--json`` acks in the same change; reset/purge tests live next to their
 existing suites (``test_reset_cmd.py`` / ``test_purge_cli.py``). This
-file covers ``mm add``: the CONTRIBUTING write-command shape
-(``{"ok": true, ...}`` / ``{"ok": false, "reason": ...}`` with exit 0
-for CLI-classified failures) and the loud nonzero exit for unexpected
-errors.
+file covers ``mm add``: the write-command shape
+(``{"ok": true, ...}`` / ``{"ok": false, "reason": ...}``) and the
+nonzero exit contract for both classified and unexpected failures.
 """
 
 from __future__ import annotations
@@ -92,7 +91,7 @@ class TestAddJsonAck:
         assert "Added to" in result.output
         assert "(2 chunks indexed)" in result.output
 
-    def test_privacy_block_json_exit_zero(self, monkeypatch):
+    def test_privacy_block_json_exits_one(self, monkeypatch):
         # The guard fires before component bootstrap — a bootstrap call
         # would mean the blocked write slipped past the chokepoint.
         bootstrap = AsyncMock()
@@ -101,14 +100,14 @@ class TestAddJsonAck:
         result = CliRunner().invoke(add_cmd, [_SECRET, "--json"])
 
         bootstrap.assert_not_called()
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         data = json.loads(result.output)
         assert data["ok"] is False
         assert "privacy pattern" in data["reason"]
 
-    def test_project_shared_decline_json_exit_zero(self, monkeypatch, tmp_path):
+    def test_project_shared_decline_json_exits_one(self, monkeypatch, tmp_path):
         # Gate B prompt under --json: chrome rides stderr, and declining
-        # is a handled outcome ({"ok": false}, exit 0) instead of the
+        # is a handled outcome ({"ok": false}, exit 1) instead of the
         # text path's click.Abort.
         proj = tmp_path / "proj"
         base = proj / ".memtomem" / "memories"
@@ -123,7 +122,7 @@ class TestAddJsonAck:
             add_cmd, [_CLEAN, "--scope", "project_shared", "--json"], input="n\n"
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         # stdout alone is the machine-readable ack; the prompt is stderr.
         data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "cancelled at project_shared confirmation prompt"}
@@ -150,14 +149,12 @@ class TestAddJsonAck:
             add_cmd, [_CLEAN, "--scope", "project_shared", "--json"], input="n\n"
         )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "cancelled at project_shared confirmation prompt"}
 
     def test_unexpected_error_keeps_nonzero_exit(self, monkeypatch, tmp_path):
-        # Only CLI-classified failures (ClickException) ride the exit-0
-        # JSON body; a crashed index engine must stay loud (CONTRIBUTING:
-        # unhandled exceptions surface through Click).
+        # A crashed index engine must also stay loud.
         comp = _components(tmp_path, index_error=RuntimeError("boom"))
         _patch_components(monkeypatch, comp)
 

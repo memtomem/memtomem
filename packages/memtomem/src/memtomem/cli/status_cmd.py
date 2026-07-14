@@ -36,14 +36,8 @@ def status(fmt: str, *, as_json: bool = False) -> None:
         asyncio.run(_status(fmt))
     except click.ClickException as e:
         if fmt == "json":
-            # Read-command error shape: {"error": ...} with exit code 0
-            # (CONTRIBUTING "JSON error shape") so `... --json | jq`
-            # pipelines see the failure in-band instead of a broken pipe.
-            # Only ClickException qualifies — it marks failures the CLI
-            # classified as expected; anything else falls through below
-            # and keeps the nonzero exit, per the same convention.
             click.echo(json.dumps({"error": e.format_message()}))
-            return
+            raise click.exceptions.Exit(1)
         raise
     except Exception as e:
         raise_cli_error(e)

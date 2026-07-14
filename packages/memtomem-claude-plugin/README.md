@@ -20,6 +20,25 @@ write-time indexing.
 /plugin install memtomem@memtomem
 ```
 
+On a completely fresh machine or HOME, initialize the user-owned store once:
+
+```bash
+uvx --from 'memtomem==0.3.11' mm init --preset minimal --non-interactive
+mm status
+```
+
+The plugin intentionally cannot perform this trust-establishing step over MCP.
+For project-specific memories, preserve the project root and create the
+gitignored local tier explicitly:
+
+```bash
+cd /path/to/project
+mm mem init --scope project_local
+```
+
+After that, `/memtomem:setup /path/to/notes` performs a one-shot index and
+verifies search. One-shot indexing does not add a watched source directory.
+
 If you previously registered the server manually, Claude Code suppresses
 the plugin-managed copy (nothing runs twice) and your manual entry keeps
 winning. Remove it (`claude mcp remove memtomem`) to switch to the

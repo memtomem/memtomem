@@ -244,7 +244,7 @@ def test_debounce_flush_surfaces_blocked_file_as_error(tmp_path, monkeypatch):
 
     # Force-drain regardless of window.
     r = runner.invoke(cli, ["index", "--flush"])
-    assert r.exit_code == 0, f"flush failed: {r.output}"
+    assert r.exit_code == 1, f"flush should report failure: {r.output}"
     assert "Indexed: 0" in r.output
     assert "Errors: 1" in r.output
     assert "redaction_blocked" in r.output
@@ -255,7 +255,7 @@ def test_debounce_flush_surfaces_blocked_file_as_error(tmp_path, monkeypatch):
     # CliRunner, so the JSON dict — the last thing ``_print_drain_result``
     # emits — is the last line, not necessarily the whole output.
     r = runner.invoke(cli, ["index", "--flush", "--json"])
-    assert r.exit_code == 0, f"flush --json failed: {r.output}"
+    assert r.exit_code == 1, f"flush --json should report failure: {r.output}"
     payload = json.loads(r.output.strip().splitlines()[-1])
     assert payload["indexed"] == []
     assert len(payload["errors"]) == 1
@@ -300,11 +300,11 @@ def test_debounce_flush_drops_poison_entry_after_cap(tmp_path, monkeypatch):
 
     for i in range(_MAX_DRAIN_ATTEMPTS - 1):
         r = runner.invoke(cli, ["index", "--flush"])
-        assert r.exit_code == 0, f"flush {i + 1} failed: {r.output}"
+        assert r.exit_code == 1, f"flush {i + 1} should fail: {r.output}"
         assert "Remaining in queue: 1" in r.output, f"flush {i + 1}: {r.output}"
 
     r = runner.invoke(cli, ["index", "--flush", "--json"])
-    assert r.exit_code == 0, f"final flush failed: {r.output}"
+    assert r.exit_code == 1, f"final flush should report dropped input: {r.output}"
     payload = json.loads(r.output.strip().splitlines()[-1])
     assert payload["errors"] == []
     assert len(payload["dropped"]) == 1
@@ -317,17 +317,10 @@ def test_debounce_flush_drops_poison_entry_after_cap(tmp_path, monkeypatch):
     assert payload["indexed"] == [] and payload["dropped"] == [] and payload["remaining"] == 0
 
 
-def test_debounce_flush_drains_terminal_skip_without_livelock(tmp_path, monkeypatch):
-    """A terminal, non-security skip (binary / too-large file) enqueued via the
-    hook path must still **drain** — it must not stick in the queue and
-    re-error on every subsequent flush. The redaction fix raises only on
-    ``blocked_files`` (the security case); ``stats.errors`` for a binary file —
-    which can never succeed on retry — must NOT pin the entry. This guards
-    against re-broadening the raise to ``stats.errors`` and reintroducing a
-    permanent queue livelock for un-indexable assets (the pre-fix silent-drop
-    was correct for these).
-    """
+def test_debounce_flush_retries_terminal_error_then_drops(tmp_path, monkeypatch):
+    """Every failed file is visible and retained until the bounded retry cap."""
     from memtomem.cli import _bootstrap
+    from memtomem.indexing.debounce import _MAX_DRAIN_ATTEMPTS
 
     for var in [k for k in os.environ if k.startswith("MEMTOMEM_")]:
         monkeypatch.delenv(var, raising=False)
@@ -356,18 +349,16 @@ def test_debounce_flush_drains_terminal_skip_without_livelock(tmp_path, monkeypa
     r = runner.invoke(cli, ["index", "--debounce-window", "999999", str(binfile)])
     assert r.exit_code == 0, f"enqueue failed: {r.output}"
 
-    r = runner.invoke(cli, ["index", "--flush"])
-    assert r.exit_code == 0, f"flush failed: {r.output}"
-    # Drained, not stuck: the terminal skip leaves nothing queued and is not
-    # reported as a retryable error. (Pre-fix-broad behavior would have raised →
-    # "Errors: 1" / "Remaining in queue: 1" and livelocked.)
-    assert "Indexed: 1" in r.output
-    assert "Remaining in queue: 0" in r.output
+    for _ in range(_MAX_DRAIN_ATTEMPTS - 1):
+        r = runner.invoke(cli, ["index", "--flush"])
+        assert r.exit_code == 1, r.output
+        assert "Errors: 1" in r.output
+        assert "Remaining in queue: 1" in r.output
 
-    # And it does not re-appear on the next flush (queue is genuinely empty).
     r = runner.invoke(cli, ["index", "--flush", "--json"])
-    assert r.exit_code == 0, f"second flush failed: {r.output}"
+    assert r.exit_code == 1, r.output
     payload = json.loads(r.output.strip().splitlines()[-1])
     assert payload["indexed"] == []
     assert payload["errors"] == []
+    assert len(payload["dropped"]) == 1
     assert payload["remaining"] == 0

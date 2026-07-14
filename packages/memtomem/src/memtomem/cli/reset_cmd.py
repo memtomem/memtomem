@@ -66,18 +66,17 @@ def reset(yes: bool, backup: bool, force: bool, as_json: bool) -> None:
 
 def _refuse(message: str, hint: str, *, as_json: bool = False) -> None:
     if as_json:
-        # Write-command JSON error shape (CONTRIBUTING): the refusal is a
-        # handled failure, so it rides the body with exit 0 — scripts read
-        # `ok`, not the exit code.
+        # Write-command JSON error shape (CONTRIBUTING): keep stdout
+        # machine-readable while signaling the handled failure via exit 1.
         click.echo(json.dumps({"ok": False, "reason": f"{message} {hint}"}))
-        sys.exit(0)
+        sys.exit(1)
     click.secho(message, fg="red")
     click.secho(f"  {hint}", fg="red")
     sys.exit(2)
 
 
 def _check_gates(db_path: Path, *, as_json: bool = False) -> None:
-    """Refuse (exit 2; exit 0 + ``ok: false`` under ``--json``) while any
+    """Refuse (exit 2; exit 1 + ``ok: false`` under ``--json``) while any
     known writer is alive or holds the DB lock."""
     server = check_server_liveness()
     if server.alive:
@@ -208,6 +207,8 @@ async def _run(
             else:
                 click.echo("Cancelled.")
             await storage.close()
+            if as_json:
+                raise click.exceptions.Exit(1)
             return
 
     backup_path: Path | None = None
@@ -222,7 +223,7 @@ async def _run(
                 click.echo(
                     json.dumps({"ok": False, "reason": f"backup failed ({exc}); nothing wiped"})
                 )
-                sys.exit(0)
+                sys.exit(1)
             click.secho(f"Backup failed ({exc}); aborting without wiping.", fg="red")
             sys.exit(1)
         if not as_json:

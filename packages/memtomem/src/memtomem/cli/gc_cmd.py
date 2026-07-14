@@ -1,11 +1,14 @@
 """CLI: ``mm gc`` — storage maintenance commands (ADR-0011 follow-up #884).
 
-Currently exposes one subcommand:
+Exposes two subcommands:
 
 * ``mm gc orphan-projects`` — find chunks whose recorded ``project_root``
   no longer exists on disk and, with ``--apply``, delete them. Default
   is dry-run; ``--apply`` requires interactive confirmation;
   ``--apply --yes`` is the non-interactive form.
+* ``mm gc orphan-sources`` — find indexed source files that no longer exist
+  and optionally remove their chunks. This is the terminal equivalent of
+  ``mem_cleanup_orphans``.
 
 Placed at the top level (not under ``mm context``) because the rows it
 cleans live in user-local storage, not the Context Gateway artifact
@@ -61,6 +64,77 @@ def orphan_projects(apply_: bool, assume_yes: bool) -> None:
     if assume_yes and not apply_:
         raise click.UsageError("--yes requires --apply.")
     asyncio.run(_run(apply_=apply_, assume_yes=assume_yes))
+
+
+@gc.command("orphan-sources")
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    help="Actually delete. Without this flag, prints what would be deleted (dry-run).",
+)
+@click.option(
+    "--yes",
+    "assume_yes",
+    is_flag=True,
+    help="Skip the confirmation prompt. Requires --apply.",
+)
+def orphan_sources(apply_: bool, assume_yes: bool) -> None:
+    """Remove indexed chunks whose source file no longer exists.
+
+    The scan checks missing sources twice to avoid treating a transiently
+    unavailable cloud or removable volume as deleted. Preview is the default;
+    deletion requires ``--apply`` and an explicit confirmation unless ``--yes``
+    is also supplied.
+    """
+    if assume_yes and not apply_:
+        raise click.UsageError("--yes requires --apply.")
+    asyncio.run(_run_orphan_sources(apply_=apply_, assume_yes=assume_yes))
+
+
+async def _run_orphan_sources(*, apply_: bool, assume_yes: bool) -> None:
+    from memtomem.cli._bootstrap import cli_components
+    from memtomem.storage.orphan_detect import scan_orphans
+
+    async with cli_components() as comp:
+        result = await scan_orphans(comp.storage)
+        orphaned = sorted(result.confirmed_orphans)
+        if not orphaned:
+            click.secho(
+                f"No orphaned sources found ({result.total_sources} source files checked).",
+                fg="green",
+            )
+            return
+
+        click.echo(
+            f"Found {len(orphaned)} orphaned source "
+            f"{'file' if len(orphaned) == 1 else 'files'} "
+            f"({result.total_sources} source files checked):"
+        )
+        for source in orphaned:
+            click.echo(f"  - {source}")
+
+        if not apply_:
+            click.echo("\nRun with --apply to delete their indexed chunks.")
+            click.echo("Run with --apply --yes for non-interactive deletion.")
+            return
+
+        if not assume_yes and not click.confirm(
+            f"Delete indexed chunks for {len(orphaned)} missing source file(s)?",
+            default=False,
+        ):
+            click.echo("Cleanup cancelled; no chunks were deleted.")
+            return
+
+        deleted = 0
+        for source in orphaned:
+            deleted += await comp.storage.delete_by_source(source)
+        if deleted and getattr(comp, "search_pipeline", None) is not None:
+            comp.search_pipeline.invalidate_cache()
+        click.secho(
+            f"Cleanup complete: {deleted} chunks deleted from {len(orphaned)} sources.",
+            fg="green",
+        )
 
 
 async def _run(*, apply_: bool, assume_yes: bool) -> None:

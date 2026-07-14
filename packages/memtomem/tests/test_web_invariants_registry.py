@@ -118,6 +118,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "system.index_stream",
         "system.open_memory_dir",
         "system.patch_config",
+        "system.preview_namespace",
         "system.rebuild_fts",
         "system.reindex_all",
         "system.remove_memory_dir",
@@ -193,6 +194,7 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "system.index_stream": (
         "path/options only; discovered file content is guarded by the indexing engine"
     ),
+    "system.preview_namespace": ("read-only path/options preview; no file content is persisted"),
     # Delete-only / no body content.
     "chunks.delete_chunk": "delete-only, no payload",
     "context_agents.delete_agent": "delete-only, no payload",
@@ -754,6 +756,13 @@ def test_csrf_classification_covers_every_unsafe_route() -> None:
                 "renamed or removed):\n  - " + "\n  - ".join(stale)
             )
         pytest.fail("\n\n".join(msg))
+
+
+def test_preview_namespace_spa_uses_csrf_protected_post() -> None:
+    """The local-path preview must not regress to a token-exempt GET."""
+    settings_js = (STATIC_DIR / "settings-config.js").read_text(encoding="utf-8")
+    assert "api('POST', '/api/index/preview-namespace'" in settings_js
+    assert "api('GET', `/api/index/preview-namespace" not in settings_js
 
 
 def test_redaction_protected_handlers_scan_and_refuse() -> None:

@@ -1,6 +1,6 @@
 {
   "name": "memtomem-automation",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Opt-in prompt retrieval and write-time indexing automation for memtomem",
   "author": {
     "name": "memtomem",

@@ -37,7 +37,7 @@ async def mem_index(
     if mismatch_msg:
         return mismatch_msg
 
-    target = Path(path).resolve()
+    target = Path(path).expanduser().resolve()
     effective_ns = namespace or _resolve_agent_namespace(app, None)
 
     stats = await app.index_engine.index_path(
@@ -45,7 +45,18 @@ async def mem_index(
         recursive=recursive,
         force=force,
         namespace=effective_ns,
+        path_scope="explicit",
     )
+
+    if stats.errors and stats.total_files == 0:
+        return "Error: " + "; ".join(stats.errors)
+
+    if stats.total_files == 0:
+        return (
+            "Indexing complete: no indexable files found\n"
+            f"- Path: {target}\n"
+            "- Root registration: unchanged (one-shot index)"
+        )
 
     result = (
         f"Indexing complete:\n"
@@ -57,6 +68,10 @@ async def mem_index(
         f"- Blocked (redaction): {stats.blocked_files}\n"
         f"- Duration: {stats.duration_ms:.0f}ms"
     )
+    if not app.index_engine._is_within_memory_dirs(target):
+        result += "\n- Root registration: unchanged (one-shot index)"
+    if stats.errors:
+        result += "\n- Errors:\n" + "\n".join(f"    {e}" for e in stats.errors)
     if stats.blocked_files:
         # ADR-0006 PR-A: name the skipped files so an operator can review them.
         result += "\n- Blocked files:\n" + "\n".join(f"    {p}" for p in stats.blocked_paths)

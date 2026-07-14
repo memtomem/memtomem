@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import pathspec
 
@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from memtomem.storage.sqlite_backend import SqliteBackend
 
 logger = logging.getLogger(__name__)
+
+PathScope = Literal["configured", "explicit"]
 
 _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 
@@ -465,12 +467,18 @@ class IndexEngine:
         namespace: str | None = None,
         *,
         force_unsafe: bool = False,
+        path_scope: PathScope = "configured",
     ) -> IndexingStats:
         self._active_runs += 1
         try:
             async with self._index_lock:
                 return await self._index_path_inner(
-                    path, recursive, force, namespace, force_unsafe=force_unsafe
+                    path,
+                    recursive,
+                    force,
+                    namespace,
+                    force_unsafe=force_unsafe,
+                    path_scope=path_scope,
                 )
         finally:
             self._active_runs -= 1
@@ -483,17 +491,23 @@ class IndexEngine:
         namespace: str | None = None,
         *,
         force_unsafe: bool = False,
+        path_scope: PathScope = "configured",
     ) -> IndexingStats:
         start = time.monotonic()
         path = path.resolve()
 
-        if not self._is_within_memory_dirs(path):
-            logger.warning("Path %s resolves outside configured memory_dirs, skipping", path)
-            return IndexingStats(0, 0, 0, 0, 0, 0.0)
+        if path_scope == "configured" and not self._is_within_memory_dirs(path):
+            message = f"path is outside configured memory directories: {path}"
+            logger.warning(message)
+            return IndexingStats(0, 0, 0, 0, 0, 0.0, errors=(message,))
+
+        if not path.exists():
+            message = f"index path does not exist: {path}"
+            return IndexingStats(0, 0, 0, 0, 0, 0.0, errors=(message,))
 
         # File-set parity: route through ``discover_indexable_files`` so the
         # preview-namespace endpoint and the indexing run see the same set.
-        files = self.discover_indexable_files(path, recursive)
+        files = self.discover_indexable_files(path, recursive, path_scope=path_scope)
         if not files:
             return IndexingStats(0, 0, 0, 0, 0, 0.0)
 
@@ -502,7 +516,11 @@ class IndexEngine:
         async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
                 return await self._index_file(
-                    fp, force, namespace=namespace, force_unsafe=force_unsafe
+                    fp,
+                    force,
+                    namespace=namespace,
+                    force_unsafe=force_unsafe,
+                    path_scope=path_scope,
                 )
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
@@ -575,7 +593,13 @@ class IndexEngine:
         ns_set: set[str | None] = {self._resolve_namespace(f, explicit_ns) for f in files}
         return sorted(ns_set, key=lambda x: (x is None, x or ""))
 
-    def discover_indexable_files(self, path: Path, recursive: bool = True) -> list[Path]:
+    def discover_indexable_files(
+        self,
+        path: Path,
+        recursive: bool = True,
+        *,
+        path_scope: PathScope = "configured",
+    ) -> list[Path]:
         """Enumerate files ``index_path`` would visit for ``path``.
 
         Single source of truth for "which files would be indexed" — the
@@ -585,7 +609,7 @@ class IndexEngine:
         ``_index_path_inner`` so the preview cannot drift from reality.
         """
         path = path.resolve()
-        if not self._is_within_memory_dirs(path):
+        if path_scope == "configured" and not self._is_within_memory_dirs(path):
             return []
         if path.is_file():
             return [path]
@@ -603,6 +627,7 @@ class IndexEngine:
         force_unsafe: bool = False,
         already_scanned: bool = False,
         lock_held: bool = False,
+        path_scope: PathScope = "configured",
     ) -> tuple[IndexFileResult, float]:
         """Run ``_index_file`` under the L2 sidecar → L3 ``_index_lock`` pair.
 
@@ -649,6 +674,7 @@ class IndexEngine:
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
+                    path_scope=path_scope,
                 )
                 return result, (time.monotonic() - start) * 1000
         async with async_file_lock(
@@ -664,6 +690,7 @@ class IndexEngine:
                     on_chunk_progress=on_chunk_progress,
                     force_unsafe=force_unsafe,
                     already_scanned=already_scanned,
+                    path_scope=path_scope,
                 )
                 return result, (time.monotonic() - start) * 1000
 
@@ -676,6 +703,7 @@ class IndexEngine:
         force_unsafe: bool = False,
         already_scanned: bool = False,
         lock_held: bool = False,
+        path_scope: PathScope = "configured",
     ) -> IndexingStats:
         """Index a single file. Convenience wrapper for external callers.
 
@@ -750,6 +778,7 @@ class IndexEngine:
                 force_unsafe=force_unsafe,
                 already_scanned=already_scanned,
                 lock_held=lock_held,
+                path_scope=path_scope,
             )
         finally:
             self._active_runs -= 1
@@ -917,7 +946,9 @@ class IndexEngine:
         """
         return self._containing_index_root(path) is not None
 
-    async def _delete_missing_source(self, file_path: Path) -> IndexFileResult:
+    async def _delete_missing_source(
+        self, file_path: Path, *, path_scope: PathScope = "configured"
+    ) -> IndexFileResult:
         """Remove stale chunks for a source file that is gone from disk.
 
         Reached when ``stat``/``read_text`` raise ``FileNotFoundError`` /
@@ -937,7 +968,7 @@ class IndexEngine:
         same ``delete_by_source`` primitive as those backstops. (#1566)
         """
         root = self._containing_index_root(file_path)
-        if root is None or not root.is_dir():
+        if path_scope == "configured" and (root is None or not root.is_dir()):
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
         deleted = await self._storage.delete_by_source(file_path)
         if deleted:
@@ -958,6 +989,7 @@ class IndexEngine:
         on_chunk_progress: Callable[[int, int], None] | None = None,
         force_unsafe: bool = False,
         already_scanned: bool = False,
+        path_scope: PathScope = "configured",
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
@@ -976,7 +1008,7 @@ class IndexEngine:
             # File deleted/renamed away (NotADirectoryError: a parent component
             # was replaced by a file, so the path cannot exist) — purge its
             # stale chunks instead of a silent no-op.
-            return await self._delete_missing_source(file_path)
+            return await self._delete_missing_source(file_path, path_scope=path_scope)
         except OSError:
             # Transient I/O (EACCES/EIO/ESTALE) — never delete on a blip.
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
@@ -987,7 +1019,7 @@ class IndexEngine:
         # content read) and BEFORE the exclude guard, so an excluded file that
         # was swapped for a same-named directory is still cleaned up. (#1566)
         if not stat_module.S_ISREG(stat_result.st_mode):
-            return await self._delete_missing_source(file_path)
+            return await self._delete_missing_source(file_path, path_scope=path_scope)
 
         # Primary exclude guard — every caller (index_file, _index_path_inner
         # after _discover_files, index_path_stream single-file branch) funnels
@@ -1026,7 +1058,7 @@ class IndexEngine:
             # or the leaf path was replaced by a directory (``IsADirectoryError``
             # — ``stat`` succeeds on the dir, the read fails). Either way the old
             # source no longer exists, so purge its stale chunks. (#1566)
-            return await self._delete_missing_source(file_path)
+            return await self._delete_missing_source(file_path, path_scope=path_scope)
         except OSError:
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
@@ -1263,6 +1295,7 @@ class IndexEngine:
         namespace: str | None = None,
         *,
         force_unsafe: bool = False,
+        path_scope: PathScope = "configured",
     ):
         """Like index_path(), but yields progress dicts as each file is processed.
 
@@ -1305,6 +1338,23 @@ class IndexEngine:
             start = time.monotonic()
             path = path.resolve()
 
+            if path_scope == "configured" and not self._is_within_memory_dirs(path):
+                yield {
+                    "type": "complete",
+                    "total_files": 0,
+                    "total_chunks": 0,
+                    "indexed_chunks": 0,
+                    "skipped_chunks": 0,
+                    "deleted_chunks": 0,
+                    "duration_ms": 0.0,
+                    "errors": [f"path is outside configured memory directories: {path}"],
+                    "resolved_namespaces": [],
+                    "blocked_files": 0,
+                    "blocked_paths": [],
+                    "blocked_project_shared_files": 0,
+                }
+                return
+
             if path.is_file():
                 files = [path]
             elif path.is_dir():
@@ -1318,7 +1368,7 @@ class IndexEngine:
                     "skipped_chunks": 0,
                     "deleted_chunks": 0,
                     "duration_ms": 0.0,
-                    "errors": [],
+                    "errors": [f"index path does not exist: {path}"],
                     "resolved_namespaces": [],
                     "blocked_files": 0,
                     "blocked_paths": [],
@@ -1390,6 +1440,7 @@ class IndexEngine:
                             namespace=namespace,
                             on_chunk_progress=cb,
                             force_unsafe=force_unsafe,
+                            path_scope=path_scope,
                         )
                         return result
                     finally:

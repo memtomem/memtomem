@@ -139,11 +139,8 @@ def add(
         )
     except click.ClickException as e:
         if as_json:
-            # Write-command JSON error shape (CONTRIBUTING): failures the
-            # CLI classified ride the body with exit 0; unexpected
-            # exceptions below keep the nonzero Click exit.
             click.echo(json.dumps({"ok": False, "reason": e.format_message()}))
-            return
+            raise click.exceptions.Exit(1)
         raise
     except Exception as e:
         raise_cli_error(e)

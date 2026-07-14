@@ -7,6 +7,34 @@ import { bootApp } from './setup/jsdom-app.mjs';
 // m2m-app-initialized); first-run tests opt in with { firstRun: true } or by
 // clearing localStorage before calling the landing helper directly.
 describe('First-run landing on Home (S2.1)', () => {
+  it('renders onboarding progress from the backend bootstrap stage', async () => {
+    const dom = await bootApp();
+    const { window } = dom;
+    await window.I18N.init();
+
+    window._applyBootstrapOrientation({
+      stage: 'needs_source',
+      total_sources: 0,
+      total_chunks: 0,
+    });
+    const orientation = window.document.getElementById('home-orientation');
+    expect(orientation.open).toBe(true);
+    expect(orientation.dataset.stage).toBe('needs_source');
+    expect(window.document.getElementById('home-orientation-status').textContent)
+      .toContain('No indexed source');
+
+    window._applyBootstrapOrientation({
+      stage: 'ready',
+      total_sources: 2,
+      total_chunks: 8,
+    });
+    const steps = orientation.querySelectorAll('.home-orientation-step');
+    expect(steps[0].classList.contains('is-complete')).toBe(true);
+    expect(steps[1].classList.contains('is-complete')).toBe(true);
+    expect(window.document.getElementById('home-orientation-status').textContent)
+      .toContain('2 sources and 8 chunks');
+  });
+
   it('_isFirstRun() is true only when no app-owned localStorage key exists', async () => {
     const dom = await bootApp();
     const { window } = dom;

@@ -119,7 +119,7 @@ that file by hand.
 
 The direct command preserves the extras in the persistent environment used by
 `mm`. For a no-install setup, use `uvx --isolated --from
-"memtomem[all]==0.3.10" memtomem-server`. If an older user-scope registration
+"memtomem[all]==0.3.11" memtomem-server`. If an older user-scope registration
 already exists, replace it explicitly:
 
 ```bash
@@ -227,7 +227,7 @@ only when those side effects are wanted:
 Install the exact CLI version expected by the automation bundle:
 
 ```bash
-uv tool install 'memtomem==0.3.10'
+uv tool install 'memtomem==0.3.11'
 ```
 
 The bundled dispatcher reads Claude's hook JSON from stdin; it never expands

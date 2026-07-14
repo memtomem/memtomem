@@ -152,7 +152,7 @@ async def _index(
         run_with_progress,
     )
 
-    resolved = Path(path).resolve()
+    resolved = Path(path).expanduser().resolve()
 
     try:
         agg = await run_with_progress(
@@ -166,7 +166,7 @@ async def _index(
     except KeyboardInterrupt:
         click.echo()
         click.secho(f"  Cancelled. Resume with: mm index {resolved}", fg="yellow")
-        return
+        raise click.exceptions.Exit(130)
 
     # Format string preserved verbatim from the pre-stream implementation —
     # downstream scripts may parse this. ``duration_ms`` accumulates across
@@ -197,6 +197,8 @@ async def _index(
         ),
     )
     print_index_errors(agg["errors"])
+    if agg["errors"] or agg["blocked"]:
+        raise click.exceptions.Exit(1)
 
 
 def _print_status(*, as_json: bool) -> None:
@@ -232,6 +234,8 @@ def _run_flush(*, as_json: bool) -> None:
 
     result = asyncio.run(_flush_async())
     _print_drain_result(result, as_json=as_json, label="Flushed")
+    if result.errors or result.dropped:
+        raise click.exceptions.Exit(1)
 
 
 def _run_debounce(
@@ -244,7 +248,7 @@ def _run_debounce(
 ) -> None:
     from memtomem.indexing import debounce
 
-    abs_path = str(Path(path).resolve())
+    abs_path = str(Path(path).expanduser().resolve())
     debounce.enqueue(abs_path, namespace=namespace, force=force)
 
     async def _drain_async() -> debounce.DrainResult:
@@ -261,15 +265,12 @@ def _run_debounce(
         as_json=as_json,
         label=f"Debounced (window={window_seconds}s, queued={abs_path})",
     )
+    if result.errors or result.dropped:
+        raise click.exceptions.Exit(1)
 
 
 class _IndexingStatsError(RuntimeError):
-    """Raised by ``_make_indexer`` when a drained file was redaction-blocked
-    (``IndexingStats.blocked_files``) so the debounce/flush drain loop
-    (``indexing/debounce.py``) treats it as a failed indexer call — keeping the
-    queue entry for retry — instead of silently deleting it. This closes the
-    ADR-0006 observability gap for the hook path without livelocking the queue
-    on terminal, non-security skips (see ``_make_indexer``)."""
+    """Turn a structured indexing failure into a retryable drain failure."""
 
 
 def _make_indexer(comp):
@@ -277,33 +278,40 @@ def _make_indexer(comp):
     queue entry's namespace/force. Closes over the bootstrapped components
     so the drain functions don't depend on the CLI bootstrap module.
 
-    ``index_path`` aggregates per-file outcomes into the returned
-    ``IndexingStats`` instead of raising, so a redaction block must be turned
-    back into an exception here — otherwise ``drain_ready`` / ``drain_all`` see
-    a normal return, mark the path ``indexed``, and drop it from the queue with
-    no retry even though the gate skipped it (the ADR-0006 hook-path gap).
+    ``index_path`` aggregates per-file outcomes into ``IndexingStats``. Every
+    reported error or privacy block becomes a failed drain attempt so hook
+    automation cannot claim success. The queue's bounded retry cap eventually
+    drops terminal inputs loudly with a direct ``mm index <path>`` remediation;
+    excluded, unsupported, or already-removed inputs return ``"skipped"`` and
+    leave the queue without being mislabeled as indexed."""
 
-    The raise is scoped to ``blocked_files`` (the secret-redaction case) on
-    purpose. ``stats.errors`` also carries **terminal** non-security skips —
-    ``file too large`` and ``binary file detected`` (``engine.py`` — returned
-    before the suffix filter) — which can never succeed on retry: raising on
-    those would pin them in the queue forever, re-erroring on every subsequent
-    drain (a livelock the pre-fix silent-drop correctly avoided). A blocked file
-    self-clears once the secret is removed; a too-large/binary file never would.
-    Surfacing transient (e.g. embedding-backend) errors on the debounce path is
-    a separate call and is intentionally left as-is (silent drop, as before)."""
-
-    async def _do(path_str: str, namespace: str | None, force: bool) -> None:
-        stats = await comp.index_engine.index_path(
-            Path(path_str),
-            recursive=False,
-            force=force,
-            namespace=namespace,
-        )
-        if stats.blocked_files:
+    async def _do(path_str: str, namespace: str | None, force: bool) -> str:
+        target = Path(path_str).expanduser().resolve()
+        existed_as_file = target.is_file()
+        if target.is_dir():
+            stats = await comp.index_engine.index_path(
+                target,
+                recursive=False,
+                force=force,
+                namespace=namespace,
+                path_scope="explicit",
+            )
+        else:
+            stats = await comp.index_engine.index_file(
+                target,
+                force=force,
+                namespace=namespace,
+                path_scope="explicit",
+            )
+        if stats.blocked_files or stats.errors:
             # ``stats.errors`` holds the redaction_blocked message(s) for the
             # blocked file(s); surface them (never the matched bytes).
-            raise _IndexingStatsError("; ".join(stats.errors))
+            raise _IndexingStatsError("; ".join(stats.errors) or "indexing blocked")
+        if stats.total_files == 0 or (
+            not existed_as_file and stats.deleted_chunks == 0 and not target.is_dir()
+        ):
+            return "skipped"
+        return "indexed"
 
     return _do
 
@@ -314,6 +322,7 @@ def _print_drain_result(result, *, as_json: bool, label: str) -> None:
             _json.dumps(
                 {
                     "indexed": result.indexed,
+                    "skipped": result.skipped,
                     "errors": [{"path": p, "message": m} for p, m in result.errors],
                     "dropped": [{"path": p, "message": m} for p, m in result.dropped],
                     "remaining": result.remaining,
@@ -323,6 +332,7 @@ def _print_drain_result(result, *, as_json: bool, label: str) -> None:
         return
     click.echo(f"{label}")
     click.echo(f"  Indexed: {len(result.indexed)}")
+    click.echo(f"  Skipped: {len(result.skipped)}")
     if result.errors:
         click.echo(f"  Errors: {len(result.errors)}")
         for p, m in result.errors:

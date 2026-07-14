@@ -42,7 +42,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import IO, Awaitable, Callable, Iterable
+from typing import IO, Awaitable, Callable, Iterable, Literal
 
 import portalocker
 
@@ -90,6 +90,7 @@ class DrainResult:
     """Summary of a drain pass — what was indexed, what errored, what's left."""
 
     indexed: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
     dropped: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
     remaining: int = 0
@@ -303,7 +304,7 @@ def _record_failure(
 async def drain_ready(
     *,
     window_seconds: float,
-    indexer: Callable[[str, str | None, bool], Awaitable[None]],
+    indexer: Callable[[str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]],
     now: float | None = None,
     queue_file: Path | None = None,
 ) -> DrainResult:
@@ -323,8 +324,13 @@ async def drain_ready(
         for p in ready_paths:
             entry = entries[p]
             try:
-                await indexer(p, entry.namespace, entry.force)
-                result.indexed.append(p)
+                outcome = await indexer(p, entry.namespace, entry.force)
+                if outcome == "skipped":
+                    result.skipped.append(p)
+                else:
+                    # ``None`` remains the backward-compatible success value
+                    # for existing callback implementations and test doubles.
+                    result.indexed.append(p)
                 del entries[p]
             except Exception as e:
                 # Keep the entry so the next hook call retries — until the
@@ -337,7 +343,7 @@ async def drain_ready(
 
 async def drain_all(
     *,
-    indexer: Callable[[str, str | None, bool], Awaitable[None]],
+    indexer: Callable[[str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]],
     paths: Iterable[str] | None = None,
     queue_file: Path | None = None,
 ) -> DrainResult:
@@ -360,8 +366,11 @@ async def drain_all(
         for p in targets:
             entry = entries[p]
             try:
-                await indexer(p, entry.namespace, entry.force)
-                result.indexed.append(p)
+                outcome = await indexer(p, entry.namespace, entry.force)
+                if outcome == "skipped":
+                    result.skipped.append(p)
+                else:
+                    result.indexed.append(p)
                 del entries[p]
             except Exception as e:
                 # Same poison-entry cap as drain_ready — this path runs on

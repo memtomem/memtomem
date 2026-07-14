@@ -81,9 +81,7 @@ def test_documented_quickstart_round_trip(tmp_path: Path) -> None:
             f"status failed:\nstdout={result.stdout}\nstderr={result.stderr}"
         )
         payload = json.loads(result.stdout)
-        # ``mm status --json`` emits ``{"error": ...}`` with exit code 0 on a
-        # ClickException (read-command JSON error shape), so returncode alone
-        # is too weak a guard — assert the report body is actually present.
+        # The report body must be present as well as the successful exit code.
         assert "error" not in payload, f"status returned an error shape: {payload}"
         return payload
 
@@ -92,6 +90,7 @@ def test_documented_quickstart_round_trip(tmp_path: Path) -> None:
 
     empty = _status_json(_run("status", "--json"))
     assert empty["index"]["total_chunks"] == 0
+    assert empty["config"]["db_path"] == str((home / ".memtomem" / "memtomem.db").resolve())
 
     sentence = "Deployment checklist uses blue-green rollout"
     add = _run("add", sentence, "--tags", "ops", "--json")

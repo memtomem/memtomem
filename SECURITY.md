@@ -21,7 +21,9 @@ memtomem is alpha (`0.x`); only the latest published minor receives security fix
 - **Content Security Policy**: Strict CSP header limits script/style sources to self + cdnjs
 - **Frame protection**: `X-Frame-Options: DENY` prevents clickjacking
 - **CORS**: Restricted to localhost origins only
-- **Path traversal protection**: All file access endpoints validate against indexed sources; symlinked files are rejected
+- **Path traversal protection**: General file access endpoints validate against
+  indexed sources and reject symlink escapes. The explicit one-shot indexing
+  exception is documented below.
 - **Error masking**: Filesystem paths are stripped from error responses
 
 #### CSRF / Origin / Host guard (RFC #787)
@@ -68,6 +70,31 @@ structured `web.csrf.observe` log record for after-the-fact auditing.
   Set to `0` / `false` / `no` / `off` to keep the structured log line
   but skip the 403. Any other value (including unset and typos) keeps
   enforcement on.
+
+#### Explicit one-shot indexing trust boundary (0.3.11 sign-off)
+
+The Folder Index flow deliberately accepts an operator-selected local file or
+directory even when it is outside configured `memory_dirs`. This is a
+single-user, local-machine capability: it indexes the selected content once
+but does not register the path for watching or startup reindexing.
+
+Security controls and limits:
+
+- index and namespace-preview requests are `POST` operations protected by the
+  per-process CSRF token;
+- Host and Origin/Referer validation applies to all API methods;
+- the server binds to loopback unless the operator explicitly enables remote
+  UI access and configures trusted hosts/origins;
+- only supported, indexable files are discovered, namespace preview is capped
+  at 200 files, and indexed content passes the normal redaction guard;
+- a one-shot request does not modify `memory_dirs` or expand the watcher.
+
+**Accepted residual risk:** a process or browser context that already has
+same-origin access and the live CSRF token can ask the locally running server
+to read and index any file the memtomem process account can read, subject to
+the indexability and redaction controls above. This matches the authority of a
+local user running `mm index <path>` and is accepted for the 0.3.11 local SPA
+threat model. Do not expose the unauthenticated Web UI to untrusted users.
 
 ### MCP server transports
 

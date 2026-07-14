@@ -1,6 +1,6 @@
 {
   "name": "memtomem",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Safe, explicit memory search and persistence workflows backed by the memtomem MCP server",
   "author": {
     "name": "memtomem",
