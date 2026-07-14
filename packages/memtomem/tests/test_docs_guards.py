@@ -668,7 +668,6 @@ class TestPublicReadmeAndExamples:
                 offenders.append(target)
         assert not offenders, f"PyPI README has relative Markdown links: {offenders}"
 
-
     def test_normal_mcp_examples_do_not_override_saved_memory_dirs(self) -> None:
         mcp_clients = _read(_GUIDES / "mcp-clients.md")
         ordinary, marker, overrides = mcp_clients.partition("## 11. Environment Variable Overrides")
@@ -720,10 +719,9 @@ class TestVibeCodingQuickstart:
             assert relative in _read(entrypoint), (
                 f"{entrypoint.relative_to(_REPO_ROOT)} must link the Korean vibe-coding quickstart"
             )
-        assert (
-            "https://github.com/memtomem/memtomem/blob/main/docs/guides/"
-            f"{relative}"
-        ) in _read(_PYPI_README)
+        assert (f"https://github.com/memtomem/memtomem/blob/main/docs/guides/{relative}") in _read(
+            _PYPI_README
+        )
 
     def test_plugin_install_commands_match_supported_public_flow(self) -> None:
         guide = _read(_VIBE_GUIDE)
