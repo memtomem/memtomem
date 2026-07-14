@@ -66,7 +66,7 @@ mem_do(action="ns_assign", params={"namespace": "archive", "old_namespace": "def
 Derive namespace from subfolder names automatically:
 
 ```
-mem_config(key="namespace.enable_auto_ns", value="true")
+mem_config(key="namespace.enable_auto_ns", value="true", persist=True)
 ```
 
 ```
@@ -158,8 +158,8 @@ mem_entity_search(entity_type="person")             # query extracted entities
 Score decay reduces relevance of older memories:
 
 ```
-mem_config(key="decay.enabled", value="true")
-mem_config(key="decay.half_life_days", value="30")
+mem_config(key="decay.enabled", value="true", persist=True)
+mem_config(key="decay.half_life_days", value="30", persist=True)
 ```
 
 TTL-based cleanup:

@@ -32,8 +32,8 @@ Create or edit the `~/.cursor/mcp.json` file:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }

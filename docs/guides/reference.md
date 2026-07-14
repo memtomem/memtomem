@@ -87,7 +87,9 @@ sequenceDiagram
 
 ## MCP Tools at a Glance
 
-memtomem provides **96 MCP tools** organized into categories:
+memtomem provides **96 current MCP tools** organized into categories. Full mode
+also registers the deprecated `mem_context_migrate` compatibility alias (97
+registered names total):
 
 | Category | Tools | What they do |
 |----------|-------|-------------|
@@ -103,7 +105,7 @@ memtomem provides **96 MCP tools** organized into categories:
 | **Working Memory** | `mem_scratch_set/get/promote` | Ephemeral key-value scratch space |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* | Monitor and configure |
 | **Pinned Context** | `mem_pinned_list/get/set/delete`, `mem_context_compose` | Keep bounded instructions ahead of retrieved memory |
-| **Formation** | `mem_formation_scan`, `mem_candidate_list/review/recover` | Review proposed memories and recover interrupted approvals |
+| **Formation** | `mem_formation_scan`, `mem_candidate_propose/list/review/recover` | Submit and review proposed memories and recover interrupted approvals |
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
@@ -143,4 +145,4 @@ The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skill
 - [LLM Providers](llm-providers.md) — Optional LLM features (auto-tag, entity extraction, ask)
 - [MCP Client Setup](mcp-clients.md) — Editor-specific configuration
 - [memtomem-stm](https://github.com/memtomem/memtomem-stm) — Proactive surfacing, compression, caching (separate package)
-- [Full Tool Reference](../../packages/memtomem/README.md) — All 96 tools with parameters
+- [Full Tool Reference](../../packages/memtomem/README.md) — All current tools with parameters

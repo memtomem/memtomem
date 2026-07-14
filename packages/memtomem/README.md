@@ -40,7 +40,12 @@ mm index /path/to/your/notes
 
 If `mm init` registered an MCP client, ask it to `Call the mem_status tool`. See [Getting Started](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md) for install alternatives and [MCP Client Setup](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md) for manual registration.
 
-`[all]` includes local ONNX embeddings, the Korean tokenizer, provider SDKs, code chunking, and the Web UI. Install bare `memtomem` for BM25-only usage. If `mm` is not on PATH, run `uv tool update-shell` and open a new shell. If an install appears stale, re-run it with `--refresh`.
+`[all]` includes ONNX, Ollama and OpenAI integrations, Korean tokenization,
+code chunking, the Web UI, Langfuse tracing, and LangGraph Store support.
+Install bare `memtomem` for BM25-only usage. See the
+[optional extras table](https://github.com/memtomem/memtomem/blob/main/docs/guides/getting-started.md#optional-extras)
+for smaller bundles. If `mm` is not on PATH, run `uv tool update-shell` and
+open a new shell. If an install appears stale, re-run it with `--refresh`.
 
 > memtomem is the long-term-memory store. [memtomem-stm](https://github.com/memtomem/memtomem-stm) is a separate, optional MCP proxy for automatic surfacing, compression, and caching.
 
@@ -55,14 +60,15 @@ If `mm init` registered an MCP client, ask it to `Call the mem_status tool`. See
 - **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
 - **🧭 Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable Wiki assets, then sync them to supported runtimes
 - **⚙️ Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips cold-start
-- **🛠️ 96 MCP tools** — full feature surface as MCP tools, with `mem_do` meta-tool routing all registered actions in `core` mode (default) for minimal context usage
+- **🛠️ 9-tool core mode** — a compact default surface, with `mem_do` routing the full feature set without loading every tool into agent context
 - **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
 - **🕸️ LangGraph Store** — optional `MemtomemBaseStore` supplies tuple-namespace JSON persistence and search
 
-The 96-tool surface includes the new Pinned Context actions
+The full surface contains **96 current tools** plus the deprecated
+`mem_context_migrate` compatibility alias. It includes the Pinned Context actions
 (`mem_pinned_list/get/set/delete`, `mem_context_compose`) and review-first
-formation actions (`mem_formation_scan`, `mem_candidate_list/review/recover`). See the
-[complete MCP table](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md#available-mcp-tools-96)
+formation actions (`mem_formation_scan`, `mem_candidate_propose/list/review/recover`). See the
+[complete MCP table](https://github.com/memtomem/memtomem/blob/main/docs/guides/mcp-clients.md#available-mcp-tools)
 for every category.
 
 ## Documentation

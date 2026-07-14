@@ -128,7 +128,7 @@ like Namespaces, Sessions, Working Memory, and Health Report.
 ```bash
 uv tool install memtomem             # no extras — dense search, web UI, Korean tokenizer unavailable until you add them
 ```
-Opt in later per-feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the extras table in [Getting Started](docs/guides/getting-started.md#option-c-from-source-for-development-or-testing)).
+Opt in later per-feature: `uv tool install --reinstall 'memtomem[onnx,web]'` (see the [extras table](docs/guides/getting-started.md#optional-extras)).
 
 **Project-scoped** (per-project isolation):
 ```bash
@@ -137,7 +137,7 @@ uv add 'memtomem[all]' && uv run mm init    # all commands need `uv run` prefix
 
 **No install** (uvx on demand):
 ```bash
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+claude mcp add memtomem -s user -- uvx --isolated --from "memtomem[all]==0.3.10" memtomem-server
 ```
 
 See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor / Windsurf / Claude Desktop / Gemini CLI / Kimi CLI.

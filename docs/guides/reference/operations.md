@@ -8,6 +8,7 @@ STM proactive surfacing, and uninstalling.
 **On this page**
 
 - [Web UI](#web-ui)
+- [Web API and readiness](#web-api-and-readiness)
 - [Privacy audits](#privacy-audits)
 - [Troubleshooting](#troubleshooting)
 - [STM: Proactive Memory Surfacing (Optional)](#stm-proactive-memory-surfacing-optional)
@@ -30,6 +31,20 @@ mm web --mode {prod,dev}       # explicit mode (mutually exclusive with --dev)
 `mm web` opens in **Simple** mode by default, showing the Home, Search, Sources, Gateway, Index, and Settings tabs. The **Gateway** tab is the Context Gateway surface (Overview, Projects, Skills, Commands, Subagents, MCP Servers, Hooks, Wiki); the **Settings** tab holds Config, Namespaces, and Reset Database. Flip the header's **Advanced** toggle to reveal the Tags and Timeline tabs, plus the Dedup, Age-out, and Export/Import sections inside Settings. `mm web --dev` — or setting `MEMTOMEM_WEB__MODE=dev` in your shell profile — extends the surface with maintainer pages (Sessions, Working Memory, Procedures, Health Report) and unlocks structural namespace verbs (rename, delete) that are dev-only by ADR-0007.
 
 Tab classification changes over time — run `mm web --dev` against your installed version to see the complete surface. The API endpoints backing dev-only pages return 404 in `prod` mode; scripts that hit `/api/sessions`, `/api/scratch`, `/api/namespaces/{ns}/rename`, `DELETE /api/namespaces/{ns}`, etc. need `dev` mode. `GET /api/namespaces` (list) and `PATCH /api/namespaces/{ns}` (cosmetic edit — color, description) are prod-tier and respond in both modes.
+
+### Web API and readiness
+
+The local server exposes interactive OpenAPI documentation at `/api/docs`.
+Use `GET /api/readiness` for orchestration: it returns `200` when the runtime
+is ready and `503` with `startup_unavailable` while required startup components
+are unavailable.
+
+Search requests support exact source matching (`source_exact`), `chunk_type`,
+and creation bounds (`created_from`, `created_before`). Timestamps must include
+a timezone; invalid or reversed ranges return `422`. Export accepts a namespace
+filter. Initial indexing reports `success`, `partial`, or `failed` so automation
+can distinguish a usable partial index from a clean completion and a total
+failure.
 
 ### Remote access
 
@@ -129,8 +144,8 @@ If you moved or renamed your memtomem source directory:
 ### Slow search
 
 1. Reduce `top_k` (default 10)
-2. `mem_config(key="search.bm25_candidates", value="30")` — Reduce candidate pool
-3. Disable one retriever if sufficient: `mem_config(key="search.enable_bm25", value="false")`
+2. `mem_config(key="search.bm25_candidates", value="30", persist=True)` — Reduce candidate pool
+3. Disable one retriever if sufficient: `mem_config(key="search.enable_bm25", value="false", persist=True)`
 
 ### "database is locked"
 

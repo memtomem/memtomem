@@ -76,8 +76,7 @@ uv tool install 'memtomem[all]'       # or: pipx install 'memtomem[all]'
 mm --version
 ```
 
-`[all]` includes ONNX embeddings, the Korean tokenizer, Ollama/OpenAI SDKs,
-code chunking, and the Web UI. For BM25-only search without optional downloads:
+`[all]` includes every bundle below. For BM25-only search without optional downloads:
 
 ```bash
 uv tool install memtomem
@@ -88,6 +87,22 @@ Add features later with a reinstall such as:
 ```bash
 uv tool install --reinstall 'memtomem[onnx,web]'
 ```
+
+<a id="optional-extras"></a>
+
+#### Optional extras
+
+| Extra | Adds |
+|---|---|
+| `onnx` | Local FastEmbed embeddings and reranking |
+| `ollama` | Ollama Python SDK integration |
+| `openai` | OpenAI Python SDK integration |
+| `korean` | Kiwi Korean tokenizer |
+| `code` | Tree-sitter Python, JavaScript, and TypeScript chunking |
+| `web` | FastAPI/uvicorn Web UI runtime |
+| `langfuse` | Langfuse tracing |
+| `langgraph` | `MemtomemStore` and `MemtomemBaseStore` adapters |
+| `all` | Every extra above |
 
 ### Option B: Project dependency (per-project isolation)
 
@@ -223,12 +238,16 @@ want an environment override.
 Claude Code's minimal manual registration is:
 
 ```bash
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+claude mcp add memtomem -s user -- memtomem-server
 ```
 
-Claude Code users can instead install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
-which bundles the MCP server plus optional commands, hooks, and a curator
-agent. Manual and plugin-managed server copies are not run simultaneously.
+This reuses the persistent `memtomem[all]` environment installed above. For a
+one-off setup without a persistent install, use `uvx --isolated --from
+"memtomem[all]==0.3.10" memtomem-server`. Claude Code users can instead
+install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
+which provides an exact-pinned MCP server and six focused workflows. Automatic
+indexing hooks are supplied only by the separate `memtomem-automation` plugin.
+Manual and plugin-managed server copies are not run simultaneously.
 
 ## Optional: Sync memories across your own machines
 
@@ -296,9 +315,11 @@ Confirm `mm status` works in a terminal, then restart the client and follow
 
 ### Install and upgrade issues
 
-If `mm --version` is older than the latest release, re-run the install with
-`--refresh` or use `mm upgrade`. Detailed recovery commands live in
-[Operations](reference/operations.md).
+If `mm --version` is older than the latest release, re-run the installation
+command with `--refresh`. `mm upgrade` automates this only for `uv tool`
+installs; pipx, project, and source installs use their own package-manager
+workflow. Detailed recovery commands live in
+[Data, config & CLI](reference/data-config-cli.md#cli-reference).
 
 ## Optional: Share rules, skills, sub-agents, and commands across editors
 

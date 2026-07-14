@@ -111,8 +111,8 @@ Code, use `claude mcp add` instead of editing a file. See
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
+      "command": "memtomem-server",
+      "args": [],
       "env": {
         "MEMTOMEM_LLM__ENABLED": "true",
         "MEMTOMEM_LLM__PROVIDER": "openai",

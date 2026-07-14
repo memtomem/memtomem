@@ -897,7 +897,7 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP tools are exposed: `core` (9 tools), `standard` (38 incl. `mem_do`), `full` (96) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (38 incl. `mem_do`), `full` (96 current tools + deprecated `mem_context_migrate` alias) |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
 
@@ -984,5 +984,6 @@ You can also inspect and change settings at runtime via the `mem_config` MCP too
 ```
 mem_config()                                      # Output all settings as JSON
 mem_config(key="search.default_top_k")            # Query a single value
-mem_config(key="search.default_top_k", value="20")  # Change and persist
+mem_config(key="search.default_top_k", value="20")  # Change for this server process
+mem_config(key="search.default_top_k", value="20", persist=True)  # Persist to config.json
 ```

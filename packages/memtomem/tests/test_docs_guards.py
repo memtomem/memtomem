@@ -38,6 +38,8 @@ import pytest
 
 from memtomem.cli import cli as _CLI
 from memtomem.config import Mem2MemConfig
+from memtomem.server import _ALL_REGISTERED_TOOLS, _CORE_TOOLS, _STANDARD_PACKS
+from memtomem.server.tool_registry import ACTIONS
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GUIDES = _REPO_ROOT / "docs" / "guides"
@@ -604,6 +606,7 @@ class TestInternalDocLinksResolve:
                 "4-recall-recent-memories",
             },
             _GUIDES / "mcp-clients.md": {
+                "available-mcp-tools-96",
                 "verify-connection",
                 "verify-connection-1",
                 "verify-connection-2",
@@ -691,3 +694,48 @@ class TestPublicReadmeAndExamples:
         file_param = next(param for param in add.params if param.name == "file_name")
         assert "selected scope's memory directory" in (file_param.help or "")
         assert "~/.memtomem/memories" not in (file_param.help or "")
+
+
+class TestRegistryAndInstallDocs:
+    def test_cli_reference_names_every_top_level_command(self) -> None:
+        text = _read(_GUIDES / "reference" / "data-config-cli.md")
+        section = text.split("## CLI Reference", 1)[1]
+        missing = [name for name in sorted(_CLI.commands) if f"`{name}`" not in section]
+        assert not missing, f"CLI reference lost top-level commands: {missing}"
+
+    def test_full_mcp_table_matches_current_registry(self) -> None:
+        text = _read(_GUIDES / "mcp-clients.md")
+        section = text.split("### Available MCP Tools", 1)[1].split("### STM Proxy Tools", 1)[0]
+        table = "\n".join(line for line in section.splitlines() if line.startswith("|"))
+        documented = set(re.findall(r"\bmem_[a-z0-9_]+\b", table))
+        current = set(_ALL_REGISTERED_TOOLS) - {"mem_context_migrate"}
+        assert documented == current, (
+            f"MCP table drifted; missing={sorted(current - documented)}, "
+            f"extra={sorted(documented - current)}"
+        )
+        assert len(current) == 96
+        assert len(_ALL_REGISTERED_TOOLS) == 97
+        assert len(_CORE_TOOLS) == 9
+        standard = set(_CORE_TOOLS) | {
+            f"mem_{name}" for name, info in ACTIONS.items() if info.category in _STANDARD_PACKS
+        }
+        assert len(standard & set(_ALL_REGISTERED_TOOLS)) == 38
+
+    def test_optional_extras_table_matches_package_metadata(self) -> None:
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            project = tomllib.load(handle)["project"]
+        expected = set(project["optional-dependencies"])
+        guide = _read(_GUIDES / "getting-started.md")
+        section = guide.split("#### Optional extras", 1)[1].split("### Option B", 1)[0]
+        documented = set(re.findall(r"^\| `([^`]+)` \|", section, re.MULTILINE))
+        assert documented == expected
+
+    def test_public_docs_do_not_use_floating_bare_uvx_server(self) -> None:
+        blob = "\n".join(_read(doc) for doc in _public_markdown())
+        assert "uvx --from memtomem memtomem-server" not in blob
+        assert '["--from", "memtomem", "memtomem-server"]' not in blob
+
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
+        pins = set(re.findall(r"memtomem\[all\]==([0-9]+\.[0-9]+\.[0-9]+)", blob))
+        assert pins == {version}

@@ -144,7 +144,7 @@ if (_ctxPortalInstallGuideModal) {
             <span>${escapeHtml(t('settings.ctx.guide_code_header_terminal'))}</span>
             <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
           </div>
-          <pre class="guide-code"><code>claude mcp add memtomem -- uvx --from memtomem memtomem-server</code></pre>
+          <pre class="guide-code"><code>claude mcp add memtomem -- memtomem-server</code></pre>
         </div>
         <p class="guide-note">${escapeHtml(t('settings.ctx.guide_claude_note'))}</p>
       `;
@@ -162,8 +162,8 @@ if (_ctxPortalInstallGuideModal) {
   "mcpServers": {
     "memtomem": {
       "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }</code></pre>
@@ -178,8 +178,8 @@ if (_ctxPortalInstallGuideModal) {
             <button type="button" class="btn-ghost btn-xs copy-code-btn">${escapeHtml(t('settings.ctx.copy'))}</button>
           </div>
           <pre class="guide-code"><code>[mcp_servers.memtomem]
-command = "uvx"
-args = ["--from", "memtomem", "memtomem-server"]</code></pre>
+command = "memtomem-server"
+args = []</code></pre>
         </div>
       `;
     } else if (runtimeName === 'kimi') {

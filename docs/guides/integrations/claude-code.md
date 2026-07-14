@@ -101,10 +101,10 @@ silently spawns an MCP server.
 
 ```bash
 # User scope — install once, available in every project
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+claude mcp add memtomem -s user -- memtomem-server
 
 # Local scope — this project only, not committed (omitting -s is the same)
-claude mcp add memtomem -s local -- uvx --from memtomem memtomem-server
+claude mcp add memtomem -s local -- memtomem-server
 
 # Source install (running from a git clone)
 # claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
@@ -112,6 +112,16 @@ claude mcp add memtomem -s local -- uvx --from memtomem memtomem-server
 
 Both `-s local` and `-s user` write to `~/.claude.json` — no need to edit
 that file by hand.
+
+The direct command preserves the extras in the persistent environment used by
+`mm`. For a no-install setup, use `uvx --isolated --from
+"memtomem[all]==0.3.10" memtomem-server`. If an older user-scope registration
+already exists, replace it explicitly:
+
+```bash
+claude mcp remove memtomem -s user
+mm init
+```
 
 #### Project scope via `.mcp.json`
 
@@ -121,8 +131,8 @@ For a team-shared setup, commit a `.mcp.json` at the project root:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }

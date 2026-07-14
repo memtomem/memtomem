@@ -69,16 +69,20 @@ credentials.
 
 ```bash
 # Local scope (default) — this project only, not committed
-claude mcp add memtomem -- uvx --from memtomem memtomem-server
+claude mcp add memtomem -- memtomem-server
 
 # User scope — available in every project
-claude mcp add memtomem -s user -- uvx --from memtomem memtomem-server
+claude mcp add memtomem -s user -- memtomem-server
 
 # Source (if running from git clone)
 # claude mcp add memtomem -s user -- uv run --directory /path/to/memtomem memtomem-server
 ```
 
 Both write to `~/.claude.json` — no need to edit that file by hand.
+
+These commands reuse the persistent environment that provides `mm`. If you
+intentionally do not install memtomem, replace `memtomem-server` with `uvx
+--isolated --from "memtomem[all]==0.3.10" memtomem-server`.
 
 For the safe plugin experience (bundled MCP server plus six focused skills),
 install `/plugin install memtomem@memtomem`. Prompt retrieval and write-time
@@ -93,8 +97,8 @@ For a team-shared setup, create a `.mcp.json` at the project root:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -121,8 +125,8 @@ Create or edit the `~/.cursor/mcp.json` file:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -147,8 +151,8 @@ Create or edit the `~/.codeium/windsurf/mcp_config.json` file:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -166,8 +170,8 @@ Edit the `~/Library/Application Support/Claude/claude_desktop_config.json` (macO
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -193,8 +197,8 @@ Create or edit the `~/.gemini/settings.json` file:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -213,8 +217,8 @@ Kimi CLI reads MCP servers from `~/.kimi/mcp.json` by default. If
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -252,8 +256,8 @@ memtomem:
 
 ```toml
 [mcp_servers.memtomem]
-command = "uvx"
-args = ["--from", "memtomem", "memtomem-server"]
+command = "memtomem-server"
+args = []
 ```
 
 Restart Codex CLI after configuration.
@@ -279,14 +283,27 @@ Call mem_status to check the memtomem connection status
 
 ## 8. OpenCode
 
-Install the configuration-only npm plugin:
+The npm plugin source is available but the package is not published yet.
+Configure the released MCP server directly in `opencode.json`:
 
-```bash
-opencode plugin add opencode-memtomem@0.1.0
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memtomem": {
+      "type": "local",
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.10", "memtomem-server"],
+      "enabled": true,
+      "timeout": 60000,
+      "environment": {"MEMTOMEM_TOOL_MODE": "core"}
+    }
+  }
+}
 ```
 
-It supplies the exact-pinned MCP server, six commands, three read-only skills,
-and conservative tool permissions. Run `/memtomem-status` after restarting.
+After npm publication, OpenCode's plugin form is
+`{"plugin": ["opencode-memtomem@0.1.0"]}`. The plugin supplies an exact-pinned
+MCP server, six commands, three read-only skills, and conservative permissions.
 See the [OpenCode integration guide](integrations/opencode.md) for precedence,
 permission, platform, and development-install details.
 
@@ -314,8 +331,8 @@ files — register memtomem in whichever you actually use:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -348,8 +365,8 @@ Create or edit that file:
   "mcpServers": {
     "memtomem": {
       "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -414,7 +431,9 @@ mm status
 uses, so the output is identical. Useful as a sanity check between
 `mm init` and the first editor-side call.
 
-### Available MCP Tools (96)
+<a id="available-mcp-tools-96"></a>
+
+### Available MCP Tools
 
 | Category | Tools |
 |----------|-------|
@@ -449,12 +468,21 @@ uses, so the output is identical. Useful as a sanity check between
 | **Evaluation** | `mem_eval` |
 | **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync`, `mem_context_memory_migrate`, `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version`, `mem_context_promote` — cross-runtime artifact sync (`mm context`). Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
 | **Pinned Context** | `mem_pinned_list`, `mem_pinned_get`, `mem_pinned_set`, `mem_pinned_delete`, `mem_context_compose` |
-| **Formation** | `mem_formation_scan`, `mem_candidate_list`, `mem_candidate_review`, `mem_candidate_recover` |
+| **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_review`, `mem_candidate_recover` |
 
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 tools, default), `standard` (core + common packs + `mem_do`), or `full` (all 96 tools individually) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (96 current tools plus the deprecated `mem_context_migrate` alias, 97 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+
+`mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
+external agent submit a review candidate without writing durable memory.
+`content` must be non-empty and at most 2,000 characters; `source` and
+`idempotency_key` are required. The content and source reference pass the
+privacy scanner, accepted proposals remain pending for up to 30 days, and a
+reused idempotency key returns the original proposal unless its content differs.
+`mem_context_migrate` is a deprecated alias for
+`mem_context_memory_migrate` and is scheduled for removal in v0.5.0.
 
 ### STM Proxy Tools (optional, separate package)
 
@@ -480,8 +508,8 @@ settings with `mm init`, `mm config`, or the Web UI.
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
+      "command": "memtomem-server",
+      "args": [],
       "env": {
         "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]",
         "MEMTOMEM_STORAGE__SQLITE_PATH": "~/.memtomem/memtomem.db",
@@ -506,8 +534,8 @@ ollama pull bge-m3
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"],
+      "command": "memtomem-server",
+      "args": [],
       "env": {
         "MEMTOMEM_INDEXING__MEMORY_DIRS": "[\"~/memories\"]",
         "MEMTOMEM_EMBEDDING__MODEL": "bge-m3",
@@ -742,7 +770,8 @@ section in the reference guide.
 3. Verify the install is reachable: `mm --version` (or `uvx --from memtomem mm --version` for uvx-only setups) — side-effect-free
 4. From inside the editor, ask it to call the `mem_status` tool — a successful response confirms the MCP handshake reached the server
 
-> Running `uvx --from memtomem memtomem-server` bare in a terminal prints
+> Running `uvx --isolated --from "memtomem[all]==0.3.10" memtomem-server`
+> bare in a terminal prints
 > a setup hint (MCP client configuration plus the network-transport
 > examples from §12) and exits — it is **not** a "does it serve?" smoke
 > test because no MCP client is connected. To test stdio, configure your

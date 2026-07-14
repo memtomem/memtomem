@@ -160,13 +160,17 @@ def test_opencode_plugin_matches_contract() -> None:
     assert f"MCP_TIMEOUT_MS = {contract['opencode']['mcp_timeout_ms']}" in generated
 
     plugin_version = contract["plugins"]["opencode_version"]
-    install_command = f"opencode plugin add {package['name']}@{plugin_version}"
+    plugin_spec = f'"plugin": ["{package["name"]}@{plugin_version}"]'
+    mcp_spec = f"memtomem[all]=={contract['core']['version']}"
     for path in (
         "packages/opencode-memtomem/README.md",
         "docs/guides/integrations/opencode.md",
         "docs/guides/mcp-clients.md",
     ):
-        assert install_command in (_ROOT / path).read_text(encoding="utf-8")
+        text = (_ROOT / path).read_text(encoding="utf-8")
+        assert f"opencode plugin add {package['name']}" not in text
+        assert plugin_spec in text
+        assert mcp_spec in text
 
     compatibility = f"compatibility: OpenCode {contract['opencode']['version_range']}"
     for skill in (_ROOT / "packages/opencode-memtomem/skills").glob("*/SKILL.md"):

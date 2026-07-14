@@ -21,7 +21,6 @@ from typing import Any, Iterable
 
 FIXTURE_ROOT = Path("packages/memtomem/tests/fixtures/corpus_v2")
 GENRES = frozenset({"runbook", "postmortem", "adr", "troubleshooting"})
-METRICS = ("recall@10", "mrr@10", "ndcg@10")
 
 
 def _load_sibling(name: str) -> Any:
@@ -149,6 +148,9 @@ async def _evaluate_track(
     embedding_dimension: int,
     reranker_model: str | None,
     reranker_pool: int,
+    top_k: int,
+    rrf_k: int,
+    candidate_k: int,
 ) -> dict[str, Any]:
     from memtomem.config import Mem2MemConfig
     import memtomem.config as config_module
@@ -167,6 +169,9 @@ async def _evaluate_track(
     config.embedding.model = embedding_model
     config.embedding.dimension = embedding_dimension
     config.search.cache_ttl = 0.0
+    config.search.rrf_k = rrf_k
+    config.search.bm25_candidates = candidate_k
+    config.search.dense_candidates = candidate_k
     if reranker_model is not None:
         config.rerank.enabled = True
         config.rerank.provider = "fastembed"
@@ -219,22 +224,22 @@ async def _evaluate_track(
             started = time.perf_counter()
             results, _ = await components.search_pipeline.search(
                 query.text,
-                top_k=10,
+                top_k=top_k,
                 rrf_weights=list(weights),
             )
             latencies.append((time.perf_counter() - started) * 1000)
             retrieved = [_portable_result_key(result, memory_root) for result in results]
-            recall = ir_metrics.recall_at_k(retrieved, allowed_primary, 10)
-            mrr = ir_metrics.reciprocal_rank_at_k(retrieved, allowed_primary, 10)
-            ndcg = ir_metrics.ndcg_at_k(retrieved, allowed_relevance, 10)
+            recall = ir_metrics.recall_at_k(retrieved, allowed_primary, top_k)
+            mrr = ir_metrics.reciprocal_rank_at_k(retrieved, allowed_primary, top_k)
+            ndcg = ir_metrics.ndcg_at_k(retrieved, allowed_relevance, top_k)
             row: dict[str, Any] = {
                 "query_id": query.query_id,
                 "pair_id": query.pair_id,
                 "lang": query.lang,
                 "type": query.type,
-                "recall@10": recall,
-                "mrr@10": mrr,
-                "ndcg@10": ndcg,
+                f"recall@{top_k}": recall,
+                f"mrr@{top_k}": mrr,
+                f"ndcg@{top_k}": ndcg,
                 "zero_hit": recall == 0.0,
                 "retrieved": retrieved,
             }
@@ -247,7 +252,7 @@ async def _evaluate_track(
                     and (track == "cross_language" or chunk.lang == query.lang)
                 }
                 row["genre_hit@1"] = float(bool(retrieved and retrieved[0] in matching_genre))
-                row["genre_mrr@10"] = _reciprocal_rank(retrieved, matching_genre)
+                row[f"genre_mrr@{top_k}"] = _reciprocal_rank(retrieved, matching_genre, top_k)
             if query.type == "negation":
                 first_relevant = next(
                     (index for index, key in enumerate(retrieved) if key in allowed_primary),
@@ -257,26 +262,26 @@ async def _evaluate_track(
                     (index for index, key in enumerate(retrieved) if key in allowed_hard_negative),
                     None,
                 )
-                row["constraint_success@10"] = float(
+                row[f"constraint_success@{top_k}"] = float(
                     first_relevant is not None
                     and (first_negative is None or first_relevant < first_negative)
                 )
-                row["hard_negative_hits@10"] = sum(
-                    key in allowed_hard_negative for key in retrieved[:10]
+                row[f"hard_negative_hits@{top_k}"] = sum(
+                    key in allowed_hard_negative for key in retrieved[:top_k]
                 )
             if query.type == "multi_topic":
                 retrieved_topics = {
-                    chunk.topic for chunk in all_chunks if chunk.key in set(retrieved[:10])
+                    chunk.topic for chunk in all_chunks if chunk.key in set(retrieved[:top_k])
                 }
                 intents = set(qrels["intents"])
-                row["intent_coverage@10"] = len(retrieved_topics & intents) / len(intents)
+                row[f"intent_coverage@{top_k}"] = len(retrieved_topics & intents) / len(intents)
             if track == "cross_language":
-                row["same_language_precision@10"] = sum(
-                    key.startswith(f"{query.lang}/") for key in retrieved[:10]
-                ) / max(1, len(retrieved[:10]))
-                row["cross_language_relevant@10"] = sum(
+                row[f"same_language_precision@{top_k}"] = sum(
+                    key.startswith(f"{query.lang}/") for key in retrieved[:top_k]
+                ) / max(1, len(retrieved[:top_k]))
+                row[f"cross_language_relevant@{top_k}"] = sum(
                     key in allowed_primary and not key.startswith(f"{query.lang}/")
-                    for key in retrieved[:10]
+                    for key in retrieved[:top_k]
                 )
             rows.append(row)
 
@@ -286,14 +291,16 @@ async def _evaluate_track(
             prefix = f"{row['lang']}|{row['type']}"
             for key, value in row.items():
                 if key in {
-                    *METRICS,
+                    f"recall@{top_k}",
+                    f"mrr@{top_k}",
+                    f"ndcg@{top_k}",
                     "genre_hit@1",
-                    "genre_mrr@10",
-                    "constraint_success@10",
-                    "hard_negative_hits@10",
-                    "intent_coverage@10",
-                    "same_language_precision@10",
-                    "cross_language_relevant@10",
+                    f"genre_mrr@{top_k}",
+                    f"constraint_success@{top_k}",
+                    f"hard_negative_hits@{top_k}",
+                    f"intent_coverage@{top_k}",
+                    f"same_language_precision@{top_k}",
+                    f"cross_language_relevant@{top_k}",
                 }:
                     samples[f"{prefix}|{key}"].append(float(value))
         for key, values in samples.items():
@@ -369,9 +376,16 @@ async def benchmark(
     embedding_models: dict[str, tuple[str, int]] | None = None,
     reranker_model: str | None = None,
     reranker_pool: int = 20,
+    top_k: int = 10,
+    rrf_k: int = 60,
+    candidate_k: int = 50,
 ) -> dict[str, Any]:
     if runs <= 0:
         raise ValueError("runs must be positive")
+    if min(top_k, rrf_k, candidate_k) <= 0:
+        raise ValueError("top_k, rrf_k, and candidate_k must be positive")
+    if reranker_model is not None and reranker_pool < top_k:
+        raise ValueError("reranker_pool must be at least top_k")
     portfolio = _load_sibling("query_holdout_v2")
     chunks = collect_tagged_chunks()
     models = embedding_models or {
@@ -397,6 +411,9 @@ async def benchmark(
         embedding_dimension=models["english"][1],
         reranker_model=reranker_model,
         reranker_pool=reranker_pool,
+        top_k=top_k,
+        rrf_k=rrf_k,
+        candidate_k=candidate_k,
     )
     same_ko = await _repeat_track(
         runs,
@@ -409,6 +426,9 @@ async def benchmark(
         embedding_dimension=models["korean"][1],
         reranker_model=reranker_model,
         reranker_pool=reranker_pool,
+        top_k=top_k,
+        rrf_k=rrf_k,
+        candidate_k=candidate_k,
     )
     cross_language = await _repeat_track(
         runs,
@@ -421,6 +441,9 @@ async def benchmark(
         embedding_dimension=models["cross_language"][1],
         reranker_model=reranker_model,
         reranker_pool=reranker_pool,
+        top_k=top_k,
+        rrf_k=rrf_k,
+        candidate_k=candidate_k,
     )
     query_payload = [asdict(query) for query in portfolio.QUERIES]
     return {
@@ -441,7 +464,10 @@ async def benchmark(
         },
         "search": {
             "rrf_weights": list(weights),
-            "top_k": 10,
+            "top_k": top_k,
+            "rrf_k": rrf_k,
+            "bm25_candidates": candidate_k,
+            "dense_candidates": candidate_k,
             "reranker_model": reranker_model,
             "reranker_pool": reranker_pool if reranker_model is not None else None,
         },
@@ -458,12 +484,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", default="1,1", help="BM25,dense RRF weights")
     parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--rrf-k", type=int, default=60)
+    parser.add_argument("--candidate-k", type=int, default=50)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     values = tuple(float(value.strip()) for value in args.weights.split(","))
     if len(values) != 2 or any(value < 0 for value in values) or not any(values):
         parser.error("--weights requires two non-negative values with at least one non-zero")
-    report = asyncio.run(benchmark((values[0], values[1]), runs=args.runs))
+    report = asyncio.run(
+        benchmark(
+            (values[0], values[1]),
+            runs=args.runs,
+            top_k=args.top_k,
+            rrf_k=args.rrf_k,
+            candidate_k=args.candidate_k,
+        )
+    )
     text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text, encoding="utf-8")

@@ -21,6 +21,7 @@ import click
 from memtomem.cli.init_cmd import (
     MmBinaryOrigin,
     RuntimeProfile,
+    _mcp_server_command,
     _write_kimi_mcp_json,
     _write_mcp_json,
 )
@@ -279,6 +280,61 @@ def _make_init_state(tmp_path: Path) -> dict:
         # state["_profile"] via _make_test_profile(tmp_path, kind=...).
         "_profile": _make_test_profile(),  # default: pypi / unknown
     }
+
+
+class TestMcpServerCommand:
+    @pytest.mark.parametrize("kind", ["source", "project"])
+    def test_workspace_uses_uv_run(
+        self, tmp_path: Path, kind: Literal["source", "project"]
+    ) -> None:
+        profile = _make_test_profile(tmp_path, kind=kind)
+
+        assert _mcp_server_command(profile) == (
+            "uv",
+            ["run", "--directory", str(tmp_path), "memtomem-server"],
+        )
+
+    @pytest.mark.parametrize("origin", ["uv-tool", "system", "unknown"])
+    def test_persistent_runtime_reuses_raw_interpreter(
+        self, tmp_path: Path, origin: MmBinaryOrigin
+    ) -> None:
+        raw_interpreter = tmp_path / "venv-link" / "bin" / "python"
+        profile = RuntimeProfile(
+            cwd_install_type="pypi",
+            cwd_install_dir=None,
+            runtime_interpreter=raw_interpreter,
+            workspace_venv_path=None,
+            mm_binary_origin=origin,
+            runtime_matches_workspace=False,
+        )
+
+        assert _mcp_server_command(profile) == (
+            str(raw_interpreter),
+            ["-m", "memtomem.server"],
+        )
+
+    def test_uvx_uses_isolated_exact_all_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        profile = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
+        monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", lambda _: "0.3.10")
+
+        assert _mcp_server_command(profile) == (
+            "uvx",
+            ["--isolated", "--from", "memtomem[all]==0.3.10", "memtomem-server"],
+        )
+
+    def test_persistent_command_launches_server_module(self) -> None:
+        profile = _make_test_profile(kind="pypi", mm_binary_origin="uv-tool")
+        command, args = _mcp_server_command(profile)
+
+        result = subprocess.run(
+            [command, *args, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        assert result.returncode == 0
+        assert "--transport" in result.stdout
 
 
 class TestInitConfigMerge:
@@ -2804,8 +2860,10 @@ class TestMcpPasteHints:
         mcp_path = share_dir / "mcp.json"
         assert f"Kimi CLI MCP config: wrote {mcp_path}" in out
         data = json.loads(mcp_path.read_text(encoding="utf-8"))
-        assert data["mcpServers"]["memtomem"]["command"] in {"uvx", "uv"}
-        assert "memtomem-server" in data["mcpServers"]["memtomem"]["args"]
+        assert data["mcpServers"]["memtomem"] == {
+            "command": sys.executable,
+            "args": ["-m", "memtomem.server"],
+        }
         assert not (tmp_path / ".mcp.json").exists()
 
 

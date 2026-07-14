@@ -138,10 +138,11 @@ async def mem_search(
             searches return ``user`` only. Pass ``project_shared`` from outside any
             project context for a cross-project search.
 
-    Result count may fall below ``top_k`` when post-rerank filters
-    (``source_filter``, ``tag_filter``, validity windows via ``as_of``) exclude
-    candidates. Increase ``top_k`` or ``rerank_pool`` to widen the pre-filter
-    candidate set; this method does not auto-oversample.
+    Result count may fall below ``top_k`` when filters exclude candidates.
+    Increase ``top_k`` for a wider per-call request. When reranking is enabled,
+    the candidate pool is automatically derived from ``rerank.oversample``,
+    ``rerank.min_pool``, and ``rerank.max_pool``; there is no per-call
+    ``rerank_pool`` argument.
     """
     if not query.strip():
         return "Error: query cannot be empty."

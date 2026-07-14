@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -145,6 +148,58 @@ def test_v2_committed_quality_bounds_match_generation_formula():
         floors, ceilings = tuner._quality_bounds(track)
         assert baseline["quality_floors"][track_name] == floors
         assert baseline["quality_ceilings"][track_name] == ceilings
+
+
+def test_v2_benchmark_rejects_invalid_k_parameters():
+    benchmark = _load("benchmark_v2_invalid_k", "tools/retrieval-eval/benchmark_v2.py")
+    with pytest.raises(ValueError, match="must be positive"):
+        asyncio.run(benchmark.benchmark(top_k=0))
+    with pytest.raises(ValueError, match="at least top_k"):
+        asyncio.run(
+            benchmark.benchmark(
+                top_k=10,
+                reranker_model="reranker",
+                reranker_pool=5,
+            )
+        )
+
+
+def test_k_sweep_assessment_applies_language_and_weak_slice_gates():
+    sweep = _load("sweep_k_v2_assessment", "tools/retrieval-eval/sweep_k_v2.py")
+
+    def track(lang: str, value: float, zero_hits: int) -> dict:
+        return {
+            "aggregate": {
+                f"{lang}|direct|recall@10": value,
+                f"{lang}|direct|mrr@10": value,
+                f"{lang}|direct|ndcg@10": value,
+                f"{lang}|genre_primary|genre_hit@1": value,
+                f"{lang}|negation|constraint_success@10": value,
+                f"{lang}|multi_topic|intent_coverage@10": value,
+            },
+            "zero_hit_count": zero_hits,
+            "latency_ms": {"p95": 10.0},
+        }
+
+    control = {
+        "search": {"top_k": 10},
+        "tracks": {
+            "english": track("en", 0.5, 2),
+            "korean": track("ko", 0.5, 2),
+            "cross_language": track("ko", 0.5, 3),
+        },
+    }
+    candidate = deepcopy(control)
+    candidate["tracks"]["korean"] = track("ko", 0.55, 1)
+    candidate["tracks"]["cross_language"] = track("ko", 0.55, 2)
+    assessment = sweep.assess(candidate, control)
+    assert assessment["eligible"] is True
+    assert assessment["quality_gain"] == 0.2
+
+    candidate["tracks"]["english"] = track("en", 0.48, 2)
+    assessment = sweep.assess(candidate, control)
+    assert assessment["eligible"] is False
+    assert "English MRR/nDCG regression exceeds 0.01" in assessment["failures"]
 
 
 def test_model_comparison_uses_multilingual_reranker_and_1024_dim_bge_m3():

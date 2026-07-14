@@ -34,8 +34,8 @@ Edit the `~/Library/Application Support/Claude/claude_desktop_config.json` file:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }
@@ -49,8 +49,8 @@ Edit the `%APPDATA%\Claude\claude_desktop_config.json` file:
 {
   "mcpServers": {
     "memtomem": {
-      "command": "uvx",
-      "args": ["--from", "memtomem", "memtomem-server"]
+      "command": "memtomem-server",
+      "args": []
     }
   }
 }

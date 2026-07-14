@@ -12,16 +12,38 @@ skills without adding event hooks or automatic indexing.
 
 Native Windows has not yet been verified.
 
-## Install
+## Install today
 
-After the npm package is published:
+The npm plugin is not published yet. Configure memtomem as a local MCP server
+in `opencode.json`:
 
-```bash
-opencode plugin add opencode-memtomem@0.1.0
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "memtomem": {
+      "type": "local",
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.10", "memtomem-server"],
+      "enabled": true,
+      "timeout": 60000,
+      "environment": {"MEMTOMEM_TOOL_MODE": "core"}
+    }
+  }
+}
 ```
 
-For development from this repository, build the package and point OpenCode's
-plugin configuration at `packages/opencode-memtomem/dist/server.js`.
+Restart OpenCode and call `memtomem_mem_status`. This manual path exposes the
+MCP tools but not the plugin's bundled slash commands and skills.
+
+After the npm package is published, add it through OpenCode's singular
+`plugin` configuration key (there is no `opencode plugin add` command):
+
+```json
+{"plugin": ["opencode-memtomem@0.1.0"]}
+```
+
+For development from this repository, build the package and point the same
+`plugin` array at `packages/opencode-memtomem/dist/server.js`.
 
 Restart OpenCode, then verify:
 
@@ -34,7 +56,7 @@ Restart OpenCode, then verify:
 
 | Surface | Included behavior |
 |---|---|
-| MCP | `uvx --from memtomem==0.3.10 memtomem-server`, core tool mode |
+| MCP | Exact-pinned `memtomem==0.3.10`, core tool mode (plugin); `[all]` no-install runtime (manual MCP) |
 | Commands | `memtomem-search`, `recall`, `status`, `remember`, `index`, `setup` |
 | Skills | Read-only `search`, `recall`, and `status` |
 

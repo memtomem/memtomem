@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import importlib.metadata
 import json
 import os
 import re
@@ -370,6 +371,49 @@ def _runtime_profile() -> RuntimeProfile:
         mm_binary_origin=mm_binary_origin,
         runtime_matches_workspace=runtime_matches_workspace,
     )
+
+
+def _mcp_server_command(profile: RuntimeProfile) -> tuple[str, list[str]]:
+    """Return an MCP command that preserves the selected runtime environment.
+
+    Workspace installs continue to resolve through ``uv run``. Persistent
+    installs reuse the exact interpreter that is running ``mm init`` so the
+    generated MCP server sees the same optional extras. Only an ephemeral
+    ``uvx`` invocation creates a new environment; that environment is isolated
+    and exact-pinned to the current distribution with ``[all]`` enabled.
+    """
+    if profile.cwd_install_type in ("source", "project"):
+        if profile.cwd_install_dir is None:
+            raise click.ClickException(
+                "Could not determine the memtomem workspace directory for MCP setup."
+            )
+        return (
+            "uv",
+            ["run", "--directory", str(profile.cwd_install_dir), "memtomem-server"],
+        )
+
+    if profile.mm_binary_origin == "uvx":
+        try:
+            version = importlib.metadata.version("memtomem")
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise click.ClickException(
+                "Could not determine the installed memtomem version for an isolated "
+                "MCP runtime. Install permanently with `uv tool install "
+                '"memtomem[all]"` and re-run `mm init`.'
+            ) from exc
+        return (
+            "uvx",
+            [
+                "--isolated",
+                "--from",
+                f"memtomem[all]=={version}",
+                "memtomem-server",
+            ],
+        )
+
+    # Keep the raw interpreter path. Resolving it can cross a venv shim or
+    # symlink boundary and silently lose the environment (and its extras).
+    return str(profile.runtime_interpreter), ["-m", "memtomem.server"]
 
 
 def _have_module(name: str) -> bool:
@@ -2137,15 +2181,14 @@ def _write_config_and_summary(
 
     # All install-context branching reads from the single profile struct
     # built once at init() entry. #363 Phase 3 collapsed the prior 4
-    # source_install / project_install / source_dir / project_dir reads
-    # into this struct; #368 dropped the parallel state keys and the
-    # follow-up removed the _get_or_build_profile back-compat shim, so
+    # source/project directory reads into this struct; #368 dropped the
+    # parallel state keys and the follow-up removed the
+    # _get_or_build_profile back-compat shim, so
     # there is now exactly one place a future install-context judgment
     # can land.
     profile = state["_profile"]
     source_install = profile.cwd_install_type == "source"
     project_install = profile.cwd_install_type == "project"
-    workspace_dir = str(profile.cwd_install_dir) if profile.cwd_install_dir else None
 
     # Write ~/.memtomem/config.json (read-merge-write to preserve non-init fields)
     click.secho("Writing configuration...", fg="green")
@@ -2367,20 +2410,9 @@ def _write_config_and_summary(
             written = existing  # unreachable in practice; stay safe
         _emit_preserved_block(existing_before, written, wizard_touched_keys)
 
-    # Build MCP server command. source_install and project_install both
-    # resolve to the same `uv run --directory <workspace_dir>` shape — only
-    # the directory differs. The branches are kept separate (not collapsed
-    # into `if workspace_dir:`) so a reader bisecting a bad .mcp.json can
-    # still tell which install-type produced it from the wizard source.
-    if source_install and workspace_dir:
-        server_cmd = "uv"
-        server_args = ["run", "--directory", workspace_dir, "memtomem-server"]
-    elif project_install and workspace_dir:
-        server_cmd = "uv"
-        server_args = ["run", "--directory", workspace_dir, "memtomem-server"]
-    else:
-        server_cmd = "uvx"
-        server_args = ["--from", "memtomem", "memtomem-server"]
+    # Reuse the selected install environment so optional extras configured by
+    # the wizard remain available when an editor later starts the MCP server.
+    server_cmd, server_args = _mcp_server_command(profile)
 
     # All settings come from ~/.memtomem/config.json at startup via
     # load_config_overrides() — no env overrides are written into .mcp.json.

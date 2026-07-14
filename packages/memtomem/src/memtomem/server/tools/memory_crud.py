@@ -657,6 +657,10 @@ async def mem_add(
                       even when content matches a secret pattern. Use only
                       when matches are known false positives (e.g.,
                       documenting an example credential schema).
+        scope: Write tier: ``user`` (default), ``project_local``, or
+               ``project_shared``.
+        confirm_project_shared: Required explicit consent for a Git-tracked
+                                ``project_shared`` write.
         idempotency_key: Optional client-chosen key (max 256 chars) making
                          this write idempotent for 24h: a retried call with
                          the same key returns the original result and performs

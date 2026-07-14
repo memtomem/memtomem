@@ -197,7 +197,8 @@ uptime probes and dashboards can pattern-match on the keys:
 ```
 mem_config()                                         # show all settings
 mem_config(key="search.default_top_k")               # read one value
-mem_config(key="search.default_top_k", value="20")   # change (persists to ~/.memtomem/config.json)
+mem_config(key="search.default_top_k", value="20")   # runtime-only change (default)
+mem_config(key="search.default_top_k", value="20", persist=True)  # persist to config.json
 ```
 
 Key settings:
@@ -234,6 +235,21 @@ mm embedding-reset --mode revert-to-stored  # switch runtime to match DB
 
 ## CLI Reference
 
+The complete v0.3.10 top-level command catalog is grouped below. Run `mm
+<command> --help` for its subcommands and flags.
+
+| Area | Top-level commands |
+|---|---|
+| First use and core memory | `init`, `status`, `add`, `index`, `search`, `recall`, `memory`, `mem`, `pinned`, `review` |
+| Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `reset`, `purge`, `gc`, `uninstall` |
+| Organization and automation | `tags`, `agent`, `session`, `activity`, `schedule`, `watchdog` |
+| Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |
+| Interfaces and utilities | `web`, `shell` |
+
+For CI, `mm status --json` always produces JSON. Check that the payload has no
+top-level `error` field; an initialization error is reported in the payload and
+does not by itself make the process exit non-zero.
+
 `mm` is a shorthand alias for `memtomem`. All commands support `-h` and `--help`.
 
 ```bash
@@ -264,8 +280,8 @@ mm reset --yes                         # skip confirmation prompt (safety gates 
 mm reset --backup                      # snapshot the DB to <db>.pre-reset-<ts>.bak before wiping
 mm reset --force                       # bypass the liveness/write-lock gates (stale-pid recovery)
 mm reset --json                        # emit a machine-readable ack instead of prose (also on mm add / mm purge)
-mm upgrade                             # stop the running server, clear the stale pid, reinstall with --refresh
-mm upgrade --version 0.3.1 --dry-run   # preview a pinned upgrade (also: --grace, --extras, -y/--yes, --json)
+mm upgrade                             # uv-tool installs: stop services and reinstall with --refresh
+mm upgrade --version 0.3.10 --dry-run  # preview an exact uv-tool reinstall (also: --grace, --extras, -y/--yes, --json)
 
 # Tags — bulk tag maintenance (mutations are dry-run unless --apply; --yes skips the prompt)
 mm tags list                           # list every tag with its chunk count

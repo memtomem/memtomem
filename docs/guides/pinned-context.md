@@ -11,14 +11,25 @@ mm pinned set response-style \
   --description "Default response style" --priority 10
 
 mm pinned list
+mm pinned get response-style --scope user
 mm pinned compose "deployment checklist"
+mm pinned delete response-style --scope user
+```
+
+Choose `--scope user|project_local|project_shared` on exact get/set/delete
+operations. Writes to the Git-tracked shared tier require explicit consent:
+
+```bash
+mm pinned set team-policy --scope project_shared \
+  --confirm-project-shared --content "Run the release checklist before tagging."
 ```
 
 Agent-specific blocks use `--agent NAME`. For the same block id, agent-specific
 beats general and `project_local` beats `project_shared`, which beats `user`.
-One block is limited to 2,000 characters, all pinned blocks to 6,000, and a
-default composed bundle to 12,000. A block is never cut in the middle; omitted
-ids are returned explicitly.
+One block is limited to 2,000 characters. The 6,000-character value is the
+pinned portion of one compose operation, not a global storage limit; the
+default complete composed bundle is limited to 12,000 characters. A block is
+never cut in the middle and omitted ids are returned explicitly.
 
 `mem_context_compose` schema 2 accepts the same optional `namespace` and
 `context_window` retrieval controls used by search. Schema 3 additionally
@@ -39,6 +50,13 @@ composition from composition that also preserves visible context windows.
 ## Review-first candidates
 
 Candidate generation is explicit and never writes long-term memory by itself.
+
+An external client can propose one candidate through
+`mem_candidate_propose(content, source, source_ref, idempotency_key)`. Content
+must be non-empty and at most 2,000 characters; source, source reference, and
+idempotency key are limited to 128, 512, and 256 characters. The content and
+source reference are privacy-scanned. Reusing a key with identical content
+returns the original pending candidate; using it for different content fails.
 
 ```bash
 mm review scan SESSION_ID
@@ -82,7 +100,8 @@ transition is audit-recorded; direct re-approval remains blocked.
 
 ## LangGraph
 
-Install the optional adapter and pass it to a graph as its store:
+Install the optional adapters. `MemtomemBaseStore` implements LangGraph's
+tuple-namespace JSON `BaseStore` contract:
 
 ```bash
 uv add 'memtomem[langgraph]'
@@ -99,3 +118,22 @@ item = store.get(("users", "alice"), "preferences")
 Canonical records are inspectable JSON files under the configured memory root;
 semantic projections are derived. TTL is deliberately unsupported and raises
 an explicit error.
+
+`MemtomemStore` is the higher-level async adapter for memtomem search, writes,
+sessions, and working memory. Its `config_overrides` are applied after
+`config.d/` and `~/.memtomem/config.json`, so constructor values win over the
+ambient process configuration. Use that precedence to isolate tests or graphs:
+
+```python
+from memtomem.integrations.langgraph import MemtomemStore
+
+store = MemtomemStore(
+    config_overrides={
+        "storage": {"sqlite_path": "/tmp/my-graph/memtomem.db"},
+        "indexing": {"memory_dirs": ["/tmp/my-graph/memories"]},
+    }
+)
+```
+
+Unknown override sections or keys raise `ValueError` on the first async call
+instead of silently falling back to the user's default database.

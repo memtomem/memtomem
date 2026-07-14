@@ -109,13 +109,19 @@ left untouched and every recovery is audit-recorded.
 
 ## Public evaluation corpus
 
-The repository benchmark uses synthetic data only and fixes the public
-contract at 48 files, 192 chunks, and 100 Korean/English queries. Run:
+The original regression portfolio uses synthetic data and fixes its contract
+at 48 files, 192 chunks, and 100 Korean/English queries. The v2 holdout adds
+120 bilingual queries with separate English, Korean, and cross-language tracks,
+portable qrels, and pinned corpus/query hashes. Run both gates:
 
 ```bash
 uv run python tools/retrieval-eval/audit_public_corpus.py
 uv run python tools/retrieval-eval/check_baseline.py
+uv run python tools/retrieval-eval/check_baseline_v2.py
 ```
 
 The audit verifies corpus integrity and checks for secret-like values,
-disallowed email addresses, and public IP literals before publication.
+disallowed email addresses, and public IP literals before publication. The v2
+model comparison and staged k-sweep are maintainer experiments; the one-run
+k-sweep retains `top_k=10`, candidates `50/50`, `rrf_k=60`, and reranking off
+until repeated validation supports a change.

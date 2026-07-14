@@ -37,6 +37,19 @@ PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
 PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
   tools/retrieval-eval/compare_models_v2.py \
   --reranker-pool 20 --output tools/retrieval-eval/model_comparison_v2.json
+
+PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
+  tools/retrieval-eval/sweep_k_v2.py --runs 1 --stage all \
+  --output tools/retrieval-eval/k_sweep_v2.json
+```
+
+Run an individual stage only for investigation and write it outside the
+committed all-stage artifact, for example:
+
+```bash
+PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
+  tools/retrieval-eval/sweep_k_v2.py --runs 1 --stage rrf \
+  --output /tmp/k_sweep_rrf_v2.json
 ```
 
 The committed `baseline_v0.3.8.json` was calibrated over 10 deterministic
@@ -119,3 +132,24 @@ versions, commands, pass/fail evidence, result tables, and limitations:
 These results support retaining the small English model for English-only use,
 considering BGE-M3 for Korean/cross-language quality profiles, and keeping the
 reranker opt-in where its latency and ~1.1 GB model cost are acceptable.
+
+## Staged k-sweep
+
+`k_sweep_v2.json` is a one-run, 19-profile candidate-reduction experiment over
+three stages: RRF `k`, candidate width at `top_k=5/10/20`, and reranker pool
+size for language-specific and BGE-M3 embeddings. Selection requires the
+quality gates to pass, then maximizes the Korean plus cross-language
+Recall/nDCG gain; ties prefer the lower maximum p95.
+
+The recorded selections keep `rrf_k=60`; keep candidate width `50` for
+`top_k=10` and `top_k=20`; and keep reranker pool `20` for both embedding
+families. Candidate width `100` at `top_k=5` is an eligible follow-up candidate,
+not evidence for a global default change. Product defaults therefore remain
+`top_k=10`, BM25/dense candidates `50/50`, `rrf_k=60`, and reranking disabled.
+
+The experiment is a single-run screening pass. It does not record run spread,
+environment/corpus hashes, cold-vs-warm state, model-load time, RSS, or disk
+cost, and it does not compare reranker enabled versus disabled. See
+[`K_SWEEP_REPORT.md`](./K_SWEEP_REPORT.md) for the gates, rejection reasons,
+metrics, and limitations, and [`k_sweep_v2.json`](./k_sweep_v2.json) for the
+raw artifact.

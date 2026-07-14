@@ -193,6 +193,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `bm25_weight` / `dense_weight` | Override RRF weights (default `1.0`) | `2.0` |
 | `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled) | `1` |
 | `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
+| `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
 
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")
@@ -200,7 +201,11 @@ mem_search(query="auth", source_filter="docs/adr", top_k=5)
 mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 ```
 
-> **Result count with filters**: `mem_search` returns *up to* `top_k` results. Post-rerank filters (`source_filter`, `tag_filter`, `as_of` validity) reduce the returned count one-for-one when they exclude candidates. Increase `top_k` or `rerank_pool` to widen the pre-filter candidate set; this method does not auto-oversample.
+> **Result count with filters**: `mem_search` returns *up to* `top_k` results.
+> Increase `top_k` when one call needs more results. When reranking is enabled,
+> the candidate pool is automatically computed from `rerank.oversample`,
+> `rerank.min_pool`, and `rerank.max_pool`; `rerank_pool` is not a
+> `mem_search` argument. Post-rank filters can still reduce the final count.
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
 
@@ -267,6 +272,7 @@ mem_recall(namespace="project:*", limit=5)
 | `namespace` | Single, comma-separated, or glob | `"work"`, `"project:*"` |
 | `limit` | Max results (default 20, max 500) | `10` |
 | `output_format` | `"compact"` (default) or `"structured"` (JSON with `hints` field) | `"structured"` |
+| `scope` | Memory tier filter: one value, comma list, or glob | `"project_shared"` |
 
 Like `mem_search`, `mem_recall` hides system namespaces (`archive:*` by default) when no namespace is pinned and appends a trust-UX hint if any chunks were filtered or if an embedding dimension mismatch is detected. `output_format="structured"` exposes those as a `hints` array for programmatic consumers.
 
@@ -289,6 +295,10 @@ mem_add(content="Redis LRU→LFU migration reduced cache misses by 40%", tags=["
 | `file` | Target file path (auto-generates date-stamped file if omitted) |
 | `namespace` | Namespace assignment |
 | `template` | Structured template (`adr`, `meeting`, `debug`, `decision`, `procedure`) |
+| `scope` | Write tier: `user`, `project_local`, or `project_shared` |
+| `confirm_project_shared` | Required `true` consent for Git-tracked shared writes |
+| `force_unsafe` | Bypass a reviewed false-positive privacy match; forbidden for shared-tier writes |
+| `idempotency_key` | Optional client key (max 256 chars) preventing duplicate successful writes for 24 hours |
 
 ```
 mem_add(content="New rate limit: 1000 req/min", file="api-notes.md", tags=["api"])
