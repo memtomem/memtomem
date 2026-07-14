@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -77,6 +78,13 @@ async def collect_status_report(app: AppContext) -> dict:
     """
     stats = await app.storage.get_stats()
     config = app.config
+    try:
+        cwd = Path(os.getcwd()).resolve()
+    except OSError:
+        cwd = None
+    from memtomem.server.tools.search import _resolve_project_context_root
+
+    project_root = _resolve_project_context_root(app)
 
     stored = getattr(app.storage, "stored_embedding_info", None)
     if stored:
@@ -177,10 +185,20 @@ async def collect_status_report(app: AppContext) -> dict:
     return {
         "config": {
             "storage_backend": config.storage.backend,
-            "db_path": str(Path(config.storage.sqlite_path).expanduser()),
+            "db_path": str(Path(config.storage.sqlite_path).expanduser().resolve()),
             "embedding": embedding,
             "top_k": config.search.default_top_k,
             "rrf_k": config.search.rrf_k,
+            "memory_dirs": [
+                str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
+            ],
+            "project_memory_dirs": [
+                str(Path(p).expanduser().resolve()) for p in config.indexing.project_memory_dirs
+            ],
+        },
+        "runtime": {
+            "cwd": str(cwd) if cwd is not None else None,
+            "project_context_root": str(project_root) if project_root is not None else None,
         },
         "index": {
             "total_chunks": stats["total_chunks"],
@@ -242,6 +260,7 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
     cfg = data["config"]
     emb = cfg["embedding"]
     index = data["index"]
+    runtime = data.get("runtime", {})
 
     lines = [
         StatusLine("title", value="memtomem Status"),
@@ -253,6 +272,25 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
         StatusLine("kv", key="Top-K:".ljust(11), value=str(cfg["top_k"])),
         StatusLine("kv", key="RRF k:".ljust(11), value=str(cfg["rrf_k"])),
         StatusLine("blank"),
+        StatusLine("section", value="Runtime context", meta={"tone": "plain"}),
+        StatusLine("rule", value="---------------", meta={"tone": "plain"}),
+        StatusLine("kv", key="CWD:".ljust(15), value=str(runtime.get("cwd") or "(unavailable)")),
+        StatusLine(
+            "kv",
+            key="Project root:".ljust(15),
+            value=str(runtime.get("project_context_root") or "(none registered for CWD)"),
+        ),
+        StatusLine(
+            "kv",
+            key="User sources:".ljust(15),
+            value=", ".join(cfg.get("memory_dirs", [])) or "(none)",
+        ),
+        StatusLine(
+            "kv",
+            key="Project sources: ",
+            value=", ".join(cfg.get("project_memory_dirs", [])) or "(none)",
+        ),
+        StatusLine("blank"),
         StatusLine("section", value="Index stats", meta={"tone": "plain"}),
         StatusLine("rule", value="-----------", meta={"tone": "plain"}),
         StatusLine("kv", key="Total chunks:".ljust(15), value=str(index["total_chunks"])),
@@ -261,7 +299,7 @@ def iter_status_lines(data: dict) -> list[StatusLine]:
             key="Source files:".ljust(15),
             value=str(index["total_sources"]),
             suffix=(
-                f" ({index['orphaned_sources']} orphaned — run mem_cleanup_orphans)"
+                f" ({index['orphaned_sources']} orphaned — run `mm gc orphan-sources`)"
                 if index["orphaned_sources"]
                 else ""
             ),

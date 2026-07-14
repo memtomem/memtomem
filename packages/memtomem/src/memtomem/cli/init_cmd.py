@@ -1808,6 +1808,7 @@ def _seed_with_progress(paths: list[Path]) -> bool:
                 recursive=True,
                 force=False,
                 namespace=None,
+                path_scope="configured",
             )
         )
     except KeyboardInterrupt:

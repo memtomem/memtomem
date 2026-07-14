@@ -5273,6 +5273,11 @@ textarea:focus-visible,
 .wizard-card { border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); }
 
 .home-layout { gap: var(--space-5); padding: var(--space-6); }
+.home-orientation-status { margin-inline-start: var(--space-2); font-weight: 600; }
+.home-orientation-status.is-ready { color: var(--success); }
+.home-orientation-status.is-warning { color: var(--warning); }
+.home-orientation-step.is-complete .home-orientation-step-num { background: var(--success); color: #fff; }
+.home-orientation-step.is-complete .home-orientation-step-text::after { content: " ✓"; color: var(--success); font-weight: 700; }
 .home-search-row { order: -4; }
 .home-search-wrap { max-width: 760px; padding: var(--space-2); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
 .home-search-wrap input { min-height: 44px; border-color: transparent; background: transparent; }

@@ -160,6 +160,9 @@ class TestConsumerRegressionPin:
         "memtomem/server/tools/url_index.py",
         "memtomem/server/tools/importers.py",
         "memtomem/server/tools/memory_crud.py",
+        # Diagnostics intentionally reports user and project tiers separately,
+        # so it must read the user-tier field rather than flattening roots.
+        "memtomem/server/tools/status_config.py",
     )
 
     def test_no_unaudited_memory_dirs_access(self):
@@ -215,7 +218,7 @@ class TestConsumerRegressionPin:
     def test_web_routes_uses_all_index_roots(self):
         """Functional pin: web/routes/system.py uses all_index_roots() for indexing-fan-out."""
         src = (SRC_ROOT / "web" / "routes" / "system.py").read_text(encoding="utf-8")
-        # At minimum, the four call sites the PR migrated:
-        # memory_dirs_status, reindex_all, index_path_stream guard,
-        # trigger_index guard.
-        assert src.count("all_index_roots()") >= 4
+        # Registered-root status and reindex fan out across all tiers. Explicit
+        # one-shot index/preview endpoints intentionally bypass registration.
+        assert src.count("all_index_roots()") >= 2
+        assert src.count('path_scope="explicit"') >= 3

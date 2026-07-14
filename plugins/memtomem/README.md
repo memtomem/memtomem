@@ -13,3 +13,22 @@ codex plugin add memtomem@memtomem
 
 Start a new Codex thread after installation so the skills and MCP server are
 loaded. BM25 is the default and requires no embedding provider.
+
+On a completely fresh machine or HOME, initialize the user-owned store once:
+
+```sh
+uvx --from 'memtomem==0.3.11' mm init --preset minimal --non-interactive
+mm status
+```
+
+For project-specific memories, keep the terminal in that project and create
+the gitignored local tier explicitly:
+
+```sh
+cd /path/to/project
+mm mem init --scope project_local
+```
+
+The plugin does not self-authorize these trust steps. After initialization,
+use `$memtomem-setup` with an explicit path; it performs a one-shot index
+without silently registering a watched source.

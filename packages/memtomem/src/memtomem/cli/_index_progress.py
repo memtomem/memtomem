@@ -40,7 +40,7 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -81,6 +81,7 @@ async def run_with_progress(
     force: bool = False,
     namespace: str | None = None,
     force_unsafe: bool = False,
+    path_scope: Literal["configured", "explicit"] = "explicit",
 ) -> dict[str, Any]:
     """Stream ``index_path_stream`` across ``paths`` with a click.progressbar.
 
@@ -91,7 +92,7 @@ async def run_with_progress(
         in turn; complete-event counters aggregate across the run.
     label:
         Progress-bar label (e.g. ``"  Indexing"`` or ``"  Seeding"``).
-    recursive, force, namespace:
+    recursive, force, namespace, path_scope:
         Forwarded verbatim to ``index_path_stream``. ``namespace`` is
         ``None`` for the wizard seed (preserves prior behavior — namespace
         defaults are resolved server-side from indexing rules) and
@@ -200,6 +201,7 @@ async def run_with_progress(
                     force=force,
                     namespace=namespace,
                     force_unsafe=force_unsafe,
+                    path_scope=path_scope,
                 ):
                     if evt["type"] == "discovery":
                         # Authoritative bar-length source. Engine emits this

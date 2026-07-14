@@ -176,6 +176,8 @@ async def _run_claude_single_slug(mem_dir: Path, files: list[Path], dry_run: boo
     )
     for err in summary.errors:
         click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    if summary.errors:
+        raise click.exceptions.Exit(1)
 
 
 async def _run_claude_multi_slug(slug_dirs: list[Path], dry_run: bool) -> None:
@@ -223,6 +225,8 @@ async def _run_claude_multi_slug(slug_dirs: list[Path], dry_run: bool) -> None:
     )
     for err in total_errors:
         click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    if total_errors:
+        raise click.exceptions.Exit(1)
 
 
 @dataclass(frozen=True)
@@ -449,6 +453,8 @@ async def _run_gemini_ingest(source_path: Path, dry_run: bool) -> None:
     )
     for err in summary.errors:
         click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    if summary.errors:
+        raise click.exceptions.Exit(1)
 
 
 def _gemini_discover_files(source: Path) -> list[Path]:
@@ -557,6 +563,8 @@ async def _run_codex_ingest(source_path: Path, dry_run: bool) -> None:
     )
     for err in summary.errors:
         click.echo(click.style(f"  ERROR: {err}", fg="red"))
+    if summary.errors:
+        raise click.exceptions.Exit(1)
 
 
 def _codex_discover_files(source_root: Path) -> list[Path]:

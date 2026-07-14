@@ -2116,14 +2116,17 @@ async function loadDashboard() {
     // /api/sessions and /api/scratch are dev-only — gated below. The
     // namespaces list endpoint is prod-mounted via namespaces_read so
     // the donut + count card render real values in both tiers.
-    const [stats, nsData, configData, embStatus, timelineData, memDirsResp] = await Promise.all([
+    const [stats, nsData, configData, embStatus, timelineData, memDirsResp, bootstrap] = await Promise.all([
       api('GET', '/api/stats'),
       api('GET', '/api/namespaces').catch(() => ({ namespaces: [] })),
       api('GET', '/api/config'),
       api('GET', '/api/embedding-status').catch(() => null),
       api('GET', `/api/timeline?days=365&limit=${HOME_ACTIVITY_TIMELINE_LIMIT}`).catch(() => ({ chunks: [] })),
       api('GET', '/api/memory-dirs/status').catch(() => ({ dirs: [] })),
+      api('GET', '/api/bootstrap').catch(() => null),
     ]);
+
+    _applyBootstrapOrientation(bootstrap);
 
     const allSources = Array.isArray(stats.home_sources) ? stats.home_sources : [];
     const recentSources = Array.isArray(stats.home_recent_sources) && stats.home_recent_sources.length
@@ -7086,6 +7089,28 @@ function _initHomeOrientation() {
   qs('home-orientation-add')?.addEventListener('click', () => activateTab('index'));
   qs('home-orientation-connect')?.addEventListener('click', () => activateTab('context-gateway'));
   qs('home-orientation-search')?.addEventListener('click', () => activateTab('search'));
+}
+
+function _applyBootstrapOrientation(bootstrap) {
+  if (!bootstrap || typeof bootstrap.stage !== 'string') return;
+  STATE.bootstrap = bootstrap;
+  const details = qs('home-orientation');
+  const status = qs('home-orientation-status');
+  if (details) {
+    details.dataset.stage = bootstrap.stage;
+    if (bootstrap.stage !== 'ready') details.open = true;
+  }
+  if (status) {
+    status.textContent = t(`home.orientation.state.${bootstrap.stage}`, {
+      sources: bootstrap.total_sources || 0,
+      chunks: bootstrap.total_chunks || 0,
+    });
+    status.classList.toggle('is-ready', bootstrap.stage === 'ready');
+    status.classList.toggle('is-warning', bootstrap.stage !== 'ready');
+  }
+  const steps = details ? Array.from(details.querySelectorAll('.home-orientation-step')) : [];
+  if (steps[0]) steps[0].classList.toggle('is-complete', (bootstrap.total_sources || 0) > 0);
+  if (steps[1]) steps[1].classList.toggle('is-complete', (bootstrap.total_chunks || 0) > 0);
 }
 
 // S3.1 — first-run wizard. A one-time, three-step guided intro (add → search →

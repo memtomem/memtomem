@@ -132,7 +132,7 @@ class TestStatusOutput:
         result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0, result.output
         assert "2 orphaned" in result.output
-        assert "mem_cleanup_orphans" in result.output
+        assert "mm gc orphan-sources" in result.output
 
     def test_dense_coverage_line_emitted_full(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
@@ -413,10 +413,17 @@ Dimension: 1024
 Top-K:     10
 RRF k:     60
 
+Runtime context
+---------------
+CWD:           {Path.cwd().resolve()}
+Project root:  (none registered for CWD)
+User sources:  {Path("~/.memtomem/memories").expanduser().resolve()}
+Project sources: (none)
+
 Index stats
 -----------
 Total chunks:  53
-Source files:  25 (2 orphaned — run mem_cleanup_orphans)
+Source files:  25 (2 orphaned — run `mm gc orphan-sources`)
 Dense vectors: 21/53 (39.6%)  (partial dense coverage — some chunks BM25-only)
 
 Immutable fields (set once at init)
@@ -443,7 +450,7 @@ Warnings
 
 class TestStatusJson:
     """``mm status --format json`` / ``--json`` — CONTRIBUTING read-command
-    contract: stable payload keys, ``{"error": ...}`` + exit 0 on handled
+    contract: stable payload keys, ``{"error": ...}`` + exit 1 on handled
     failure, and byte-parity between the alias and the long form."""
 
     def test_json_payload_has_stable_keys(
@@ -464,7 +471,9 @@ class TestStatusJson:
         assert result.exit_code == 0, result.output
 
         data = json.loads(result.output)
-        assert set(data) == {"config", "index", "immutable", "warnings"}
+        assert set(data) == {"config", "runtime", "index", "immutable", "warnings"}
+        assert set(data["runtime"]) == {"cwd", "project_context_root"}
+        assert data["runtime"]["cwd"] == str(Path.cwd().resolve())
         assert data["index"]["total_chunks"] == 42
         assert data["index"]["dense_coverage"] == {
             "with_dense": 21,
@@ -524,9 +533,7 @@ class TestStatusJson:
 
         result = runner.invoke(cli, ["status", "--json"])
 
-        # Handled failure rides the JSON body, not the exit code, so
-        # `mm status --json | jq` pipelines keep working.
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         data = json.loads(result.output)
         assert set(data) == {"error"}
         assert "not configured" in data["error"]

@@ -16,7 +16,7 @@ from __future__ import annotations
 import shutil
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from click.testing import CliRunner
@@ -29,6 +29,7 @@ from memtomem.storage.orphan_gc import (
     find_orphan_project_roots,
     sweep_orphan_project_root,
 )
+from memtomem.storage.orphan_detect import OrphanScanResult
 from memtomem.storage.sqlite_backend import SqliteBackend
 
 
@@ -470,5 +471,59 @@ class TestCli:
         # should refuse rather than silently degrade.
         result = CliRunner().invoke(cli, ["gc", "orphan-projects", "--yes"])
 
+        assert result.exit_code != 0
+        assert "--yes requires --apply" in result.output
+
+
+class TestOrphanSourcesCli:
+    def _patch_scan(self, monkeypatch, result: OrphanScanResult) -> None:
+        monkeypatch.setattr(
+            "memtomem.storage.orphan_detect.scan_orphans",
+            AsyncMock(return_value=result),
+        )
+
+    def test_dry_run_lists_without_deleting(self, monkeypatch, tmp_path):
+        missing = tmp_path / "missing.md"
+        comp = SimpleNamespace(
+            storage=SimpleNamespace(delete_by_source=AsyncMock()),
+            search_pipeline=SimpleNamespace(invalidate_cache=lambda: None),
+        )
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(
+            monkeypatch,
+            OrphanScanResult(3, 1, [missing]),
+        )
+
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources"])
+
+        assert result.exit_code == 0, result.output
+        assert str(missing) in result.output
+        assert "Run with --apply" in result.output
+        comp.storage.delete_by_source.assert_not_awaited()
+
+    def test_apply_yes_deletes_and_invalidates(self, monkeypatch, tmp_path):
+        missing = tmp_path / "missing.md"
+        invalidate = Mock()
+        comp = SimpleNamespace(
+            storage=SimpleNamespace(delete_by_source=AsyncMock(return_value=4)),
+            search_pipeline=SimpleNamespace(invalidate_cache=invalidate),
+        )
+        _patch_bootstrap(monkeypatch, comp)
+        self._patch_scan(
+            monkeypatch,
+            OrphanScanResult(1, 1, [missing]),
+        )
+
+        result = CliRunner().invoke(
+            cli, ["gc", "orphan-sources", "--apply", "--yes"]
+        )
+
+        assert result.exit_code == 0, result.output
+        comp.storage.delete_by_source.assert_awaited_once_with(missing)
+        invalidate.assert_called_once_with()
+        assert "4 chunks deleted" in result.output
+
+    def test_yes_requires_apply(self):
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--yes"])
         assert result.exit_code != 0
         assert "--yes requires --apply" in result.output

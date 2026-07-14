@@ -157,8 +157,8 @@ class TestResetGates:
 
 class TestResetJson:
     """``--json`` write acks (#1615) — CONTRIBUTING write-command shape:
-    handled outcomes (success, gate refusal, cancellation, backup failure)
-    ride the body with exit 0; text-path behavior is untouched."""
+    success and no-op exit 0; handled failures retain their JSON body and exit
+    1. Text-path behavior is untouched."""
 
     def test_wipe_json_ack(self, home, monkeypatch):
         _patch_liveness(monkeypatch)
@@ -190,7 +190,7 @@ class TestResetJson:
         assert result.exit_code == 0, result.output
         assert json.loads(result.output) == {"ok": True, "deleted": {}, "backup": None}
 
-    def test_gate_refusal_json_exit_zero(self, home, monkeypatch):
+    def test_gate_refusal_json_exit_one(self, home, monkeypatch):
         _patch_liveness(
             monkeypatch, server=ServerState(alive=True, pid=4242, pid_file=home / "pid")
         )
@@ -198,8 +198,8 @@ class TestResetJson:
         result = CliRunner().invoke(cli, ["reset", "-y", "--json"])
 
         # Text path exits 2; under --json the refusal is a handled failure
-        # carried in the body.
-        assert result.exit_code == 0, result.output
+        # carried in the body with the standard automation exit code.
+        assert result.exit_code == 1, result.output
         data = json.loads(result.output)
         assert data["ok"] is False
         assert "MCP server still running" in data["reason"]
@@ -218,7 +218,7 @@ class TestResetJson:
         (bak,) = (home / ".memtomem").glob("memtomem.db.pre-reset-*.bak")
         assert data["backup"] == str(bak)
 
-    def test_backup_failure_json_exit_zero_without_wiping(self, home, monkeypatch):
+    def test_backup_failure_json_exit_one_without_wiping(self, home, monkeypatch):
         _patch_liveness(monkeypatch)
         runner = CliRunner()
         db_path = _init_and_index(home, runner)
@@ -229,7 +229,7 @@ class TestResetJson:
         monkeypatch.setattr(reset_cmd, "_backup_db", _boom)
         result = runner.invoke(cli, ["reset", "-y", "--backup", "--json"])
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         data = json.loads(result.output)
         assert data["ok"] is False
         assert "backup failed" in data["reason"]
@@ -242,7 +242,7 @@ class TestResetJson:
 
         result = runner.invoke(cli, ["reset", "--json"], input="n\n")
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         # stdout must be a single JSON document — the prompt rides stderr
         # under --json so `mm reset --json | jq` works on the cancel path.
         # (result.output merges the streams; assert on stdout alone.)
@@ -265,7 +265,7 @@ class TestResetJson:
 
         result = runner.invoke(cli, ["reset", "--json"], input="n\n")
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         data = json.loads(result.stdout)
         assert data == {"ok": False, "reason": "cancelled at confirmation prompt"}
 

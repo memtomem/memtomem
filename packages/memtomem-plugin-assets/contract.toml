@@ -1,12 +1,12 @@
 [core]
-version = "0.3.10"
+version = "0.3.11"
 tool_mode = "core"
 
 [plugins]
-claude_version = "0.3.0"
-codex_version = "0.1.0"
-automation_version = "0.1.0"
-opencode_version = "0.1.0"
+claude_version = "0.3.1"
+codex_version = "0.1.1"
+automation_version = "0.1.1"
+opencode_version = "0.1.1"
 
 [opencode]
 package = "opencode-memtomem"
@@ -59,7 +59,7 @@ id = "remember"
 codex_name = "memtomem-remember"
 title = "Remember information"
 description = "Save an explicit user-requested memory with memtomem. Use only when the user clearly asks to remember, record, or persist information for later."
-tools = ["mem_add"]
+tools = ["mem_add", "mem_status"]
 effect = "write"
 implicit = false
 argument_hint = "[content to remember]"

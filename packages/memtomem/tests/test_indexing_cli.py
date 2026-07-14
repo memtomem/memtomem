@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+import click
 
 from memtomem.cli.indexing import _index
 
@@ -132,7 +133,9 @@ class TestIndexStreamConversion:
         ]
         _install_fake_engine(monkeypatch, events=events)
 
-        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+        assert exc_info.value.exit_code == 1
         out = capsys.readouterr().out
         assert "ERROR: broken.md: embedder OOM" in out
 
@@ -162,8 +165,10 @@ class TestIndexKeyboardInterrupt:
         ]
         _install_fake_engine(monkeypatch, events=events)
 
-        # ``_index`` swallows the KeyboardInterrupt and prints the hint.
-        asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+        # ``_index`` converts the interrupt to the standard shell exit 130.
+        with pytest.raises(click.exceptions.Exit) as exc_info:
+            asyncio.run(_index(str(target), recursive=True, force=False, namespace=None))
+        assert exc_info.value.exit_code == 130
         out = capsys.readouterr().out
         assert "Cancelled" in out
         assert f"mm index {target.resolve()}" in out

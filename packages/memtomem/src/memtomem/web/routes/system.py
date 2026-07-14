@@ -183,6 +183,75 @@ async def get_session(request: Request) -> dict[str, str]:
     }
 
 
+@router.get("/bootstrap")
+async def get_bootstrap_state(request: Request) -> dict[str, Any]:
+    """Return one state snapshot that drives first-run and recovery UI.
+
+    This route deliberately has no ``require_configured`` dependency: the SPA
+    must be able to explain an unconfigured or degraded install instead of
+    discovering it through a cascade of unrelated 409/503 responses.
+    """
+    configured = (Path.home() / ".memtomem" / "config.json").exists()
+    startup_state = getattr(request.app.state, "startup_state", "not_started")
+    config = getattr(request.app.state, "config", None)
+    storage = getattr(request.app.state, "storage", None)
+
+    total_chunks = 0
+    total_sources = 0
+    if storage is not None:
+        try:
+            stats = await storage.get_stats()
+            total_chunks = int(stats.get("total_chunks", 0))
+            total_sources = int(stats.get("total_sources", 0))
+        except Exception:
+            logger.debug("bootstrap stats unavailable", exc_info=True)
+
+    memory_dirs = []
+    project_memory_dirs = []
+    project_context_root = None
+    db_path = None
+    mismatch = False
+    if config is not None:
+        memory_dirs = [
+            str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
+        ]
+        project_memory_dirs = [
+            str(Path(p).expanduser().resolve())
+            for p in config.indexing.project_memory_dirs
+        ]
+        db_path = str(Path(config.storage.sqlite_path).expanduser().resolve())
+        from memtomem.server.tools.search import _resolve_project_context_from_dirs
+
+        root = _resolve_project_context_from_dirs(config.indexing.project_memory_dirs)
+        project_context_root = str(root) if root is not None else None
+    if storage is not None:
+        mismatch = getattr(storage, "embedding_mismatch", None) is not None
+
+    if not configured:
+        stage = "unconfigured"
+    elif startup_state != "ready" or storage is None:
+        stage = "startup_unavailable"
+    elif mismatch:
+        stage = "degraded"
+    elif total_sources == 0:
+        stage = "needs_source"
+    else:
+        stage = "ready"
+
+    return {
+        "stage": stage,
+        "configured": configured,
+        "startup_state": startup_state,
+        "total_chunks": total_chunks,
+        "total_sources": total_sources,
+        "db_path": db_path,
+        "memory_dirs": memory_dirs,
+        "project_memory_dirs": project_memory_dirs,
+        "project_context_root": project_context_root,
+        "embedding_mismatch": mismatch,
+    }
+
+
 @router.get("/health")
 async def health_liveness() -> dict[str, Any]:
     return {"status": "ok", "checks": {"process": "ok"}}
@@ -1395,17 +1464,9 @@ async def indexing_active(index_engine=Depends(get_index_engine)) -> JSONRespons
 async def index_stream(
     req: IndexRequest,
     index_engine=Depends(get_index_engine),
-    config=Depends(get_config),
 ) -> StreamingResponse:
     """Stream CSRF-protected indexing progress as Server-Sent Events."""
     resolved = Path(req.path).expanduser().resolve()
-    resolved_norm = Path(norm_path(resolved))
-    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.all_index_roots()]
-    if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
-        raise HTTPException(
-            status_code=403,
-            detail="Path is outside configured memory_dirs",
-        )
 
     async def _generate():
         try:
@@ -1415,6 +1476,7 @@ async def index_stream(
                 force=req.force,
                 namespace=req.namespace,
                 force_unsafe=req.force_unsafe,
+                path_scope="explicit",
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
@@ -1447,19 +1509,15 @@ async def index_stream_get_disabled() -> None:
 async def trigger_index(
     req: IndexRequest = IndexRequest(),
     index_engine=Depends(get_index_engine),
-    config=Depends(get_config),
 ) -> IndexResponse:
     resolved = Path(req.path).expanduser().resolve()
-    resolved_norm = Path(norm_path(resolved))
-    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.all_index_roots()]
-    if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
-        raise HTTPException(status_code=403, detail="Path is outside configured memory directories")
     stats = await index_engine.index_path(
         resolved,
         recursive=req.recursive,
         force=req.force,
         force_unsafe=req.force_unsafe,
         namespace=req.namespace,
+        path_scope="explicit",
     )
     return IndexResponse(
         total_files=stats.total_files,
@@ -1491,7 +1549,6 @@ async def preview_namespace(
     path: str,
     recursive: bool = True,
     index_engine=Depends(get_index_engine),
-    config=Depends(get_config),
 ) -> PreviewNamespaceResponse:
     """Preview which namespace(s) would be applied if ``path`` were indexed.
 
@@ -1502,15 +1559,9 @@ async def preview_namespace(
     bounded; ``truncated=True`` flags when the cap was hit.
     """
     resolved = Path(path).expanduser().resolve()
-    resolved_norm = Path(norm_path(resolved))
-    memory_dirs = [Path(norm_path(Path(d).expanduser())) for d in config.indexing.memory_dirs]
-    if not any(resolved_norm.is_relative_to(d) for d in memory_dirs):
-        # 403 (not 422) — same trust gate as POST /index. Out-of-memory_dirs
-        # is a security boundary (read access to arbitrary paths), not a
-        # parse error. Mirror trigger_index for parity.
-        raise HTTPException(status_code=403, detail="Path is outside configured memory directories")
-
-    files = index_engine.discover_indexable_files(resolved, recursive)
+    files = index_engine.discover_indexable_files(
+        resolved, recursive, path_scope="explicit"
+    )
     truncated = len(files) > _PREVIEW_FILE_CAP
     walked = files[:_PREVIEW_FILE_CAP]
     return PreviewNamespaceResponse(

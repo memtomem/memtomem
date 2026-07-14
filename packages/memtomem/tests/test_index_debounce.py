@@ -222,6 +222,19 @@ class TestDrainAll:
         assert result.indexed == []
         assert result.remaining == 0
 
+    def test_terminal_noop_is_reported_as_skipped(self, queue_file: Path) -> None:
+        debounce.enqueue("/tmp/removed.py", now=100.0, queue_file=queue_file)
+
+        async def indexer(p: str, ns: str | None, force: bool) -> str:
+            return "skipped"
+
+        result = asyncio.run(debounce.drain_all(indexer=indexer, queue_file=queue_file))
+
+        assert result.indexed == []
+        assert result.skipped == ["/tmp/removed.py"]
+        assert result.errors == []
+        assert result.remaining == 0
+
 
 class TestPoisonEntryCap:
     """A deterministically-failing entry is retried up to

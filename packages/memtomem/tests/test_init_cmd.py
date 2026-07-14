@@ -315,11 +315,11 @@ class TestMcpServerCommand:
 
     def test_uvx_uses_isolated_exact_all_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
         profile = _make_test_profile(kind="pypi", mm_binary_origin="uvx")
-        monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", lambda _: "0.3.10")
+        monkeypatch.setattr("memtomem.cli.init_cmd.importlib.metadata.version", lambda _: "0.3.11")
 
         assert _mcp_server_command(profile) == (
             "uvx",
-            ["--isolated", "--from", "memtomem[all]==0.3.10", "memtomem-server"],
+            ["--isolated", "--from", "memtomem[all]==0.3.11", "memtomem-server"],
         )
 
     def test_persistent_command_launches_server_module(self) -> None:
@@ -5412,7 +5412,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
@@ -5470,7 +5476,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
@@ -5529,7 +5541,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 yield {"type": "discovery", "files_total": 2}
                 yield {
@@ -5594,7 +5612,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 yield {"type": "discovery", "files_total": 1}
                 yield {
@@ -5795,7 +5819,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 key = str(path)
                 counts = path_counts[key]
@@ -5896,7 +5926,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 yield {"type": "discovery", "files_total": 1}
                 file = str(memory_dir / "big.md")
@@ -5980,7 +6016,13 @@ class TestInitialSeedThreshold:
 
         class _FakeEngine:
             async def index_path_stream(
-                self, path, recursive=True, force=False, namespace=None, force_unsafe=False
+                self,
+                path,
+                recursive=True,
+                force=False,
+                namespace=None,
+                force_unsafe=False,
+                path_scope="configured",
             ):
                 yield {"type": "discovery", "files_total": 2}
                 for name in ("a.md", "b.md"):

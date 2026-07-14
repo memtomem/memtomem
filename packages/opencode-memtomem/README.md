@@ -18,7 +18,7 @@ For a released memtomem installation, configure the local MCP server now:
   "mcp": {
     "memtomem": {
       "type": "local",
-      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.10", "memtomem-server"],
+      "command": ["uvx", "--isolated", "--from", "memtomem[all]==0.3.11", "memtomem-server"],
       "enabled": true,
       "timeout": 60000,
       "environment": {"MEMTOMEM_TOOL_MODE": "core"}
@@ -30,12 +30,12 @@ For a released memtomem installation, configure the local MCP server now:
 After the npm package is published, the plugin form will be:
 
 ```json
-{"plugin": ["opencode-memtomem@0.1.0"]}
+{"plugin": ["opencode-memtomem@0.1.1"]}
 ```
 
 Restart OpenCode, then run `/memtomem-status` or `/memtomem-search topic`.
 `uvx` must be available on `PATH`. The manual configuration above starts the
-exact-pinned `memtomem[all]==0.3.10` runtime on demand.
+exact-pinned `memtomem[all]==0.3.11` runtime on demand.
 
 The plugin supports macOS, Linux, and Windows through WSL. Native Windows has
 not been verified.

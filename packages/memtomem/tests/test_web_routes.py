@@ -357,6 +357,38 @@ class TestHealth:
         assert any("storage" in r.message for r in caplog.records)
 
 
+class TestBootstrapState:
+    async def test_unconfigured_state_is_available_without_bootstrap_gate(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        app.state.startup_state = "ready"
+
+        resp = await client.get("/api/bootstrap")
+
+        assert resp.status_code == 200
+        assert resp.json()["stage"] == "unconfigured"
+        assert resp.json()["configured"] is False
+
+    async def test_ready_state_identifies_store_and_sources(
+        self, app, client: AsyncClient, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_path = tmp_path / ".memtomem" / "config.json"
+        config_path.parent.mkdir()
+        config_path.write_text("{}", encoding="utf-8")
+        app.state.startup_state = "ready"
+
+        resp = await client.get("/api/bootstrap")
+
+        data = resp.json()
+        assert data["stage"] == "ready"
+        assert data["total_chunks"] == 42
+        assert data["total_sources"] == 3
+        assert data["db_path"] == str(Path(app.state.config.storage.sqlite_path).resolve())
+        assert data["memory_dirs"]
+
+
 # ---------------------------------------------------------------------------
 # GET /api/stats
 # ---------------------------------------------------------------------------
@@ -2519,13 +2551,13 @@ class TestIndex:
         assert data["indexed_chunks"] == 2
 
     async def test_trigger_index_default_params(self, client: AsyncClient):
-        # Default path "." is outside configured memory_dirs, should be rejected
+        # Folder Index is an explicit one-shot scan and need not register cwd.
         resp = await client.post("/api/index")
-        assert resp.status_code == 403
+        assert resp.status_code == 200
 
     async def test_trigger_index_outside_memory_dirs(self, client: AsyncClient):
         resp = await client.post("/api/index", json={"path": "/etc"})
-        assert resp.status_code == 403
+        assert resp.status_code == 200
 
     async def test_trigger_index_returns_resolved_namespaces(self, app, client: AsyncClient):
         """``IndexResponse.resolved_namespaces`` must echo what the engine
@@ -2610,10 +2642,9 @@ class TestIndex:
         assert len(called_with) == 200
 
     async def test_preview_namespace_outside_memory_dirs(self, app, client: AsyncClient):
-        """403, not 422: out-of-memory_dirs is a security boundary, same
-        trust gate as POST /index."""
+        """Preview mirrors the explicitly selected one-shot scan."""
         resp = await client.get("/api/index/preview-namespace?path=/etc/passwd")
-        assert resp.status_code == 403
+        assert resp.status_code == 200
 
     async def test_preview_namespace_missing_path(self, app, client: AsyncClient):
         """422 — FastAPI query-param validation."""
@@ -3105,21 +3136,25 @@ class TestUnicodePaths:
         assert resp.status_code == 200, resp.text
         assert app.state.config.indexing.memory_dirs == [other_dir]
 
-    async def test_index_stream_rejects_sibling_path_with_shared_prefix(
+    async def test_index_stream_accepts_explicit_sibling_without_registering_it(
         self, app, client: AsyncClient, tmp_path
     ):
-        # Regression for #238: the previous ``str.startswith`` check let a
-        # sibling path with a shared string prefix slip past the memory_dir
-        # gate (e.g. memory_dir ``/foo/bar`` accepted ``/foo/barbaz``).
-        # ``Path.is_relative_to`` compares parts, so the sibling is rejected.
+        # Explicit indexing is a one-shot operation and may target an external
+        # path. It must not mutate the configured watcher roots.
         bar_dir = tmp_path / "bar"
         bar_dir.mkdir()
         barbaz_dir = tmp_path / "barbaz"
         barbaz_dir.mkdir()
         app.state.config.indexing.memory_dirs = [bar_dir]
 
+        async def _fake_stream(*args, **kwargs):
+            assert kwargs["path_scope"] == "explicit"
+            yield {"type": "complete", "indexed": 0}
+
+        app.state.index_engine.index_path_stream = _fake_stream
         resp = await client.post("/api/index/stream", json={"path": str(barbaz_dir)})
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 200, resp.text
+        assert app.state.config.indexing.memory_dirs == [bar_dir]
 
     async def test_index_stream_matches_nfd_memory_dir_with_nfc_query(
         self, app, client: AsyncClient, tmp_path

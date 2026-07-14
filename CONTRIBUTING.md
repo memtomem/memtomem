@@ -243,10 +243,12 @@ already disambiguates from an error:
 | **Read** (`list`, `get`, `show`, `events`, `status`) | `{"<items>": [...], "count": N}` — the keys self-disambiguate | `{"error": "<reason>"}` |
 | **Write** (`log`, `add`, `set`, `run`) | `{"ok": true, ...}` — explicit flag | `{"ok": false, "reason": "<reason>"}` |
 
-Both shapes keep **exit code 0** under `--json`; the JSON body carries
-the outcome, not the exit code, so `cmd --json | jq` pipelines don't
-break on a handled failure. Unhandled exceptions (programmer errors,
-not expected failure modes) should still surface through Click.
+Both shapes remain machine-readable under failure, but the process exits
+**1** for handled failures. Consumers should parse the JSON body for detail
+and use the exit code for automation control flow. Successful operations and
+valid no-op results exit 0; an explicit user interrupt exits 130. Unhandled
+exceptions (programmer errors, not expected failure modes) also surface
+nonzero through Click.
 
 Rationale: read success payloads (`events: [...]`, `sessions: [...]`)
 are naturally disambiguated from `{error: ...}` by presence-of-key, so

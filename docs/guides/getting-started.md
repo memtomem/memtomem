@@ -243,7 +243,7 @@ claude mcp add memtomem -s user -- memtomem-server
 
 This reuses the persistent `memtomem[all]` environment installed above. For a
 one-off setup without a persistent install, use `uvx --isolated --from
-"memtomem[all]==0.3.10" memtomem-server`. Claude Code users can instead
+"memtomem[all]==0.3.11" memtomem-server`. Claude Code users can instead
 install the [memtomem plugin](integrations/claude-code.md#mcp-server-setup),
 which provides an exact-pinned MCP server and six focused workflows. Automatic
 indexing hooks are supplied only by the separate `memtomem-automation` plugin.

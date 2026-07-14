@@ -1510,6 +1510,40 @@ class TestPreviewHelpers:
 
         assert engine.discover_indexable_files(outside) == []
 
+    async def test_explicit_index_path_outside_memory_dirs(self, components, tmp_path):
+        """A caller-selected one-shot path is indexable without registering it."""
+        engine = components.index_engine
+        outside = tmp_path / "outside-explicit"
+        outside.mkdir()
+        note = outside / "note.md"
+        note.write_text("# Explicit\n\nOne-shot content.\n", encoding="utf-8")
+
+        stats = await engine.index_path(outside, path_scope="explicit")
+
+        assert stats.total_files == 1
+        assert stats.indexed_chunks > 0
+        assert engine.discover_indexable_files(outside) == []
+
+    async def test_configured_index_path_outside_reports_error(self, components, tmp_path):
+        engine = components.index_engine
+        outside = tmp_path / "outside-configured"
+        outside.mkdir()
+
+        stats = await engine.index_path(outside)
+
+        assert stats.total_files == 0
+        assert stats.errors
+        assert "outside configured memory directories" in stats.errors[0]
+
+    async def test_explicit_missing_path_reports_error(self, components, tmp_path):
+        stats = await components.index_engine.index_path(
+            tmp_path / "missing", path_scope="explicit"
+        )
+
+        assert stats.total_files == 0
+        assert stats.errors
+        assert "index path does not exist" in stats.errors[0]
+
     async def test_resolve_namespaces_for_uniform(self, components, memory_dir):
         """All files under the memory_dir root with default config →
         single ``None`` entry (untagged, ``default_namespace == 'default'``
