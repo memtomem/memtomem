@@ -66,15 +66,13 @@ uvx --from 'memtomem==0.3.11' mm init --preset minimal --non-interactive
 uvx --from 'memtomem==0.3.11' mm mem init --scope project_local
 ```
 
-### 2. 자동 인덱싱 범위 이해
+### 2. 프로젝트 파일은 자동으로 들어오지 않음
 
 플러그인을 설치했다고 기존 프로젝트 전체나 Claude Code의 내장 memory가
 자동으로 모두 인덱싱되는 것은 아닙니다.
 
-| 구성 | 자동으로 하는 일 | 자동으로 하지 않는 일 |
-|---|---|---|
-| 기본 `memtomem` 플러그인 | 없음. 요청한 검색·저장·인덱싱 workflow만 실행 | 백그라운드 감시, 기존 프로젝트 전체 인덱싱, 대화 자동 저장 |
-| 선택형 `memtomem-automation` 플러그인 | 긴 prompt를 검색하고 Claude가 `Write`/`Edit`한 지원 파일을 응답 종료 시 인덱싱 | 설치 전 파일 전체, Claude 내장 memory 전체, 결정·대화 자동 저장 |
+기본 플러그인은 사용자가 요청한 검색·저장·인덱싱 workflow만 실행합니다.
+백그라운드에서 프로젝트를 감시하거나 대화 전체를 자동 저장하지 않습니다.
 
 기존 프로젝트 문서는 처음 한 번 원하는 범위를 명시합니다.
 
@@ -86,24 +84,9 @@ uvx --from 'memtomem==0.3.11' mm mem init --scope project_local
 대상으로 등록하지 않습니다. 홈 디렉터리나 저장소 전체 대신 문서·ADR처럼
 검색할 가치가 있고 secret이 없는 작은 경로부터 시작하세요.
 
-자동화가 필요할 때만 별도 플러그인과 같은 버전의 CLI를 설치합니다.
-
-```text
-/plugin install memtomem-automation@memtomem
-```
-
-```bash
-uv tool install 'memtomem==0.3.11'
-```
-
-Claude Code 내장 auto-memory(`~/.claude/projects/<slug>/memory/`)의 기존
-내용은 플러그인 설치와 별개입니다. 읽기 전용 snapshot으로 가져오려면 먼저
-dry-run한 뒤 직접 ingest하고, 이후 변경분도 명령을 다시 실행해야 합니다.
-
-```bash
-mm ingest claude-memory --source ~/.claude/projects/<slug>/memory/ --dry-run
-mm ingest claude-memory --source ~/.claude/projects/<slug>/memory/
-```
+파일 변경 자동 반영과 Claude Code 내장 memory 가져오기는 첫 기억 왕복을
+마친 뒤 [Claude Code 심화 가이드](integrations/claude-code.md)의 automation과
+built-in memory 절에서 별도로 설정하세요.
 
 ### 3. Claude Code 상태 확인
 
@@ -257,7 +240,6 @@ Show the source path.
 | workflow/skill이 보이지 않음 | Claude는 reload 또는 새 세션, Codex는 새 thread를 시작합니다. |
 | MCP 서버가 시작되지 않음 | `uv --version`을 확인하고 `uvx`가 PATH에 있는지 봅니다. |
 | 기존 프로젝트 파일이 검색되지 않음 | 기본 플러그인은 전체를 자동 인덱싱하지 않습니다. 원하는 경로에 `/memtomem:setup`을 실행합니다. |
-| automation을 설치했는데 이전 파일이 검색되지 않음 | automation은 설치 후 Claude가 Write/Edit한 지원 파일만 반영합니다. 기존 파일은 먼저 setup/index합니다. |
 | 검색 결과가 0건 | status에서 chunk 수를 보고, 저장한 문장의 정확한 키워드로 다시 검색합니다. |
 | Claude와 Codex의 결과가 다름 | database path, `HOME`, `MEMTOMEM_*` 환경 변수를 비교합니다. |
 
@@ -267,7 +249,7 @@ Show the source path.
 ## 완료 체크
 
 - [ ] Claude Code 또는 Codex CLI에서 status workflow가 실행된다.
-- [ ] 기본 플러그인과 선택형 automation의 인덱싱 범위를 구분한다.
+- [ ] 기본 플러그인이 기존 프로젝트 전체를 자동 인덱싱하지 않음을 이해한다.
 - [ ] BM25-only 상태를 오류로 오해하지 않는다.
 - [ ] 검증용 기억 하나를 명시적으로 저장했다.
 - [ ] 새 세션에서 같은 기억과 source를 찾았다.
