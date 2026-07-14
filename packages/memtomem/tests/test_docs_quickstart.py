@@ -90,9 +90,7 @@ def test_documented_quickstart_round_trip(tmp_path: Path) -> None:
 
     empty = _status_json(_run("status", "--json"))
     assert empty["index"]["total_chunks"] == 0
-    assert empty["config"]["db_path"] == str(
-        (home / ".memtomem" / "memtomem.db").resolve()
-    )
+    assert empty["config"]["db_path"] == str((home / ".memtomem" / "memtomem.db").resolve())
 
     sentence = "Deployment checklist uses blue-green rollout"
     add = _run("add", sentence, "--tags", "ops", "--json")

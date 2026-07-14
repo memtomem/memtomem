@@ -514,9 +514,7 @@ class TestOrphanSourcesCli:
             OrphanScanResult(1, 1, [missing]),
         )
 
-        result = CliRunner().invoke(
-            cli, ["gc", "orphan-sources", "--apply", "--yes"]
-        )
+        result = CliRunner().invoke(cli, ["gc", "orphan-sources", "--apply", "--yes"])
 
         assert result.exit_code == 0, result.output
         comp.storage.delete_by_source.assert_awaited_once_with(missing)

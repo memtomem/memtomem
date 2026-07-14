@@ -212,12 +212,9 @@ async def get_bootstrap_state(request: Request) -> dict[str, Any]:
     db_path = None
     mismatch = False
     if config is not None:
-        memory_dirs = [
-            str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs
-        ]
+        memory_dirs = [str(Path(p).expanduser().resolve()) for p in config.indexing.memory_dirs]
         project_memory_dirs = [
-            str(Path(p).expanduser().resolve())
-            for p in config.indexing.project_memory_dirs
+            str(Path(p).expanduser().resolve()) for p in config.indexing.project_memory_dirs
         ]
         db_path = str(Path(config.storage.sqlite_path).expanduser().resolve())
         from memtomem.server.tools.search import _resolve_project_context_from_dirs
@@ -1559,9 +1556,7 @@ async def preview_namespace(
     bounded; ``truncated=True`` flags when the cap was hit.
     """
     resolved = Path(path).expanduser().resolve()
-    files = index_engine.discover_indexable_files(
-        resolved, recursive, path_scope="explicit"
-    )
+    files = index_engine.discover_indexable_files(resolved, recursive, path_scope="explicit")
     truncated = len(files) > _PREVIEW_FILE_CAP
     walked = files[:_PREVIEW_FILE_CAP]
     return PreviewNamespaceResponse(

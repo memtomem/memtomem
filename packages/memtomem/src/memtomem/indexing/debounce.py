@@ -304,9 +304,7 @@ def _record_failure(
 async def drain_ready(
     *,
     window_seconds: float,
-    indexer: Callable[
-        [str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]
-    ],
+    indexer: Callable[[str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]],
     now: float | None = None,
     queue_file: Path | None = None,
 ) -> DrainResult:
@@ -345,9 +343,7 @@ async def drain_ready(
 
 async def drain_all(
     *,
-    indexer: Callable[
-        [str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]
-    ],
+    indexer: Callable[[str, str | None, bool], Awaitable[Literal["indexed", "skipped"] | None]],
     paths: Iterable[str] | None = None,
     queue_file: Path | None = None,
 ) -> DrainResult:
