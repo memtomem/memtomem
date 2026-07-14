@@ -732,10 +732,34 @@ class TestRegistryAndInstallDocs:
 
     def test_public_docs_do_not_use_floating_bare_uvx_server(self) -> None:
         blob = "\n".join(_read(doc) for doc in _public_markdown())
-        assert "uvx --from memtomem memtomem-server" not in blob
-        assert '["--from", "memtomem", "memtomem-server"]' not in blob
+        floating_from = re.compile(
+            r"--from(?:\s+|[\"']?\s*,\s*[\"'])memtomem"
+            r"(?:\s+|[\"']?\s*,\s*[\"'])memtomem-server"
+        )
+        assert floating_from.search(blob) is None
 
         with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
             version = tomllib.load(handle)["project"]["version"]
         pins = set(re.findall(r"memtomem\[all\]==([0-9]+\.[0-9]+\.[0-9]+)", blob))
         assert pins == {version}
+
+    def test_runtime_setup_surfaces_use_exact_pinned_uvx(self) -> None:
+        with (_REPO_ROOT / "packages" / "memtomem" / "pyproject.toml").open("rb") as handle:
+            version = tomllib.load(handle)["project"]["version"]
+
+        portal = _read(
+            _REPO_ROOT
+            / "packages"
+            / "memtomem"
+            / "src"
+            / "memtomem"
+            / "web"
+            / "static"
+            / "context-portal.js"
+        )
+        pin = f"memtomem[all]=={version}"
+        assert f"--from '{pin}' memtomem-server" in portal
+        assert portal.count(f'"{pin}"') == 2
+        assert "<code>claude mcp add memtomem -- memtomem-server</code>" not in portal
+        assert '"command": "memtomem-server"' not in portal
+        assert 'command = "memtomem-server"' not in portal

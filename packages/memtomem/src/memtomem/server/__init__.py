@@ -427,7 +427,8 @@ def _print_direct_stdio_help() -> None:
                 f'  args: ["--isolated", "--from", "memtomem[all]=={_memtomem_version}", "memtomem-server"]',
                 "",
                 "Example:",
-                "  claude mcp add memtomem -s user -- memtomem-server",
+                "  claude mcp add memtomem -s user -- uvx --isolated "
+                f"--from 'memtomem[all]=={_memtomem_version}' memtomem-server",
                 "",
                 "For a manually started network server, use:",
                 "  memtomem-server --transport sse --host 127.0.0.1 --port 8000 --url http://127.0.0.1:8000/sse",

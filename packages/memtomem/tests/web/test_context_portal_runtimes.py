@@ -340,9 +340,20 @@ def test_install_guide_bodies_carry_verbatim_commands(page, mm_web_url: str) -> 
     _open_portal(page, mm_web_url)
 
     cases = {
-        "claude": ["claude mcp add memtomem", "memtomem-server"],
-        "antigravity": ["~/.gemini/antigravity-cli/mcp_config.json", "memtomem-server"],
-        "codex": ["[mcp_servers.memtomem]", "memtomem-server"],
+        "claude": [
+            "claude mcp add memtomem",
+            "uvx --isolated --from 'memtomem[all]==0.3.10' memtomem-server",
+        ],
+        "antigravity": [
+            "~/.gemini/antigravity-cli/mcp_config.json",
+            '"command": "uvx"',
+            '"memtomem[all]==0.3.10"',
+        ],
+        "codex": [
+            "[mcp_servers.memtomem]",
+            'command = "uvx"',
+            '"memtomem[all]==0.3.10"',
+        ],
         "kimi": ["mm init --mcp kimi"],
     }
     for client, needles in cases.items():

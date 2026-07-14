@@ -73,6 +73,11 @@ def test_stdio_direct_terminal_prints_help_and_exits(
     assert "memtomem-server is an MCP stdio server." in out
     assert "No MCP client is connected; exiting." in out
     assert "--url http://127.0.0.1:8000/mcp" in out
+    assert (
+        "claude mcp add memtomem -s user -- uvx --isolated "
+        f"--from 'memtomem[all]=={server_mod._memtomem_version}' memtomem-server"
+    ) in out
+    assert "-- memtomem-server\n" not in out
     # Direct server launches should point users to MCP setup/network transports.
     assert "mm status" not in out
 
