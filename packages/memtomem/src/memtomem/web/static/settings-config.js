@@ -1608,10 +1608,9 @@ qs('imp-btn').addEventListener('click', () => runImport());
 async function _fetchPreviewNamespace(pathValue) {
   if (!pathValue) return null;
   try {
-    const params = new URLSearchParams({ path: pathValue });
-    return await api('GET', `/api/index/preview-namespace?${params.toString()}`);
+    return await api('POST', '/api/index/preview-namespace', { path: pathValue });
   } catch (_) {
-    // 403 (out of memory_dirs) / network errors / route absent — fall
+    // CSRF / network errors / route absent — fall
     // through to the config-derived placeholder. The form submit will
     // surface a real error if the path is genuinely invalid.
     return null;

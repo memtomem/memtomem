@@ -142,3 +142,8 @@ class PreviewNamespaceResponse(BaseModel):
     resolved_namespaces: list[str | None] = []
     truncated: bool = False
     scanned_files: int = 0
+
+
+class PreviewNamespaceRequest(BaseModel):
+    path: str
+    recursive: bool = True

@@ -5,6 +5,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.3.11] — 2026-07-14
+
+### Added
+
+- **First-run diagnostics and recovery** — status output now identifies the
+  active database, project context, and user/project source roots; orphaned
+  sources can be previewed and removed with `mm gc orphan-sources`.
+- **Backend-driven Web onboarding** — the Home screen now distinguishes an
+  unconfigured install, unavailable startup, degraded state, missing source,
+  and ready state, while the former Gateway navigation is presented as
+  Connections.
+
+### Changed
+
+- **Breaking: handled CLI failures now return a failing process status.** JSON
+  error bodies remain machine-readable, but `mm status --json`, `mm add
+  --json`, `mm reset --json`, ingestion failures, and indexing failures now
+  exit `1` instead of reporting failure with exit `0`. Interrupted indexing
+  exits `130`. Automation must inspect the JSON body after accepting a
+  non-zero status rather than relying on a successful pipeline status.
+- Explicit `mm index <path>`, MCP `mem_index`, and Web one-shot indexing now
+  accept paths outside the configured watched roots without registering them
+  for future watching. Configured reindex and startup flows remain restricted
+  to registered roots.
+
+### Security
+
+- Namespace preview is now a CSRF-protected `POST`, matching the one-shot
+  indexing endpoints. Host and Origin checks still cover every API request;
+  explicit local paths remain subject to indexability and content-redaction
+  checks. The accepted local-operator trust boundary is documented in
+  `SECURITY.md`.
+
 ## [0.3.10] — 2026-07-13
 
 ### Added

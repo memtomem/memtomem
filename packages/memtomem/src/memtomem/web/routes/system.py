@@ -79,6 +79,7 @@ from memtomem.web.schemas.memory import (
     AddMemoryResponse,
     IndexRequest,
     IndexResponse,
+    PreviewNamespaceRequest,
     PreviewNamespaceResponse,
     UploadFileResult,
     UploadResponse,
@@ -1537,14 +1538,13 @@ async def trigger_index(
 _PREVIEW_FILE_CAP = 200
 
 
-@router.get(
+@router.post(
     "/index/preview-namespace",
     response_model=PreviewNamespaceResponse,
     dependencies=[Depends(require_configured)],
 )
 async def preview_namespace(
-    path: str,
-    recursive: bool = True,
+    body: PreviewNamespaceRequest,
     index_engine=Depends(get_index_engine),
 ) -> PreviewNamespaceResponse:
     """Preview which namespace(s) would be applied if ``path`` were indexed.
@@ -1555,8 +1555,8 @@ async def preview_namespace(
     Capped at ``_PREVIEW_FILE_CAP`` files to keep focus-event latency
     bounded; ``truncated=True`` flags when the cap was hit.
     """
-    resolved = Path(path).expanduser().resolve()
-    files = index_engine.discover_indexable_files(resolved, recursive, path_scope="explicit")
+    resolved = Path(body.path).expanduser().resolve()
+    files = index_engine.discover_indexable_files(resolved, body.recursive, path_scope="explicit")
     truncated = len(files) > _PREVIEW_FILE_CAP
     walked = files[:_PREVIEW_FILE_CAP]
     return PreviewNamespaceResponse(

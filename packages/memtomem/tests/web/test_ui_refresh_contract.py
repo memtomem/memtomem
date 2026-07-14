@@ -60,6 +60,7 @@ def test_changed_static_assets_bump_cache_versions() -> None:
 
     assert "/style.css?v=137" in html
     assert "/app.js?v=152" in html
+    assert "/settings-config.js?v=16" in html
 
 
 def test_theme_icon_follows_document_theme_without_duplicate_js_state() -> None:

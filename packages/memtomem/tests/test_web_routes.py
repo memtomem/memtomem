@@ -2583,7 +2583,9 @@ class TestIndex:
 
     async def test_preview_namespace_leaf_file(self, app, client: AsyncClient):
         """Single-file path → single-element list (here: ``notes``)."""
-        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories/note.md")
+        resp = await client.post(
+            "/api/index/preview-namespace", json={"path": "/tmp/memories/note.md"}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["resolved_namespaces"] == ["notes"]
@@ -2599,7 +2601,7 @@ class TestIndex:
             ]
         )
         app.state.index_engine.resolve_namespaces_for = MagicMock(return_value=["personal"])
-        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories")
+        resp = await client.post("/api/index/preview-namespace", json={"path": "/tmp/memories"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["resolved_namespaces"] == ["personal"]
@@ -2618,7 +2620,7 @@ class TestIndex:
         app.state.index_engine.resolve_namespaces_for = MagicMock(
             return_value=["ns-alpha", "ns-beta"]
         )
-        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories")
+        resp = await client.post("/api/index/preview-namespace", json={"path": "/tmp/memories"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["resolved_namespaces"] == ["ns-alpha", "ns-beta"]
@@ -2630,7 +2632,7 @@ class TestIndex:
             return_value=[Path(f"/tmp/memories/f{i}.md") for i in range(250)]
         )
         app.state.index_engine.resolve_namespaces_for = MagicMock(return_value=["notes"])
-        resp = await client.get("/api/index/preview-namespace?path=/tmp/memories")
+        resp = await client.post("/api/index/preview-namespace", json={"path": "/tmp/memories"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["truncated"] is True
@@ -2643,13 +2645,18 @@ class TestIndex:
 
     async def test_preview_namespace_outside_memory_dirs(self, app, client: AsyncClient):
         """Preview mirrors the explicitly selected one-shot scan."""
-        resp = await client.get("/api/index/preview-namespace?path=/etc/passwd")
+        resp = await client.post("/api/index/preview-namespace", json={"path": "/etc/passwd"})
         assert resp.status_code == 200
 
     async def test_preview_namespace_missing_path(self, app, client: AsyncClient):
-        """422 — FastAPI query-param validation."""
-        resp = await client.get("/api/index/preview-namespace")
+        """422 — request body requires an explicit path."""
+        resp = await client.post("/api/index/preview-namespace", json={})
         assert resp.status_code == 422
+
+    async def test_preview_namespace_get_is_not_exposed(self, client: AsyncClient):
+        """The path-reading preview must remain behind unsafe-method CSRF."""
+        resp = await client.get("/api/index/preview-namespace?path=/etc/passwd")
+        assert resp.status_code == 404
 
     async def test_trigger_index_surfaces_engine_errors(self, app, client: AsyncClient):
         """#354 regression: POST /api/index must surface ``IndexingStats.errors``
