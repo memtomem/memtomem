@@ -1105,3 +1105,19 @@ class TestSubcommandHelp:
         result = runner.invoke(cli, ["shell", "--help"])
         assert result.exit_code == 0
         assert "Interactive" in result.output
+
+
+class TestHelpEpilog:
+    """#1667: ``mm search`` / ``mm add`` --help should surface usage examples."""
+
+    def test_search_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "Examples:" in result.output
+        assert 'mm search "payment timeout"' in result.output
+
+    def test_add_help_shows_examples(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["add", "--help"])
+        assert result.exit_code == 0
+        assert "Examples:" in result.output
+        assert 'mm add "Canary deploy froze' in result.output
