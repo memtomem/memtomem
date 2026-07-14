@@ -53,7 +53,59 @@ Claude Code 세션에서 실행합니다.
 
 `/reload-plugins`가 없다면 Claude Code를 종료하고 새 세션을 엽니다.
 
-### 2. Claude Code 상태 확인
+완전히 새 환경이라면 터미널에서 사용자 저장소를 한 번 초기화합니다.
+
+```bash
+uvx --from 'memtomem==0.3.11' mm init --preset minimal --non-interactive
+```
+
+프로젝트에만 둘 로컬 기억 계층이 필요할 때는 프로젝트 루트에서 별도로
+초기화합니다.
+
+```bash
+uvx --from 'memtomem==0.3.11' mm mem init --scope project_local
+```
+
+### 2. 자동 인덱싱 범위 이해
+
+플러그인을 설치했다고 기존 프로젝트 전체나 Claude Code의 내장 memory가
+자동으로 모두 인덱싱되는 것은 아닙니다.
+
+| 구성 | 자동으로 하는 일 | 자동으로 하지 않는 일 |
+|---|---|---|
+| 기본 `memtomem` 플러그인 | 없음. 요청한 검색·저장·인덱싱 workflow만 실행 | 백그라운드 감시, 기존 프로젝트 전체 인덱싱, 대화 자동 저장 |
+| 선택형 `memtomem-automation` 플러그인 | 긴 prompt를 검색하고 Claude가 `Write`/`Edit`한 지원 파일을 응답 종료 시 인덱싱 | 설치 전 파일 전체, Claude 내장 memory 전체, 결정·대화 자동 저장 |
+
+기존 프로젝트 문서는 처음 한 번 원하는 범위를 명시합니다.
+
+```text
+/memtomem:setup /path/to/project/docs
+```
+
+`setup`과 `/memtomem:index`는 **일회성 인덱싱**이며 해당 디렉터리를 감시
+대상으로 등록하지 않습니다. 홈 디렉터리나 저장소 전체 대신 문서·ADR처럼
+검색할 가치가 있고 secret이 없는 작은 경로부터 시작하세요.
+
+자동화가 필요할 때만 별도 플러그인과 같은 버전의 CLI를 설치합니다.
+
+```text
+/plugin install memtomem-automation@memtomem
+```
+
+```bash
+uv tool install 'memtomem==0.3.11'
+```
+
+Claude Code 내장 auto-memory(`~/.claude/projects/<slug>/memory/`)의 기존
+내용은 플러그인 설치와 별개입니다. 읽기 전용 snapshot으로 가져오려면 먼저
+dry-run한 뒤 직접 ingest하고, 이후 변경분도 명령을 다시 실행해야 합니다.
+
+```bash
+mm ingest claude-memory --source ~/.claude/projects/<slug>/memory/ --dry-run
+mm ingest claude-memory --source ~/.claude/projects/<slug>/memory/
+```
+
+### 3. Claude Code 상태 확인
 
 ```text
 /memtomem:status
@@ -67,7 +119,7 @@ Claude Code 세션에서 실행합니다.
 
 database path는 뒤의 교차 도구 확인에 사용하므로 기록해 둡니다.
 
-### 3. Claude Code에서 검증용 기억 저장
+### 4. Claude Code에서 검증용 기억 저장
 
 실제 비밀정보 대신 삭제해도 되는 문장으로 시험합니다.
 
@@ -78,7 +130,7 @@ database path는 뒤의 교차 도구 확인에 사용하므로 기록해 둡니
 저장된 파일과 indexed chunk 수가 표시되면 성공입니다. `remember`는
 사용자가 명시적으로 요청해야 실행되는 write workflow입니다.
 
-### 4. Claude Code에서 다시 검색
+### 5. Claude Code에서 다시 검색
 
 ```text
 /memtomem:search PR 전에 실행할 테스트
@@ -87,7 +139,7 @@ database path는 뒤의 교차 도구 확인에 사용하므로 기록해 둡니
 방금 저장한 문장과 source path가 나오는지 확인합니다. 결과가 없으면
 `/memtomem:status`로 돌아갑니다.
 
-### 5. 새 세션에서 확인
+### 6. 새 세션에서 확인
 
 Claude Code를 새로 열고 다음처럼 요청합니다.
 
@@ -204,6 +256,8 @@ Show the source path.
 | 플러그인을 찾지 못함 | marketplace 목록을 확인하고 다시 설치합니다. |
 | workflow/skill이 보이지 않음 | Claude는 reload 또는 새 세션, Codex는 새 thread를 시작합니다. |
 | MCP 서버가 시작되지 않음 | `uv --version`을 확인하고 `uvx`가 PATH에 있는지 봅니다. |
+| 기존 프로젝트 파일이 검색되지 않음 | 기본 플러그인은 전체를 자동 인덱싱하지 않습니다. 원하는 경로에 `/memtomem:setup`을 실행합니다. |
+| automation을 설치했는데 이전 파일이 검색되지 않음 | automation은 설치 후 Claude가 Write/Edit한 지원 파일만 반영합니다. 기존 파일은 먼저 setup/index합니다. |
 | 검색 결과가 0건 | status에서 chunk 수를 보고, 저장한 문장의 정확한 키워드로 다시 검색합니다. |
 | Claude와 Codex의 결과가 다름 | database path, `HOME`, `MEMTOMEM_*` 환경 변수를 비교합니다. |
 
@@ -213,6 +267,7 @@ Show the source path.
 ## 완료 체크
 
 - [ ] Claude Code 또는 Codex CLI에서 status workflow가 실행된다.
+- [ ] 기본 플러그인과 선택형 automation의 인덱싱 범위를 구분한다.
 - [ ] BM25-only 상태를 오류로 오해하지 않는다.
 - [ ] 검증용 기억 하나를 명시적으로 저장했다.
 - [ ] 새 세션에서 같은 기억과 source를 찾았다.
