@@ -361,7 +361,7 @@ class TestBootstrapState:
     async def test_unconfigured_state_is_available_without_bootstrap_gate(
         self, app, client: AsyncClient, tmp_path, monkeypatch
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         app.state.startup_state = "ready"
 
         resp = await client.get("/api/bootstrap")
@@ -373,7 +373,7 @@ class TestBootstrapState:
     async def test_ready_state_identifies_store_and_sources(
         self, app, client: AsyncClient, tmp_path, monkeypatch
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         config_path = tmp_path / ".memtomem" / "config.json"
         config_path.parent.mkdir()
         config_path.write_text("{}", encoding="utf-8")
