@@ -197,14 +197,37 @@ class TestBlockContext:
         parsed = parse_memory_index("Example:\n\n    - [Example](gone.md) — indented\n")
         assert parsed.entries == ()
 
-    def test_multiline_item_is_read_but_not_fixable(self):
-        # A lazy continuation makes the item two lines, so the line is no longer
-        # the entry — the links still get checked, but splicing the first line
-        # would strand the second.
-        parsed = parse_memory_index("- [A](a.md) — hook\n  continues here\n")
-        assert [e.target for e in parsed.entries] == ["a.md"]
-        assert parsed.entries[0].line_no == 1
+    # An item outgrows its line in more ways than a wrapped paragraph. Each of
+    # these leaves the pointer's own paragraph exactly one line long, so only
+    # the item's *structure* gives it away — and deleting the pointer's line
+    # would reparent what follows as top-level markdown.
+    OUTGROWS_ITS_LINE = [
+        ("- [A](a.md) — hook\n  continues here\n", "lazy continuation"),
+        ("- [A](a.md) — hook\n\n  second paragraph\n", "second paragraph"),
+        ("- [A](a.md) — hook\n\n  ```\n  code\n  ```\n", "child fence"),
+        ("- [A](a.md) — hook\n  - [B](b.md) — child\n", "nested list"),
+    ]
+
+    @pytest.mark.parametrize("text,why", OUTGROWS_ITS_LINE, ids=[w for _, w in OUTGROWS_ITS_LINE])
+    def test_item_bigger_than_its_line_is_read_but_not_fixable(self, text, why):
+        parsed = parse_memory_index(text)
+        # The pointer is still read and checked — only --fix stands down.
+        assert parsed.entries[0].target == "a.md", why
+        assert parsed.entries[0].line_no == 1, why
+        assert 1 in parsed.multiline_lines, why
+
+    def test_nested_child_is_fixable_on_its_own_line(self):
+        # The parent is unfixable, but the child item *is* its line.
+        parsed = parse_memory_index("- [A](a.md) — hook\n  - [B](b.md) — child\n")
+        assert [(e.line_no, e.target) for e in parsed.entries] == [(1, "a.md"), (2, "b.md")]
         assert parsed.multiline_lines == frozenset({1})
+
+    def test_entry_before_a_blank_line_stays_fixable(self):
+        # A loose list's item map swallows the blank line after it, so measuring
+        # the map instead of the structure would call this a multi-line item —
+        # and every entry before a paragraph break would stop being fixable.
+        parsed = parse_memory_index("- [A](a.md) — hook\n\nprose after the list\n")
+        assert parsed.multiline_lines == frozenset()
 
 
 class TestReferenceStyleLinks:

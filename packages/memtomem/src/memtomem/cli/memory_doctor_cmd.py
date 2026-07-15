@@ -230,6 +230,41 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
     return links, unresolved
 
 
+def _list_item_body(tokens: list[Token], open_index: int) -> list[Token]:
+    """The tokens between ``tokens[open_index]`` (a ``list_item_open``) and its
+    matching close, nested items included."""
+    depth = 0
+    for j in range(open_index, len(tokens)):
+        if tokens[j].type == "list_item_open":
+            depth += 1
+        elif tokens[j].type == "list_item_close":
+            depth -= 1
+            if depth == 0:
+                return tokens[open_index + 1 : j]
+    return tokens[open_index + 1 :]  # unclosed item: treat the rest as its body
+
+
+def _item_is_one_line(body: list[Token], inline: Token) -> bool:
+    """Whether a list item is exactly the one line its pointer sits on.
+
+    ``--fix`` splices whole lines, so an item that is more than its first line
+    can't be deleted by deleting that line — the remainder would be reparented
+    as top-level markdown. Two ways an item outgrows its line, and the item's
+    source map catches neither cleanly (a *loose* list's item map swallows the
+    blank line after it, so measuring the map would flag every entry before a
+    paragraph break):
+
+    * **Its paragraph wraps** — a lazy continuation, which shows up as the
+      inline's own map spanning more than one line.
+    * **It holds more than that paragraph** — a second paragraph, a child fence,
+      a nested list. Structure says so: a one-line item's body is exactly
+      ``paragraph_open, inline, paragraph_close``.
+    """
+    if inline.map is not None and inline.map[1] - inline.map[0] > 1:
+        return False
+    return len(body) == 3 and body[0].type == "paragraph_open"
+
+
 def _target_is_unreadable(target: str) -> bool:
     """Whether *target* will be path-resolved but may not be the path it reads as."""
     t = target.strip()
@@ -259,23 +294,17 @@ def parse_memory_index(text: str) -> ParsedIndex:
     multiline: set[int] = set()
     pointer_lines: set[int] = set()
 
-    open_blocks: list[str] = []
-    for token in _markdown_parser().parse(text, {}):
-        if token.type.endswith("_open"):
-            open_blocks.append(token.type)
+    tokens = _markdown_parser().parse(text, {})
+    for i, token in enumerate(tokens):
+        if token.type != "list_item_open":
             continue
-        if token.type.endswith("_close"):
-            if open_blocks:
-                open_blocks.pop()
+        body = _list_item_body(tokens, i)
+        inline = next((t for t in body if t.type == "inline" and t.map is not None), None)
+        if inline is None:
             continue
-        if token.type != "inline" or token.map is None:
-            continue
-        if not any(block.startswith("list_item") for block in open_blocks):
-            continue  # a paragraph, heading, table cell — not a pointer line
 
-        start, end = token.map
-        line_no = start + 1
-        links, unresolved = _read_inline(token)
+        line_no = inline.map[0] + 1
+        links, unresolved = _read_inline(inline)
         if not links:
             # Link syntax that resolved to no link (``- [B](b.md``) would
             # otherwise pass as ordinary prose — an unread pointer reported as
@@ -286,12 +315,10 @@ def parse_memory_index(text: str) -> ParsedIndex:
         pointer_lines.add(line_no)
         if unresolved or any(_target_is_unreadable(target) for _, target in links):
             ambiguous.add(line_no)
-        if end - start > 1:
-            # The item runs past its first line, so "the line" is no longer the
-            # entry — splicing it would strand the continuation as loose prose.
+        if not _item_is_one_line(body, inline):
             multiline.add(line_no)
         entries.extend(
-            IndexEntry(line_no=line_no, title=title, target=target.strip(), raw=lines[start])
+            IndexEntry(line_no=line_no, title=title, target=target.strip(), raw=lines[line_no - 1])
             for title, target in links
         )
 
