@@ -170,6 +170,43 @@ class TestDeceivingLines:
         assert parse_memory_index(line + "\n").ambiguous_lines == frozenset({1}), why
 
 
+class TestBlockContext:
+    """A bullet is only a pointer where the *document* says it is.
+
+    An index explains itself: it holds fenced examples of the very shape it is
+    made of. Read line by line, an example is indistinguishable from the real
+    thing — and its target is usually a placeholder that doesn't exist, which is
+    exactly the verdict ``--fix`` deletes on. Reading blocks, not lines, is what
+    tells them apart.
+    """
+
+    def test_fenced_example_is_not_a_pointer(self):
+        text = (
+            "- [Real](real.md) — genuine\n"
+            "\n"
+            "```markdown\n"
+            "- [Example](gone.md) — how to write an entry\n"
+            "```\n"
+        )
+        parsed = parse_memory_index(text)
+        assert [e.target for e in parsed.entries] == ["real.md"]
+        # The fence's lines are preserved as-is, so the budget still counts them.
+        assert [n for n, _ in parsed.other_lines] == [2, 3, 4, 5]
+
+    def test_indented_code_block_is_not_a_pointer(self):
+        parsed = parse_memory_index("Example:\n\n    - [Example](gone.md) — indented\n")
+        assert parsed.entries == ()
+
+    def test_multiline_item_is_read_but_not_fixable(self):
+        # A lazy continuation makes the item two lines, so the line is no longer
+        # the entry — the links still get checked, but splicing the first line
+        # would strand the second.
+        parsed = parse_memory_index("- [A](a.md) — hook\n  continues here\n")
+        assert [e.target for e in parsed.entries] == ["a.md"]
+        assert parsed.entries[0].line_no == 1
+        assert parsed.multiline_lines == frozenset({1})
+
+
 class TestReferenceStyleLinks:
     """A pointer whose destination is defined on another line is still a pointer.
 
@@ -1159,6 +1196,31 @@ class TestApplyFix:
         assert removed == []
         assert index.read_text(encoding="utf-8") == text  # untouched
 
+    def test_revalidate_line_that_left_fix_scope_is_spared(self, tmp_path):
+        """A guard is not a one-time admission check — the file is live.
+
+        The candidate line is untouched between analysis and apply, so its raw
+        still matches and its target is still dead. What changed is elsewhere:
+        the agent defined the reference the line already cited, which turns it
+        from a single dead pointer into a line with a live sibling on it.
+        Re-classifying the target alone can't see that; the scope guards have to
+        be re-asked of the fresh read.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) and [Live][live]\n"
+        index.write_text(analysis_text, encoding="utf-8")
+        candidates = _candidate_raws(analysis_text, root)
+        assert candidates  # single-entry at analysis time: the reference is undefined
+
+        # The agent defines the reference before the fix takes the lock.
+        index.write_text(analysis_text + "\n[live]: exists.md\n", encoding="utf-8")
+
+        removed = _apply_fix(index, root, candidates)
+
+        assert removed == []
+        assert "[Live][live]" in index.read_text(encoding="utf-8")
+
     def test_revalidate_agent_edited_candidate_line_is_spared(self, tmp_path):
         # The agent rewrote the candidate line's hook since analysis. Its raw no
         # longer matches the candidate set, so the fix leaves it alone.
@@ -1473,6 +1535,38 @@ class TestFixScopeFrozen:
 
         assert result.exit_code == 0
         assert "No missing_target links to remove" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_fenced_example_is_never_edited(self, tmp_path, monkeypatch):
+        """End to end: --apply must not touch a code block.
+
+        The example's target doesn't exist — that's what makes it an example —
+        so a line-wise reader offers it up as a dead pointer and edits the
+        fence.
+        """
+        body = "- [Dead](gone.md) — real\n\n```markdown\n- [Example](nowhere.md) — example\n```\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        # The real dead pointer goes; the fence survives byte-for-byte.
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == (
+            "\n```markdown\n- [Example](nowhere.md) — example\n```\n"
+        )
+        assert "nowhere.md" not in result.output
+
+    def test_multiline_item_is_refused(self, tmp_path, monkeypatch):
+        body = "- [Dead](gone.md) — hook\n  continues here\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "continues past this line" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
     def test_reference_sibling_blocks_the_fix(self, tmp_path, monkeypatch):

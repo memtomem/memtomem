@@ -78,6 +78,7 @@ from typing import TYPE_CHECKING, Literal
 
 import click
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
@@ -141,16 +142,18 @@ class ParsedIndex:
     at all. Their entries are still parsed — the raw text is what a human needs
     to repair the line — but the targets are not evidence: not of a broken link,
     not of a listed file, and least of all of a line safe to delete.
+
+    ``multiline_lines`` holds the first line of any list item that runs past it
+    (a lazy continuation). Their links are read and checked like any other —
+    only ``--fix`` cares, because deleting the item's first line would strand
+    the rest of it as loose prose.
     """
 
     entries: tuple[IndexEntry, ...]
     other_lines: tuple[tuple[int, str], ...]
     ambiguous_lines: frozenset[int] = frozenset()
+    multiline_lines: frozenset[int] = frozenset()
 
-
-# A pointer line is a list item; anything else (headers, prose, comments) is
-# preserved verbatim and never link-classified.
-_BULLET_RE = re.compile(r"^\s*[-*]\s")
 
 # Link syntax surviving as literal text: the line meant a pointer the parser
 # could not resolve (an unclosed ``- [B](b.md``). Only ever applied to text the
@@ -185,40 +188,16 @@ def _markdown_parser() -> MarkdownIt:
     return md
 
 
-def _reference_env(text: str) -> dict[str, object]:
-    """The link reference definitions declared anywhere in *text*.
-
-    Lines are read one at a time, so that each entry keeps its own line number —
-    the unit ``--fix`` splices by. A reference-style link (``[Live][live]``) is
-    the one construct that breaks that isolation: its destination is defined on
-    some *other* line (``[live]: live.md``), so a line read alone reports no link
-    there at all. That is not a cosmetic gap — a line whose live reference link
-    goes unseen looks single-entry, and its dead inline neighbour then takes the
-    whole line, live pointer included, when ``--fix`` splices it.
-
-    So the definitions are harvested from the whole document first and handed to
-    each line's read. Collapsed (``[Coll][]``) and shortcut (``[Short]``) forms
-    resolve through the same table.
-    """
-    env: dict[str, object] = {}
-    _markdown_parser().parse(text, env)
-    return env
-
-
-def _read_line(line: str, env: dict[str, object]) -> tuple[list[tuple[str, str]], bool]:
-    """Read *line* as Markdown: its ``(title, destination)`` links, and whether
-    it also holds link syntax that resolved to no link at all.
-
-    *env* carries the document's reference definitions (see
-    :func:`_reference_env`); it is copied per line so a definition on one line
-    cannot leak a mutation into the next read.
+def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
+    """An inline token's ``(title, destination)`` links, plus whether it also
+    holds link syntax that resolved to no link at all.
 
     Reading an index means reading Markdown as Markdown. A destination can be
     escaped (``notes_\\(v2.md``), entity-encoded (``notes_&amp;v2.md``) or
-    angle-bracketed (``<x y.md>``); a label can nest brackets; a link can be
-    quoted inside a code span of any backtick run. In every case the literal
-    text differs from the link the file declares, and ``--fix`` deletes lines on
-    the strength of that read. A pattern would have to enumerate those
+    angle-bracketed (``<x y.md>``); a label can nest brackets; a link's
+    destination can be defined on a different line entirely. In every case the
+    literal text differs from the link the file declares, and ``--fix`` deletes
+    lines on the strength of that read. A pattern would have to enumerate those
     differences — tried over three review rounds, it kept missing the next one —
     so the parser resolves them instead.
 
@@ -233,26 +212,21 @@ def _read_line(line: str, env: dict[str, object]) -> tuple[list[tuple[str, str]]
     """
     links: list[tuple[str, str]] = []
     unresolved = False
-    references = env.get("references")
-    line_env: dict[str, object] = {"references": dict(references)} if references else {}
-    for token in _markdown_parser().parse(line, line_env):
-        if token.type != "inline":
-            continue
-        title_parts: list[str] = []
-        in_link = False
-        for child in token.children or []:
-            if child.type == "link_open":
-                in_link = True
-                title_parts = []
-                links.append(("", child.attrGet("href") or ""))
-            elif child.type == "link_close" and in_link:
-                if links:
-                    links[-1] = ("".join(title_parts).strip(), links[-1][1])
-                in_link = False
-            elif in_link:
-                title_parts.append(child.content)
-            elif child.type == "text" and _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
-                unresolved = True
+    title_parts: list[str] = []
+    in_link = False
+    for child in token.children or []:
+        if child.type == "link_open":
+            in_link = True
+            title_parts = []
+            links.append(("", child.attrGet("href") or ""))
+        elif child.type == "link_close" and in_link:
+            if links:
+                links[-1] = ("".join(title_parts).strip(), links[-1][1])
+            in_link = False
+        elif in_link:
+            title_parts.append(child.content)
+        elif child.type == "text" and _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
+            unresolved = True
     return links, unresolved
 
 
@@ -265,33 +239,68 @@ def _target_is_unreadable(target: str) -> bool:
 
 
 def parse_memory_index(text: str) -> ParsedIndex:
-    """Parse an index file into pointer entries + preserved other lines."""
+    """Parse an index file into pointer entries + preserved other lines.
+
+    The whole document is parsed once, and only the inline content of genuine
+    **list items** is read for pointers. Block context is the reason: a bullet
+    inside a fenced or indented code block is an *example* of an index line, not
+    an index line, and a reader that works line by line cannot tell the
+    difference — it would offer the example's dead target to ``--fix``, which
+    would then edit the code block. The token stream answers structurally what
+    no amount of squinting at a line can.
+
+    Line numbers come from each item's source map, so an entry still carries the
+    line ``--fix`` splices by (ADR-0020 §2), and reference definitions resolve
+    because the document is read as one.
+    """
+    lines = text.splitlines()
     entries: list[IndexEntry] = []
-    other: list[tuple[int, str]] = []
     ambiguous: set[int] = set()
-    env = _reference_env(text)
-    for i, line in enumerate(text.splitlines(), start=1):
-        bullet = _BULLET_RE.match(line)
-        links, unresolved = _read_line(line[bullet.end() :], env) if bullet else ([], False)
-        if not links:
-            # A bullet whose link syntax resolved to no link (``- [B](b.md``)
-            # would otherwise slip by as prose — an unread pointer reported as
-            # nothing at all. It has no entry to carry, but the line still gets
-            # flagged for a human.
-            if unresolved:
-                ambiguous.add(i)
-            other.append((i, line))
+    multiline: set[int] = set()
+    pointer_lines: set[int] = set()
+
+    open_blocks: list[str] = []
+    for token in _markdown_parser().parse(text, {}):
+        if token.type.endswith("_open"):
+            open_blocks.append(token.type)
             continue
+        if token.type.endswith("_close"):
+            if open_blocks:
+                open_blocks.pop()
+            continue
+        if token.type != "inline" or token.map is None:
+            continue
+        if not any(block.startswith("list_item") for block in open_blocks):
+            continue  # a paragraph, heading, table cell — not a pointer line
+
+        start, end = token.map
+        line_no = start + 1
+        links, unresolved = _read_inline(token)
+        if not links:
+            # Link syntax that resolved to no link (``- [B](b.md``) would
+            # otherwise pass as ordinary prose — an unread pointer reported as
+            # nothing at all. There is no entry to carry it, so flag the line.
+            if unresolved:
+                ambiguous.add(line_no)
+            continue
+        pointer_lines.add(line_no)
         if unresolved or any(_target_is_unreadable(target) for _, target in links):
-            ambiguous.add(i)
+            ambiguous.add(line_no)
+        if end - start > 1:
+            # The item runs past its first line, so "the line" is no longer the
+            # entry — splicing it would strand the continuation as loose prose.
+            multiline.add(line_no)
         entries.extend(
-            IndexEntry(line_no=i, title=title, target=target.strip(), raw=line)
+            IndexEntry(line_no=line_no, title=title, target=target.strip(), raw=lines[start])
             for title, target in links
         )
+
+    other = [(i, line) for i, line in enumerate(lines, start=1) if i not in pointer_lines]
     return ParsedIndex(
         entries=tuple(entries),
         other_lines=tuple(other),
         ambiguous_lines=frozenset(ambiguous),
+        multiline_lines=frozenset(multiline),
     )
 
 
@@ -993,16 +1002,18 @@ def _missing_target_entries(text: str, *, root: Path) -> list[IndexEntry]:
 _LEGACY_ENTRY_SHAPE_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
 
 
-def _unfixable_lines(entries: list[IndexEntry], *, parsed: ParsedIndex) -> list[str]:
-    """Reasons *entries*' lines are out of ``--fix``'s scope, one per line.
+def _unfixable_reason(entry: IndexEntry, *, parsed: ParsedIndex) -> str | None:
+    """Why *entry*'s line is out of ``--fix``'s scope, or ``None`` if it isn't.
 
     ``--fix`` removes a dead pointer by splicing out its **whole line**
     (:func:`_splice_lines`), which is only sound while "one line = one entry"
-    holds — the contract the harness itself states for ``MEMORY.md``. Three
-    shapes break that premise, and all three fail closed:
+    holds — the contract the harness itself states for ``MEMORY.md``. Four
+    shapes break that premise, and all four fail closed:
 
     * **Several entries on one line.** Splicing the line for one dead target
       would also delete every *live* entry beside it.
+    * **An item that runs past its first line.** Deleting the line would strand
+      the item's continuation as loose prose.
     * **A line holding a destination we won't resolve on a guess.** ``--fix``
       may only remove a *provably* dead pointer (ADR-0020 §1), and a target
       carrying URI machinery may name a file other than its literal text does.
@@ -1011,25 +1022,35 @@ def _unfixable_lines(entries: list[IndexEntry], *, parsed: ParsedIndex) -> list[
       previously delete. Widening the write scope on the back of a parser fix
       would smuggle a contract change in; it waits for the amendment.
 
+    Judged against *parsed*, so it can be re-asked of a fresh read under the
+    lock — the index is a live file, and a line that was in scope at analysis
+    time need not still be.
+    """
+    line_links = sum(1 for e in parsed.entries if e.line_no == entry.line_no)
+    if line_links > 1:
+        return "carries more than one entry"
+    if entry.line_no in parsed.multiline_lines:
+        return "is a list item that continues past this line"
+    if entry.line_no in parsed.ambiguous_lines:
+        return "holds a target this command will not resolve on a guess"
+    if _LEGACY_ENTRY_SHAPE_RE.match(entry.raw) is None:
+        return "does not have the one-entry-per-line shape --fix is contracted for"
+    return None
+
+
+def _unfixable_lines(entries: list[IndexEntry], *, parsed: ParsedIndex) -> list[str]:
+    """Reasons *entries*' lines are out of ``--fix``'s scope, one per line.
+
     Returns one ``L{n}: {raw}`` line per offending line (deduped, in file
     order), or an empty list when every candidate is safely fixable.
     """
-    from collections import Counter
-
-    links_per_line = Counter(e.line_no for e in parsed.entries)
     reasons: dict[int, str] = {}
     for e in entries:
         if e.line_no in reasons:
             continue
-        if links_per_line[e.line_no] > 1:
-            why = "carries more than one entry"
-        elif e.line_no in parsed.ambiguous_lines:
-            why = "holds a target this command will not resolve on a guess"
-        elif _LEGACY_ENTRY_SHAPE_RE.match(e.raw) is None:
-            why = "does not have the one-entry-per-line shape --fix is contracted for"
-        else:
-            continue
-        reasons[e.line_no] = f"      - L{e.line_no}: {e.raw}\n        ({why})"
+        why = _unfixable_reason(e, parsed=parsed)
+        if why is not None:
+            reasons[e.line_no] = f"      - L{e.line_no}: {e.raw}\n        ({why})"
     return [reasons[n] for n in sorted(reasons)]
 
 
@@ -1065,8 +1086,12 @@ def _apply_fix(index_path: Path, root: Path, candidate_raws: list[str]) -> list[
        preserve it).
     2. **Re-validate** each candidate against the fresh content + current disk.
        A fresh entry is removed only if it still classifies as ``missing_target``
-       (so a target that reappeared on disk is spared) AND its raw line text is
-       still "owed" by *candidate_raws*. Matching is *count-bounded*:
+       (so a target that reappeared on disk is spared), its line is still within
+       ``--fix``'s scope (:func:`_unfixable_reason` re-asked of the *fresh* read
+       — the guards are not a one-time admission check: an agent that defines a
+       reference definition between analysis and apply turns an unchanged
+       single-entry candidate into a line with a live sibling on it), AND its raw
+       line text is still "owed" by *candidate_raws*. Matching is *count-bounded*:
        ``candidate_raws`` carries one entry per occurrence analysis (T1) saw, and
        each fresh removal consumes one, so removals never exceed the
        analysis-time count of a given line. Distinct entries the agent added
@@ -1107,6 +1132,8 @@ def _apply_fix(index_path: Path, root: Path, candidate_raws: list[str]) -> list[
                 continue  # not a candidate, or its analysis-time count is exhausted
             if classify_link(e.target, root=root, source_dir=root) != "missing_target":
                 continue  # target reappeared since analysis — leave it alone
+            if _unfixable_reason(e, parsed=fresh) is not None:
+                continue  # the line left --fix's scope since analysis — spare it
             budget[e.raw] -= 1
             removed.append((e.line_no, e.raw))
         if not removed:
