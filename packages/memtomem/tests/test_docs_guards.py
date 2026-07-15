@@ -831,18 +831,26 @@ class TestRegistryAndInstallDocs:
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 _LINT_DOCS = (_REPO_ROOT / "CLAUDE.md", _REPO_ROOT / "CONTRIBUTING.md")
 
+# Anchored at the bare ``ruff`` token, not ``uv run ruff``: a doc teaching
+# ``uvx ruff check src`` (or ``uv  run`` with doubled spaces) narrows the lint
+# just as effectively, so the launcher must not be part of the match.
 # ``[^\S\n]`` (horizontal space only) keeps a call from swallowing the lines
 # below it; continuations are folded to spaces before this runs.
-_RUFF_CALL = re.compile(r"(?<![\w-])uv run ruff (check|format)((?:[^\S\n]+[^\s`#;|&\\]+)*)")
+_RUFF_CALL = re.compile(r"(?<![\w-])ruff((?:[^\S\n]+[^\s`#;|&\\]+)+)")
 
-# Flags known not to change which files ruff walks. Everything else is
-# reported rather than dropped: modelling ruff's option arity here would mean
-# tracking its whole CLI, and the interesting flags are exactly the ones that
-# re-scope a call that otherwise carries CI's paths (``--exclude``, and
-# ``--config``, which can carry an exclude of its own). An allowlist is
-# fail-closed for the flags nobody has thought of yet, at the cost of a
-# deliberate edit here when the docs legitimately grow a new one.
-_INERT_FLAGS = frozenset({"--fix", "--no-fix", "--check", "--diff"})
+# Flags known not to change which files ruff walks NOR mask violations, per
+# verb. Everything else is reported rather than dropped: modelling ruff's
+# option arity here would mean tracking its whole CLI, and the interesting
+# flags are exactly the ones that re-scope a call that otherwise carries CI's
+# paths (``--exclude``; ``--config``, which can carry an exclude of its own).
+# An allowlist is fail-closed for the flags nobody has thought of yet, at the
+# cost of a deliberate edit here when the docs legitimately grow a new one.
+# ``--diff`` is format-only: for ``check`` it implies fix-only mode and exits
+# 0 on violations that have no autofix, so it weakens the documented gate.
+_INERT_FLAGS = {
+    "check": frozenset({"--fix", "--no-fix"}),
+    "format": frozenset({"--check", "--diff"}),
+}
 
 
 class _RuffCall(typing.NamedTuple):
@@ -852,13 +860,17 @@ class _RuffCall(typing.NamedTuple):
 
 
 def _ruff_calls(text: str) -> list[_RuffCall]:
-    """Every ``uv run ruff check|format`` call, in order.
+    """Every ``ruff check|format`` call, in order, whatever the launcher.
 
     Backslash continuations are folded first so a call split across lines
     reads as one invocation (same normalisation as
-    ``test_documented_mm_flags_resolve``).
+    ``test_documented_mm_flags_resolve``). The first non-flag token after
+    ``ruff`` is the verb; matches whose verb is not ``check``/``format``
+    (prose like "ruff and tests must pass", other subcommands) are skipped.
+    Flags before the verb — ruff's global-option slot, ``ruff --config x
+    check`` — are collected the same as flags after it.
 
-    Only the inert flags are dropped; any other flag is kept in
+    Only the verb's inert flags are dropped; any other flag is kept in
     ``other_flags`` for the caller to reject. A flag's value may therefore
     land in ``paths`` (``--select E`` reads "E" as a path) — harmless,
     because a call carrying an un-inert flag is already an offender.
@@ -868,17 +880,34 @@ def _ruff_calls(text: str) -> list[_RuffCall]:
     would hide ``ruff check --exclude tests``.
     """
     calls: list[_RuffCall] = []
-    for verb, args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
+    for args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
+        verb: str | None = None
         paths: list[str] = []
         flags: list[str] = []
+        prev_was_flag = False
         for tok in shlex.split(args):
             if tok.startswith("-"):
-                name = tok.split("=", 1)[0]
-                if name not in _INERT_FLAGS:
-                    flags.append(name)
+                flags.append(tok.split("=", 1)[0])
+                prev_was_flag = True
                 continue
-            paths.append(tok)
-        calls.append(_RuffCall(verb, tuple(paths) or (".",), tuple(flags)))
+            if verb is None:
+                if tok in _INERT_FLAGS:
+                    verb = tok
+                elif not prev_was_flag:
+                    # Bare word where the verb should be: prose ("ruff can
+                    # check your code") or another subcommand. Not a lint call.
+                    break
+                # else: a pre-verb flag's space-separated value ("--config
+                # custom.toml check"). Skip it — the flag itself is already
+                # recorded, and no pre-verb flag is inert, so the call is an
+                # offender regardless of what the value says.
+            else:
+                paths.append(tok)
+            prev_was_flag = False
+        if verb is None:
+            continue
+        kept = tuple(f for f in flags if f not in _INERT_FLAGS[verb])
+        calls.append(_RuffCall(verb, tuple(paths) or (".",), kept))
     return calls
 
 
