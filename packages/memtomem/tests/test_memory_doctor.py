@@ -186,6 +186,53 @@ class TestDeceivingLines:
         assert parsed.ambiguous_lines == frozenset({1})  # the *line* stays unfixable
 
 
+class TestListMarkers:
+    """The parser reads every list marker CommonMark does — `--fix` still doesn't.
+
+    The old grammar was anchored at `^\\s*[-*]\\s`, so an ordered or `+`-marked
+    entry was invisible: unchecked, and counted as an orphan. Reading them is
+    the fix. *Deleting* them is a separate question — the legacy shape `--fix`
+    is contracted for names only `-`/`*`, so they stay refused until ADR-0020
+    §1 says otherwise.
+    """
+
+    MARKERS = [
+        ("1. [a](x.md) — ordered", "ordered list"),
+        ("+ [a](x.md) — plus", "plus bullet"),
+        ("* [a](x.md) — star", "star bullet"),
+        ("- [a](x.md) — dash", "dash bullet"),
+    ]
+
+    @pytest.mark.parametrize("line,why", MARKERS, ids=[w for _, w in MARKERS])
+    def test_every_marker_is_read(self, line, why):
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == ["x.md"], why
+
+    @pytest.mark.parametrize(
+        "body,fixable",
+        [("- [Dead](gone.md) — dash\n", True), ("1. [Dead](gone.md) — ordered\n", False)],
+        ids=["dash is fixable", "ordered is refused"],
+    )
+    def test_fix_scope_still_only_covers_the_legacy_shape(
+        self, body, fixable, tmp_path, monkeypatch
+    ):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        if fixable:
+            assert result.exit_code == 0
+            assert (mem_dir / "MEMORY.md").read_bytes() != before
+        else:
+            assert result.exit_code != 0
+            assert "one-entry-per-line shape" in result.output
+            assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+
 class TestBlockContext:
     """A bullet is only a pointer where the *document* says it is.
 
@@ -293,6 +340,15 @@ class TestReferenceStyleLinks:
         )
         assert [e.target for e in parsed.entries] == ["c.md", "s.md"]
 
+    def test_undefined_reference_is_left_as_prose(self):
+        # A shortcut reference with no definition is, to CommonMark, literal
+        # text — and it is indistinguishable from ordinary bracketed prose
+        # ("see [note] below"), so guessing that it meant a pointer would flag
+        # hooks all over a healthy index. Pinned as intended, not overlooked.
+        parsed = parse_memory_index("- [Live][nope] — no such definition\n")
+        assert parsed.entries == ()
+        assert parsed.unresolved_syntax_lines == frozenset()
+
     def test_reference_sibling_is_seen_beside_a_dead_inline_link(self):
         # The line that made this matter: read line-by-line, the live reference
         # link is invisible, so the line reads single-entry and --fix splices it
@@ -313,7 +369,20 @@ class TestAmbiguousLines:
 
     def test_unresolved_link_syntax_beside_a_good_link_is_flagged(self):
         parsed = parse_memory_index("- [A](a.md) — and [B](b.md\n")
-        assert parsed.ambiguous_lines == frozenset({1})
+        # Recorded on its own terms, not inferred from "a line with no entry":
+        # this line has one. Folding both doubts into a single set is what let
+        # the report lose it (see test_unread_pointer_is_reported_beside_a_good_link).
+        assert parsed.unresolved_syntax_lines == frozenset({1})
+        assert [e.target for e in parsed.entries] == ["a.md"]
+        assert parsed.ambiguous_lines == frozenset({1})  # still unfixable
+
+    def test_the_two_doubts_are_tracked_apart(self):
+        # An unreadable *target* is an entry the report can point at; unresolved
+        # *syntax* has no entry at all. Only their union is --fix's business.
+        parsed = parse_memory_index("- [Odd](live%2Emd) — target\n- [B](b.md\n")
+        assert parsed.unresolved_syntax_lines == frozenset({2})
+        assert [(e.line_no, e.unreadable) for e in parsed.entries] == [(1, True)]
+        assert parsed.ambiguous_lines == frozenset({1, 2})
 
     def test_url_and_anchor_targets_are_not_flagged(self):
         # They carry a ``:`` / lead with ``#``, but are never resolved against
@@ -693,6 +762,36 @@ async def test_dead_link_is_reported_beside_an_unreadable_one(tmp_path, monkeypa
     assert by["broken_link"].severity == "error"
     assert by["broken_link"].items == ["L1 [missing_target] gone.md"]
     assert "live%2Emd" in by["ambiguous_index_line"].items[0]
+
+
+@pytest.mark.asyncio
+async def test_unread_pointer_is_reported_beside_a_good_link(tmp_path, monkeypatch):
+    """An unclosed pointer must not hide behind a readable one on its line.
+
+    This shipped once: the report asked for "ambiguous lines that produced no
+    entry" as `ambiguous_lines - entry_lines`, which excludes any line carrying
+    an entry — so `[B](b.md` next to a live `[A](a.md)` was reported by neither
+    path, and `--fix` never surfaces it either (the line yields no candidate
+    while a.md is live). The parser-level pin passed throughout; only a pin on
+    the *report* could catch it.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-unread" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "a.md").write_text("# a\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [A](a.md) — and [B](b.md\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "unread.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    assert by["ambiguous_index_line"].severity == "warn"
+    assert "[B](b.md" in by["ambiguous_index_line"].items[0]
 
 
 @pytest.mark.asyncio

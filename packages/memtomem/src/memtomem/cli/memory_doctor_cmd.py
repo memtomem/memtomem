@@ -143,12 +143,13 @@ class ParsedIndex:
     numbers so a future write phase can round-trip the file; Tier 1 only reads
     them for the budget measurement.
 
-    ``ambiguous_lines`` holds the 1-based numbers of lines that ``--fix`` must
-    not splice because something on them could not be read: an unreadable
-    target, or link syntax that resolved to no link at all. It is line-level
-    because deletion is: the doubt is about the line as a whole. *Reporting* is
-    per entry (``IndexEntry.unreadable``) — a readable pointer is still checked
-    even where it shares a line with an unreadable one.
+    ``unresolved_syntax_lines`` holds the 1-based numbers of lines that meant a
+    pointer the parser could not resolve to a link (an unclosed ``[B](b.md``).
+    It is kept apart from the entries because that is the whole problem with
+    such a line: it has none. Two different doubts — "this target may not be the
+    path it reads as" (an entry, flagged ``unreadable``) and "this text meant a
+    link and isn't one" (no entry at all) — must not share a set, or reporting
+    one has to guess at the other.
 
     ``multiline_lines`` holds the first line of any list item that runs past it
     (a lazy continuation). Their links are read and checked like any other —
@@ -158,8 +159,19 @@ class ParsedIndex:
 
     entries: tuple[IndexEntry, ...]
     other_lines: tuple[tuple[int, str], ...]
-    ambiguous_lines: frozenset[int] = frozenset()
+    unresolved_syntax_lines: frozenset[int] = frozenset()
     multiline_lines: frozenset[int] = frozenset()
+
+    @property
+    def ambiguous_lines(self) -> frozenset[int]:
+        """Lines ``--fix`` must not splice: something on them could not be read.
+
+        Line-level because deletion is — the doubt is about the line as a whole.
+        Reporting stays per entry (:attr:`IndexEntry.unreadable`) and per
+        unresolved line, so a readable pointer is still checked where it shares
+        a line with an unreadable one.
+        """
+        return self.unresolved_syntax_lines | {e.line_no for e in self.entries if e.unreadable}
 
 
 # Link syntax surviving as literal text: the line meant a pointer the parser
@@ -325,7 +337,7 @@ def parse_memory_index(text: str) -> ParsedIndex:
     """
     lines = text.splitlines()
     entries: list[IndexEntry] = []
-    ambiguous: set[int] = set()
+    unresolved_syntax: set[int] = set()
     multiline: set[int] = set()
     pointer_lines: set[int] = set()
 
@@ -337,20 +349,15 @@ def parse_memory_index(text: str) -> ParsedIndex:
         for inline in _own_inlines(body):
             line_no = inline.map[0] + 1
             links, unresolved = _read_inline(inline)
+            # Link syntax that resolved to no link (``- [B](b.md``) would
+            # otherwise pass as ordinary prose — an unread pointer reported as
+            # nothing at all. It has no entry to carry it, so the line is
+            # recorded, whether or not a *readable* pointer shares it.
+            if unresolved:
+                unresolved_syntax.add(line_no)
             if not links:
-                # Link syntax that resolved to no link (``- [B](b.md``) would
-                # otherwise pass as ordinary prose — an unread pointer reported
-                # as nothing at all. There is no entry to carry it, so flag the
-                # line itself.
-                if unresolved:
-                    ambiguous.add(line_no)
                 continue
             pointer_lines.add(line_no)
-            # Line-level, because deletion is: doubt anywhere on the line puts
-            # the whole line out of --fix's reach. Per-entry readability is
-            # carried on the entries themselves, for the report.
-            if unresolved or any(_target_is_unreadable(target) for _, target in links):
-                ambiguous.add(line_no)
             if not _item_is_one_line(body, inline):
                 multiline.add(line_no)
             entries.extend(
@@ -368,7 +375,7 @@ def parse_memory_index(text: str) -> ParsedIndex:
     return ParsedIndex(
         entries=tuple(entries),
         other_lines=tuple(other),
-        ambiguous_lines=frozenset(ambiguous),
+        unresolved_syntax_lines=frozenset(unresolved_syntax),
         multiline_lines=frozenset(multiline),
     )
 
@@ -807,11 +814,14 @@ def _analyze_index_file(
         elif cls == "ok":
             resolved = (root / entry.target.split("#", 1)[0]).resolve()
             listed_norm.add(norm_path(resolved))  # type: ignore[operator]
-    # A line whose link syntax resolved to no link has no entry to speak for it,
-    # so it is reported from the source text.
+    # A line that meant a pointer the parser could not resolve has no entry to
+    # speak for it, so it is reported from the source text. It is reported
+    # whether or not a readable pointer shares the line: an unread ``[B](b.md``
+    # beside a live ``[A](a.md)`` is the same pointer-hiding-behind-its-company
+    # shape as above, and the line yields no --fix candidate to surface it
+    # either.
     raw_lines = text.splitlines()
-    entry_lines = {e.line_no for e in parsed.entries}
-    for line_no in sorted(parsed.ambiguous_lines - entry_lines):
+    for line_no in sorted(parsed.unresolved_syntax_lines):
         ambiguous_items.append(f"L{line_no} [unreadable link syntax] {raw_lines[line_no - 1]}")
     ambiguous_items.sort(key=lambda item: int(item.split(None, 1)[0][1:]))
     if broken:
@@ -1052,18 +1062,22 @@ class FixFileResult:
         }
 
 
-def _missing_target_entries(text: str, *, root: Path) -> list[IndexEntry]:
+def _missing_target_entries(
+    text: str, *, root: Path, parsed: ParsedIndex | None = None
+) -> list[IndexEntry]:
     """Pointer entries in *text* whose target classifies as ``missing_target``.
 
     The single link-class ``--fix`` removes (ADR-0020 §1): a pointer that
     resolves *inside* the memory root but points at a file that does not exist.
     ``outside_root`` / ``url`` / ``anchor`` / ``ok`` are all left untouched —
     only a provably-dead in-root reference is safe to delete subtractively.
+
+    Pass *parsed* to reuse a read of the same *text* the caller already has.
     """
-    parsed = parse_memory_index(text)
+    entries = (parsed if parsed is not None else parse_memory_index(text)).entries
     return [
         e
-        for e in parsed.entries
+        for e in entries
         if classify_link(e.target, root=root, source_dir=root) == "missing_target"
     ]
 
@@ -1105,26 +1119,31 @@ def _unfixable_reason(entry: IndexEntry, *, parsed: ParsedIndex) -> str | None:
         return "carries more than one entry"
     if entry.line_no in parsed.multiline_lines:
         return "is a list item that continues past this line"
-    if entry.line_no in parsed.ambiguous_lines:
+    if entry.line_no in parsed.unresolved_syntax_lines:
+        return "also holds link syntax that resolved to no link"
+    if any(e.unreadable for e in parsed.entries if e.line_no == entry.line_no):
         return "holds a target this command will not resolve on a guess"
     if _LEGACY_ENTRY_SHAPE_RE.match(entry.raw) is None:
         return "does not have the one-entry-per-line shape --fix is contracted for"
     return None
 
 
-def _unfixable_lines(entries: list[IndexEntry], *, parsed: ParsedIndex) -> list[str]:
+def _unfixable_lines(
+    entries: list[IndexEntry], *, parsed: ParsedIndex
+) -> list[tuple[int, str, str]]:
     """Reasons *entries*' lines are out of ``--fix``'s scope, one per line.
 
-    Returns one ``L{n}: {raw}`` line per offending line (deduped, in file
-    order), or an empty list when every candidate is safely fixable.
+    Returns ``(line_no, raw, reason)`` per offending line, deduped and in file
+    order; empty when every candidate is safely fixable. Rendering belongs to
+    the caller.
     """
-    reasons: dict[int, str] = {}
+    reasons: dict[int, tuple[int, str, str]] = {}
     for e in entries:
         if e.line_no in reasons:
             continue
         why = _unfixable_reason(e, parsed=parsed)
         if why is not None:
-            reasons[e.line_no] = f"      - L{e.line_no}: {e.raw}\n        ({why})"
+            reasons[e.line_no] = (e.line_no, e.raw, why)
     return [reasons[n] for n in sorted(reasons)]
 
 
@@ -1259,16 +1278,17 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
             text = index_path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        candidates = _missing_target_entries(text, root=resolved)
+        parsed = parse_memory_index(text)
+        candidates = _missing_target_entries(text, root=resolved, parsed=parsed)
         if not candidates:
             results.append(FixFileResult(str(resolved), index_file_name, applied=apply, removed=[]))
             continue
         # Fail closed before promising (dry-run) or performing (--apply) a splice
         # we cannot prove is subtractive-only. Guarded on both paths so the
         # preview never advertises a removal we would refuse to make.
-        unsafe = _unfixable_lines(candidates, parsed=parse_memory_index(text))
+        unsafe = _unfixable_lines(candidates, parsed=parsed)
         if unsafe:
-            detail = "\n".join(unsafe)
+            detail = "\n".join(f"      - L{n}: {raw}\n        ({why})" for n, raw, why in unsafe)
             raise click.UsageError(
                 f"{index_path}: refusing --fix — {len(unsafe)} line(s) are outside the shape "
                 f"--fix can safely splice, and it removes whole lines, so proceeding could "

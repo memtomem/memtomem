@@ -44,7 +44,13 @@ dependencies = [
     # pattern that has to enumerate every way the two differ. Already installed
     # in practice (mcp[cli] -> rich -> markdown-it-py); declared because we
     # import it directly.
-    "markdown-it-py>=3.0",
+    #
+    # Capped, unlike the deps above, because we don't just call this one — we
+    # override `normalizeLink`/`validateLink` on the instance (a documented
+    # pattern, but internals). A major that reworks them would break at *user*
+    # runtime, not in CI, which resolves through uv.lock. Raise the cap
+    # deliberately: `TestDeceivingLines` is the contract to re-run against.
+    "markdown-it-py>=3.0,<5",
 ]
 
 [project.optional-dependencies]

@@ -1183,7 +1183,7 @@ requires-dist = [
     { name = "kiwipiepy", marker = "extra == 'korean'", specifier = ">=0.18" },
     { name = "langfuse", marker = "extra == 'langfuse'", specifier = ">=4.0" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.0,<2" },
-    { name = "markdown-it-py", specifier = ">=3.0" },
+    { name = "markdown-it-py", specifier = ">=3.0,<5" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27.2" },
     { name = "memtomem", extras = ["onnx", "ollama", "openai", "korean", "code", "web", "langfuse", "langgraph"], marker = "extra == 'all'", editable = "packages/memtomem" },
     { name = "ollama", marker = "extra == 'ollama'", specifier = ">=0.4" },
