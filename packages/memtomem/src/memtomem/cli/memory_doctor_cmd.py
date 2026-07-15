@@ -72,6 +72,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -298,8 +299,8 @@ def _own_inlines(body: list[Token]) -> list[Token]:
     naively lets a parent with no text of its own (``-`` on a line by itself, or
     one opening with a fence) adopt its child's inline: the child's pointer gets
     recorded twice, once against each item, which double-reports the link and
-    makes the child's line look like it carries two entries — refusing a fix
-    that is safe.
+    hangs the parent's unfixable-item verdict on the child's line — skipping a
+    fix that is safe.
 
     Every own inline is read, not just the first: an item can put its pointer in
     a second paragraph, and skipping those would drop a real pointer from the
@@ -1080,12 +1081,17 @@ class FixFileResult:
     index_file: str  # the index filename (e.g. MEMORY.md)
     applied: bool
     removed: list[tuple[int, str]]  # (1-based line_no, raw line text)
+    # Candidates --fix found but will not remove: (line_no, raw, why). ADR-0020
+    # §1 — a skipped candidate is a dead pointer left behind, so it is part of
+    # the report, never a silent omission.
+    skipped: list[tuple[int, str, str]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, object]:
         return {
             "path": self.path,
             "index_file": self.index_file,
             "removed": [{"line": n, "text": t} for n, t in self.removed],
+            "skipped": [{"line": n, "text": t, "reason": w} for n, t, w in self.skipped],
         }
 
 
@@ -1099,79 +1105,143 @@ def _missing_target_entries(
     ``outside_root`` / ``url`` / ``anchor`` / ``ok`` are all left untouched —
     only a provably-dead in-root reference is safe to delete subtractively.
 
+    An **unreadable** target is excluded here, at the candidate stage, the same
+    way Tier 1 excludes it from ``broken_link``: a destination carrying URI
+    machinery may name a file other than its literal text does, so its literal
+    miss is not proof of death — it is an ``ambiguous_index_line`` for a human
+    to read, not a candidate. The distinction matters because a line whose only
+    links are unreadable must not surface as a *skipped candidate* either: it
+    is not a `--fix` concern at all (ADR-0020 §1), and reporting it as a
+    pointer `--fix` declined to remove would misfile Tier 1's warning as Tier
+    2 business. A line mixing a dead link with an unreadable one *is* a
+    candidate, and the ambiguity is then caught per line by
+    :func:`_line_skip_reason`.
+
     Pass *parsed* to reuse a read of the same *text* the caller already has.
     """
     entries = (parsed if parsed is not None else parse_memory_index(text)).entries
     return [
         e
         for e in entries
-        if classify_link(e.target, root=root, source_dir=root) == "missing_target"
+        if not e.unreadable
+        and classify_link(e.target, root=root, source_dir=root) == "missing_target"
     ]
 
 
-# The pre-#1757 entry grammar: line-anchored, at most one match per line. The
-# parser no longer uses it — it now reads every link on a line — but ``--fix``
-# still does, to keep its write scope frozen at exactly the shape it could
-# already delete before the parser widened. Relaxing that scope is an ADR-0020
-# §1 change and lands with the amendment, not here.
-_LEGACY_ENTRY_SHAPE_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
+# ADR-0020 §1's strict grammar starts at the marker: a single-line ``-``/``*``
+# bullet. An ordered (``1.``) or ``+`` item is read by the parser and reported,
+# but stays out of the write path — the shape the ``MEMORY.md`` contract
+# specifies is the only one whose whole-line deletion is a curation no-op.
+_BULLET_MARKER_RE = re.compile(r"^\s*[-*]\s")
 
 
-def _unfixable_reason(entry: IndexEntry, *, parsed: ParsedIndex) -> str | None:
-    """Why *entry*'s line is out of ``--fix``'s scope, or ``None`` if it isn't.
+def _line_skip_reason(line_no: int, *, parsed: ParsedIndex, root: Path) -> str | None:
+    """Why the line at *line_no* is not eligible for deletion, or ``None``.
 
-    ``--fix`` removes a dead pointer by splicing out its **whole line**
-    (:func:`_splice_lines`), which is only sound while "one line = one entry"
-    holds — the contract the harness itself states for ``MEMORY.md``. Four
-    shapes break that premise, and all four fail closed:
+    ADR-0020 §1's two-part test, asked of a *candidate* line (one carrying at
+    least one ``missing_target`` link). Both parts fail closed:
 
-    * **Several entries on one line.** Splicing the line for one dead target
-      would also delete every *live* entry beside it.
-    * **An item that runs past its first line.** Deleting the line would strand
-      the item's continuation as loose prose.
-    * **A line holding a destination we won't resolve on a guess.** ``--fix``
-      may only remove a *provably* dead pointer (ADR-0020 §1), and a target
-      carrying URI machinery may name a file other than its literal text does.
-    * **A pointer the legacy grammar never saw.** The widened parser now reads
-      prose-prefixed lines (``- NS: [a](x.md)``), which ``--fix`` could not
-      previously delete. Widening the write scope on the back of a parser fix
-      would smuggle a contract change in; it waits for the amendment.
+    * **Strict grammar — the parse must account for the whole line.** A
+      single-line ``-``/``*`` bullet of links plus inert prose. A line that is
+      not that bullet, an item that runs past its first line (deleting it would
+      strand the continuation as loose prose), link syntax that resolved to no
+      link (the line meant a pointer the grammar could not read), or a target
+      this command will not resolve on a guess (URI machinery may name a file
+      other than its literal text does) — none is eligible.
+    * **All links dead.** Every link on the line must classify
+      ``missing_target``. One live, out-of-root, or otherwise not-provably-dead
+      sibling spares the whole line: splicing it would delete a pointer
+      memtomem cannot prove dead, and carving the dead entry out of the line is
+      the span surgery ADR-0020 rejects.
 
+    Judged per *line*, not per entry, because the line is the unit of deletion.
     Judged against *parsed*, so it can be re-asked of a fresh read under the
-    lock — the index is a live file, and a line that was in scope at analysis
-    time need not still be.
+    lock — the index is a live file, and a line eligible at analysis time need
+    not still be (§5).
+
+    *line_no* must name a pointer line of *parsed*; every reason below is a
+    statement about the links on it, so a line with none has no answer here —
+    only a caller bug can ask, and it fails loudly rather than dressing a
+    non-candidate up as a skipped one.
     """
-    line_links = sum(1 for e in parsed.entries if e.line_no == entry.line_no)
-    if line_links > 1:
-        return "carries more than one entry"
-    if entry.line_no in parsed.multiline_lines:
+    line_entries = [e for e in parsed.entries if e.line_no == line_no]
+    if _BULLET_MARKER_RE.match(line_entries[0].raw) is None:
+        return "is not a `-`/`*` bullet entry"
+    if line_no in parsed.multiline_lines:
         return "is a list item that continues past this line"
-    if entry.line_no in parsed.unresolved_syntax_lines:
+    if line_no in parsed.unresolved_syntax_lines:
         return "also holds link syntax that resolved to no link"
-    if any(e.unreadable for e in parsed.entries if e.line_no == entry.line_no):
+    if any(e.unreadable for e in line_entries):
         return "holds a target this command will not resolve on a guess"
-    if _LEGACY_ENTRY_SHAPE_RE.match(entry.raw) is None:
-        return "does not have the one-entry-per-line shape --fix is contracted for"
+    if any(
+        classify_link(e.target, root=root, source_dir=root) != "missing_target"
+        for e in line_entries
+    ):
+        return "carries a link that is not provably dead"
     return None
 
 
-def _unfixable_lines(
-    entries: list[IndexEntry], *, parsed: ParsedIndex
-) -> list[tuple[int, str, str]]:
-    """Reasons *entries*' lines are out of ``--fix``'s scope, one per line.
+def _partition_candidates(
+    candidates: list[IndexEntry], *, parsed: ParsedIndex, root: Path
+) -> tuple[list[tuple[int, str]], list[tuple[int, str, str]]]:
+    """Split candidate lines into the eligible and the skipped (ADR-0020 §1).
 
-    Returns ``(line_no, raw, reason)`` per offending line, deduped and in file
-    order; empty when every candidate is safely fixable. Rendering belongs to
-    the caller.
+    *candidates* are entries; the unit of the answer is the **line**, so they
+    are collapsed by line number first — a line carrying two dead links is one
+    candidate, judged once. Returns ``(eligible, skipped)``, each in file
+    order: ``eligible`` as ``(line_no, raw)``, ``skipped`` as
+    ``(line_no, raw, reason)``. Rendering belongs to the caller.
     """
-    reasons: dict[int, tuple[int, str, str]] = {}
-    for e in entries:
-        if e.line_no in reasons:
-            continue
-        why = _unfixable_reason(e, parsed=parsed)
-        if why is not None:
-            reasons[e.line_no] = (e.line_no, e.raw, why)
-    return [reasons[n] for n in sorted(reasons)]
+    lines: dict[int, str] = {}
+    for e in candidates:
+        lines.setdefault(e.line_no, e.raw)
+    eligible: list[tuple[int, str]] = []
+    skipped: list[tuple[int, str, str]] = []
+    for line_no in sorted(lines):
+        why = _line_skip_reason(line_no, parsed=parsed, root=root)
+        if why is None:
+            eligible.append((line_no, lines[line_no]))
+        else:
+            skipped.append((line_no, lines[line_no], why))
+    return eligible, skipped
+
+
+@dataclass(frozen=True)
+class _AnalysisSnapshot:
+    """What the analysis read (T1) tells the locked apply (T2) about the file.
+
+    The apply re-derives everything else from its own fresh read (ADR-0020 §5) —
+    this carries only what a *later* read cannot recover: what the file looked
+    like when the report was made.
+    """
+
+    eligible: tuple[tuple[int, str], ...]  # (line_no, raw) of the lines §1 cleared
+    candidate_raws: frozenset[str]  # raws of every candidate line, cleared or skipped
+    occurrences: Counter[str]  # pointer lines carrying each raw
+
+    @classmethod
+    def of(
+        cls, parsed: ParsedIndex, *, candidates: list[IndexEntry], eligible: list[tuple[int, str]]
+    ) -> _AnalysisSnapshot:
+        return cls(
+            eligible=tuple(eligible),
+            candidate_raws=frozenset(e.raw for e in candidates),
+            occurrences=Counter(_pointer_lines(parsed).values()),
+        )
+
+
+def _pointer_lines(parsed: ParsedIndex) -> dict[int, str]:
+    """Every physical line carrying a pointer, as ``{line_no: raw}``.
+
+    The population §5's multiplicity guard counts, on both the analysis and the
+    fresh side: a line's entries collapsed by line number, so a line with two
+    links is one occurrence. Counting the two sides over *different* populations
+    is how a guard starts reporting a change that never happened.
+    """
+    lines: dict[int, str] = {}
+    for e in parsed.entries:
+        lines.setdefault(e.line_no, e.raw)
+    return lines
 
 
 def _splice_lines(original_text: str, remove_line_nos: set[int]) -> str:
@@ -1192,8 +1262,12 @@ def _splice_lines(original_text: str, remove_line_nos: set[int]) -> str:
     )
 
 
-def _apply_fix(index_path: Path, root: Path, candidate_raws: list[str]) -> list[tuple[int, str]]:
-    """Under the sidecar lock, splice still-dead candidate lines out of *index_path*.
+def _apply_fix(
+    index_path: Path,
+    root: Path,
+    analysis: _AnalysisSnapshot,
+) -> tuple[list[tuple[int, str]], list[tuple[int, str, str]]]:
+    """Under the sidecar lock, splice still-eligible candidate lines out of *index_path*.
 
     Implements ADR-0020 §5's concurrency-aware write. All work happens while
     holding the ``_file_lock`` sidecar lock so a concurrent *memtomem* writer is
@@ -1204,66 +1278,105 @@ def _apply_fix(index_path: Path, root: Path, candidate_raws: list[str]) -> list[
     1. **Fresh, newline-preserving re-read** (``read_bytes().decode`` — NOT
        ``read_text``, which would normalize CRLF→LF before the splice could
        preserve it).
-    2. **Re-validate** each candidate against the fresh content + current disk.
-       A fresh entry is removed only if it still classifies as ``missing_target``
-       (so a target that reappeared on disk is spared), its line is still within
-       ``--fix``'s scope (:func:`_unfixable_reason` re-asked of the *fresh* read
-       — the guards are not a one-time admission check: an agent that defines a
-       reference definition between analysis and apply turns an unchanged
-       single-entry candidate into a line with a live sibling on it), AND its raw
-       line text is still "owed" by *candidate_raws*. Matching is *count-bounded*:
-       ``candidate_raws`` carries one entry per occurrence analysis (T1) saw, and
-       each fresh removal consumes one, so removals never exceed the
-       analysis-time count of a given line. Distinct entries the agent added
-       after T1 are therefore never removed, and an agent *edit* to a candidate
-       line spares it (its raw no longer matches). The one residual case is an
-       agent that added an *exact byte-duplicate* of a still-dead candidate: the
-       budget keeps the right number of copies (the net of the addition is
-       preserved), but because the duplicates are byte-identical, *which*
-       physical line survives is unspecified — and irrelevant, since the spliced
-       result is byte-identical either way. The budget bounds removals to what
-       was provably dead at analysis time.
-    3. **Splice** the still-qualifying lines out of the fresh text, carrying
+    2. **Re-validate** each candidate against the fresh content + current disk,
+       on two axes.
+
+       *Multiplicity.* Matching is count-bounded on the raw line text, counted
+       in **physical line occurrences** on both sides — an all-dead line
+       carrying two links is one occurrence, not two. A raw whose fresh count
+       differs from its analysis-time count is skipped **entirely**: the count
+       says how many copies should survive but nothing about *which*, and
+       byte-identical lines can sit in different sections, so picking one to
+       remove could delete the copy the agent meant to keep. The mismatch fails
+       closed and is reported. A count *match* means the agent neither added nor
+       removed a copy, so removing them is the net the analysis promised; a
+       distinct line the agent added is never a match at all, and an agent
+       *edit* to a candidate spares it (its raw stops matching, so the count
+       drops and the mismatch skips it).
+
+       *Eligibility.* §1 is re-asked of the **fresh parse**, not carried over —
+       it is not a one-time admission check. A resurrected target, or a
+       reference definition the agent added that turns an all-dead line into one
+       with a live sibling, drops the line here. Drops are reported, not
+       silently absent (§1).
+    3. **Splice** the still-eligible lines out of the fresh text, carrying
        through everything the agent added before the lock.
     4. **Atomically replace**, preserving the file's existing mode (``mkstemp``
        defaults to ``0o600``, which would silently downgrade a ``0o644`` TOC).
 
-    Returns the removed lines as ``(line_no, raw)`` for the audit report.
+    **The report describes the file this call leaves on disk.** It is built from
+    the fresh partition alone; the analysis snapshot contributes only the count
+    bound. Every dead pointer still in the file — skipped by §1, dropped by the
+    guards above, or written by the agent since analysis — is named, and nothing
+    else is. Two properties follow, and both are the point:
+
+    * *No stale coordinates.* A candidate the agent deleted or rewrote between
+      the two reads is not reported: it is not in the file, so there is nothing
+      to repair and no line to name. The snapshot's line numbers describe a file
+      the agent may have rewritten, so a report merged from both can name a line
+      that moved — or, when eligibility swaps between byte-identical copies,
+      call the same line removed *and* skipped.
+    * *"Clean" means clean.* A dead pointer the agent wrote since analysis is
+      not removable here (no analysis-time count bounds it) but it is *there*,
+      so the run reports it rather than calling the file clean. Re-running
+      ``--fix`` clears it, now that an analysis has seen it.
+
+    Returns ``(removed, skipped)`` — the removed lines as ``(line_no, raw)`` for
+    the audit report, and the apply-time drops as ``(line_no, raw, why)``.
     """
     import stat
-    from collections import Counter
 
     from memtomem.context._atomic import _file_lock, _lock_path_for, atomic_write_text
 
+    removed: list[tuple[int, str]] = []
     with _file_lock(_lock_path_for(index_path)):
         # §5.1 — fresh, newline-preserving read (NOT read_text()).
         fresh_text = index_path.read_bytes().decode("utf-8")
         fresh = parse_memory_index(fresh_text)
-        # §5.2 — re-validate against a count-bounded budget: remove at most as
-        # many occurrences of each raw line as analysis (T1) saw. Distinct agent
-        # additions are never touched; for a byte-identical duplicate of a dead
-        # candidate the net addition is preserved (one fewer copy), though which
-        # equal copy survives is unspecified (they're identical, so the spliced
-        # result is the same either way).
-        budget: Counter[str] = Counter(candidate_raws)
-        removed: list[tuple[int, str]] = []
-        for e in fresh.entries:
-            if budget[e.raw] <= 0:
-                continue  # not a candidate, or its analysis-time count is exhausted
-            if classify_link(e.target, root=root, source_dir=root) != "missing_target":
-                continue  # target reappeared since analysis — leave it alone
-            if _unfixable_reason(e, parsed=fresh) is not None:
-                continue  # the line left --fix's scope since analysis — spare it
-            budget[e.raw] -= 1
-            removed.append((e.line_no, e.raw))
+        # §5.2 — re-ask §1 of the FRESH read, and report from it. The analysis
+        # snapshot contributes only the count bound: its line numbers and
+        # verdicts describe a file that may no longer exist, so reporting from it
+        # can name a line the agent moved — or contradict this run's own removal.
+        fresh_candidates = _missing_target_entries(fresh_text, root=root, parsed=fresh)
+        fresh_eligible, skipped = _partition_candidates(fresh_candidates, parsed=fresh, root=root)
+        fresh_eligible_by_raw: dict[str, list[int]] = {}
+        for line_no, raw in fresh_eligible:
+            fresh_eligible_by_raw.setdefault(raw, []).append(line_no)
+        fresh_count = Counter(_pointer_lines(fresh).values())
+        eligible_count: Counter[str] = Counter(raw for _, raw in analysis.eligible)
+
+        for raw, line_nos in fresh_eligible_by_raw.items():
+            if raw not in analysis.candidate_raws:
+                # A dead line analysis never saw — the agent added or rewrote it
+                # since. Removing it is not this run's to do (no analysis-time
+                # count bounds it, and it may precede a file the agent is about
+                # to create), but it is a dead pointer sitting in the file, so
+                # the report names it rather than passing the file off as clean.
+                why = "added since analysis — re-run --fix to remove it"
+            elif raw not in eligible_count:
+                # Analysis saw this line and skipped it; it is eligible now, so
+                # there is no analysis-time count to bound a removal by.
+                why = "changed in eligibility since analysis — will not guess which copy to remove"
+            elif fresh_count[raw] != analysis.occurrences[raw]:
+                why = "changed in number since analysis — will not guess which copy to remove"
+            elif len(line_nos) != eligible_count[raw]:
+                why = "changed in eligibility since analysis — will not guess which copy to remove"
+            else:
+                removed.extend((n, raw) for n in line_nos)
+                continue
+            # Fail closed on every copy: the counts say how many copies should go
+            # but nothing about which, and byte-identical lines can sit in
+            # different sections. One skip per physical line, so the report names
+            # them all (§1) — a raw-level record would undercount duplicates.
+            skipped.extend((n, raw, why) for n in line_nos)
         if not removed:
-            return []
+            return [], sorted(skipped)
         # §5.3 — splice out of the FRESH text (agent additions carried through).
         new_text = _splice_lines(fresh_text, {n for n, _ in removed})
         # §5.4 — atomic replace, preserving the original file mode.
         original_mode = stat.S_IMODE(index_path.stat().st_mode)
         atomic_write_text(index_path, new_text, mode=original_mode)
-    return removed
+    return sorted(removed), sorted(skipped)
 
 
 def _collect_fixable(inspect_dirs: list[Path]) -> list[tuple[Path, Path, str]]:
@@ -1292,10 +1405,15 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
     """Drive ``--fix`` over every inspected dir's index file (preview or apply).
 
     Per file the analysis-time read (T1) collects the ``missing_target``
-    candidates; ``--apply`` then hands their raw line text to :func:`_apply_fix`,
-    which re-reads fresh under the lock (T2) and re-validates before writing.
-    Dry-run reports the T1 candidates directly. Each removed line is reported
-    (ADR-0020 §5 — even on ``--apply``, the removal must be auditable).
+    candidate lines and partitions them (ADR-0020 §1): the eligible ones are
+    previewed or handed to :func:`_apply_fix`, which re-reads fresh under the
+    lock (T2) and re-validates before writing; the rest are skipped and
+    reported for manual repair, while the eligible lines in the same file are
+    still fixed. Every removed line is reported too (§5 — even on ``--apply``,
+    the removal must be auditable).
+
+    Skipping is a per-*line* partition, not a whole-run refusal: one
+    non-conforming line no longer blocks fixing the rest of the file.
     """
     results: list[FixFileResult] = []
     for resolved, index_path, index_file_name in _collect_fixable(inspect_dirs):
@@ -1307,28 +1425,33 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
             continue
         parsed = parse_memory_index(text)
         candidates = _missing_target_entries(text, root=resolved, parsed=parsed)
-        if not candidates:
+        eligible, skipped = _partition_candidates(candidates, parsed=parsed, root=resolved)
+        if apply:
+            # Run even with nothing to do: ``--apply``'s report describes the
+            # file it leaves on disk, and only the locked fresh read knows what
+            # that is — an index clean at T1 may have gained a dead pointer by
+            # the time the lock is taken, and reporting it clean would be a claim
+            # this run never checked.
+            #
+            # ``_apply_fix`` re-partitions that fresh read and reports from *it*,
+            # so its skips replace these rather than joining them: the analysis
+            # snapshot's verdicts describe a file the agent may have edited
+            # since, and merging the two can report a line as both removed and
+            # skipped.
+            removed, skipped = _apply_fix(
+                index_path,
+                resolved,
+                _AnalysisSnapshot.of(parsed, candidates=candidates, eligible=eligible),
+            )
+        elif not candidates:
             results.append(FixFileResult(str(resolved), index_file_name, applied=apply, removed=[]))
             continue
-        # Fail closed before promising (dry-run) or performing (--apply) a splice
-        # we cannot prove is subtractive-only. Guarded on both paths so the
-        # preview never advertises a removal we would refuse to make.
-        unsafe = _unfixable_lines(candidates, parsed=parsed)
-        if unsafe:
-            detail = "\n".join(f"      - L{n}: {raw}\n        ({why})" for n, raw, why in unsafe)
-            raise click.UsageError(
-                f"{index_path}: refusing --fix — {len(unsafe)} line(s) are outside the shape "
-                f"--fix can safely splice, and it removes whole lines, so proceeding could "
-                f"delete a live pointer:\n{detail}\n"
-                f"    Repair these lines by hand, or split the index to one entry per line "
-                f"(the MEMORY.md contract) and re-run."
-            )
-        if apply:
-            removed = _apply_fix(index_path, resolved, [e.raw for e in candidates])
         else:
-            removed = [(e.line_no, e.raw) for e in candidates]
+            removed = eligible
         results.append(
-            FixFileResult(str(resolved), index_file_name, applied=apply, removed=removed)
+            FixFileResult(
+                str(resolved), index_file_name, applied=apply, removed=removed, skipped=skipped
+            )
         )
 
     if json_out:
@@ -1336,35 +1459,71 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
     else:
         _emit_fix_human(results, applied=apply)
 
+    # A dead pointer left behind is not success. Exit non-zero so a script
+    # cannot read a partially-fixed index as a clean one (ADR-0020 §1).
+    if sum(len(r.skipped) for r in results) > 0:
+        raise click.exceptions.Exit(1)
+
 
 def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
     total = sum(len(r.removed) for r in results)
-    if total == 0:
+    skipped_total = sum(len(r.skipped) for r in results)
+    if total == 0 and skipped_total == 0:
         click.secho("No missing_target links to remove.", fg="green")
         return
     verb = "Removed" if applied else "Would remove"
     for r in results:
-        if not r.removed:
+        if not r.removed and not r.skipped:
             continue
         click.secho(f"\n■ {r.path} · {r.index_file}", bold=True)
-        click.echo(f"  {verb} {len(r.removed)} missing_target link(s):")
-        for line_no, raw in r.removed:
-            click.echo(f"      - L{line_no}: {raw}")
+        if r.removed:
+            # Lines, not links: an all-dead line may carry several.
+            click.echo(f"  {verb} {len(r.removed)} dead pointer line(s):")
+            for line_no, raw in r.removed:
+                click.echo(f"      - L{line_no}: {raw}")
+        if r.skipped:
+            click.secho(
+                f"  Skipped {len(r.skipped)} line(s) --fix will not remove (repair by hand):",
+                fg="yellow",
+            )
+            for line_no, raw, why in r.skipped:
+                click.echo(f"      - L{line_no}: {raw}\n        ({why})")
     n_files = sum(1 for r in results if r.removed)
     if applied:
-        click.secho(f"\n{total} line(s) removed across {n_files} file(s).", fg="green")
+        summary = f"\n{total} line(s) removed across {n_files} file(s)."
     else:
-        click.echo(f"\n{total} line(s) across {n_files} file(s). Run with --apply to write.")
+        summary = f"\n{total} line(s) across {n_files} file(s). Run with --apply to write."
+    if skipped_total:
+        # Not a clean run: dead pointers remain, and only a human can clear them.
+        summary += f" {skipped_total} line(s) skipped."
+        click.secho(summary, fg="yellow")
+    elif applied:
+        click.secho(summary, fg="green")
+    else:
+        click.echo(summary)
 
 
 def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
     total = sum(len(r.removed) for r in results)
-    status = "clean" if total == 0 else ("fixed" if applied else "would-fix")
+    skipped_total = sum(len(r.skipped) for r in results)
+    # Three outcomes stay distinguishable (ADR-0020 §1): nothing to do, every
+    # candidate handled, some candidate left behind. A run that skipped one is
+    # never "clean" and never plain "fixed".
+    if total == 0 and skipped_total == 0:
+        status = "clean"
+    elif skipped_total:
+        status = "partial" if applied else "would-partial"
+    else:
+        status = "fixed" if applied else "would-fix"
     payload = {
         "status": status,
         "applied": applied,
-        "files": [r.to_json() for r in results if r.removed],
-        "summary": {"files": sum(1 for r in results if r.removed), "lines": total},
+        "files": [r.to_json() for r in results if r.removed or r.skipped],
+        "summary": {
+            "files": sum(1 for r in results if r.removed or r.skipped),
+            "lines": total,
+            "skipped": skipped_total,
+        },
     }
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -1393,7 +1552,9 @@ def memory() -> None:
     default=False,
     help=(
         "Subtractively remove broken `missing_target` links from the index file "
-        "(ADR-0020). Dry-run unless --apply. Other findings are left untouched."
+        "(ADR-0020). Dry-run unless --apply. Other findings are left untouched. "
+        "A dead link on a line --fix cannot safely splice is skipped and reported "
+        "(exit 1), while the rest of the file is still fixed."
     ),
 )
 @click.option(
@@ -1416,8 +1577,11 @@ def memory_doctor(path: str | None, json_out: bool, fix: bool, apply_: bool) -> 
     ``--fix`` switches to a subtractive curation mode: it removes index-file
     pointer lines whose target is missing on disk (``broken_link`` /
     ``missing_target``) and nothing else (ADR-0020). It is a dry-run preview
-    unless ``--apply`` is also passed. The default report is read-only and
-    unchanged.
+    unless ``--apply`` is also passed. A dead link on a line ``--fix`` cannot
+    safely delete whole (it carries a link that is not provably dead, or is not
+    a single-line bullet the parse accounts for) is skipped, reported for manual
+    repair, and exits ``1``; the eligible lines in the same file are still
+    fixed. The default report is read-only and unchanged.
     """
     if apply_ and not fix:
         raise click.UsageError("--apply only applies with --fix. See: mm memory doctor --help")
