@@ -20,6 +20,9 @@ Layers:
   LF/CRLF ± trailing newline, the missing_target-only subtractive guard, the
   locked re-validate/atomic-write apply path against a real on-disk index file,
   and the CLI dry-run/apply/exit-code surface.
+* ``TestAllLinksDeadRule`` / ``TestStrictGrammarRule`` — ADR-0020 §1's per-line
+  eligibility (amended #1764): which candidate lines ``--fix`` may delete whole,
+  and that the rest are *skipped and reported* rather than blocking the run.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from memtomem.cli.memory_doctor_cmd import (
     _apply_fix,
     _gather_reports,
     _missing_target_entries,
+    _partition_candidates,
     _splice_lines,
     classify_link,
     measure_budget,
@@ -271,9 +275,9 @@ class TestListMarkers:
 
     The old grammar was anchored at `^\\s*[-*]\\s`, so an ordered or `+`-marked
     entry was invisible: unchecked, and counted as an orphan. Reading them is
-    the fix. *Deleting* them is a separate question — the legacy shape `--fix`
-    is contracted for names only `-`/`*`, so they stay refused until ADR-0020
-    §1 says otherwise.
+    the fix. *Deleting* them is a separate question — ADR-0020 §1's strict
+    grammar names only the `-`/`*` bullet the `MEMORY.md` contract specifies, so
+    the others are skipped and reported for a human.
     """
 
     MARKERS = [
@@ -291,11 +295,9 @@ class TestListMarkers:
     @pytest.mark.parametrize(
         "body,fixable",
         [("- [Dead](gone.md) — dash\n", True), ("1. [Dead](gone.md) — ordered\n", False)],
-        ids=["dash is fixable", "ordered is refused"],
+        ids=["dash is fixable", "ordered is skipped"],
     )
-    def test_fix_scope_still_only_covers_the_legacy_shape(
-        self, body, fixable, tmp_path, monkeypatch
-    ):
+    def test_fix_scope_only_covers_the_bullet_shape(self, body, fixable, tmp_path, monkeypatch):
         import memtomem.cli.memory_doctor_cmd as mod
 
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
@@ -308,8 +310,8 @@ class TestListMarkers:
             assert result.exit_code == 0
             assert (mem_dir / "MEMORY.md").read_bytes() != before
         else:
-            assert result.exit_code != 0
-            assert "one-entry-per-line shape" in result.output
+            assert result.exit_code == 1
+            assert "bullet entry" in result.output
             assert (mem_dir / "MEMORY.md").read_bytes() == before
 
 
@@ -1270,22 +1272,45 @@ class TestDocsParity:
         assert "--apply" in out
         assert "missing_target" in out  # the subtractive scope is documented
 
+    _REF_DOC = (
+        Path(__file__).resolve().parents[3]
+        / "docs"
+        / "guides"
+        / "reference"
+        / "organization-maintenance.md"
+    )
+
     def test_reference_documents_fix(self):
-        # reference/organization-maintenance.md §5 gains the --fix surface when Tier 2 ships (ADR-0020
-        # consequence). Pin the usage examples + the subtractive-scope wording
-        # so docs can't silently drift from the shipped flags.
-        ref = (
-            Path(__file__).resolve().parents[3]
-            / "docs"
-            / "guides"
-            / "reference"
-            / "organization-maintenance.md"
-        )
-        text = ref.read_text(encoding="utf-8")
+        # reference/organization-maintenance.md §5 carries the --fix surface
+        # (ADR-0020 consequence). Pin the usage examples + the subtractive-scope
+        # wording so docs can't silently drift from the shipped flags.
+        text = self._REF_DOC.read_text(encoding="utf-8")
         assert "mm memory doctor --fix --apply" in text
         assert "Fixing broken links" in text  # the subsection heading
         assert "subtractive" in text.lower()
         assert "0020-memory-index-write-contract" in text  # ADR link
+
+    def test_reference_documents_the_fix_status_values(self):
+        # The doc names the --json statuses and the skip exit code; drift here
+        # would have a script trust "clean" for a partially-fixed index.
+        text = self._REF_DOC.read_text(encoding="utf-8")
+        for status in ("clean", "would-fix", "fixed", "would-partial", "partial"):
+            assert f"`{status}`" in text, f"§5 does not document --fix --json status {status!r}"
+
+    def test_reference_documents_per_line_skip_not_whole_run_refusal(self):
+        """The pre-#1764 contract refused the whole run; the shipped one skips per line.
+
+        This is the wording the amendment (ADR-0020 §1) explicitly deferred to
+        the implementing PR, so pin it: the doc must not drift back to promising
+        a refusal the code no longer makes.
+        """
+        text = self._REF_DOC.read_text(encoding="utf-8")
+        assert "aborts the whole `--fix` run" not in text
+        assert "One entry per line, or it refuses" not in text
+        assert "skipped" in text
+        # §5's multiplicity guard counts lines, not links (the amended rule).
+        assert "physical line occurrences" in text
+        assert "which identical copy survives is unspecified" not in text
 
     def test_json_status_rule_matches_summary(self, capsys):
         # Documented rule: status is "issues" when any error/warn finding
@@ -1386,14 +1411,35 @@ class TestMissingTargetGuard:
         (tmp_path / "gone.md").write_text("back", encoding="utf-8")
         assert _missing_target_entries(text, root=tmp_path) == []  # now present → spared
 
+    def test_unreadable_target_is_never_a_candidate(self, tmp_path):
+        """A literal miss on a target we won't resolve is not proof of death.
+
+        ``live.md?view=1`` names no file *literally*, so it classifies
+        missing_target — but the query may belong to the filename, which is the
+        guess ``--fix`` must not make. Tier 1 already reports it as
+        ``ambiguous_index_line``; letting it through here would make a line
+        ``--fix`` has no business touching look like a candidate it declined.
+        """
+        (tmp_path / "live.md").write_text("x", encoding="utf-8")
+        text = "- [Q](live.md?view=1) — query\n- [Dead](gone.md) — really dead\n"
+        assert [e.target for e in _missing_target_entries(text, root=tmp_path)] == ["gone.md"]
+
 
 # ── Tier 2: locked apply path (ADR-0020 §5) ──────────────────────────
 
 
-def _candidate_raws(text, root):
-    # A list, not a set — multiplicity matters: the apply budget removes at most
-    # as many occurrences of each raw as analysis saw (ADR-0020 §5).
-    return [e.raw for e in _missing_target_entries(text, root=root)]
+def _analysis(text, root):
+    """The T1 snapshot ``_run_fix`` hands ``_apply_fix`` for *text*.
+
+    Built the same way the command builds it, so these tests exercise the real
+    handoff rather than a hand-rolled stand-in.
+    """
+    from memtomem.cli.memory_doctor_cmd import _AnalysisSnapshot
+
+    parsed = parse_memory_index(text)
+    candidates = _missing_target_entries(text, root=root, parsed=parsed)
+    eligible, _ = _partition_candidates(candidates, parsed=parsed, root=root)
+    return _AnalysisSnapshot.of(parsed, candidates=candidates, eligible=eligible)
 
 
 class TestApplyFix:
@@ -1414,8 +1460,9 @@ class TestApplyFix:
             "- [Web](https://x.com) — keep\n"
         )
         index.write_text(text, encoding="utf-8")
-        removed = _apply_fix(index, root, _candidate_raws(text, root))
+        removed, skipped = _apply_fix(index, root, _analysis(text, root))
         assert [r[1] for r in removed] == ["- [Dead](gone.md) — drop"]
+        assert skipped == []
         out = index.read_text(encoding="utf-8")
         assert "gone.md" not in out
         # Every non-missing_target line — including outside_root — survives.
@@ -1427,7 +1474,7 @@ class TestApplyFix:
         index = root / "MEMORY.md"
         text = "- [Ok](exists.md) — keep\r\n- [Dead](gone.md) — drop\r\n"
         index.write_bytes(text.encode("utf-8"))  # write CRLF bytes verbatim
-        _apply_fix(index, root, _candidate_raws(text, root))
+        _apply_fix(index, root, _analysis(text, root))
         raw = index.read_bytes()
         # Survivor keeps CRLF; the dropped line is gone; no LF normalization.
         assert raw == b"- [Ok](exists.md) \xe2\x80\x94 keep\r\n"
@@ -1437,7 +1484,7 @@ class TestApplyFix:
         index = root / "MEMORY.md"
         text = "- [Ok](exists.md) — a\n- [Dead](gone.md) — b"  # no EOF newline
         index.write_text(text, encoding="utf-8")
-        _apply_fix(index, root, _candidate_raws(text, root))
+        _apply_fix(index, root, _analysis(text, root))
         # Dropping the un-terminated last line leaves the survivor's LF intact.
         assert index.read_text(encoding="utf-8") == "- [Ok](exists.md) — a\n"
 
@@ -1454,21 +1501,25 @@ class TestApplyFix:
         text = "- [Dead](gone.md) — x\n- [Ok](exists.md) — y\n"
         index.write_text(text, encoding="utf-8")
         os.chmod(index, 0o644)  # a typical TOC mode, NOT atomic_write's 0o600
-        _apply_fix(index, root, _candidate_raws(text, root))
+        _apply_fix(index, root, _analysis(text, root))
         assert stat.S_IMODE(index.stat().st_mode) == 0o644
 
     def test_revalidate_target_reappeared_is_spared(self, tmp_path):
         # Candidate collected while gone.md is absent; the target reappears
         # before apply (the locked re-classify sees it as ok → spares the line).
+        # The drop is reported, not silently absent (ADR-0020 §1).
         root = self._setup(tmp_path)
         index = root / "MEMORY.md"
         text = "- [Dead](gone.md) — x\n- [Ok](exists.md) — y\n"
         index.write_text(text, encoding="utf-8")
-        candidates = _candidate_raws(text, root)
+        snapshot = _analysis(text, root)
         (root / "gone.md").write_text("resurrected", encoding="utf-8")
-        removed = _apply_fix(index, root, candidates)
+        removed, skipped = _apply_fix(index, root, snapshot)
         assert removed == []
-        assert index.read_text(encoding="utf-8") == text  # untouched
+        # The line is no longer a dead pointer at all, so there is nothing left
+        # in the file to report — and the file is untouched.
+        assert skipped == []
+        assert index.read_text(encoding="utf-8") == text
 
     def test_revalidate_line_that_left_fix_scope_is_spared(self, tmp_path):
         """A guard is not a one-time admission check — the file is live.
@@ -1476,35 +1527,48 @@ class TestApplyFix:
         The candidate line is untouched between analysis and apply, so its raw
         still matches and its target is still dead. What changed is elsewhere:
         the agent defined the reference the line already cited, which turns it
-        from a single dead pointer into a line with a live sibling on it.
-        Re-classifying the target alone can't see that; the scope guards have to
-        be re-asked of the fresh read.
+        from an all-dead line into one with a live sibling on it. Re-classifying
+        the candidate's own target can't see that; §1's test has to be re-asked
+        of the fresh read.
         """
         root = self._setup(tmp_path)
         index = root / "MEMORY.md"
         analysis_text = "- [Dead](gone.md) and [Live][live]\n"
         index.write_text(analysis_text, encoding="utf-8")
-        candidates = _candidate_raws(analysis_text, root)
-        assert candidates  # single-entry at analysis time: the reference is undefined
+        snapshot = _analysis(analysis_text, root)
+        assert snapshot.eligible  # eligible at analysis time: the reference is undefined
 
         # The agent defines the reference before the fix takes the lock.
         index.write_text(analysis_text + "\n[live]: exists.md\n", encoding="utf-8")
 
-        removed = _apply_fix(index, root, candidates)
+        removed, skipped = _apply_fix(index, root, snapshot)
 
         assert removed == []
+        # The line is still a candidate (gone.md is still dead), so the fresh
+        # partition speaks for it and names §1's reason.
+        assert [(n, why) for n, _, why in skipped] == [
+            (1, "carries a link that is not provably dead")
+        ]
         assert "[Live][live]" in index.read_text(encoding="utf-8")
 
     def test_revalidate_agent_edited_candidate_line_is_spared(self, tmp_path):
-        # The agent rewrote the candidate line's hook since analysis. Its raw no
-        # longer matches the candidate set, so the fix leaves it alone.
+        """The agent rewrote the candidate line's hook since analysis.
+
+        Its raw no longer occurs in the fresh read, so the count that bounded the
+        removal is gone and the line is spared. The report speaks of the file on
+        disk, not the snapshot: it names the *rewritten* line (a dead pointer
+        that is really there, at the line number it is really at), never the old
+        text at a coordinate that may now belong to something else.
+        """
         root = self._setup(tmp_path)
         index = root / "MEMORY.md"
         analysis_text = "- [Dead](gone.md) — old hook\n"
-        candidates = _candidate_raws(analysis_text, root)
+        snapshot = _analysis(analysis_text, root)
         index.write_text("- [Dead](gone.md) — NEW hook\n", encoding="utf-8")
-        removed = _apply_fix(index, root, candidates)
+        removed, skipped = _apply_fix(index, root, snapshot)
         assert removed == []
+        assert [(n, raw) for n, raw, _ in skipped] == [(1, "- [Dead](gone.md) — NEW hook")]
+        assert "added since analysis" in skipped[0][2]
         assert index.read_text(encoding="utf-8") == "- [Dead](gone.md) — NEW hook\n"
 
     def test_agent_additions_carried_through_new_dead_spared(self, tmp_path):
@@ -1512,40 +1576,242 @@ class TestApplyFix:
         # and a *new* dead pointer that was never a candidate. The fix removes
         # only the original candidate; both additions survive (the new dead one
         # is spared because it isn't in the candidate set — it may precede a file
-        # the agent is about to create).
+        # the agent is about to create). It is still *reported*: it is a dead
+        # pointer this run left in the file, and a run that hid it would hand
+        # back a "fixed" file with a dead pointer in it.
         root = self._setup(tmp_path)
         index = root / "MEMORY.md"
         analysis_text = "- [Dead](gone.md) — drop\n"
-        candidates = _candidate_raws(analysis_text, root)
+        snapshot = _analysis(analysis_text, root)
         fresh = (
             "- [Dead](gone.md) — drop\n"
             "- [Real](exists.md) — agent added\n"
             "- [Fresh](alsogone.md) — agent added, not yet on disk\n"
         )
         index.write_text(fresh, encoding="utf-8")
-        removed = _apply_fix(index, root, candidates)
+        removed, skipped = _apply_fix(index, root, snapshot)
         assert [r[1] for r in removed] == ["- [Dead](gone.md) — drop"]
+        assert [(n, why) for n, _, why in skipped] == [
+            (3, "added since analysis — re-run --fix to remove it")
+        ]
         out = index.read_text(encoding="utf-8")
         assert "- [Dead](gone.md) — drop" not in out
         assert "- [Real](exists.md) — agent added" in out
         assert "- [Fresh](alsogone.md) — agent added, not yet on disk" in out
 
-    def test_revalidate_duplicate_dead_removes_only_analysis_count(self, tmp_path):
-        # Count-bounded guard (ADR-0020 §5): analysis (T1) saw ONE dead line; the
-        # agent added an *identical* dead pointer before apply (fresh has two).
-        # The fix removes at most the analysis-time count — exactly one — so the
-        # net of the agent's addition is preserved (one copy survives). Which
-        # byte-identical copy survives is irrelevant; the spliced result is the
-        # same either way. (Regression for the frozenset-membership bug that
-        # removed every identical match, emptying the file.)
+    def test_ineligible_twin_does_not_look_like_a_changed_count(self, tmp_path):
+        """Both sides of the guard must count the same population, or it lies.
+
+        Two byte-identical dead lines, one of them a multiline item: analysis
+        finds one *eligible* copy (L1's continuation rules it out) and one
+        skipped. Counting eligible copies at analysis against *all* copies in
+        the fresh read makes 1 != 2 — and the fix reports a line "changed in
+        number since analysis" on a file nobody touched. Nothing changed here,
+        so L4 goes and only L4.
+        """
         root = self._setup(tmp_path)
         index = root / "MEMORY.md"
-        candidates = _candidate_raws("- [Dead](gone.md) — drop\n", root)
-        assert len(candidates) == 1
-        index.write_text("- [Dead](gone.md) — drop\n- [Dead](gone.md) — drop\n", encoding="utf-8")
-        removed = _apply_fix(index, root, candidates)
-        assert len(removed) == 1  # bounded by the analysis-time count, not "all matches"
-        assert index.read_text(encoding="utf-8") == "- [Dead](gone.md) — drop\n"
+        text = "- [Dead](gone.md) — hook\n  continues here\n\n- [Dead](gone.md) — hook\n"
+        index.write_text(text, encoding="utf-8")
+        snapshot = _analysis(text, root)
+        assert [n for n, _ in snapshot.eligible] == [4]  # L1 is skipped at T1 (multiline)
+
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert [n for n, _ in removed] == [4]
+        # L1 is still a dead pointer --fix won't take, so the fresh partition
+        # reports it — with §1's reason, not a bogus "it changed" one.
+        assert [(n, why) for n, _, why in skipped] == [
+            (1, "is a list item that continues past this line")
+        ]
+        assert index.read_text(encoding="utf-8") == (
+            "- [Dead](gone.md) — hook\n  continues here\n\n"
+        )
+
+    def test_duplicate_appeared_since_analysis_removes_no_copy(self, tmp_path):
+        # Multiplicity guard (ADR-0020 §5): analysis (T1) saw ONE dead line; the
+        # agent added a byte-identical dead pointer before apply (fresh has two).
+        # The count says one copy should go but nothing about *which* — and
+        # identical lines can sit in different sections, so removing either could
+        # take the copy the agent meant to keep. It fails closed on both and
+        # reports, rather than guessing. (Also the regression pin for the
+        # frozenset-membership bug that removed every identical match, emptying
+        # the file.)
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        snapshot = _analysis("- [Dead](gone.md) — drop\n", root)
+        assert len(snapshot.eligible) == 1
+        both = "- [Dead](gone.md) — drop\n- [Dead](gone.md) — drop\n"
+        index.write_text(both, encoding="utf-8")
+        removed, skipped = _apply_fix(index, root, snapshot)
+        assert removed == []
+        # Both copies are dead pointers left behind, so both are named (§1) —
+        # one record per raw string would undercount them.
+        assert [n for n, _, _ in skipped] == [1, 2]
+        assert "will not guess which copy to remove" in skipped[0][2]
+        assert index.read_text(encoding="utf-8") == both  # neither copy touched
+
+    def test_mismatch_names_every_line_it_left(self, tmp_path):
+        # Analysis saw two identical dead copies; the agent added a third. All
+        # three stay, so all three must be in the report — a per-raw record would
+        # say "1 skipped" for three dead pointers the user still has to repair.
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Dead](gone.md) — x\n- [Dead](gone.md) — x\n"
+        index.write_text(text, encoding="utf-8")
+        snapshot = _analysis(text, root)
+        assert len(snapshot.eligible) == 2
+        index.write_text(text + "- [Dead](gone.md) — x\n", encoding="utf-8")
+
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert removed == []
+        assert [n for n, _, _ in skipped] == [1, 2, 3]
+        assert index.read_text(encoding="utf-8") == text + "- [Dead](gone.md) — x\n"
+
+    def test_rewritten_candidate_is_reported_at_its_fresh_line_not_its_old_one(self, tmp_path):
+        """A rewritten candidate is reported as what it is now, not what it was.
+
+        The agent both rewrites the hook *and* drops the continuation, so the
+        line analysis skipped is gone and a different, eligible dead line stands
+        in its place. Matching is on raw text (§5), so nothing bounds a removal —
+        but the dead pointer is really there, and the report says so instead of
+        calling the file clean.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) — hook\n  continues here\n"
+        index.write_text(analysis_text, encoding="utf-8")
+        snapshot = _analysis(analysis_text, root)
+        assert snapshot.eligible == ()
+
+        index.write_text("- [Dead](gone.md) — NEW hook\n", encoding="utf-8")
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert removed == []
+        assert [(n, raw) for n, raw, _ in skipped] == [(1, "- [Dead](gone.md) — NEW hook")]
+
+    def test_vanished_candidate_is_not_reported_at_a_stale_coordinate(self, tmp_path):
+        """A candidate the agent deleted is not "left behind" — it is gone.
+
+        Analysis saw dead A at L1 and dead B at L2. The agent deletes A, so B
+        moves up to L1 and apply removes it there. Reporting A from the snapshot
+        would print L1 — the line number this very run just removed B from — for
+        a line that is not in the file at all.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [A](goneA.md) — a\n- [B](goneB.md) — b\n"
+        index.write_text(text, encoding="utf-8")
+        snapshot = _analysis(text, root)
+        assert [n for n, _ in snapshot.eligible] == [1, 2]
+
+        index.write_text("- [B](goneB.md) — b\n", encoding="utf-8")  # the agent removed A
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert [(n, raw) for n, raw in removed] == [(1, "- [B](goneB.md) — b")]
+        assert skipped == []
+        assert index.read_text(encoding="utf-8") == ""
+
+    def test_skipped_candidate_that_became_eligible_is_still_reported(self, tmp_path):
+        """A candidate the report promised to leave behind must not vanish from it.
+
+        Analysis skips the only candidate (a multiline item); the agent then
+        deletes the continuation, making that same line eligible. Analysis
+        cleared no copy of this raw, so there is no count to bound a removal by
+        and the line is spared — but it is a dead pointer the dry-run named, so
+        an apply that drops it from the report claims a clean file over a dead
+        pointer that is still sitting in it.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) — hook\n  continues here\n"
+        index.write_text(analysis_text, encoding="utf-8")
+        snapshot = _analysis(analysis_text, root)
+        assert snapshot.eligible == ()  # analysis cleared nothing
+
+        index.write_text("- [Dead](gone.md) — hook\n", encoding="utf-8")
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert removed == []
+        assert [(n, why) for n, _, why in skipped] == [
+            (1, "changed in eligibility since analysis — will not guess which copy to remove")
+        ]
+        assert index.read_text(encoding="utf-8") == "- [Dead](gone.md) — hook\n"
+
+    def test_apply_report_never_calls_one_line_both_removed_and_skipped(self, tmp_path):
+        """The apply report comes from the fresh read, never the stale snapshot.
+
+        The agent moves the continuation from the first identical copy to the
+        second, so eligibility *swaps* between two byte-identical lines: counts
+        never move, and L1 — the copy analysis skipped — is now the eligible one.
+        Removing it is right (the fresh file says so, and §5 preserves how many
+        copies survive, not which). But a report that keeps analysis's verdicts
+        would carry "L1 skipped: continues past this line" alongside this run's
+        own "L1 removed", and name L3's surviving dead pointer nowhere.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) — hook\n  continues here\n\n- [Dead](gone.md) — hook\n"
+        index.write_text(analysis_text, encoding="utf-8")
+        snapshot = _analysis(analysis_text, root)
+        assert [n for n, _ in snapshot.eligible] == [4]  # analysis cleared the *second* copy
+
+        index.write_text(
+            "- [Dead](gone.md) — hook\n\n- [Dead](gone.md) — hook\n  continues here\n",
+            encoding="utf-8",
+        )
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert [n for n, _ in removed] == [1]
+        assert [(n, why) for n, _, why in skipped] == [
+            (3, "is a list item that continues past this line")
+        ]
+        assert not {n for n, _ in removed} & {n for n, _, _ in skipped}
+        # One copy survives, and it is the one that still has a continuation.
+        assert index.read_text(encoding="utf-8") == "\n- [Dead](gone.md) — hook\n  continues here\n"
+
+    def test_eligibility_growing_since_analysis_is_skipped_not_a_crash(self, tmp_path):
+        """The copies can stay put while *more* of them become eligible.
+
+        Analysis: L1 is an ineligible twin (multiline), L4 is the eligible copy.
+        The agent then deletes L1's continuation, so both copies are eligible —
+        the raw's occurrence count never moved, but the eligible count grew from
+        1 to 2. No copy has a skip reason to report, so a reader that assumes an
+        ineligible one exists crashes; and since analysis only ever cleared one
+        copy, removing either would be the guess the guard exists to refuse.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) — hook\n  continues here\n\n- [Dead](gone.md) — hook\n"
+        index.write_text(analysis_text, encoding="utf-8")
+        snapshot = _analysis(analysis_text, root)
+        assert [n for n, _ in snapshot.eligible] == [4]
+
+        fresh = "- [Dead](gone.md) — hook\n\n- [Dead](gone.md) — hook\n"
+        index.write_text(fresh, encoding="utf-8")
+
+        removed, skipped = _apply_fix(index, root, snapshot)
+
+        assert removed == []
+        assert [n for n, _, _ in skipped] == [1, 3]
+        assert "changed in eligibility since analysis" in skipped[0][2]
+        assert index.read_text(encoding="utf-8") == fresh  # untouched
+
+    def test_duplicate_dead_lines_are_removed_when_the_count_matches(self, tmp_path):
+        # The mismatch guard must not disarm the fix on a file that legitimately
+        # holds the same dead line twice: analysis saw two occurrences, apply
+        # sees two, so the count agrees and both go.
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        text = "- [Dead](gone.md) — drop\n- [Ok](exists.md) — keep\n- [Dead](gone.md) — drop\n"
+        index.write_text(text, encoding="utf-8")
+        snapshot = _analysis(text, root)
+        assert [n for n, _ in snapshot.eligible] == [1, 3]
+        removed, skipped = _apply_fix(index, root, snapshot)
+        assert [n for n, _ in removed] == [1, 3]
+        assert skipped == []
+        assert index.read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
 
     def test_apply_does_not_create_lock_artifacts_in_tree(self, tmp_path):
         # The sidecar lock lives next to the index file; it must be the only
@@ -1554,7 +1820,7 @@ class TestApplyFix:
         index = root / "MEMORY.md"
         text = "- [Dead](gone.md) — x\n"
         index.write_text(text, encoding="utf-8")
-        _apply_fix(index, root, _candidate_raws(text, root))
+        _apply_fix(index, root, _analysis(text, root))
         leftovers = {p.name for p in root.iterdir()} - {"MEMORY.md", "exists.md"}
         # Only the sidecar lockfile may remain; no .tmp residue from mkstemp.
         assert not any(name.endswith(".tmp") for name in leftovers)
@@ -1635,10 +1901,11 @@ class TestFixCli:
         payload = json.loads(result.output)
         assert payload["status"] == "would-fix"
         assert payload["applied"] is False
-        assert payload["summary"] == {"files": 1, "lines": 1}
+        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 0}
         f = payload["files"][0]
         assert f["index_file"] == "MEMORY.md"
         assert f["removed"] == [{"line": 2, "text": "- [Dead](gone.md) — drop"}]
+        assert f["skipped"] == []
 
     def test_fix_json_apply_status(self, tmp_path, monkeypatch):
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
@@ -1649,15 +1916,185 @@ class TestFixCli:
         assert payload["applied"] is True
         assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
 
+    # One dead line --fix can take, one it must not (the live sibling would go
+    # with it). The three outcomes ADR-0020 §1 requires stay apart in --json:
+    # "clean" is above, "fixed"/"would-fix" is above, and a run that left a dead
+    # pointer behind is neither.
+    _MIXED = "- [Dead](gone.md) — drop\n- [Dead2](gone2.md) — keep · [Live](exists.md) — keep\n"
 
-class TestMultiEntryLineGuard:
-    """``--fix`` splices whole lines, so it must refuse lines holding >1 entry.
+    def test_partial_json_status_dry_run(self, tmp_path, monkeypatch):
+        config, _ = _fix_env(tmp_path, monkeypatch, body=self._MIXED)
+        self._patch_loader(monkeypatch, config)
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
+        payload = json.loads(result.output)
+        assert payload["status"] == "would-partial"  # NOT would-fix, NOT clean
+        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 1}
+        f = payload["files"][0]
+        assert f["removed"] == [{"line": 1, "text": "- [Dead](gone.md) — drop"}]
+        assert f["skipped"] == [
+            {
+                "line": 2,
+                "text": "- [Dead2](gone2.md) — keep · [Live](exists.md) — keep",
+                "reason": "carries a link that is not provably dead",
+            }
+        ]
+        assert result.exit_code == 1  # a dead pointer remains — not success
 
-    Without the guard, a dead first pointer would splice the line and silently
-    delete the live entries beside it. The parser now *sees* those siblings
-    (#1757), which is what lets the refusal name them — but seeing them does not
-    make whole-line removal safe, so the fail-closed behaviour stands until
-    ADR-0020 §1 says otherwise.
+    def test_partial_json_status_apply(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._MIXED)
+        self._patch_loader(monkeypatch, config)
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+        payload = json.loads(result.output)
+        assert payload["status"] == "partial"
+        assert payload["applied"] is True
+        assert result.exit_code == 1
+        # The eligible line went; the skipped one survives byte-exact.
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == (
+            "- [Dead2](gone2.md) — keep · [Live](exists.md) — keep\n"
+        )
+
+    def test_apply_json_removed_and_skipped_are_disjoint(self, tmp_path, monkeypatch):
+        """End to end: the --apply report describes the file the fix actually wrote.
+
+        The agent edits the index between the analysis read and the locked apply
+        read — the race ADR-0020 §5 exists for. Here it moves a continuation
+        between two byte-identical dead copies, which swaps which copy is
+        eligible. An --apply report that kept the analysis snapshot's verdicts
+        would list the same line as both removed and skipped.
+        """
+        body = "- [Dead](gone.md) — hook\n  continues here\n\n- [Dead](gone.md) — hook\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        index = mem_dir / "MEMORY.md"
+
+        # Stand in for the agent: rewrite the file after the analysis read, while
+        # --fix is between T1 and taking the lock.
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        real_apply = mod._apply_fix
+
+        def edit_then_apply(*args, **kwargs):
+            index.write_text(
+                "- [Dead](gone.md) — hook\n\n- [Dead](gone.md) — hook\n  continues here\n",
+                encoding="utf-8",
+            )
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_apply_fix", edit_then_apply)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        f = payload["files"][0]
+        removed_lines = {r["line"] for r in f["removed"]}
+        skipped_lines = {s["line"] for s in f["skipped"]}
+        assert removed_lines and skipped_lines
+        assert not removed_lines & skipped_lines, "a line was reported removed AND skipped"
+        assert payload["summary"]["skipped"] == len(f["skipped"])
+        # The reported coordinates come from the fresh apply-time read — L3 is
+        # the surviving line's number *after* the agent's edit, not before it.
+        assert skipped_lines == {3}
+        assert index.read_text(encoding="utf-8") == "\n- [Dead](gone.md) — hook\n  continues here\n"
+
+    def test_apply_never_reports_clean_over_a_surviving_dead_pointer(self, tmp_path, monkeypatch):
+        """ "Clean" must mean the file has no dead pointers, not that we lost track.
+
+        The dry-run reports this candidate as skipped. If the agent then makes
+        the line eligible before the lock, the apply still cannot remove it
+        (analysis cleared no copy to bound the removal) — so the one thing it
+        must not do is report the file clean while the dead pointer is still in
+        it.
+        """
+        body = "- [Dead](gone.md) — hook\n  continues here\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        index = mem_dir / "MEMORY.md"
+
+        dry = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
+        assert json.loads(dry.output)["status"] == "would-partial"  # promised: left behind
+
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        real_apply = mod._apply_fix
+
+        def edit_then_apply(*args, **kwargs):
+            index.write_text("- [Dead](gone.md) — hook\n", encoding="utf-8")
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_apply_fix", edit_then_apply)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        assert "gone.md" in index.read_text(encoding="utf-8")  # still there…
+        assert payload["status"] == "partial"  # …so the report says so
+        assert payload["summary"]["skipped"] == 1
+        assert result.exit_code == 1
+
+    def test_apply_on_a_clean_index_still_reads_under_the_lock(self, tmp_path, monkeypatch):
+        """ "Nothing to do" at analysis time is not a licence to skip the fresh read.
+
+        The index is clean when --fix analyses it, and the agent adds a dead
+        pointer before the lock. Short-circuiting on the analysis verdict would
+        report clean about a file this run never re-opened — and the dead pointer
+        would be in it.
+        """
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body="- [Ok](exists.md) — keep\n")
+        self._patch_loader(monkeypatch, config)
+        index = mem_dir / "MEMORY.md"
+
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        real_apply = mod._apply_fix
+
+        def edit_then_apply(*args, **kwargs):
+            index.write_text(
+                "- [Ok](exists.md) — keep\n- [Dead](gone.md) — agent added\n", encoding="utf-8"
+            )
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_apply_fix", edit_then_apply)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "partial"
+        assert payload["files"][0]["skipped"] == [
+            {
+                "line": 2,
+                "text": "- [Dead](gone.md) — agent added",
+                "reason": "added since analysis — re-run --fix to remove it",
+            }
+        ]
+        assert result.exit_code == 1
+        # Spared, not removed: no analysis-time count bounds it. A re-run clears it.
+        assert "gone.md" in index.read_text(encoding="utf-8")
+
+    def test_all_candidates_skipped_is_not_clean(self, tmp_path, monkeypatch):
+        # Nothing was removed — but "no dead pointers" and "dead pointers this
+        # tool won't touch" must not read the same to a script.
+        body = "- [Dead](gone.md) · [Live](exists.md)\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "partial"
+        assert payload["summary"] == {"files": 1, "lines": 0, "skipped": 1}
+        assert result.exit_code == 1
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+
+class TestAllLinksDeadRule:
+    """``--fix`` splices whole lines, so every link on the line must be dead.
+
+    A line is the unit of deletion, so the question is not "how many entries?"
+    but "is *every* one of them provably dead?" — one live sibling would go with
+    the line. The parser sees those siblings (#1757), which is what lets a
+    multi-link line be judged at all: all-dead is fixable, mixed is skipped and
+    reported (ADR-0020 §1, amended #1764).
     """
 
     def _patch_loader(self, monkeypatch, config):
@@ -1668,7 +2105,7 @@ class TestMultiEntryLineGuard:
     # One line, three entries: the first is dead, the other two are live.
     _CRAMMED = "- [Dead](gone.md) — drop · [Live](exists.md) — keep · [Live2](exists2.md) — keep\n"
 
-    def test_apply_refuses_and_leaves_file_untouched(self, tmp_path, monkeypatch):
+    def test_apply_skips_and_leaves_the_line_untouched(self, tmp_path, monkeypatch):
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._CRAMMED)
         (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
         self._patch_loader(monkeypatch, config)
@@ -1676,25 +2113,25 @@ class TestMultiEntryLineGuard:
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
-        assert "refusing --fix" in result.output
+        assert result.exit_code == 1  # a dead pointer was left behind
+        assert "Skipped" in result.output
         # The live siblings must still be on disk — this is the data loss the
-        # guard exists to prevent.
+        # all-links-dead rule exists to prevent.
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
-    def test_dry_run_refuses_too(self, tmp_path, monkeypatch):
-        """The preview must not advertise a removal --apply would refuse."""
+    def test_dry_run_skips_too(self, tmp_path, monkeypatch):
+        """The preview must not advertise a removal --apply would not make."""
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._CRAMMED)
         (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
         self._patch_loader(monkeypatch, config)
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
 
-        assert result.exit_code != 0
-        assert "refusing --fix" in result.output
+        assert result.exit_code == 1
+        assert "Skipped" in result.output
         assert "Would remove" not in result.output
 
-    def test_error_names_the_offending_line(self, tmp_path, monkeypatch):
+    def test_skip_names_the_offending_line(self, tmp_path, monkeypatch):
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._CRAMMED)
         (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
         self._patch_loader(monkeypatch, config)
@@ -1702,10 +2139,49 @@ class TestMultiEntryLineGuard:
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
 
         assert "L1:" in result.output
-        assert "one entry per line" in result.output
+        assert "not provably dead" in result.output
+
+    def test_all_dead_multi_entry_line_is_removed(self, tmp_path, monkeypatch):
+        """The rule is all-links-*dead*, not one-link-per-line.
+
+        Every pointer on this line is gone, so no correct version of the TOC
+        keeps it — the line goes whole. Under the pre-#1764 contract the mere
+        entry count refused it.
+        """
+        body = "- [D1](gone.md) — drop · [D2](gone2.md) — drop\n- [Ok](exists.md) — keep\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert "Skipped" not in result.output
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
+
+    def test_partition_fixes_the_rest_of_the_file(self, tmp_path, monkeypatch):
+        """One non-conforming line no longer blocks fixing the rest (#1758 → #1764).
+
+        This is the whole point of the per-line partition: the mixed line
+        survives byte-exact *and* the eligible dead lines around it still go.
+        """
+        body = (
+            "# TOC\n"
+            "- [Dead](gone.md) — drop\n"
+            "- [Mixed](gone2.md) — keep · [Live](exists.md) — keep\n"
+            "- [Dead3](gone3.md) — drop\n"
+        )
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 1  # the mixed line's dead pointer remains
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == (
+            "# TOC\n- [Mixed](gone2.md) — keep · [Live](exists.md) — keep\n"
+        )
 
     def test_single_entry_lines_still_fix(self, tmp_path, monkeypatch):
-        """The guard is scoped to crammed lines — it must not disarm --fix."""
+        """The rule is scoped to mixed lines — it must not disarm --fix."""
         body = "- [Ok](exists.md) — keep\n- [Dead](gone.md) — drop\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         self._patch_loader(monkeypatch, config)
@@ -1715,8 +2191,8 @@ class TestMultiEntryLineGuard:
         assert result.exit_code == 0
         assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
 
-    def test_live_multi_entry_line_is_not_blocked(self, tmp_path, monkeypatch):
-        """A crammed line with no dead pointer is not a candidate — no refusal."""
+    def test_live_multi_entry_line_is_not_a_candidate(self, tmp_path, monkeypatch):
+        """A crammed line with no dead pointer was never a candidate — not "skipped"."""
         body = "- [Live](exists.md) — keep · [Live2](exists2.md) — keep\n- [Dead](gone.md) — drop\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
@@ -1725,11 +2201,12 @@ class TestMultiEntryLineGuard:
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
         assert result.exit_code == 0
+        assert "Skipped" not in result.output
         out = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
         assert out == "- [Live](exists.md) — keep · [Live2](exists2.md) — keep\n"
 
-    def test_hook_internal_link_counts_as_multi(self, tmp_path, monkeypatch):
-        """A dead entry whose hook cites another memo must not splice that cite away."""
+    def test_live_hook_internal_link_spares_the_line(self, tmp_path, monkeypatch):
+        """A dead entry whose hook cites a *live* memo must not splice that cite away."""
         body = "- [Dead](gone.md) — see also ([why](exists.md))\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         self._patch_loader(monkeypatch, config)
@@ -1737,16 +2214,51 @@ class TestMultiEntryLineGuard:
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
+        assert result.exit_code == 1
+        assert "not provably dead" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_dead_hook_internal_link_does_not_save_the_line(self, tmp_path, monkeypatch):
+        """Whether the nested link is a sibling or hook prose never has to be answered.
+
+        Both destinations are gone, so the line-unit deletion is right either
+        way — which is exactly why ADR-0020 rejected span surgery.
+        """
+        body = "- [Dead](gone.md) — see also ([why](gone2.md))\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
+
+    def test_outside_root_sibling_spares_the_line(self, tmp_path, monkeypatch):
+        """Not-dead is broader than live: an escaping link isn't provably dead either.
+
+        ``--fix`` never removes an ``outside_root`` link on its own line, so it
+        must not remove one riding along on a candidate's line.
+        """
+        body = "- [Dead](gone.md) — drop · [Out](../../etc/passwd) — keep\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 1
+        assert "not provably dead" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
 
-class TestFixScopeFrozen:
-    """The widened parser must not widen what ``--fix`` deletes (#1757).
+class TestStrictGrammarRule:
+    """Reading a line is not the same as being able to delete it (ADR-0020 §1).
 
-    Reading more of the index is a Tier 1 change; deleting more of it is an
-    ADR-0020 §1 change. These pin the two apart: newly-visible pointers are
-    *reported*, but stay out of the write path until the contract amendment.
+    The parse must account for the *whole* line before a splice may take it:
+    a single-line ``-``/``*`` bullet of links plus inert prose. What the widened
+    parser newly reads right (a prose prefix, a balanced paren) is now fixable;
+    what it reads with a doubt (unresolved syntax, a destination we won't guess
+    at) never is, and a line that outgrows itself never is.
     """
 
     def _patch_loader(self, monkeypatch, config):
@@ -1754,28 +2266,31 @@ class TestFixScopeFrozen:
 
         monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
 
-    def test_prose_prefixed_dead_line_is_refused(self, tmp_path, monkeypatch):
-        # The old parser never saw this pointer, so --fix could not delete it.
-        # The new one does — and must still not delete it.
+    def test_prose_prefixed_dead_line_is_removed(self, tmp_path, monkeypatch):
+        """The old grammar couldn't see this pointer; the parse accounts for it now.
+
+        ``- NS: [Dead](gone.md)`` is a bullet whose links are all dead and whose
+        prefix is inert prose — §1's test passes, so the frozen legacy-shape
+        refusal is gone with the amendment.
+        """
         body = "- NS: [Dead](gone.md) — drop\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         self._patch_loader(monkeypatch, config)
-        before = (mem_dir / "MEMORY.md").read_bytes()
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
-        assert "refusing --fix" in result.output
-        assert "one-entry-per-line shape" in result.output
-        assert (mem_dir / "MEMORY.md").read_bytes() == before
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
 
-    def test_unresolvable_target_line_is_refused(self, tmp_path, monkeypatch):
-        """A destination we won't resolve is never deleted on the guess.
+    def test_unresolvable_target_line_is_not_even_a_candidate(self, tmp_path, monkeypatch):
+        """A destination we won't resolve is never deleted on the guess — nor reported here.
 
-        ``live.md?view=1`` is a single link in the legacy shape — it clears
-        every other guard, and its literal text names no file, so it classifies
-        missing_target. Whether the query belongs to the filename is exactly the
-        guess --fix must not make with a delete.
+        ``live.md?view=1``'s literal text names no file, so a literal lookup
+        calls it missing_target — but the query may belong to the filename, and
+        that guess is the one --fix must not make with a delete. Tier 1 reports
+        it as ambiguous_index_line; Tier 2 has no business with the line at all,
+        so it is not a candidate and not a *skip* either (a skip would claim
+        --fix found a dead pointer here, which it did not).
         """
         body = "- [Live](live.md?view=1) — query\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
@@ -1783,11 +2298,42 @@ class TestFixScopeFrozen:
         self._patch_loader(monkeypatch, config)
         before = (mem_dir / "MEMORY.md").read_bytes()
 
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        assert json.loads(result.output)["status"] == "clean"
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_unreadable_sibling_of_a_dead_link_skips_the_line(self, tmp_path, monkeypatch):
+        """The doubt is per line once a real dead pointer puts the line in scope.
+
+        Unlike the case above there *is* a candidate here, so the line is --fix
+        business — and the splice would take a pointer whose destination nobody
+        resolved. Skipped and reported.
+        """
+        body = "- [Dead](gone.md) — drop · [Q](live.md?view=1) — query\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        (mem_dir / "live.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
-        assert "refusing --fix" in result.output
+        assert result.exit_code == 1
         assert "will not resolve on a guess" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_unresolved_syntax_beside_a_dead_link_skips_the_line(self, tmp_path, monkeypatch):
+        """An unclosed link is a pointer the grammar could not read — the line stays."""
+        body = "- [Dead](gone.md) — drop and [B](b.md\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 1
+        assert "resolved to no link" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
     def test_escaped_target_line_survives_because_it_is_read_right(self, tmp_path, monkeypatch):
@@ -1831,7 +2377,7 @@ class TestFixScopeFrozen:
         )
         assert "nowhere.md" not in result.output
 
-    def test_multiline_item_is_refused(self, tmp_path, monkeypatch):
+    def test_multiline_item_is_skipped(self, tmp_path, monkeypatch):
         body = "- [Dead](gone.md) — hook\n  continues here\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         self._patch_loader(monkeypatch, config)
@@ -1839,7 +2385,7 @@ class TestFixScopeFrozen:
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
+        assert result.exit_code == 1
         assert "continues past this line" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
@@ -1857,8 +2403,8 @@ class TestFixScopeFrozen:
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
-        assert "carries more than one entry" in result.output
+        assert result.exit_code == 1
+        assert "not provably dead" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
     def test_quoted_link_is_not_a_sibling_so_the_line_stays_fixable(self, tmp_path, monkeypatch):
@@ -1876,17 +2422,17 @@ class TestFixScopeFrozen:
         assert result.exit_code == 0
         assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
 
-    def test_refusal_names_the_reason_per_line(self, tmp_path, monkeypatch):
-        body = "- [Dead](gone.md) · [Live](exists.md)\n- NS: [Dead2](gone2.md)\n"
+    def test_skip_report_names_the_reason_per_line(self, tmp_path, monkeypatch):
+        body = "- [Dead](gone.md) · [Live](exists.md)\n1. [Dead2](gone2.md)\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         self._patch_loader(monkeypatch, config)
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
 
         assert "L1:" in result.output
-        assert "carries more than one entry" in result.output
+        assert "not provably dead" in result.output
         assert "L2:" in result.output
-        assert "one-entry-per-line shape" in result.output
+        assert "bullet entry" in result.output
 
     def test_balanced_hook_parens_stay_fixable(self, tmp_path, monkeypatch):
         """Ambiguity must be narrow: ordinary parenthetical prose still fixes."""

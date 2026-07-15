@@ -17,8 +17,9 @@ it appends pointer lines, trims the budget, and orders entries. A `--fix` that
 edits `MEMORY.md` would be memtomem's *first* write to an artifact another
 process actively curates. Without a contract, that write could fight the
 agent's curation, reflow prose it shouldn't touch, or corrupt the file on a
-crash. This ADR pins the contract before any code lands (the Tier 2 `--fix`
-implementation is a follow-up PR).
+crash. This ADR pinned the contract before any code landed; the Tier 2 `--fix`
+implementation followed, and the 2026-07-15 amendment below repeated the
+sequence for the per-line partition.
 
 It layers onto ADR-0011 (`MEMORY.md` is the user-tier memory TOC in the
 canonical-artifact scope hierarchy) and reuses the round-trip-preservation
@@ -213,6 +214,18 @@ contract) are **unchanged**: no flag, no write, no behavior change.
      carried through, never dropped.
   4. Atomically replaces.
 
+  **Reporting (settled by the implementing PR).** The `--apply` report is built
+  from the fresh read, and describes the file the call leaves on disk: every
+  dead pointer still in it is named — skipped under §1, dropped by the guards
+  above, or written by the agent inside the window (not removable, since no
+  analysis-time count bounds it, but not hidden either; a re-run clears it) —
+  and nothing else is. A candidate the agent deleted or rewrote meanwhile is
+  therefore *not* reported: it is not in the file, so there is nothing to
+  repair, and naming it would print an analysis-time line number that now
+  belongs to another line. This is what "reported, not silently absent" means
+  for a file two writers touch: `clean` states that the index holds no dead
+  pointers, not merely that this run lost track of one.
+
   This **bounds but does not eliminate** the race. `atomic_write_text` wraps
   `os.replace` internally, so there is no compare-and-swap at the replace
   point: an agent write landing in the window between step 1's read and step
@@ -235,9 +248,9 @@ contract) are **unchanged**: no flag, no write, no behavior change.
 
 ## Consequences
 
-- memtomem becomes a narrow, subtractive writer of `MEMORY.md`. When the Tier
-  2 `--fix` ships, `docs/guides/reference/organization-maintenance.md` §5 gains its remediation entry
-  (per the doc-update-on-new-surface rule).
+- memtomem becomes a narrow, subtractive writer of `MEMORY.md`.
+  `docs/guides/reference/organization-maintenance.md` §5 carries the
+  remediation entry (per the doc-update-on-new-surface rule).
 - The agent and memtomem can both write the file. The fresh re-read +
   re-validate (§5) carries agent additions through and skips resurrected
   targets; a residual sub-`os.replace` race remains and is accepted as
@@ -252,12 +265,16 @@ contract) are **unchanged**: no flag, no write, no behavior change.
   are removed; ambiguous and multiline lines are skipped *and reported*; and
   an apply-time multiplicity mismatch removes no copy of that raw line.
 - **Amended 2026-07-15 (#1757) — contract-first, again.** As with the original
-  ADR, this amendment lands before the code: shipped `--fix` keeps the frozen
+  ADR, this amendment landed before the code: `--fix` kept the frozen
   fail-closed semantics (#1758's whole-run refusal, write scope pinned to the
-  pre-#1757 single-link shape through #1760) until the follow-up PR implements
-  the per-line partition above. That PR also updates the `--fix` section of
-  `docs/guides/reference/organization-maintenance.md` §5, which documents
-  shipped behavior and deliberately keeps the "refuses" wording until then.
+  pre-#1757 single-link shape through #1760) until the implementing PR, which
+  shipped the per-line partition above together with the `--fix` section of
+  `docs/guides/reference/organization-maintenance.md` §5 (it documents shipped
+  behavior, so it kept the "refuses" wording until then). That PR's surface
+  decisions, left open here: a skipped candidate exits `1` in both dry-run and
+  `--apply`, and `--json` splits `status` into `clean` / `would-fix` / `fixed` /
+  `would-partial` / `partial`, with per-file `skipped` entries naming the line
+  and the reason.
 
 ## Considered & rejected
 
