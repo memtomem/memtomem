@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 import logging
 import os
 from dataclasses import dataclass, field
@@ -21,6 +23,92 @@ if TYPE_CHECKING:
     from memtomem.server.context import AppContext
 
 logger = logging.getLogger(__name__)
+
+
+def _dependency_state(module: str, distribution: str | None = None) -> dict[str, object]:
+    """Return a secret-free, non-importing dependency availability report."""
+    try:
+        available = importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        # Test doubles and partially initialized imports may have no __spec__.
+        available = False
+    installed_version: str | None = None
+    if available:
+        try:
+            installed_version = distribution_version(distribution or module)
+        except PackageNotFoundError:
+            pass
+    return {"available": available, "version": installed_version}
+
+
+def collect_runtime_profile() -> dict[str, object]:
+    """Describe the effective retrieval runtime without initializing models or storage."""
+    try:
+        from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+
+        config = Mem2MemConfig()
+        load_config_d(config, quiet=True)
+        load_config_overrides(config, migrate=False)
+    except Exception:
+        logger.debug("Unable to collect runtime profile", exc_info=True)
+        return {"schema_version": 1, "config_state": "error"}
+
+    fastembed = _dependency_state("fastembed")
+    kiwi = _dependency_state("kiwipiepy")
+    provider = str(config.embedding.provider)
+    dense_configured = bool(config.search.enable_dense and provider != "none")
+    dense_available = dense_configured and not (
+        provider == "onnx" and not bool(fastembed["available"])
+    )
+    bm25_available = bool(config.search.enable_bm25)
+
+    def retrieval_mode(*, dense: bool) -> str:
+        if bm25_available and dense:
+            return "hybrid"
+        if bm25_available:
+            return "bm25_only"
+        if dense:
+            return "dense_only"
+        return "disabled"
+
+    configured_mode = retrieval_mode(dense=dense_configured)
+    effective_mode = retrieval_mode(dense=dense_available)
+
+    missing_extras: list[str] = []
+    fastembed_required_for: list[str] = []
+    if provider == "onnx":
+        fastembed_required_for.append("embedding")
+    if config.rerank.enabled and config.rerank.provider == "fastembed":
+        fastembed_required_for.append("rerank")
+    if fastembed_required_for and not fastembed["available"]:
+        missing_extras.append("onnx")
+    if config.search.tokenizer == "kiwipiepy" and not kiwi["available"]:
+        missing_extras.append("korean")
+
+    fastembed["required_for"] = fastembed_required_for
+    kiwi["required_for"] = ["tokenizer"] if config.search.tokenizer == "kiwipiepy" else []
+    return {
+        "schema_version": 1,
+        "config_state": "ok",
+        "embedding": {
+            "provider": provider,
+            "model": str(config.embedding.model),
+            "dimension": int(config.embedding.dimension),
+        },
+        "search": {
+            "enable_bm25": bool(config.search.enable_bm25),
+            "enable_dense": bool(config.search.enable_dense),
+            "tokenizer": str(config.search.tokenizer),
+            "configured_mode": configured_mode,
+            "effective_mode": effective_mode,
+        },
+        "rerank": {
+            "enabled": bool(config.rerank.enabled),
+            "provider": str(config.rerank.provider),
+        },
+        "dependencies": {"fastembed": fastembed, "kiwipiepy": kiwi},
+        "missing_extras": missing_extras,
+    }
 
 
 @mcp.tool()
@@ -670,6 +758,7 @@ async def mem_version(
     Used by external systems (e.g. memtomem-stm) to discover which features
     are available before using them. Callable via mem_do(action="version").
     """
+    runtime_profile = collect_runtime_profile()
     return json.dumps(
         {
             "version": __version__,
@@ -677,7 +766,9 @@ async def mem_version(
                 "search_formats": ["compact", "verbose", "structured"],
                 "context_compose": {"schema_version": 3},
                 "candidate_propose": {"schema_version": 1},
+                "runtime_profile": {"schema_version": 1},
             },
+            "runtime_profile": runtime_profile,
         },
         ensure_ascii=False,
     )
