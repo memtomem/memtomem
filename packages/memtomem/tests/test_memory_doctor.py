@@ -79,6 +79,77 @@ class TestParser:
         parsed = parse_memory_index("- [한글](한글노트.md) — 메모\n")
         assert parsed.entries[0].target == "한글노트.md"
 
+    def test_every_link_on_a_line_is_an_entry(self):
+        # #1757 defect 1/2: a line-anchored, match-once parser saw only ``a``,
+        # so ``b``'s live target never suppressed its orphan and a dead ``b``
+        # was never link-classified at all.
+        parsed = parse_memory_index("- [a](x.md) · [b](y.md)\n")
+        assert [(e.title, e.target) for e in parsed.entries] == [("a", "x.md"), ("b", "y.md")]
+        assert [e.line_no for e in parsed.entries] == [1, 1]
+        # ``raw`` stays the whole line for both — it is the splice unit, not the
+        # link's slice of the line.
+        assert {e.raw for e in parsed.entries} == {"- [a](x.md) · [b](y.md)"}
+
+    def test_prose_prefixed_bullet_is_parsed(self):
+        # The old ``^\s*[-*]\s*\[`` anchor matched nothing here, so the line
+        # silently became "other" and its pointer went unchecked.
+        parsed = parse_memory_index("- NS: [a](x.md) — hook\n")
+        assert [(e.title, e.target) for e in parsed.entries] == [("a", "x.md")]
+
+    def test_nested_hook_link_is_an_entry(self):
+        # Real-world shape: the hook's parenthetical carries a second pointer at
+        # a real file. Counting it is what keeps that file out of index_orphan.
+        parsed = parse_memory_index("- [A](topic.md) — P2=NO-GO([why](other.md))\n")
+        assert [e.target for e in parsed.entries] == ["topic.md", "other.md"]
+        assert 1 not in parsed.ambiguous_lines  # balanced parens read cleanly
+
+    def test_non_bullet_line_with_link_is_not_an_entry(self):
+        parsed = parse_memory_index("See [docs](https://example.com) for more.\n")
+        assert parsed.entries == ()
+        assert [n for n, _ in parsed.other_lines] == [1]
+
+    def test_bullet_without_link_is_preserved(self):
+        parsed = parse_memory_index("- just a prose bullet\n")
+        assert parsed.entries == ()
+        assert [n for n, _ in parsed.other_lines] == [1]
+
+
+class TestAmbiguousLines:
+    """``_LINK_RE`` is a restricted grammar; lines it may mis-read are flagged.
+
+    Not a style check — a mis-slice can make a *live* pointer classify
+    ``missing_target``, which is exactly the "proof" ``--fix`` deletes on.
+    """
+
+    def test_paren_in_target_is_ambiguous(self):
+        # Target truncates at the inner ``)`` → ``notes_(v2``, which would
+        # classify missing_target while naming a file that exists.
+        parsed = parse_memory_index("- [Live](notes_(v2).md)\n")
+        assert parsed.entries[0].target == "notes_(v2"  # the mis-read, recorded
+        assert parsed.ambiguous_lines == frozenset({1})
+
+    def test_code_span_is_ambiguous(self):
+        parsed = parse_memory_index("- [A](a.md) — run `mm index [x](y)`\n")
+        assert parsed.ambiguous_lines == frozenset({1})
+
+    def test_angle_destination_is_ambiguous(self):
+        parsed = parse_memory_index("- [A](<x y.md>)\n")
+        assert parsed.ambiguous_lines == frozenset({1})
+
+    def test_stray_bracket_is_ambiguous(self):
+        parsed = parse_memory_index("- [A](a.md) — see [note] later\n")
+        assert parsed.ambiguous_lines == frozenset({1})
+
+    def test_balanced_hook_parens_are_not_ambiguous(self):
+        # The common shape must stay fixable — over-flagging would freeze --fix
+        # out of ordinary indexes.
+        parsed = parse_memory_index("- [A](a.md) — see (the note) here\n")
+        assert parsed.ambiguous_lines == frozenset()
+
+    def test_plain_lines_are_not_ambiguous(self):
+        parsed = parse_memory_index("- [a](x.md) · [b](y.md)\n- NS: [c](z.md) — hook\n")
+        assert parsed.ambiguous_lines == frozenset()
+
 
 # ── Pure: link classification ───────────────────────────────────────
 
@@ -288,6 +359,117 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert not any("example.com" in i for i in broken.items)
     assert by["index_orphan"].items == ["delta.md"]
     assert "budget" not in by  # small index file is under budget
+
+
+@pytest.mark.asyncio
+async def test_multi_entry_index_reports_accurately(tmp_path, monkeypatch):
+    """#1757: an index that packs entries onto a line is read in full.
+
+    The pre-fix parser saw one entry per line and nothing at all on a
+    prose-prefixed line, which produced (1) an ``index_orphan`` for every
+    correctly-indexed file whose pointer wasn't first on its line, and (2) a
+    ``broken_link`` blind spot — a dead pointer at position ≥2 reported clean,
+    which is the worse half: a safety check that passes when it shouldn't.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-crammed" / "memory"
+    mem_dir.mkdir(parents=True)
+    for name in ("first.md", "second.md", "nested.md", "prose.md"):
+        (mem_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text(
+        # Two entries on one line — ``second.md`` is only reachable at position 2.
+        "- [First](first.md) · [Second](second.md)\n"
+        # A hook parenthetical carrying a real pointer (the real-world shape).
+        "- [Topic](prose.md) — P2=NO-GO([why](nested.md))\n"
+        # Prose prefix: invisible to the old anchor, dead target at position 2.
+        "- NS: [Live](first.md) · [Dead](gone.md)\n",
+        encoding="utf-8",
+    )
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "crammed.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        for i, name in enumerate(("first.md", "second.md", "nested.md", "prose.md")):
+            _insert_chunk(
+                backend,
+                chunk_id=f"c{i}",
+                source_file=mem_dir / name,
+                access_count=1,
+                last_accessed_at="2026-06-01T00:00:00",
+            )
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    # Defect 1: every listed file is seen as listed — no false orphans. Before
+    # the fix, second.md and nested.md (position ≥2) and prose.md (prose-prefixed
+    # line) were all reported as orphans despite being correctly indexed.
+    assert "index_orphan" not in by
+
+    # Defect 2: the dead pointer at position 2 of a prose-prefixed line is
+    # caught. Before the fix this line yielded no entries at all → silent pass.
+    broken = by["broken_link"]
+    assert broken.severity == "error"
+    assert broken.count == 1
+    assert "gone.md" in broken.items[0]
+    assert broken.items[0].startswith("L3 ")
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_line_downgrades_broken_link_to_warn(tmp_path, monkeypatch):
+    """A mis-sliceable line's "dead" verdict is a suspicion, not an error.
+
+    ``[Live](notes_(v2).md)`` parses to target ``notes_(v2`` — a file that does
+    not exist — while the pointer it names is live. Reporting that as an
+    error-severity ``broken_link`` would fail CI on a healthy index (and, in
+    Tier 2, offer the line up for deletion).
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-ambig" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "notes_(v2).md").write_text("# live\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Live](notes_(v2).md) — real file\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "ambig.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(
+            backend,
+            chunk_id="a1",
+            source_file=mem_dir / "notes_(v2).md",
+            access_count=1,
+            last_accessed_at="2026-06-01T00:00:00",
+        )
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = [r for r in reports if r.path != "(unowned)"][0]
+    by = _findings_by_check(report)
+
+    assert "broken_link" not in by  # not reported as a hard error
+    assert by["ambiguous_index_line"].severity == "warn"
+    assert "notes_(v2" in by["ambiguous_index_line"].items[0]
+    # warn-only → the run does not fail.
+    assert not any(f.severity == "error" for f in report.findings)
 
 
 @pytest.mark.asyncio
@@ -1010,9 +1192,11 @@ class TestFixCli:
 class TestMultiEntryLineGuard:
     """``--fix`` splices whole lines, so it must refuse lines holding >1 entry.
 
-    ``_ENTRY_RE`` is line-anchored and matches once per line, so the parser is
-    blind to entries after the first. Without the guard, a dead first pointer
-    would splice the line and silently delete the live entries beside it.
+    Without the guard, a dead first pointer would splice the line and silently
+    delete the live entries beside it. The parser now *sees* those siblings
+    (#1757), which is what lets the refusal name them — but seeing them does not
+    make whole-line removal safe, so the fail-closed behaviour stands until
+    ADR-0020 §1 says otherwise.
     """
 
     def _patch_loader(self, monkeypatch, config):
@@ -1094,3 +1278,76 @@ class TestMultiEntryLineGuard:
 
         assert result.exit_code != 0
         assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+
+class TestFixScopeFrozen:
+    """The widened parser must not widen what ``--fix`` deletes (#1757).
+
+    Reading more of the index is a Tier 1 change; deleting more of it is an
+    ADR-0020 §1 change. These pin the two apart: newly-visible pointers are
+    *reported*, but stay out of the write path until the contract amendment.
+    """
+
+    def _patch_loader(self, monkeypatch, config):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+
+    def test_prose_prefixed_dead_line_is_refused(self, tmp_path, monkeypatch):
+        # The old parser never saw this pointer, so --fix could not delete it.
+        # The new one does — and must still not delete it.
+        body = "- NS: [Dead](gone.md) — drop\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "refusing --fix" in result.output
+        assert "one-entry-per-line shape" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_ambiguous_line_is_refused(self, tmp_path, monkeypatch):
+        """The data-loss case the restricted grammar cannot rule out.
+
+        ``notes_(v2).md`` exists; the parser reads its target as ``notes_(v2``,
+        which classifies missing_target. Single link, legacy shape — it clears
+        every other guard. Only the ambiguity check stands between the shipped
+        splice and deleting a live pointer.
+        """
+        body = "- [Live](notes_(v2).md) — real file\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        (mem_dir / "notes_(v2).md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "refusing --fix" in result.output
+        assert "unambiguously" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_refusal_names_the_reason_per_line(self, tmp_path, monkeypatch):
+        body = "- [Dead](gone.md) · [Live](exists.md)\n- NS: [Dead2](gone2.md)\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+
+        assert "L1:" in result.output
+        assert "carries more than one entry" in result.output
+        assert "L2:" in result.output
+        assert "one-entry-per-line shape" in result.output
+
+    def test_balanced_hook_parens_stay_fixable(self, tmp_path, monkeypatch):
+        """Ambiguity must be narrow: ordinary parenthetical prose still fixes."""
+        body = "- [Dead](gone.md) — drop (for good reasons)\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""

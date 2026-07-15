@@ -106,7 +106,13 @@ _SAMPLE_LIMIT = 8
 
 @dataclass(frozen=True)
 class IndexEntry:
-    """One pointer line from an index file: ``- [title](target) — hook``."""
+    """One ``[title](target)`` link occurrence on a pointer line.
+
+    The harness contract is one entry per line, but an index that packs several
+    onto a line is parsed faithfully rather than silently truncated: every link
+    on a bullet line becomes an entry, so entries may share a ``line_no`` and
+    ``raw`` (which is always the whole line, never the link's slice of it).
+    """
 
     line_no: int  # 1-based
     title: str
@@ -121,37 +127,107 @@ class ParsedIndex:
     ``other_lines`` keeps prose / comments / blanks verbatim with their line
     numbers so a future write phase can round-trip the file; Tier 1 only reads
     them for the budget measurement.
+
+    ``ambiguous_lines`` holds the 1-based numbers of pointer lines the link
+    grammar could not consume unambiguously (see :func:`_line_is_ambiguous`).
+    Their entries are still parsed — a best-effort read is what makes the
+    orphan check work — but a target read off such a line may be wrong, so
+    callers must not treat it as proof of anything (least of all deletion).
     """
 
     entries: tuple[IndexEntry, ...]
     other_lines: tuple[tuple[int, str], ...]
+    ambiguous_lines: frozenset[int] = frozenset()
 
 
-# ``- [Title](target)`` with optional leading whitespace and bullet. The
-# title is non-greedy up to the first ``]`` so nested brackets in a hook (the
-# trailing prose) don't get pulled into the title. Anything after ``)`` is
-# ignored here (it's the hook); link classification handles the target.
-_ENTRY_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
+# A pointer line is a list item; anything else (headers, prose, comments) is
+# preserved verbatim and never link-classified.
+_BULLET_RE = re.compile(r"^\s*[-*]\s")
+
+# One ``[title](target)`` link, matched with ``finditer`` so *every* link on a
+# pointer line yields an entry. The title is bounded by the first ``]`` so hook
+# brackets don't get pulled in; the target by the first ``)``.
+_LINK_RE = re.compile(r"\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
+
+# Markdown-significant characters that must not appear in the text *around* the
+# links on a line: a backtick could open a code span (whose contents only look
+# like a link), a bracket could belong to a link the grammar mis-sliced, and a
+# backslash could escape either. Angle brackets mark the ``<...>`` destination
+# form, which ``_LINK_RE`` does not model.
+_AMBIGUOUS_RESIDUE_RE = re.compile(r"[`\[\]\\<>]")
+
+# The same, inside a matched target: ``[A](<x y.md>)`` parses as the literal
+# target ``<x y.md>``, which is the angle-destination form, not a filename.
+_AMBIGUOUS_TARGET_RE = re.compile(r"[`<>]")
+
+
+def _parens_balanced(text: str) -> bool:
+    """Whether ``(``/``)`` nest properly and close out in *text*."""
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _line_is_ambiguous(line: str, matches: list[re.Match[str]]) -> bool:
+    """Whether ``_LINK_RE`` may have mis-read *line*'s links.
+
+    ``_LINK_RE`` is a restricted grammar, not a Markdown parser, so it cannot
+    itself tell a clean read from a wrong one: ``[Live](notes_(v2).md)`` matches
+    with target ``notes_(v2``, which then classifies ``missing_target`` even
+    though the pointer is live. Deleting such a line on that "evidence" would be
+    data loss (ADR-0020 §1 permits removing *provably* dead pointers only).
+
+    So the residue — everything on the line outside the matched links — is
+    checked for the constructs that make a read unsound: markdown-significant
+    characters, and unbalanced parens (the tell that a target was cut short at
+    an inner ``)``, as above). A hook that merely *contains* balanced parens —
+    ``- [A](a.md) — decision ([why](b.md))``, the common nested-hook shape — is
+    unambiguous and stays fixable.
+    """
+    residue_parts: list[str] = []
+    last = 0
+    for m in matches:
+        residue_parts.append(line[last : m.start()])
+        last = m.end()
+    residue_parts.append(line[last:])
+    residue = "".join(residue_parts)
+    if _AMBIGUOUS_RESIDUE_RE.search(residue) or not _parens_balanced(residue):
+        return True
+    return any(_AMBIGUOUS_TARGET_RE.search(m.group("target")) for m in matches)
 
 
 def parse_memory_index(text: str) -> ParsedIndex:
     """Parse an index file into pointer entries + preserved other lines."""
     entries: list[IndexEntry] = []
     other: list[tuple[int, str]] = []
+    ambiguous: set[int] = set()
     for i, line in enumerate(text.splitlines(), start=1):
-        m = _ENTRY_RE.match(line)
-        if m is None:
+        matches = list(_LINK_RE.finditer(line)) if _BULLET_RE.match(line) else []
+        if not matches:
             other.append((i, line))
             continue
-        entries.append(
+        if _line_is_ambiguous(line, matches):
+            ambiguous.add(i)
+        entries.extend(
             IndexEntry(
                 line_no=i,
                 title=m.group("title").strip(),
                 target=m.group("target").strip(),
                 raw=line,
             )
+            for m in matches
         )
-    return ParsedIndex(entries=tuple(entries), other_lines=tuple(other))
+    return ParsedIndex(
+        entries=tuple(entries),
+        other_lines=tuple(other),
+        ambiguous_lines=frozenset(ambiguous),
+    )
 
 
 # ── Pure: link classification ───────────────────────────────────────
@@ -564,12 +640,22 @@ def _analyze_index_file(
     # broken_link — classify every pointer target; report only the broken
     # classes. ``listed_norm`` collects the resolvable targets for the orphan
     # check below.
+    #
+    # A target read off an ambiguous line (``parsed.ambiguous_lines``) may be a
+    # mis-slice rather than a real pointer, so its "broken" verdict is a
+    # suspicion, not a finding: it is reported separately at ``warn`` for a
+    # human to read, and never as an ``error`` that fails the run.
     broken: list[str] = []
+    suspect: list[str] = []
     listed_norm: set[str] = set()
     for entry in parsed.entries:
         cls = classify_link(entry.target, root=root, source_dir=root)
         if cls in ("missing_target", "outside_root"):
-            broken.append(f"L{entry.line_no} [{cls}] {entry.target}")
+            item = f"L{entry.line_no} [{cls}] {entry.target}"
+            if entry.line_no in parsed.ambiguous_lines:
+                suspect.append(item)
+            else:
+                broken.append(item)
         elif cls == "ok":
             resolved = (root / entry.target.split("#", 1)[0]).resolve()
             listed_norm.add(norm_path(resolved))  # type: ignore[operator]
@@ -580,6 +666,19 @@ def _analyze_index_file(
                 severity="error",
                 summary=f"{len(broken)} broken link(s) in {index_file_name}",
                 items=broken,
+            )
+        )
+    if suspect:
+        report.findings.append(
+            Finding(
+                check="ambiguous_index_line",
+                severity="warn",
+                summary=(
+                    f"{len(suspect)} link(s) in {index_file_name} look broken but sit on a line "
+                    "this parser cannot read unambiguously (code span, stray bracket, or a "
+                    "parenthesis inside the target) — verify by hand; --fix will not touch them"
+                ),
+                items=suspect,
             )
         )
 
@@ -812,27 +911,50 @@ def _missing_target_entries(text: str, *, root: Path) -> list[IndexEntry]:
     ]
 
 
-# A whole markdown link, used only to count how many links share one line.
-# ``_ENTRY_RE`` cannot answer this: it is anchored at line start and matches at
-# most once per line, which is exactly the blind spot this guard covers.
-_ANY_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
+# The pre-#1757 entry grammar: line-anchored, at most one match per line. The
+# parser no longer uses it — it now reads every link on a line — but ``--fix``
+# still does, to keep its write scope frozen at exactly the shape it could
+# already delete before the parser widened. Relaxing that scope is an ADR-0020
+# §1 change and lands with the amendment, not here.
+_LEGACY_ENTRY_SHAPE_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
 
 
-def _multi_entry_lines(entries: list[IndexEntry]) -> list[IndexEntry]:
-    """Candidate entries whose raw line carries more than one markdown link.
+def _unfixable_lines(entries: list[IndexEntry], *, ambiguous_lines: frozenset[int]) -> list[str]:
+    """Reasons *entries*' lines are out of ``--fix``'s scope, one per line.
 
     ``--fix`` removes a dead pointer by splicing out its **whole line**
     (:func:`_splice_lines`), which is only sound while "one line = one entry"
-    holds — the contract the harness itself states for ``MEMORY.md``. An index
-    that packs several entries onto a line breaks that premise: splicing the
-    line for one dead target would also delete every *live* entry sharing it.
+    holds — the contract the harness itself states for ``MEMORY.md``. Three
+    shapes break that premise, and all three fail closed:
 
-    The parser cannot even see those siblings (``_ENTRY_RE`` is line-anchored and
-    matches once), so it would report a one-line removal while silently dropping
-    the rest. Rather than delete data we cannot account for, refuse the fix and
-    let the caller repair the line by hand.
+    * **Several entries on one line.** Splicing the line for one dead target
+      would also delete every *live* entry beside it.
+    * **A line the entry grammar cannot read unambiguously.** ``--fix`` may only
+      remove a *provably* dead pointer (ADR-0020 §1); a target mis-sliced out of
+      ``[Live](notes_(v2).md)`` classifies ``missing_target`` while naming a file
+      that exists, so the proof does not hold.
+    * **A pointer the legacy grammar never saw.** The widened parser now reads
+      prose-prefixed lines (``- NS: [a](x.md)``), which ``--fix`` could not
+      previously delete. Widening the write scope on the back of a parser fix
+      would smuggle a contract change in; it waits for the amendment.
+
+    Returns one ``L{n}: {raw}`` line per offending line (deduped, in file
+    order), or an empty list when every candidate is safely fixable.
     """
-    return [e for e in entries if len(_ANY_LINK_RE.findall(e.raw)) > 1]
+    reasons: dict[int, str] = {}
+    for e in entries:
+        if e.line_no in reasons:
+            continue
+        if len(_LINK_RE.findall(e.raw)) > 1:
+            why = "carries more than one entry"
+        elif e.line_no in ambiguous_lines:
+            why = "cannot be read unambiguously (code span, stray bracket, or paren in target)"
+        elif _LEGACY_ENTRY_SHAPE_RE.match(e.raw) is None:
+            why = "does not have the one-entry-per-line shape --fix is contracted for"
+        else:
+            continue
+        reasons[e.line_no] = f"      - L{e.line_no}: {e.raw}\n        ({why})"
+    return [reasons[n] for n in sorted(reasons)]
 
 
 def _splice_lines(original_text: str, remove_line_nos: set[int]) -> str:
@@ -965,15 +1087,17 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
             results.append(FixFileResult(str(resolved), index_file_name, applied=apply, removed=[]))
             continue
         # Fail closed before promising (dry-run) or performing (--apply) a splice
-        # that would take live sibling entries with it. Guarded on both paths so
-        # the preview never advertises a removal we would refuse to make.
-        unsafe = _multi_entry_lines(candidates)
+        # we cannot prove is subtractive-only. Guarded on both paths so the
+        # preview never advertises a removal we would refuse to make.
+        unsafe = _unfixable_lines(
+            candidates, ambiguous_lines=parse_memory_index(text).ambiguous_lines
+        )
         if unsafe:
-            detail = "\n".join(f"      - L{e.line_no}: {e.raw}" for e in unsafe)
+            detail = "\n".join(unsafe)
             raise click.UsageError(
-                f"{index_path}: refusing --fix — {len(unsafe)} line(s) carry more than one "
-                f"entry, and --fix removes whole lines, so fixing the dead pointer would "
-                f"also delete the live entries beside it:\n{detail}\n"
+                f"{index_path}: refusing --fix — {len(unsafe)} line(s) are outside the shape "
+                f"--fix can safely splice, and it removes whole lines, so proceeding could "
+                f"delete a live pointer:\n{detail}\n"
                 f"    Repair these lines by hand, or split the index to one entry per line "
                 f"(the MEMORY.md contract) and re-run."
             )
