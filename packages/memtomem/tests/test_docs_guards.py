@@ -835,16 +835,20 @@ _LINT_DOCS = (_REPO_ROOT / "CLAUDE.md", _REPO_ROOT / "CONTRIBUTING.md")
 # below it; continuations are folded to spaces before this runs.
 _RUFF_CALL = re.compile(r"(?<![\w-])uv run ruff (check|format)((?:[^\S\n]+[^\s`#;|&\\]+)*)")
 
-# Flags that narrow what ruff walks. A doc can hold CI's exact path list and
-# still lint less than CI by excluding one of those paths, so these are
-# tracked rather than dropped with the other flags.
-_SCOPE_FLAGS = frozenset({"--exclude", "--extend-exclude", "--force-exclude"})
+# Flags known not to change which files ruff walks. Everything else is
+# reported rather than dropped: modelling ruff's option arity here would mean
+# tracking its whole CLI, and the interesting flags are exactly the ones that
+# re-scope a call that otherwise carries CI's paths (``--exclude``, and
+# ``--config``, which can carry an exclude of its own). An allowlist is
+# fail-closed for the flags nobody has thought of yet, at the cost of a
+# deliberate edit here when the docs legitimately grow a new one.
+_INERT_FLAGS = frozenset({"--fix", "--no-fix", "--check", "--diff"})
 
 
 class _RuffCall(typing.NamedTuple):
     verb: str  # "check" | "format"
     paths: tuple[str, ...]
-    scope_flags: tuple[str, ...]
+    other_flags: tuple[str, ...]
 
 
 def _ruff_calls(text: str) -> list[_RuffCall]:
@@ -852,29 +856,29 @@ def _ruff_calls(text: str) -> list[_RuffCall]:
 
     Backslash continuations are folded first so a call split across lines
     reads as one invocation (same normalisation as
-    ``test_documented_mm_flags_resolve``). Inert flags (``--fix``,
-    ``--check``) are dropped; scope-narrowing ones are kept. A
-    space-separated flag value (``--exclude tests``) is consumed with its
-    flag so it is not mistaken for a path.
+    ``test_documented_mm_flags_resolve``).
+
+    Only the inert flags are dropped; any other flag is kept in
+    ``other_flags`` for the caller to reject. A flag's value may therefore
+    land in ``paths`` (``--select E`` reads "E" as a path) — harmless,
+    because a call carrying an un-inert flag is already an offender.
+
+    ``paths`` is never empty: ruff defaults ``[FILES]`` to ``.``, so a
+    pathless call is recorded as ``(".",)`` rather than dropped, which
+    would hide ``ruff check --exclude tests``.
     """
     calls: list[_RuffCall] = []
     for verb, args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
         paths: list[str] = []
-        scope: list[str] = []
-        expect_value = False
+        flags: list[str] = []
         for tok in shlex.split(args):
-            if expect_value:
-                expect_value = False
-                continue
             if tok.startswith("-"):
                 name = tok.split("=", 1)[0]
-                if name in _SCOPE_FLAGS:
-                    scope.append(name)
-                    expect_value = "=" not in tok
+                if name not in _INERT_FLAGS:
+                    flags.append(name)
                 continue
             paths.append(tok)
-        if paths:
-            calls.append(_RuffCall(verb, tuple(paths), tuple(scope)))
+        calls.append(_RuffCall(verb, tuple(paths) or (".",), tuple(flags)))
     return calls
 
 
@@ -912,10 +916,11 @@ class TestLintPathsMatchCI:
             f"ruff check and ruff format --check lint different paths in "
             f"{_CI_WORKFLOW.name}: {sorted(distinct)}. The docs can't mirror both."
         )
-        excluding = [call for call in calls if call.scope_flags]
-        assert not excluding, (
-            f"{_CI_WORKFLOW.name} now narrows ruff with {excluding[0].scope_flags}; "
-            "the parity test below compares paths only and would miss it."
+        flagged = [call for call in calls if call.other_flags]
+        assert not flagged, (
+            f"{_CI_WORKFLOW.name} now passes ruff {list(flagged[0].other_flags)}, which may "
+            "re-scope the lint. The parity test below compares paths only and would miss it — "
+            f"teach {Path(__file__).name} what the flag does before adding it here."
         )
 
     def test_docs_lint_the_same_paths_as_ci(self) -> None:
@@ -927,13 +932,13 @@ class TestLintPathsMatchCI:
                 offenders.append(f"{doc.name}: documents no `uv run ruff` command at all")
                 continue
             for call in calls:
-                shown = " ".join([*call.paths, *call.scope_flags])
+                shown = " ".join([*call.paths, *call.other_flags])
                 if call.paths != expected:
                     offenders.append(f"{doc.name}: `uv run ruff {call.verb} ... {shown}`")
-                elif call.scope_flags:
+                elif call.other_flags:
                     offenders.append(
-                        f"{doc.name}: `uv run ruff {call.verb} ... {shown}` "
-                        "carries CI's paths but narrows them back out"
+                        f"{doc.name}: `uv run ruff {call.verb} ... {shown}` carries CI's paths "
+                        f"but adds {list(call.other_flags)}, which may re-scope them"
                     )
         assert not offenders, (
             "Documented ruff paths drifted from the required `lint` CI check.\n"
