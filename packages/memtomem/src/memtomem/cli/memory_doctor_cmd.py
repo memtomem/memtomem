@@ -721,11 +721,11 @@ def _analyze_index_file(
                 check="ambiguous_index_line",
                 severity="warn",
                 summary=(
-                    f"{len(ambiguous_items)} line(s) in {index_file_name} carry link syntax this "
-                    "parser cannot read unambiguously (a link inside a code span, an escaped or "
-                    "angle-bracketed target, or a parenthesis inside the target) — their links "
-                    "are neither link-checked nor counted as listed, and --fix will not touch "
-                    "them; simplify the line's markdown to bring it back under the checks"
+                    f"{len(ambiguous_items)} line(s) in {index_file_name} hold links that can't "
+                    "be resolved as written (a target that isn't a plain relative path, a link "
+                    "quoted in a code span, or link syntax left unclosed) — they are neither "
+                    "link-checked nor counted as listed, and --fix will not touch them; "
+                    "simplify the line to bring it back under the checks"
                 ),
                 items=ambiguous_items,
             )
