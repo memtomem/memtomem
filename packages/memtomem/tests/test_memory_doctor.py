@@ -79,6 +79,23 @@ class TestParser:
         parsed = parse_memory_index("- [한글](한글노트.md) — 메모\n")
         assert parsed.entries[0].target == "한글노트.md"
 
+    def test_crlf_line_numbers_stay_aligned(self):
+        # Entry line numbers come from markdown-it's source maps, but --fix
+        # splices by `splitlines(keepends=True)` index. The two counters agree
+        # on CRLF only because both treat \r\n as one break — if they ever
+        # diverged, every splice on a Windows-authored index would cut the
+        # wrong line, and TestSpliceRoundTrip can't see it (it's handed line
+        # numbers rather than deriving them).
+        parsed = parse_memory_index(
+            "- [A](a.md) — x\r\n- [Dead](gone.md) — y\r\n- [B](b.md) — z\r\n"
+        )
+        assert [(e.line_no, e.target) for e in parsed.entries] == [
+            (1, "a.md"),
+            (2, "gone.md"),
+            (3, "b.md"),
+        ]
+        assert parsed.entries[1].raw == "- [Dead](gone.md) — y"  # terminator-stripped
+
     def test_every_link_on_a_line_is_an_entry(self):
         # #1757 defect 1/2: a line-anchored, match-once parser saw only ``a``,
         # so ``b``'s live target never suppressed its orphan and a dead ``b``
