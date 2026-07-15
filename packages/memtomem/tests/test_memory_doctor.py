@@ -167,7 +167,23 @@ class TestDeceivingLines:
     @pytest.mark.parametrize("line,why", WONT_GUESS, ids=[w for _, w in WONT_GUESS])
     def test_uri_machinery_is_not_resolved_on_a_guess(self, line, why):
         """Parsed fine; still not called a filename. Reported, never deleted."""
-        assert parse_memory_index(line + "\n").ambiguous_lines == frozenset({1}), why
+        parsed = parse_memory_index(line + "\n")
+        assert parsed.entries[0].unreadable is True, why
+        assert parsed.ambiguous_lines == frozenset({1}), why
+
+    def test_doubt_about_one_target_does_not_cover_for_its_neighbour(self):
+        """Readability is per entry; only the refusal to delete is per line.
+
+        Letting one odd destination silence the pointer beside it would put back
+        the blind spot this parser exists to close — a dead link going unreported
+        because of the company it keeps.
+        """
+        parsed = parse_memory_index("- [Odd](live%2Emd) · [Dead](gone.md)\n")
+        assert [(e.target, e.unreadable) for e in parsed.entries] == [
+            ("live%2Emd", True),
+            ("gone.md", False),  # still checkable, and still checked
+        ]
+        assert parsed.ambiguous_lines == frozenset({1})  # the *line* stays unfixable
 
 
 class TestBlockContext:
@@ -215,6 +231,14 @@ class TestBlockContext:
         assert parsed.entries[0].target == "a.md", why
         assert parsed.entries[0].line_no == 1, why
         assert 1 in parsed.multiline_lines, why
+
+    def test_pointer_in_a_later_paragraph_is_still_read(self):
+        # The item's first paragraph is prose; the pointer is in its second.
+        # Reading only the item's first inline would drop it from the report
+        # entirely — a real pointer, unchecked.
+        parsed = parse_memory_index("- introductory note\n\n  [Dead](gone.md) — second para\n")
+        assert [(e.line_no, e.target) for e in parsed.entries] == [(3, "gone.md")]
+        assert parsed.multiline_lines == frozenset({3})  # read, checked, not fixable
 
     def test_nested_child_is_fixable_on_its_own_line(self):
         # The parent is unfixable, but the child item *is* its line.

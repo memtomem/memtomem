@@ -120,12 +120,19 @@ class IndexEntry:
     onto a line is parsed faithfully rather than silently truncated: every link
     on a bullet line becomes an entry, so entries may share a ``line_no`` and
     ``raw`` (which is always the whole line, never the link's slice of it).
+
+    ``unreadable`` marks a target this command won't resolve on a guess (see
+    :func:`_target_is_unreadable`). It is per *entry*, not per line: one odd
+    destination says nothing about the pointer next to it, and suppressing a
+    sibling's broken-link verdict on its neighbour's account would put back the
+    blind spot this all started with.
     """
 
     line_no: int  # 1-based
     title: str
     target: str
     raw: str
+    unreadable: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,12 +143,12 @@ class ParsedIndex:
     numbers so a future write phase can round-trip the file; Tier 1 only reads
     them for the budget measurement.
 
-    ``ambiguous_lines`` holds the 1-based numbers of pointer lines carrying a
-    destination this command won't resolve on a guess (see
-    :func:`_target_is_unreadable`) or link syntax the parser resolved to no link
-    at all. Their entries are still parsed — the raw text is what a human needs
-    to repair the line — but the targets are not evidence: not of a broken link,
-    not of a listed file, and least of all of a line safe to delete.
+    ``ambiguous_lines`` holds the 1-based numbers of lines that ``--fix`` must
+    not splice because something on them could not be read: an unreadable
+    target, or link syntax that resolved to no link at all. It is line-level
+    because deletion is: the doubt is about the line as a whole. *Reporting* is
+    per entry (``IndexEntry.unreadable``) — a readable pointer is still checked
+    even where it shares a line with an unreadable one.
 
     ``multiline_lines`` holds the first line of any list item that runs past it
     (a lazy continuation). Their links are read and checked like any other —
@@ -244,17 +251,23 @@ def _list_item_body(tokens: list[Token], open_index: int) -> list[Token]:
     return tokens[open_index + 1 :]  # unclosed item: treat the rest as its body
 
 
-def _own_inline(body: list[Token]) -> Token | None:
-    """The item's *own* first inline — not one belonging to a nested item.
+def _own_inlines(body: list[Token]) -> list[Token]:
+    """The item's *own* inlines — never one belonging to a nested item.
 
     ``_list_item_body`` slices the whole item, children included, because the
-    structural check needs to see them. Reading a pointer out of that slice
-    naively lets a parent with no text of its own (``-`` on a line by itself,
-    or one opening with a fence) adopt its child's inline: the child's pointer
-    is then recorded twice, once against each item, which double-reports the
-    link and makes the child's line look like it carries two entries — so a
-    genuinely fixable line gets refused.
+    structural check needs to see them. Reading pointers out of that slice
+    naively lets a parent with no text of its own (``-`` on a line by itself, or
+    one opening with a fence) adopt its child's inline: the child's pointer gets
+    recorded twice, once against each item, which double-reports the link and
+    makes the child's line look like it carries two entries — refusing a fix
+    that is safe.
+
+    Every own inline is read, not just the first: an item can put its pointer in
+    a second paragraph, and skipping those would drop a real pointer from the
+    report. Each entry keeps its own inline's line number; the item is not
+    one-line, so ``--fix`` stands down for all of them.
     """
+    inlines: list[Token] = []
     depth = 0
     for token in body:
         if token.type == "list_item_open":
@@ -262,8 +275,8 @@ def _own_inline(body: list[Token]) -> Token | None:
         elif token.type == "list_item_close":
             depth -= 1
         elif depth == 0 and token.type == "inline" and token.map is not None:
-            return token
-    return None
+            inlines.append(token)
+    return inlines
 
 
 def _item_is_one_line(body: list[Token], inline: Token) -> bool:
@@ -321,28 +334,35 @@ def parse_memory_index(text: str) -> ParsedIndex:
         if token.type != "list_item_open":
             continue
         body = _list_item_body(tokens, i)
-        inline = _own_inline(body)
-        if inline is None:
-            continue  # an item with no text of its own — its children speak for themselves
-
-        line_no = inline.map[0] + 1
-        links, unresolved = _read_inline(inline)
-        if not links:
-            # Link syntax that resolved to no link (``- [B](b.md``) would
-            # otherwise pass as ordinary prose — an unread pointer reported as
-            # nothing at all. There is no entry to carry it, so flag the line.
-            if unresolved:
+        for inline in _own_inlines(body):
+            line_no = inline.map[0] + 1
+            links, unresolved = _read_inline(inline)
+            if not links:
+                # Link syntax that resolved to no link (``- [B](b.md``) would
+                # otherwise pass as ordinary prose — an unread pointer reported
+                # as nothing at all. There is no entry to carry it, so flag the
+                # line itself.
+                if unresolved:
+                    ambiguous.add(line_no)
+                continue
+            pointer_lines.add(line_no)
+            # Line-level, because deletion is: doubt anywhere on the line puts
+            # the whole line out of --fix's reach. Per-entry readability is
+            # carried on the entries themselves, for the report.
+            if unresolved or any(_target_is_unreadable(target) for _, target in links):
                 ambiguous.add(line_no)
-            continue
-        pointer_lines.add(line_no)
-        if unresolved or any(_target_is_unreadable(target) for _, target in links):
-            ambiguous.add(line_no)
-        if not _item_is_one_line(body, inline):
-            multiline.add(line_no)
-        entries.extend(
-            IndexEntry(line_no=line_no, title=title, target=target.strip(), raw=lines[line_no - 1])
-            for title, target in links
-        )
+            if not _item_is_one_line(body, inline):
+                multiline.add(line_no)
+            entries.extend(
+                IndexEntry(
+                    line_no=line_no,
+                    title=title,
+                    target=target.strip(),
+                    raw=lines[line_no - 1],
+                    unreadable=_target_is_unreadable(target),
+                )
+                for title, target in links
+            )
 
     other = [(i, line) for i, line in enumerate(lines, start=1) if i not in pointer_lines]
     return ParsedIndex(
@@ -764,19 +784,22 @@ def _analyze_index_file(
     # classes. ``listed_norm`` collects the resolvable targets for the orphan
     # check below.
     #
-    # An ambiguous line's targets are not evidence of anything: the text read as
-    # a target may not be the path Markdown resolves. Such a line is reported
-    # once, on its own, and contributes to *neither* conclusion — not a
-    # ``broken_link`` error (it would fail a run over a healthy index) and not a
-    # ``listed`` entry (a coincidentally-existing mis-slice would silently mark
-    # the wrong file as indexed). The pointed-at file may therefore also surface
-    # as an ``index_orphan``; that is the honest read, since the doctor cannot
-    # tell which file the line means.
+    # An unreadable target is evidence of nothing: the text read as a path may
+    # not be the path Markdown resolves. Such an entry is reported on its own and
+    # feeds *neither* conclusion — not a ``broken_link`` error (which would fail
+    # a run over a healthy index) and not a ``listed`` entry (which would mark a
+    # file indexed on a guess). The file it may have meant can therefore also
+    # surface as an ``index_orphan``; that is the honest read.
+    #
+    # This is per entry, not per line. Doubt about one destination says nothing
+    # about the pointer beside it, and letting it suppress that sibling's verdict
+    # would put back the very blind spot this parser exists to close.
     broken: list[str] = []
     ambiguous_items: list[str] = []
     listed_norm: set[str] = set()
     for entry in parsed.entries:
-        if entry.line_no in parsed.ambiguous_lines:
+        if entry.unreadable:
+            ambiguous_items.append(f"L{entry.line_no} [unreadable target] {entry.target}")
             continue
         cls = classify_link(entry.target, root=root, source_dir=root)
         if cls in ("missing_target", "outside_root"):
@@ -784,11 +807,13 @@ def _analyze_index_file(
         elif cls == "ok":
             resolved = (root / entry.target.split("#", 1)[0]).resolve()
             listed_norm.add(norm_path(resolved))  # type: ignore[operator]
-    # Read the raw text back from the source: an ambiguous line need not have
-    # produced an entry (a link the grammar could not close yields none).
+    # A line whose link syntax resolved to no link has no entry to speak for it,
+    # so it is reported from the source text.
     raw_lines = text.splitlines()
-    for line_no in sorted(parsed.ambiguous_lines):
-        ambiguous_items.append(f"L{line_no} {raw_lines[line_no - 1]}")
+    entry_lines = {e.line_no for e in parsed.entries}
+    for line_no in sorted(parsed.ambiguous_lines - entry_lines):
+        ambiguous_items.append(f"L{line_no} [unreadable link syntax] {raw_lines[line_no - 1]}")
+    ambiguous_items.sort(key=lambda item: int(item.split(None, 1)[0][1:]))
     if broken:
         report.findings.append(
             Finding(
