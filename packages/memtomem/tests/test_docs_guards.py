@@ -833,22 +833,48 @@ _LINT_DOCS = (_REPO_ROOT / "CLAUDE.md", _REPO_ROOT / "CONTRIBUTING.md")
 
 # ``[^\S\n]`` (horizontal space only) keeps a call from swallowing the lines
 # below it; continuations are folded to spaces before this runs.
-_RUFF_CALL = re.compile(r"(?<![\w-])uv run ruff (?:check|format)((?:[^\S\n]+[^\s`#;|&\\]+)*)")
+_RUFF_CALL = re.compile(r"(?<![\w-])uv run ruff (check|format)((?:[^\S\n]+[^\s`#;|&\\]+)*)")
+
+# Flags that narrow what ruff walks. A doc can hold CI's exact path list and
+# still lint less than CI by excluding one of those paths, so these are
+# tracked rather than dropped with the other flags.
+_SCOPE_FLAGS = frozenset({"--exclude", "--extend-exclude", "--force-exclude"})
 
 
-def _ruff_path_args(text: str) -> list[tuple[str, ...]]:
-    """Every ``uv run ruff check|format`` call's positional paths, in order.
+class _RuffCall(typing.NamedTuple):
+    verb: str  # "check" | "format"
+    paths: tuple[str, ...]
+    scope_flags: tuple[str, ...]
+
+
+def _ruff_calls(text: str) -> list[_RuffCall]:
+    """Every ``uv run ruff check|format`` call, in order.
 
     Backslash continuations are folded first so a call split across lines
     reads as one invocation (same normalisation as
-    ``test_documented_mm_flags_resolve``). Flags (``--fix``, ``--check``)
-    are dropped; what remains is the path list.
+    ``test_documented_mm_flags_resolve``). Inert flags (``--fix``,
+    ``--check``) are dropped; scope-narrowing ones are kept. A
+    space-separated flag value (``--exclude tests``) is consumed with its
+    flag so it is not mistaken for a path.
     """
-    calls: list[tuple[str, ...]] = []
-    for args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
-        paths = tuple(tok for tok in shlex.split(args) if not tok.startswith("-"))
+    calls: list[_RuffCall] = []
+    for verb, args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
+        paths: list[str] = []
+        scope: list[str] = []
+        expect_value = False
+        for tok in shlex.split(args):
+            if expect_value:
+                expect_value = False
+                continue
+            if tok.startswith("-"):
+                name = tok.split("=", 1)[0]
+                if name in _SCOPE_FLAGS:
+                    scope.append(name)
+                    expect_value = "=" not in tok
+                continue
+            paths.append(tok)
         if paths:
-            calls.append(paths)
+            calls.append(_RuffCall(verb, tuple(paths), tuple(scope)))
     return calls
 
 
@@ -867,30 +893,48 @@ class TestLintPathsMatchCI:
     """
 
     def test_ci_still_lints_with_explicit_paths(self) -> None:
-        """Anchor: if CI's ruff calls move, the parity test below is void."""
-        calls = _ruff_path_args(_read(_CI_WORKFLOW))
-        assert len(calls) == 2, (
-            f"Expected exactly 2 ruff invocations in {_CI_WORKFLOW.name} (check + format), "
-            f"found {len(calls)}: {calls}. Update this guard to match the workflow."
+        """Anchor: if CI's ruff calls move, the parity test below is void.
+
+        Asserting the shape (one ``check``, one ``format``, same paths, no
+        exclusions) is what lets the parity test read CI's path list off a
+        single call. Without it, dropping ``format`` from the workflow
+        would leave parity passing against a contract CI no longer has.
+        """
+        calls = _ruff_calls(_read(_CI_WORKFLOW))
+        verbs = sorted(call.verb for call in calls)
+        assert verbs == ["check", "format"], (
+            f"Expected exactly one `ruff check` and one `ruff format` in "
+            f"{_CI_WORKFLOW.name}, found {verbs or 'none'}. Update this guard "
+            "to match the workflow."
         )
-        assert calls[0] == calls[1], (
-            f"ruff check and ruff format --check lint different paths in {_CI_WORKFLOW.name}: "
-            f"{calls[0]} vs {calls[1]}. The docs can't mirror both."
+        distinct = {call.paths for call in calls}
+        assert len(distinct) == 1, (
+            f"ruff check and ruff format --check lint different paths in "
+            f"{_CI_WORKFLOW.name}: {sorted(distinct)}. The docs can't mirror both."
+        )
+        excluding = [call for call in calls if call.scope_flags]
+        assert not excluding, (
+            f"{_CI_WORKFLOW.name} now narrows ruff with {excluding[0].scope_flags}; "
+            "the parity test below compares paths only and would miss it."
         )
 
     def test_docs_lint_the_same_paths_as_ci(self) -> None:
-        expected = _ruff_path_args(_read(_CI_WORKFLOW))[0]
+        expected = _ruff_calls(_read(_CI_WORKFLOW))[0].paths
         offenders: list[str] = []
         for doc in _LINT_DOCS:
-            calls = _ruff_path_args(_read(doc))
+            calls = _ruff_calls(_read(doc))
             if not calls:
                 offenders.append(f"{doc.name}: documents no `uv run ruff` command at all")
                 continue
-            offenders.extend(
-                f"{doc.name}: `uv run ruff ... {' '.join(paths)}`"
-                for paths in calls
-                if paths != expected
-            )
+            for call in calls:
+                shown = " ".join([*call.paths, *call.scope_flags])
+                if call.paths != expected:
+                    offenders.append(f"{doc.name}: `uv run ruff {call.verb} ... {shown}`")
+                elif call.scope_flags:
+                    offenders.append(
+                        f"{doc.name}: `uv run ruff {call.verb} ... {shown}` "
+                        "carries CI's paths but narrows them back out"
+                    )
         assert not offenders, (
             "Documented ruff paths drifted from the required `lint` CI check.\n"
             f"{_CI_WORKFLOW.name} lints: {' '.join(expected)}\n"
