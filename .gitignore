@@ -54,6 +54,8 @@ node_modules/
 docs/testing/
 docs/marketing/
 docs/reports/
+docs/plans/
+docs/qa/
 .claude-memory/
 BUG_REPORT.md
 *.png
