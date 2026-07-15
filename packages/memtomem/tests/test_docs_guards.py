@@ -826,3 +826,73 @@ class TestRegistryAndInstallDocs:
         assert "<code>claude mcp add memtomem -- memtomem-server</code>" not in portal
         assert '"command": "memtomem-server"' not in portal
         assert 'command = "memtomem-server"' not in portal
+
+
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_LINT_DOCS = (_REPO_ROOT / "CLAUDE.md", _REPO_ROOT / "CONTRIBUTING.md")
+
+# ``[^\S\n]`` (horizontal space only) keeps a call from swallowing the lines
+# below it; continuations are folded to spaces before this runs.
+_RUFF_CALL = re.compile(r"(?<![\w-])uv run ruff (?:check|format)((?:[^\S\n]+[^\s`#;|&\\]+)*)")
+
+
+def _ruff_path_args(text: str) -> list[tuple[str, ...]]:
+    """Every ``uv run ruff check|format`` call's positional paths, in order.
+
+    Backslash continuations are folded first so a call split across lines
+    reads as one invocation (same normalisation as
+    ``test_documented_mm_flags_resolve``). Flags (``--fix``, ``--check``)
+    are dropped; what remains is the path list.
+    """
+    calls: list[tuple[str, ...]] = []
+    for args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
+        paths = tuple(tok for tok in shlex.split(args) if not tok.startswith("-"))
+        if paths:
+            calls.append(paths)
+    return calls
+
+
+class TestLintPathsMatchCI:
+    """Documented ruff paths must be the paths CI actually lints.
+
+    The `lint` check is required to merge, so a doc that under-scopes it
+    hands contributors a command that passes locally and still fails CI,
+    with nothing local to reproduce against. That is not hypothetical: an
+    external contributor's PR (#1678) went red on a UTF-8 BOM in a file
+    under ``packages/memtomem/tests/`` while the then-documented
+    ``ruff ... packages/memtomem/src`` reported clean.
+
+    ``ci.yml`` is the source of truth — comparing the two docs against
+    each other would pass while both are wrong together.
+    """
+
+    def test_ci_still_lints_with_explicit_paths(self) -> None:
+        """Anchor: if CI's ruff calls move, the parity test below is void."""
+        calls = _ruff_path_args(_read(_CI_WORKFLOW))
+        assert len(calls) == 2, (
+            f"Expected exactly 2 ruff invocations in {_CI_WORKFLOW.name} (check + format), "
+            f"found {len(calls)}: {calls}. Update this guard to match the workflow."
+        )
+        assert calls[0] == calls[1], (
+            f"ruff check and ruff format --check lint different paths in {_CI_WORKFLOW.name}: "
+            f"{calls[0]} vs {calls[1]}. The docs can't mirror both."
+        )
+
+    def test_docs_lint_the_same_paths_as_ci(self) -> None:
+        expected = _ruff_path_args(_read(_CI_WORKFLOW))[0]
+        offenders: list[str] = []
+        for doc in _LINT_DOCS:
+            calls = _ruff_path_args(_read(doc))
+            if not calls:
+                offenders.append(f"{doc.name}: documents no `uv run ruff` command at all")
+                continue
+            offenders.extend(
+                f"{doc.name}: `uv run ruff ... {' '.join(paths)}`"
+                for paths in calls
+                if paths != expected
+            )
+        assert not offenders, (
+            "Documented ruff paths drifted from the required `lint` CI check.\n"
+            f"{_CI_WORKFLOW.name} lints: {' '.join(expected)}\n"
+            "Offending call(s):\n  " + "\n  ".join(offenders)
+        )
