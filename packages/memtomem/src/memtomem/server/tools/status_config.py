@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 def _dependency_state(module: str, distribution: str | None = None) -> dict[str, object]:
     """Return a secret-free, non-importing dependency availability report."""
-    available = importlib.util.find_spec(module) is not None
+    try:
+        available = importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        # Test doubles and partially initialized imports may have no __spec__.
+        available = False
     installed_version: str | None = None
     if available:
         try:
