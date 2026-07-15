@@ -12,13 +12,16 @@ Requires Python 3.12+ and `uv` (workspace-managed monorepo).
 ```bash
 uv pip install -e "packages/memtomem[all]"             # install deps
 uv run pytest -m "not ollama"                          # tests (CI filter)
-uv run ruff check packages/memtomem/src && \
-    uv run ruff format --check packages/memtomem/src   # lint (required)
-uv run mypy packages/memtomem/src                      # typecheck (advisory)
+uv run ruff check packages/memtomem/src packages/memtomem/tests tools && \
+    uv run ruff format --check \
+    packages/memtomem/src packages/memtomem/tests tools   # lint (required)
+uv run mypy packages/memtomem/src                         # typecheck (advisory)
 ```
 
 The `ollama` marker auto-skips when Ollama isn't running; CI always uses
 `-m "not ollama"`. `ruff` and tests must pass to merge; `mypy` is advisory.
+Lint covers `tests/` and `tools/`, not just `src/` — a narrower invocation
+passes locally and still fails CI (`.github/workflows/ci.yml`).
 CLI entry points live in `packages/memtomem/pyproject.toml` — `mm` is an alias
 for `memtomem` and both resolve to `memtomem.cli:cli`.
 
