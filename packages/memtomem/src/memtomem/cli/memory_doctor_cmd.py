@@ -812,6 +812,29 @@ def _missing_target_entries(text: str, *, root: Path) -> list[IndexEntry]:
     ]
 
 
+# A whole markdown link, used only to count how many links share one line.
+# ``_ENTRY_RE`` cannot answer this: it is anchored at line start and matches at
+# most once per line, which is exactly the blind spot this guard covers.
+_ANY_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
+
+
+def _multi_entry_lines(entries: list[IndexEntry]) -> list[IndexEntry]:
+    """Candidate entries whose raw line carries more than one markdown link.
+
+    ``--fix`` removes a dead pointer by splicing out its **whole line**
+    (:func:`_splice_lines`), which is only sound while "one line = one entry"
+    holds — the contract the harness itself states for ``MEMORY.md``. An index
+    that packs several entries onto a line breaks that premise: splicing the
+    line for one dead target would also delete every *live* entry sharing it.
+
+    The parser cannot even see those siblings (``_ENTRY_RE`` is line-anchored and
+    matches once), so it would report a one-line removal while silently dropping
+    the rest. Rather than delete data we cannot account for, refuse the fix and
+    let the caller repair the line by hand.
+    """
+    return [e for e in entries if len(_ANY_LINK_RE.findall(e.raw)) > 1]
+
+
 def _splice_lines(original_text: str, remove_line_nos: set[int]) -> str:
     """Return *original_text* with the given 1-based lines removed, byte-exact.
 
@@ -941,6 +964,19 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
         if not candidates:
             results.append(FixFileResult(str(resolved), index_file_name, applied=apply, removed=[]))
             continue
+        # Fail closed before promising (dry-run) or performing (--apply) a splice
+        # that would take live sibling entries with it. Guarded on both paths so
+        # the preview never advertises a removal we would refuse to make.
+        unsafe = _multi_entry_lines(candidates)
+        if unsafe:
+            detail = "\n".join(f"      - L{e.line_no}: {e.raw}" for e in unsafe)
+            raise click.UsageError(
+                f"{index_path}: refusing --fix — {len(unsafe)} line(s) carry more than one "
+                f"entry, and --fix removes whole lines, so fixing the dead pointer would "
+                f"also delete the live entries beside it:\n{detail}\n"
+                f"    Repair these lines by hand, or split the index to one entry per line "
+                f"(the MEMORY.md contract) and re-run."
+            )
         if apply:
             removed = _apply_fix(index_path, resolved, [e.raw for e in candidates])
         else:
