@@ -170,6 +170,35 @@ class TestDeceivingLines:
         assert parse_memory_index(line + "\n").ambiguous_lines == frozenset({1}), why
 
 
+class TestReferenceStyleLinks:
+    """A pointer whose destination is defined on another line is still a pointer.
+
+    Lines are read one at a time so each entry keeps the line number ``--fix``
+    splices by. Reference links are the construct that breaks that isolation:
+    read alone, ``- [Live][live]`` has no destination and so looks like no link
+    at all. The definitions are harvested from the whole document to close it.
+    """
+
+    def test_full_reference_resolves(self):
+        parsed = parse_memory_index("- [Live][live] — hook\n\n[live]: live.md\n")
+        assert [(e.title, e.target) for e in parsed.entries] == [("Live", "live.md")]
+        assert parsed.entries[0].line_no == 1  # the pointer's line, not the definition's
+
+    def test_collapsed_and_shortcut_references_resolve(self):
+        parsed = parse_memory_index(
+            "- [Coll][] — x\n- [Short] — y\n\n[coll]: c.md\n[short]: s.md\n"
+        )
+        assert [e.target for e in parsed.entries] == ["c.md", "s.md"]
+
+    def test_reference_sibling_is_seen_beside_a_dead_inline_link(self):
+        # The line that made this matter: read line-by-line, the live reference
+        # link is invisible, so the line reads single-entry and --fix splices it
+        # away — dead pointer and live sibling together.
+        parsed = parse_memory_index("- [Dead](gone.md) and [Live][live]\n\n[live]: live.md\n")
+        assert [e.target for e in parsed.entries] == ["gone.md", "live.md"]
+        assert [e.line_no for e in parsed.entries] == [1, 1]
+
+
 class TestAmbiguousLines:
     def test_unclosed_link_on_bullet_yields_no_entry_but_is_flagged(self):
         # The line has no complete link, so it produces no entry and would
@@ -1444,6 +1473,24 @@ class TestFixScopeFrozen:
 
         assert result.exit_code == 0
         assert "No missing_target links to remove" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_reference_sibling_blocks_the_fix(self, tmp_path, monkeypatch):
+        """End to end: the live reference link must stop the splice.
+
+        The dead inline pointer alone would make this line fixable, and the
+        live sibling's destination lives on another line — so a reader that
+        can't see across lines deletes a live pointer and reports one removal.
+        """
+        body = "- [Dead](gone.md) and [Live][live]\n\n[live]: exists.md\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "carries more than one entry" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
     def test_quoted_link_is_not_a_sibling_so_the_line_stays_fixable(self, tmp_path, monkeypatch):

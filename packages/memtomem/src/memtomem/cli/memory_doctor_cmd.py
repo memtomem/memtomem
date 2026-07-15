@@ -185,9 +185,33 @@ def _markdown_parser() -> MarkdownIt:
     return md
 
 
-def _read_line(line: str) -> tuple[list[tuple[str, str]], bool]:
+def _reference_env(text: str) -> dict[str, object]:
+    """The link reference definitions declared anywhere in *text*.
+
+    Lines are read one at a time, so that each entry keeps its own line number —
+    the unit ``--fix`` splices by. A reference-style link (``[Live][live]``) is
+    the one construct that breaks that isolation: its destination is defined on
+    some *other* line (``[live]: live.md``), so a line read alone reports no link
+    there at all. That is not a cosmetic gap — a line whose live reference link
+    goes unseen looks single-entry, and its dead inline neighbour then takes the
+    whole line, live pointer included, when ``--fix`` splices it.
+
+    So the definitions are harvested from the whole document first and handed to
+    each line's read. Collapsed (``[Coll][]``) and shortcut (``[Short]``) forms
+    resolve through the same table.
+    """
+    env: dict[str, object] = {}
+    _markdown_parser().parse(text, env)
+    return env
+
+
+def _read_line(line: str, env: dict[str, object]) -> tuple[list[tuple[str, str]], bool]:
     """Read *line* as Markdown: its ``(title, destination)`` links, and whether
     it also holds link syntax that resolved to no link at all.
+
+    *env* carries the document's reference definitions (see
+    :func:`_reference_env`); it is copied per line so a definition on one line
+    cannot leak a mutation into the next read.
 
     Reading an index means reading Markdown as Markdown. A destination can be
     escaped (``notes_\\(v2.md``), entity-encoded (``notes_&amp;v2.md``) or
@@ -209,7 +233,9 @@ def _read_line(line: str) -> tuple[list[tuple[str, str]], bool]:
     """
     links: list[tuple[str, str]] = []
     unresolved = False
-    for token in _markdown_parser().parse(line):
+    references = env.get("references")
+    line_env: dict[str, object] = {"references": dict(references)} if references else {}
+    for token in _markdown_parser().parse(line, line_env):
         if token.type != "inline":
             continue
         title_parts: list[str] = []
@@ -243,9 +269,10 @@ def parse_memory_index(text: str) -> ParsedIndex:
     entries: list[IndexEntry] = []
     other: list[tuple[int, str]] = []
     ambiguous: set[int] = set()
+    env = _reference_env(text)
     for i, line in enumerate(text.splitlines(), start=1):
         bullet = _BULLET_RE.match(line)
-        links, unresolved = _read_line(line[bullet.end() :]) if bullet else ([], False)
+        links, unresolved = _read_line(line[bullet.end() :], env) if bullet else ([], False)
         if not links:
             # A bullet whose link syntax resolved to no link (``- [B](b.md``)
             # would otherwise slip by as prose — an unread pointer reported as
