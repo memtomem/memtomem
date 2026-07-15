@@ -70,7 +70,9 @@ def _render_validity_window(valid_from_unix: int | None, valid_to_unix: int | No
 ADD_EPILOG = """\
 Examples:
   mm add "Canary deploy froze at 14:02Z; rolled back." --tags incident,postmortem
-  mm add "Decision: standardize on uv for installs." --scope project_shared --confirm-project-shared
+
+  mm add "Standardize on uv for installs." --scope project_shared --confirm-project-shared
+
   mm add "Quick note to self" --json
 """
 
