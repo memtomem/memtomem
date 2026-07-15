@@ -1142,6 +1142,52 @@ class TestCli:
         assert result.exit_code != 0
         assert "not a configured memory_dir" in result.output
 
+    def _index_missing_finding(self, payload):
+        dir_entry = next(d for d in payload["dirs"] if d["category"] == "claude-memory")
+        return next(f for f in dir_entry["findings"] if f["check"] == "index_missing")
+
+    def test_undecodable_index_is_index_missing_warn_not_traceback(self, doctor_env, monkeypatch):
+        """#1769: ``UnicodeDecodeError`` is a ``ValueError``, not an ``OSError``.
+
+        An index the doctor cannot decode must land in the existing
+        ``index_missing`` warn ("could not read"), not take the command — and
+        its ``--json`` payload — down with a traceback.
+        """
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(b"- [Dead](gone.md) \xff\xfe broken bytes\n")
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert result.exit_code == 0  # warn is advisory, same as a missing index
+        payload = json.loads(result.output)  # a payload, not a traceback
+        finding = self._index_missing_finding(payload)
+        assert finding["severity"] == "warn"
+        assert "could not read MEMORY.md" in finding["summary"]
+
+    def test_oserror_index_read_is_index_missing_warn(self, doctor_env, monkeypatch):
+        # The OSError arm predates #1769 but was untested; pin it while the
+        # except structure is being touched.
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        index = (mem_dir / "MEMORY.md").resolve()
+
+        real_read_text = Path.read_text
+
+        def deny_index(self, *args, **kwargs):
+            if self.resolve() == index:
+                raise PermissionError(13, "Permission denied")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", deny_index)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert result.exit_code == 0
+        finding = self._index_missing_finding(json.loads(result.output))
+        assert finding["severity"] == "warn"
+        assert "could not read MEMORY.md" in finding["summary"]
+
 
 # ── Docs-as-tests parity ────────────────────────────────────────────
 #
@@ -1294,7 +1340,7 @@ class TestDocsParity:
         # The doc names the --json statuses and the skip exit code; drift here
         # would have a script trust "clean" for a partially-fixed index.
         text = self._REF_DOC.read_text(encoding="utf-8")
-        for status in ("clean", "would-fix", "fixed", "would-partial", "partial"):
+        for status in ("clean", "would-fix", "fixed", "would-partial", "partial", "error"):
             assert f"`{status}`" in text, f"§5 does not document --fix --json status {status!r}"
 
     def test_reference_documents_per_line_skip_not_whole_run_refusal(self):
@@ -1901,11 +1947,12 @@ class TestFixCli:
         payload = json.loads(result.output)
         assert payload["status"] == "would-fix"
         assert payload["applied"] is False
-        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 0}
+        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 0, "errors": 0}
         f = payload["files"][0]
         assert f["index_file"] == "MEMORY.md"
         assert f["removed"] == [{"line": 2, "text": "- [Dead](gone.md) — drop"}]
         assert f["skipped"] == []
+        assert f["error"] is None
 
     def test_fix_json_apply_status(self, tmp_path, monkeypatch):
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
@@ -1928,7 +1975,7 @@ class TestFixCli:
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
         payload = json.loads(result.output)
         assert payload["status"] == "would-partial"  # NOT would-fix, NOT clean
-        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 1}
+        assert payload["summary"] == {"files": 1, "lines": 1, "skipped": 1, "errors": 0}
         f = payload["files"][0]
         assert f["removed"] == [{"line": 1, "text": "- [Dead](gone.md) — drop"}]
         assert f["skipped"] == [
@@ -2082,9 +2129,204 @@ class TestFixCli:
 
         payload = json.loads(result.output)
         assert payload["status"] == "partial"
-        assert payload["summary"] == {"files": 1, "lines": 0, "skipped": 1}
+        assert payload["summary"] == {"files": 1, "lines": 0, "skipped": 1, "errors": 0}
         assert result.exit_code == 1
         assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    # ── #1769: an index --fix cannot read is an error, never "clean" ──
+
+    _RAW_BAD = b"- [Dead](gone.md) \xff\xfe broken bytes\n"
+
+    def test_fix_json_unreadable_index_is_error_not_clean(self, tmp_path, monkeypatch):
+        """The issue's repro: --fix used to drop the file and report clean/0."""
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(self._RAW_BAD)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert result.exit_code == 1
+        f = payload["files"][0]
+        assert "utf-8" in f["error"]
+        assert f["removed"] == [] and f["skipped"] == []
+        assert payload["summary"] == {"files": 1, "lines": 0, "skipped": 0, "errors": 1}
+
+    def test_fix_apply_unreadable_index_is_error_and_writes_nothing(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(self._RAW_BAD)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert result.exit_code == 1
+        assert (mem_dir / "MEMORY.md").read_bytes() == self._RAW_BAD
+
+    def test_unreadable_index_does_not_suppress_healthy_dir(self, tmp_path, monkeypatch):
+        """One bad index must not swallow the others' report — and ``error``
+        outranks ``fixed`` in the headline (the account is incomplete)."""
+        config, bad_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        (bad_dir / "MEMORY.md").write_bytes(self._RAW_BAD)
+        good_dir = tmp_path / ".claude" / "projects" / "-fix-proj-b" / "memory"
+        good_dir.mkdir(parents=True)
+        (good_dir / "exists.md").write_text("x", encoding="utf-8")
+        (good_dir / "MEMORY.md").write_text(self._BODY, encoding="utf-8")
+        config.indexing.memory_dirs = [bad_dir, good_dir]
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"  # precedence: error > fixed
+        assert result.exit_code == 1
+        assert payload["summary"] == {"files": 2, "lines": 1, "skipped": 0, "errors": 1}
+        good = next(f for f in payload["files"] if f["error"] is None)
+        bad = next(f for f in payload["files"] if f["error"] is not None)
+        assert good["removed"] == [{"line": 2, "text": "- [Dead](gone.md) — drop"}]
+        assert bad["removed"] == [] and bad["skipped"] == []
+        # The healthy index really was fixed on disk; the bad one untouched.
+        assert (good_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
+        assert (bad_dir / "MEMORY.md").read_bytes() == self._RAW_BAD
+
+    def test_fix_human_output_names_unreadable_index(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body="- [Ok](exists.md) — keep\n")
+        self._patch_loader(monkeypatch, config)
+        (mem_dir / "MEMORY.md").write_bytes(self._RAW_BAD)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+
+        assert result.exit_code == 1
+        assert "Could not read MEMORY.md" in result.output
+        assert "index file(s) could not be read" in result.output
+        # An all-error run has verified nothing — it must not claim otherwise.
+        assert "No missing_target links to remove" not in result.output
+
+    def test_apply_time_unreadable_index_is_error_not_a_crash(self, tmp_path, monkeypatch):
+        """The index decodes at T1 and turns non-UTF-8 before the lock (#1769).
+
+        The locked fresh read inside ``_apply_fix`` must surface as a per-file
+        error inside valid JSON, not as a traceback through the payload. Only
+        the read is converted: nothing was written, so ``removed=[]`` is true.
+        """
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        index = mem_dir / "MEMORY.md"
+
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        real_apply = mod._apply_fix
+
+        def corrupt_then_apply(*args, **kwargs):
+            index.write_bytes(self._RAW_BAD)
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(mod, "_apply_fix", corrupt_then_apply)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert result.exit_code == 1
+        f = payload["files"][0]
+        assert "utf-8" in f["error"]
+        assert f["removed"] == []
+        assert index.read_bytes() == self._RAW_BAD  # nothing was written
+
+    def test_fix_oserror_on_read_is_error(self, tmp_path, monkeypatch):
+        # Decode failures aren't the only unreadable shape; an I/O failure on
+        # the same read must get the same accounting (cross-platform stand-in
+        # for chmod-000).
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        index = (mem_dir / "MEMORY.md").resolve()
+
+        real_read_bytes = Path.read_bytes
+
+        def deny_index(self):
+            if self.resolve() == index:
+                raise PermissionError(13, "Permission denied")
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", deny_index)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert result.exit_code == 1
+        assert "Permission denied" in payload["files"][0]["error"]
+
+    def test_fix_blank_oserror_message_is_still_an_error(self, tmp_path, monkeypatch):
+        """``str(OSError())`` is ``""`` — presence must be ``is not None``.
+
+        A blank message under a truthiness check would drop the file from the
+        report and resurrect the original false-``clean`` (#1769, review
+        finding). The message falls back to the exception class name.
+        """
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+        index = (mem_dir / "MEMORY.md").resolve()
+
+        real_read_bytes = Path.read_bytes
+
+        def deny_index(self):
+            if self.resolve() == index:
+                raise OSError()
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", deny_index)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--json"])
+
+        payload = json.loads(result.output)
+        assert payload["status"] == "error"
+        assert result.exit_code == 1
+        assert payload["files"][0]["error"] == "OSError"
+        assert payload["summary"]["errors"] == 1
+
+    def test_write_failure_during_apply_propagates_not_error(self, tmp_path, monkeypatch):
+        """Only the *read* converts to a per-file error; write failures escape.
+
+        An exception surfacing from the atomic replace may postdate the commit,
+        so converting it to ``error`` + ``removed=[]`` could hide a write that
+        happened — the audit guarantee (ADR-0020 §5) requires it to propagate
+        instead (#1769).
+        """
+        config, _ = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+
+        import memtomem.context._atomic as atomic_mod
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(atomic_mod, "atomic_write_text", boom)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        assert isinstance(result.exception, OSError)
+        assert '"status"' not in result.output  # no payload claimed anything
+
+    def test_lock_failure_during_apply_propagates_not_error(self, tmp_path, monkeypatch):
+        # Same boundary from the other side of the read: failing to take the
+        # lock is not "could not read the index".
+        config, _ = _fix_env(tmp_path, monkeypatch, body=self._BODY)
+        self._patch_loader(monkeypatch, config)
+
+        import memtomem.context._atomic as atomic_mod
+
+        def boom(*args, **kwargs):
+            raise OSError(13, "lock dir denied")
+
+        monkeypatch.setattr(atomic_mod, "_file_lock", boom)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply", "--json"])
+
+        assert isinstance(result.exception, OSError)
+        assert '"status"' not in result.output
 
 
 class TestAllLinksDeadRule:
