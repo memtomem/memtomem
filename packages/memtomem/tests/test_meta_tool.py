@@ -250,6 +250,13 @@ class TestMemVersion:
         from memtomem import config as config_mod
 
         monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr(config_mod, "_config_d_path", lambda: tmp_path / "config.d")
+        for key in (
+            "MEMTOMEM_SEARCH__ENABLE_BM25",
+            "MEMTOMEM_SEARCH__ENABLE_DENSE",
+            "MEMTOMEM_SEARCH__TOKENIZER",
+        ):
+            monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__API_KEY", "do-not-leak")
         parsed = json.loads(await mem_version())
         assert parsed["capabilities"]["runtime_profile"] == {"schema_version": 1}
@@ -275,6 +282,13 @@ class TestMemVersion:
         from memtomem.server.tools import status_config
 
         monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr(config_mod, "_config_d_path", lambda: tmp_path / "config.d")
+        for key in (
+            "MEMTOMEM_SEARCH__ENABLE_BM25",
+            "MEMTOMEM_SEARCH__ENABLE_DENSE",
+            "MEMTOMEM_SEARCH__TOKENIZER",
+        ):
+            monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
