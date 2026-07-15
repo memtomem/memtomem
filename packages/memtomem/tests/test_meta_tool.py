@@ -246,7 +246,12 @@ class TestMemVersion:
         assert "context_compose" in ACTIONS
         assert "candidate_propose" in ACTIONS
 
-    async def test_runtime_profile_is_additive_and_secret_free(self, monkeypatch):
+    async def test_runtime_profile_is_additive_and_secret_free(
+        self, monkeypatch, tmp_path
+    ):
+        from memtomem import config as config_mod
+
+        monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__API_KEY", "do-not-leak")
         parsed = json.loads(await mem_version())
         assert parsed["capabilities"]["runtime_profile"] == {"schema_version": 1}
@@ -259,11 +264,21 @@ class TestMemVersion:
             "dense_only",
             "disabled",
         }
+        assert profile["search"]["effective_mode"] in {
+            "hybrid",
+            "bm25_only",
+            "dense_only",
+            "disabled",
+        }
         assert "do-not-leak" not in json.dumps(parsed)
 
-    async def test_runtime_profile_reports_onnx_dependency_gap(self, monkeypatch):
+    async def test_runtime_profile_reports_onnx_dependency_gap(
+        self, monkeypatch, tmp_path
+    ):
+        from memtomem import config as config_mod
         from memtomem.server.tools import status_config
 
+        monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
         monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
@@ -278,5 +293,6 @@ class TestMemVersion:
             ),
         )
         profile = json.loads(await mem_version())["runtime_profile"]
-        assert profile["search"]["configured_mode"] == "bm25_only"
+        assert profile["search"]["configured_mode"] == "hybrid"
+        assert profile["search"]["effective_mode"] == "bm25_only"
         assert profile["missing_extras"] == ["onnx"]

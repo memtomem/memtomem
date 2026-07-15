@@ -61,14 +61,18 @@ def collect_runtime_profile() -> dict[str, object]:
         provider == "onnx" and not bool(fastembed["available"])
     )
     bm25_available = bool(config.search.enable_bm25)
-    if bm25_available and dense_available:
-        mode = "hybrid"
-    elif bm25_available:
-        mode = "bm25_only"
-    elif dense_available:
-        mode = "dense_only"
-    else:
-        mode = "disabled"
+
+    def retrieval_mode(*, dense: bool) -> str:
+        if bm25_available and dense:
+            return "hybrid"
+        if bm25_available:
+            return "bm25_only"
+        if dense:
+            return "dense_only"
+        return "disabled"
+
+    configured_mode = retrieval_mode(dense=dense_configured)
+    effective_mode = retrieval_mode(dense=dense_available)
 
     missing_extras: list[str] = []
     fastembed_required_for: list[str] = []
@@ -95,7 +99,8 @@ def collect_runtime_profile() -> dict[str, object]:
             "enable_bm25": bool(config.search.enable_bm25),
             "enable_dense": bool(config.search.enable_dense),
             "tokenizer": str(config.search.tokenizer),
-            "configured_mode": mode,
+            "configured_mode": configured_mode,
+            "effective_mode": effective_mode,
         },
         "rerank": {
             "enabled": bool(config.rerank.enabled),
