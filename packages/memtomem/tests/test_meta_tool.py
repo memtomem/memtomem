@@ -245,3 +245,64 @@ class TestMemVersion:
         assert capabilities["candidate_propose"] == {"schema_version": 1}
         assert "context_compose" in ACTIONS
         assert "candidate_propose" in ACTIONS
+
+    async def test_runtime_profile_is_additive_and_secret_free(self, monkeypatch, tmp_path):
+        from memtomem import config as config_mod
+
+        monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr(config_mod, "_config_d_path", lambda: tmp_path / "config.d")
+        for key in (
+            "MEMTOMEM_SEARCH__ENABLE_BM25",
+            "MEMTOMEM_SEARCH__ENABLE_DENSE",
+            "MEMTOMEM_SEARCH__TOKENIZER",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__API_KEY", "do-not-leak")
+        parsed = json.loads(await mem_version())
+        assert parsed["capabilities"]["runtime_profile"] == {"schema_version": 1}
+        profile = parsed["runtime_profile"]
+        assert profile["schema_version"] == 1
+        assert profile["config_state"] == "ok"
+        assert profile["search"]["configured_mode"] in {
+            "hybrid",
+            "bm25_only",
+            "dense_only",
+            "disabled",
+        }
+        assert profile["search"]["effective_mode"] in {
+            "hybrid",
+            "bm25_only",
+            "dense_only",
+            "disabled",
+        }
+        assert "do-not-leak" not in json.dumps(parsed)
+
+    async def test_runtime_profile_reports_onnx_dependency_gap(self, monkeypatch, tmp_path):
+        from memtomem import config as config_mod
+        from memtomem.server.tools import status_config
+
+        monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
+        monkeypatch.setattr(config_mod, "_config_d_path", lambda: tmp_path / "config.d")
+        for key in (
+            "MEMTOMEM_SEARCH__ENABLE_BM25",
+            "MEMTOMEM_SEARCH__ENABLE_DENSE",
+            "MEMTOMEM_SEARCH__TOKENIZER",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__PROVIDER", "onnx")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__MODEL", "bge-m3")
+        monkeypatch.setenv("MEMTOMEM_EMBEDDING__DIMENSION", "1024")
+        original = status_config._dependency_state
+        monkeypatch.setattr(
+            status_config,
+            "_dependency_state",
+            lambda module, distribution=None: (
+                {"available": False, "version": None}
+                if module == "fastembed"
+                else original(module, distribution)
+            ),
+        )
+        profile = json.loads(await mem_version())["runtime_profile"]
+        assert profile["search"]["configured_mode"] == "hybrid"
+        assert profile["search"]["effective_mode"] == "bm25_only"
+        assert profile["missing_extras"] == ["onnx"]
