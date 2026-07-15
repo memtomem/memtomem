@@ -178,7 +178,15 @@ class ParsedIndex:
 # could not resolve (an unclosed ``- [B](b.md``). Only ever applied to text the
 # parser handed back as text — a code span holding ``[x](y)`` is quoting, not
 # pointing, and the parser tells the two apart for us.
-_UNRESOLVED_LINK_SYNTAX_RE = re.compile(r"\]\(")
+#
+# The lookbehind spares wikilinks. ``[[memo]](note)`` closes with ``]](``, and
+# when the note holds a space CommonMark won't read it as a link at all — so the
+# whole thing stays text, and without the lookbehind its ``](`` reads as a
+# pointer someone failed to close. Same wikilink-vs-CommonMark collision as
+# :data:`_WIKILINK_LABEL_RE`, reached down the text path instead of the link
+# path. A genuinely unclosed link has something other than ``]`` before its
+# ``](``.
+_UNRESOLVED_LINK_SYNTAX_RE = re.compile(r"(?<!\])\]\(")
 
 # What a path-resolved destination must look like for the doctor to act on it:
 # a plain relative path. CommonMark hands back the destination the file

@@ -226,6 +226,21 @@ class TestWikilinks:
         targets = [e.target for e in parse_memory_index(line + "\n").entries]
         assert "미커밋" not in targets and "wip" not in targets and "x.md" not in targets, why
 
+    SPACED_NOTES = [
+        ("- [Real](real.md) — built → [[memo-b]](PR#42 merged)", "spaced note"),
+        ("- [Real](real.md) — [[a]](PR#1 merged)·[[b]](not yet)", "two of them"),
+    ]
+
+    @pytest.mark.parametrize("line,why", SPACED_NOTES, ids=[w for _, w in SPACED_NOTES])
+    def test_wikilink_with_a_spaced_note_is_not_unresolved_syntax(self, line, why):
+        # A space means CommonMark won't read `(...)` as a destination, so the
+        # whole `[[memo]](note)` stays literal text — and its `]](` then looks
+        # like a pointer someone failed to close. Same collision as above, down
+        # the text path rather than the link path.
+        parsed = parse_memory_index(line + "\n")
+        assert parsed.unresolved_syntax_lines == frozenset(), why
+        assert [e.target for e in parsed.entries] == ["real.md"], why
+
     STILL_POINTERS = [
         ("- [[draft] Title](file.md)", "bracketed prefix in the title"),
         ("- [Title [note]](file.md)", "bracketed suffix in the title"),
