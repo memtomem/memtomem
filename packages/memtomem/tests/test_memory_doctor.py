@@ -203,6 +203,54 @@ class TestDeceivingLines:
         assert parsed.ambiguous_lines == frozenset({1})  # the *line* stays unfixable
 
 
+class TestWikilinks:
+    """memtomem has wikilinks; CommonMark doesn't. The doctor must know its own.
+
+    `[[other-memo]]` is memtomem's link syntax (`chunking/markdown.py`, and the
+    agent memory convention writes it constantly). CommonMark reads
+    `[[note]](미커밋)` as an ordinary link — label `[note]`, destination `미커밋`
+    — so a parenthetical *after a wikilink* became a pointer at a file that
+    never existed, reported at error severity. Found by post-merge smoke against
+    a real index; the line-at-a-time parser it replaced never saw past the first
+    link, which is why it went unnoticed until the reader widened.
+    """
+
+    NOT_POINTERS = [
+        ("- [Real](real.md) — done → [[memo-b]](미커밋)", "wikilink + parenthetical note"),
+        ("- [Real](real.md) — see [[memo-b|alias]](wip)", "aliased wikilink + note"),
+        ("- [[memo-a]](x.md) — leading wikilink", "wikilink whose note looks like a file"),
+    ]
+
+    @pytest.mark.parametrize("line,why", NOT_POINTERS, ids=[w for _, w in NOT_POINTERS])
+    def test_wikilink_parenthetical_is_not_a_pointer(self, line, why):
+        targets = [e.target for e in parse_memory_index(line + "\n").entries]
+        assert "미커밋" not in targets and "wip" not in targets and "x.md" not in targets, why
+
+    STILL_POINTERS = [
+        ("- [[draft] Title](file.md)", "bracketed prefix in the title"),
+        ("- [Title [note]](file.md)", "bracketed suffix in the title"),
+        ("- [Plain](file.md)", "ordinary title"),
+    ]
+
+    @pytest.mark.parametrize("line,why", STILL_POINTERS, ids=[w for _, w in STILL_POINTERS])
+    def test_bracketed_titles_are_still_pointers(self, line, why):
+        # The tell is a title CommonMark reports as *wholly* bracketed — only
+        # `[[x]]` in the source produces that. A title merely containing
+        # brackets is an ordinary pointer and must stay checked.
+        assert [e.target for e in parse_memory_index(line + "\n").entries] == ["file.md"], why
+
+    def test_bare_wikilink_is_not_an_entry(self):
+        # No parenthetical, so CommonMark sees no link at all. Pinned so that
+        # "wikilinks are invisible to the doctor" is a state on record rather
+        # than an accident: they do point at memory files, and whether to
+        # link-check them is a separate decision (resolution rules, severity —
+        # the memory convention blesses a `[[name]]` with no file yet — and
+        # whether to read memo bodies at all, which the doctor doesn't today).
+        parsed = parse_memory_index("- [[memo-a]] and [[memo-b]] — related\n")
+        assert parsed.entries == ()
+        assert parsed.unresolved_syntax_lines == frozenset()
+
+
 class TestListMarkers:
     """The parser reads every list marker CommonMark does — `--fix` still doesn't.
 

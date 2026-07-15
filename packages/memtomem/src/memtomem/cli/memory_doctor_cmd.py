@@ -190,6 +190,18 @@ _UNRESOLVED_LINK_SYNTAX_RE = re.compile(r"\]\(")
 # ``anchor`` targets never reach this test — they are not path-resolved.
 _PLAIN_RELATIVE_TARGET_RE = re.compile(r"^[^\s?%:]+$")
 
+# A link label that is itself a whole ``[[wikilink]]``. CommonMark has no
+# wikilinks, so it reads ``[[note]](미커밋)`` as an ordinary link — label
+# ``[note]``, destination ``미커밋`` — and the destination is prose, not a path.
+# memtomem *does* have wikilinks (``chunking/markdown.py:_WIKILINK_RE``, and the
+# agent memory convention writes ``[[other-memo]]``), so reading that shape as a
+# pointer isn't a judgement call about ambiguous markdown; it is this command
+# failing to know its own system's link syntax. The label is the tell: a title
+# CommonMark reports as ``[note]`` can only have come from ``[[note]]`` in the
+# source. Bracketed *parts* of a title (``[draft] Title``, ``Title [note]``)
+# don't match, and are pointers as before.
+_WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
+
 
 def _markdown_parser() -> MarkdownIt:
     """A CommonMark parser that reports destinations as the file declares them.
@@ -228,6 +240,9 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
 
     Nested links can't occur in CommonMark (a link inside a link label is
     demoted to text), so each ``link_open`` starts a new entry.
+
+    A ``[[wikilink]](note)`` is dropped rather than read as a pointer — see
+    :data:`_WIKILINK_LABEL_RE`. CommonMark has no wikilinks; memtomem does.
     """
     links: list[tuple[str, str]] = []
     unresolved = False
@@ -240,7 +255,11 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
             links.append(("", child.attrGet("href") or ""))
         elif child.type == "link_close" and in_link:
             if links:
-                links[-1] = ("".join(title_parts).strip(), links[-1][1])
+                title = "".join(title_parts).strip()
+                if _WIKILINK_LABEL_RE.match(title):
+                    links.pop()  # a wikilink; the parenthetical after it is prose
+                else:
+                    links[-1] = (title, links[-1][1])
             in_link = False
         elif in_link:
             title_parts.append(child.content)
