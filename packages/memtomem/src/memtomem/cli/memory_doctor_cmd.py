@@ -34,13 +34,12 @@ Checks (per configured ``memory_dir``):
   root). ``url`` and ``anchor`` links are classified and *not* reported.
 * **index_orphan** — files on disk that the index file (``MEMORY.md``) does
   not list. Distinct from ``db_coverage``: "not in the TOC" ≠ "not indexed".
-* **ambiguous_index_line** — a pointer line whose links cannot be resolved as
-  written: a target that isn't a plain relative path (a paren, escape,
-  character reference or angle-bracket form makes the literal text differ from
-  what Markdown resolves), a link quoted inside a code span, or link syntax the
-  grammar cannot close. Its links are left unclassified rather than guessed at,
-  so the line is reported for a human instead of link-checked, counted as
-  listed, or offered to ``--fix``.
+* **ambiguous_index_line** — a pointer line naming something we won't resolve
+  on a guess: a link target that isn't a plain relative path (it carries a
+  query, a percent-escape, a scheme or a space), or link syntax that resolved to
+  no link at all. Left unclassified rather than guessed at, so the line is
+  reported for a human instead of being link-checked, counted as listed, or
+  offered to ``--fix``.
 * **budget** — the index file exceeds its byte / line / per-line-char budget
   (the hot cache loaded into the agent's context each session).
 * **cold_candidate** — indexed files never accessed since indexing
@@ -78,6 +77,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import click
+from markdown_it import MarkdownIt
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
@@ -135,13 +135,12 @@ class ParsedIndex:
     numbers so a future write phase can round-trip the file; Tier 1 only reads
     them for the budget measurement.
 
-    ``ambiguous_lines`` holds the 1-based numbers of pointer lines the link
-    grammar could not consume unambiguously (see :func:`_line_is_ambiguous`).
-    Their entries are still parsed — the read is the best available, and the
-    raw text is what a human needs to see to repair the line — but a target
-    read off such a line may not be the path Markdown resolves, so callers must
-    not treat it as evidence: not of a broken link, not of a listed file, and
-    least of all of a line safe to delete.
+    ``ambiguous_lines`` holds the 1-based numbers of pointer lines carrying a
+    destination this command won't resolve on a guess (see
+    :func:`_target_is_unreadable`) or link syntax the parser resolved to no link
+    at all. Their entries are still parsed — the raw text is what a human needs
+    to repair the line — but the targets are not evidence: not of a broken link,
+    not of a listed file, and least of all of a line safe to delete.
     """
 
     entries: tuple[IndexEntry, ...]
@@ -153,86 +152,90 @@ class ParsedIndex:
 # preserved verbatim and never link-classified.
 _BULLET_RE = re.compile(r"^\s*[-*]\s")
 
-# One ``[title](target)`` link, matched with ``finditer`` so *every* link on a
-# pointer line yields an entry. The title is bounded by the first ``]`` so hook
-# brackets don't get pulled in; the target by the first ``)``.
-_LINK_RE = re.compile(r"\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
+# Link syntax surviving as literal text: the line meant a pointer the parser
+# could not resolve (an unclosed ``- [B](b.md``). Only ever applied to text the
+# parser handed back as text — a code span holding ``[x](y)`` is quoting, not
+# pointing, and the parser tells the two apart for us.
+_UNRESOLVED_LINK_SYNTAX_RE = re.compile(r"\]\(")
 
-# Link syntax left *outside* every match: the matcher consumed the line's links
-# wrong, or there is one it could not see at all.
-_UNMATCHED_LINK_SYNTAX_RE = re.compile(r"\]\(")
-
-# What a target must look like for its literal text to be the path Markdown
-# resolves: no whitespace, and none of the characters that make Markdown
-# transform a destination before resolving it.
-#
-# This is a whitelist on purpose. The alternative — enumerating the ways a
-# destination can lie — does not converge: ``notes_(v2).md`` truncates at the
-# inner paren, ``notes_\(v2.md`` hides an escape, ``<x y.md>`` is the angle
-# form, ``notes_&amp;v2.md`` is a character reference, and each of those was
-# found only after the last was fixed. A pointer in a memory index is a
-# relative filename; anything fancier is set aside for a human rather than
-# guessed at, which fails closed by construction instead of by enumeration.
-_SAFE_TARGET_RE = re.compile(r"^[^\s`<>\\&()\[\]]+$")
-
-# A code span, delimited by a *run* of backticks (CommonMark: any run closes on
-# a matching run, so ``` ``[x](y)`` ``` is one span). Its contents are literal
-# text, so a link matched inside one is not a pointer at all.
-_CODE_SPAN_RE = re.compile(r"(`+).*?\1")
+# What a path-resolved destination must look like for the doctor to act on it:
+# a plain relative path. CommonMark hands back the destination the file
+# declares, so this is not about *reading* the link — it is about what we are
+# willing to treat as a filename. A destination carrying URI machinery (``?``
+# query, ``%`` escape, ``:`` scheme) may name a different file than its literal
+# text does, and the index convention is plain relative filenames anyway, so
+# anything else is left for a human rather than resolved on a guess. ``url`` and
+# ``anchor`` targets never reach this test — they are not path-resolved.
+_PLAIN_RELATIVE_TARGET_RE = re.compile(r"^[^\s?%:]+$")
 
 
-def _parens_balanced(text: str) -> bool:
-    """Whether ``(``/``)`` nest properly and close out in *text*."""
-    depth = 0
-    for ch in text:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth < 0:
-                return False
-    return depth == 0
+def _markdown_parser() -> MarkdownIt:
+    """A CommonMark parser that reports destinations as the file declares them.
 
-
-def _line_is_ambiguous(line: str, matches: list[re.Match[str]]) -> bool:
-    """Whether ``_LINK_RE`` may have mis-read *line*'s links.
-
-    ``_LINK_RE`` is a restricted grammar, not a Markdown parser, so it cannot
-    itself tell a clean read from a wrong one: ``[Live](notes_(v2).md)`` matches
-    with target ``notes_(v2``, which then classifies ``missing_target`` even
-    though the pointer is live. Deleting such a line on that "evidence" would be
-    data loss (ADR-0020 §1 permits removing *provably* dead pointers only), and
-    reporting it as an error would fail CI on a healthy index.
-
-    A line reads cleanly only when all three hold; anything else is set aside:
-
-    * **Every target is a plain relative path** (:data:`_SAFE_TARGET_RE`) — the
-      whitelist that keeps this from being an endless hunt for the next way a
-      destination can lie.
-    * **No link syntax outside the matches, and balanced parens in what's left**
-      — ``](`` in the residue means a link went unread; an unbalanced ``)``
-      means a target was cut short at a paren inside it. Balanced parens are
-      ordinary prose, so ``- [A](a.md) — decision ([why](b.md))``, the common
-      nested-hook shape, reads cleanly and stays fixable.
-    * **No link matched inside a code span** — literal text that merely looks
-      like a pointer.
-
-    Callers must not read a ``False`` here as "this line is well-formed
-    Markdown"; it means only that these links can be resolved as written.
+    ``normalizeLink`` percent-encodes for the web (``한글노트.md`` becomes
+    ``%ED%95%9C…``), which is the wrong shape for a filesystem lookup; the
+    escapes and character references we *do* need resolved are handled during
+    inline parsing, before normalization. ``validateLink`` is opened up so an
+    unusual scheme surfaces as a destination we can judge, rather than being
+    silently dropped into a non-link.
     """
-    residue_parts: list[str] = []
-    last = 0
-    for m in matches:
-        residue_parts.append(line[last : m.start()])
-        last = m.end()
-    residue_parts.append(line[last:])
-    residue = "".join(residue_parts)
-    if _UNMATCHED_LINK_SYNTAX_RE.search(residue) or not _parens_balanced(residue):
-        return True
-    if any(not _SAFE_TARGET_RE.match(m.group("target")) for m in matches):
-        return True
-    code_spans = [(c.start(), c.end()) for c in _CODE_SPAN_RE.finditer(line)]
-    return any(start <= m.start() and m.end() <= end for m in matches for start, end in code_spans)
+    md = MarkdownIt("commonmark")
+    md.normalizeLink = lambda url: url
+    md.validateLink = lambda url: True
+    return md
+
+
+def _read_line(line: str) -> tuple[list[tuple[str, str]], bool]:
+    """Read *line* as Markdown: its ``(title, destination)`` links, and whether
+    it also holds link syntax that resolved to no link at all.
+
+    Reading an index means reading Markdown as Markdown. A destination can be
+    escaped (``notes_\\(v2.md``), entity-encoded (``notes_&amp;v2.md``) or
+    angle-bracketed (``<x y.md>``); a label can nest brackets; a link can be
+    quoted inside a code span of any backtick run. In every case the literal
+    text differs from the link the file declares, and ``--fix`` deletes lines on
+    the strength of that read. A pattern would have to enumerate those
+    differences — tried over three review rounds, it kept missing the next one —
+    so the parser resolves them instead.
+
+    The second return value catches what the first cannot say: an unclosed
+    ``[B](b.md`` yields no link, and without it the line would read as ordinary
+    prose. Only literal **text** counts toward it — a code span quoting link
+    syntax is quoting, not pointing, and the parser hands those back as
+    ``code_inline``.
+
+    Nested links can't occur in CommonMark (a link inside a link label is
+    demoted to text), so each ``link_open`` starts a new entry.
+    """
+    links: list[tuple[str, str]] = []
+    unresolved = False
+    for token in _markdown_parser().parse(line):
+        if token.type != "inline":
+            continue
+        title_parts: list[str] = []
+        in_link = False
+        for child in token.children or []:
+            if child.type == "link_open":
+                in_link = True
+                title_parts = []
+                links.append(("", child.attrGet("href") or ""))
+            elif child.type == "link_close" and in_link:
+                if links:
+                    links[-1] = ("".join(title_parts).strip(), links[-1][1])
+                in_link = False
+            elif in_link:
+                title_parts.append(child.content)
+            elif child.type == "text" and _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
+                unresolved = True
+    return links, unresolved
+
+
+def _target_is_unreadable(target: str) -> bool:
+    """Whether *target* will be path-resolved but may not be the path it reads as."""
+    t = target.strip()
+    if not t or t.startswith("#") or _is_url(t):
+        return False  # anchor / url — never resolved against the filesystem
+    return not _PLAIN_RELATIVE_TARGET_RE.match(t)
 
 
 def parse_memory_index(text: str) -> ParsedIndex:
@@ -241,27 +244,22 @@ def parse_memory_index(text: str) -> ParsedIndex:
     other: list[tuple[int, str]] = []
     ambiguous: set[int] = set()
     for i, line in enumerate(text.splitlines(), start=1):
-        is_bullet = bool(_BULLET_RE.match(line))
-        matches = list(_LINK_RE.finditer(line)) if is_bullet else []
-        if not matches:
-            # A bullet holding link syntax the grammar could not close
-            # (``- [B](b.md``) yields no entry, so it would otherwise slip by as
-            # prose — an unread pointer reported as nothing at all. It has no
-            # entry to carry, but the line still gets flagged for a human.
-            if is_bullet and _UNMATCHED_LINK_SYNTAX_RE.search(line):
+        bullet = _BULLET_RE.match(line)
+        links, unresolved = _read_line(line[bullet.end() :]) if bullet else ([], False)
+        if not links:
+            # A bullet whose link syntax resolved to no link (``- [B](b.md``)
+            # would otherwise slip by as prose — an unread pointer reported as
+            # nothing at all. It has no entry to carry, but the line still gets
+            # flagged for a human.
+            if unresolved:
                 ambiguous.add(i)
             other.append((i, line))
             continue
-        if _line_is_ambiguous(line, matches):
+        if unresolved or any(_target_is_unreadable(target) for _, target in links):
             ambiguous.add(i)
         entries.extend(
-            IndexEntry(
-                line_no=i,
-                title=m.group("title").strip(),
-                target=m.group("target").strip(),
-                raw=line,
-            )
-            for m in matches
+            IndexEntry(line_no=i, title=title, target=target.strip(), raw=line)
+            for title, target in links
         )
     return ParsedIndex(
         entries=tuple(entries),
@@ -721,11 +719,11 @@ def _analyze_index_file(
                 check="ambiguous_index_line",
                 severity="warn",
                 summary=(
-                    f"{len(ambiguous_items)} line(s) in {index_file_name} hold links that can't "
-                    "be resolved as written (a target that isn't a plain relative path, a link "
-                    "quoted in a code span, or link syntax left unclosed) — they are neither "
-                    "link-checked nor counted as listed, and --fix will not touch them; "
-                    "simplify the line to bring it back under the checks"
+                    f"{len(ambiguous_items)} line(s) in {index_file_name} name a target this "
+                    "command will not resolve on a guess (it carries a query, percent-escape, "
+                    "scheme or space) or hold link syntax that resolved to no link — they are "
+                    "neither link-checked nor counted as listed, and --fix will not touch them; "
+                    "rewrite the target as a plain relative filename"
                 ),
                 items=ambiguous_items,
             )
@@ -968,7 +966,7 @@ def _missing_target_entries(text: str, *, root: Path) -> list[IndexEntry]:
 _LEGACY_ENTRY_SHAPE_RE = re.compile(r"^\s*[-*]\s*\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
 
 
-def _unfixable_lines(entries: list[IndexEntry], *, ambiguous_lines: frozenset[int]) -> list[str]:
+def _unfixable_lines(entries: list[IndexEntry], *, parsed: ParsedIndex) -> list[str]:
     """Reasons *entries*' lines are out of ``--fix``'s scope, one per line.
 
     ``--fix`` removes a dead pointer by splicing out its **whole line**
@@ -978,10 +976,9 @@ def _unfixable_lines(entries: list[IndexEntry], *, ambiguous_lines: frozenset[in
 
     * **Several entries on one line.** Splicing the line for one dead target
       would also delete every *live* entry beside it.
-    * **A line the entry grammar cannot read unambiguously.** ``--fix`` may only
-      remove a *provably* dead pointer (ADR-0020 §1); a target mis-sliced out of
-      ``[Live](notes_(v2).md)`` classifies ``missing_target`` while naming a file
-      that exists, so the proof does not hold.
+    * **A line holding a destination we won't resolve on a guess.** ``--fix``
+      may only remove a *provably* dead pointer (ADR-0020 §1), and a target
+      carrying URI machinery may name a file other than its literal text does.
     * **A pointer the legacy grammar never saw.** The widened parser now reads
       prose-prefixed lines (``- NS: [a](x.md)``), which ``--fix`` could not
       previously delete. Widening the write scope on the back of a parser fix
@@ -990,14 +987,17 @@ def _unfixable_lines(entries: list[IndexEntry], *, ambiguous_lines: frozenset[in
     Returns one ``L{n}: {raw}`` line per offending line (deduped, in file
     order), or an empty list when every candidate is safely fixable.
     """
+    from collections import Counter
+
+    links_per_line = Counter(e.line_no for e in parsed.entries)
     reasons: dict[int, str] = {}
     for e in entries:
         if e.line_no in reasons:
             continue
-        if len(_LINK_RE.findall(e.raw)) > 1:
+        if links_per_line[e.line_no] > 1:
             why = "carries more than one entry"
-        elif e.line_no in ambiguous_lines:
-            why = "cannot be read unambiguously (code span, stray bracket, or paren in target)"
+        elif e.line_no in parsed.ambiguous_lines:
+            why = "holds a target this command will not resolve on a guess"
         elif _LEGACY_ENTRY_SHAPE_RE.match(e.raw) is None:
             why = "does not have the one-entry-per-line shape --fix is contracted for"
         else:
@@ -1138,9 +1138,7 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
         # Fail closed before promising (dry-run) or performing (--apply) a splice
         # we cannot prove is subtractive-only. Guarded on both paths so the
         # preview never advertises a removal we would refuse to make.
-        unsafe = _unfixable_lines(
-            candidates, ambiguous_lines=parse_memory_index(text).ambiguous_lines
-        )
+        unsafe = _unfixable_lines(candidates, parsed=parse_memory_index(text))
         if unsafe:
             detail = "\n".join(unsafe)
             raise click.UsageError(

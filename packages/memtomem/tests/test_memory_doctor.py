@@ -114,50 +114,63 @@ class TestParser:
         assert [n for n, _ in parsed.other_lines] == [1]
 
 
-class TestAmbiguousLines:
-    """``_LINK_RE`` is a restricted grammar; lines it may mis-read are flagged.
+class TestDeceivingLines:
+    """Lines whose literal text is not the link the file declares.
 
-    Not a style check — a mis-slice can make a *live* pointer classify
-    ``missing_target``, which is exactly the "proof" ``--fix`` deletes on.
+    Every line here was a live counterexample from an adversarial review pass —
+    each was read wrong by the hand-rolled grammar that preceded the CommonMark
+    parser, and each was found only after the previous one had been fixed. That
+    history is the point: it is the record of an enumeration that did not
+    converge, and the reason the links are parsed rather than pattern-matched
+    now. Deleting a case needs a reason; adding one is always welcome.
+
+    A mis-read here is not cosmetic. ``--fix`` deletes a line on the strength of
+    its target classifying ``missing_target``, so reading a live pointer wrong
+    destroys memory.
     """
 
-    def test_paren_in_target_is_ambiguous(self):
-        # Target truncates at the inner ``)`` → ``notes_(v2``, which would
-        # classify missing_target while naming a file that exists.
-        parsed = parse_memory_index("- [Live](notes_(v2).md)\n")
-        assert parsed.entries[0].target == "notes_(v2"  # the mis-read, recorded
-        assert parsed.ambiguous_lines == frozenset({1})
-
-    # Every line here was a live counterexample found by review, not a shape
-    # imagined up front — each one was reported clean by the check as it stood
-    # when the previous entry was added. That history is the reason the target
-    # test is a whitelist (_SAFE_TARGET_RE) rather than a list of known-bad
-    # constructs: enumerating the ways a Markdown destination can lie does not
-    # converge. Additions welcome; deletions need a reason.
-    DECEIVING_LINES = [
-        (r"- [Live](notes_(v2).md)", "paren inside target truncates it"),
-        (r"- [Live](notes_\(v2.md)", "backslash escape resolves to a different path"),
-        ("- [Live](notes_&amp;v2.md)", "character reference resolves to a different path"),
-        ("- [A](<x y.md>)", "angle-bracket destination form"),
-        ("- [A](a.md) — run `echo [x](y)`", "link inside a code span is literal text"),
-        ("- ``[literal](gone.md)``", "code span delimited by a backtick run"),
-        ("- [B](b.md", "link syntax the grammar cannot close"),
+    RESOLVED = [
+        ("- [Live](notes_(v2).md)", "notes_(v2).md", "paren inside the destination"),
+        (r"- [Live](notes_\(v2.md)", "notes_(v2.md", "backslash escape in the destination"),
+        ("- [Live](notes_&amp;v2.md)", "notes_&v2.md", "character reference"),
+        ("- [A [nested]](gone.md)", "gone.md", "nested brackets in the label"),
+        (r"- [A \] title](gone.md)", "gone.md", "escaped bracket in the label"),
+        ("- [한글](한글노트.md) — 메모", "한글노트.md", "non-ascii filename stays un-encoded"),
     ]
 
-    @pytest.mark.parametrize("line,why", DECEIVING_LINES, ids=[w for _, w in DECEIVING_LINES])
-    def test_deceiving_line_is_ambiguous(self, line, why):
-        """Each line's literal read is not what Markdown resolves — so: hands off."""
+    @pytest.mark.parametrize("line,target,why", RESOLVED, ids=[w for *_, w in RESOLVED])
+    def test_destination_is_resolved_not_guessed(self, line, target, why):
+        """The parser reports the link the file declares — so these stay usable."""
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == [target], why
+        assert parsed.ambiguous_lines == frozenset(), why
+
+    NOT_A_POINTER = [
+        ("- [A](a.md) — run `echo [x](y)`", ["a.md"], "link quoted in a code span"),
+        ("- ``[literal](gone.md)``", [], "code span delimited by a backtick run"),
+    ]
+
+    @pytest.mark.parametrize("line,targets,why", NOT_A_POINTER, ids=[w for *_, w in NOT_A_POINTER])
+    def test_quoted_link_is_not_an_entry(self, line, targets, why):
+        """Code spans quote link syntax; quoting is not pointing."""
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == targets, why
+        assert parsed.ambiguous_lines == frozenset(), why
+
+    WONT_GUESS = [
+        ("- [A](<x y.md>)", "angle-bracket form, destination holds a space"),
+        ("- [Live](live.md?view=1)", "query string may not be part of the filename"),
+        ("- [Live](live%2Emd)", "percent-escape may not be part of the filename"),
+        ("- [Live](urn:live.md)", "a scheme that is neither a url nor a path"),
+    ]
+
+    @pytest.mark.parametrize("line,why", WONT_GUESS, ids=[w for _, w in WONT_GUESS])
+    def test_uri_machinery_is_not_resolved_on_a_guess(self, line, why):
+        """Parsed fine; still not called a filename. Reported, never deleted."""
         assert parse_memory_index(line + "\n").ambiguous_lines == frozenset({1}), why
 
-    def test_escaped_paren_in_target_is_ambiguous(self):
-        # Markdown resolves ``\(`` to a literal ``(``, so this points at the live
-        # file ``notes_(v2.md`` — but a literal path lookup of the raw target
-        # misses it and calls it dead. Nothing in the *residue* betrays this; the
-        # tell is inside the target.
-        parsed = parse_memory_index("- [Live](notes_\\(v2.md) — escaped\n")
-        assert parsed.entries[0].target == "notes_\\(v2.md"
-        assert parsed.ambiguous_lines == frozenset({1})
 
+class TestAmbiguousLines:
     def test_unclosed_link_on_bullet_yields_no_entry_but_is_flagged(self):
         # The line has no complete link, so it produces no entry and would
         # otherwise be filed as prose — an unread pointer reported as nothing.
@@ -166,16 +179,19 @@ class TestAmbiguousLines:
         assert [n for n, _ in parsed.other_lines] == [1]
         assert parsed.ambiguous_lines == frozenset({1})
 
-    def test_unmatched_link_syntax_beside_a_good_link_is_ambiguous(self):
-        # A second link the grammar could not close: its ``](`` survives in the
-        # residue, proving the line holds link syntax that went unread.
+    def test_unresolved_link_syntax_beside_a_good_link_is_flagged(self):
         parsed = parse_memory_index("- [A](a.md) — and [B](b.md\n")
         assert parsed.ambiguous_lines == frozenset({1})
 
-    def test_prose_punctuation_is_not_ambiguous(self):
-        # The check is keyed to how the grammar actually breaks, not to
-        # markdown-significant characters at large: an index is prose, and
-        # over-flagging would bury a real finding under warnings about hooks.
+    def test_url_and_anchor_targets_are_not_flagged(self):
+        # They carry a ``:`` / lead with ``#``, but are never resolved against
+        # the filesystem, so the plain-relative rule does not apply to them.
+        parsed = parse_memory_index("- [Web](https://example.com) — x\n- [Top](#section) — y\n")
+        assert parsed.ambiguous_lines == frozenset()
+
+    def test_prose_punctuation_is_not_flagged(self):
+        # Over-flagging would bury a real finding under warnings about hooks:
+        # an index is prose, and prose is full of backticks, brackets, parens.
         clean = (
             "- [A](a.md) — see (the note) here\n"
             "- [B](b.md) — see [note] later\n"
@@ -184,6 +200,7 @@ class TestAmbiguousLines:
             "- [E](e.md) — P2=NO-GO([why](f.md))\n"
             "- [a](x.md) · [b](y.md)\n"
             "- NS: [c](z.md) — hook\n"
+            "- [A](sub/b.md#anchor) — anchored path\n"
         )
         assert parse_memory_index(clean).ambiguous_lines == frozenset()
 
@@ -475,24 +492,24 @@ async def test_multi_entry_index_reports_accurately(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_line_downgrades_broken_link_to_warn(tmp_path, monkeypatch):
-    """A mis-sliceable line's "dead" verdict is a suspicion, not an error.
+async def test_paren_filename_resolves_instead_of_being_flagged(tmp_path, monkeypatch):
+    """A filename with parens is a filename, and reads as one.
 
-    ``[Live](notes_(v2).md)`` parses to target ``notes_(v2`` — a file that does
-    not exist — while the pointer it names is live. Reporting that as an
-    error-severity ``broken_link`` would fail CI on a healthy index (and, in
-    Tier 2, offer the line up for deletion).
+    ``[Live](notes_(v2).md)`` defeated the hand-rolled grammar, which sliced the
+    target at the inner ``)`` and called the live pointer dead — an error-level
+    finding on a healthy index, and a deletion candidate. Read as Markdown it is
+    simply correct, so the right outcome is *no finding at all*.
     """
     from helpers import isolate_memtomem_env
 
     isolate_memtomem_env(monkeypatch)
-    mem_dir = tmp_path / ".claude" / "projects" / "-ambig" / "memory"
+    mem_dir = tmp_path / ".claude" / "projects" / "-paren" / "memory"
     mem_dir.mkdir(parents=True)
     (mem_dir / "notes_(v2).md").write_text("# live\n", encoding="utf-8")
     (mem_dir / "MEMORY.md").write_text("- [Live](notes_(v2).md) — real file\n", encoding="utf-8")
 
     config = Mem2MemConfig()
-    config.storage.sqlite_path = tmp_path / "ambig.db"
+    config.storage.sqlite_path = tmp_path / "paren.db"
     config.indexing.memory_dirs = [mem_dir]
 
     backend = SqliteBackend(
@@ -512,45 +529,43 @@ async def test_ambiguous_line_downgrades_broken_link_to_warn(tmp_path, monkeypat
 
     reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
     report = [r for r in reports if r.path != "(unowned)"][0]
-    by = _findings_by_check(report)
 
-    assert "broken_link" not in by  # not reported as a hard error
-    assert by["ambiguous_index_line"].severity == "warn"
-    assert "notes_(v2" in by["ambiguous_index_line"].items[0]
-    # warn-only → the run does not fail.
-    assert not any(f.severity == "error" for f in report.findings)
+    # Resolved, listed, indexed — a clean line in every respect.
+    assert report.findings == []
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_target_does_not_count_as_listed(tmp_path, monkeypatch):
-    """A mis-sliced target must not mark a file as listed, even if it resolves.
+async def test_unresolvable_target_feeds_neither_conclusion(tmp_path, monkeypatch):
+    """A destination we won't resolve is reported, and used for nothing else.
 
-    ``[Live](notes_(v2).md)`` slices to ``notes_(v2``. Should a file by that
-    name happen to exist, taking the slice at face value would mark the *wrong*
-    file as listed and leave the real one reported as an orphan — with nothing
-    said about why. An ambiguous line feeds neither conclusion; it is reported
-    on its own terms.
+    ``live.md?view=1`` parses fine, but whether the query is part of the
+    filename is not ours to guess. Guessing either way writes a wrong finding:
+    call it dead and a healthy index fails CI (and the line becomes deletable);
+    call it ``live.md`` and a file is silently marked listed on an assumption.
+    So it is stated as what it is, and feeds neither the broken-link nor the
+    listed set — the file it may mean is left to surface as an orphan.
     """
     from helpers import isolate_memtomem_env
 
     isolate_memtomem_env(monkeypatch)
-    mem_dir = tmp_path / ".claude" / "projects" / "-coincide" / "memory"
+    mem_dir = tmp_path / ".claude" / "projects" / "-query" / "memory"
     mem_dir.mkdir(parents=True)
-    (mem_dir / "notes_(v2).md").write_text("# real\n", encoding="utf-8")
-    (mem_dir / "notes_(v2").write_text("coincidental truncation\n", encoding="utf-8")
-    (mem_dir / "MEMORY.md").write_text("- [Live](notes_(v2).md) — real\n", encoding="utf-8")
+    (mem_dir / "live.md").write_text("# real\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Live](live.md?view=1) — query\n", encoding="utf-8")
 
     config = Mem2MemConfig()
-    config.storage.sqlite_path = tmp_path / "coincide.db"
+    config.storage.sqlite_path = tmp_path / "query.db"
     config.indexing.memory_dirs = [mem_dir]
 
     reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
-    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+    report = [r for r in reports if r.path != "(unowned)"][0]
+    by = _findings_by_check(report)
 
-    # The ambiguity is stated outright rather than silently absorbed.
     assert by["ambiguous_index_line"].severity == "warn"
-    assert "notes_(v2" in by["ambiguous_index_line"].items[0]
-    assert "broken_link" not in by
+    assert "live.md?view=1" in by["ambiguous_index_line"].items[0]
+    assert "broken_link" not in by  # never guessed dead
+    assert by["index_orphan"].items == ["live.md"]  # nor guessed listed
+    assert not any(f.severity == "error" for f in report.findings)
 
 
 @pytest.mark.asyncio
@@ -1389,17 +1404,17 @@ class TestFixScopeFrozen:
         assert "one-entry-per-line shape" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
-    def test_ambiguous_line_is_refused(self, tmp_path, monkeypatch):
-        """The data-loss case the restricted grammar cannot rule out.
+    def test_unresolvable_target_line_is_refused(self, tmp_path, monkeypatch):
+        """A destination we won't resolve is never deleted on the guess.
 
-        ``notes_(v2).md`` exists; the parser reads its target as ``notes_(v2``,
-        which classifies missing_target. Single link, legacy shape — it clears
-        every other guard. Only the ambiguity check stands between the shipped
-        splice and deleting a live pointer.
+        ``live.md?view=1`` is a single link in the legacy shape — it clears
+        every other guard, and its literal text names no file, so it classifies
+        missing_target. Whether the query belongs to the filename is exactly the
+        guess --fix must not make with a delete.
         """
-        body = "- [Live](notes_(v2).md) — real file\n"
+        body = "- [Live](live.md?view=1) — query\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
-        (mem_dir / "notes_(v2).md").write_text("x", encoding="utf-8")
+        (mem_dir / "live.md").write_text("x", encoding="utf-8")
         self._patch_loader(monkeypatch, config)
         before = (mem_dir / "MEMORY.md").read_bytes()
 
@@ -1407,16 +1422,17 @@ class TestFixScopeFrozen:
 
         assert result.exit_code != 0
         assert "refusing --fix" in result.output
-        assert "unambiguously" in result.output
+        assert "will not resolve on a guess" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
-    def test_escaped_target_line_is_refused(self, tmp_path, monkeypatch):
-        """The escape case: nothing outside the target hints the read is wrong.
+    def test_escaped_target_line_survives_because_it_is_read_right(self, tmp_path, monkeypatch):
+        """The escape case, end to end: read correctly, so never a candidate.
 
-        Markdown resolves ``notes_\\(v2.md`` to the live ``notes_(v2.md``. The
-        line is a single link in the legacy shape with clean residue — every
-        guard but the target check waves it through, and --apply deletes a live
-        pointer.
+        Markdown resolves ``notes_\\(v2.md`` to the live ``notes_(v2.md``. A
+        literal path lookup misses it and calls it dead — which is how --apply
+        came to delete a live pointer. Nothing on the line hints at the
+        difference, so no amount of inspecting the *text* saves it; only reading
+        the link does.
         """
         body = "- [Live](notes_\\(v2.md) — escaped paren\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
@@ -1426,20 +1442,24 @@ class TestFixScopeFrozen:
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
-        assert "refusing --fix" in result.output
+        assert result.exit_code == 0
+        assert "No missing_target links to remove" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
-    def test_code_span_link_line_is_refused(self, tmp_path, monkeypatch):
+    def test_quoted_link_is_not_a_sibling_so_the_line_stays_fixable(self, tmp_path, monkeypatch):
+        """A code span is not an entry, so it neither blocks nor survives a fix.
+
+        The line's only pointer is dead, so the line goes — quoted text and all.
+        Treating the quote as a live sibling would have frozen --fix instead.
+        """
         body = "- [Dead](gone.md) — quoting `[x](y)`\n"
         config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
         self._patch_loader(monkeypatch, config)
-        before = (mem_dir / "MEMORY.md").read_bytes()
 
         result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
 
-        assert result.exit_code != 0
-        assert (mem_dir / "MEMORY.md").read_bytes() == before
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
 
     def test_refusal_names_the_reason_per_line(self, tmp_path, monkeypatch):
         body = "- [Dead](gone.md) · [Live](exists.md)\n- NS: [Dead2](gone2.md)\n"
