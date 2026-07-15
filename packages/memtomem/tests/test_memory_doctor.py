@@ -1005,3 +1005,92 @@ class TestFixCli:
         assert payload["status"] == "fixed"
         assert payload["applied"] is True
         assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
+
+
+class TestMultiEntryLineGuard:
+    """``--fix`` splices whole lines, so it must refuse lines holding >1 entry.
+
+    ``_ENTRY_RE`` is line-anchored and matches once per line, so the parser is
+    blind to entries after the first. Without the guard, a dead first pointer
+    would splice the line and silently delete the live entries beside it.
+    """
+
+    def _patch_loader(self, monkeypatch, config):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+
+    # One line, three entries: the first is dead, the other two are live.
+    _CRAMMED = "- [Dead](gone.md) — drop · [Live](exists.md) — keep · [Live2](exists2.md) — keep\n"
+
+    def test_apply_refuses_and_leaves_file_untouched(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._CRAMMED)
+        (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "refusing --fix" in result.output
+        # The live siblings must still be on disk — this is the data loss the
+        # guard exists to prevent.
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_dry_run_refuses_too(self, tmp_path, monkeypatch):
+        """The preview must not advertise a removal --apply would refuse."""
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._CRAMMED)
+        (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+
+        assert result.exit_code != 0
+        assert "refusing --fix" in result.output
+        assert "Would remove" not in result.output
+
+    def test_error_names_the_offending_line(self, tmp_path, monkeypatch):
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=self._CRAMMED)
+        (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+
+        assert "L1:" in result.output
+        assert "one entry per line" in result.output
+
+    def test_single_entry_lines_still_fix(self, tmp_path, monkeypatch):
+        """The guard is scoped to crammed lines — it must not disarm --fix."""
+        body = "- [Ok](exists.md) — keep\n- [Dead](gone.md) — drop\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == "- [Ok](exists.md) — keep\n"
+
+    def test_live_multi_entry_line_is_not_blocked(self, tmp_path, monkeypatch):
+        """A crammed line with no dead pointer is not a candidate — no refusal."""
+        body = "- [Live](exists.md) — keep · [Live2](exists2.md) — keep\n- [Dead](gone.md) — drop\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        (mem_dir / "exists2.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        out = (mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert out == "- [Live](exists.md) — keep · [Live2](exists2.md) — keep\n"
+
+    def test_hook_internal_link_counts_as_multi(self, tmp_path, monkeypatch):
+        """A dead entry whose hook cites another memo must not splice that cite away."""
+        body = "- [Dead](gone.md) — see also ([why](exists.md))\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
