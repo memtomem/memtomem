@@ -79,6 +79,361 @@ class TestParser:
         parsed = parse_memory_index("- [한글](한글노트.md) — 메모\n")
         assert parsed.entries[0].target == "한글노트.md"
 
+    def test_crlf_line_numbers_stay_aligned(self):
+        # Entry line numbers come from markdown-it's source maps, but --fix
+        # splices by `splitlines(keepends=True)` index. The two counters agree
+        # on CRLF only because both treat \r\n as one break — if they ever
+        # diverged, every splice on a Windows-authored index would cut the
+        # wrong line, and TestSpliceRoundTrip can't see it (it's handed line
+        # numbers rather than deriving them).
+        parsed = parse_memory_index(
+            "- [A](a.md) — x\r\n- [Dead](gone.md) — y\r\n- [B](b.md) — z\r\n"
+        )
+        assert [(e.line_no, e.target) for e in parsed.entries] == [
+            (1, "a.md"),
+            (2, "gone.md"),
+            (3, "b.md"),
+        ]
+        assert parsed.entries[1].raw == "- [Dead](gone.md) — y"  # terminator-stripped
+
+    def test_every_link_on_a_line_is_an_entry(self):
+        # #1757 defect 1/2: a line-anchored, match-once parser saw only ``a``,
+        # so ``b``'s live target never suppressed its orphan and a dead ``b``
+        # was never link-classified at all.
+        parsed = parse_memory_index("- [a](x.md) · [b](y.md)\n")
+        assert [(e.title, e.target) for e in parsed.entries] == [("a", "x.md"), ("b", "y.md")]
+        assert [e.line_no for e in parsed.entries] == [1, 1]
+        # ``raw`` stays the whole line for both — it is the splice unit, not the
+        # link's slice of the line.
+        assert {e.raw for e in parsed.entries} == {"- [a](x.md) · [b](y.md)"}
+
+    def test_prose_prefixed_bullet_is_parsed(self):
+        # The old ``^\s*[-*]\s*\[`` anchor matched nothing here, so the line
+        # silently became "other" and its pointer went unchecked.
+        parsed = parse_memory_index("- NS: [a](x.md) — hook\n")
+        assert [(e.title, e.target) for e in parsed.entries] == [("a", "x.md")]
+
+    def test_nested_hook_link_is_an_entry(self):
+        # Real-world shape: the hook's parenthetical carries a second pointer at
+        # a real file. Counting it is what keeps that file out of index_orphan.
+        parsed = parse_memory_index("- [A](topic.md) — P2=NO-GO([why](other.md))\n")
+        assert [e.target for e in parsed.entries] == ["topic.md", "other.md"]
+        assert 1 not in parsed.ambiguous_lines  # balanced parens read cleanly
+
+    def test_non_bullet_line_with_link_is_not_an_entry(self):
+        parsed = parse_memory_index("See [docs](https://example.com) for more.\n")
+        assert parsed.entries == ()
+        assert [n for n, _ in parsed.other_lines] == [1]
+
+    def test_bullet_without_link_is_preserved(self):
+        parsed = parse_memory_index("- just a prose bullet\n")
+        assert parsed.entries == ()
+        assert [n for n, _ in parsed.other_lines] == [1]
+
+
+class TestDeceivingLines:
+    """Lines whose literal text is not the link the file declares.
+
+    Every line here was a live counterexample from an adversarial review pass —
+    each was read wrong by the hand-rolled grammar that preceded the CommonMark
+    parser, and each was found only after the previous one had been fixed. That
+    history is the point: it is the record of an enumeration that did not
+    converge, and the reason the links are parsed rather than pattern-matched
+    now. Deleting a case needs a reason; adding one is always welcome.
+
+    A mis-read here is not cosmetic. ``--fix`` deletes a line on the strength of
+    its target classifying ``missing_target``, so reading a live pointer wrong
+    destroys memory.
+    """
+
+    RESOLVED = [
+        ("- [Live](notes_(v2).md)", "notes_(v2).md", "paren inside the destination"),
+        (r"- [Live](notes_\(v2.md)", "notes_(v2.md", "backslash escape in the destination"),
+        ("- [Live](notes_&amp;v2.md)", "notes_&v2.md", "character reference"),
+        ("- [A [nested]](gone.md)", "gone.md", "nested brackets in the label"),
+        (r"- [A \] title](gone.md)", "gone.md", "escaped bracket in the label"),
+        ("- [한글](한글노트.md) — 메모", "한글노트.md", "non-ascii filename stays un-encoded"),
+    ]
+
+    @pytest.mark.parametrize("line,target,why", RESOLVED, ids=[w for *_, w in RESOLVED])
+    def test_destination_is_resolved_not_guessed(self, line, target, why):
+        """The parser reports the link the file declares — so these stay usable."""
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == [target], why
+        assert parsed.ambiguous_lines == frozenset(), why
+
+    NOT_A_POINTER = [
+        ("- [A](a.md) — run `echo [x](y)`", ["a.md"], "link quoted in a code span"),
+        ("- ``[literal](gone.md)``", [], "code span delimited by a backtick run"),
+    ]
+
+    @pytest.mark.parametrize("line,targets,why", NOT_A_POINTER, ids=[w for *_, w in NOT_A_POINTER])
+    def test_quoted_link_is_not_an_entry(self, line, targets, why):
+        """Code spans quote link syntax; quoting is not pointing."""
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == targets, why
+        assert parsed.ambiguous_lines == frozenset(), why
+
+    WONT_GUESS = [
+        ("- [A](<x y.md>)", "angle-bracket form, destination holds a space"),
+        ("- [Live](live.md?view=1)", "query string may not be part of the filename"),
+        ("- [Live](live%2Emd)", "percent-escape may not be part of the filename"),
+        ("- [Live](urn:live.md)", "a scheme that is neither a url nor a path"),
+    ]
+
+    @pytest.mark.parametrize("line,why", WONT_GUESS, ids=[w for _, w in WONT_GUESS])
+    def test_uri_machinery_is_not_resolved_on_a_guess(self, line, why):
+        """Parsed fine; still not called a filename. Reported, never deleted."""
+        parsed = parse_memory_index(line + "\n")
+        assert parsed.entries[0].unreadable is True, why
+        assert parsed.ambiguous_lines == frozenset({1}), why
+
+    def test_doubt_about_one_target_does_not_cover_for_its_neighbour(self):
+        """Readability is per entry; only the refusal to delete is per line.
+
+        Letting one odd destination silence the pointer beside it would put back
+        the blind spot this parser exists to close — a dead link going unreported
+        because of the company it keeps.
+        """
+        parsed = parse_memory_index("- [Odd](live%2Emd) · [Dead](gone.md)\n")
+        assert [(e.target, e.unreadable) for e in parsed.entries] == [
+            ("live%2Emd", True),
+            ("gone.md", False),  # still checkable, and still checked
+        ]
+        assert parsed.ambiguous_lines == frozenset({1})  # the *line* stays unfixable
+
+
+class TestListMarkers:
+    """The parser reads every list marker CommonMark does — `--fix` still doesn't.
+
+    The old grammar was anchored at `^\\s*[-*]\\s`, so an ordered or `+`-marked
+    entry was invisible: unchecked, and counted as an orphan. Reading them is
+    the fix. *Deleting* them is a separate question — the legacy shape `--fix`
+    is contracted for names only `-`/`*`, so they stay refused until ADR-0020
+    §1 says otherwise.
+    """
+
+    MARKERS = [
+        ("1. [a](x.md) — ordered", "ordered list"),
+        ("+ [a](x.md) — plus", "plus bullet"),
+        ("* [a](x.md) — star", "star bullet"),
+        ("- [a](x.md) — dash", "dash bullet"),
+    ]
+
+    @pytest.mark.parametrize("line,why", MARKERS, ids=[w for _, w in MARKERS])
+    def test_every_marker_is_read(self, line, why):
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == ["x.md"], why
+
+    @pytest.mark.parametrize(
+        "body,fixable",
+        [("- [Dead](gone.md) — dash\n", True), ("1. [Dead](gone.md) — ordered\n", False)],
+        ids=["dash is fixable", "ordered is refused"],
+    )
+    def test_fix_scope_still_only_covers_the_legacy_shape(
+        self, body, fixable, tmp_path, monkeypatch
+    ):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        if fixable:
+            assert result.exit_code == 0
+            assert (mem_dir / "MEMORY.md").read_bytes() != before
+        else:
+            assert result.exit_code != 0
+            assert "one-entry-per-line shape" in result.output
+            assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+
+class TestBlockContext:
+    """A bullet is only a pointer where the *document* says it is.
+
+    An index explains itself: it holds fenced examples of the very shape it is
+    made of. Read line by line, an example is indistinguishable from the real
+    thing — and its target is usually a placeholder that doesn't exist, which is
+    exactly the verdict ``--fix`` deletes on. Reading blocks, not lines, is what
+    tells them apart.
+    """
+
+    def test_fenced_example_is_not_a_pointer(self):
+        text = (
+            "- [Real](real.md) — genuine\n"
+            "\n"
+            "```markdown\n"
+            "- [Example](gone.md) — how to write an entry\n"
+            "```\n"
+        )
+        parsed = parse_memory_index(text)
+        assert [e.target for e in parsed.entries] == ["real.md"]
+        # The fence's lines are preserved as-is, so the budget still counts them.
+        assert [n for n, _ in parsed.other_lines] == [2, 3, 4, 5]
+
+    def test_indented_code_block_is_not_a_pointer(self):
+        parsed = parse_memory_index("Example:\n\n    - [Example](gone.md) — indented\n")
+        assert parsed.entries == ()
+
+    # An item outgrows its line in more ways than a wrapped paragraph. Each of
+    # these leaves the pointer's own paragraph exactly one line long, so only
+    # the item's *structure* gives it away — and deleting the pointer's line
+    # would reparent what follows as top-level markdown.
+    OUTGROWS_ITS_LINE = [
+        ("- [A](a.md) — hook\n  continues here\n", "lazy continuation"),
+        ("- [A](a.md) — hook\n\n  second paragraph\n", "second paragraph"),
+        ("- [A](a.md) — hook\n\n  ```\n  code\n  ```\n", "child fence"),
+        ("- [A](a.md) — hook\n  - [B](b.md) — child\n", "nested list"),
+    ]
+
+    @pytest.mark.parametrize("text,why", OUTGROWS_ITS_LINE, ids=[w for _, w in OUTGROWS_ITS_LINE])
+    def test_item_bigger_than_its_line_is_read_but_not_fixable(self, text, why):
+        parsed = parse_memory_index(text)
+        # The pointer is still read and checked — only --fix stands down.
+        assert parsed.entries[0].target == "a.md", why
+        assert parsed.entries[0].line_no == 1, why
+        assert 1 in parsed.multiline_lines, why
+
+    def test_pointer_in_a_later_paragraph_is_still_read(self):
+        # The item's first paragraph is prose; the pointer is in its second.
+        # Reading only the item's first inline would drop it from the report
+        # entirely — a real pointer, unchecked.
+        parsed = parse_memory_index("- introductory note\n\n  [Dead](gone.md) — second para\n")
+        assert [(e.line_no, e.target) for e in parsed.entries] == [(3, "gone.md")]
+        assert parsed.multiline_lines == frozenset({3})  # read, checked, not fixable
+
+    def test_nested_child_is_fixable_on_its_own_line(self):
+        # The parent is unfixable, but the child item *is* its line.
+        parsed = parse_memory_index("- [A](a.md) — hook\n  - [B](b.md) — child\n")
+        assert [(e.line_no, e.target) for e in parsed.entries] == [(1, "a.md"), (2, "b.md")]
+        assert parsed.multiline_lines == frozenset({1})
+
+    CHILDLESS_PARENTS = [
+        ("-\n  - [A](a.md) — child\n", 2, "parent with no text of its own"),
+        ("- ```\n  code\n  ```\n  - [A](a.md) — child\n", 4, "parent opening with a fence"),
+    ]
+
+    @pytest.mark.parametrize(
+        "text,line,why", CHILDLESS_PARENTS, ids=[w for *_, w in CHILDLESS_PARENTS]
+    )
+    def test_parent_does_not_adopt_its_childs_pointer(self, text, line, why):
+        """One pointer, recorded once, against the item it actually belongs to.
+
+        A parent with no inline of its own must not pick up its child's: that
+        counts the pointer twice, reports the link twice, and makes the child's
+        line look like it carries two entries — refusing a fix that is safe.
+        """
+        parsed = parse_memory_index(text)
+        assert [(e.line_no, e.target) for e in parsed.entries] == [(line, "a.md")], why
+        assert parsed.multiline_lines == frozenset(), why
+
+    def test_entry_before_a_blank_line_stays_fixable(self):
+        # A loose list's item map swallows the blank line after it, so measuring
+        # the map instead of the structure would call this a multi-line item —
+        # and every entry before a paragraph break would stop being fixable.
+        parsed = parse_memory_index("- [A](a.md) — hook\n\nprose after the list\n")
+        assert parsed.multiline_lines == frozenset()
+
+
+class TestReferenceStyleLinks:
+    """A pointer whose destination is defined on another line is still a pointer.
+
+    Lines are read one at a time so each entry keeps the line number ``--fix``
+    splices by. Reference links are the construct that breaks that isolation:
+    read alone, ``- [Live][live]`` has no destination and so looks like no link
+    at all. The definitions are harvested from the whole document to close it.
+    """
+
+    def test_full_reference_resolves(self):
+        parsed = parse_memory_index("- [Live][live] — hook\n\n[live]: live.md\n")
+        assert [(e.title, e.target) for e in parsed.entries] == [("Live", "live.md")]
+        assert parsed.entries[0].line_no == 1  # the pointer's line, not the definition's
+
+    def test_collapsed_and_shortcut_references_resolve(self):
+        parsed = parse_memory_index(
+            "- [Coll][] — x\n- [Short] — y\n\n[coll]: c.md\n[short]: s.md\n"
+        )
+        assert [e.target for e in parsed.entries] == ["c.md", "s.md"]
+
+    def test_undefined_reference_is_left_as_prose(self):
+        # A shortcut reference with no definition is, to CommonMark, literal
+        # text — and it is indistinguishable from ordinary bracketed prose
+        # ("see [note] below"), so guessing that it meant a pointer would flag
+        # hooks all over a healthy index. Pinned as intended, not overlooked.
+        parsed = parse_memory_index("- [Live][nope] — no such definition\n")
+        assert parsed.entries == ()
+        assert parsed.unresolved_syntax_lines == frozenset()
+
+    def test_reference_sibling_is_seen_beside_a_dead_inline_link(self):
+        # The line that made this matter: read line-by-line, the live reference
+        # link is invisible, so the line reads single-entry and --fix splices it
+        # away — dead pointer and live sibling together.
+        parsed = parse_memory_index("- [Dead](gone.md) and [Live][live]\n\n[live]: live.md\n")
+        assert [e.target for e in parsed.entries] == ["gone.md", "live.md"]
+        assert [e.line_no for e in parsed.entries] == [1, 1]
+
+
+class TestAmbiguousLines:
+    def test_unclosed_link_on_bullet_yields_no_entry_but_is_flagged(self):
+        # The line has no complete link, so it produces no entry and would
+        # otherwise be filed as prose — an unread pointer reported as nothing.
+        parsed = parse_memory_index("- [B](b.md\n")
+        assert parsed.entries == ()
+        assert [n for n, _ in parsed.other_lines] == [1]
+        assert parsed.ambiguous_lines == frozenset({1})
+
+    def test_unresolved_link_syntax_beside_a_good_link_is_flagged(self):
+        parsed = parse_memory_index("- [A](a.md) — and [B](b.md\n")
+        # Recorded on its own terms, not inferred from "a line with no entry":
+        # this line has one. Folding both doubts into a single set is what let
+        # the report lose it (see test_unread_pointer_is_reported_beside_a_good_link).
+        assert parsed.unresolved_syntax_lines == frozenset({1})
+        assert [e.target for e in parsed.entries] == ["a.md"]
+        assert parsed.ambiguous_lines == frozenset({1})  # still unfixable
+
+    def test_the_two_doubts_are_tracked_apart(self):
+        # An unreadable *target* is an entry the report can point at; unresolved
+        # *syntax* has no entry at all. Only their union is --fix's business.
+        parsed = parse_memory_index("- [Odd](live%2Emd) — target\n- [B](b.md\n")
+        assert parsed.unresolved_syntax_lines == frozenset({2})
+        assert [(e.line_no, e.unreadable) for e in parsed.entries] == [(1, True)]
+        assert parsed.ambiguous_lines == frozenset({1, 2})
+
+    def test_url_and_anchor_targets_are_not_flagged(self):
+        # They carry a ``:`` / lead with ``#``, but are never resolved against
+        # the filesystem, so the plain-relative rule does not apply to them.
+        parsed = parse_memory_index("- [Web](https://example.com) — x\n- [Top](#section) — y\n")
+        assert parsed.ambiguous_lines == frozenset()
+
+    def test_prose_punctuation_is_not_flagged(self):
+        # Over-flagging would bury a real finding under warnings about hooks:
+        # an index is prose, and prose is full of backticks, brackets, parens.
+        clean = (
+            "- [A](a.md) — see (the note) here\n"
+            "- [B](b.md) — see [note] later\n"
+            "- [C](c.md) — run `mm index --force`\n"
+            "- [D](d.md) — idle=`var(--muted)`\n"
+            "- [E](e.md) — P2=NO-GO([why](f.md))\n"
+            "- [a](x.md) · [b](y.md)\n"
+            "- NS: [c](z.md) — hook\n"
+            "- [A](sub/b.md#anchor) — anchored path\n"
+        )
+        assert parse_memory_index(clean).ambiguous_lines == frozenset()
+
+    def test_real_world_index_is_not_flagged(self):
+        # Regression pin for the noise budget: an early version of this check
+        # flagged 34 of the 189 lines in a real maintainer index (every hook
+        # holding a backtick), which would have made the finding worthless.
+        real_shapes = (
+            "- [UI polish prefs](user_ui_polish_prefs.md) — text>icon, idle=`var(--muted)`\n"
+            "- [MCP 설정 위치](reference_mcp.md) — 3건: CC `.claude.json`·Codex `config.toml`\n"
+            "- [STM no core import](feedback_stm.md) `from memtomem.*` 금지\n"
+            "- [진행중: ADR-0026](project_adr0026.md) #1353 P0/P1 shipped·P2=NO-GO([probe 금지](f.md))\n"
+        )
+        assert parse_memory_index(real_shapes).ambiguous_lines == frozenset()
+
 
 # ── Pure: link classification ───────────────────────────────────────
 
@@ -288,6 +643,206 @@ async def test_analysis_detects_all_drift_classes(doctor_env):
     assert not any("example.com" in i for i in broken.items)
     assert by["index_orphan"].items == ["delta.md"]
     assert "budget" not in by  # small index file is under budget
+
+
+@pytest.mark.asyncio
+async def test_multi_entry_index_reports_accurately(tmp_path, monkeypatch):
+    """#1757: an index that packs entries onto a line is read in full.
+
+    The pre-fix parser saw one entry per line and nothing at all on a
+    prose-prefixed line, which produced (1) an ``index_orphan`` for every
+    correctly-indexed file whose pointer wasn't first on its line, and (2) a
+    ``broken_link`` blind spot — a dead pointer at position ≥2 reported clean,
+    which is the worse half: a safety check that passes when it shouldn't.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-crammed" / "memory"
+    mem_dir.mkdir(parents=True)
+    for name in ("first.md", "second.md", "nested.md", "prose.md"):
+        (mem_dir / name).write_text(f"# {name}\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text(
+        # Two entries on one line — ``second.md`` is only reachable at position 2.
+        "- [First](first.md) · [Second](second.md)\n"
+        # A hook parenthetical carrying a real pointer (the real-world shape).
+        "- [Topic](prose.md) — P2=NO-GO([why](nested.md))\n"
+        # Prose prefix: invisible to the old anchor, dead target at position 2.
+        "- NS: [Live](first.md) · [Dead](gone.md)\n",
+        encoding="utf-8",
+    )
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "crammed.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        for i, name in enumerate(("first.md", "second.md", "nested.md", "prose.md")):
+            _insert_chunk(
+                backend,
+                chunk_id=f"c{i}",
+                source_file=mem_dir / name,
+                access_count=1,
+                last_accessed_at="2026-06-01T00:00:00",
+            )
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    # Defect 1: every listed file is seen as listed — no false orphans. Before
+    # the fix, second.md and nested.md (position ≥2) and prose.md (prose-prefixed
+    # line) were all reported as orphans despite being correctly indexed.
+    assert "index_orphan" not in by
+
+    # Defect 2: the dead pointer at position 2 of a prose-prefixed line is
+    # caught. Before the fix this line yielded no entries at all → silent pass.
+    broken = by["broken_link"]
+    assert broken.severity == "error"
+    assert broken.count == 1
+    assert "gone.md" in broken.items[0]
+    assert broken.items[0].startswith("L3 ")
+
+
+@pytest.mark.asyncio
+async def test_paren_filename_resolves_instead_of_being_flagged(tmp_path, monkeypatch):
+    """A filename with parens is a filename, and reads as one.
+
+    ``[Live](notes_(v2).md)`` defeated the hand-rolled grammar, which sliced the
+    target at the inner ``)`` and called the live pointer dead — an error-level
+    finding on a healthy index, and a deletion candidate. Read as Markdown it is
+    simply correct, so the right outcome is *no finding at all*.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-paren" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "notes_(v2).md").write_text("# live\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Live](notes_(v2).md) — real file\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "paren.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    backend = SqliteBackend(
+        config.storage, dimension=0, embedding_provider="none", embedding_model=""
+    )
+    await backend.initialize()
+    try:
+        _insert_chunk(
+            backend,
+            chunk_id="a1",
+            source_file=mem_dir / "notes_(v2).md",
+            access_count=1,
+            last_accessed_at="2026-06-01T00:00:00",
+        )
+    finally:
+        await backend.close()
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = [r for r in reports if r.path != "(unowned)"][0]
+
+    # Resolved, listed, indexed — a clean line in every respect.
+    assert report.findings == []
+
+
+@pytest.mark.asyncio
+async def test_dead_link_is_reported_beside_an_unreadable_one(tmp_path, monkeypatch):
+    """A dead link must not hide behind the company it keeps.
+
+    ``live%2Emd`` is a destination the doctor won't resolve, but the pointer
+    beside it is an ordinary dead one. Suppressing its verdict because a
+    neighbour is doubtful is the same blind spot this issue is about — a broken
+    link that reports clean — just reached by a different route.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-mixed" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "live.md").write_text("# real\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Odd](live%2Emd) · [Dead](gone.md)\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "mixed.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    assert by["broken_link"].severity == "error"
+    assert by["broken_link"].items == ["L1 [missing_target] gone.md"]
+    assert "live%2Emd" in by["ambiguous_index_line"].items[0]
+
+
+@pytest.mark.asyncio
+async def test_unread_pointer_is_reported_beside_a_good_link(tmp_path, monkeypatch):
+    """An unclosed pointer must not hide behind a readable one on its line.
+
+    This shipped once: the report asked for "ambiguous lines that produced no
+    entry" as `ambiguous_lines - entry_lines`, which excludes any line carrying
+    an entry — so `[B](b.md` next to a live `[A](a.md)` was reported by neither
+    path, and `--fix` never surfaces it either (the line yields no candidate
+    while a.md is live). The parser-level pin passed throughout; only a pin on
+    the *report* could catch it.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-unread" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "a.md").write_text("# a\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [A](a.md) — and [B](b.md\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "unread.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    assert by["ambiguous_index_line"].severity == "warn"
+    assert "[B](b.md" in by["ambiguous_index_line"].items[0]
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_target_feeds_neither_conclusion(tmp_path, monkeypatch):
+    """A destination we won't resolve is reported, and used for nothing else.
+
+    ``live.md?view=1`` parses fine, but whether the query is part of the
+    filename is not ours to guess. Guessing either way writes a wrong finding:
+    call it dead and a healthy index fails CI (and the line becomes deletable);
+    call it ``live.md`` and a file is silently marked listed on an assumption.
+    So it is stated as what it is, and feeds neither the broken-link nor the
+    listed set — the file it may mean is left to surface as an orphan.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-query" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "live.md").write_text("# real\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Live](live.md?view=1) — query\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "query.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = [r for r in reports if r.path != "(unowned)"][0]
+    by = _findings_by_check(report)
+
+    assert by["ambiguous_index_line"].severity == "warn"
+    assert "live.md?view=1" in by["ambiguous_index_line"].items[0]
+    assert "broken_link" not in by  # never guessed dead
+    assert by["index_orphan"].items == ["live.md"]  # nor guessed listed
+    assert not any(f.severity == "error" for f in report.findings)
 
 
 @pytest.mark.asyncio
@@ -852,6 +1407,31 @@ class TestApplyFix:
         assert removed == []
         assert index.read_text(encoding="utf-8") == text  # untouched
 
+    def test_revalidate_line_that_left_fix_scope_is_spared(self, tmp_path):
+        """A guard is not a one-time admission check — the file is live.
+
+        The candidate line is untouched between analysis and apply, so its raw
+        still matches and its target is still dead. What changed is elsewhere:
+        the agent defined the reference the line already cited, which turns it
+        from a single dead pointer into a line with a live sibling on it.
+        Re-classifying the target alone can't see that; the scope guards have to
+        be re-asked of the fresh read.
+        """
+        root = self._setup(tmp_path)
+        index = root / "MEMORY.md"
+        analysis_text = "- [Dead](gone.md) and [Live][live]\n"
+        index.write_text(analysis_text, encoding="utf-8")
+        candidates = _candidate_raws(analysis_text, root)
+        assert candidates  # single-entry at analysis time: the reference is undefined
+
+        # The agent defines the reference before the fix takes the lock.
+        index.write_text(analysis_text + "\n[live]: exists.md\n", encoding="utf-8")
+
+        removed = _apply_fix(index, root, candidates)
+
+        assert removed == []
+        assert "[Live][live]" in index.read_text(encoding="utf-8")
+
     def test_revalidate_agent_edited_candidate_line_is_spared(self, tmp_path):
         # The agent rewrote the candidate line's hook since analysis. Its raw no
         # longer matches the candidate set, so the fix leaves it alone.
@@ -1010,9 +1590,11 @@ class TestFixCli:
 class TestMultiEntryLineGuard:
     """``--fix`` splices whole lines, so it must refuse lines holding >1 entry.
 
-    ``_ENTRY_RE`` is line-anchored and matches once per line, so the parser is
-    blind to entries after the first. Without the guard, a dead first pointer
-    would splice the line and silently delete the live entries beside it.
+    Without the guard, a dead first pointer would splice the line and silently
+    delete the live entries beside it. The parser now *sees* those siblings
+    (#1757), which is what lets the refusal name them — but seeing them does not
+    make whole-line removal safe, so the fail-closed behaviour stands until
+    ADR-0020 §1 says otherwise.
     """
 
     def _patch_loader(self, monkeypatch, config):
@@ -1094,3 +1676,162 @@ class TestMultiEntryLineGuard:
 
         assert result.exit_code != 0
         assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+
+class TestFixScopeFrozen:
+    """The widened parser must not widen what ``--fix`` deletes (#1757).
+
+    Reading more of the index is a Tier 1 change; deleting more of it is an
+    ADR-0020 §1 change. These pin the two apart: newly-visible pointers are
+    *reported*, but stay out of the write path until the contract amendment.
+    """
+
+    def _patch_loader(self, monkeypatch, config):
+        import memtomem.cli.memory_doctor_cmd as mod
+
+        monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+
+    def test_prose_prefixed_dead_line_is_refused(self, tmp_path, monkeypatch):
+        # The old parser never saw this pointer, so --fix could not delete it.
+        # The new one does — and must still not delete it.
+        body = "- NS: [Dead](gone.md) — drop\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "refusing --fix" in result.output
+        assert "one-entry-per-line shape" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_unresolvable_target_line_is_refused(self, tmp_path, monkeypatch):
+        """A destination we won't resolve is never deleted on the guess.
+
+        ``live.md?view=1`` is a single link in the legacy shape — it clears
+        every other guard, and its literal text names no file, so it classifies
+        missing_target. Whether the query belongs to the filename is exactly the
+        guess --fix must not make with a delete.
+        """
+        body = "- [Live](live.md?view=1) — query\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        (mem_dir / "live.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "refusing --fix" in result.output
+        assert "will not resolve on a guess" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_escaped_target_line_survives_because_it_is_read_right(self, tmp_path, monkeypatch):
+        """The escape case, end to end: read correctly, so never a candidate.
+
+        Markdown resolves ``notes_\\(v2.md`` to the live ``notes_(v2.md``. A
+        literal path lookup misses it and calls it dead — which is how --apply
+        came to delete a live pointer. Nothing on the line hints at the
+        difference, so no amount of inspecting the *text* saves it; only reading
+        the link does.
+        """
+        body = "- [Live](notes_\\(v2.md) — escaped paren\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        (mem_dir / "notes_(v2.md").write_text("x", encoding="utf-8")
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert "No missing_target links to remove" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_fenced_example_is_never_edited(self, tmp_path, monkeypatch):
+        """End to end: --apply must not touch a code block.
+
+        The example's target doesn't exist — that's what makes it an example —
+        so a line-wise reader offers it up as a dead pointer and edits the
+        fence.
+        """
+        body = "- [Dead](gone.md) — real\n\n```markdown\n- [Example](nowhere.md) — example\n```\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        # The real dead pointer goes; the fence survives byte-for-byte.
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == (
+            "\n```markdown\n- [Example](nowhere.md) — example\n```\n"
+        )
+        assert "nowhere.md" not in result.output
+
+    def test_multiline_item_is_refused(self, tmp_path, monkeypatch):
+        body = "- [Dead](gone.md) — hook\n  continues here\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "continues past this line" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_reference_sibling_blocks_the_fix(self, tmp_path, monkeypatch):
+        """End to end: the live reference link must stop the splice.
+
+        The dead inline pointer alone would make this line fixable, and the
+        live sibling's destination lives on another line — so a reader that
+        can't see across lines deletes a live pointer and reports one removal.
+        """
+        body = "- [Dead](gone.md) and [Live][live]\n\n[live]: exists.md\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code != 0
+        assert "carries more than one entry" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_quoted_link_is_not_a_sibling_so_the_line_stays_fixable(self, tmp_path, monkeypatch):
+        """A code span is not an entry, so it neither blocks nor survives a fix.
+
+        The line's only pointer is dead, so the line goes — quoted text and all.
+        Treating the quote as a live sibling would have frozen --fix instead.
+        """
+        body = "- [Dead](gone.md) — quoting `[x](y)`\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
+
+    def test_refusal_names_the_reason_per_line(self, tmp_path, monkeypatch):
+        body = "- [Dead](gone.md) · [Live](exists.md)\n- NS: [Dead2](gone2.md)\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+
+        assert "L1:" in result.output
+        assert "carries more than one entry" in result.output
+        assert "L2:" in result.output
+        assert "one-entry-per-line shape" in result.output
+
+    def test_balanced_hook_parens_stay_fixable(self, tmp_path, monkeypatch):
+        """Ambiguity must be narrow: ordinary parenthetical prose still fixes."""
+        body = "- [Dead](gone.md) — drop (for good reasons)\n"
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        self._patch_loader(monkeypatch, config)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+
+        assert result.exit_code == 0
+        assert (mem_dir / "MEMORY.md").read_text(encoding="utf-8") == ""
