@@ -222,6 +222,25 @@ class TestBlockContext:
         assert [(e.line_no, e.target) for e in parsed.entries] == [(1, "a.md"), (2, "b.md")]
         assert parsed.multiline_lines == frozenset({1})
 
+    CHILDLESS_PARENTS = [
+        ("-\n  - [A](a.md) — child\n", 2, "parent with no text of its own"),
+        ("- ```\n  code\n  ```\n  - [A](a.md) — child\n", 4, "parent opening with a fence"),
+    ]
+
+    @pytest.mark.parametrize(
+        "text,line,why", CHILDLESS_PARENTS, ids=[w for *_, w in CHILDLESS_PARENTS]
+    )
+    def test_parent_does_not_adopt_its_childs_pointer(self, text, line, why):
+        """One pointer, recorded once, against the item it actually belongs to.
+
+        A parent with no inline of its own must not pick up its child's: that
+        counts the pointer twice, reports the link twice, and makes the child's
+        line look like it carries two entries — refusing a fix that is safe.
+        """
+        parsed = parse_memory_index(text)
+        assert [(e.line_no, e.target) for e in parsed.entries] == [(line, "a.md")], why
+        assert parsed.multiline_lines == frozenset(), why
+
     def test_entry_before_a_blank_line_stays_fixable(self):
         # A loose list's item map swallows the blank line after it, so measuring
         # the map instead of the structure would call this a multi-line item —

@@ -244,6 +244,28 @@ def _list_item_body(tokens: list[Token], open_index: int) -> list[Token]:
     return tokens[open_index + 1 :]  # unclosed item: treat the rest as its body
 
 
+def _own_inline(body: list[Token]) -> Token | None:
+    """The item's *own* first inline — not one belonging to a nested item.
+
+    ``_list_item_body`` slices the whole item, children included, because the
+    structural check needs to see them. Reading a pointer out of that slice
+    naively lets a parent with no text of its own (``-`` on a line by itself,
+    or one opening with a fence) adopt its child's inline: the child's pointer
+    is then recorded twice, once against each item, which double-reports the
+    link and makes the child's line look like it carries two entries — so a
+    genuinely fixable line gets refused.
+    """
+    depth = 0
+    for token in body:
+        if token.type == "list_item_open":
+            depth += 1
+        elif token.type == "list_item_close":
+            depth -= 1
+        elif depth == 0 and token.type == "inline" and token.map is not None:
+            return token
+    return None
+
+
 def _item_is_one_line(body: list[Token], inline: Token) -> bool:
     """Whether a list item is exactly the one line its pointer sits on.
 
@@ -299,9 +321,9 @@ def parse_memory_index(text: str) -> ParsedIndex:
         if token.type != "list_item_open":
             continue
         body = _list_item_body(tokens, i)
-        inline = next((t for t in body if t.type == "inline" and t.map is not None), None)
+        inline = _own_inline(body)
         if inline is None:
-            continue
+            continue  # an item with no text of its own — its children speak for themselves
 
         line_no = inline.map[0] + 1
         links, unresolved = _read_inline(inline)
