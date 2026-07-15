@@ -833,10 +833,12 @@ _LINT_DOCS = (_REPO_ROOT / "CLAUDE.md", _REPO_ROOT / "CONTRIBUTING.md")
 
 # Anchored at the bare ``ruff`` token, not ``uv run ruff``: a doc teaching
 # ``uvx ruff check src`` (or ``uv  run`` with doubled spaces) narrows the lint
-# just as effectively, so the launcher must not be part of the match.
+# just as effectively, so the launcher must not be part of the match. The
+# optional ``@…`` absorbs uv's version-qualified requests (``uvx
+# ruff@0.15.21 check``), which are the same call in a different coat.
 # ``[^\S\n]`` (horizontal space only) keeps a call from swallowing the lines
 # below it; continuations are folded to spaces before this runs.
-_RUFF_CALL = re.compile(r"(?<![\w-])ruff((?:[^\S\n]+[^\s`#;|&\\]+)+)")
+_RUFF_CALL = re.compile(r"(?<![\w-])ruff(?:@[^\s`#;|&\\]+)?((?:[^\S\n]+[^\s`#;|&\\]+)+)")
 
 # Flags known not to change which files ruff walks NOR mask violations, per
 # verb. Everything else is reported rather than dropped: modelling ruff's
@@ -881,11 +883,17 @@ def _ruff_calls(text: str) -> list[_RuffCall]:
     """
     calls: list[_RuffCall] = []
     for args in _RUFF_CALL.findall(text.replace("\\\n", " ")):
+        try:
+            tokens = shlex.split(args)
+        except ValueError as exc:
+            raise AssertionError(
+                f"Unparseable ruff invocation in a guarded file — {exc}: `ruff{args}`"
+            ) from exc
         verb: str | None = None
         paths: list[str] = []
         flags: list[str] = []
         prev_was_flag = False
-        for tok in shlex.split(args):
+        for tok in tokens:
             if tok.startswith("-"):
                 flags.append(tok.split("=", 1)[0])
                 prev_was_flag = True
@@ -974,3 +982,56 @@ class TestLintPathsMatchCI:
             f"{_CI_WORKFLOW.name} lints: {' '.join(expected)}\n"
             "Offending call(s):\n  " + "\n  ".join(offenders)
         )
+
+    # The parser is the guard's entire attack surface: every bypass found in
+    # review (five rounds' worth) was a parse gap, not a comparison bug. This
+    # table pins each one so a parser refactor can't quietly reopen them.
+    @pytest.mark.parametrize(
+        ("snippet", "expected"),
+        [
+            # The two real commands the guarded docs actually teach.
+            (
+                "uv run ruff check packages/memtomem/src packages/memtomem/tests tools",
+                [
+                    _RuffCall(
+                        "check", ("packages/memtomem/src", "packages/memtomem/tests", "tools"), ()
+                    )
+                ],
+            ),
+            (
+                "uv run ruff format --check a b && echo ok",
+                [_RuffCall("format", ("a", "b"), ())],
+            ),
+            # Inert flags per verb stay invisible; --diff is only inert for
+            # format (for check it exits 0 on unfixable violations).
+            ("uv run ruff check a --fix", [_RuffCall("check", ("a",), ())]),
+            ("uv run ruff check a --no-fix", [_RuffCall("check", ("a",), ())]),
+            ("uv run ruff format a --diff", [_RuffCall("format", ("a",), ())]),
+            ("uv run ruff check a --diff", [_RuffCall("check", ("a",), ("--diff",))]),
+            # Scope-changing flags surface in other_flags whatever the spelling.
+            ("ruff check a --exclude=b", [_RuffCall("check", ("a",), ("--exclude",))]),
+            ("ruff check a --config=x.toml", [_RuffCall("check", ("a",), ("--config",))]),
+            ("ruff --config x.toml check a", [_RuffCall("check", ("a",), ("--config",))]),
+            ("ruff check a --select E", [_RuffCall("check", ("a", "E"), ("--select",))]),
+            # Pathless calls default to ".", never vanish.
+            ("ruff check --exclude=tests", [_RuffCall("check", (".",), ("--exclude",))]),
+            # Launcher and spacing variants are all the same call.
+            ("uvx ruff check a", [_RuffCall("check", ("a",), ())]),
+            ("uvx ruff@0.15.21 check a", [_RuffCall("check", ("a",), ())]),
+            ("uv tool run ruff@0.15.21 check a", [_RuffCall("check", ("a",), ())]),
+            ("uv  run ruff check a", [_RuffCall("check", ("a",), ())]),
+            # Continuations fold into one call.
+            ("uv run ruff check \\\n    a \\\n    b", [_RuffCall("check", ("a", "b"), ())]),
+            # Prose and non-lint subcommands are not calls.
+            ("ruff and tests must pass to merge", []),
+            ("ruff rule F821", []),
+            ("`ruff` alone in backticks", []),
+            ("run ruff check locally", [_RuffCall("check", ("locally",), ())]),
+        ],
+    )
+    def test_parser_pins_reviewed_spellings(self, snippet: str, expected: list[_RuffCall]) -> None:
+        assert _ruff_calls(snippet) == expected
+
+    def test_parser_reports_unparseable_call_with_fragment(self) -> None:
+        with pytest.raises(AssertionError, match=r"No closing quotation.*unterminated"):
+            _ruff_calls('uv run ruff check "unterminated')
