@@ -1158,10 +1158,13 @@ def _line_skip_reason(line_no: int, *, parsed: ParsedIndex, root: Path) -> str |
     Judged against *parsed*, so it can be re-asked of a fresh read under the
     lock — the index is a live file, and a line eligible at analysis time need
     not still be (§5).
+
+    *line_no* must name a pointer line of *parsed*; every reason below is a
+    statement about the links on it, so a line with none has no answer here —
+    only a caller bug can ask, and it fails loudly rather than dressing a
+    non-candidate up as a skipped one.
     """
     line_entries = [e for e in parsed.entries if e.line_no == line_no]
-    if not line_entries:
-        return "no longer holds a pointer"
     if _BULLET_MARKER_RE.match(line_entries[0].raw) is None:
         return "is not a `-`/`*` bullet entry"
     if line_no in parsed.multiline_lines:
@@ -1291,35 +1294,32 @@ def _apply_fix(
        *edit* to a candidate spares it (its raw stops matching, so the count
        drops and the mismatch skips it).
 
-    **The report describes the file this call leaves on disk.** Every dead
-    pointer still in it — skipped by §1, dropped by the guards above, or written
-    by the agent since analysis — is named, and nothing else is. Two properties
-    follow, and both are the point:
-
-    * *No stale coordinates.* A candidate the agent deleted or rewrote between
-      the two reads is simply not reported: it is not in the file, so there is
-      nothing to repair and no line to name. Reporting it from the snapshot
-      would print a line number that now belongs to some other line.
-    * *"Clean" means clean.* A dead pointer the agent wrote since analysis is
-      not removable here (no analysis-time count bounds it) but it is *there*,
-      so the run reports it rather than calling the file clean. Re-running
-      ``--fix`` clears it, now that an analysis has seen it.
-
        *Eligibility.* §1 is re-asked of the **fresh parse**, not carried over —
        it is not a one-time admission check. A resurrected target, or a
        reference definition the agent added that turns an all-dead line into one
        with a live sibling, drops the line here. Drops are reported, not
        silently absent (§1).
-
-       The report is built from that fresh partition alone. The analysis
-       snapshot contributes only the count bound: its line numbers and verdicts
-       describe a file the agent may have rewritten, so a report merged from
-       both can name a line that moved — or, when eligibility swaps between
-       byte-identical copies, call the same line removed *and* skipped.
     3. **Splice** the still-eligible lines out of the fresh text, carrying
        through everything the agent added before the lock.
     4. **Atomically replace**, preserving the file's existing mode (``mkstemp``
        defaults to ``0o600``, which would silently downgrade a ``0o644`` TOC).
+
+    **The report describes the file this call leaves on disk.** It is built from
+    the fresh partition alone; the analysis snapshot contributes only the count
+    bound. Every dead pointer still in the file — skipped by §1, dropped by the
+    guards above, or written by the agent since analysis — is named, and nothing
+    else is. Two properties follow, and both are the point:
+
+    * *No stale coordinates.* A candidate the agent deleted or rewrote between
+      the two reads is not reported: it is not in the file, so there is nothing
+      to repair and no line to name. The snapshot's line numbers describe a file
+      the agent may have rewritten, so a report merged from both can name a line
+      that moved — or, when eligibility swaps between byte-identical copies,
+      call the same line removed *and* skipped.
+    * *"Clean" means clean.* A dead pointer the agent wrote since analysis is
+      not removable here (no analysis-time count bounds it) but it is *there*,
+      so the run reports it rather than calling the file clean. Re-running
+      ``--fix`` clears it, now that an analysis has seen it.
 
     Returns ``(removed, skipped)`` — the removed lines as ``(line_no, raw)`` for
     the audit report, and the apply-time drops as ``(line_no, raw, why)``.
@@ -1497,8 +1497,10 @@ def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
         # Not a clean run: dead pointers remain, and only a human can clear them.
         summary += f" {skipped_total} line(s) skipped."
         click.secho(summary, fg="yellow")
+    elif applied:
+        click.secho(summary, fg="green")
     else:
-        click.secho(summary, fg="green") if applied else click.echo(summary)
+        click.echo(summary)
 
 
 def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
