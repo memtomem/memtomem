@@ -128,6 +128,27 @@ class TestAmbiguousLines:
         assert parsed.entries[0].target == "notes_(v2"  # the mis-read, recorded
         assert parsed.ambiguous_lines == frozenset({1})
 
+    # Every line here was a live counterexample found by review, not a shape
+    # imagined up front — each one was reported clean by the check as it stood
+    # when the previous entry was added. That history is the reason the target
+    # test is a whitelist (_SAFE_TARGET_RE) rather than a list of known-bad
+    # constructs: enumerating the ways a Markdown destination can lie does not
+    # converge. Additions welcome; deletions need a reason.
+    DECEIVING_LINES = [
+        (r"- [Live](notes_(v2).md)", "paren inside target truncates it"),
+        (r"- [Live](notes_\(v2.md)", "backslash escape resolves to a different path"),
+        ("- [Live](notes_&amp;v2.md)", "character reference resolves to a different path"),
+        ("- [A](<x y.md>)", "angle-bracket destination form"),
+        ("- [A](a.md) — run `echo [x](y)`", "link inside a code span is literal text"),
+        ("- ``[literal](gone.md)``", "code span delimited by a backtick run"),
+        ("- [B](b.md", "link syntax the grammar cannot close"),
+    ]
+
+    @pytest.mark.parametrize("line,why", DECEIVING_LINES, ids=[w for _, w in DECEIVING_LINES])
+    def test_deceiving_line_is_ambiguous(self, line, why):
+        """Each line's literal read is not what Markdown resolves — so: hands off."""
+        assert parse_memory_index(line + "\n").ambiguous_lines == frozenset({1}), why
+
     def test_escaped_paren_in_target_is_ambiguous(self):
         # Markdown resolves ``\(`` to a literal ``(``, so this points at the live
         # file ``notes_(v2.md`` — but a literal path lookup of the raw target
@@ -137,17 +158,15 @@ class TestAmbiguousLines:
         assert parsed.entries[0].target == "notes_\\(v2.md"
         assert parsed.ambiguous_lines == frozenset({1})
 
-    def test_link_inside_code_span_is_ambiguous(self):
-        # ``[x](y)`` here is literal text being quoted, not a pointer — but it
-        # matches the link grammar and would classify as a dead one.
-        parsed = parse_memory_index("- [A](a.md) — run `echo [x](y)`\n")
+    def test_unclosed_link_on_bullet_yields_no_entry_but_is_flagged(self):
+        # The line has no complete link, so it produces no entry and would
+        # otherwise be filed as prose — an unread pointer reported as nothing.
+        parsed = parse_memory_index("- [B](b.md\n")
+        assert parsed.entries == ()
+        assert [n for n, _ in parsed.other_lines] == [1]
         assert parsed.ambiguous_lines == frozenset({1})
 
-    def test_angle_destination_is_ambiguous(self):
-        parsed = parse_memory_index("- [A](<x y.md>)\n")
-        assert parsed.ambiguous_lines == frozenset({1})
-
-    def test_unmatched_link_syntax_is_ambiguous(self):
+    def test_unmatched_link_syntax_beside_a_good_link_is_ambiguous(self):
         # A second link the grammar could not close: its ``](`` survives in the
         # residue, proving the line holds link syntax that went unread.
         parsed = parse_memory_index("- [A](a.md) — and [B](b.md\n")

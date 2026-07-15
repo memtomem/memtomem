@@ -34,11 +34,13 @@ Checks (per configured ``memory_dir``):
   root). ``url`` and ``anchor`` links are classified and *not* reported.
 * **index_orphan** — files on disk that the index file (``MEMORY.md``) does
   not list. Distinct from ``db_coverage``: "not in the TOC" ≠ "not indexed".
-* **ambiguous_index_line** — a pointer line carrying link syntax the parser
-  cannot read unambiguously (a paren inside the target, an escaped or
-  angle-bracketed target, a link quoted in a code span). Its links are left
-  unclassified rather than guessed at, so the line is reported for a human
-  instead of link-checked, counted as listed, or offered to ``--fix``.
+* **ambiguous_index_line** — a pointer line whose links cannot be resolved as
+  written: a target that isn't a plain relative path (a paren, escape,
+  character reference or angle-bracket form makes the literal text differ from
+  what Markdown resolves), a link quoted inside a code span, or link syntax the
+  grammar cannot close. Its links are left unclassified rather than guessed at,
+  so the line is reported for a human instead of link-checked, counted as
+  listed, or offered to ``--fix``.
 * **budget** — the index file exceeds its byte / line / per-line-char budget
   (the hot cache loaded into the agent's context each session).
 * **cold_candidate** — indexed files never accessed since indexing
@@ -160,16 +162,23 @@ _LINK_RE = re.compile(r"\[(?P<title>[^\]]*)\]\((?P<target>[^)]*)\)")
 # wrong, or there is one it could not see at all.
 _UNMATCHED_LINK_SYNTAX_RE = re.compile(r"\]\(")
 
-# Tells that a matched *target* is not the path it appears to be:
-# ``[A](<x y.md>)`` yields the angle-destination form ``<x y.md>``;
-# ``[A](notes_\(v2.md)`` yields ``notes_\(v2.md``, whose escape Markdown
-# resolves to a live ``notes_(v2.md`` but a literal path lookup does not;
-# a backtick means the target ran into a code span.
-_AMBIGUOUS_TARGET_RE = re.compile(r"[`<>\\]")
+# What a target must look like for its literal text to be the path Markdown
+# resolves: no whitespace, and none of the characters that make Markdown
+# transform a destination before resolving it.
+#
+# This is a whitelist on purpose. The alternative — enumerating the ways a
+# destination can lie — does not converge: ``notes_(v2).md`` truncates at the
+# inner paren, ``notes_\(v2.md`` hides an escape, ``<x y.md>`` is the angle
+# form, ``notes_&amp;v2.md`` is a character reference, and each of those was
+# found only after the last was fixed. A pointer in a memory index is a
+# relative filename; anything fancier is set aside for a human rather than
+# guessed at, which fails closed by construction instead of by enumeration.
+_SAFE_TARGET_RE = re.compile(r"^[^\s`<>\\&()\[\]]+$")
 
-# A backtick-delimited code span. Its contents are literal text, so a link
-# matched *inside* one is not a pointer at all.
-_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+# A code span, delimited by a *run* of backticks (CommonMark: any run closes on
+# a matching run, so ``` ``[x](y)`` ``` is one span). Its contents are literal
+# text, so a link matched inside one is not a pointer at all.
+_CODE_SPAN_RE = re.compile(r"(`+).*?\1")
 
 
 def _parens_balanced(text: str) -> bool:
@@ -195,21 +204,21 @@ def _line_is_ambiguous(line: str, matches: list[re.Match[str]]) -> bool:
     data loss (ADR-0020 §1 permits removing *provably* dead pointers only), and
     reporting it as an error would fail CI on a healthy index.
 
-    The check is deliberately keyed to the ways the grammar actually goes wrong,
-    not to markdown-significant characters at large — an index is written in
-    prose, and hooks are full of backticks, brackets and parens that read
-    perfectly well. Four tells:
+    A line reads cleanly only when all three hold; anything else is set aside:
 
-    * **Link syntax outside every match** (``](`` in the residue) — the matcher
-      consumed the line's links wrong, or missed one entirely.
-    * **Unbalanced parens in the residue** — the tell that a target was cut short
-      at a ``)`` inside it, as above. Balanced parens are ordinary prose, so
-      ``- [A](a.md) — decision ([why](b.md))``, the common nested-hook shape,
-      reads cleanly and stays fixable.
-    * **A target carrying its own escape hatch** (backtick, angle bracket,
-      backslash) — the literal text is not the path Markdown would resolve.
-    * **A link matched inside a code span** — literal text that merely looks
+    * **Every target is a plain relative path** (:data:`_SAFE_TARGET_RE`) — the
+      whitelist that keeps this from being an endless hunt for the next way a
+      destination can lie.
+    * **No link syntax outside the matches, and balanced parens in what's left**
+      — ``](`` in the residue means a link went unread; an unbalanced ``)``
+      means a target was cut short at a paren inside it. Balanced parens are
+      ordinary prose, so ``- [A](a.md) — decision ([why](b.md))``, the common
+      nested-hook shape, reads cleanly and stays fixable.
+    * **No link matched inside a code span** — literal text that merely looks
       like a pointer.
+
+    Callers must not read a ``False`` here as "this line is well-formed
+    Markdown"; it means only that these links can be resolved as written.
     """
     residue_parts: list[str] = []
     last = 0
@@ -220,7 +229,7 @@ def _line_is_ambiguous(line: str, matches: list[re.Match[str]]) -> bool:
     residue = "".join(residue_parts)
     if _UNMATCHED_LINK_SYNTAX_RE.search(residue) or not _parens_balanced(residue):
         return True
-    if any(_AMBIGUOUS_TARGET_RE.search(m.group("target")) for m in matches):
+    if any(not _SAFE_TARGET_RE.match(m.group("target")) for m in matches):
         return True
     code_spans = [(c.start(), c.end()) for c in _CODE_SPAN_RE.finditer(line)]
     return any(start <= m.start() and m.end() <= end for m in matches for start, end in code_spans)
@@ -232,8 +241,15 @@ def parse_memory_index(text: str) -> ParsedIndex:
     other: list[tuple[int, str]] = []
     ambiguous: set[int] = set()
     for i, line in enumerate(text.splitlines(), start=1):
-        matches = list(_LINK_RE.finditer(line)) if _BULLET_RE.match(line) else []
+        is_bullet = bool(_BULLET_RE.match(line))
+        matches = list(_LINK_RE.finditer(line)) if is_bullet else []
         if not matches:
+            # A bullet holding link syntax the grammar could not close
+            # (``- [B](b.md``) yields no entry, so it would otherwise slip by as
+            # prose — an unread pointer reported as nothing at all. It has no
+            # entry to carry, but the line still gets flagged for a human.
+            if is_bullet and _UNMATCHED_LINK_SYNTAX_RE.search(line):
+                ambiguous.add(i)
             other.append((i, line))
             continue
         if _line_is_ambiguous(line, matches):
@@ -685,9 +701,11 @@ def _analyze_index_file(
         elif cls == "ok":
             resolved = (root / entry.target.split("#", 1)[0]).resolve()
             listed_norm.add(norm_path(resolved))  # type: ignore[operator]
+    # Read the raw text back from the source: an ambiguous line need not have
+    # produced an entry (a link the grammar could not close yields none).
+    raw_lines = text.splitlines()
     for line_no in sorted(parsed.ambiguous_lines):
-        raw = next(e.raw for e in parsed.entries if e.line_no == line_no)
-        ambiguous_items.append(f"L{line_no} {raw}")
+        ambiguous_items.append(f"L{line_no} {raw_lines[line_no - 1]}")
     if broken:
         report.findings.append(
             Finding(
