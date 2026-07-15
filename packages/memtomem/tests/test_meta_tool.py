@@ -246,9 +246,7 @@ class TestMemVersion:
         assert "context_compose" in ACTIONS
         assert "candidate_propose" in ACTIONS
 
-    async def test_runtime_profile_is_additive_and_secret_free(
-        self, monkeypatch, tmp_path
-    ):
+    async def test_runtime_profile_is_additive_and_secret_free(self, monkeypatch, tmp_path):
         from memtomem import config as config_mod
 
         monkeypatch.setattr(config_mod, "_override_path", lambda: tmp_path / "config.json")
@@ -272,9 +270,7 @@ class TestMemVersion:
         }
         assert "do-not-leak" not in json.dumps(parsed)
 
-    async def test_runtime_profile_reports_onnx_dependency_gap(
-        self, monkeypatch, tmp_path
-    ):
+    async def test_runtime_profile_reports_onnx_dependency_gap(self, monkeypatch, tmp_path):
         from memtomem import config as config_mod
         from memtomem.server.tools import status_config
 
