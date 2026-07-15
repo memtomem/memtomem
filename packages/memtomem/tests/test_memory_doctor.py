@@ -667,6 +667,35 @@ async def test_paren_filename_resolves_instead_of_being_flagged(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_dead_link_is_reported_beside_an_unreadable_one(tmp_path, monkeypatch):
+    """A dead link must not hide behind the company it keeps.
+
+    ``live%2Emd`` is a destination the doctor won't resolve, but the pointer
+    beside it is an ordinary dead one. Suppressing its verdict because a
+    neighbour is doubtful is the same blind spot this issue is about — a broken
+    link that reports clean — just reached by a different route.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-mixed" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "live.md").write_text("# real\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text("- [Odd](live%2Emd) · [Dead](gone.md)\n", encoding="utf-8")
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "mixed.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    assert by["broken_link"].severity == "error"
+    assert by["broken_link"].items == ["L1 [missing_target] gone.md"]
+    assert "live%2Emd" in by["ambiguous_index_line"].items[0]
+
+
+@pytest.mark.asyncio
 async def test_unresolvable_target_feeds_neither_conclusion(tmp_path, monkeypatch):
     """A destination we won't resolve is reported, and used for nothing else.
 
