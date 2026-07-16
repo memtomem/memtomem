@@ -180,16 +180,34 @@ async def _delete_block(
 @click.option("--agent", "agent_id", default=None)
 @click.option("--max-chars", type=click.IntRange(min=1), default=12_000)
 @click.option("--top-k", type=click.IntRange(min=1), default=10)
-def compose(query: str | None, agent_id: str | None, max_chars: int, top_k: int) -> None:
+@click.option(
+    "--no-rerank",
+    "no_rerank",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip cross-encoder reranking for the retrieval leg (faster, lower "
+        "precision; otherwise follows server config)."
+    ),
+)
+def compose(
+    query: str | None, agent_id: str | None, max_chars: int, top_k: int, no_rerank: bool
+) -> None:
     """Emit a structured pinned-first context bundle as JSON."""
-    asyncio.run(_compose(query, agent_id, max_chars, top_k))
+    asyncio.run(_compose(query, agent_id, max_chars, top_k, rerank=False if no_rerank else None))
 
 
-async def _compose(query: str | None, agent_id: str | None, max_chars: int, top_k: int) -> None:
+async def _compose(
+    query: str | None,
+    agent_id: str | None,
+    max_chars: int,
+    top_k: int,
+    rerank: bool | None = None,
+) -> None:
     from memtomem.pinned import ContextAssembler
 
     async with _store_context() as (comp, store):
         bundle = await ContextAssembler(store, comp.search_pipeline).compose(
-            query, agent_id=agent_id, max_chars=max_chars, top_k=top_k
+            query, agent_id=agent_id, max_chars=max_chars, top_k=top_k, rerank=rerank
         )
         click.echo(json.dumps(bundle.as_dict(), ensure_ascii=False))

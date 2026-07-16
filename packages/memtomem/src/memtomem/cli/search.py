@@ -57,6 +57,16 @@ from memtomem.server.tools.search import (
         "(namespace-grouped, relevance-tiered truncation)."
     ),
 )
+@click.option(
+    "--no-rerank",
+    "no_rerank",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip cross-encoder reranking for this query (faster, lower "
+        "precision; otherwise follows server config)."
+    ),
+)
 def search(
     query: str,
     top_k: int,
@@ -66,10 +76,23 @@ def search(
     scope: str | None,
     as_of: str | None,
     fmt: str,
+    no_rerank: bool,
 ) -> None:
     """Search the knowledge base."""
     try:
-        asyncio.run(_search(query, top_k, source_filter, tag_filter, namespace, scope, as_of, fmt))
+        asyncio.run(
+            _search(
+                query,
+                top_k,
+                source_filter,
+                tag_filter,
+                namespace,
+                scope,
+                as_of,
+                fmt,
+                rerank=False if no_rerank else None,
+            )
+        )
     except click.ClickException:
         raise
     except Exception as e:
@@ -85,6 +108,7 @@ async def _search(
     scope: str | None,
     as_of: str | None,
     fmt: str,
+    rerank: bool | None = None,
 ) -> None:
     from memtomem.chunking.markdown import _parse_validity_bound
     from memtomem.cli._bootstrap import cli_components
@@ -109,6 +133,7 @@ async def _search(
             as_of_unix=as_of_unix,
             scope=scope,
             project_context_root=project_context_root,
+            rerank=rerank,
         )
 
     if not results and fmt in ("table", "plain"):

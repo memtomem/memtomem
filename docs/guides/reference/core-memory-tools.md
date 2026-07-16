@@ -194,6 +194,7 @@ Combines keyword matching (exact words) with meaning-based search (similar conce
 | `context_window` | Expand each result with ±N adjacent chunks (`0` = disabled) | `1` |
 | `output_format` | `"compact"` (default), `"verbose"`, or `"structured"` (JSON with `hints` field) | `"structured"` |
 | `scope` | Memory tier filter: one value, comma list, or glob; omitted uses user plus current-project tiers | `"user,project_local"`, `"project_*"` |
+| `rerank` | Per-call rerank control: `false` skips the cross-encoder rerank stage (fast path for latency-bounded callers); omitted/`true` follows server config — `true` cannot enable reranking the server has disabled | `false` |
 
 ```
 mem_search(query="caching strategy", tag_filter="redis,cache", namespace="work")
@@ -204,12 +205,13 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > **Result count with filters**: `mem_search` returns *up to* `top_k` results.
 > Increase `top_k` when one call needs more results. When reranking is enabled,
 > the candidate pool is automatically computed from `rerank.oversample`,
-> `rerank.min_pool`, and `rerank.max_pool`; `rerank_pool` is not a
-> `mem_search` argument. Post-rank filters can still reduce the final count.
+> `rerank.min_pool`, and `rerank.max_pool`; passing `rerank=false` skips
+> reranking for the call and collapses that pool to `top_k`. Post-rank filters
+> can still reduce the final count.
 
 > **source_filter tip**: Use substrings like `"docs/adr"` or `".py"` for filtering. Glob patterns (`*`, `?`) are matched against the **full absolute path** via `fnmatch`, so `"*.py"` won't work as expected — use `".py"` instead.
 
-> **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. In `output_format="structured"` those hints are emitted as a `hints` array instead.
+> **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. In `output_format="structured"` those hints are emitted as a `hints` array instead.
 
 ### Tuning search weights
 

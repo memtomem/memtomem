@@ -106,9 +106,23 @@ async def mem_context_compose(
     top_k: int = 10,
     namespace: str | list[str] | None = None,
     context_window: int | None = None,
+    rerank: bool | None = None,
     ctx: CtxType = None,
 ) -> str:
-    """Compose Pinned Context first, then fill the remaining budget by retrieval."""
+    """Compose Pinned Context first, then fill the remaining budget by retrieval.
+
+    Args:
+        query: Retrieval query for the remaining budget (omit for pinned-only)
+        agent_id: Restrict pinned blocks to this agent
+        max_chars: Total character budget for the bundle (default 12,000)
+        top_k: Number of retrieval results to consider (default 10)
+        namespace: Namespace scope for retrieval
+        context_window: Expand each retrieved hit with ±N adjacent chunks
+        rerank: Per-call rerank control for the retrieval leg. ``false`` = skip
+            the cross-encoder rerank stage — the fast path for latency-bounded
+            callers. Omitted/``true`` = follow server config (``rerank.enabled``);
+            ``true`` cannot enable reranking when the server has it disabled.
+    """
     app, store = await _store(ctx)
     bundle = await ContextAssembler(store, app.search_pipeline).compose(
         query,
@@ -117,5 +131,6 @@ async def mem_context_compose(
         top_k=top_k,
         namespace=namespace,
         context_window=context_window,
+        rerank=rerank,
     )
     return json.dumps(bundle.as_dict())

@@ -265,6 +265,10 @@ class RetrievalStats:
     # explicit namespace — surfaces as a hint in mem_search's output so
     # users know their archived memories still exist.
     hidden_system_ns: int = 0
+    # Whether Stage 3b cross-encoder reranking actually ran for this call —
+    # the per-call effective decision (#1766), not the live server config,
+    # so hint builders stay accurate across concurrent hot reloads.
+    rerank_applied: bool = False
 
 
 if TYPE_CHECKING:
@@ -316,6 +320,16 @@ class SearchPipeline:
         # LLM query expansion cache (cleared on invalidate_cache)
         self._expansion_cache: dict[str, str] = {}
 
+    @property
+    def rerank_active(self) -> bool:
+        """True when a reranker instance is wired and configured (server-side on).
+
+        Hot reload keeps the pair consistent: it sets ``_rerank_config`` to
+        ``None`` alongside dropping the reranker when ``rerank.enabled`` is
+        turned off (``web/hot_reload.py``).
+        """
+        return self._reranker is not None and self._rerank_config is not None
+
     def _cache_key(
         self,
         query: str,
@@ -329,13 +343,27 @@ class SearchPipeline:
         metadata_filter: SearchMetadataFilter | None = None,
         exclude_source_roots: tuple[Path, ...] = (),
         effective_rrf_weights: list[float] | tuple[float, ...] | None = None,
+        apply_rerank: bool | None = None,
+        rerank_cfg: RerankConfig | None = None,
     ) -> str:
         import hashlib
 
         ctx_win = self._resolve_context_window(context_window)
-        if self._reranker is not None and self._rerank_config is not None:
-            rcfg = self._rerank_config
-            rerank_signal = f"on:{rcfg.oversample}:{rcfg.min_pool}:{rcfg.max_pool}"
+        # ``apply_rerank`` is the per-call effective decision and
+        # ``rerank_cfg`` the config snapshot taken alongside it (#1766) —
+        # ``search()`` passes both so the key never re-reads attributes a
+        # concurrent hot reload may have swapped. Direct callers omitting
+        # them fall back to the live server state. A bypassed call
+        # (rerank=False) is byte-identical to a server-off call with the
+        # same args, so both deliberately share the "off" slot.
+        if apply_rerank is None:
+            apply_rerank = self.rerank_active
+        if rerank_cfg is None:
+            rerank_cfg = self._rerank_config
+        if apply_rerank and rerank_cfg is not None:
+            rerank_signal = (
+                f"on:{rerank_cfg.oversample}:{rerank_cfg.min_pool}:{rerank_cfg.max_pool}"
+            )
         else:
             rerank_signal = "off"
         # ADR-0011: scope + project_context_root MUST participate in the cache
@@ -726,7 +754,12 @@ class SearchPipeline:
         created_from: datetime | None = None,
         created_before: datetime | None = None,
         exclude_source_roots: tuple[Path, ...] | None = None,
+        rerank: bool | None = None,
     ) -> tuple[list[SearchResult], RetrievalStats]:
+        # ``rerank`` (#1766): None = follow server config; False = skip the
+        # Stage 3b cross-encoder and collapse the candidate pool to top_k
+        # (per-call fast path for latency-bounded callers); True = follow
+        # config — it cannot force-enable when no reranker is wired.
         # #750: tag/source-only branch — no keyword to rank by, so the
         # filter takes over as the primary selector. We enumerate via
         # ``recall_chunks`` and skip BM25/dense/expansion/rescue/rerank
@@ -771,6 +804,14 @@ class SearchPipeline:
         top_k = self._config.default_top_k if top_k is None else top_k
         effective_weights = rrf_weights or self._config.rrf_weights
 
+        # Snapshot the reranker pair once: hot reload swaps (and closes) these
+        # attributes while a search may be awaiting, so every rerank-dependent
+        # site below (cache key, pool widening, Stage 3b) must read the same
+        # consistent pair rather than re-reading ``self._*`` mid-flight.
+        reranker = self._reranker
+        rerank_cfg = self._rerank_config
+        apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
+
         # Check TTL cache for identical queries
         import time
 
@@ -792,6 +833,8 @@ class SearchPipeline:
             metadata_filter=metadata_filter,
             exclude_source_roots=normalized_exclusion_roots,
             effective_rrf_weights=effective_weights,
+            apply_rerank=apply_rerank,
+            rerank_cfg=rerank_cfg,
         )
         version_at_start = self._cache_version
         ttl_snapshot = self._cache_ttl
@@ -923,6 +966,7 @@ class SearchPipeline:
             bm25_error=bm25_error,
             dense_error=dense_error,
             hidden_system_ns=hidden_system_ns,
+            rerank_applied=apply_rerank,
         )
 
         # Stage 1 enrichment (RFC P1 Phase C): session-summary rescue.
@@ -970,13 +1014,13 @@ class SearchPipeline:
         # cross-encoder can rescue items RRF ranked just outside top_k.
         # pool = clamp(oversample * top_k, [min_pool, max_pool]) — scales
         # with the request and bounded by cost controls. Collapses to
-        # top_k when reranking is disabled so single-retriever passthrough
-        # size is unchanged.
-        if self._reranker is not None and self._rerank_config is not None:
-            rcfg = self._rerank_config
+        # top_k when reranking is disabled or bypassed per-call
+        # (rerank=False, #1766) so single-retriever passthrough size is
+        # unchanged — the widening exists only to feed the reranker.
+        if apply_rerank and rerank_cfg is not None:
             rerank_pool = max(
-                rcfg.min_pool,
-                min(rcfg.max_pool, int(rcfg.oversample * top_k)),
+                rerank_cfg.min_pool,
+                min(rerank_cfg.max_pool, int(rerank_cfg.oversample * top_k)),
             )
         else:
             rerank_pool = top_k
@@ -1038,10 +1082,11 @@ class SearchPipeline:
             fused = []
         stats.fused_total = len(fused)
 
-        # Stage 3b: Cross-encoder reranking
-        if self._reranker is not None and fused:
+        # Stage 3b: Cross-encoder reranking (skipped when bypassed per-call
+        # via rerank=False, #1766)
+        if apply_rerank and reranker is not None and fused:
             try:
-                fused = await self._reranker.rerank(query, fused, top_k=top_k)
+                fused = await reranker.rerank(query, fused, top_k=top_k)
             except Exception as exc:
                 logger.warning("Reranking failed, using original order: %s", exc)
                 # Fallback must still honor the caller's response size —
