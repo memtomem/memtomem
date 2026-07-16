@@ -48,11 +48,14 @@ class FastEmbedReranker:
         """
         # A closed instance must not resurrect: re-downloading/re-initializing
         # the released ONNX model here is silent expensive work on an
-        # instance nobody owns (#1778).
+        # instance nobody owns (#1778). Cached reads go through a local
+        # snapshot so a concurrent close() nulling ``_model`` between the
+        # check and the return cannot hand the caller ``None``.
         if self._closed:
             raise RuntimeError("FastEmbedReranker is closed")
-        if self._model is not None:
-            return self._model
+        model = self._model
+        if model is not None:
+            return model
         with self._load_lock:
             # Re-check under the lock: a warmup/readiness thread that passed
             # the guard above can lose the race to a concurrent close() on
@@ -60,8 +63,9 @@ class FastEmbedReranker:
             # the closed instance (#1778).
             if self._closed:
                 raise RuntimeError("FastEmbedReranker is closed")
-            if self._model is not None:
-                return self._model
+            model = self._model
+            if model is not None:
+                return model
             try:
                 from fastembed.rerank.cross_encoder import (  # type: ignore[import-untyped]
                     TextCrossEncoder,
@@ -81,9 +85,7 @@ class FastEmbedReranker:
             self._loading = True
             self._load_error = None
             try:
-                self._model = TextCrossEncoder(
-                    model_name=self._config.model, cache_dir=str(cache_dir)
-                )
+                model = TextCrossEncoder(model_name=self._config.model, cache_dir=str(cache_dir))
             except ValueError as exc:
                 supported = [m.get("model", "") for m in TextCrossEncoder.list_supported_models()]
                 self._load_error = str(exc)
@@ -101,7 +103,16 @@ class FastEmbedReranker:
                 raise
             finally:
                 self._loading = False
-            return self._model
+            # Publish-then-verify: close() does not take this lock, so it can
+            # land while the (seconds-long) construction above is in flight.
+            # Publishing first and re-checking makes every interleaving of
+            # close()'s (flag, _model=None) writes end with the closed
+            # instance holding no model (#1778).
+            self._model = model
+            if self._closed:
+                self._model = None
+                raise RuntimeError("FastEmbedReranker is closed")
+            return model
 
     def _rerank_sync(self, query: str, documents: list[str]) -> list[float]:
         """Run inference synchronously — called inside ``asyncio.to_thread``."""

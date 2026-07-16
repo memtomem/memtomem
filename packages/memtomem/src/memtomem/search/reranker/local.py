@@ -28,9 +28,13 @@ class LocalReranker:
     def _get_model(self):
         # A closed instance must not resurrect: reloading the released model
         # here is silent expensive work on an instance nobody owns (#1778).
+        # Cached reads go through a local snapshot so a concurrent close()
+        # nulling ``_model`` between the check and the return cannot hand
+        # the caller ``None``.
         if self._closed:
             raise RuntimeError("LocalReranker is closed")
-        if self._model is None:
+        model = self._model
+        if model is None:
             with self._load_lock:
                 # Re-check under the lock: a warmup/readiness thread that
                 # passed the guard above can lose the race to a concurrent
@@ -38,12 +42,22 @@ class LocalReranker:
                 # closed instance (#1778).
                 if self._closed:
                     raise RuntimeError("LocalReranker is closed")
-                if self._model is None:
+                model = self._model
+                if model is None:
                     from sentence_transformers import CrossEncoder
 
-                    self._model = CrossEncoder(self._config.model)
+                    model = CrossEncoder(self._config.model)
+                    # Publish-then-verify: close() does not take this lock,
+                    # so it can land while the construction above is in
+                    # flight. Publishing first and re-checking makes every
+                    # interleaving of close()'s (flag, _model=None) writes
+                    # end with the closed instance holding no model (#1778).
+                    self._model = model
+                    if self._closed:
+                        self._model = None
+                        raise RuntimeError("LocalReranker is closed")
                     logger.info("Loaded local reranker: %s", self._config.model)
-        return self._model
+        return model
 
     async def rerank(
         self, query: str, results: list[SearchResult], top_k: int

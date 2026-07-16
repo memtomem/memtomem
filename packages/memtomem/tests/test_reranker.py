@@ -151,6 +151,59 @@ class TestLocalReranker:
             reranker._get_model()
         assert reranker._model is None
 
+    @pytest.mark.asyncio
+    async def test_close_during_construction_does_not_publish_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """close() landing while the model constructor is in flight must not
+        leave the finished model published on the closed instance (#1780
+        codex review). The real async close() runs mid-construction, gated
+        by events. sentence_transformers is not a test dependency, so a
+        pausing stand-in module is injected."""
+        import asyncio
+        import sys
+        import threading
+        import types
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _PausingModel:
+            def __init__(self, model_name: str) -> None:
+                entered.set()
+                assert release.wait(5)
+
+        monkeypatch.setitem(
+            sys.modules,
+            "sentence_transformers",
+            types.SimpleNamespace(CrossEncoder=_PausingModel),
+        )
+
+        reranker = LocalReranker(RerankConfig(enabled=True, provider="local"))
+        errors: list[BaseException] = []
+
+        def load() -> None:
+            try:
+                reranker._get_model()
+            except RuntimeError as exc:
+                errors.append(exc)
+
+        loader = threading.Thread(target=load)
+        loader.start()
+        assert await asyncio.to_thread(entered.wait, 5)  # constructor in flight
+
+        await reranker.close()  # lands mid-construction
+
+        release.set()
+        await asyncio.to_thread(loader.join, 5)
+        assert not loader.is_alive()
+
+        assert reranker._model is None  # the finished model was not published
+        assert errors and "closed" in str(errors[0])
+
 
 class TestRerankerFactory:
     def test_disabled(self):
