@@ -539,6 +539,8 @@ so the pool scales with the caller's requested `top_k` while staying bounded by 
 
 `rerank.enabled`, `rerank.oversample`, `rerank.min_pool`, and `rerank.max_pool` are runtime-tunable via `mm config set` or the Web UI Settings panel — no restart required. `rerank.provider` / `rerank.model` / `rerank.api_key` are load-time only because the reranker instance is cached on startup.
 
+Latency-bounded callers can also skip reranking **per call** without touching server config: pass `rerank=false` to `mem_search` or `mem_context_compose` (MCP), or `--no-rerank` to `mm search` / `mm pinned compose` (CLI). The call then skips the cross-encoder stage and collapses the candidate pool to `top_k` — trading rerank precision for an un-reranked search that typically finishes in well under a second. Omitting the parameter (or passing `true`) follows the server config; `true` cannot enable reranking on a server that has it disabled.
+
 > **Deprecated:** earlier releases exposed `MEMTOMEM_RERANK__TOP_K` / `rerank.top_k` as an absolute candidate-pool size. The field still loads (legacy configs are migrated to `rerank.min_pool` with a `DeprecationWarning`) but is slated for removal in a future release. Use `rerank.oversample` + `rerank.min_pool` + `rerank.max_pool` instead.
 
 ### Provider-specific models

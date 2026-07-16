@@ -111,6 +111,7 @@ async def mem_search(
     verbose: bool = False,
     output_format: OutputFormat = "compact",
     scope: str | None = None,
+    rerank: bool | None = None,
     ctx: CtxType = None,
 ) -> str:
     """Search across indexed memory files using hybrid BM25 + semantic search.
@@ -137,12 +138,18 @@ async def mem_search(
             searches return ``user`` + the current project's project tiers; out-of-project
             searches return ``user`` only. Pass ``project_shared`` from outside any
             project context for a cross-project search.
+        rerank: Per-call rerank control. ``false`` = skip the cross-encoder rerank
+            stage for this call — the fast path for latency-bounded callers
+            (typically <100ms vs several seconds when reranking); also skips the
+            candidate-pool oversample that exists only to feed the reranker.
+            Omitted/``true`` = follow server config (``rerank.enabled``); ``true``
+            cannot enable reranking when the server has it disabled.
 
     Result count may fall below ``top_k`` when filters exclude candidates.
     Increase ``top_k`` for a wider per-call request. When reranking is enabled,
     the candidate pool is automatically derived from ``rerank.oversample``,
-    ``rerank.min_pool``, and ``rerank.max_pool``; there is no per-call
-    ``rerank_pool`` argument.
+    ``rerank.min_pool``, and ``rerank.max_pool``; passing ``rerank=false`` skips
+    reranking for the call and collapses that pool to ``top_k``.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -186,12 +193,21 @@ async def mem_search(
         as_of_unix=as_of_unix,
         scope=scope,
         project_context_root=project_context_root,
+        rerank=rerank,
     )
 
     # Build trust-UX hints shared across formats: archive filter count and a
     # one-shot embedding mismatch notice. Emitted for users who did NOT pin a
     # namespace (otherwise the archive filter never engaged).
     hints: list[str] = []
+    # stats.rerank_applied is the per-call effective decision, not the live
+    # config — accurate even when a hot reload flips rerank.enabled while
+    # this call is in flight.
+    if rerank is True and not stats.rerank_applied:
+        hints.append(
+            "rerank=true requested but server reranking is disabled "
+            "(rerank.enabled=false); results are un-reranked."
+        )
     if effective_ns is None and stats.hidden_system_ns > 0:
         hints.append(
             f"{stats.hidden_system_ns} result(s) hidden in system namespaces "

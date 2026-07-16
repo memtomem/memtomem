@@ -254,6 +254,7 @@ class ContextAssembler:
         top_k: int = 10,
         namespace: str | list[str] | None = None,
         context_window: int | None = None,
+        rerank: bool | None = None,
     ) -> ContextBundle:
         pinned: list[PinnedBlock] = []
         omitted: list[str] = []
@@ -275,6 +276,7 @@ class ContextAssembler:
                 context_window=context_window,
                 project_context_root=self.store.project_root,
                 exclude_source_roots=self.store.search_exclusion_roots(),
+                rerank=rerank,
             )
             # Preserve the schema-2 matched-hit budget before spending any
             # remaining capacity on schema-3 context windows.  This keeps

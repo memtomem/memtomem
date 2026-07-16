@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Added
+
+- **Per-call rerank bypass** (#1766) — `mem_search` and `mem_context_compose`
+  accept `rerank=false` (CLI: `mm search --no-rerank`, `mm pinned compose
+  --no-rerank`) to skip the cross-encoder rerank stage and its candidate-pool
+  oversample for a single call, letting latency-bounded callers trade rerank
+  precision for a fast un-reranked search without changing server config.
+  Omitted/`true` follows `rerank.enabled`; `true` cannot force-enable
+  reranking on a server that has it disabled.
+
 ## [0.3.11] — 2026-07-14
 
 ### Added

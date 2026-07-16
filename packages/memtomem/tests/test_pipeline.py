@@ -622,6 +622,145 @@ class TestRerankCandidatePool:
         assert FIELD_CONSTRAINTS["rerank.enabled"]["type"] is bool
 
 
+class TestPerCallRerankBypass:
+    """#1766: ``search(rerank=False)`` must skip Stage 3b AND collapse the
+    candidate-pool oversample to ``top_k``; ``None`` follows server config;
+    ``True`` cannot force-enable and must not error when no reranker is wired.
+    """
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _make_pipeline = TestRerankCandidatePool._make_pipeline
+    _probe_reranker = staticmethod(TestRerankCandidatePool._probe_reranker)
+
+    @pytest.mark.asyncio
+    async def test_rerank_false_skips_reranker_and_collapses_pool(self):
+        """With rerank bypassed, the chunk RRF ranked at 15 must NOT be
+        rescued (proves the pool collapsed, not just that Stage 3b was
+        skipped) and the probe must never run."""
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        relevant = fused_input[14]
+
+        received_pool_size: list[int] = []
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=self._probe_reranker(received_pool_size, relevant.chunk.id),
+            rerank_config=RerankConfig(enabled=True),
+        )
+
+        results, stats = await pipeline.search("anything", top_k=10, rerank=False)
+
+        assert received_pool_size == []
+        assert len(results) == 10
+        assert relevant.chunk.id not in {r.chunk.id for r in results}
+        assert stats.rerank_applied is False
+
+    @pytest.mark.asyncio
+    async def test_rerank_none_follows_server_config(self):
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        relevant = fused_input[14]
+
+        received_pool_size: list[int] = []
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=self._probe_reranker(received_pool_size, relevant.chunk.id),
+            rerank_config=RerankConfig(enabled=True),
+        )
+
+        results, stats = await pipeline.search("anything", top_k=10, rerank=None)
+
+        assert received_pool_size == [20]
+        assert results[0].chunk.id == relevant.chunk.id
+        assert stats.rerank_applied is True
+
+    @pytest.mark.asyncio
+    async def test_rerank_true_is_noop_when_server_disabled(self):
+        """Explicit True with no reranker wired follows config (documented
+        no-op) instead of erroring."""
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+
+        pipeline = self._make_pipeline(fused_input, reranker=None, rerank_config=None)
+        results, stats = await pipeline.search("anything", top_k=10, rerank=True)
+        assert len(results) == 10
+        assert stats.rerank_applied is False
+
+    def test_cache_key_bypass_shares_the_off_slot(self):
+        """A bypassed call is byte-identical to a server-off call with the
+        same args, so both deliberately share the "off" cache slot — while
+        rerank-on and bypassed calls must never alias."""
+        from memtomem.config import RerankConfig
+
+        received: list[int] = []
+        enabled = self._make_pipeline(
+            [],
+            reranker=self._probe_reranker(received),
+            rerank_config=RerankConfig(enabled=True),
+        )
+        disabled = self._make_pipeline([], reranker=None, rerank_config=None)
+
+        args = ("query", 10, None, None, None)
+        assert enabled._cache_key(*args, apply_rerank=False) == disabled._cache_key(*args)
+        assert enabled._cache_key(*args, apply_rerank=True) != enabled._cache_key(
+            *args, apply_rerank=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_bypassed_call_does_not_alias_reranked_cache_entry(self):
+        """A reranked result cached within the TTL must not be served to a
+        rerank=False call with otherwise-identical args."""
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        relevant = fused_input[14]
+
+        received_pool_size: list[int] = []
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=self._probe_reranker(received_pool_size, relevant.chunk.id),
+            rerank_config=RerankConfig(enabled=True),
+        )
+
+        reranked, _ = await pipeline.search("anything", top_k=10)
+        assert reranked[0].chunk.id == relevant.chunk.id
+
+        bypassed, _ = await pipeline.search("anything", top_k=10, rerank=False)
+
+        assert received_pool_size == [20]  # probe ran once, for the first call only
+        assert bypassed[0].chunk.id != relevant.chunk.id
+
+    @pytest.mark.asyncio
+    async def test_hot_reload_mid_search_uses_consistent_snapshot(self):
+        """Hot reload swaps ``_reranker``/``_rerank_config`` while a search is
+        awaiting; the decision snapshot taken at entry must keep all
+        rerank-dependent sites consistent (no exception, reranked result)."""
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        relevant = fused_input[14]
+
+        received_pool_size: list[int] = []
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=self._probe_reranker(received_pool_size, relevant.chunk.id),
+            rerank_config=RerankConfig(enabled=True),
+        )
+
+        async def flip_then_return(*args, **kwargs):
+            pipeline._reranker = None
+            pipeline._rerank_config = None
+            return fused_input
+
+        pipeline._storage.bm25_search.side_effect = flip_then_return
+
+        results, _ = await pipeline.search("anything", top_k=10)
+
+        assert received_pool_size == [20]
+        assert results[0].chunk.id == relevant.chunk.id
+
+
 class TestFilterOnlySearch:
     """Empty-query path (#750): tag/source filter is the primary selector.
 
