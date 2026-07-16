@@ -358,7 +358,10 @@ class SearchPipeline:
         # Direct assignment installs a fresh generation and abandons the old
         # one WITHOUT closing it (the assigner owns its lifecycle) — exactly
         # the pre-#1777 contract. Hot-reload paths must use swap_reranker.
-        self._rerank_entry = _RerankerEntry(value, self._rerank_entry.config)
+        # getattr: the plain-attribute contract allowed assignment on a bare
+        # instance (tests build one via __new__ to probe _cache_key).
+        prev = getattr(self, "_rerank_entry", None)
+        self._rerank_entry = _RerankerEntry(value, prev.config if prev else None)
 
     @property
     def _rerank_config(self) -> RerankConfig | None:
@@ -367,7 +370,8 @@ class SearchPipeline:
     @_rerank_config.setter
     def _rerank_config(self, value: RerankConfig | None) -> None:
         # See the _reranker setter: fresh generation, old one abandoned unclosed.
-        self._rerank_entry = _RerankerEntry(self._rerank_entry.reranker, value)
+        prev = getattr(self, "_rerank_entry", None)
+        self._rerank_entry = _RerankerEntry(prev.reranker if prev else None, value)
 
     @contextlib.contextmanager
     def _lease_reranker(self) -> Iterator[tuple[object | None, RerankConfig | None]]:
