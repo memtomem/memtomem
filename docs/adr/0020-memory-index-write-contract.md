@@ -4,7 +4,8 @@
 strict-grammar + all-links-dead, per-line skip replaces the blanket refusal;
 §5 gains two apply-time clauses; span-based entry removal rejected — #1757.
 Amended 2026-07-16: an unreadable index is a per-file `error`, never `clean` —
-#1769)
+#1769; §1 gains a fourth unreadable shape — a wikilink-shaped label the raw
+source cannot attribute is contested, never demoted on a guess — #1774)
 **Date:** 2026-06-01 (amended 2026-07-15, 2026-07-16)
 **Context:** `mm memory doctor` (shipped in #1170, documented in #1171,
 `docs/guides/reference/organization-maintenance.md` §5) is **read-only by design**: it reports the
@@ -65,8 +66,8 @@ deletion **iff both** hold:
 
 - **Strict grammar — the parse must account for the whole line.** The line is
   a single-line bullet (`-`/`*`) pointer entry as the CommonMark parser
-  (#1760) reads it: one or more markdown links plus inert prose. Three shapes
-  fail that test, and all three fail **closed** (the line is never eligible
+  (#1760) reads it: one or more markdown links plus inert prose. Four shapes
+  fail that test, and all four fail **closed** (the line is never eligible
   for deletion):
   - a list item that continues past its first line — deleting the line would
     strand the continuation as loose prose;
@@ -75,9 +76,15 @@ deletion **iff both** hold:
   - a target the doctor will not resolve on a guess — a destination that is
     not a plain relative path (it carries a `?` query, a `%` escape, a `:`
     scheme, or whitespace) may name a file other than its literal text does,
-    so its pointer is never *provably* dead.
+    so its pointer is never *provably* dead;
+  - a link whose wholly bracketed label the raw source cannot attribute — a
+    genuine `[[memo]](note)` wikilink and an escaped `[\[memo\]](file.md)`
+    pointer sharing a line decode to the same label, and the parse cannot say
+    which occurrence is the wikilink, so none is demoted on the guess: every
+    same-named label stays an entry, contested, and its line is never spliced
+    (#1774).
 
-  The last two are exactly the lines the doctor already reports as
+  The last three are exactly the lines the doctor already reports as
   `ambiguous_index_line` at `warn`: something on them could not be read, and
   a splice must not act on a doubt. (#1757's design sketch stated this
   ambiguity test as a scan for markdown-significant characters left outside
@@ -156,7 +163,7 @@ deliberately left to the human / agent:
 | Finding | Why `--fix` won't touch it |
 |---|---|
 | `broken_link` / `outside_root` | A link escaping the root may be a typo'd path *or* an intentional out-of-tree reference. Removing it could drop a real pointer — ambiguous intent. |
-| `ambiguous_index_line` | Something on the line could not be read (unresolved link syntax, or a target carrying URI machinery — §1's strict-grammar failures). Reported at `warn` for manual repair; a splice must not act on a doubt. *(Row added by the 2026-07-15 amendment, #1757.)* |
+| `ambiguous_index_line` | Something on the line could not be read (unresolved link syntax, a target carrying URI machinery, or a contested wikilink label — §1's strict-grammar failures). Reported at `warn` for manual repair; a splice must not act on a doubt. *(Row added by the 2026-07-15 amendment, #1757; contested labels added by the 2026-07-16 amendment, #1774.)* |
 | `budget` | Trimming an over-budget TOC means choosing *which entries to cut* — prose judgement, i.e. curation. |
 | `index_orphan` | *Adding* a missing pointer requires generating a title + hook and choosing insertion order. Generation, not deletion. |
 | `stale_source`, `convention_violation` | DB-side. Fixed by `mem_do(action="cleanup_orphans")` / `mm purge --matching-excluded`, not by editing the index file. |
