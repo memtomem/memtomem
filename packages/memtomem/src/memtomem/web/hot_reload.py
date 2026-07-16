@@ -49,6 +49,7 @@ from memtomem.config import (
     load_config_d,
     load_config_overrides,
 )
+from memtomem.search.reranker.base import close_reranker_safely
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -406,20 +407,13 @@ def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:
 async def _close_reranker_safely(reranker: object) -> None:
     """Close a reranker, tolerating sync/async/missing close + errors.
 
-    Shared between the disk hot-reload path (this module) and the PATCH
-    handler in ``web/routes/system.py`` so a flaky teardown never turns
-    a clean "rejected"/"accepted" reply into a 500.
+    Kept as a module name because the PATCH handler in
+    ``web/routes/system.py`` calls it for never-installed rerankers; the
+    canonical implementation lives in ``search.reranker.base`` so the
+    pipeline's deferred-close path (#1777) can share it without importing
+    from ``web/``.
     """
-    close = getattr(reranker, "close", None)
-    if not callable(close):
-        return
-
-    try:
-        result = close()
-        if inspect.isawaitable(result):
-            await result
-    except Exception:
-        logger.exception("Error while closing replaced reranker")
+    await close_reranker_safely(reranker)
 
 
 def _schedule_fts_rebuild(
