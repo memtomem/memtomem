@@ -122,6 +122,12 @@ _SAMPLE_LIMIT = 8
 
 # ── Pure: index-file parsing ────────────────────────────────────────
 
+# The closed set of doubts an entry can carry (see :class:`IndexEntry`). The
+# value is both the discriminant and the exact bracket tag the
+# ``ambiguous_index_line`` item prints; a Literal keeps a typo'd third doubt
+# from slipping in as a plain string.
+UnreadableReason = Literal["unreadable target", "contested wikilink label"]
+
 
 @dataclass(frozen=True)
 class IndexEntry:
@@ -149,7 +155,7 @@ class IndexEntry:
     title: str
     target: str
     raw: str
-    unreadable_reason: str | None = None
+    unreadable_reason: UnreadableReason | None = None
 
     @property
     def unreadable(self) -> bool:
@@ -301,8 +307,8 @@ _CENSUS_SAFE_TYPES = frozenset(
         "em_close",
         "strong_open",
         "strong_close",
-        "s_open",
-        "s_close",
+        "s_open",  # strikethrough — GFM only, never emitted by the "commonmark"
+        "s_close",  # preset; listed so enabling it later can't widen the census
     }
 )
 
