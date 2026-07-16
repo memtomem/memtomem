@@ -367,6 +367,215 @@ class TestWikilinks:
         assert not skipped
 
 
+class TestContestedWikilinkLabels:
+    """#1774: a demotion must be paid for by the raw source, occurrence for occurrence.
+
+    The label route's old confirmation was inline-wide, so a genuine
+    `[[memo]](note)` vouched for an escaped `[\\[memo\\]](README.md)` beside it:
+    both demoted, the live pointer gone from the entries, and its line — now
+    reading as all-dead — offered whole to `--fix --apply`. The census that
+    replaced it counts raw `[[name]](` occurrences per label name, subtracts
+    the ones a delimiter-isolated claim source accounts for (a code span, an
+    html attribute, a link destination or title), and refuses to demote when
+    anything is left unattributable — an unknown token type, or bracket
+    characters stranded in decoded text (the trace a needle split across token
+    boundaries always leaves). The refusal is `contested wikilink label`:
+    every same-named label stays an entry, warned as `ambiguous_index_line`,
+    excluded from link-checking and from `--fix`.
+    """
+
+    CONTESTED = [
+        (
+            r"- [[memo]](note) and [\[memo\]](README.md)",
+            [("note", True), ("README.md", True)],
+            [],
+            "genuine + backslash-escaped same name",
+        ),
+        (
+            "- [[memo]](note) and [&#91;memo&#93;](README.md)",
+            [("note", True), ("README.md", True)],
+            [],
+            "genuine + entity-encoded same name",
+        ),
+        (
+            r"- [\[memo\]](README.md) and `[[memo]](x)`",
+            [("README.md", True)],
+            [],
+            "a code span supplies the raw needle",
+        ),
+        (
+            r"- [\[memo\]](README.md) and [[memo]](not yet)",
+            [("README.md", True)],
+            ["memo"],
+            "a spaced parenthetical supplies the needle from text",
+        ),
+        (
+            r"- [\[memo\]](README.md) and ![[memo]](x.png)",
+            [("README.md", True)],
+            [],
+            "an image consumes the needle in syntax the census can't read",
+        ),
+        (
+            r"- [\[memo\]](README.md) and [`[[memo]](x)`](dest.md)",
+            [("README.md", True), ("dest.md", False)],
+            [],
+            "a code span inside another link's label",
+        ),
+        (
+            r'- [\[memo\]](README.md) and <span data-x="[[memo]](x)">',
+            [("README.md", True)],
+            [],
+            "an html attribute carries the needle verbatim",
+        ),
+        (
+            r"- [\[memo\]](README.md) and [other](foo[[memo]](bar))",
+            [("README.md", True), ("foo[[memo]](bar)", False)],
+            [],
+            "a link destination carries the needle",
+        ),
+        (
+            r'- [\[memo\]](README.md) and [other](dest.md "[[memo]](x)")',
+            [("README.md", True), ("dest.md", False)],
+            [],
+            "a link title carries the needle",
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        "line,entries,wikilinks,why", CONTESTED, ids=[w for *_, w in CONTESTED]
+    )
+    def test_unattributable_needle_never_demotes(self, line, entries, wikilinks, why):
+        # Every row writes one raw `[[memo]](` the completed links can't be
+        # proven to own. The escaped pointer must stay an entry — flagged, so
+        # the *line* is protected — and the label route must collect no
+        # wikilink on the guess.
+        parsed = parse_memory_index(line + "\n")
+        assert [(e.target, e.unreadable) for e in parsed.entries] == entries, why
+        assert [t for _, t in parsed.wikilinks] == wikilinks, why
+        assert parsed.ambiguous_lines == frozenset({1}), why
+
+    def test_reference_link_cannot_smuggle_the_needle(self):
+        # A reference link consumes the needle's middle, splitting it across
+        # tokens so no single claim source sees it — but the split strands
+        # `[other][` and `](x)` in text, and stranded brackets are exactly
+        # what bracket accounting refuses to demote over.
+        text = r"- [\[memo\]](README.md) and [other][[memo]](x)" + "\n\n[memo]: missing.md\n"
+        parsed = parse_memory_index(text)
+        assert [(e.target, e.unreadable) for e in parsed.entries] == [
+            ("README.md", True),
+            ("missing.md", False),
+        ]
+        assert parsed.wikilinks == ()
+        assert 1 in parsed.ambiguous_lines
+
+    STILL_DEMOTED = [
+        ("- [[memo]](a) · [[memo]](b)", [], ["memo", "memo"], "same name twice, both real"),
+        (
+            "- [[memo]](note) and `[[memo]](x)`",
+            [],
+            ["memo"],
+            "a code-span claim cancels its own needle exactly",
+        ),
+        (
+            r"- [[memo|alias]](x) and [\[memo\]](README.md)",
+            [("README.md", False)],
+            ["memo"],
+            "an alias groups apart from the bare name",
+        ),
+        (
+            "- [[memo]](note) and [[memo]](PR#42 merged)",
+            [],
+            ["memo", "memo"],
+            "a spaced same-name parenthetical claims its own needle",
+        ),
+        (
+            "- [[b]](note) then [[a]]",
+            [],
+            ["b", "a"],
+            "a bare wikilink is scrubbed, not stranded — and order is source order",
+        ),
+        (
+            "- [Topic](topic.md) — built → [[memo-b]](PR#42 머지)·[[memo-c]](미커밋)",
+            [("topic.md", False)],
+            ["memo-b", "memo-c"],
+            "the real index line that must stay quiet (#1761's own shape)",
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        "line,entries,wikilinks,why", STILL_DEMOTED, ids=[w for *_, w in STILL_DEMOTED]
+    )
+    def test_attributable_labels_still_demote(self, line, entries, wikilinks, why):
+        # The census must not buy safety with blanket refusal: when the raw
+        # occurrences cover every same-named label and nothing else could
+        # have written them, the demotion is exactly #1761's.
+        parsed = parse_memory_index(line + "\n")
+        assert [(e.target, e.unreadable) for e in parsed.entries] == entries, why
+        assert [t for _, t in parsed.wikilinks] == wikilinks, why
+        assert parsed.ambiguous_lines == frozenset(), why
+
+    FAIL_CLOSED_NOISE = [
+        (
+            "- [[memo]](note) and ![icon](x.png)",
+            [("note", True)],
+            [],
+            "an unrelated opaque token contests a genuine wikilink",
+        ),
+        (
+            "- [[memo]](note) and [Title [draft]](live.md)",
+            [("note", True), ("live.md", False)],
+            [],
+            "brackets in another link's label contest the census",
+        ),
+        (
+            "- [[memo]](note) — [WIP]",
+            [("note", True)],
+            [],
+            "bracketed prose is a strand the scrub can't account for",
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        "line,entries,wikilinks,why", FAIL_CLOSED_NOISE, ids=[w for *_, w in FAIL_CLOSED_NOISE]
+    )
+    def test_fail_closed_noise_is_deliberate(self, line, entries, wikilinks, why):
+        # These lines demoted cleanly before #1774 and now warn instead: the
+        # bracket-bearing company means the raw needle is no longer provably
+        # the link's own. Pinned as accepted — warn-only, and any future
+        # "noise reduction" that flips one of these back to a demotion is
+        # reopening the deletion path, not polishing.
+        parsed = parse_memory_index(line + "\n")
+        assert [(e.target, e.unreadable) for e in parsed.entries] == entries, why
+        assert [t for _, t in parsed.wikilinks] == wikilinks, why
+        assert parsed.ambiguous_lines == frozenset({1}), why
+
+    def test_the_reason_names_the_doubt(self):
+        # Two different doubts share the unreadable flag; the report must not
+        # call a perfectly readable path "unreadable target".
+        line = r"- [[memo]](note) and [\[memo\]](README.md) · [Q](x.md?v=1)"
+        parsed = parse_memory_index(line + "\n")
+        assert [e.unreadable_reason for e in parsed.entries] == [
+            "contested wikilink label",
+            "contested wikilink label",
+            "unreadable target",
+        ]
+
+    def test_contested_line_is_skipped_not_eligible(self, tmp_path):
+        # The issue's repro, at the unit seam `--fix` runs on: the contested
+        # pointer is no candidate, and its line — dead sibling and all — is
+        # skipped with a reported reason, not spliced.
+        (tmp_path / "README.md").write_text("x", encoding="utf-8")
+        text = r"- [[memo]](note) and [\[memo\]](README.md) and [Dead](missing.md)" + "\n"
+        parsed = parse_memory_index(text)
+        candidates = _missing_target_entries(text, root=tmp_path, parsed=parsed)
+        assert [e.target for e in candidates] == ["missing.md"]
+        eligible, skipped = _partition_candidates(candidates, parsed=parsed, root=tmp_path)
+        assert eligible == []
+        assert [(line_no, why) for line_no, _, why in skipped] == [
+            (1, "holds a link this command will not resolve on a guess")
+        ]
+
+
 class TestListMarkers:
     """The parser reads every list marker CommonMark does — `--fix` still doesn't.
 
@@ -941,6 +1150,45 @@ async def test_dead_link_is_reported_beside_an_unreadable_one(tmp_path, monkeypa
     assert by["broken_link"].severity == "error"
     assert by["broken_link"].items == ["L1 [missing_target] gone.md"]
     assert "live%2Emd" in by["ambiguous_index_line"].items[0]
+
+
+@pytest.mark.asyncio
+async def test_contested_label_is_warn_not_broken_nor_dangling(tmp_path, monkeypatch):
+    """#1774 at the report surface: the census's refusal is a warn that names itself.
+
+    The contested pair is excluded from ``broken_link`` (neither ``note`` nor
+    ``live.md`` is judged), excluded from ``dangling_wikilink`` (no name was
+    attributed), and surfaced as ``ambiguous_index_line`` items that say
+    *contested wikilink label* — not *unreadable target*, which would send the
+    reader off to fix a perfectly readable path. The dead sibling still
+    reports: doubt about the pair says nothing about the pointer beside it.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-contested" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "live.md").write_text("# real\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text(
+        r"- [[memo]](note) and [\[memo\]](live.md) and [Dead](gone.md)" + "\n",
+        encoding="utf-8",
+    )
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "contested.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    by = _findings_by_check([r for r in reports if r.path != "(unowned)"][0])
+
+    assert by["broken_link"].items == ["L1 [missing_target] gone.md"]
+    assert by["ambiguous_index_line"].severity == "warn"
+    assert by["ambiguous_index_line"].items == [
+        "L1 [contested wikilink label] note",
+        "L1 [contested wikilink label] live.md",
+    ]
+    assert by["ambiguous_index_line"].summary.startswith("1 line(s)")  # lines, not items
+    assert "dangling_wikilink" not in by
 
 
 def test_dangling_wikilink_is_info_never_error(tmp_path, monkeypatch):
@@ -2789,6 +3037,36 @@ class TestStrictGrammarRule:
 
         assert result.exit_code == 1
         assert "resolved to no link" in result.output
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+    def test_contested_wikilink_label_line_survives_apply(self, tmp_path, monkeypatch):
+        """#1774's promised harm, pinned through the real write path.
+
+        A genuine wikilink and an escaped same-name pointer share the line with
+        a dead sibling; the old inline-wide confirmation demoted the live
+        ``live.md`` pointer, read the line as all-dead, and ``--apply`` deleted
+        it whole. The census contests the pair instead, so the line — live
+        pointer and all — must survive byte-for-byte, in the dry run and under
+        ``--apply``, with the skip reported for a human.
+        """
+        body = (
+            "- [Ok](exists.md) — keep\n"
+            + r"- [[memo]](note) and [\[memo\]](live.md) and [Dead](gone.md)"
+            + "\n"
+        )
+        config, mem_dir = _fix_env(tmp_path, monkeypatch, body=body)
+        (mem_dir / "live.md").write_text("x", encoding="utf-8")  # provably live
+        self._patch_loader(monkeypatch, config)
+        before = (mem_dir / "MEMORY.md").read_bytes()
+
+        dry = CliRunner().invoke(cli, ["memory", "doctor", "--fix"])
+        assert "will not resolve on a guess" in dry.output
+        assert "Would remove" not in dry.output  # no advertised removal either
+        assert (mem_dir / "MEMORY.md").read_bytes() == before
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--fix", "--apply"])
+        assert result.exit_code == 1
+        assert "will not resolve on a guess" in result.output
         assert (mem_dir / "MEMORY.md").read_bytes() == before
 
     def test_escaped_target_line_survives_because_it_is_read_right(self, tmp_path, monkeypatch):

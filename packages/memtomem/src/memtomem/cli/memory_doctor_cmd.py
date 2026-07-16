@@ -43,8 +43,10 @@ Checks (per configured ``memory_dir``):
   not list. Distinct from ``db_coverage``: "not in the TOC" ≠ "not indexed".
 * **ambiguous_index_line** — a pointer line naming something we won't resolve
   on a guess: a link target that isn't a plain relative path (it carries a
-  query, a percent-escape, a scheme or a space), or link syntax that resolved to
-  no link at all. Left unclassified rather than guessed at, so the line is
+  query, a percent-escape, a scheme or a space), link syntax that resolved to
+  no link at all, or a wholly-bracketed link label the raw source cannot
+  attribute (a same-named genuine wikilink and escaped pointer sharing a
+  line, #1774). Left unclassified rather than guessed at, so the line is
   reported for a human instead of being link-checked, counted as listed, or
   offered to ``--fix``.
 * **budget** — the index file exceeds its byte / line / per-line-char budget
@@ -120,6 +122,12 @@ _SAMPLE_LIMIT = 8
 
 # ── Pure: index-file parsing ────────────────────────────────────────
 
+# The closed set of doubts an entry can carry (see :class:`IndexEntry`). The
+# value is both the discriminant and the exact bracket tag the
+# ``ambiguous_index_line`` item prints; a Literal keeps a typo'd third doubt
+# from slipping in as a plain string.
+UnreadableReason = Literal["unreadable target", "contested wikilink label"]
+
 
 @dataclass(frozen=True)
 class IndexEntry:
@@ -130,18 +138,29 @@ class IndexEntry:
     on a bullet line becomes an entry, so entries may share a ``line_no`` and
     ``raw`` (which is always the whole line, never the link's slice of it).
 
-    ``unreadable`` marks a target this command won't resolve on a guess (see
-    :func:`_target_is_unreadable`). It is per *entry*, not per line: one odd
-    destination says nothing about the pointer next to it, and suppressing a
-    sibling's broken-link verdict on its neighbour's account would put back the
-    blind spot this all started with.
+    ``unreadable_reason`` marks a link this command won't resolve on a guess,
+    and names which doubt it is: an ``unreadable target`` (URI machinery that
+    may name a file other than its literal text does, see
+    :func:`_target_is_unreadable`) or a ``contested wikilink label`` (a
+    wholly-bracketed label the raw source cannot attribute, see
+    :func:`_settle_wikilink_labels`). The reason is the exact bracket tag the
+    ``ambiguous_index_line`` item prints, so the report says what it knows
+    instead of calling a perfectly readable path "unreadable". It is per
+    *entry*, not per line: one odd link says nothing about the pointer next to
+    it, and suppressing a sibling's broken-link verdict on its neighbour's
+    account would put back the blind spot this all started with.
     """
 
     line_no: int  # 1-based
     title: str
     target: str
     raw: str
-    unreadable: bool = False
+    unreadable_reason: UnreadableReason | None = None
+
+    @property
+    def unreadable(self) -> bool:
+        """Whether this entry is left for a human — see ``unreadable_reason``."""
+        return self.unreadable_reason is not None
 
 
 @dataclass(frozen=True)
@@ -227,8 +246,8 @@ _PLAIN_RELATIVE_TARGET_RE = re.compile(r"^[^\s?%:]+$")
 # title, so it is only ever a hint: ``[\[memo\]](gone.md)`` and
 # ``[&#91;memo&#93;](gone.md)`` render the same ``[memo]`` from source that never
 # wrote a wikilink, and demoting those would lose an ordinary pointer. Every
-# match is therefore confirmed against the raw source (:func:`_wikilink_in`)
-# before it is treated as a wikilink.
+# match is therefore settled against the raw source — per label name, not per
+# inline (:func:`_settle_wikilink_labels`) — before it is treated as a wikilink.
 _WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
 
 # A ``[[target]]`` / ``[[target|alias]]`` wikilink in literal text. Mirrors
@@ -241,28 +260,18 @@ _WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
 
 
-def _wikilink_in(raw: str, inner: str, *, followed_by_paren: bool = False) -> bool:
+def _wikilink_in(raw: str, inner: str) -> bool:
     """Whether *raw* (an inline's **source**) literally writes ``[[inner]]``.
 
-    Both routes to a wikilink read text markdown-it has already decoded, and
-    decoding is exactly where a wikilink can be conjured from source that wrote
-    none: ``\\[\\[future]]`` and ``&#91;[future]]`` both *render* ``[[future]]``,
-    and a ``[\\[memo\\]](gone.md)`` label renders ``[memo]`` — the same shape a
-    real ``[[memo]](note)`` leaves behind. Escaping brackets is how an author
-    says "not a wikilink"; honouring that keeps an ordinary pointer checkable
-    (it stays an entry, and a ``--fix`` candidate when dead) and keeps escaped
-    prose out of ``dangling_wikilink``.
+    The text route to a wikilink reads text markdown-it has already decoded,
+    and decoding is exactly where a wikilink can be conjured from source that
+    wrote none: ``\\[\\[future]]`` and ``&#91;[future]]`` both *render*
+    ``[[future]]``. Escaping brackets is how an author says "not a wikilink";
+    honouring that keeps escaped prose out of ``dangling_wikilink``.
 
     The check only ever *subtracts*: the token walk has already established the
-    match came from text or a link label rather than a code span, so this can
-    never re-admit quoted syntax.
-
-    *followed_by_paren* tightens it for the label route, where a demotion has
-    consequences — the pointer would stop being link-checked and stop being a
-    ``--fix`` candidate. That route only fires on a real CommonMark link, so
-    its source necessarily reads ``[[inner]](destination)``; requiring the
-    ``(`` keeps a code span elsewhere on the line (``\\[\\[memo\\]](gone.md) and
-    `[[memo]]` ``) from vouching for an escaped label that isn't one.
+    match came from literal text rather than a code span, so this can never
+    re-admit quoted syntax.
 
     Membership is inline-wide, so two residual shapes stay imprecise, both
     accepted: escaped prose beside a code span quoting *the same name* raises
@@ -270,10 +279,132 @@ def _wikilink_in(raw: str, inner: str, *, followed_by_paren: bool = False) -> bo
     (``[[memo&amp;x]]``) is decoded in the text but not in *raw*, so it is not
     collected. Both are contrived, neither is an error, and closing them means
     hand-rolling CommonMark's code-span and escape rules over the raw source —
-    the parsing-by-pattern this module exists to avoid.
+    the parsing-by-pattern this module exists to avoid. The label route, where
+    a wrong call costs a pointer its link-check and ``--fix`` its safety
+    proof, does not use this membership test at all — it gets the stricter
+    per-name census in :func:`_settle_wikilink_labels`.
     """
-    needle = f"[[{inner}]]("
-    return needle in raw if followed_by_paren else needle[:-1] in raw
+    return f"[[{inner}]]" in raw
+
+
+# The inline child token types the wikilink census knows how to account for.
+# A *whitelist*, deliberately: the enumerate-the-bad-shapes direction was tried
+# over successive review rounds and kept missing the next shape (an ``image``
+# carries the needle in its own syntax, ``html_inline`` in an attribute, a
+# reference link splits it across its neighbours). Anything not listed here —
+# including whatever a future markdown-it adds — makes the inline opaque to the
+# census, which fails *closed* (contested → warn), never open (demote).
+_CENSUS_SAFE_TYPES = frozenset(
+    {
+        "text",
+        "code_inline",
+        "html_inline",
+        "link_open",
+        "link_close",
+        "softbreak",
+        "hardbreak",
+        "em_open",
+        "em_close",
+        "strong_open",
+        "strong_close",
+        "s_open",  # strikethrough — GFM only, never emitted by the "commonmark"
+        "s_close",  # preset; listed so enabling it later can't widen the census
+    }
+)
+
+
+def _settle_wikilink_labels(
+    raw: str,
+    events: list[tuple[str, str, str]],
+    claim_sources: list[str],
+    opaque: bool,
+) -> tuple[list[tuple[str, str, bool]], list[str]]:
+    """Decide, per label name, which wikilink-shaped links are wikilinks.
+
+    A completed link whose title is wholly bracketed (``[memo]``) *may* have
+    been a ``[[memo]](note)`` wikilink — or an escaped ``[\\[memo\\]](file.md)``
+    pointer that decodes to the same title. Demoting the wrong one costs a live
+    pointer its link-check and, worse, its voice in ``--fix``'s all-links-dead
+    test: the line it sits on can then be deleted with the live pointer still
+    on it (#1774). So a demotion is never granted on the label alone; it must
+    be paid for by the raw source, occurrence for occurrence.
+
+    Per label name, three verdicts (fail closed on ambiguity):
+
+    * **No raw ``[[name]](`` at all** → every same-named label was escaped or
+      encoded; all stay pointers.
+    * **Every raw occurrence is attributable** — the inline is not opaque, and
+      the raw occurrences minus those a *claim source* accounts for still
+      cover every same-named label → all are wikilinks; demote all.
+    * **Anything else** → the parse cannot say which occurrence is which.
+      Every same-named label-shaped link stays an entry, flagged
+      ``contested`` — surfaced as ``ambiguous_index_line`` (warn), neither
+      link-checked nor counted as listed, and its line ineligible for
+      ``--fix``. A contested *label occurrence* collects no wikilink either —
+      what the census declined to attribute must not raise
+      ``dangling_wikilink`` on a guess. (A text-route ``[[name]]`` the walk
+      confirmed independently is not a guess, and passes through even beside
+      a contested label.)
+
+    *Claim sources* are the places a raw needle can sit *whole* without being
+    a wikilink: a code span's content, an ``html_inline``'s verbatim text, a
+    link destination or title attribute (each held between raw delimiters —
+    backticks, ``<…>``, the link's own ``](…)`` — that a needle cannot span),
+    and out-of-link text itself (a spaced ``[[memo]](PR#42 merged)`` that
+    stayed prose carries its needle inside one token: no other token's raw
+    starts with ``(``, so a text-resident ``[[name]]`` can only complete its
+    needle in that same text). Decoding can make a claim with no raw
+    counterpart; that only over-subtracts, which lands in contested — the
+    error every path here is allowed to make.
+
+    *opaque* is the census's account of everything else (built during the
+    token walk): a child token type outside :data:`_CENSUS_SAFE_TYPES`, or
+    bracket characters nothing accounts for — left in out-of-link text after
+    every whole ``[[…]]`` is scrubbed, or anywhere in the label of a link
+    that is *not* wholly bracketed. A needle split across token boundaries (a
+    reference link consuming its middle) necessarily strands bracket
+    *fragments* — ``[other][``, ``](x)`` — that no scrub matches, so
+    unaccounted brackets mean unattributable needles. Labels get the stricter
+    unscrubbed test because a label's own ``](`` can complete a needle a
+    scrub would hide (``[[[a]]](x)``); the one bracket use the census itself
+    accounts for — a label-shaped link's own decoded ``[inner]`` — is exempt.
+    The cost of this rigor is warn-only noise on contrived lines (a genuine
+    wikilink beside an image, or beside bracketed prose, goes contested); the
+    alternative was hand-rolling CommonMark's escape rules over the raw
+    source, which this module exists to avoid.
+    """
+    label_counts = Counter(
+        title[1:-1]
+        for kind, title, _ in events
+        if kind == "link" and _WIKILINK_LABEL_RE.match(title)
+    )
+    verdicts: dict[str, str] = {}
+    for inner, label_count in label_counts.items():
+        needle = f"[[{inner}]]("
+        raw_count = raw.count(needle)
+        claimed = sum(source.count(needle) for source in claim_sources)
+        if raw_count == 0:
+            verdicts[inner] = "pointer"
+        elif not opaque and raw_count - claimed >= label_count:
+            verdicts[inner] = "wikilink"
+        else:
+            verdicts[inner] = "contested"
+
+    links: list[tuple[str, str, bool]] = []
+    wikilinks: list[str] = []
+    for kind, title, dest in events:
+        if kind == "wiki":
+            wikilinks.append(title)  # the name rides in the title slot
+            continue
+        inner = title[1:-1] if _WIKILINK_LABEL_RE.match(title) else None
+        if inner is not None and verdicts[inner] == "wikilink":
+            # CommonMark reports the label as ``[memo]``; settled against the
+            # source, it can only have come from ``[[memo]]`` — recover the
+            # target (dropping an ``|alias`` part, which never names the file).
+            wikilinks.append(inner.split("|", 1)[0])
+        else:
+            links.append((title, dest, inner is not None and verdicts[inner] == "contested"))
+    return links, wikilinks
 
 
 def _markdown_parser() -> MarkdownIt:
@@ -292,9 +423,10 @@ def _markdown_parser() -> MarkdownIt:
     return md
 
 
-def _read_inline(token: Token) -> tuple[list[tuple[str, str]], list[str], bool]:
-    """An inline token's ``(title, destination)`` links, its wikilink targets,
-    plus whether it also holds link syntax that resolved to no link at all.
+def _read_inline(token: Token) -> tuple[list[tuple[str, str, bool]], list[str], bool]:
+    """An inline token's ``(title, destination, contested)`` links, its
+    wikilink targets, plus whether it also holds link syntax that resolved to
+    no link at all.
 
     Reading an index means reading Markdown as Markdown. A destination can be
     escaped (``notes_\\(v2.md``), entity-encoded (``notes_&amp;v2.md``) or
@@ -305,7 +437,7 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], list[str], bool]:
     differences — tried over three review rounds, it kept missing the next one —
     so the parser resolves them instead.
 
-    The second return value catches what the first cannot say: an unclosed
+    The third return value catches what the first cannot say: an unclosed
     ``[B](b.md`` yields no link, and without it the line would read as ordinary
     prose. Only literal **text** counts toward it — a code span quoting link
     syntax is quoting, not pointing, and the parser hands those back as
@@ -316,50 +448,69 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], list[str], bool]:
 
     A ``[[wikilink]](note)`` is not read as a pointer — see
     :data:`_WIKILINK_LABEL_RE`. CommonMark has no wikilinks; memtomem does.
-    Wikilinks are instead returned as their own list: both the bare/text forms
-    (``[[memo]]``, ``[[memo|alias]]``) and the label recovered from that
-    dropped-link shape. Only literal text is scanned — a code span quoting
-    ``[[x]]`` is quoting, not linking — and every match is confirmed against
-    the inline's raw source, because the text the parser hands back is decoded
-    and a decoded ``[[x]]`` may have been escaped in the file
-    (:func:`_wikilink_in`).
+    Wikilinks are instead returned as their own list, in source order: both
+    the bare/text forms (``[[memo]]``, ``[[memo|alias]]``) and the label
+    recovered from that dropped-link shape. Only literal text is scanned — a
+    code span quoting ``[[x]]`` is quoting, not linking — and every match is
+    checked against the inline's raw source, because the text the parser hands
+    back is decoded and a decoded ``[[x]]`` may have been escaped in the file:
+    text-route matches by membership (:func:`_wikilink_in`), label-shaped
+    links by the per-name census (:func:`_settle_wikilink_labels`), whose
+    contested verdict this function passes through per link. The walk here
+    only gathers what the census needs — completed links and text-route hits
+    in source order, the claim sources, and the two opacity signals (a child
+    type outside :data:`_CENSUS_SAFE_TYPES`; brackets left in decoded text
+    outside a label-shaped label).
     """
     raw = token.content
-    links: list[tuple[str, str]] = []
-    wikilinks: list[str] = []
+    events: list[tuple[str, str, str]] = []
+    claim_sources: list[str] = []
+    opaque = False
     unresolved = False
     title_parts: list[str] = []
+    href = ""
     in_link = False
     for child in token.children or []:
+        if child.type not in _CENSUS_SAFE_TYPES:
+            opaque = True  # a shape the census can't account for (e.g. ``image``)
         if child.type == "link_open":
             in_link = True
             title_parts = []
-            links.append(("", child.attrGet("href") or ""))
+            href = str(child.attrGet("href") or "")
+            # Attributes never surface as child content, but their raw spans
+            # sit between the link's own delimiters — claimable, not spannable.
+            claim_sources.extend((href, str(child.attrGet("title") or "")))
         elif child.type == "link_close" and in_link:
-            if links:
-                title = "".join(title_parts).strip()
-                if _WIKILINK_LABEL_RE.match(title) and _wikilink_in(
-                    raw, title[1:-1], followed_by_paren=True
-                ):
-                    links.pop()  # a wikilink; the parenthetical after it is prose
-                    # CommonMark reports the label as ``[memo]``; confirmed
-                    # against the source, it can only have come from
-                    # ``[[memo]]`` — recover the target (dropping an ``|alias``
-                    # part, which never names the file).
-                    wikilinks.append(title[1:-1].split("|", 1)[0])
-                else:
-                    links[-1] = (title, links[-1][1])
+            title = "".join(title_parts).strip()
+            # markdown-it always pairs link_open/link_close, so recording the
+            # completed link at close (rather than a placeholder at open) is
+            # unobservable — and leaves nothing half-built to misread.
+            events.append(("link", title, href))
+            if not _WIKILINK_LABEL_RE.match(title) and ("[" in title or "]" in title):
+                opaque = True  # brackets in a label the census doesn't account for
             in_link = False
+        elif child.type in ("code_inline", "html_inline"):
+            claim_sources.append(child.content)
+            if in_link:
+                title_parts.append(child.content)
         elif in_link:
             title_parts.append(child.content)
         elif child.type == "text":
+            # A needle *resident* in the text is claimable as-is; only the
+            # brackets no whole ``[[…]]`` accounts for — the strands a needle
+            # split across token boundaries always leaves — force opacity.
+            claim_sources.append(child.content)
+            scrubbed = _WIKILINK_RE.sub("", child.content)
+            if "[" in scrubbed or "]" in scrubbed:
+                opaque = True  # stranded brackets: split or escaped syntax
             if _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
                 unresolved = True
-            wikilinks.extend(
-                m.group(1)
+            events.extend(
+                ("wiki", m.group(1), "")
                 for m in _WIKILINK_RE.finditer(child.content)
                 if _wikilink_in(raw, m.group(0)[2:-2])
             )
+    links, wikilinks = _settle_wikilink_labels(raw, events, claim_sources, opaque)
     return links, wikilinks, unresolved
 
 
@@ -482,9 +633,18 @@ def parse_memory_index(text: str) -> ParsedIndex:
                     title=title,
                     target=target.strip(),
                     raw=lines[line_no - 1],
-                    unreadable=_target_is_unreadable(target),
+                    # Target-shape doubt wins the wording when both hold: a
+                    # target we can't resolve is the stronger claim, and
+                    # either way the entry is left for a human.
+                    unreadable_reason=(
+                        "unreadable target"
+                        if _target_is_unreadable(target)
+                        else "contested wikilink label"
+                        if contested
+                        else None
+                    ),
                 )
-                for title, target in links
+                for title, target, contested in links
             )
 
     other = [(i, line) for i, line in enumerate(lines, start=1) if i not in pointer_lines]
@@ -938,10 +1098,12 @@ def _analyze_index_file(
     # would put back the very blind spot this parser exists to close.
     broken: list[str] = []
     ambiguous_items: list[str] = []
+    ambiguous_line_nos: set[int] = set()
     listed_norm: set[str] = set()
     for entry in parsed.entries:
         if entry.unreadable:
-            ambiguous_items.append(f"L{entry.line_no} [unreadable target] {entry.target}")
+            ambiguous_items.append(f"L{entry.line_no} [{entry.unreadable_reason}] {entry.target}")
+            ambiguous_line_nos.add(entry.line_no)
             continue
         cls = classify_link(entry.target, root=root, source_dir=root)
         if cls in ("missing_target", "outside_root"):
@@ -958,6 +1120,7 @@ def _analyze_index_file(
     raw_lines = text.splitlines()
     for line_no in sorted(parsed.unresolved_syntax_lines):
         ambiguous_items.append(f"L{line_no} [unreadable link syntax] {raw_lines[line_no - 1]}")
+        ambiguous_line_nos.add(line_no)
     ambiguous_items.sort(key=lambda item: int(item.split(None, 1)[0][1:]))
     if broken:
         report.findings.append(
@@ -974,11 +1137,14 @@ def _analyze_index_file(
                 check="ambiguous_index_line",
                 severity="warn",
                 summary=(
-                    f"{len(ambiguous_items)} line(s) in {index_file_name} name a target this "
+                    f"{len(ambiguous_line_nos)} line(s) in {index_file_name} name a target this "
                     "command will not resolve on a guess (it carries a query, percent-escape, "
-                    "scheme or space) or hold link syntax that resolved to no link — they are "
+                    "scheme or space), hold link syntax that resolved to no link, or carry a "
+                    "wikilink-shaped label the raw source cannot attribute — they are "
                     "neither link-checked nor counted as listed, and --fix will not touch them; "
-                    "rewrite the target as a plain relative filename"
+                    "rewrite the target as a plain relative filename, or rename the wholly "
+                    "bracketed label if the link is a pointer (un-escaping it makes it a "
+                    "wikilink instead)"
                 ),
                 items=ambiguous_items,
             )
@@ -1308,9 +1474,10 @@ def _line_skip_reason(line_no: int, *, parsed: ParsedIndex, root: Path) -> str |
       single-line ``-``/``*`` bullet of links plus inert prose. A line that is
       not that bullet, an item that runs past its first line (deleting it would
       strand the continuation as loose prose), link syntax that resolved to no
-      link (the line meant a pointer the grammar could not read), or a target
+      link (the line meant a pointer the grammar could not read), or a link
       this command will not resolve on a guess (URI machinery may name a file
-      other than its literal text does) — none is eligible.
+      other than its literal text does, or a wikilink-shaped label the raw
+      source cannot attribute) — none is eligible.
     * **All links dead.** Every link on the line must classify
       ``missing_target``. One live, out-of-root, or otherwise not-provably-dead
       sibling spares the whole line: splicing it would delete a pointer
@@ -1335,7 +1502,7 @@ def _line_skip_reason(line_no: int, *, parsed: ParsedIndex, root: Path) -> str |
     if line_no in parsed.unresolved_syntax_lines:
         return "also holds link syntax that resolved to no link"
     if any(e.unreadable for e in line_entries):
-        return "holds a target this command will not resolve on a guess"
+        return "holds a link this command will not resolve on a guess"
     if any(
         classify_link(e.target, root=root, source_dir=root) != "missing_target"
         for e in line_entries
