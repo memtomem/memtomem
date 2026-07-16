@@ -32,11 +32,13 @@ Checks (per configured ``memory_dir``):
 * **broken_link** — links in the index file that don't resolve:
   ``missing_target`` (file gone) or ``outside_root`` (escapes the memory
   root). ``url`` and ``anchor`` links are classified and *not* reported.
-* **dangling_wikilink** — a ``[[name]]`` on an index line with no ``name.md``
-  in the memory root (#1762). Informational, never an error: the doctor
-  cannot tell a forward reference (allowed by the agent memory convention)
-  from a stale link to a deleted memo. Wikilinks are never pointer entries,
-  so they don't feed ``broken_link``, ``index_orphan`` or ``--fix``.
+* **dangling_wikilink** — a ``[[name]]`` on an index line naming no
+  ``name.md`` inside the memory root, or one outside it (#1762). Each item
+  names its class (``missing_target`` / ``outside_root``). Informational,
+  never an error: the doctor cannot tell a forward reference (allowed by the
+  agent memory convention) from a stale link to a deleted memo. Wikilinks are
+  never pointer entries, so they don't feed ``broken_link``, ``index_orphan``
+  or ``--fix``.
 * **index_orphan** — files on disk that the index file (``MEMORY.md``) does
   not list. Distinct from ``db_coverage``: "not in the TOC" ≠ "not indexed".
 * **ambiguous_index_line** — a pointer line naming something we won't resolve
@@ -987,8 +989,15 @@ def _analyze_index_file(
     # a forward reference (blessed by the agent memory convention — a name
     # worth writing later) from a stale link left by a deleted memo, so this
     # never gates the exit code, and wikilinks stay out of entries / the
-    # listed set / ``--fix`` eligibility. Resolution is the importers'
-    # convention: ``[[name]]`` → ``name.md`` in the memory root.
+    # listed set / ``--fix`` eligibility.
+    #
+    # Resolution is this command's own rule, close to the importers'
+    # (``indexing/importers.py``: ``[[name]]`` → ``name.md``) but deliberately
+    # more lenient where they part: an author who writes the suffix means the
+    # file, so ``[[name.md]]`` resolves to ``name.md`` rather than the
+    # importers' ``name.md.md``. A target outside the root is reported too —
+    # it may well exist, so the item names its class rather than claiming the
+    # file is missing.
     dangling: list[str] = []
     for line_no, target in parsed.wikilinks:
         name = target.strip().split("#", 1)[0]  # drop an Obsidian ``#section``
@@ -1004,9 +1013,10 @@ def _analyze_index_file(
                 check="dangling_wikilink",
                 severity="info",
                 summary=(
-                    f"{len(dangling)} wikilink(s) in {index_file_name} with no memory file — "
-                    "a forward reference (fine: it marks a memory worth writing later) or a "
-                    "stale link to a deleted memo"
+                    f"{len(dangling)} wikilink(s) in {index_file_name} naming no memory file "
+                    "inside the memory root (missing_target), or one outside it "
+                    "(outside_root) — a forward reference (fine: it marks a memory worth "
+                    "writing later), a stale link to a deleted memo, or a name to correct"
                 ),
                 items=dangling,
             )

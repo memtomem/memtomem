@@ -992,6 +992,46 @@ def test_dangling_wikilink_is_info_never_error(tmp_path, monkeypatch):
     assert "wikilink" in result.output
 
 
+def test_wikilink_resolution_edges(tmp_path, monkeypatch):
+    """The doctor's resolution rule, where it parts from the importers'.
+
+    Documented as "close to the import convention, deliberately more lenient",
+    which only means something if the divergence is pinned: the importer
+    appends `.md` unconditionally (`[[name.md]]` → `name.md.md`), while an
+    author who writes the suffix means the file. An `outside_root` name is
+    reported with its own class rather than as a missing file — it may well
+    exist where it points.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-edges" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "suffixed.md").write_text("# s\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text(
+        "- [S](suffixed.md) — [[suffixed.md]] resolves, not suffixed.md.md\n"
+        "- [S2](suffixed.md) — [[../../../etc/passwd]] escapes the root\n",
+        encoding="utf-8",
+    )
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "edges.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    report = [
+        r for r in _gather_reports(config=config, inspect_dirs=[mem_dir]) if r.path != "(unowned)"
+    ][0]
+    by = _findings_by_check(report)
+
+    # ``[[suffixed.md]]`` names a real file → no finding for L1; only the
+    # escape is reported, and it says *why* rather than "no memory file".
+    assert by["dangling_wikilink"].items == [
+        "L2 [outside_root] [[../../../etc/passwd]] → ../../../etc/passwd.md"
+    ]
+    assert by["dangling_wikilink"].severity == "info"
+    assert not any(f.severity == "error" for f in report.findings)
+
+
 @pytest.mark.asyncio
 async def test_unread_pointer_is_reported_beside_a_good_link(tmp_path, monkeypatch):
     """An unclosed pointer must not hide behind a readable one on its line.
