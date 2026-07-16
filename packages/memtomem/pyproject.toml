@@ -21,7 +21,7 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mcp[cli]>=1.27.2",
+    "mcp[cli]>=1.28.1",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "sqlite-vec>=0.1.6",
