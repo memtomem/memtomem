@@ -277,3 +277,51 @@ def test_delete_is_exact_and_confirmed_for_shared(pinned_store):
     pinned_store.set("one", "content")
     assert pinned_store.delete("one") is True
     assert pinned_store.delete("one") is False
+
+
+# ---------------------------------------------------------------------------
+# Empty ``indexing.memory_dirs`` — the "index nothing" state (#1768)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def empty_dirs_config():
+    config = Mem2MemConfig()
+    config.indexing.memory_dirs = []
+    return config
+
+
+def test_empty_memory_dirs_store_constructs_and_reads_gracefully(empty_dirs_config):
+    store = PinnedContextStore(empty_dirs_config)
+    assert store.user_base is None
+    assert store.list() == []
+    assert store.get("anything") is None
+    assert store.search_exclusion_roots() == ()
+
+
+def test_empty_memory_dirs_user_writes_raise_config_error(empty_dirs_config):
+    from memtomem.errors import ConfigError
+
+    store = PinnedContextStore(empty_dirs_config)
+    with pytest.raises(ConfigError, match="indexing.memory_dirs"):
+        store.set("block", "content")
+    with pytest.raises(ConfigError, match="indexing.memory_dirs"):
+        store.delete("block")
+
+
+def test_empty_memory_dirs_project_tier_still_works(empty_dirs_config, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    store = PinnedContextStore(empty_dirs_config, project_root=project)
+    store.set("team", "team rule", scope="project_shared", confirm_project_shared=True)
+    assert [block.block_id for block in store.list()] == ["team"]
+    assert store.search_exclusion_roots() == (
+        store._base("project_shared").resolve(),
+        store._base("project_local").resolve(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_compose_with_empty_memory_dirs_returns_bundle_without_pinned(empty_dirs_config):
+    bundle = await ContextAssembler(PinnedContextStore(empty_dirs_config)).compose(max_chars=100)
+    assert bundle.pinned == ()

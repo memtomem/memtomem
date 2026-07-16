@@ -84,8 +84,8 @@ def _hint_for(e: Exception) -> str | None:
         )
     if isinstance(e, ConfigError):
         return (
-            "configuration failed to load — inspect it with `mm config show`, check "
-            "~/.memtomem/config.json permissions, or re-run `mm init`."
+            "check the active configuration with `mm config show`, then edit "
+            "~/.memtomem/config.json or re-run `mm init`."
         )
     if isinstance(e, StorageError):
         return "storage backend error — run `mm status` to check the DB path and health."

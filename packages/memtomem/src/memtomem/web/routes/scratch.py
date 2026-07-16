@@ -105,7 +105,11 @@ async def promote_scratch(
                 status_code=403, detail="Path is outside configured memory directories"
             )
     else:
-        base = bases[0]
+        from memtomem.memory_scope import require_user_base
+
+        # ConfigError → the app-level 409 handler; the "index nothing"
+        # state has no default promotion destination (#1768).
+        base = require_user_base(config.indexing.memory_dirs)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         target = base / f"{date_str}.md"
 

@@ -124,6 +124,9 @@ async def _set_block(
     confirm_project_shared: bool,
     force_unsafe: bool,
 ) -> None:
+    from memtomem.cli._errors import raise_cli_error
+    from memtomem.errors import ConfigError
+
     async with _store_context() as (_, store):
         try:
             block = store.set(
@@ -138,6 +141,8 @@ async def _set_block(
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
+        except ConfigError as exc:
+            raise_cli_error(exc)
         click.echo(block.source_path)
 
 
@@ -162,6 +167,9 @@ async def _delete_block(
     agent_id: str | None,
     confirm_project_shared: bool,
 ) -> None:
+    from memtomem.cli._errors import raise_cli_error
+    from memtomem.errors import ConfigError
+
     async with _store_context() as (_, store):
         try:
             deleted = store.delete(
@@ -172,6 +180,8 @@ async def _delete_block(
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
+        except ConfigError as exc:
+            raise_cli_error(exc)
         click.echo("Deleted." if deleted else "Not found.")
 
 

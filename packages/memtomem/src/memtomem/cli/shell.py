@@ -208,7 +208,9 @@ async def _cmd_add(comp, args: list[str]) -> None:
         return
 
     if not comp.config.indexing.memory_dirs:
-        click.secho("No memory directories configured. Run 'mm init' first.", fg="red")
+        from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR
+
+        click.secho(EMPTY_MEMORY_DIRS_ERROR, fg="red")
         return
     base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -288,7 +290,9 @@ async def _cmd_index(comp, args: list[str]) -> None:
         path = Path(args[0]).expanduser().resolve()
     else:
         if not comp.config.indexing.memory_dirs:
-            click.secho("No memory directories configured. Run 'mm init' first.", fg="red")
+            from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR
+
+            click.secho(EMPTY_MEMORY_DIRS_ERROR, fg="red")
             return
         path = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
 
