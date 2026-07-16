@@ -48,6 +48,12 @@ def test_strip_llm_response_mid_line_backticks():
     assert strip_llm_response(text) == text
 
 
+def test_strip_llm_response_mid_line_triple_backticks():
+    # Even a full ``` marker is left alone unless it opens the text.
+    text = "prefix ``` suffix"
+    assert strip_llm_response(text) == text
+
+
 def test_strip_llm_response_surrounding_whitespace():
     text = '  \n```json\n{"a": 1}\n```\n  '
     assert strip_llm_response(text) == '{"a": 1}'
