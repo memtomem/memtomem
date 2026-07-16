@@ -205,15 +205,23 @@ def app():
     embedder.embed_texts = AsyncMock(return_value=[[0.1] * 768])
     embedder.embed_query = AsyncMock(return_value=[0.1] * 768)
 
-    # -- search pipeline mock --
-    search_pipeline = AsyncMock()
+    # -- search pipeline: real instance, mocked entry points --
+    # Real SearchPipeline (not AsyncMock) because the PATCH handler drives
+    # the real swap_reranker/lease machinery (#1777); search and
+    # invalidate_cache stay mocks so route tests keep their call assertions.
+    from memtomem.config import SearchConfig as _SearchConfig
+    from memtomem.search.pipeline import SearchPipeline as _SearchPipeline
+
+    search_pipeline = _SearchPipeline(
+        storage=AsyncMock(),
+        embedder=AsyncMock(),
+        config=_SearchConfig(),
+    )
     test_chunk = _make_test_chunk()
     result = SearchResult(chunk=test_chunk, score=0.95, rank=1, source="fused")
     rstats = RetrievalStats(bm25_candidates=10, dense_candidates=10, fused_total=1, final_total=1)
-    search_pipeline.search = AsyncMock(return_value=([result], rstats))
-    search_pipeline.invalidate_cache = MagicMock()
-    search_pipeline._reranker = None
-    search_pipeline._rerank_config = None
+    search_pipeline.search = AsyncMock(return_value=([result], rstats))  # type: ignore[method-assign]
+    search_pipeline.invalidate_cache = MagicMock()  # type: ignore[method-assign]
 
     # -- index engine mock --
     index_engine = AsyncMock()
@@ -664,6 +672,42 @@ class TestConfig:
         assert app.state.search_pipeline._reranker is None
         assert app.state.search_pipeline._rerank_config is None
         assert reranker.closed is True
+
+    async def test_patch_rerank_disable_defers_close_while_search_in_flight(
+        self, app, client: AsyncClient
+    ):
+        """#1777, PATCH-path parity: disabling rerank while a search leases
+        the reranker must publish the disable immediately but defer the
+        close to the lease release. The lease is held exactly the way a real
+        ``search()`` holds it (pinned in test_pipeline.py — the fixture's
+        ``search`` is a mock, so the lease is taken directly here)."""
+
+        class StubReranker:
+            def __init__(self):
+                self.close_calls = 0
+
+            async def close(self):
+                self.close_calls += 1
+
+        pipeline = app.state.search_pipeline
+        reranker = StubReranker()
+        app.state.config.rerank.enabled = True
+        pipeline._reranker = reranker
+        pipeline._rerank_config = app.state.config.rerank
+
+        with pipeline._lease_reranker() as (leased, _):
+            assert leased is reranker
+            with patch("memtomem.web.routes.system.save_config_overrides"):
+                resp = await client.patch("/api/config", json={"rerank": {"enabled": False}})
+
+            assert resp.status_code == 200
+            assert resp.json()["rejected"] == []
+            assert pipeline._reranker is None  # disable published immediately
+            assert reranker.close_calls == 0  # leased: close deferred
+
+        if pipeline._bg_tasks:
+            await asyncio.gather(*pipeline._bg_tasks)
+        assert reranker.close_calls == 1
 
     async def test_patch_rerank_rejects_invalid_pool_bounds(self, app, client: AsyncClient):
         with patch("memtomem.web.routes.system.save_config_overrides"):

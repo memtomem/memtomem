@@ -380,12 +380,13 @@ async def _sync_reranker(
             await _close_reranker_safely(new_reranker)
         return
 
-    old_reranker = getattr(search_pipeline, "_reranker", None)
-    search_pipeline._reranker = new_reranker
-    search_pipeline._rerank_config = new_cfg.rerank if new_cfg.rerank.enabled else None
-
-    if old_reranker is not None and old_reranker is not new_reranker:
-        await _close_reranker_safely(old_reranker)
+    # swap_reranker owns the publish-first + deferred-close contract (#1777):
+    # the new generation is installed before any await, and the old instance
+    # is closed only once no in-flight search leases it. The PATCH handler in
+    # web/routes/system.py delegates to the same method.
+    await search_pipeline.swap_reranker(
+        new_reranker, new_cfg.rerank if new_cfg.rerank.enabled else None
+    )
 
 
 def _rerank_snapshot(cfg: Any) -> tuple[object, ...] | None:

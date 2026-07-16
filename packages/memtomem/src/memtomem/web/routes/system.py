@@ -677,26 +677,18 @@ async def patch_config(
 
                 # Runtime fanout — applied only after a successful persist (or
                 # immediately when persist=False). Reranker sync is inline here
-                # (not via ``apply_runtime_config_changes``) because the route
-                # runs in an async context and can ``await`` validation + close;
-                # the helper's sync path uses fire-and-forget close. Keep the two
-                # paths in lockstep when changing either. ``rerank_changed`` (not
-                # the reranker's presence) is the gate so a disable — where
-                # pending_reranker is None — still closes the old one and clears
-                # the pipeline.
+                # (not via ``apply_runtime_config_changes``) because this route
+                # validates + eagerly loads the reranker itself before
+                # persisting. ``rerank_changed`` (not the reranker's presence)
+                # is the gate so a disable — where pending_reranker is None —
+                # still retires the old one and clears the pipeline.
+                # ``swap_reranker`` owns the publish-first + deferred-close
+                # contract (#1777), shared with ``_sync_reranker`` in
+                # hot_reload.py: the new generation lands before any await, and
+                # the old instance is closed only once no in-flight search
+                # leases it.
                 if rerank_changed:
-                    # Publish the validated new reranker FIRST (a non-awaiting
-                    # pointer swap), THEN close the old one — mirroring
-                    # ``_sync_reranker`` in hot_reload.py. If the old reranker's
-                    # close() hangs into the request timeout, the live pipeline
-                    # is already correctly on the new reranker and config is
-                    # persisted; only the old instance leaks (logged), rather
-                    # than leaving the pipeline stale with the new one dropped.
-                    old_reranker = getattr(search_pipeline, "_reranker", None)
-                    search_pipeline._reranker = pending_reranker
-                    search_pipeline._rerank_config = pending_rerank_config
-                    if old_reranker is not None and old_reranker is not pending_reranker:
-                        await _hot_reload._close_reranker_safely(old_reranker)
+                    await search_pipeline.swap_reranker(pending_reranker, pending_rerank_config)
 
                 if tokenizer_changed:
                     from memtomem.storage.fts_tokenizer import set_tokenizer
