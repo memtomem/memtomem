@@ -260,14 +260,111 @@ class TestWikilinks:
 
     def test_bare_wikilink_is_not_an_entry(self):
         # No parenthetical, so CommonMark sees no link at all. Pinned so that
-        # "wikilinks are invisible to the doctor" is a state on record rather
-        # than an accident: they do point at memory files, and whether to
-        # link-check them is a separate decision (resolution rules, severity —
-        # the memory convention blesses a `[[name]]` with no file yet — and
-        # whether to read memo bodies at all, which the doctor doesn't today).
+        # "wikilinks are never pointer entries" stays a state on record: #1762
+        # decided they are link-checked separately (`dangling_wikilink`,
+        # info-severity, index lines only) precisely because they are not
+        # entries — never `broken_link`, never counted as listed, never a
+        # `--fix` candidate.
         parsed = parse_memory_index("- [[memo-a]] and [[memo-b]] — related\n")
         assert parsed.entries == ()
         assert parsed.unresolved_syntax_lines == frozenset()
+        assert [t for _, t in parsed.wikilinks] == ["memo-a", "memo-b"]
+
+    COLLECTED = [
+        ("- [Topic](topic.md) — supersedes [[deleted-memo]]", ["deleted-memo"], "beside a pointer"),
+        ("- [[memo|alias]] — aliased", ["memo"], "an alias never names the file"),
+        ("- [[memo]](미커밋) — label shape", ["memo"], "recovered from the dropped-link shape"),
+        ("- [Real](real.md) — built → [[memo-b]](PR#42 merged)", ["memo-b"], "spaced-note shape"),
+        ("prose [[not-a-bullet]]", [], "non-list lines are not index surface"),
+    ]
+
+    @pytest.mark.parametrize("line,targets,why", COLLECTED, ids=[w for *_, w in COLLECTED])
+    def test_wikilinks_are_collected(self, line, targets, why):
+        # Every shape #1761 taught the parser to *not* read as a pointer is
+        # still a wikilink at a memory file, and #1762 wants it collected —
+        # from the same token stream, so quoting stays quoting (below).
+        assert [t for _, t in parse_memory_index(line + "\n").wikilinks] == targets, why
+
+    def test_quoted_wikilink_is_not_collected(self):
+        # A code span quotes link syntax; an indented block is an *example* of
+        # an index line. Neither points at a memory file.
+        assert parse_memory_index("- `[[quoted]]` in a code span\n").wikilinks == ()
+        assert parse_memory_index("Example:\n\n    - [x](y.md) [[fenced]]\n").wikilinks == ()
+
+    ESCAPED_LABELS = [
+        (r"- [\[memo\]](gone.md) — escaped", "backslash-escaped brackets"),
+        ("- [&#91;memo&#93;](gone.md) — entity", "entity-encoded brackets"),
+        (r"- [\[memo\]](gone.md) and `[[memo]]`", "escaped label beside a same-name code span"),
+    ]
+
+    @pytest.mark.parametrize("line,why", ESCAPED_LABELS, ids=[w for _, w in ESCAPED_LABELS])
+    def test_escaped_bracket_label_is_a_pointer_not_a_wikilink(self, line, why):
+        # The label is read from the *rendered* title, which decoding can forge:
+        # both of these render `[memo]` from source that wrote no wikilink. Left
+        # unconfirmed they'd demote an ordinary pointer — its dead target then
+        # reported by nothing and offered to `--fix` by nothing. Escaping the
+        # brackets is how an author says "not a wikilink"; the raw source is the
+        # only place that survives.
+        parsed = parse_memory_index(line + "\n")
+        assert [e.target for e in parsed.entries] == ["gone.md"], why
+        assert parsed.wikilinks == (), why
+
+    ESCAPED_PROSE = [
+        (r"- \[\[future]] — escaped prose", "backslash-escaped"),
+        ("- &#91;[future]] — entity-encoded", "entity-encoded"),
+    ]
+
+    @pytest.mark.parametrize("line,why", ESCAPED_PROSE, ids=[w for _, w in ESCAPED_PROSE])
+    def test_escaped_prose_is_not_a_wikilink(self, line, why):
+        # Same decoding, the other direction: text that *renders* `[[future]]`
+        # was never a wikilink in the file, so it must not raise a dangling
+        # finding against a memo nobody linked.
+        assert parse_memory_index(line + "\n").wikilinks == (), why
+
+    ACCEPTED_IMPRECISION = [
+        (
+            r"- \[\[future]] and `[[future]]`",
+            ["future"],
+            "escaped prose vouched for by a code span",
+        ),
+        ("- [[memo&amp;x]] — entity in the target", [], "entity target is not collected"),
+    ]
+
+    @pytest.mark.parametrize(
+        "line,wikilinks,why", ACCEPTED_IMPRECISION, ids=[w for *_, w in ACCEPTED_IMPRECISION]
+    )
+    def test_raw_confirmation_is_inline_wide(self, line, wikilinks, why):
+        # The raw check asks whether the *inline* writes `[[x]]`, not whether
+        # this occurrence does, so two contrived shapes stay imprecise. Pinned
+        # as accepted, not overlooked: both are advisory-only (an info finding
+        # raised or missed, never an error, never a `--fix` candidate), and
+        # closing them means hand-rolling CommonMark's code-span and escape
+        # rules over the raw source — the parsing-by-pattern this module
+        # exists to avoid. The label route, where a demotion would cost a
+        # pointer its link-check, is tightened instead (see above).
+        assert [t for _, t in parse_memory_index(line + "\n").wikilinks] == wikilinks, why
+
+    def test_escaped_label_pointer_stays_a_fix_candidate(self, tmp_path):
+        # The end of the same thread: a demoted pointer silently drops out of
+        # `--fix` too. Pinned end-to-end because the parser assertion above
+        # can't see that consequence.
+        text = r"- [\[memo\]](gone.md) — escaped label" + "\n"
+        parsed = parse_memory_index(text)
+        candidates = _missing_target_entries(text, root=tmp_path, parsed=parsed)
+        eligible, skipped = _partition_candidates(candidates, parsed=parsed, root=tmp_path)
+        assert [line_no for line_no, _ in eligible] == [1]
+        assert not skipped
+
+    def test_wikilink_does_not_shield_a_dead_line_from_fix(self, tmp_path):
+        # #1762 considered-and-left: a wikilink is not an entry, so a line
+        # whose only pointer is provably dead stays an eligible --fix
+        # candidate even though deleting the line takes the wikilink with it.
+        text = "- [Dead](gone.md) — supersedes [[forward-ref]]\n"
+        parsed = parse_memory_index(text)
+        candidates = _missing_target_entries(text, root=tmp_path, parsed=parsed)
+        eligible, skipped = _partition_candidates(candidates, parsed=parsed, root=tmp_path)
+        assert [line_no for line_no, _ in eligible] == [1]
+        assert not skipped
 
 
 class TestListMarkers:
@@ -844,6 +941,55 @@ async def test_dead_link_is_reported_beside_an_unreadable_one(tmp_path, monkeypa
     assert by["broken_link"].severity == "error"
     assert by["broken_link"].items == ["L1 [missing_target] gone.md"]
     assert "live%2Emd" in by["ambiguous_index_line"].items[0]
+
+
+def test_dangling_wikilink_is_info_never_error(tmp_path, monkeypatch):
+    """#1762: a ``[[name]]`` with no ``name.md`` is advisory, not a failure.
+
+    The doctor cannot tell a forward reference — which the agent memory
+    convention allows (a name worth writing later) — from a stale link to a
+    deleted memo, so the finding informs, never flips the exit code, and a
+    wikilink that resolves is no finding at all.
+    """
+    from helpers import isolate_memtomem_env
+
+    isolate_memtomem_env(monkeypatch)
+    mem_dir = tmp_path / ".claude" / "projects" / "-wiki" / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "topic.md").write_text("# t\n", encoding="utf-8")
+    (mem_dir / "linked.md").write_text("# l\n", encoding="utf-8")
+    (mem_dir / "MEMORY.md").write_text(
+        "- [Topic](topic.md) — supersedes [[deleted-memo]], see [[linked]]\n"
+        "- [Linked](linked.md) — see [[nested/other|alias]]\n",
+        encoding="utf-8",
+    )
+
+    config = Mem2MemConfig()
+    config.storage.sqlite_path = tmp_path / "wiki.db"
+    config.indexing.memory_dirs = [mem_dir]
+
+    reports = _gather_reports(config=config, inspect_dirs=[mem_dir])
+    report = [r for r in reports if r.path != "(unowned)"][0]
+    by = _findings_by_check(report)
+
+    dangling = by["dangling_wikilink"]
+    assert dangling.severity == "info"
+    assert dangling.items == [
+        "L1 [missing_target] [[deleted-memo]] → deleted-memo.md",
+        "L2 [missing_target] [[nested/other]] → nested/other.md",
+    ]
+    # ``[[linked]]`` resolves → not reported; wikilinks never feed broken_link.
+    assert "broken_link" not in by
+    assert not any(f.severity == "error" for f in report.findings)
+
+    # And end-to-end: an index whose only link problem is a dangling wikilink
+    # exits 0 — info findings are advisory by decision (#1762).
+    import memtomem.cli.memory_doctor_cmd as mod
+
+    monkeypatch.setattr(mod, "_load_config_read_only", lambda: config)
+    result = CliRunner().invoke(cli, ["memory", "doctor"])
+    assert result.exit_code == 0
+    assert "wikilink" in result.output
 
 
 @pytest.mark.asyncio
