@@ -293,8 +293,11 @@ class RetrievalStats:
     # ``reranker_model``), "rrf" (reciprocal-rank fusion, bounded near
     # ``legs/rrf_k``), "bm25"/"dense" (single-retriever passthrough:
     # unfused BM25 / cosine scores), "none" (filter-only enumeration —
-    # no relevance scale, the filter is the selector), or None (no ranked
-    # results produced). Base means pre-modifier: decay / access /
+    # no relevance scale, the filter is the selector), or None (no
+    # scoring path taken, e.g. both retrievers disabled; a taken path
+    # keeps its scale even when it yielded zero results — public
+    # formatters omit the key for empty responses either way). Base
+    # means pre-modifier: decay / access /
     # importance boosts (Stages 4/6/7, all default-off) multiply on top
     # when enabled, so absolute thresholds are only portable across
     # servers with the same modifier config. Unlike ``rerank_applied``
@@ -1212,8 +1215,10 @@ class SearchPipeline:
             stats.fused_total = len(fused)
 
             # Stage 3b: Cross-encoder reranking (skipped when bypassed per-call
-            # via rerank=False, #1766)
-            if apply_rerank and reranker is not None and fused:
+            # via rerank=False, #1766). ``apply_rerank`` already implies the
+            # reranker pair is non-None; restating both here is for type
+            # narrowing, mirroring the cache-key and pool-widening sites.
+            if apply_rerank and reranker is not None and rerank_cfg is not None and fused:
                 try:
                     fused = await reranker.rerank(query, fused, top_k=top_k)
                 except Exception as exc:
@@ -1229,7 +1234,7 @@ class SearchPipeline:
                     # switches it (#1767).
                     if fused and all(r.source == "reranked" for r in fused):
                         stats.score_scale = "rerank"
-                        stats.reranker_model = rerank_cfg.model if rerank_cfg is not None else None
+                        stats.reranker_model = rerank_cfg.model
 
             # Filter by source file if requested
             if source_filter:
