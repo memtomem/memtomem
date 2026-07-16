@@ -29,6 +29,7 @@ class FastEmbedReranker:
     def __init__(self, config: RerankConfig) -> None:
         self._config = config
         self._model: object | None = None
+        self._closed = False
         # Observability flags read by ``GET /api/system/model-readiness``.
         # Match ``OnnxEmbedder`` so the endpoint can introspect both via a
         # single contract without each provider having a bespoke surface.
@@ -45,6 +46,11 @@ class FastEmbedReranker:
         Double-checked lock so concurrent first-callers (search path vs
         warmup) share a single construction.
         """
+        # A closed instance must not resurrect: re-downloading/re-initializing
+        # the released ONNX model here is silent expensive work on an
+        # instance nobody owns (#1778).
+        if self._closed:
+            raise RuntimeError("FastEmbedReranker is closed")
         if self._model is not None:
             return self._model
         with self._load_lock:
@@ -128,5 +134,6 @@ class FastEmbedReranker:
         # pytest cleans up tmp_path on Windows. See #206.
         import gc
 
+        self._closed = True
         self._model = None
         gc.collect()

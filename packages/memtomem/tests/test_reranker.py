@@ -46,6 +46,27 @@ class TestCohereReranker:
         await reranker.close()
         assert reranker._client is None
 
+    @pytest.mark.asyncio
+    async def test_closed_instance_refuses_resurrect(self):
+        """#1778: post-close use must raise, not re-create the httpx client —
+        a client born after close() on a swapped-out instance leaks."""
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.cohere import CohereReranker
+
+        config = RerankConfig(enabled=True, provider="cohere", api_key="test")
+        reranker = CohereReranker(config)
+        # Positive control: a live instance builds its client on demand.
+        assert reranker._get_client() is not None
+
+        await reranker.close()
+        assert reranker._client is None
+
+        with pytest.raises(RuntimeError, match="closed"):
+            await reranker.rerank("query", [_make_result("a", 1.0)], top_k=5)
+        assert reranker._client is None  # no new client materialized
+
+        await reranker.close()  # idempotent
+
 
 class TestLocalReranker:
     def test_init(self):
@@ -77,6 +98,28 @@ class TestLocalReranker:
         reranker = LocalReranker(config)
         await reranker.close()
         assert reranker._model is None
+
+    @pytest.mark.asyncio
+    async def test_closed_instance_refuses_resurrect(self):
+        """#1778: post-close use must raise, not silently reload the model."""
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        config = RerankConfig(enabled=True, provider="local")
+        reranker = LocalReranker(config)
+        # Positive control: a live instance serves its cached model.
+        sentinel = object()
+        reranker._model = sentinel
+        assert reranker._get_model() is sentinel
+
+        await reranker.close()
+        assert reranker._model is None
+
+        with pytest.raises(RuntimeError, match="closed"):
+            await reranker.rerank("query", [_make_result("a", 1.0)], top_k=5)
+        assert reranker._model is None  # no reload
+
+        await reranker.close()  # idempotent
 
 
 class TestRerankerFactory:

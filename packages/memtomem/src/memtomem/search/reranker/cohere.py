@@ -20,8 +20,14 @@ class CohereReranker:
     def __init__(self, config: RerankConfig):
         self._config = config
         self._client: AsyncClient | None = None
+        self._closed = False
 
     def _get_client(self) -> AsyncClient:
+        # A closed instance must not resurrect: re-creating the client here
+        # would leak it — nothing ever closes a client born after close()
+        # on a swapped-out instance (#1778).
+        if self._closed:
+            raise RuntimeError("CohereReranker is closed")
         if self._client is None:
             import httpx
 
@@ -75,6 +81,7 @@ class CohereReranker:
         return reranked[:top_k]
 
     async def close(self) -> None:
+        self._closed = True
         if self._client:
             await self._client.aclose()
             self._client = None

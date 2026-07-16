@@ -95,9 +95,16 @@ async def test_unknown_model_error_surfaces_supported_hint() -> None:
     assert "add_custom_model" in msg
 
 
-async def test_close_resets_model() -> None:
-    """close() must release the cached model so the reranker can be reused."""
+async def test_close_releases_model_and_refuses_reuse() -> None:
+    """close() releases the cached model AND further use raises (#1778) —
+    a closed instance must not silently re-download/re-init the model.
+    (Supersedes the pre-#1778 "can be reused" contract, which no caller
+    ever relied on.)"""
+    from pathlib import Path
+    from uuid import uuid4
+
     from memtomem.config import RerankConfig
+    from memtomem.models import Chunk, ChunkMetadata, SearchResult
     from memtomem.search.reranker.fastembed import FastEmbedReranker
 
     reranker = FastEmbedReranker(
@@ -107,6 +114,35 @@ async def test_close_resets_model() -> None:
             model="Xenova/ms-marco-MiniLM-L-6-v2",
         )
     )
-    reranker._model = object()  # simulate loaded state
+
+    class _FakeModel:
+        def rerank(self, query, documents):
+            return [0.5] * len(documents)
+
+    chunk = Chunk(
+        content="any content",
+        metadata=ChunkMetadata(source_file=Path("test.md")),
+        id=uuid4(),
+        embedding=[],
+    )
+    candidate = SearchResult(chunk=chunk, score=1.0, rank=1, source="fused")
+
+    # Positive control: the same instance reranks successfully pre-close.
+    reranker._model = _FakeModel()
+    reranked = await reranker.rerank("query", [candidate], top_k=5)
+    assert reranked[0].source == "reranked"
+
     await reranker.close()
     assert reranker._model is None
+
+    with pytest.raises(RuntimeError, match="closed"):
+        reranker._get_model()
+
+    # rerank() degrades through its own except-Exception fallback: the
+    # original candidates come back untouched, and no model reload happens.
+    fallback = await reranker.rerank("query", [candidate], top_k=5)
+    assert [r.chunk.id for r in fallback] == [candidate.chunk.id]
+    assert fallback[0].source == "fused"
+    assert reranker._model is None
+
+    await reranker.close()  # idempotent

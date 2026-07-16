@@ -22,6 +22,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   an in-flight search still holds it; the close is deferred until the last
   such search releases its lease. Swaps with no search in flight close
   immediately, as before.
+- **Closed rerankers no longer resurrect their resources** (#1778) — using a
+  reranker after `close()` previously re-created what close had released
+  (cohere: a new `httpx` client nothing ever closes; fastembed/local: a
+  silent full model reload). The lazy loaders now raise `RuntimeError`
+  instead; a stray call through the search pipeline degrades to the existing
+  un-reranked fallback with a warning.
 
 ## [0.3.11] — 2026-07-14
 
