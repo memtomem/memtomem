@@ -54,6 +54,12 @@ class FastEmbedReranker:
         if self._model is not None:
             return self._model
         with self._load_lock:
+            # Re-check under the lock: a warmup/readiness thread that passed
+            # the guard above can lose the race to a concurrent close() on
+            # the event loop — loading here would resurrect the model onto
+            # the closed instance (#1778).
+            if self._closed:
+                raise RuntimeError("FastEmbedReranker is closed")
             if self._model is not None:
                 return self._model
             try:

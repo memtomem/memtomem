@@ -32,6 +32,12 @@ class LocalReranker:
             raise RuntimeError("LocalReranker is closed")
         if self._model is None:
             with self._load_lock:
+                # Re-check under the lock: a warmup/readiness thread that
+                # passed the guard above can lose the race to a concurrent
+                # close() — loading here would resurrect the model onto the
+                # closed instance (#1778).
+                if self._closed:
+                    raise RuntimeError("LocalReranker is closed")
                 if self._model is None:
                     from sentence_transformers import CrossEncoder
 

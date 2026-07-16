@@ -121,6 +121,36 @@ class TestLocalReranker:
 
         await reranker.close()  # idempotent
 
+    def test_close_landing_at_lock_acquisition_refuses_load(self):
+        """A loader thread can pass the outer _closed guard, then lose the
+        race to a concurrent close() before acquiring _load_lock; the
+        re-check under the lock must refuse the load (#1778 review).
+        Deterministic pin: a lock wrapper flips _closed at the acquisition
+        point instead of racing real threads."""
+        import threading
+
+        from memtomem.config import RerankConfig
+        from memtomem.search.reranker.local import LocalReranker
+
+        reranker = LocalReranker(RerankConfig(enabled=True, provider="local"))
+
+        class _CloseOnAcquire:
+            def __init__(self) -> None:
+                self._inner = threading.Lock()
+
+            def __enter__(self):
+                reranker._closed = True  # the concurrent close() lands here
+                return self._inner.__enter__()
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+        reranker._load_lock = _CloseOnAcquire()
+
+        with pytest.raises(RuntimeError, match="closed"):
+            reranker._get_model()
+        assert reranker._model is None
+
 
 class TestRerankerFactory:
     def test_disabled(self):

@@ -146,3 +146,40 @@ async def test_close_releases_model_and_refuses_reuse() -> None:
     assert reranker._model is None
 
     await reranker.close()  # idempotent
+
+
+def test_close_landing_at_lock_acquisition_refuses_load() -> None:
+    """A loader thread can pass the outer _closed guard, then lose the race
+    to a concurrent close() before acquiring _load_lock; the re-check under
+    the lock must refuse the load (#1778 review). The interleaving is pinned
+    deterministically: a lock wrapper flips _closed at the exact acquisition
+    point instead of racing real threads."""
+    import threading
+
+    from memtomem.config import RerankConfig
+    from memtomem.search.reranker.fastembed import FastEmbedReranker
+
+    reranker = FastEmbedReranker(
+        RerankConfig(
+            enabled=True,
+            provider="fastembed",
+            model="Xenova/ms-marco-MiniLM-L-6-v2",
+        )
+    )
+
+    class _CloseOnAcquire:
+        def __init__(self) -> None:
+            self._inner = threading.Lock()
+
+        def __enter__(self):
+            reranker._closed = True  # the concurrent close() lands here
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    reranker._load_lock = _CloseOnAcquire()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="closed"):
+        reranker._get_model()
+    assert reranker._model is None  # no model resurrected onto the closed instance
