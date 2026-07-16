@@ -42,7 +42,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from dataclasses import dataclass
 
@@ -270,6 +270,12 @@ def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list
     return filtered
 
 
+# Closed vocabulary for ``RetrievalStats.score_scale`` (#1767) — typing the
+# field makes a misspelled label fail at the assignment site instead of
+# escaping into structured output.
+ScoreScale = Literal["rerank", "rrf", "bm25", "dense", "none"]
+
+
 @dataclass
 class RetrievalStats:
     bm25_candidates: int = 0
@@ -304,7 +310,7 @@ class RetrievalStats:
     # (the pre-Stage-3b decision), this is derived from the results
     # actually returned, so a reranker that fails and silently falls back
     # to the fused order keeps the label truthful.
-    score_scale: str | None = None
+    score_scale: ScoreScale | None = None
     # Rerank model identifier, set only when ``score_scale == "rerank"`` —
     # rerank ranges differ per provider (local cross-encoders emit raw
     # logits, Cohere emits [0, 1] relevance), so clients calibrating a

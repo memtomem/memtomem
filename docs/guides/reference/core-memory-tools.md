@@ -224,8 +224,8 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > multiply on top of the base scale when enabled. Pick score thresholds per
 > scale — or skip score gating for a scale you don't recognize — instead of
 > inferring the scale from the value range. Both keys are omitted when there
-> are no results. `mm search --format json` carries the same value as a
-> per-item `score_scale` key.
+> are no results. `mm search --format json` carries the same values as
+> per-item `score_scale` / `reranker` keys.
 
 ### Tuning search weights
 

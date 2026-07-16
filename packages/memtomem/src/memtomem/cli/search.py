@@ -199,12 +199,15 @@ async def _search(
 
     if fmt == "json":
         # The payload is a bare list, so score provenance rides per item
-        # (#1767): key omitted when the pipeline produced no ranked scale.
+        # (#1767): keys omitted when the pipeline produced no ranked scale.
+        # ``reranker`` accompanies the "rerank" scale because rerank score
+        # ranges are model-dependent — mirroring the MCP structured payload.
         out = [
             {
                 "rank": r.rank,
                 "score": round(r.score, 4),
                 **({"score_scale": stats.score_scale} if stats.score_scale is not None else {}),
+                **({"reranker": stats.reranker_model} if stats.reranker_model is not None else {}),
                 "source": str(r.chunk.metadata.source_file),
                 "content": r.chunk.content[:200],
             }
