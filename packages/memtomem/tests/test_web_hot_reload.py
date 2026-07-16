@@ -840,6 +840,24 @@ class TestApplyRuntimeConfigChanges:
             ),
         )
 
+    @staticmethod
+    def _make_pipeline(*, reranker: object | None = None, rerank_config: object | None = None):
+        """A real SearchPipeline: ``_sync_reranker`` swaps via
+        ``SearchPipeline.swap_reranker`` (#1777), so a SimpleNamespace fake
+        no longer satisfies the surface it drives."""
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        pipeline = SearchPipeline(
+            storage=AsyncMock(),
+            embedder=AsyncMock(),
+            config=SearchConfig(enable_bm25=True, enable_dense=False),
+            reranker=reranker,
+            rerank_config=rerank_config,
+        )
+        pipeline.invalidate_cache = MagicMock()  # type: ignore[method-assign]
+        return pipeline
+
     async def test_tokenizer_change_fires_set_tokenizer_and_rebuild(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -894,11 +912,7 @@ class TestApplyRuntimeConfigChanges:
         new = self._cfg(rerank_enabled=True)
         reranker = object()
         monkeypatch.setattr(factory, "create_reranker", lambda cfg: reranker)
-        search_pipeline = SimpleNamespace(
-            _reranker=None,
-            _rerank_config=None,
-            invalidate_cache=MagicMock(),
-        )
+        search_pipeline = self._make_pipeline()
 
         await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
 
@@ -922,11 +936,7 @@ class TestApplyRuntimeConfigChanges:
         new = self._cfg(rerank_enabled=False)
         old_reranker = StubReranker()
         monkeypatch.setattr(factory, "create_reranker", lambda cfg: None)
-        search_pipeline = SimpleNamespace(
-            _reranker=old_reranker,
-            _rerank_config=old.rerank,
-            invalidate_cache=MagicMock(),
-        )
+        search_pipeline = self._make_pipeline(reranker=old_reranker, rerank_config=old.rerank)
 
         await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
 
@@ -965,11 +975,7 @@ class TestApplyRuntimeConfigChanges:
         old = self._cfg(rerank_enabled=False)
         new = self._cfg(rerank_enabled=True)
         monkeypatch.setattr(factory, "create_reranker", lambda cfg: broken)
-        search_pipeline = SimpleNamespace(
-            _reranker=previous,
-            _rerank_config=None,
-            invalidate_cache=MagicMock(),
-        )
+        search_pipeline = self._make_pipeline(reranker=previous)
 
         await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
 
@@ -998,11 +1004,7 @@ class TestApplyRuntimeConfigChanges:
             raise RuntimeError("factory exploded")
 
         monkeypatch.setattr(factory, "create_reranker", _boom)
-        search_pipeline = SimpleNamespace(
-            _reranker=previous,
-            _rerank_config=None,
-            invalidate_cache=MagicMock(),
-        )
+        search_pipeline = self._make_pipeline(reranker=previous)
 
         await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
 
@@ -1024,11 +1026,7 @@ class TestApplyRuntimeConfigChanges:
         old = self._cfg(rerank_enabled=False)
         new = self._cfg(rerank_enabled=True)
         monkeypatch.setattr(factory, "create_reranker", lambda cfg: LazyReranker())
-        search_pipeline = SimpleNamespace(
-            _reranker=None,
-            _rerank_config=None,
-            invalidate_cache=MagicMock(),
-        )
+        search_pipeline = self._make_pipeline()
 
         event_loop_thread_id = threading.get_ident()
         await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
@@ -1070,11 +1068,7 @@ class TestApplyRuntimeConfigChanges:
         loaded = DriftingReranker()
         monkeypatch.setattr(factory, "create_reranker", lambda cfg: loaded)
         previous = SimpleNamespace()
-        search_pipeline = SimpleNamespace(
-            _reranker=previous,
-            _rerank_config=None,
-            invalidate_cache=MagicMock(),
-        )
+        search_pipeline = self._make_pipeline(reranker=previous)
 
         await _hot_reload.apply_runtime_config_changes(
             old, new, search_pipeline=search_pipeline, app=app
@@ -1083,6 +1077,89 @@ class TestApplyRuntimeConfigChanges:
         assert search_pipeline._reranker is previous
         assert loaded.closed is True
         search_pipeline.invalidate_cache.assert_called_once()
+
+    async def test_rerank_hot_reload_defers_close_while_search_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """#1777: the real disk hot-reload flow must not close a reranker an
+        in-flight search still leases — the swapped-out instance survives
+        through Stage 3b of that search and closes exactly once afterwards.
+        """
+        import memtomem.search.reranker.factory as factory
+
+        class CloseAwareReranker:
+            def __init__(self):
+                self.rerank_calls = 0
+                self.close_calls = 0
+
+            async def rerank(self, query, results, top_k):
+                if self.close_calls:
+                    raise AssertionError("rerank() called after close()")
+                self.rerank_calls += 1
+                return list(reversed(results))[:top_k]
+
+            async def close(self):
+                self.close_calls += 1
+
+        from uuid import uuid4
+
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+
+        fused_input = [
+            SearchResult(
+                chunk=Chunk(
+                    content=f"chunk{i}",
+                    metadata=ChunkMetadata(source_file=Path(f"/tmp/chunk{i}.md")),
+                    id=uuid4(),
+                    embedding=[],
+                ),
+                score=1.0 / (i + 1),
+                rank=i + 1,
+                source="fused",
+            )
+            for i in range(20)
+        ]
+
+        old = self._cfg(rerank_enabled=True)
+        new = self._cfg(rerank_enabled=False)
+        old_reranker = CloseAwareReranker()
+        monkeypatch.setattr(factory, "create_reranker", lambda cfg: None)
+        search_pipeline = self._make_pipeline(reranker=old_reranker, rerank_config=old.rerank)
+
+        release = asyncio.Event()
+
+        async def blocked_bm25(*args, **kwargs):
+            await release.wait()
+            return fused_input
+
+        storage = search_pipeline._storage
+        storage.bm25_search = AsyncMock(side_effect=blocked_bm25)
+        storage.dense_search = AsyncMock(return_value=[])
+        storage.increment_access = AsyncMock()
+        storage.save_query_history = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+
+        search_task = asyncio.create_task(search_pipeline.search("anything", top_k=10))
+        await asyncio.sleep(0)  # let the search reach the blocked retrieval
+
+        await _hot_reload.apply_runtime_config_changes(old, new, search_pipeline=search_pipeline)
+
+        assert search_pipeline._reranker is None  # new generation published
+        assert old_reranker.close_calls == 0  # leased: close deferred
+
+        release.set()
+        results, _ = await search_task
+
+        # The in-flight search finished Stage 3b on the live old instance.
+        assert old_reranker.rerank_calls == 1
+        assert [r.chunk.id for r in results] == [r.chunk.id for r in reversed(fused_input)][:10]
+
+        if search_pipeline._bg_tasks:
+            await asyncio.gather(*search_pipeline._bg_tasks)
+        assert old_reranker.close_calls == 1
 
 
 class TestScheduleFtsRebuildCoalescing:

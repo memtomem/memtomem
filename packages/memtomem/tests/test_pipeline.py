@@ -1,6 +1,7 @@
 """Tests for search pipeline stages (expansion, reranker, importance integration)."""
 
 import asyncio
+import contextlib
 
 import pytest
 from pathlib import Path
@@ -759,6 +760,186 @@ class TestPerCallRerankBypass:
 
         assert received_pool_size == [20]
         assert results[0].chunk.id == relevant.chunk.id
+
+
+class CloseAwareFakeReranker:
+    """Counts rerank/close calls and refuses to rerank after close (#1777).
+
+    The raise-after-close makes "the in-flight search still used a live
+    instance" observable: if a swap closed the leased generation early, the
+    search would hit the AssertionError instead of returning the fake's
+    distinctive reversed ordering.
+    """
+
+    def __init__(self) -> None:
+        self.rerank_calls = 0
+        self.close_calls = 0
+
+    async def rerank(self, query, results, top_k):
+        if self.close_calls:
+            raise AssertionError("rerank() called after close()")
+        self.rerank_calls += 1
+        return list(reversed(results))[:top_k]
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+class TestRerankerSwapLeasing:
+    """#1777: ``swap_reranker`` must not close a generation an in-flight
+    search still leases; the close is deferred to the last lease release.
+    Zero-lease swaps keep the pre-#1777 synchronous-close contract.
+    """
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _make_pipeline = TestRerankCandidatePool._make_pipeline
+
+    def _blocked_pipeline(self, fused_input, reranker):
+        """Pipeline whose bm25 leg blocks on an event, plus the release event."""
+        from memtomem.config import RerankConfig
+
+        pipeline = self._make_pipeline(
+            fused_input,
+            reranker=reranker,
+            rerank_config=RerankConfig(enabled=True),
+        )
+        release = asyncio.Event()
+
+        async def blocked_bm25(*args, **kwargs):
+            await release.wait()
+            return fused_input
+
+        pipeline._storage.bm25_search.side_effect = blocked_bm25
+        return pipeline, release
+
+    @pytest.mark.asyncio
+    async def test_swap_mid_search_defers_close_until_lease_released(self):
+        """The headline #1777 scenario: search blocked in retrieval, hot
+        reload swaps the reranker — the old instance must survive until the
+        search finishes Stage 3b with it, then close exactly once."""
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        old = CloseAwareFakeReranker()
+        pipeline, release = self._blocked_pipeline(fused_input, old)
+
+        search_task = asyncio.create_task(pipeline.search("anything", top_k=10))
+        await asyncio.sleep(0)  # let the search reach the blocked await
+
+        await pipeline.swap_reranker(None, None)
+        assert old.close_calls == 0  # leased: close must be deferred
+
+        release.set()
+        results, stats = await search_task
+
+        # The old instance ran Stage 3b successfully (reversed ordering).
+        assert old.rerank_calls == 1
+        assert stats.rerank_applied is True
+        assert [r.chunk.id for r in results] == [r.chunk.id for r in reversed(fused_input)][:10]
+
+        if pipeline._bg_tasks:
+            await asyncio.gather(*pipeline._bg_tasks)
+        assert old.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_swap_with_no_inflight_search_closes_synchronously(self):
+        """Zero leases → the old reranker is closed before swap_reranker
+        returns (the contract the web swap tests depend on)."""
+        old = CloseAwareFakeReranker()
+        pipeline, _ = self._blocked_pipeline([], old)
+
+        await pipeline.swap_reranker(None, None)
+
+        assert old.close_calls == 1
+        assert pipeline._reranker is None
+        assert pipeline.rerank_active is False
+
+    @pytest.mark.asyncio
+    async def test_double_swap_while_leased(self):
+        """Generations are independent: with A leased, A→B→C closes B
+        inline (never leased), defers A to its release, and never closes C."""
+        from memtomem.config import RerankConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        a = CloseAwareFakeReranker()
+        b = CloseAwareFakeReranker()
+        c = CloseAwareFakeReranker()
+        pipeline, release = self._blocked_pipeline(fused_input, a)
+
+        search_task = asyncio.create_task(pipeline.search("anything", top_k=10))
+        await asyncio.sleep(0)
+
+        cfg = RerankConfig(enabled=True)
+        await pipeline.swap_reranker(b, cfg)
+        await pipeline.swap_reranker(c, cfg)
+
+        assert b.close_calls == 1  # never leased → closed inline on B→C
+        assert a.close_calls == 0  # still leased by the blocked search
+
+        release.set()
+        await search_task
+        if pipeline._bg_tasks:
+            await asyncio.gather(*pipeline._bg_tasks)
+
+        assert a.close_calls == 1
+        assert c.close_calls == 0
+        assert pipeline._reranker is c
+
+    @pytest.mark.asyncio
+    async def test_lease_released_on_search_exception(self):
+        """An exception escaping search() must still release the lease, so a
+        later swap closes the old generation synchronously."""
+        from memtomem.config import AccessConfig
+
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        old = CloseAwareFakeReranker()
+        pipeline, release = self._blocked_pipeline(fused_input, old)
+        release.set()
+        pipeline._access_config = AccessConfig(enabled=True)
+        pipeline._storage.get_access_counts.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await pipeline.search("anything", top_k=10)
+
+        await pipeline.swap_reranker(None, None)
+        assert old.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_lease_released_on_cache_hit(self):
+        """The cache-hit early return releases its lease too."""
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        old = CloseAwareFakeReranker()
+        pipeline, release = self._blocked_pipeline(fused_input, old)
+        release.set()
+
+        await pipeline.search("anything", top_k=10)  # warm the cache
+        await pipeline.search("anything", top_k=10)  # cache-hit early return
+        assert old.rerank_calls == 1
+
+        await pipeline.swap_reranker(None, None)
+        assert old.close_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_close_drains_retired_leased_entry_exactly_once(self):
+        """pipeline.close() drains retired-but-leased generations; the lease
+        released afterwards must not schedule a second close."""
+        fused_input = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        old = CloseAwareFakeReranker()
+        pipeline, release = self._blocked_pipeline(fused_input, old)
+
+        search_task = asyncio.create_task(pipeline.search("anything", top_k=10))
+        await asyncio.sleep(0)
+
+        await pipeline.swap_reranker(None, None)
+        await pipeline.close()
+        assert old.close_calls == 1
+
+        release.set()
+        with contextlib.suppress(AssertionError):
+            # Stage 3b on the drained instance may trip the fake's
+            # rerank-after-close tripwire; this test only pins close-once.
+            await search_task
+        if pipeline._bg_tasks:
+            await asyncio.gather(*pipeline._bg_tasks)
+        assert old.close_calls == 1
 
 
 class TestFilterOnlySearch:
