@@ -36,7 +36,9 @@ applies in this branch too via ``recall_chunks``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -59,6 +61,7 @@ from memtomem.config import (
 )
 from memtomem.models import ContextInfo, NamespaceFilter, ScopeFilter, SearchResult
 from memtomem.search.fusion import reciprocal_rank_fusion
+from memtomem.search.reranker.base import close_reranker_safely
 from memtomem.storage.base import SearchMetadataFilter
 from memtomem.storage.sqlite_helpers import norm_path
 
@@ -109,6 +112,22 @@ def _bg_task_error_cb(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc:
         logger.warning("Background task %s failed: %s", task.get_name(), exc)
+
+
+class _RerankerEntry:
+    """One (reranker, config) generation with an in-flight lease count (#1777).
+
+    Identity-hashed on purpose: retired generations live in a set keyed by
+    the entry object itself, so two generations wrapping the same values
+    never collide.
+    """
+
+    __slots__ = ("reranker", "config", "leases")
+
+    def __init__(self, reranker: object | None, config: RerankConfig | None) -> None:
+        self.reranker = reranker
+        self.config = config
+        self.leases = 0
 
 
 def match_source_filter(filter_str: str, source_path: str) -> bool:
@@ -303,8 +322,8 @@ class SearchPipeline:
         self._decay_config = decay_config or DecayConfig()
         self._mmr_config = mmr_config or MMRConfig()
         self._access_config = access_config or AccessConfig()
-        self._reranker = reranker
-        self._rerank_config = rerank_config
+        self._rerank_entry = _RerankerEntry(reranker, rerank_config)
+        self._retired_rerank_entries: set[_RerankerEntry] = set()
         self._expansion_config = expansion_config
         self._importance_config = importance_config
         self._context_window_config = context_window_config
@@ -324,11 +343,74 @@ class SearchPipeline:
     def rerank_active(self) -> bool:
         """True when a reranker instance is wired and configured (server-side on).
 
-        Hot reload keeps the pair consistent: it sets ``_rerank_config`` to
-        ``None`` alongside dropping the reranker when ``rerank.enabled`` is
-        turned off (``web/hot_reload.py``).
+        Hot reload keeps the pair consistent: the two always live on one
+        ``_RerankerEntry`` generation, swapped atomically by
+        :meth:`swap_reranker`.
         """
         return self._reranker is not None and self._rerank_config is not None
+
+    @property
+    def _reranker(self) -> object | None:
+        return self._rerank_entry.reranker
+
+    @_reranker.setter
+    def _reranker(self, value: object | None) -> None:
+        # Direct assignment installs a fresh generation and abandons the old
+        # one WITHOUT closing it (the assigner owns its lifecycle) — exactly
+        # the pre-#1777 contract. Hot-reload paths must use swap_reranker.
+        self._rerank_entry = _RerankerEntry(value, self._rerank_entry.config)
+
+    @property
+    def _rerank_config(self) -> RerankConfig | None:
+        return self._rerank_entry.config
+
+    @_rerank_config.setter
+    def _rerank_config(self, value: RerankConfig | None) -> None:
+        # See the _reranker setter: fresh generation, old one abandoned unclosed.
+        self._rerank_entry = _RerankerEntry(self._rerank_entry.reranker, value)
+
+    @contextlib.contextmanager
+    def _lease_reranker(self) -> Iterator[tuple[object | None, RerankConfig | None]]:
+        """Lease the current reranker generation for the duration of a search.
+
+        Acquire/release are synchronous ops between awaits on one event
+        loop, so a plain counter suffices — no lock. A generation retired
+        by :meth:`swap_reranker` while leased is closed here, on its last
+        release, as a background task so the unlucky last search doesn't
+        pay the close latency (``close()`` gathers ``_bg_tasks``).
+        """
+        entry = self._rerank_entry
+        entry.leases += 1
+        try:
+            yield entry.reranker, entry.config
+        finally:
+            entry.leases -= 1
+            if entry.leases == 0 and entry in self._retired_rerank_entries:
+                # Popping synchronously before scheduling is the once-only
+                # latch: no other release (or close()) can see the entry.
+                self._retired_rerank_entries.discard(entry)
+                t = asyncio.create_task(close_reranker_safely(entry.reranker))
+                t.add_done_callback(_bg_task_error_cb)
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
+
+    async def swap_reranker(self, reranker: object | None, config: RerankConfig | None) -> None:
+        """Atomically install a new (reranker, config) generation (#1777).
+
+        The single hot-swap API for the web hot-reload and PATCH paths.
+        Publishes the new pair before any await — a hanging close still
+        leaves the pipeline on the new reranker. Closes the old instance
+        immediately when no in-flight search leases it; otherwise defers
+        the close to the last lease release.
+        """
+        old = self._rerank_entry
+        self._rerank_entry = _RerankerEntry(reranker, config)
+        if old.reranker is None or old.reranker is reranker:
+            return
+        if old.leases == 0:
+            await close_reranker_safely(old.reranker)
+        else:
+            self._retired_rerank_entries.add(old)
 
     def _cache_key(
         self,
@@ -804,443 +886,461 @@ class SearchPipeline:
         top_k = self._config.default_top_k if top_k is None else top_k
         effective_weights = rrf_weights or self._config.rrf_weights
 
-        # Snapshot the reranker pair once: hot reload swaps (and closes) these
-        # attributes while a search may be awaiting, so every rerank-dependent
-        # site below (cache key, pool widening, Stage 3b) must read the same
-        # consistent pair rather than re-reading ``self._*`` mid-flight.
-        reranker = self._reranker
-        rerank_cfg = self._rerank_config
-        apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
+        # Lease the reranker generation for the whole ranked-search body
+        # (#1777): hot reload retires (and eventually closes) these while a
+        # search may be awaiting, so every rerank-dependent site below
+        # (cache key, pool widening, Stage 3b) reads this one snapshot, and
+        # the instance cannot be closed out from under the call.
+        with self._lease_reranker() as (reranker, rerank_cfg):
+            apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
 
-        # Check TTL cache for identical queries
-        import time
+            # Check TTL cache for identical queries
+            import time
 
-        # ``as_of_unix`` is intentionally excluded from ``cache_key`` and
-        # bypasses the cache entirely when explicit. Default-path (None)
-        # callers fall through to ``int(time.time())`` below and reuse
-        # cached results within ``cache_ttl`` — accepting up-to-TTL
-        # staleness near a date boundary, which the RFC's date-only
-        # bounds already absorb.
-        cache_key = self._cache_key(
-            query,
-            top_k,
-            source_filter,
-            tag_filter,
-            namespace,
-            context_window,
-            scope=scope,
-            project_context_root=project_context_root,
-            metadata_filter=metadata_filter,
-            exclude_source_roots=normalized_exclusion_roots,
-            effective_rrf_weights=effective_weights,
-            apply_rerank=apply_rerank,
-            rerank_cfg=rerank_cfg,
-        )
-        version_at_start = self._cache_version
-        ttl_snapshot = self._cache_ttl
-        if as_of_unix is None and cache_key in self._search_cache:
-            ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
-            if ver == self._cache_version and time.time() - ts < ttl_snapshot:
-                return cached_results, cached_stats
-            self._search_cache.pop(cache_key, None)
+            # ``as_of_unix`` is intentionally excluded from ``cache_key`` and
+            # bypasses the cache entirely when explicit. Default-path (None)
+            # callers fall through to ``int(time.time())`` below and reuse
+            # cached results within ``cache_ttl`` — accepting up-to-TTL
+            # staleness near a date boundary, which the RFC's date-only
+            # bounds already absorb.
+            cache_key = self._cache_key(
+                query,
+                top_k,
+                source_filter,
+                tag_filter,
+                namespace,
+                context_window,
+                scope=scope,
+                project_context_root=project_context_root,
+                metadata_filter=metadata_filter,
+                exclude_source_roots=normalized_exclusion_roots,
+                effective_rrf_weights=effective_weights,
+                apply_rerank=apply_rerank,
+                rerank_cfg=rerank_cfg,
+            )
+            version_at_start = self._cache_version
+            ttl_snapshot = self._cache_ttl
+            if as_of_unix is None and cache_key in self._search_cache:
+                ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
+                if ver == self._cache_version and time.time() - ts < ttl_snapshot:
+                    return cached_results, cached_stats
+                self._search_cache.pop(cache_key, None)
 
-        bm25_k = max(self._config.bm25_candidates, top_k)
-        dense_k = max(self._config.dense_candidates, top_k)
-        ns_filter = NamespaceFilter.parse(
-            namespace,
-            system_prefixes=tuple(self._config.system_namespace_prefixes),
-        )
-
-        # When the caller did not pin a namespace, count how many chunks sit
-        # behind a system-namespace prefix (e.g. archive:*) so the tool layer
-        # can hint "N hidden — pass namespace=... to include them".
-        hidden_system_ns = 0
-        if namespace is None and self._config.system_namespace_prefixes:
-            try:
-                hidden_system_ns = await self._storage.count_chunks_by_ns_prefix(
-                    list(self._config.system_namespace_prefixes)
-                )
-            except Exception:
-                logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
-
-        use_bm25 = self._config.enable_bm25
-        use_dense = self._config.enable_dense
-        metadata_kwargs = (
-            {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
-        )
-
-        # Stage 0: Query expansion
-        if self._expansion_config and getattr(self._expansion_config, "enabled", False):
-            from memtomem.search.expansion import (
-                expand_query_headings,
-                expand_query_llm,
-                expand_query_tags,
+            bm25_k = max(self._config.bm25_candidates, top_k)
+            dense_k = max(self._config.dense_candidates, top_k)
+            ns_filter = NamespaceFilter.parse(
+                namespace,
+                system_prefixes=tuple(self._config.system_namespace_prefixes),
             )
 
-            strategy = getattr(self._expansion_config, "strategy", "tags")
-            max_terms = getattr(self._expansion_config, "max_terms", 3)
-            if strategy in ("tags", "both"):
-                query = await expand_query_tags(query, self._storage, max_terms)
-            if strategy in ("headings", "both"):
-                # ADR-0011 PR-D round 11: thread the outer search's
-                # project context onto the heading-expansion's dense
-                # probe so it samples from the same scope set the
-                # primary retrieval is pinned to.
-                query = await expand_query_headings(
-                    query,
-                    self._storage,
-                    self._embedder,
-                    max_terms,
-                    project_context_root=project_context_root,
-                )
-            if strategy == "llm":
-                if query in self._expansion_cache:
-                    query = self._expansion_cache[query]
-                elif self._llm_provider is not None:
-                    try:
-                        original = query
-                        query = await expand_query_llm(
-                            query,
-                            self._llm_provider,
-                            max_terms,  # type: ignore[arg-type]
-                        )
-                        if len(self._expansion_cache) >= _EXPANSION_CACHE_MAX:
-                            self._expansion_cache.clear()
-                        self._expansion_cache[original] = query
-                    except Exception:
-                        logger.warning(
-                            "LLM query expansion failed, using original query",
-                            exc_info=True,
-                        )
+            # When the caller did not pin a namespace, count how many chunks sit
+            # behind a system-namespace prefix (e.g. archive:*) so the tool layer
+            # can hint "N hidden — pass namespace=... to include them".
+            hidden_system_ns = 0
+            if namespace is None and self._config.system_namespace_prefixes:
+                try:
+                    hidden_system_ns = await self._storage.count_chunks_by_ns_prefix(
+                        list(self._config.system_namespace_prefixes)
+                    )
+                except Exception:
+                    logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
 
-        # Stage 1 + 2: run enabled retrievers concurrently
-        bm25_results: list[SearchResult] = []
-        dense_results: list[SearchResult] = []
-        query_embedding: list[float] = []
-        bm25_error: str | None = None
-
-        if use_bm25:
-            bm25_task = asyncio.create_task(
-                self._storage.bm25_search(
-                    query,
-                    top_k=bm25_k,
-                    namespace_filter=ns_filter,
-                    scope_filter=scope_filter,
-                    project_context_root=project_context_root,
-                    **metadata_kwargs,
-                )
+            use_bm25 = self._config.enable_bm25
+            use_dense = self._config.enable_dense
+            metadata_kwargs = (
+                {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
             )
-        dense_error: str | None = None
-        if use_dense:
-            try:
-                query_embedding = await self._embedder.embed_query(query)
-                dense_results = await self._storage.dense_search(
-                    query_embedding,
-                    top_k=dense_k,
-                    namespace_filter=ns_filter,
-                    scope_filter=scope_filter,
-                    project_context_root=project_context_root,
-                    **metadata_kwargs,
+
+            # Stage 0: Query expansion
+            if self._expansion_config and getattr(self._expansion_config, "enabled", False):
+                from memtomem.search.expansion import (
+                    expand_query_headings,
+                    expand_query_llm,
+                    expand_query_tags,
                 )
-            except Exception as exc:
-                logger.warning("Dense search unavailable: %s", exc)
-                dense_results = []
-                dense_error = str(exc)
-        if use_bm25:
-            try:
-                bm25_results = await bm25_task
-            except Exception as exc:
-                logger.warning("BM25 search failed: %s", exc)
-                bm25_results = []
-                bm25_error = str(exc)
 
-        bm25_results = _exclude_source_roots(bm25_results, normalized_exclusion_roots)
-        dense_results = _exclude_source_roots(dense_results, normalized_exclusion_roots)
-
-        # Candidate counts describe the eligible inputs entering fusion, not
-        # the raw retriever hit counts. This keeps compose telemetry aligned
-        # with the pool that can actually surface after source exclusion.
-        stats = RetrievalStats(
-            bm25_candidates=len(bm25_results),
-            dense_candidates=len(dense_results),
-            bm25_error=bm25_error,
-            dense_error=dense_error,
-            hidden_system_ns=hidden_system_ns,
-            rerank_applied=apply_rerank,
-        )
-
-        # Stage 1 enrichment (RFC P1 Phase C): session-summary rescue.
-        # When an above-threshold past-session summary's chunk_links
-        # point at source files relevant to this query, run a parallel
-        # BM25+dense retrieval restricted to those files and merge the
-        # result as a third RRF input. This brings past-session chunks
-        # into ranking contention without changing the retrieval
-        # primitives' signatures — keeping ``bm25_search`` /
-        # ``dense_search`` archive-agnostic. (Pure post-fusion score
-        # multiplier was rejected: it can only re-rank candidates that
-        # already surfaced organically; "ranking contention" requires
-        # injection.)
-        rescue_results: list[SearchResult] = []
-        rescue_chunk_ids: set[UUID] = set()
-        if (
-            namespace is None
-            and self._session_summary_config is not None
-            and self._session_summary_config.expansion_lookup_top_k > 0
-        ):
-            try:
-                boost_sources = await self._session_summary_boost_sources(
-                    query,
-                    scope_filter=scope_filter,
-                    project_context_root=project_context_root,
-                )
-                if boost_sources:
-                    rescue_results = await self._rescue_retrieval(
+                strategy = getattr(self._expansion_config, "strategy", "tags")
+                max_terms = getattr(self._expansion_config, "max_terms", 3)
+                if strategy in ("tags", "both"):
+                    query = await expand_query_tags(query, self._storage, max_terms)
+                if strategy in ("headings", "both"):
+                    # ADR-0011 PR-D round 11: thread the outer search's
+                    # project context onto the heading-expansion's dense
+                    # probe so it samples from the same scope set the
+                    # primary retrieval is pinned to.
+                    query = await expand_query_headings(
                         query,
-                        query_embedding,
-                        top_k=top_k,
-                        boost_sources=boost_sources,
-                        use_bm25=use_bm25,
-                        use_dense=use_dense,
+                        self._storage,
+                        self._embedder,
+                        max_terms,
+                        project_context_root=project_context_root,
+                    )
+                if strategy == "llm":
+                    if query in self._expansion_cache:
+                        query = self._expansion_cache[query]
+                    elif self._llm_provider is not None:
+                        try:
+                            original = query
+                            query = await expand_query_llm(
+                                query,
+                                self._llm_provider,
+                                max_terms,  # type: ignore[arg-type]
+                            )
+                            if len(self._expansion_cache) >= _EXPANSION_CACHE_MAX:
+                                self._expansion_cache.clear()
+                            self._expansion_cache[original] = query
+                        except Exception:
+                            logger.warning(
+                                "LLM query expansion failed, using original query",
+                                exc_info=True,
+                            )
+
+            # Stage 1 + 2: run enabled retrievers concurrently
+            bm25_results: list[SearchResult] = []
+            dense_results: list[SearchResult] = []
+            query_embedding: list[float] = []
+            bm25_error: str | None = None
+
+            if use_bm25:
+                bm25_task = asyncio.create_task(
+                    self._storage.bm25_search(
+                        query,
+                        top_k=bm25_k,
+                        namespace_filter=ns_filter,
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
-                        metadata_filter=metadata_filter,
+                        **metadata_kwargs,
                     )
-                    rescue_chunk_ids = {r.chunk.id for r in rescue_results}
-            except Exception:
-                _log_rescue_failure("rescue_wiring", "session-summary rescue leg failed")
+                )
+            dense_error: str | None = None
+            if use_dense:
+                try:
+                    query_embedding = await self._embedder.embed_query(query)
+                    dense_results = await self._storage.dense_search(
+                        query_embedding,
+                        top_k=dense_k,
+                        namespace_filter=ns_filter,
+                        scope_filter=scope_filter,
+                        project_context_root=project_context_root,
+                        **metadata_kwargs,
+                    )
+                except Exception as exc:
+                    logger.warning("Dense search unavailable: %s", exc)
+                    dense_results = []
+                    dense_error = str(exc)
+            if use_bm25:
+                try:
+                    bm25_results = await bm25_task
+                except Exception as exc:
+                    logger.warning("BM25 search failed: %s", exc)
+                    bm25_results = []
+                    bm25_error = str(exc)
 
-        # Stage 3: fusion (or single-retriever passthrough)
-        # When reranking is active, widen the candidate pool so the
-        # cross-encoder can rescue items RRF ranked just outside top_k.
-        # pool = clamp(oversample * top_k, [min_pool, max_pool]) — scales
-        # with the request and bounded by cost controls. Collapses to
-        # top_k when reranking is disabled or bypassed per-call
-        # (rerank=False, #1766) so single-retriever passthrough size is
-        # unchanged — the widening exists only to feed the reranker.
-        if apply_rerank and rerank_cfg is not None:
-            rerank_pool = max(
-                rerank_cfg.min_pool,
-                min(rerank_cfg.max_pool, int(rerank_cfg.oversample * top_k)),
+            bm25_results = _exclude_source_roots(bm25_results, normalized_exclusion_roots)
+            dense_results = _exclude_source_roots(dense_results, normalized_exclusion_roots)
+
+            # Candidate counts describe the eligible inputs entering fusion, not
+            # the raw retriever hit counts. This keeps compose telemetry aligned
+            # with the pool that can actually surface after source exclusion.
+            stats = RetrievalStats(
+                bm25_candidates=len(bm25_results),
+                dense_candidates=len(dense_results),
+                bm25_error=bm25_error,
+                dense_error=dense_error,
+                hidden_system_ns=hidden_system_ns,
+                rerank_applied=apply_rerank,
             )
-        else:
-            rerank_pool = top_k
 
-        # Mark rescue-leg results so fusion can OR-propagate the flag.
-        if rescue_results:
-            rescue_results = _exclude_source_roots(rescue_results, normalized_exclusion_roots)
-            rescue_results = [
-                dataclass_replace(r, via_session_summary=True) for r in rescue_results
-            ]
+            # Stage 1 enrichment (RFC P1 Phase C): session-summary rescue.
+            # When an above-threshold past-session summary's chunk_links
+            # point at source files relevant to this query, run a parallel
+            # BM25+dense retrieval restricted to those files and merge the
+            # result as a third RRF input. This brings past-session chunks
+            # into ranking contention without changing the retrieval
+            # primitives' signatures — keeping ``bm25_search`` /
+            # ``dense_search`` archive-agnostic. (Pure post-fusion score
+            # multiplier was rejected: it can only re-rank candidates that
+            # already surfaced organically; "ranking contention" requires
+            # injection.)
+            rescue_results: list[SearchResult] = []
+            rescue_chunk_ids: set[UUID] = set()
+            if (
+                namespace is None
+                and self._session_summary_config is not None
+                and self._session_summary_config.expansion_lookup_top_k > 0
+            ):
+                try:
+                    boost_sources = await self._session_summary_boost_sources(
+                        query,
+                        scope_filter=scope_filter,
+                        project_context_root=project_context_root,
+                    )
+                    if boost_sources:
+                        rescue_results = await self._rescue_retrieval(
+                            query,
+                            query_embedding,
+                            top_k=top_k,
+                            boost_sources=boost_sources,
+                            use_bm25=use_bm25,
+                            use_dense=use_dense,
+                            scope_filter=scope_filter,
+                            project_context_root=project_context_root,
+                            metadata_filter=metadata_filter,
+                        )
+                        rescue_chunk_ids = {r.chunk.id for r in rescue_results}
+                except Exception:
+                    _log_rescue_failure("rescue_wiring", "session-summary rescue leg failed")
 
-        # Single source for the rescue leg's RRF weight — the fallback is
-        # effectively unreachable (rescue only fires when the config is
-        # wired) but keeps the three fusion branches total.
-        rescue_w = (
-            self._session_summary_config.expansion_rescue_weight
-            if self._session_summary_config is not None
-            else _DEFAULT_RESCUE_WEIGHT
-        )
-
-        if use_bm25 and use_dense:
-            fusion_lists = [bm25_results, dense_results]
-            fusion_weights = list(effective_weights)
-            fusion_labels = ["bm25", "dense"]
-            if rescue_results:
-                fusion_lists.append(rescue_results)
-                fusion_weights.append(rescue_w)
-                fusion_labels.append("session_rescue")
-            fused = reciprocal_rank_fusion(
-                fusion_lists,
-                k=self._config.rrf_k,
-                top_k=rerank_pool,
-                weights=fusion_weights,
-                list_labels=fusion_labels,
-            )
-        elif use_bm25:
-            if rescue_results:
-                fused = reciprocal_rank_fusion(
-                    [bm25_results, rescue_results],
-                    k=self._config.rrf_k,
-                    top_k=rerank_pool,
-                    weights=[effective_weights[0], rescue_w],
-                    list_labels=["bm25", "session_rescue"],
+            # Stage 3: fusion (or single-retriever passthrough)
+            # When reranking is active, widen the candidate pool so the
+            # cross-encoder can rescue items RRF ranked just outside top_k.
+            # pool = clamp(oversample * top_k, [min_pool, max_pool]) — scales
+            # with the request and bounded by cost controls. Collapses to
+            # top_k when reranking is disabled or bypassed per-call
+            # (rerank=False, #1766) so single-retriever passthrough size is
+            # unchanged — the widening exists only to feed the reranker.
+            if apply_rerank and rerank_cfg is not None:
+                rerank_pool = max(
+                    rerank_cfg.min_pool,
+                    min(rerank_cfg.max_pool, int(rerank_cfg.oversample * top_k)),
                 )
             else:
-                fused = bm25_results[:rerank_pool]
-        elif use_dense:
+                rerank_pool = top_k
+
+            # Mark rescue-leg results so fusion can OR-propagate the flag.
             if rescue_results:
-                fused = reciprocal_rank_fusion(
-                    [dense_results, rescue_results],
-                    k=self._config.rrf_k,
-                    top_k=rerank_pool,
-                    weights=[effective_weights[1] if len(effective_weights) > 1 else 1.0, rescue_w],
-                    list_labels=["dense", "session_rescue"],
-                )
-            else:
-                fused = dense_results[:rerank_pool]
-        else:
-            fused = []
-        stats.fused_total = len(fused)
-
-        # Stage 3b: Cross-encoder reranking (skipped when bypassed per-call
-        # via rerank=False, #1766)
-        if apply_rerank and reranker is not None and fused:
-            try:
-                fused = await reranker.rerank(query, fused, top_k=top_k)
-            except Exception as exc:
-                logger.warning("Reranking failed, using original order: %s", exc)
-                # Fallback must still honor the caller's response size —
-                # fused is at rerank_pool (e.g. 20) right now, not top_k.
-                fused = fused[:top_k]
-
-        # Filter by source file if requested
-        if source_filter:
-            fused = [
-                r
-                for r in fused
-                if match_source_filter(source_filter, str(r.chunk.metadata.source_file))
-            ]
-
-        # Filter by tag if requested (comma-separated = OR matching)
-        if tag_filter:
-            required = {t.strip() for t in tag_filter.split(",") if t.strip()}
-            fused = [r for r in fused if required & set(r.chunk.metadata.tags)]
-
-        if metadata_filter is not None:
-            fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
-
-        # Stage β': temporal-validity filter (RFC §Pipeline integration).
-        # AND-combined with source/tag filter via sequential application —
-        # a chunk must pass both to survive. Default ``as_of`` is the
-        # current wall-clock; explicit values bypass the result cache so
-        # historical queries don't poison default-path cache slots.
-        effective_as_of = as_of_unix if as_of_unix is not None else int(time.time())
-        if fused:
-            fused = _apply_validity_filter(fused, effective_as_of)
-
-        # Stage 4: Time decay (re-score older chunks lower)
-        if self._decay_config.enabled and fused:
-            from memtomem.search.decay import apply_score_decay
-
-            fused = apply_score_decay(fused, half_life_days=self._decay_config.half_life_days)
-
-        # Stage 5: MMR diversity re-ranking
-        if self._mmr_config.enabled and not use_dense:
-            # #1619: without dense retrieval there are no vectors to
-            # diversify over, so an explicitly enabled MMR silently did
-            # nothing. Say so once per process (INFO — it's a config
-            # mismatch, not a runtime failure); mem_status carries the
-            # same fact as a persistent `mmr_disabled_no_dense` warning.
-            _log_mmr_no_dense_once()
-        if self._mmr_config.enabled and fused and use_dense:
-            from memtomem.search.mmr import apply_mmr
-
-            chunk_ids = [str(r.chunk.id) for r in fused]
-            emb_dict_raw = await self._storage.get_embeddings_for_chunks(chunk_ids)
-            if emb_dict_raw:
-                from uuid import UUID
-
-                emb_dict = {UUID(k): v for k, v in emb_dict_raw.items()}
-                fused = apply_mmr(fused, emb_dict, lambda_param=self._mmr_config.lambda_param)
-
-        # Stage 6: Access-frequency boost
-        if self._access_config.enabled and fused:
-            from memtomem.search.access import apply_access_boost
-
-            access_chunk_ids = [r.chunk.id for r in fused]
-            access_counts = await self._storage.get_access_counts(access_chunk_ids)
-            fused = apply_access_boost(
-                fused, access_counts, max_boost=self._access_config.max_boost
-            )
-
-        # Stage 7: Importance boost
-        if self._importance_config and getattr(self._importance_config, "enabled", False) and fused:
-            from memtomem.search.importance import apply_importance_boost
-
-            chunk_ids_imp = [r.chunk.id for r in fused]
-            imp_scores = await self._storage.get_importance_scores(chunk_ids_imp)
-            fused = apply_importance_boost(
-                fused,
-                imp_scores,
-                max_boost=getattr(self._importance_config, "max_boost", 1.5),
-            )
-
-        # Stage 8: Context window expansion (post-scoring, does not affect ranking)
-        ctx_win = self._resolve_context_window(context_window)
-        if ctx_win > 0 and fused:
-            fused = await self._expand_context(fused, ctx_win)
-            fused = _exclude_source_roots(fused, normalized_exclusion_roots)
-            if metadata_filter is not None and metadata_filter.source_exact:
-                # Context neighbors belong to the selected source but may have
-                # a different chunk type or timestamp. Keep that surrounding
-                # context while preserving the exact-source boundary.
-                allowed_sources = {norm_path(Path(value)) for value in metadata_filter.source_exact}
-                fused = [
-                    r for r in fused if norm_path(r.chunk.metadata.source_file) in allowed_sources
+                rescue_results = _exclude_source_roots(rescue_results, normalized_exclusion_roots)
+                rescue_results = [
+                    dataclass_replace(r, via_session_summary=True) for r in rescue_results
                 ]
 
-        # Re-stamp ``via_session_summary`` for any chunk that came in
-        # via the rescue leg. Downstream stages (decay, MMR, access,
-        # importance, reranker, context expansion) construct fresh
-        # ``SearchResult`` instances with default field values and so
-        # silently drop the flag — restoring here at the boundary keeps
-        # propagation a single-source-of-truth concern of the pipeline
-        # rather than leaking the obligation into every stage.
-        if rescue_chunk_ids:
-            fused = [
-                dataclass_replace(r, via_session_summary=True)
-                if r.chunk.id in rescue_chunk_ids
-                else r
-                for r in fused
-            ]
-
-        stats.final_total = len(fused)
-
-        # Increment access counts for returned results (fire-and-forget)
-        if fused:
-
-            async def _increment():
-                await self._storage.increment_access([r.chunk.id for r in fused])
-
-            t = asyncio.create_task(_increment())
-            t.add_done_callback(_bg_task_error_cb)
-            self._bg_tasks.add(t)
-            t.add_done_callback(self._bg_tasks.discard)
-
-        # Save to query history (fire-and-forget)
-        async def _save_history():
-            emb = query_embedding if use_dense else []
-            await self._storage.save_query_history(
-                query,
-                emb,
-                [str(r.chunk.id) for r in fused[:top_k]],
-                [r.score for r in fused[:top_k]],
+            # Single source for the rescue leg's RRF weight — the fallback is
+            # effectively unreachable (rescue only fires when the config is
+            # wired) but keeps the three fusion branches total.
+            rescue_w = (
+                self._session_summary_config.expansion_rescue_weight
+                if self._session_summary_config is not None
+                else _DEFAULT_RESCUE_WEIGHT
             )
 
-        t2 = asyncio.create_task(_save_history())
-        t2.add_done_callback(_bg_task_error_cb)
-        self._bg_tasks.add(t2)
-        t2.add_done_callback(self._bg_tasks.discard)
+            if use_bm25 and use_dense:
+                fusion_lists = [bm25_results, dense_results]
+                fusion_weights = list(effective_weights)
+                fusion_labels = ["bm25", "dense"]
+                if rescue_results:
+                    fusion_lists.append(rescue_results)
+                    fusion_weights.append(rescue_w)
+                    fusion_labels.append("session_rescue")
+                fused = reciprocal_rank_fusion(
+                    fusion_lists,
+                    k=self._config.rrf_k,
+                    top_k=rerank_pool,
+                    weights=fusion_weights,
+                    list_labels=fusion_labels,
+                )
+            elif use_bm25:
+                if rescue_results:
+                    fused = reciprocal_rank_fusion(
+                        [bm25_results, rescue_results],
+                        k=self._config.rrf_k,
+                        top_k=rerank_pool,
+                        weights=[effective_weights[0], rescue_w],
+                        list_labels=["bm25", "session_rescue"],
+                    )
+                else:
+                    fused = bm25_results[:rerank_pool]
+            elif use_dense:
+                if rescue_results:
+                    fused = reciprocal_rank_fusion(
+                        [dense_results, rescue_results],
+                        k=self._config.rrf_k,
+                        top_k=rerank_pool,
+                        weights=[
+                            effective_weights[1] if len(effective_weights) > 1 else 1.0,
+                            rescue_w,
+                        ],
+                        list_labels=["dense", "session_rescue"],
+                    )
+                else:
+                    fused = dense_results[:rerank_pool]
+            else:
+                fused = []
+            stats.fused_total = len(fused)
 
-        # Store in TTL cache only if version hasn't changed during search.
-        # Skip the write when ``as_of_unix`` was explicit so that a
-        # historical-query result never overwrites the default-path slot
-        # (next default caller would otherwise be served a past-snapshot
-        # filtering of the same query).
-        if as_of_unix is None and self._cache_version == version_at_start:
-            self._search_cache[cache_key] = (time.time(), version_at_start, fused, stats)
-            # Evict old entries (keep max 50)
-            if len(self._search_cache) > 50:
+            # Stage 3b: Cross-encoder reranking (skipped when bypassed per-call
+            # via rerank=False, #1766)
+            if apply_rerank and reranker is not None and fused:
                 try:
-                    oldest_key = min(self._search_cache, key=lambda k: self._search_cache[k][0])
-                    self._search_cache.pop(oldest_key, None)
-                except ValueError:
-                    pass  # cache emptied by concurrent invalidate_cache()
+                    fused = await reranker.rerank(query, fused, top_k=top_k)
+                except Exception as exc:
+                    logger.warning("Reranking failed, using original order: %s", exc)
+                    # Fallback must still honor the caller's response size —
+                    # fused is at rerank_pool (e.g. 20) right now, not top_k.
+                    fused = fused[:top_k]
 
-        return fused, stats
+            # Filter by source file if requested
+            if source_filter:
+                fused = [
+                    r
+                    for r in fused
+                    if match_source_filter(source_filter, str(r.chunk.metadata.source_file))
+                ]
+
+            # Filter by tag if requested (comma-separated = OR matching)
+            if tag_filter:
+                required = {t.strip() for t in tag_filter.split(",") if t.strip()}
+                fused = [r for r in fused if required & set(r.chunk.metadata.tags)]
+
+            if metadata_filter is not None:
+                fused = [r for r in fused if _matches_metadata(r, metadata_filter)]
+
+            # Stage β': temporal-validity filter (RFC §Pipeline integration).
+            # AND-combined with source/tag filter via sequential application —
+            # a chunk must pass both to survive. Default ``as_of`` is the
+            # current wall-clock; explicit values bypass the result cache so
+            # historical queries don't poison default-path cache slots.
+            effective_as_of = as_of_unix if as_of_unix is not None else int(time.time())
+            if fused:
+                fused = _apply_validity_filter(fused, effective_as_of)
+
+            # Stage 4: Time decay (re-score older chunks lower)
+            if self._decay_config.enabled and fused:
+                from memtomem.search.decay import apply_score_decay
+
+                fused = apply_score_decay(fused, half_life_days=self._decay_config.half_life_days)
+
+            # Stage 5: MMR diversity re-ranking
+            if self._mmr_config.enabled and not use_dense:
+                # #1619: without dense retrieval there are no vectors to
+                # diversify over, so an explicitly enabled MMR silently did
+                # nothing. Say so once per process (INFO — it's a config
+                # mismatch, not a runtime failure); mem_status carries the
+                # same fact as a persistent `mmr_disabled_no_dense` warning.
+                _log_mmr_no_dense_once()
+            if self._mmr_config.enabled and fused and use_dense:
+                from memtomem.search.mmr import apply_mmr
+
+                chunk_ids = [str(r.chunk.id) for r in fused]
+                emb_dict_raw = await self._storage.get_embeddings_for_chunks(chunk_ids)
+                if emb_dict_raw:
+                    from uuid import UUID
+
+                    emb_dict = {UUID(k): v for k, v in emb_dict_raw.items()}
+                    fused = apply_mmr(fused, emb_dict, lambda_param=self._mmr_config.lambda_param)
+
+            # Stage 6: Access-frequency boost
+            if self._access_config.enabled and fused:
+                from memtomem.search.access import apply_access_boost
+
+                access_chunk_ids = [r.chunk.id for r in fused]
+                access_counts = await self._storage.get_access_counts(access_chunk_ids)
+                fused = apply_access_boost(
+                    fused, access_counts, max_boost=self._access_config.max_boost
+                )
+
+            # Stage 7: Importance boost
+            if (
+                self._importance_config
+                and getattr(self._importance_config, "enabled", False)
+                and fused
+            ):
+                from memtomem.search.importance import apply_importance_boost
+
+                chunk_ids_imp = [r.chunk.id for r in fused]
+                imp_scores = await self._storage.get_importance_scores(chunk_ids_imp)
+                fused = apply_importance_boost(
+                    fused,
+                    imp_scores,
+                    max_boost=getattr(self._importance_config, "max_boost", 1.5),
+                )
+
+            # Stage 8: Context window expansion (post-scoring, does not affect ranking)
+            ctx_win = self._resolve_context_window(context_window)
+            if ctx_win > 0 and fused:
+                fused = await self._expand_context(fused, ctx_win)
+                fused = _exclude_source_roots(fused, normalized_exclusion_roots)
+                if metadata_filter is not None and metadata_filter.source_exact:
+                    # Context neighbors belong to the selected source but may have
+                    # a different chunk type or timestamp. Keep that surrounding
+                    # context while preserving the exact-source boundary.
+                    allowed_sources = {
+                        norm_path(Path(value)) for value in metadata_filter.source_exact
+                    }
+                    fused = [
+                        r
+                        for r in fused
+                        if norm_path(r.chunk.metadata.source_file) in allowed_sources
+                    ]
+
+            # Re-stamp ``via_session_summary`` for any chunk that came in
+            # via the rescue leg. Downstream stages (decay, MMR, access,
+            # importance, reranker, context expansion) construct fresh
+            # ``SearchResult`` instances with default field values and so
+            # silently drop the flag — restoring here at the boundary keeps
+            # propagation a single-source-of-truth concern of the pipeline
+            # rather than leaking the obligation into every stage.
+            if rescue_chunk_ids:
+                fused = [
+                    dataclass_replace(r, via_session_summary=True)
+                    if r.chunk.id in rescue_chunk_ids
+                    else r
+                    for r in fused
+                ]
+
+            stats.final_total = len(fused)
+
+            # Increment access counts for returned results (fire-and-forget)
+            if fused:
+
+                async def _increment():
+                    await self._storage.increment_access([r.chunk.id for r in fused])
+
+                t = asyncio.create_task(_increment())
+                t.add_done_callback(_bg_task_error_cb)
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
+
+            # Save to query history (fire-and-forget)
+            async def _save_history():
+                emb = query_embedding if use_dense else []
+                await self._storage.save_query_history(
+                    query,
+                    emb,
+                    [str(r.chunk.id) for r in fused[:top_k]],
+                    [r.score for r in fused[:top_k]],
+                )
+
+            t2 = asyncio.create_task(_save_history())
+            t2.add_done_callback(_bg_task_error_cb)
+            self._bg_tasks.add(t2)
+            t2.add_done_callback(self._bg_tasks.discard)
+
+            # Store in TTL cache only if version hasn't changed during search.
+            # Skip the write when ``as_of_unix`` was explicit so that a
+            # historical-query result never overwrites the default-path slot
+            # (next default caller would otherwise be served a past-snapshot
+            # filtering of the same query).
+            if as_of_unix is None and self._cache_version == version_at_start:
+                self._search_cache[cache_key] = (time.time(), version_at_start, fused, stats)
+                # Evict old entries (keep max 50)
+                if len(self._search_cache) > 50:
+                    try:
+                        oldest_key = min(self._search_cache, key=lambda k: self._search_cache[k][0])
+                        self._search_cache.pop(oldest_key, None)
+                    except ValueError:
+                        pass  # cache emptied by concurrent invalidate_cache()
+
+            return fused, stats
 
     async def close(self) -> None:
         """Release resources held by the pipeline (reranker client, etc.)."""
+        # Retired-but-still-leased reranker generations first (#1777):
+        # emptying the set now means a lease released after this point finds
+        # no retired entry and schedules nothing — no orphan task, no double
+        # close. Already-scheduled deferred closes sit in _bg_tasks below.
+        while self._retired_rerank_entries:
+            entry = self._retired_rerank_entries.pop()
+            await close_reranker_safely(entry.reranker)
         if self._bg_tasks:
             await asyncio.gather(*self._bg_tasks, return_exceptions=True)
             self._bg_tasks.clear()
