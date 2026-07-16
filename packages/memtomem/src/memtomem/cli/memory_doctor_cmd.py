@@ -32,6 +32,13 @@ Checks (per configured ``memory_dir``):
 * **broken_link** — links in the index file that don't resolve:
   ``missing_target`` (file gone) or ``outside_root`` (escapes the memory
   root). ``url`` and ``anchor`` links are classified and *not* reported.
+* **dangling_wikilink** — a ``[[name]]`` on an index line naming no
+  ``name.md`` inside the memory root, or one outside it (#1762). Each item
+  names its class (``missing_target`` / ``outside_root``). Informational,
+  never an error: the doctor cannot tell a forward reference (allowed by the
+  agent memory convention) from a stale link to a deleted memo. Wikilinks are
+  never pointer entries, so they don't feed ``broken_link``, ``index_orphan``
+  or ``--fix``.
 * **index_orphan** — files on disk that the index file (``MEMORY.md``) does
   not list. Distinct from ``db_coverage``: "not in the TOC" ≠ "not indexed".
 * **ambiguous_index_line** — a pointer line naming something we won't resolve
@@ -48,7 +55,8 @@ Checks (per configured ``memory_dir``):
 Output: human glyphs by default, ``--json`` for a structured payload. Exit
 ``1`` when any *error*-severity finding exists (``stale_source``,
 ``convention_violation``, ``broken_link``), else ``0``. Coverage gaps,
-orphans, budget and cold candidates are advisory (a partially-indexed dir is
+orphans, dangling wikilinks, budget and cold candidates are advisory (a
+partially-indexed dir is
 a legitimate steady state) so they warn without failing the exit code —
 mirrors ``mm sync-doctor`` (warns don't fail) while exposing a JSON + exit
 code for CI like ``mm context settings-doctor``.
@@ -156,12 +164,19 @@ class ParsedIndex:
     (a lazy continuation). Their links are read and checked like any other —
     only ``--fix`` cares, because deleting the item's first line would strand
     the rest of it as loose prose.
+
+    ``wikilinks`` holds ``(line_no, target)`` for every ``[[target]]`` /
+    ``[[target|alias]]`` on a list-item line. Deliberately *not* entries: a
+    wikilink is a cross-reference, not a TOC pointer — it never feeds
+    ``broken_link``, the listed set, or ``--fix`` eligibility (#1761 pinned
+    that). It only feeds the info-severity ``dangling_wikilink`` check (#1762).
     """
 
     entries: tuple[IndexEntry, ...]
     other_lines: tuple[tuple[int, str], ...]
     unresolved_syntax_lines: frozenset[int] = frozenset()
     multiline_lines: frozenset[int] = frozenset()
+    wikilinks: tuple[tuple[int, str], ...] = ()
 
     @property
     def ambiguous_lines(self) -> frozenset[int]:
@@ -208,8 +223,57 @@ _PLAIN_RELATIVE_TARGET_RE = re.compile(r"^[^\s?%:]+$")
 # failing to know its own system's link syntax. The label is the tell: a title
 # CommonMark reports as ``[note]`` can only have come from ``[[note]]`` in the
 # source. Bracketed *parts* of a title (``[draft] Title``, ``Title [note]``)
-# don't match, and are pointers as before.
+# don't match, and are pointers as before. The label is read from the *rendered*
+# title, so it is only ever a hint: ``[\[memo\]](gone.md)`` and
+# ``[&#91;memo&#93;](gone.md)`` render the same ``[memo]`` from source that never
+# wrote a wikilink, and demoting those would lose an ordinary pointer. Every
+# match is therefore confirmed against the raw source (:func:`_wikilink_in`)
+# before it is treated as a wikilink.
 _WIKILINK_LABEL_RE = re.compile(r"^\[[^\[\]]*\]$")
+
+# A ``[[target]]`` / ``[[target|alias]]`` wikilink in literal text. Mirrors
+# ``chunking/markdown.py:_WIKILINK_RE`` (kept as this command's own copy, like
+# the other index-reading patterns here, rather than importing chunking
+# internals). Wikilinks are never pointer *entries* — ``--fix`` must not act on
+# them — but they do name memory files, so the doctor collects them for the
+# info-severity ``dangling_wikilink`` check (#1762). Group 1 is the target; an
+# alias never names the file.
+_WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+
+
+def _wikilink_in(raw: str, inner: str, *, followed_by_paren: bool = False) -> bool:
+    """Whether *raw* (an inline's **source**) literally writes ``[[inner]]``.
+
+    Both routes to a wikilink read text markdown-it has already decoded, and
+    decoding is exactly where a wikilink can be conjured from source that wrote
+    none: ``\\[\\[future]]`` and ``&#91;[future]]`` both *render* ``[[future]]``,
+    and a ``[\\[memo\\]](gone.md)`` label renders ``[memo]`` — the same shape a
+    real ``[[memo]](note)`` leaves behind. Escaping brackets is how an author
+    says "not a wikilink"; honouring that keeps an ordinary pointer checkable
+    (it stays an entry, and a ``--fix`` candidate when dead) and keeps escaped
+    prose out of ``dangling_wikilink``.
+
+    The check only ever *subtracts*: the token walk has already established the
+    match came from text or a link label rather than a code span, so this can
+    never re-admit quoted syntax.
+
+    *followed_by_paren* tightens it for the label route, where a demotion has
+    consequences — the pointer would stop being link-checked and stop being a
+    ``--fix`` candidate. That route only fires on a real CommonMark link, so
+    its source necessarily reads ``[[inner]](destination)``; requiring the
+    ``(`` keeps a code span elsewhere on the line (``\\[\\[memo\\]](gone.md) and
+    `[[memo]]` ``) from vouching for an escaped label that isn't one.
+
+    Membership is inline-wide, so two residual shapes stay imprecise, both
+    accepted: escaped prose beside a code span quoting *the same name* raises
+    an advisory ``dangling_wikilink``, and a target carrying an entity
+    (``[[memo&amp;x]]``) is decoded in the text but not in *raw*, so it is not
+    collected. Both are contrived, neither is an error, and closing them means
+    hand-rolling CommonMark's code-span and escape rules over the raw source —
+    the parsing-by-pattern this module exists to avoid.
+    """
+    needle = f"[[{inner}]]("
+    return needle in raw if followed_by_paren else needle[:-1] in raw
 
 
 def _markdown_parser() -> MarkdownIt:
@@ -228,9 +292,9 @@ def _markdown_parser() -> MarkdownIt:
     return md
 
 
-def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
-    """An inline token's ``(title, destination)`` links, plus whether it also
-    holds link syntax that resolved to no link at all.
+def _read_inline(token: Token) -> tuple[list[tuple[str, str]], list[str], bool]:
+    """An inline token's ``(title, destination)`` links, its wikilink targets,
+    plus whether it also holds link syntax that resolved to no link at all.
 
     Reading an index means reading Markdown as Markdown. A destination can be
     escaped (``notes_\\(v2.md``), entity-encoded (``notes_&amp;v2.md``) or
@@ -250,10 +314,19 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
     Nested links can't occur in CommonMark (a link inside a link label is
     demoted to text), so each ``link_open`` starts a new entry.
 
-    A ``[[wikilink]](note)`` is dropped rather than read as a pointer — see
+    A ``[[wikilink]](note)`` is not read as a pointer — see
     :data:`_WIKILINK_LABEL_RE`. CommonMark has no wikilinks; memtomem does.
+    Wikilinks are instead returned as their own list: both the bare/text forms
+    (``[[memo]]``, ``[[memo|alias]]``) and the label recovered from that
+    dropped-link shape. Only literal text is scanned — a code span quoting
+    ``[[x]]`` is quoting, not linking — and every match is confirmed against
+    the inline's raw source, because the text the parser hands back is decoded
+    and a decoded ``[[x]]`` may have been escaped in the file
+    (:func:`_wikilink_in`).
     """
+    raw = token.content
     links: list[tuple[str, str]] = []
+    wikilinks: list[str] = []
     unresolved = False
     title_parts: list[str] = []
     in_link = False
@@ -265,16 +338,29 @@ def _read_inline(token: Token) -> tuple[list[tuple[str, str]], bool]:
         elif child.type == "link_close" and in_link:
             if links:
                 title = "".join(title_parts).strip()
-                if _WIKILINK_LABEL_RE.match(title):
+                if _WIKILINK_LABEL_RE.match(title) and _wikilink_in(
+                    raw, title[1:-1], followed_by_paren=True
+                ):
                     links.pop()  # a wikilink; the parenthetical after it is prose
+                    # CommonMark reports the label as ``[memo]``; confirmed
+                    # against the source, it can only have come from
+                    # ``[[memo]]`` — recover the target (dropping an ``|alias``
+                    # part, which never names the file).
+                    wikilinks.append(title[1:-1].split("|", 1)[0])
                 else:
                     links[-1] = (title, links[-1][1])
             in_link = False
         elif in_link:
             title_parts.append(child.content)
-        elif child.type == "text" and _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
-            unresolved = True
-    return links, unresolved
+        elif child.type == "text":
+            if _UNRESOLVED_LINK_SYNTAX_RE.search(child.content):
+                unresolved = True
+            wikilinks.extend(
+                m.group(1)
+                for m in _WIKILINK_RE.finditer(child.content)
+                if _wikilink_in(raw, m.group(0)[2:-2])
+            )
+    return links, wikilinks, unresolved
 
 
 def _list_item_body(tokens: list[Token], open_index: int) -> list[Token]:
@@ -368,6 +454,7 @@ def parse_memory_index(text: str) -> ParsedIndex:
     unresolved_syntax: set[int] = set()
     multiline: set[int] = set()
     pointer_lines: set[int] = set()
+    wikilinks: list[tuple[int, str]] = []
 
     tokens = _markdown_parser().parse(text, {})
     for i, token in enumerate(tokens):
@@ -376,7 +463,8 @@ def parse_memory_index(text: str) -> ParsedIndex:
         body = _list_item_body(tokens, i)
         for inline in _own_inlines(body):
             line_no = inline.map[0] + 1
-            links, unresolved = _read_inline(inline)
+            links, inline_wikilinks, unresolved = _read_inline(inline)
+            wikilinks.extend((line_no, target) for target in inline_wikilinks)
             # Link syntax that resolved to no link (``- [B](b.md``) would
             # otherwise pass as ordinary prose — an unread pointer reported as
             # nothing at all. It has no entry to carry it, so the line is
@@ -405,6 +493,7 @@ def parse_memory_index(text: str) -> ParsedIndex:
         other_lines=tuple(other),
         unresolved_syntax_lines=frozenset(unresolved_syntax),
         multiline_lines=frozenset(multiline),
+        wikilinks=tuple(wikilinks),
     )
 
 
@@ -803,7 +892,8 @@ def _analyze_index_file(
     disk_norm: dict[str, Path],
     norm_path: object,
 ) -> None:
-    """Broken-link, index-orphan and budget checks against the TOC file."""
+    """Broken-link, dangling-wikilink, index-orphan and budget checks against
+    the TOC file."""
     index_path = root / index_file_name
     try:
         text = index_path.read_text(encoding="utf-8")
@@ -891,6 +981,44 @@ def _analyze_index_file(
                     "rewrite the target as a plain relative filename"
                 ),
                 items=ambiguous_items,
+            )
+        )
+
+    # dangling_wikilink — a ``[[name]]`` on an index line whose memory file
+    # doesn't exist (#1762). Info-severity by decision: the doctor cannot tell
+    # a forward reference (blessed by the agent memory convention — a name
+    # worth writing later) from a stale link left by a deleted memo, so this
+    # never gates the exit code, and wikilinks stay out of entries / the
+    # listed set / ``--fix`` eligibility.
+    #
+    # Resolution is this command's own rule, close to the importers'
+    # (``indexing/importers.py``: ``[[name]]`` → ``name.md``) but deliberately
+    # more lenient where they part: an author who writes the suffix means the
+    # file, so ``[[name.md]]`` resolves to ``name.md`` rather than the
+    # importers' ``name.md.md``. A target outside the root is reported too —
+    # it may well exist, so the item names its class rather than claiming the
+    # file is missing.
+    dangling: list[str] = []
+    for line_no, target in parsed.wikilinks:
+        name = target.strip().split("#", 1)[0]  # drop an Obsidian ``#section``
+        if not name:
+            continue
+        candidate = name if name.endswith(".md") else name + ".md"
+        cls = classify_link(candidate, root=root, source_dir=root)
+        if cls in ("missing_target", "outside_root"):
+            dangling.append(f"L{line_no} [{cls}] [[{target}]] → {candidate}")
+    if dangling:
+        report.findings.append(
+            Finding(
+                check="dangling_wikilink",
+                severity="info",
+                summary=(
+                    f"{len(dangling)} wikilink(s) in {index_file_name} naming no memory file "
+                    "inside the memory root (missing_target), or one outside it "
+                    "(outside_root) — a forward reference (fine: it marks a memory worth "
+                    "writing later), a stale link to a deleted memo, or a name to correct"
+                ),
+                items=dangling,
             )
         )
 
