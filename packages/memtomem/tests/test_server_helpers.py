@@ -272,6 +272,35 @@ class TestFormatStructuredResults:
         parsed = json.loads(_format_structured_results([r]))
         assert parsed["results"][0]["score"] == 0.9235
 
+    def test_score_scale_emitted_top_level(self):
+        """#1767: the scale rides the payload, not each item — per-result
+        keys stay the stable narrow shape pinned above."""
+        import json
+
+        r = self._make_result()
+        parsed = json.loads(_format_structured_results([r], score_scale="rrf"))
+        assert parsed["score_scale"] == "rrf"
+        assert "score_scale" not in parsed["results"][0]
+        assert "reranker" not in parsed
+
+    def test_score_scale_with_reranker_model(self):
+        import json
+
+        r = self._make_result()
+        parsed = json.loads(
+            _format_structured_results([r], score_scale="rerank", reranker="test-reranker-v1")
+        )
+        assert parsed["score_scale"] == "rerank"
+        assert parsed["reranker"] == "test-reranker-v1"
+
+    def test_score_scale_omitted_when_none(self):
+        import json
+
+        r = self._make_result()
+        parsed = json.loads(_format_structured_results([r]))
+        assert "score_scale" not in parsed
+        assert "reranker" not in parsed
+
     def test_source_filename_only(self):
         import json
 

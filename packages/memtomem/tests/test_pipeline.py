@@ -762,6 +762,256 @@ class TestPerCallRerankBypass:
         assert results[0].chunk.id == relevant.chunk.id
 
 
+class TestScoreScale:
+    """#1767: ``RetrievalStats.score_scale`` must name the scale the returned
+    scores are actually on — derived from the results, not the rerank
+    decision, so silent reranker fallbacks keep the label truthful.
+    """
+
+    _make_result = staticmethod(TestRerankCandidatePool._make_result)
+    _probe_reranker = staticmethod(TestRerankCandidatePool._probe_reranker)
+
+    def _make_pipeline(
+        self,
+        bm25_results: list[SearchResult],
+        dense_results: list[SearchResult] | None = None,
+        *,
+        enable_dense: bool = False,
+        reranker: object | None = None,
+        rerank_config: object | None = None,
+    ):
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        storage = AsyncMock()
+        storage.bm25_search = AsyncMock(return_value=bm25_results)
+        storage.dense_search = AsyncMock(return_value=dense_results or [])
+        storage.increment_access = AsyncMock()
+        storage.save_query_history = AsyncMock()
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+
+        return SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=True, enable_dense=enable_dense),
+            reranker=reranker,
+            rerank_config=rerank_config,
+        )
+
+    @pytest.mark.asyncio
+    async def test_hybrid_fusion_is_rrf(self):
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(5)]
+        pipeline = self._make_pipeline(results_in, results_in, enable_dense=True)
+
+        _, stats = await pipeline.search("anything", top_k=5)
+
+        assert stats.score_scale == "rrf"
+        assert stats.reranker_model is None
+
+    @pytest.mark.asyncio
+    async def test_bm25_passthrough_is_bm25(self):
+        """Single-retriever passthrough skips RRF and keeps raw retriever
+        scores — it must NOT be labeled "rrf"."""
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(5)]
+        pipeline = self._make_pipeline(results_in)
+
+        _, stats = await pipeline.search("anything", top_k=5)
+
+        assert stats.score_scale == "bm25"
+
+    @pytest.mark.asyncio
+    async def test_dense_passthrough_is_dense(self):
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import SearchConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(5)]
+        storage = AsyncMock()
+        storage.dense_search = AsyncMock(return_value=results_in)
+        storage.get_access_counts = AsyncMock(return_value={})
+        storage.get_embeddings_for_chunks = AsyncMock(return_value={})
+        storage.get_importance_scores = AsyncMock(return_value={})
+        storage.count_chunks_by_ns_prefix = AsyncMock(return_value=0)
+        embedder = AsyncMock()
+        embedder.embed_query = AsyncMock(return_value=[0.1] * 8)
+        pipeline = SearchPipeline(
+            storage=storage,
+            embedder=embedder,
+            config=SearchConfig(enable_bm25=False, enable_dense=True),
+        )
+
+        _, stats = await pipeline.search("anything", top_k=5)
+
+        assert stats.score_scale == "dense"
+
+    @pytest.mark.asyncio
+    async def test_successful_rerank_is_rerank_with_model(self):
+        from memtomem.config import RerankConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        received: list[int] = []
+        pipeline = self._make_pipeline(
+            results_in,
+            reranker=self._probe_reranker(received, results_in[0].chunk.id),
+            rerank_config=RerankConfig(enabled=True, model="test-reranker-v1"),
+        )
+
+        _, stats = await pipeline.search("anything", top_k=10)
+
+        assert received == [20]
+        assert stats.score_scale == "rerank"
+        assert stats.reranker_model == "test-reranker-v1"
+
+    @pytest.mark.asyncio
+    async def test_rerank_exception_fallback_keeps_base_scale(self):
+        """Stage 3b catches reranker exceptions and keeps the fused order —
+        the scale label must stay on the base scale, not claim "rerank"."""
+        from memtomem.config import RerankConfig
+
+        class _Exploding:
+            async def rerank(self, query, results, top_k):
+                raise RuntimeError("model gone")
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        pipeline = self._make_pipeline(
+            results_in,
+            reranker=_Exploding(),
+            rerank_config=RerankConfig(enabled=True, model="test-reranker-v1"),
+        )
+
+        results, stats = await pipeline.search("anything", top_k=10)
+
+        assert len(results) == 10
+        assert stats.rerank_applied is True  # the decision flag alone would lie
+        assert stats.score_scale == "bm25"
+        assert stats.reranker_model is None
+
+    @pytest.mark.asyncio
+    async def test_provider_silent_fallback_keeps_base_scale(self):
+        """Both shipped rerankers swallow their own errors and return the
+        input unchanged (no "reranked" re-stamp) — the label must not
+        promote to "rerank" on a normally-returning no-op."""
+        from memtomem.config import RerankConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        received: list[int] = []
+        pipeline = self._make_pipeline(
+            results_in,
+            # target_chunk_id=None → probe returns its input untouched,
+            # mimicking the providers' internal error fallback.
+            reranker=self._probe_reranker(received),
+            rerank_config=RerankConfig(enabled=True, model="test-reranker-v1"),
+        )
+
+        _, stats = await pipeline.search("anything", top_k=10)
+
+        assert received == [20]
+        assert stats.score_scale == "bm25"
+        assert stats.reranker_model is None
+
+    @pytest.mark.asyncio
+    async def test_per_call_bypass_keeps_base_scale(self):
+        from memtomem.config import RerankConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        received: list[int] = []
+        pipeline = self._make_pipeline(
+            results_in,
+            reranker=self._probe_reranker(received, results_in[0].chunk.id),
+            rerank_config=RerankConfig(enabled=True),
+        )
+
+        _, stats = await pipeline.search("anything", top_k=10, rerank=False)
+
+        assert received == []
+        assert stats.score_scale == "bm25"
+
+    @pytest.mark.asyncio
+    async def test_filter_only_path_is_none_scale(self):
+        """The #750 enumeration path has no relevance scale — labeled
+        "none" so consumers know there is no magnitude to gate. With
+        modifiers off (the default) the scores are the 1.0 seed."""
+        from unittest.mock import AsyncMock
+
+        chunk = Chunk(
+            content="a",
+            metadata=ChunkMetadata(source_file=Path("/tmp/a.md"), tags=("redis",)),
+            id=uuid4(),
+            embedding=[],
+        )
+        pipeline = self._make_pipeline([])
+        pipeline._storage.recall_chunks = AsyncMock(return_value=[chunk])
+
+        results, stats = await pipeline.search(query="", tag_filter="redis", top_k=5)
+
+        assert [r.score for r in results] == [1.0]
+        assert stats.score_scale == "none"
+
+    @pytest.mark.asyncio
+    async def test_filter_only_stays_none_scale_under_modifiers(self):
+        """ "none" means *no relevance scale*, not *constant value*: with
+        decay enabled the filter-only scores vary (recency ordering), and
+        the label must still be "none" — there is a scale of sorts, but
+        not one that carries relevance magnitude."""
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import AsyncMock
+
+        from memtomem.config import DecayConfig
+        from memtomem.search.pipeline import SearchPipeline
+
+        old = Chunk(
+            content="old note",
+            metadata=ChunkMetadata(source_file=Path("/tmp/old.md"), tags=("redis",)),
+            id=uuid4(),
+            embedding=[],
+            updated_at=datetime.now(timezone.utc) - timedelta(days=60),
+        )
+        base = self._make_pipeline([])
+        pipeline = SearchPipeline(
+            storage=base._storage,
+            embedder=base._embedder,
+            config=base._config,
+            decay_config=DecayConfig(enabled=True, half_life_days=30.0),
+        )
+        pipeline._storage.recall_chunks = AsyncMock(return_value=[old])
+
+        results, stats = await pipeline.search(query="", tag_filter="redis", top_k=5)
+
+        assert results[0].score < 1.0  # decay transformed the 1.0 seed
+        assert stats.score_scale == "none"
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_preserves_scale(self):
+        """Stats ride the TTL cache alongside results, so a cache hit must
+        report the same scale without re-running the reranker."""
+        from memtomem.config import RerankConfig
+
+        results_in = [self._make_result(f"chunk{i}", rank=i + 1) for i in range(20)]
+        received: list[int] = []
+        pipeline = self._make_pipeline(
+            results_in,
+            reranker=self._probe_reranker(received, results_in[0].chunk.id),
+            rerank_config=RerankConfig(enabled=True, model="test-reranker-v1"),
+        )
+
+        _, first = await pipeline.search("anything", top_k=10)
+        _, second = await pipeline.search("anything", top_k=10)
+
+        assert received == [20]  # reranker ran once — second call was cached
+        assert first.score_scale == "rerank"
+        assert second.score_scale == "rerank"
+        assert second.reranker_model == "test-reranker-v1"
+
+
 class CloseAwareFakeReranker:
     """Counts rerank/close calls and refuses to rerank after close (#1777).
 

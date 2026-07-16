@@ -300,6 +300,26 @@ class TestArchiveHint:
         assert parsed["results"] == []
         # No archive chunks, no dim mismatch, no filter → no hints key.
         assert "hints" not in parsed
+        # No scores → no scale to name (#1767).
+        assert "score_scale" not in parsed
+
+    async def test_search_structured_emits_score_scale(self, trust_components):
+        """#1767: structured payloads name the scale the scores are on so
+        consumers can threshold per scale. The BM25-only fixture takes the
+        single-retriever passthrough, so the scale is raw "bm25" — not
+        "rrf", which would misdescribe the unfused scores."""
+        from memtomem.server.tools.search import mem_search
+
+        comp, _ = trust_components
+        await comp.storage.upsert_chunks([make_chunk("notes about pipelines")])
+
+        ctx = _search_ctx(comp)
+        out = await mem_search(query="pipelines", output_format="structured", ctx=ctx)
+
+        parsed = json.loads(out)
+        assert parsed["results"]
+        assert parsed["score_scale"] == "bm25"
+        assert "reranker" not in parsed  # only set when the scale is "rerank"
 
     async def test_search_structured_empty_surfaces_archive_hint(self, trust_components):
         """When archive chunks exist but none match the query, the structured

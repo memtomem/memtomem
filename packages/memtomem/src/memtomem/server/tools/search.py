@@ -150,6 +150,18 @@ async def mem_search(
     the candidate pool is automatically derived from ``rerank.oversample``,
     ``rerank.min_pool``, and ``rerank.max_pool``; passing ``rerank=false`` skips
     reranking for the call and collapses that pool to ``top_k``.
+
+    Structured output includes a top-level ``score_scale`` naming the base
+    scale the ``score`` values are on — ``"rerank"`` (cross-encoder output;
+    model-dependent range, see the accompanying ``reranker`` model ID),
+    ``"rrf"`` (reciprocal-rank fusion), ``"bm25"``/``"dense"`` (unfused
+    single-retriever scores), or ``"none"`` (filter-only enumeration — no
+    relevance scale, the filter is the selector) — so score thresholds can
+    be chosen per scale instead of inferred from the value range. Optional
+    modifier stages (time decay, access/importance boosts; all default-off)
+    multiply on top of the base scale when the server has them enabled, so
+    absolute thresholds are only portable across servers sharing the same
+    modifier config.
     """
     if not query.strip():
         return "Error: query cannot be empty."
@@ -264,7 +276,12 @@ async def mem_search(
         return "No results found." + tail
 
     if effective_format == "structured":
-        output = _format_structured_results(results, hints=hints or None)
+        output = _format_structured_results(
+            results,
+            hints=hints or None,
+            score_scale=stats.score_scale,
+            reranker=stats.reranker_model,
+        )
     else:
         is_verbose = effective_format == "verbose"
         output = _format_results(results, verbose=is_verbose)

@@ -219,7 +219,12 @@ async def mem_agent_search(
         return f"No results found for agent '{agent_id or 'current'}'."
 
     if output_format == "structured":
-        return _format_structured_results(results, hints=hints or None)
+        return _format_structured_results(
+            results,
+            hints=hints or None,
+            score_scale=stats.score_scale,
+            reranker=stats.reranker_model,
+        )
     return _format_results(results, verbose=output_format == "verbose")
 
 

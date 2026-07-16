@@ -116,7 +116,12 @@ def _format_verbose_result(r) -> str:
     )
 
 
-def _format_structured_results(results: list, hints: list[str] | None = None) -> str:
+def _format_structured_results(
+    results: list,
+    hints: list[str] | None = None,
+    score_scale: str | None = None,
+    reranker: str | None = None,
+) -> str:
     """JSON structured format for machine consumption.
 
     Returns a JSON string with all result fields untruncated.
@@ -126,6 +131,16 @@ def _format_structured_results(results: list, hints: list[str] | None = None) ->
     When ``hints`` is non-empty, the output also includes a ``hints`` array
     so machine consumers can surface the same trust-UX notices (archive
     filter, embedding mismatch, etc.) that compact/verbose append as text.
+
+    ``score_scale`` (#1767) names the base scale the ``score`` values are
+    on ("rerank" | "rrf" | "bm25" | "dense" | "none") so consumers can
+    pick a threshold per scale — or skip score gating for a scale they
+    don't recognize — instead of inferring from the value range. Optional
+    modifier stages (time decay, access/importance boosts; all
+    default-off) multiply on top of the base scale when the server has
+    them enabled. ``reranker`` carries the rerank model ID when the scale
+    is "rerank" (ranges are model-dependent). Both are top-level keys,
+    omitted when None.
     """
     out = []
     for r in results:
@@ -147,6 +162,10 @@ def _format_structured_results(results: list, hints: list[str] | None = None) ->
             entry["via_session_summary"] = True
         out.append(entry)
     payload: dict[str, object] = {"results": out}
+    if score_scale is not None:
+        payload["score_scale"] = score_scale
+    if reranker is not None:
+        payload["reranker"] = reranker
     if hints:
         payload["hints"] = list(hints)
     return json.dumps(payload, ensure_ascii=False)

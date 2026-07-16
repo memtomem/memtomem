@@ -198,10 +198,13 @@ async def _search(
         return
 
     if fmt == "json":
+        # The payload is a bare list, so score provenance rides per item
+        # (#1767): key omitted when the pipeline produced no ranked scale.
         out = [
             {
                 "rank": r.rank,
                 "score": round(r.score, 4),
+                **({"score_scale": stats.score_scale} if stats.score_scale is not None else {}),
                 "source": str(r.chunk.metadata.source_file),
                 "content": r.chunk.content[:200],
             }

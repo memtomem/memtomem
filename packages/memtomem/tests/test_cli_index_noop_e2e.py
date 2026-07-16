@@ -99,6 +99,16 @@ class TestFreshNoopIndexInline:
         assert r.exit_code == 0, f"search failed: {r.output}"
         assert "hello world" in r.output
 
+        # #1767: the JSON format carries score provenance per item.
+        # ``--provider none`` keeps ``enable_dense`` on (the dense leg just
+        # returns nothing), so fusion still runs and the scale is "rrf" —
+        # observable in the score itself: 1/(rrf_k + 1) ≈ 0.0164, not a raw
+        # BM25 magnitude.
+        r = runner.invoke(cli, ["search", "--format", "json", "hello"])
+        assert r.exit_code == 0, f"json search failed: {r.output}"
+        items = json.loads(r.output)
+        assert items and all(item["score_scale"] == "rrf" for item in items)
+
 
 class TestFreshNoopIndexSubprocess:
     def test_init_index_search_via_subprocess(self, tmp_path):
