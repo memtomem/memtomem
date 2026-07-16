@@ -803,7 +803,11 @@ def _analyze_index_file(
             )
         )
         return
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, not an OSError — without this arm
+        # an undecodable index takes the whole command down (#1769). Bare
+        # ValueError stays uncaught: parse bugs must not masquerade as an
+        # unreadable file.
         report.findings.append(
             Finding(
                 check="index_missing",
@@ -1073,6 +1077,29 @@ def _emit_json(reports: list[DirReport]) -> None:
 #      each candidate against fresh content so concurrent agent edits survive.
 
 
+def _read_error_message(exc: Exception) -> str:
+    """Render a read failure for the report — never empty.
+
+    ``str(OSError())`` is ``""``; an empty message would vanish under any
+    truthiness check downstream and turn a real failure back into "clean"
+    (#1769) — so presence is ``error is not None`` everywhere, and the message
+    itself falls back to the exception class name.
+    """
+    return str(exc) or type(exc).__name__
+
+
+class _IndexUnreadable(Exception):
+    """The locked fresh read inside :func:`_apply_fix` could not decode the index.
+
+    Raised so ``_run_fix`` can report the file as a per-file error instead of
+    letting the traceback corrupt the ``--json`` payload. Deliberately narrow:
+    only the read raises this — lock, ``stat`` and write failures keep
+    propagating, so an exception after the atomic replace can never be
+    misreported as ``removed=[]`` (ADR-0020 §5, every removed line is
+    auditable).
+    """
+
+
 @dataclass
 class FixFileResult:
     """Per-index-file outcome of a ``--fix`` run (preview or applied)."""
@@ -1085,6 +1112,10 @@ class FixFileResult:
     # §1 — a skipped candidate is a dead pointer left behind, so it is part of
     # the report, never a silent omission.
     skipped: list[tuple[int, str, str]] = field(default_factory=list)
+    # The index could not be read: nothing about this file is verified, so the
+    # run must not read as clean (#1769). Presence checks compare against None,
+    # never truthiness — see _read_error_message.
+    error: str | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -1092,6 +1123,7 @@ class FixFileResult:
             "index_file": self.index_file,
             "removed": [{"line": n, "text": t} for n, t in self.removed],
             "skipped": [{"line": n, "text": t, "reason": w} for n, t, w in self.skipped],
+            "error": self.error,
         }
 
 
@@ -1331,7 +1363,15 @@ def _apply_fix(
     removed: list[tuple[int, str]] = []
     with _file_lock(_lock_path_for(index_path)):
         # §5.1 — fresh, newline-preserving read (NOT read_text()).
-        fresh_text = index_path.read_bytes().decode("utf-8")
+        try:
+            fresh_text = index_path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # Only the read is wrapped: nothing has been written yet, so the
+            # caller can report error + removed=[] without hiding a write.
+            # Failures past this point (stat, atomic replace, lock teardown)
+            # keep propagating — converting those would let a post-commit
+            # exception erase removed lines from the audit report (#1769).
+            raise _IndexUnreadable(_read_error_message(exc)) from exc
         fresh = parse_memory_index(fresh_text)
         # §5.2 — re-ask §1 of the FRESH read, and report from it. The analysis
         # snapshot contributes only the count bound: its line numbers and
@@ -1421,7 +1461,19 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
             # T1 (analysis snapshot). Terminator-stripped ``raw`` is CRLF-agnostic,
             # so this read need not be newline-preserving — only the apply splice is.
             text = index_path.read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as exc:
+            # An unread index supports no claim — dropping it here made the run
+            # report "clean" about a file it never opened (#1769). Report it as
+            # a per-file error instead; the other dirs still get their report.
+            results.append(
+                FixFileResult(
+                    str(resolved),
+                    index_file_name,
+                    applied=apply,
+                    removed=[],
+                    error=_read_error_message(exc),
+                )
+            )
             continue
         parsed = parse_memory_index(text)
         candidates = _missing_target_entries(text, root=resolved, parsed=parsed)
@@ -1438,11 +1490,27 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
             # snapshot's verdicts describe a file the agent may have edited
             # since, and merging the two can report a line as both removed and
             # skipped.
-            removed, skipped = _apply_fix(
-                index_path,
-                resolved,
-                _AnalysisSnapshot.of(parsed, candidates=candidates, eligible=eligible),
-            )
+            try:
+                removed, skipped = _apply_fix(
+                    index_path,
+                    resolved,
+                    _AnalysisSnapshot.of(parsed, candidates=candidates, eligible=eligible),
+                )
+            except _IndexUnreadable as exc:
+                # The file decoded at T1 but not under the lock — an agent
+                # rewrote it to non-UTF-8 in between. Same accounting as the
+                # T1 read failure: nothing was written (only the fresh read
+                # raises this), so error + removed=[] is the truth.
+                results.append(
+                    FixFileResult(
+                        str(resolved),
+                        index_file_name,
+                        applied=apply,
+                        removed=[],
+                        error=str(exc),
+                    )
+                )
+                continue
         elif not candidates:
             results.append(FixFileResult(str(resolved), index_file_name, applied=apply, removed=[]))
             continue
@@ -1459,23 +1527,31 @@ def _run_fix(*, inspect_dirs: list[Path], apply: bool, json_out: bool) -> None:
     else:
         _emit_fix_human(results, applied=apply)
 
-    # A dead pointer left behind is not success. Exit non-zero so a script
-    # cannot read a partially-fixed index as a clean one (ADR-0020 §1).
-    if sum(len(r.skipped) for r in results) > 0:
+    # A dead pointer left behind is not success, and neither is an index this
+    # run could not read. Exit non-zero so a script cannot read a
+    # partially-fixed — or unread — index as a clean one (ADR-0020 §1, #1769).
+    if any(r.skipped for r in results) or any(r.error is not None for r in results):
         raise click.exceptions.Exit(1)
 
 
 def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
     total = sum(len(r.removed) for r in results)
     skipped_total = sum(len(r.skipped) for r in results)
-    if total == 0 and skipped_total == 0:
+    error_total = sum(1 for r in results if r.error is not None)
+    if total == 0 and skipped_total == 0 and error_total == 0:
         click.secho("No missing_target links to remove.", fg="green")
         return
     verb = "Removed" if applied else "Would remove"
     for r in results:
-        if not r.removed and not r.skipped:
+        if not r.removed and not r.skipped and r.error is None:
             continue
         click.secho(f"\n■ {r.path} · {r.index_file}", bold=True)
+        if r.error is not None:
+            # "Couldn't even look" is louder than "looked and skipped" (red vs
+            # yellow): nothing in this file is verified.
+            click.secho(f"  Could not read {r.index_file}: {r.error}", fg="red")
+            click.echo("  Nothing removed or verified here — repair the file and re-run --fix.")
+            continue
         if r.removed:
             # Lines, not links: an all-dead line may carry several.
             click.echo(f"  {verb} {len(r.removed)} dead pointer line(s):")
@@ -1489,6 +1565,11 @@ def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
             for line_no, raw, why in r.skipped:
                 click.echo(f"      - L{line_no}: {raw}\n        ({why})")
     n_files = sum(1 for r in results if r.removed)
+    if total == 0 and skipped_total == 0:
+        # Error-only run (the all-clean case returned above): a "--apply to
+        # write" hint would imply there is something to write.
+        click.secho(f"\n{error_total} index file(s) could not be read.", fg="red")
+        return
     if applied:
         summary = f"\n{total} line(s) removed across {n_files} file(s)."
     else:
@@ -1496,6 +1577,10 @@ def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
     if skipped_total:
         # Not a clean run: dead pointers remain, and only a human can clear them.
         summary += f" {skipped_total} line(s) skipped."
+    if error_total:
+        summary += f" {error_total} index file(s) could not be read."
+        click.secho(summary, fg="red")
+    elif skipped_total:
         click.secho(summary, fg="yellow")
     elif applied:
         click.secho(summary, fg="green")
@@ -1506,23 +1591,36 @@ def _emit_fix_human(results: list[FixFileResult], *, applied: bool) -> None:
 def _emit_fix_json(results: list[FixFileResult], *, applied: bool) -> None:
     total = sum(len(r.removed) for r in results)
     skipped_total = sum(len(r.skipped) for r in results)
-    # Three outcomes stay distinguishable (ADR-0020 §1): nothing to do, every
-    # candidate handled, some candidate left behind. A run that skipped one is
-    # never "clean" and never plain "fixed".
-    if total == 0 and skipped_total == 0:
-        status = "clean"
+    error_total = sum(1 for r in results if r.error is not None)
+    # The outcomes stay distinguishable (ADR-0020 §1): nothing to do, every
+    # candidate handled, some candidate left behind, some index never read. A
+    # run that skipped a line is never "clean" and never plain "fixed"; a run
+    # that could not read an index is "error" no matter what the readable files
+    # yielded — a skip is a complete account of what remains, an unread file is
+    # no account at all (#1769). One word for dry-run and apply alike: not
+    # reading the file is a condition, not an action, and `applied` already
+    # carries the run mode.
+    if error_total:
+        status = "error"
     elif skipped_total:
         status = "partial" if applied else "would-partial"
+    elif total == 0:
+        status = "clean"
     else:
         status = "fixed" if applied else "would-fix"
+
+    def _reportable(r: FixFileResult) -> bool:
+        return bool(r.removed or r.skipped) or r.error is not None
+
     payload = {
         "status": status,
         "applied": applied,
-        "files": [r.to_json() for r in results if r.removed or r.skipped],
+        "files": [r.to_json() for r in results if _reportable(r)],
         "summary": {
-            "files": sum(1 for r in results if r.removed or r.skipped),
+            "files": sum(1 for r in results if _reportable(r)),
             "lines": total,
             "skipped": skipped_total,
+            "errors": error_total,
         },
     }
     click.echo(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -1554,7 +1652,8 @@ def memory() -> None:
         "Subtractively remove broken `missing_target` links from the index file "
         "(ADR-0020). Dry-run unless --apply. Other findings are left untouched. "
         "A dead link on a line --fix cannot safely splice is skipped and reported "
-        "(exit 1), while the rest of the file is still fixed."
+        "(exit 1), while the rest of the file is still fixed. An index file it "
+        "cannot read is reported as an error (exit 1) instead of being skipped."
     ),
 )
 @click.option(

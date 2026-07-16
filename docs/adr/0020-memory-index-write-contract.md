@@ -2,8 +2,10 @@
 
 **Status:** Accepted (amended 2026-07-15: §1 line eligibility restated as
 strict-grammar + all-links-dead, per-line skip replaces the blanket refusal;
-§5 gains two apply-time clauses; span-based entry removal rejected — #1757)
-**Date:** 2026-06-01 (amended 2026-07-15)
+§5 gains two apply-time clauses; span-based entry removal rejected — #1757.
+Amended 2026-07-16: an unreadable index is a per-file `error`, never `clean` —
+#1769)
+**Date:** 2026-06-01 (amended 2026-07-15, 2026-07-16)
 **Context:** `mm memory doctor` (shipped in #1170, documented in #1171,
 `docs/guides/reference/organization-maintenance.md` §5) is **read-only by design**: it reports the
 3-way drift between disk, the agent index/TOC file (`MEMORY.md` for a
@@ -275,6 +277,22 @@ contract) are **unchanged**: no flag, no write, no behavior change.
   `--apply`, and `--json` splits `status` into `clean` / `would-fix` / `fixed` /
   `would-partial` / `partial`, with per-file `skipped` entries naming the line
   and the reason.
+- **Amended 2026-07-16 (#1769).** An index file `--fix` cannot read — a decode
+  or I/O failure, in either the analysis read or the locked `--apply` re-read —
+  is reported per file with an `error` message instead of silently dropping out
+  of the report (which made the run claim `clean` about a file it never
+  opened). `--json` `status` gains a sixth value, `error`, that takes
+  precedence over `partial` / `fixed` / `clean` whenever any file hit it; one
+  word covers dry-run and `--apply` alike (not reading the file is a condition,
+  not an action — `applied` carries the run mode); `summary` gains an `errors`
+  count; and the run exits `1`. The remaining dirs are still read, reported,
+  and (under `--apply`) fixed. Only the *read* converts to a per-file error:
+  lock, `stat`, and write failures keep propagating, so an exception after the
+  atomic replace can never be misreported as `removed=[]` — §5's audit
+  guarantee (every removed line is reported) survives, and §5's rationale
+  ("clean" states the index holds no dead pointers, not merely that this run
+  lost track of one) is applied at the file-read boundary: a file the run never
+  opened supports no claim.
 
 ## Considered & rejected
 
