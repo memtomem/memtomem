@@ -15,6 +15,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Omitted/`true` follows `rerank.enabled`; `true` cannot force-enable
   reranking on a server that has it disabled.
 
+### Fixed
+
+- **Reranker hot-swap use-after-close** (#1777) — hot reload (disk config
+  edit or `PATCH /api/config`) no longer closes the outgoing reranker while
+  an in-flight search still holds it; the close is deferred until the last
+  such search releases its lease. Swaps with no search in flight close
+  immediately, as before.
+
 ## [0.3.11] — 2026-07-14
 
 ### Added
