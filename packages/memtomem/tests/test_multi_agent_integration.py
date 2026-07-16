@@ -601,6 +601,11 @@ class TestCaseFOutputFormat:
         assert "results" in payload
         assert len(payload["results"]) >= 1
         assert "chunk_id" in payload["results"][0]
+        # #1767 parity with mem_search: the payload names the score scale.
+        # BM25-only components take the single-retriever passthrough, so
+        # the base scale is "bm25"; no reranker is wired → no model key.
+        assert payload["score_scale"] == "bm25"
+        assert "reranker" not in payload
         # Empty-result branch also returns valid JSON shape for the
         # structured path (consumers can rely on the schema).
         empty = await mem_agent_search(  # type: ignore[arg-type]
@@ -611,6 +616,7 @@ class TestCaseFOutputFormat:
         )
         empty_payload = json.loads(empty)
         assert empty_payload["results"] == []
+        assert "score_scale" not in empty_payload  # no scores → no scale key
 
     @pytest.mark.asyncio
     async def test_verbose_output_includes_full_uuid(self, bm25_only_components):

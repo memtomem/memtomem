@@ -213,6 +213,20 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 
 > **Trust-UX hints**: when you don't pin a namespace, results are followed by a parenthesized hint if chunks were hidden in system namespaces (e.g. `archive:*`) or if the configured embedding dimension disagrees with what's in the database. A third hint — independent of namespace selection — appears when you pass `rerank=true` but the server has reranking disabled (`rerank.enabled=false`), since the parameter cannot force-enable it. In `output_format="structured"` those hints are emitted as a `hints` array instead.
 
+> **Score scale**: `score` values are only comparable within one scale, and the
+> scale follows server config. Structured output names the base scale in a
+> top-level `score_scale` key: `"rerank"` (cross-encoder output — range depends
+> on the model, reported alongside in a `reranker` key), `"rrf"`
+> (reciprocal-rank fusion), `"bm25"` / `"dense"` (unfused single-retriever
+> scores when only one retriever is enabled), or `"none"` (filter-only
+> enumeration — no relevance scale; the filter is the selector). Optional
+> modifier stages (time decay, access/importance boosts; all off by default)
+> multiply on top of the base scale when enabled. Pick score thresholds per
+> scale — or skip score gating for a scale you don't recognize — instead of
+> inferring the scale from the value range. Both keys are omitted when there
+> are no results. `mm search --format json` carries the same values as
+> per-item `score_scale` / `reranker` keys.
+
 ### Tuning search weights
 
 Use `bm25_weight` and `dense_weight` to shift between keyword and semantic matching:

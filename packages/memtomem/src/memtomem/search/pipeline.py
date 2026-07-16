@@ -42,7 +42,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from dataclasses import dataclass
 
@@ -270,6 +270,12 @@ def _apply_validity_filter(results: list[SearchResult], as_of_unix: int) -> list
     return filtered
 
 
+# Closed vocabulary for ``RetrievalStats.score_scale`` (#1767) — typing the
+# field makes a misspelled label fail at the assignment site instead of
+# escaping into structured output.
+ScoreScale = Literal["rerank", "rrf", "bm25", "dense", "none"]
+
+
 @dataclass
 class RetrievalStats:
     bm25_candidates: int = 0
@@ -288,6 +294,28 @@ class RetrievalStats:
     # the per-call effective decision (#1766), not the live server config,
     # so hint builders stay accurate across concurrent hot reloads.
     rerank_applied: bool = False
+    # Which BASE scale the returned ``score`` values are on (#1767):
+    # "rerank" (cross-encoder output — range is model-dependent, see
+    # ``reranker_model``), "rrf" (reciprocal-rank fusion, bounded near
+    # ``legs/rrf_k``), "bm25"/"dense" (single-retriever passthrough:
+    # unfused BM25 / cosine scores), "none" (filter-only enumeration —
+    # no relevance scale, the filter is the selector), or None (no
+    # scoring path taken, e.g. both retrievers disabled; a taken path
+    # keeps its scale even when it yielded zero results — public
+    # formatters omit the key for empty responses either way). Base
+    # means pre-modifier: decay / access /
+    # importance boosts (Stages 4/6/7, all default-off) multiply on top
+    # when enabled, so absolute thresholds are only portable across
+    # servers with the same modifier config. Unlike ``rerank_applied``
+    # (the pre-Stage-3b decision), this is derived from the results
+    # actually returned, so a reranker that fails and silently falls back
+    # to the fused order keeps the label truthful.
+    score_scale: ScoreScale | None = None
+    # Rerank model identifier, set only when ``score_scale == "rerank"`` —
+    # rerank ranges differ per provider (local cross-encoders emit raw
+    # logits, Cohere emits [0, 1] relevance), so clients calibrating a
+    # threshold need the model, not just the scale family.
+    reranker_model: str | None = None
 
 
 if TYPE_CHECKING:
@@ -776,7 +804,11 @@ class SearchPipeline:
             for i, c in enumerate(chunks)
         ]
         fused = _exclude_source_roots(fused, exclude_source_roots)
-        stats = RetrievalStats(fused_total=len(fused))
+        # score_scale="none": there is no relevance scale — the filter is
+        # the selector. Scores start at 1.0 and only the decay/access/
+        # importance modifiers (when enabled) differentiate them, so there
+        # is no relevance magnitude to gate on.
+        stats = RetrievalStats(fused_total=len(fused), score_scale="none")
 
         effective_as_of = as_of_unix if as_of_unix is not None else int(time.time())
         if fused:
@@ -1151,6 +1183,7 @@ class SearchPipeline:
                     weights=fusion_weights,
                     list_labels=fusion_labels,
                 )
+                stats.score_scale = "rrf"
             elif use_bm25:
                 if rescue_results:
                     fused = reciprocal_rank_fusion(
@@ -1160,8 +1193,13 @@ class SearchPipeline:
                         weights=[effective_weights[0], rescue_w],
                         list_labels=["bm25", "session_rescue"],
                     )
+                    stats.score_scale = "rrf"
                 else:
+                    # Passthrough keeps raw retriever scores — a distinct
+                    # scale (#1767): Okapi BM25 is unbounded positive, far
+                    # outside the RRF ceiling.
                     fused = bm25_results[:rerank_pool]
+                    stats.score_scale = "bm25"
             elif use_dense:
                 if rescue_results:
                     fused = reciprocal_rank_fusion(
@@ -1174,15 +1212,19 @@ class SearchPipeline:
                         ],
                         list_labels=["dense", "session_rescue"],
                     )
+                    stats.score_scale = "rrf"
                 else:
                     fused = dense_results[:rerank_pool]
+                    stats.score_scale = "dense"
             else:
                 fused = []
             stats.fused_total = len(fused)
 
             # Stage 3b: Cross-encoder reranking (skipped when bypassed per-call
-            # via rerank=False, #1766)
-            if apply_rerank and reranker is not None and fused:
+            # via rerank=False, #1766). ``apply_rerank`` already implies the
+            # reranker pair is non-None; restating both here is for type
+            # narrowing, mirroring the cache-key and pool-widening sites.
+            if apply_rerank and reranker is not None and rerank_cfg is not None and fused:
                 try:
                     fused = await reranker.rerank(query, fused, top_k=top_k)
                 except Exception as exc:
@@ -1190,6 +1232,15 @@ class SearchPipeline:
                     # Fallback must still honor the caller's response size —
                     # fused is at rerank_pool (e.g. 20) right now, not top_k.
                     fused = fused[:top_k]
+                else:
+                    # Providers also fall back silently (returning the input
+                    # unchanged) on their own errors, so the decision flag
+                    # alone can't label the scale — only a list the reranker
+                    # actually re-scored (every item re-stamped "reranked")
+                    # switches it (#1767).
+                    if fused and all(r.source == "reranked" for r in fused):
+                        stats.score_scale = "rerank"
+                        stats.reranker_model = rerank_cfg.model
 
             # Filter by source file if requested
             if source_filter:

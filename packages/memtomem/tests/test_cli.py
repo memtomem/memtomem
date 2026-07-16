@@ -105,6 +105,46 @@ class TestSearchCLI:
         result = runner.invoke(cli, ["search"])
         assert result.exit_code != 0
 
+    def test_search_json_reranked_carries_scale_and_model(
+        self, runner: CliRunner, monkeypatch
+    ) -> None:
+        """#1767: on the "rerank" scale the JSON items must also carry the
+        model ID — rerank score ranges are model-dependent, so the scale
+        alone can't calibrate a threshold (parity with the MCP payload)."""
+        import json
+        from contextlib import asynccontextmanager
+        from unittest.mock import AsyncMock
+        from uuid import uuid4
+
+        from memtomem.models import Chunk, ChunkMetadata, SearchResult
+        from memtomem.search.pipeline import RetrievalStats
+
+        chunk = Chunk(
+            content="reranked hit",
+            metadata=ChunkMetadata(source_file=Path("/tmp/hit.md")),
+            id=uuid4(),
+            embedding=[],
+        )
+        results = [SearchResult(chunk=chunk, score=1.0928, rank=1, source="reranked")]
+        stats = RetrievalStats(
+            final_total=1, score_scale="rerank", reranker_model="test-reranker-v1"
+        )
+
+        comp = MagicMock()
+        comp.search_pipeline.search = AsyncMock(return_value=(results, stats))
+
+        @asynccontextmanager
+        async def fake_components():
+            yield comp
+
+        monkeypatch.setattr("memtomem.cli._bootstrap.cli_components", lambda: fake_components())
+
+        result = runner.invoke(cli, ["search", "--format", "json", "anything"])
+        assert result.exit_code == 0, result.output
+        items = json.loads(result.output)
+        assert items[0]["score_scale"] == "rerank"
+        assert items[0]["reranker"] == "test-reranker-v1"
+
 
 # ── Config commands ─────────────────────────────────────────────────────
 
