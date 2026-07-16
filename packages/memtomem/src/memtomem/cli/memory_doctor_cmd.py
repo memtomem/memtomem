@@ -534,6 +534,19 @@ class DirReport:
         }
 
 
+def _read_error_message(exc: Exception) -> str:
+    """Render a read failure for a report — never empty.
+
+    ``str(OSError())`` is ``""``, so interpolating the exception directly can
+    leave a message that trails off (``"could not read MEMORY.md: "``) or, in
+    Tier 2, one that vanishes under a truthiness check and turns a real failure
+    back into "clean" (#1769). Both read paths route through here: the message
+    falls back to the exception class name, and Tier 2's presence check stays
+    ``error is not None`` regardless.
+    """
+    return str(exc) or type(exc).__name__
+
+
 # ── Read-only config + engine plumbing ──────────────────────────────
 
 
@@ -812,7 +825,7 @@ def _analyze_index_file(
             Finding(
                 check="index_missing",
                 severity="warn",
-                summary=f"could not read {index_file_name}: {exc}",
+                summary=f"could not read {index_file_name}: {_read_error_message(exc)}",
             )
         )
         return
@@ -1077,17 +1090,6 @@ def _emit_json(reports: list[DirReport]) -> None:
 #      each candidate against fresh content so concurrent agent edits survive.
 
 
-def _read_error_message(exc: Exception) -> str:
-    """Render a read failure for the report — never empty.
-
-    ``str(OSError())`` is ``""``; an empty message would vanish under any
-    truthiness check downstream and turn a real failure back into "clean"
-    (#1769) — so presence is ``error is not None`` everywhere, and the message
-    itself falls back to the exception class name.
-    """
-    return str(exc) or type(exc).__name__
-
-
 class _IndexUnreadable(Exception):
     """The locked fresh read inside :func:`_apply_fix` could not decode the index.
 
@@ -1114,7 +1116,8 @@ class FixFileResult:
     skipped: list[tuple[int, str, str]] = field(default_factory=list)
     # The index could not be read: nothing about this file is verified, so the
     # run must not read as clean (#1769). Presence checks compare against None,
-    # never truthiness — see _read_error_message.
+    # never truthiness — the message itself is never empty (see
+    # _read_error_message), but "" would still be a real failure.
     error: str | None = None
 
     def to_json(self) -> dict[str, object]:

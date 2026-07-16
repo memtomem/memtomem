@@ -1188,6 +1188,33 @@ class TestCli:
         assert finding["severity"] == "warn"
         assert "could not read MEMORY.md" in finding["summary"]
 
+    def test_blank_oserror_message_names_the_exception_class(self, doctor_env, monkeypatch):
+        """``str(OSError())`` is empty — the summary must not trail off (#1771).
+
+        Tier 1's finding never depended on the message being truthy (unlike
+        Tier 2's per-file error), so this is about what the reader sees: the
+        shared helper falls back to the exception class name rather than
+        leaving "could not read MEMORY.md: ".
+        """
+        config, mem_dir = doctor_env
+        self._patch_loader(monkeypatch, config)
+        index = (mem_dir / "MEMORY.md").resolve()
+
+        real_read_text = Path.read_text
+
+        def deny_index(self, *args, **kwargs):
+            if self.resolve() == index:
+                raise OSError()
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", deny_index)
+
+        result = CliRunner().invoke(cli, ["memory", "doctor", "--json"])
+
+        assert result.exit_code == 0
+        finding = self._index_missing_finding(json.loads(result.output))
+        assert finding["summary"] == "could not read MEMORY.md: OSError"
+
 
 # ── Docs-as-tests parity ────────────────────────────────────────────
 #
