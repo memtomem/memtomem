@@ -406,6 +406,15 @@ class SearchPipeline:
         leaves the pipeline on the new reranker. Closes the old instance
         immediately when no in-flight search leases it; otherwise defers
         the close to the last lease release.
+
+        Contract: ``reranker`` must be ``None`` or a fresh instance never
+        previously installed. Re-installing the live instance early-returns
+        below WITHOUT retiring the old generation, so its leases no longer
+        guard the instance — a later swap would see zero leases on the new
+        generation and close it out from under an in-flight search. Both
+        production call sites always pass a fresh ``create_reranker``
+        product or ``None``; supporting identity re-install would take a
+        per-instance (not per-generation) refcount.
         """
         old = self._rerank_entry
         self._rerank_entry = _RerankerEntry(reranker, config)
