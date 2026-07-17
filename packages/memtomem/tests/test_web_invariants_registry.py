@@ -104,6 +104,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "scratch.delete_scratch",
         "scratch.promote_scratch",
         "scratch.set_scratch",
+        "search_runs.save_search_feedback",
         "settings_sync.apply_settings_sync",
         "settings_sync.copy_hook_to_project",
         "settings_sync.delete_target_rule",
@@ -202,6 +203,10 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_projects.delete_known_project": "delete-only, no payload",
     "context_skills.delete_skill": "delete-only, no payload",
     "scratch.delete_scratch": "delete-only, no payload",
+    "search_runs.save_search_feedback": (
+        "body is IDs echoed from prior server output plus a closed-vocabulary "
+        "judgment validated in storage; no free-text content is persisted"
+    ),
     "sources.delete_source": "delete-only, no payload",
     "sources.regenerate_summaries": (
         "no user-supplied content — body is empty; trigger only "
