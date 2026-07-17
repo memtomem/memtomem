@@ -246,9 +246,16 @@ async def collect_status_report(app: AppContext) -> dict:
         )
     mismatch = getattr(app.storage, "embedding_mismatch", None)
     if mismatch is not None:
+        warning_kind = (
+            "embedding_policy_mismatch"
+            if mismatch.get("policy_mismatch")
+            and not mismatch.get("dimension_mismatch")
+            and not mismatch.get("model_mismatch")
+            else "embedding_dim_mismatch"
+        )
         warnings.append(
             {
-                "kind": "embedding_dim_mismatch",
+                "kind": warning_kind,
                 "stored": dict(mismatch["stored"]),
                 "configured": dict(mismatch["configured"]),
                 "fix": "uv run mm embedding-reset --mode apply-current",
@@ -553,6 +560,13 @@ async def mem_config(
 
             # Invalidate search cache so changes take effect immediately.
             app.search_pipeline.invalidate_cache()
+            if key == "embedding.onnx_batch_size":
+                class_setter = getattr(type(app.embedder), "set_onnx_batch_size", None)
+                setter = getattr(app.embedder, "set_onnx_batch_size", None)
+                if callable(setter) and (
+                    callable(class_setter) or "set_onnx_batch_size" in vars(app.embedder)
+                ):
+                    setter(app.config.embedding.onnx_batch_size)
             # Rebuild FTS index when tokenizer changes.
             if key == "search.tokenizer":
                 from memtomem.storage.fts_tokenizer import set_tokenizer
@@ -611,6 +625,10 @@ def _revert_to_stored(app: AppContext) -> str:
     config.embedding.provider = stored["provider"]
     config.embedding.model = stored["model"]
     config.embedding.dimension = stored["dimension"]
+    if stored.get("max_sequence_tokens") is not None:
+        config.embedding.max_sequence_tokens = stored["max_sequence_tokens"]
+    storage._embedding_policy_fingerprint = stored.get("policy_fingerprint", "")
+    storage._embedding_max_sequence_tokens = stored.get("max_sequence_tokens")
 
     # ``app.embedder`` / ``app.search_pipeline`` / ``app.index_engine`` are
     # read-only properties that proxy to ``app._components.<name>`` (#399
@@ -691,10 +709,13 @@ async def mem_embedding_reset(
             lines.append(
                 f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)"
             )
+            if stored.get("max_sequence_tokens") is not None:
+                lines.append(f"  DB max sequence tokens: {stored['max_sequence_tokens']}")
         lines.append(
             f"  Config:     {config.embedding.provider}/{config.embedding.model} "
             f"({config.embedding.dimension}d)"
         )
+        lines.append(f"  Config max sequence tokens: {config.embedding.max_sequence_tokens}")
         if mismatch is None:
             lines.append("\nNo mismatch — DB and config are in sync.")
         else:
@@ -704,14 +725,19 @@ async def mem_embedding_reset(
         return "\n".join(lines)
 
     if mode == "apply_current":
+        from memtomem.config import embedding_policy_fingerprint
+
         await app.storage.reset_embedding_meta(
             dimension=config.embedding.dimension,
             provider=config.embedding.provider,
             model=config.embedding.model,
+            policy_fingerprint=embedding_policy_fingerprint(config.embedding),
+            max_sequence_tokens=config.embedding.max_sequence_tokens,
         )
         return (
             f"DB reset to {config.embedding.provider}/{config.embedding.model} "
-            f"({config.embedding.dimension}d). All vectors deleted — run mem_index to re-index."
+            f"({config.embedding.dimension}d). All vectors deleted — run "
+            "mem_index(force=true) to re-index."
         )
 
     # mode == "revert_to_stored"

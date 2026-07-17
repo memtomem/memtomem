@@ -49,6 +49,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Hash-matched siblings keep their UUID, vector, FTS row, timestamps, and
   personalization while a metadata-only update refreshes shifted source line
   ranges. Explicit CLI/MCP/Web force re-indexing still re-embeds every chunk.
+- **Local ONNX indexing now bounds batch and sequence activation memory**
+  (#1786, refs #1783). FastEmbed previously received a whole file through its
+  implicit 256-text batch and allowed bge-m3 inputs up to 8192 tokens, so one
+  oversized chunk could pad a large `session.run` and push sequential
+  `mm index --force` near 30 GB RSS. ONNX now defaults to batches of 8 and an
+  actual-token cap of 1024; stored content and BM25 stay complete while a
+  truncated dense vector represents the prefix. Existing ONNX indexes should
+  enter safe degraded mode via a stored policy fingerprint: vector writes are
+  blocked and dense retrieval falls back to BM25 until
+  `mm embedding-reset --mode apply-current` and a forced re-index complete. Set
+  `embedding.max_sequence_tokens = 0` before restart to keep the prior model
+  limit; `embedding.onnx_batch_size` controls only inference batching.
 - **Reranker hot-swap use-after-close** (#1777) — hot reload (disk config
   edit or `PATCH /api/config`) no longer closes the outgoing reranker while
   an in-flight search still holds it; the close is deferred until the last

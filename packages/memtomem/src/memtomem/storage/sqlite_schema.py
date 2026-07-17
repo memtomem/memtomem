@@ -91,6 +91,8 @@ def create_tables(
     embedding_provider: str,
     embedding_model: str,
     *,
+    embedding_policy_fingerprint: str = "",
+    embedding_max_sequence_tokens: int | None = None,
     strict_dim_check: bool = True,
 ) -> tuple[int, tuple[int, int] | None, tuple[str, str, str, str] | None]:
     """Create all required tables and return effective (dimension, dim_mismatch, model_mismatch).
@@ -293,6 +295,24 @@ def create_tables(
             meta.set_meta("embedding_provider", embedding_provider)
         if embedding_model:
             meta.set_meta("embedding_model", embedding_model)
+
+    # ---- embedding policy validation -----------------------------------
+    # Pre-policy ONNX databases contain vectors generated at the model's
+    # native limit. Record that legacy policy as cap=0 instead of silently
+    # claiming the newly configured safety cap. Fresh DBs and non-ONNX
+    # legacy DBs can safely adopt the current policy metadata.
+    if embedding_policy_fingerprint:
+        stored_policy = meta.get_meta("embedding_policy_fingerprint")
+        if stored_policy is None:
+            if vec_exists and (embedding_provider or "").lower() == "onnx":
+                meta.set_meta("embedding_policy_fingerprint", "onnx:v1:max_sequence_tokens=0")
+                meta.set_meta("embedding_max_sequence_tokens", "0")
+            else:
+                meta.set_meta("embedding_policy_fingerprint", embedding_policy_fingerprint)
+                if embedding_max_sequence_tokens is not None:
+                    meta.set_meta(
+                        "embedding_max_sequence_tokens", str(embedding_max_sequence_tokens)
+                    )
 
     # ---- dim=0 / real-provider mismatch -- fail fast at startup ---------
     # Catches the legacy NoopEmbedder → real-provider switch: stored

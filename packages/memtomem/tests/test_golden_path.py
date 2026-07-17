@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 
+from memtomem.embedding.onnx import _truncated_input_indexes
 from memtomem.tools.memory_writer import append_entry
 
 pytest.importorskip(
@@ -64,6 +65,18 @@ class TestOnnxGoldenPath:
         contents = " ".join(c.content for c in recall)
         assert "Redis" in contents
         assert "PostgreSQL" in contents
+
+    async def test_fastembed_tokenizer_safety_cap_contract(self, onnx_components):
+        """Pinned FastEmbed 0.8 keeps the tokenizer path used by #1786."""
+        comp, _ = onnx_components
+        await comp.embedder.embed_texts(["load the real tokenizer"])
+        tokenizer = comp.embedder._tokenizer
+        assert tokenizer is not None
+        # This compact model has a native 128-token limit; the fixture requests
+        # 64 so this proves the pinned FastEmbed tokenizer is actively narrowed.
+        assert tokenizer.truncation["max_length"] == 64
+        assert comp.embedder._active_max_sequence_tokens == 64
+        assert _truncated_input_indexes(tokenizer, ["long input " * 500]) == [0]
 
     async def test_korean_roundtrip_top_3(self, onnx_components):
         """Korean query finds the matching chunk within top-3.

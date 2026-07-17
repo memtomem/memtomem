@@ -309,6 +309,8 @@ async def apply_runtime_config_changes(
       ``storage.rebuild_fts()`` (async, fire-and-forget on current loop).
     * ``rerank`` changed → rebuild the live reranker attached to the search
       pipeline.
+    * ``embedding.onnx_batch_size`` changed → publish it to the live ONNX
+      embedder for the next inference call.
     * Any change → invalidate search cache.
 
     Some callers of this helper (e.g. focused tests) may not provide
@@ -325,6 +327,18 @@ async def apply_runtime_config_changes(
         tokenizer_changed = old_cfg.search.tokenizer != new_cfg.search.tokenizer
     except AttributeError:
         tokenizer_changed = False
+
+    try:
+        onnx_batch_changed = old_cfg.embedding.onnx_batch_size != new_cfg.embedding.onnx_batch_size
+    except AttributeError:
+        onnx_batch_changed = False
+
+    if onnx_batch_changed and app is not None:
+        embedder = getattr(app.state, "embedder", None)
+        class_setter = getattr(type(embedder), "set_onnx_batch_size", None)
+        setter = getattr(embedder, "set_onnx_batch_size", None)
+        if callable(setter) and (callable(class_setter) or "set_onnx_batch_size" in vars(embedder)):
+            setter(new_cfg.embedding.onnx_batch_size)
 
     if tokenizer_changed and storage is not None:
         from memtomem.storage.fts_tokenizer import set_tokenizer

@@ -45,7 +45,15 @@ def _openai_config(**kw) -> EmbeddingConfig:
 
 
 def _onnx_config(**kw) -> EmbeddingConfig:
-    base = dict(provider="onnx", model="all-MiniLM-L6-v2", dimension=3)
+    # Most progress tests replace ``_embed_sync`` and do not construct a real
+    # FastEmbed tokenizer. Keep the safety cap disabled in this helper; the
+    # provider tests exercise the production default and tokenizer contract.
+    base = dict(
+        provider="onnx",
+        model="all-MiniLM-L6-v2",
+        dimension=3,
+        max_sequence_tokens=0,
+    )
     base.update(kw)
     return EmbeddingConfig(**base)
 
@@ -201,12 +209,12 @@ async def test_ollama_progress_callback_exception_swallowed():
 # ONNX (mocked _embed_sync; no fastembed dependency at test time)
 #
 # Note on ONNX progress shape: the implementation uses a SINGLE
-# ``model.embed(texts)`` call (so fastembed's default internal batching
-# stays in effect — a 250-text run = 1 ORT session.run instead of 4
-# with our config.batch_size=64). Per-yield progress is then surfaced
+# ``model.embed(texts, batch_size=onnx_batch_size)`` call. FastEmbed still
+# owns the internal streaming loop, while memtomem explicitly caps each ORT
+# batch at the memory-safe ONNX setting. Per-yield progress is then surfaced
 # via a thread-safe callback. Earlier versions did Python-side chunking
 # at ``config.batch_size``; benchmarking caught a +20% wall-clock
-# regression vs the single-call path, so the implementation switched
+# regression vs repeated calls, so the implementation switched
 # to streaming. As a result, ``on_progress`` fires per-text (throttled
 # to ~20 ticks per file), NOT per-config.batch_size batch.
 # ---------------------------------------------------------------------------

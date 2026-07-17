@@ -58,6 +58,19 @@ export MEMTOMEM_EMBEDDING__DIMENSION=1024
 
 > **Note:** `bge-m3` is ~2.3 GB on disk — a substantial download, and much larger than the Ollama models below. For lightweight English-only search, use `all-MiniLM-L6-v2` or `bge-small-en-v1.5`.
 
+Local ONNX inference uses two memory-safe bounds by default:
+
+```bash
+export MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=8
+export MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=1024
+```
+
+The sequence cap is enforced by the model's actual tokenizer. When an input is
+longer, the dense vector represents its prefix while stored content and BM25
+still cover the complete chunk. Set the cap to `0` to restore the model's own
+limit. Changing the cap requires a restart and a force-reindex of existing ONNX
+content to keep vector generation consistent.
+
 ## Ollama (local server)
 
 ```bash
@@ -106,8 +119,11 @@ If you switch the embedding model after indexing, run `mm embedding-reset` to de
 - **"Request URL is missing an 'http://' or 'https://' protocol"** — your config has `embedding.provider` set to `ollama` but `embedding.base_url` is empty. Upgrade to the latest version (which defaults to `http://localhost:11434`) or add `"base_url": "http://localhost:11434"` to the `embedding` section of `~/.memtomem/config.json`.
 - **"Cannot connect to Ollama"** — verify `ollama serve` is running.
 - **"Model not found"** — run `ollama pull <model>` to download it.
-- **Dimension mismatch after model switch** — use `mm embedding-reset --mode apply-current` then re-index.
+- **Embedding model or ONNX sequence-policy mismatch** — dense search safely
+  falls back to BM25 and indexing is blocked. Use
+  `mm embedding-reset --mode apply-current`, then
+  `mm index --force <memory_dir>`.
 
 ## Tuning Throughput
 
-See [`configuration.md#embedding`](configuration.md#embedding) for `MEMTOMEM_EMBEDDING__BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES`. Lower batch size for memory-constrained Ollama setups; raise concurrency to saturate fast cloud endpoints.
+See [`configuration.md#embedding`](configuration.md#embedding) for the provider-specific controls. `MEMTOMEM_EMBEDDING__BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` tune remote providers; `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` bound local FastEmbed activation memory.

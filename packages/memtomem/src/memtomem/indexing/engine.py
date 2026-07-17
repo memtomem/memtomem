@@ -7,13 +7,14 @@ import contextlib
 import dataclasses
 import logging
 import os
+import inspect
 import stat as stat_module
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import pathspec
 
@@ -68,6 +69,19 @@ def _resolve_embed_limit(embedder: object) -> int:
     if isinstance(hint, int) and not isinstance(hint, bool):
         return max(1, min(_FILE_CONCURRENCY, hint))
     return _FILE_CONCURRENCY
+
+
+def _supports_input_context(embedder: object) -> bool:
+    """Return whether the concrete embed method accepts context kwargs."""
+    if getattr(embedder, "supports_input_context", None) is not True:
+        return False
+    try:
+        parameters = inspect.signature(embedder.embed_texts).parameters
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return True
+    return {"source_path", "chunk_indices"}.issubset(parameters)
 
 
 # Built-in exclude patterns. Always applied in addition to user
@@ -1044,6 +1058,20 @@ class IndexEngine:
             # Transient I/O (EACCES/EIO/ESTALE) — never delete on a blip.
             return {"total": 0, "indexed": 0, "skipped": 0, "deleted": 0, "errors": []}
 
+        mismatch = getattr(self._storage, "embedding_mismatch", None)
+        if isinstance(mismatch, dict):
+            return {
+                "total": 0,
+                "indexed": 0,
+                "skipped": 0,
+                "deleted": 0,
+                "errors": [
+                    "Embedding configuration differs from stored vectors; indexing is "
+                    "disabled. Run 'mm embedding-reset --mode apply-current', then "
+                    "'mm index --force <path>' (or mem_index(force=true))."
+                ],
+            }
+
         # The path exists but is no longer a regular file (replaced by a
         # directory or special file) — gone *as an indexable source*, so purge
         # its stale chunks. Checked from the stat result (no extra syscall, no
@@ -1201,6 +1229,7 @@ class IndexEngine:
         # and chunk identity. See ``docs/adr/0005-force-reindex-metadata-contract.md``.
         existing_state = await self._storage.get_chunk_index_state(file_path)
         diff_result = compute_diff(existing_state, new_chunks)
+        chunk_positions = {id(chunk): index + 1 for index, chunk in enumerate(new_chunks)}
         # ``new_chunk_ids`` in the return shape is documented as "freshly
         # created chunks" — callers like ``mem_consolidate_apply`` rely on
         # this distinction. Capture before any force-promotion so the
@@ -1258,10 +1287,26 @@ class IndexEngine:
                 async with (
                     embed_semaphore if embed_semaphore is not None else contextlib.nullcontext()
                 ):
-                    embeddings = await self._embedder.embed_texts(
-                        texts,
-                        on_progress=on_chunk_progress if emit_progress else None,
-                    )
+                    progress_cb = on_chunk_progress if emit_progress else None
+                    if _supports_input_context(self._embedder):
+                        # Optional duck-typed capability: only providers that
+                        # explicitly opt in receive path/index metadata. Strict
+                        # ``is True`` avoids Mock auto-attributes and keeps old
+                        # third-party embedder signatures untouched.
+                        contextual_embed = cast(Any, self._embedder.embed_texts)
+                        embeddings = await contextual_embed(
+                            texts,
+                            on_progress=progress_cb,
+                            source_path=str(file_path),
+                            chunk_indices=[
+                                chunk_positions[id(chunk)] for chunk in diff_result.to_upsert
+                            ],
+                        )
+                    else:
+                        embeddings = await self._embedder.embed_texts(
+                            texts,
+                            on_progress=progress_cb,
+                        )
                 if len(embeddings) != len(texts):
                     # Defense in depth against a short embedding array (issue
                     # #1563). The HTTP providers now assert per-batch, but a

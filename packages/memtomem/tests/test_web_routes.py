@@ -75,6 +75,8 @@ class FakeConfig:
         dimension = 768
         base_url = "http://localhost:11434"
         batch_size = 64
+        onnx_batch_size = 8
+        max_sequence_tokens = 1024
         api_key = ""
         threads = 4
 
@@ -514,6 +516,8 @@ class TestConfig:
         # default flip — pre-flip the assertion was ``== 0``.
         assert "threads" in data["embedding"]
         assert data["embedding"]["threads"] == 4
+        assert data["embedding"]["onnx_batch_size"] == 8
+        assert data["embedding"]["max_sequence_tokens"] == 1024
         assert "search" in data
         assert "indexing" in data
         assert "decay" in data

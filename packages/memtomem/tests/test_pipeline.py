@@ -854,6 +854,22 @@ class TestScoreScale:
         assert stats.score_scale == "dense"
 
     @pytest.mark.asyncio
+    async def test_embedding_mismatch_forces_bm25_only(self):
+        results_in = [self._make_result("chunk0", rank=1)]
+        pipeline = self._make_pipeline(results_in, results_in, enable_dense=True)
+        pipeline._storage.embedding_mismatch = {
+            "policy_mismatch": True,
+            "dimension_mismatch": False,
+            "model_mismatch": False,
+        }
+
+        _, stats = await pipeline.search("anything", top_k=5)
+
+        assert stats.score_scale == "bm25"
+        pipeline._storage.dense_search.assert_not_awaited()
+        pipeline._embedder.embed_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_successful_rerank_is_rerank_with_model(self):
         from memtomem.config import RerankConfig
 

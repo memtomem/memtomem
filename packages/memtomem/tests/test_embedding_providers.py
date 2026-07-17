@@ -57,6 +57,7 @@ def _onnx_config(**overrides) -> EmbeddingConfig:
         api_key="",
         batch_size=64,
         max_concurrent_batches=4,
+        max_sequence_tokens=0,
     )
     defaults.update(overrides)
     return EmbeddingConfig(**defaults)
@@ -529,11 +530,165 @@ def _make_fake_embedding_model(vectors: list[list[float]]):
     return model
 
 
+class _FakeEncoding:
+    def __init__(self, *, truncated: bool = False) -> None:
+        self.overflowing = [object()] if truncated else []
+
+
+class _FakeTokenizer:
+    def __init__(
+        self, model_limit: int = 8192, *, truncated_inputs: set[str] | None = None
+    ) -> None:
+        self.truncation = {
+            "max_length": model_limit,
+            "stride": 0,
+            "strategy": "longest_first",
+            "direction": "right",
+        }
+        self.truncated_inputs = truncated_inputs or set()
+        self.enable_calls: list[dict] = []
+
+    def enable_truncation(self, **kwargs) -> None:
+        self.enable_calls.append(kwargs)
+        self.truncation.update(kwargs)
+
+    def encode_batch(self, texts):
+        return [_FakeEncoding(truncated=text in self.truncated_inputs) for text in texts]
+
+    def encode(self, text):
+        return _FakeEncoding(truncated=text in self.truncated_inputs)
+
+
+def _make_tokenized_embedding_model(
+    vectors: list[list[float]],
+    *,
+    model_limit: int = 8192,
+    truncated_inputs: set[str] | None = None,
+):
+    model = _make_fake_embedding_model(vectors)
+    tokenizer = _FakeTokenizer(model_limit, truncated_inputs=truncated_inputs)
+    model.model.tokenizer = tokenizer
+    return model, tokenizer
+
+
 class TestOnnxEmbedder:
     def test_dimension_and_model(self):
         embedder = OnnxEmbedder(_onnx_config(dimension=384, model="all-MiniLM-L6-v2"))
         assert embedder.dimension == 384
         assert embedder.model_name == "all-MiniLM-L6-v2"
+
+    def test_memory_safety_defaults(self):
+        config = EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024)
+        assert config.onnx_batch_size == 8
+        assert config.max_sequence_tokens == 1024
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("onnx_batch_size", 0), ("max_sequence_tokens", -1)],
+    )
+    def test_memory_safety_config_validation(self, field, value):
+        with pytest.raises(ValueError):
+            EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024, **{field: value})
+
+    def test_onnx_batch_size_has_hard_upper_bound(self):
+        with pytest.raises(ValueError, match="at most 256"):
+            EmbeddingConfig(provider="onnx", onnx_batch_size=257)
+
+    def test_runtime_batch_setter_is_detached_from_candidate_config(self):
+        config = _onnx_config(onnx_batch_size=8)
+        embedder = OnnxEmbedder(config)
+
+        config.onnx_batch_size = 64
+        assert embedder.onnx_batch_size == 8
+
+        embedder.set_onnx_batch_size(4)
+        assert embedder.onnx_batch_size == 4
+
+    @pytest.mark.anyio
+    async def test_tokenizer_cap_and_onnx_batch_forwarded(self):
+        model, tokenizer = _make_tokenized_embedding_model([[0.1, 0.2, 0.3]])
+        embedder = OnnxEmbedder(
+            _onnx_config(max_sequence_tokens=1024, onnx_batch_size=8, dimension=3)
+        )
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=model),
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert tokenizer.enable_calls == [
+            {
+                "max_length": 1024,
+                "stride": 0,
+                "strategy": "longest_first",
+                "direction": "right",
+            }
+        ]
+        model.embed.assert_called_once_with(["hello"], batch_size=8)
+        assert embedder._active_max_sequence_tokens == 1024
+
+    @pytest.mark.anyio
+    async def test_tokenizer_cap_zero_preserves_model_limit(self):
+        model, tokenizer = _make_tokenized_embedding_model([[0.1]])
+        embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=0, dimension=1))
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=model),
+        ):
+            await embedder.embed_texts(["hello"])
+        assert tokenizer.enable_calls == []
+        assert embedder._active_max_sequence_tokens == 8192
+
+    @pytest.mark.anyio
+    async def test_tokenizer_cap_never_widens_smaller_model(self):
+        model, tokenizer = _make_tokenized_embedding_model([[0.1]], model_limit=512)
+        embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=1024, dimension=1))
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=model),
+        ):
+            await embedder.embed_texts(["hello"])
+        assert tokenizer.enable_calls == []
+        assert embedder._active_max_sequence_tokens == 512
+
+    @pytest.mark.anyio
+    async def test_missing_fastembed_tokenizer_fails_loud(self):
+        embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=1024))
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=MagicMock()),
+        ):
+            with pytest.raises(EmbeddingError, match="refusing unsafe ONNX fallback"):
+                await embedder.embed_texts(["hello"])
+
+    @pytest.mark.anyio
+    async def test_truncation_warning_uses_context_without_content(self, caplog):
+        sensitive = "do-not-log-this-content"
+        model, tokenizer = _make_tokenized_embedding_model(
+            [[0.1], [0.2]], truncated_inputs={sensitive}
+        )
+        embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=1024, dimension=1))
+        embedder._model = model
+        embedder._tokenizer = tokenizer
+        embedder._active_max_sequence_tokens = 1024
+
+        with caplog.at_level("WARNING", logger="memtomem.embedding.onnx"):
+            await embedder.embed_texts(
+                ["short", sensitive],
+                source_path="/tmp/example.md",
+                chunk_indices=[2, 7],
+            )
+
+        assert "source=/tmp/example.md" in caplog.text
+        assert "chunks=[7]" in caplog.text
+        assert "1024 tokens" in caplog.text
+        assert sensitive not in caplog.text
+
+    @pytest.mark.anyio
+    async def test_input_context_length_must_match(self):
+        embedder = OnnxEmbedder(_onnx_config())
+        with pytest.raises(EmbeddingError, match="chunk_indices has 1 entries for 2"):
+            await embedder.embed_texts(["a", "b"], chunk_indices=[1])
 
     @pytest.mark.anyio
     async def test_embed_texts_returns_vectors(self):
@@ -631,7 +786,7 @@ class TestOnnxEmbedder:
                 constructing.set()
                 assert release.wait(timeout=10), "release never set"
 
-            def embed(self, texts):
+            def embed(self, texts, *, batch_size=256):
                 return iter(np.array([0.0, 0.0]) for _ in texts)
 
         with (
@@ -687,7 +842,7 @@ class TestOnnxEmbedder:
                 constructing.set()
                 assert release.wait(timeout=10), "release never set"
 
-            def embed(self, texts):
+            def embed(self, texts, *, batch_size=256):
                 return iter(np.array([0.0, 0.0]) for _ in texts)
 
         with (
@@ -804,7 +959,7 @@ class TestOnnxEmbedder:
         observe whether a second one starts."""
 
         class _BlockingModel:
-            def embed(self, texts):
+            def embed(self, texts, *, batch_size=256):
                 import numpy as np
 
                 with stats_lock:

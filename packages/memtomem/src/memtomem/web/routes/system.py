@@ -330,6 +330,8 @@ def _build_config_response(
             dimension=cfg.embedding.dimension,
             base_url=cfg.embedding.base_url,
             batch_size=cfg.embedding.batch_size,
+            onnx_batch_size=cfg.embedding.onnx_batch_size,
+            max_sequence_tokens=cfg.embedding.max_sequence_tokens,
             api_key="***" if cfg.embedding.api_key else "",
             threads=cfg.embedding.threads,
         ),
@@ -514,6 +516,7 @@ async def patch_config(
     applied: list[ConfigPatchChange] = []
     rejected: list[str] = []
     tokenizer_changed = False
+    onnx_batch_changed = False
     rerank_changed = False
     # Deferred live-fanout state (#1567): the reranker swap and tokenizer/FTS
     # rebuild are held back until AFTER a successful persist so a persist
@@ -633,6 +636,8 @@ async def patch_config(
                         setattr(section_obj, key, coerced)
                         if full_key == "search.tokenizer" and old_val != coerced:
                             tokenizer_changed = True
+                        if full_key == "embedding.onnx_batch_size" and old_val != coerced:
+                            onnx_batch_changed = True
 
                         old_show = str(old_val)
                         new_show = str(coerced)
@@ -700,6 +705,14 @@ async def patch_config(
                         config.search.tokenizer,
                         count,
                     )
+
+                if onnx_batch_changed:
+                    embedder = getattr(request.app.state, "embedder", None)
+                    class_setter = getattr(type(embedder), "set_onnx_batch_size", None)
+                    setter = getattr(embedder, "set_onnx_batch_size", None)
+                    if callable(setter):
+                        if callable(class_setter) or "set_onnx_batch_size" in vars(embedder):
+                            setter(config.embedding.onnx_batch_size)
 
                 if applied or rerank_changed:
                     search_pipeline.invalidate_cache()
@@ -1128,6 +1141,8 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
             dimension=stored_info["dimension"],
             provider=stored_info["provider"],
             model=stored_info["model"],
+            policy_fingerprint=stored_info.get("policy_fingerprint", ""),
+            max_sequence_tokens=stored_info.get("max_sequence_tokens"),
         )
         if stored_info
         else None
@@ -1158,6 +1173,7 @@ async def get_embedding_status(storage=Depends(get_storage)) -> EmbeddingStatusR
         has_mismatch=True,
         dimension_mismatch=mismatch["dimension_mismatch"],
         model_mismatch=mismatch["model_mismatch"],
+        policy_mismatch=mismatch.get("policy_mismatch", False),
         stored=EmbeddingConfigInfo(**mismatch["stored"]),
         configured=EmbeddingConfigInfo(**mismatch["configured"]),
         coverage=coverage_out,
@@ -1288,14 +1304,18 @@ async def reset_embedding(
     config=Depends(get_config),
 ) -> EmbeddingResetResponse:
     """Reset embedding metadata to current config. Drops all vectors."""
+    from memtomem.config import embedding_policy_fingerprint
+
     await storage.reset_embedding_meta(
         dimension=config.embedding.dimension,
         provider=config.embedding.provider,
         model=config.embedding.model,
+        policy_fingerprint=embedding_policy_fingerprint(config.embedding),
+        max_sequence_tokens=config.embedding.max_sequence_tokens,
     )
     return EmbeddingResetResponse(
         ok=True,
-        message="Embedding metadata reset. All indexed vectors deleted — please re-index.",
+        message=("Embedding metadata reset. All indexed vectors deleted — run a forced re-index."),
     )
 
 

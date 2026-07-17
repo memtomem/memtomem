@@ -17,6 +17,95 @@ from memtomem.errors import EmbeddingError
 logger = logging.getLogger(__name__)
 
 
+def _configure_tokenizer_limit(
+    model: object, configured_limit: int
+) -> tuple[object | None, int | None]:
+    """Apply memtomem's safety cap to FastEmbed's tokenizer.
+
+    FastEmbed 0.8 does not expose a public sequence-length argument. Its
+    ``TextEmbedding`` wrapper does expose the loaded tokenizer at
+    ``model.model.tokenizer``; validate that pinned layout explicitly so a
+    future FastEmbed change cannot silently restore bge-m3's 8192-token peak.
+    ``configured_limit=0`` is the compatibility escape hatch and leaves the
+    provider's tokenizer untouched.
+    """
+
+    inner_model = getattr(model, "model", None)
+    tokenizer = getattr(inner_model, "tokenizer", None)
+    truncation = getattr(tokenizer, "truncation", None)
+    enable_truncation = getattr(tokenizer, "enable_truncation", None)
+
+    if configured_limit == 0:
+        if isinstance(truncation, dict):
+            model_limit = truncation.get("max_length")
+            if isinstance(model_limit, int) and not isinstance(model_limit, bool):
+                return tokenizer, model_limit
+        return tokenizer, None
+
+    model_limit = truncation.get("max_length") if isinstance(truncation, dict) else None
+    if (
+        tokenizer is None
+        or not callable(enable_truncation)
+        or not isinstance(model_limit, int)
+        or isinstance(model_limit, bool)
+        or model_limit <= 0
+    ):
+        raise EmbeddingError(
+            "FastEmbed tokenizer layout is incompatible with "
+            "embedding.max_sequence_tokens; refusing unsafe ONNX fallback. "
+            "Set embedding.max_sequence_tokens=0 to use the model limit explicitly."
+        )
+
+    applied_limit = min(model_limit, configured_limit)
+    if applied_limit < model_limit:
+        truncation_config = truncation if isinstance(truncation, dict) else {}
+        try:
+            enable_truncation(
+                max_length=applied_limit,
+                stride=truncation_config.get("stride", 0),
+                strategy=truncation_config.get("strategy", "longest_first"),
+                direction=truncation_config.get("direction", "right"),
+            )
+        except Exception as exc:
+            raise EmbeddingError(f"Failed to configure FastEmbed tokenizer limit: {exc}") from exc
+    return tokenizer, applied_limit
+
+
+def _truncated_input_indexes(tokenizer: object | None, texts: list[str]) -> list[int]:
+    """Return zero-based indexes truncated by the configured tokenizer."""
+
+    if tokenizer is None:
+        return []
+    encode = getattr(tokenizer, "encode", None)
+    if callable(encode):
+        truncated: list[int] = []
+        try:
+            # Encode one input at a time so warning detection does not retain
+            # every token/overflow object for a whole file at once. FastEmbed
+            # still performs its own batched tokenization for inference.
+            for index, text in enumerate(texts):
+                if bool(getattr(encode(text), "overflowing", ())):
+                    truncated.append(index)
+        except Exception as exc:
+            raise EmbeddingError(f"FastEmbed tokenizer preflight failed: {exc}") from exc
+        return truncated
+
+    # Compatibility fallback for tokenizer-like test doubles and older
+    # tokenizers APIs. The pinned FastEmbed path above exposes ``encode``.
+    encode_batch = getattr(tokenizer, "encode_batch", None)
+    if not callable(encode_batch):
+        return []
+    try:
+        encodings = encode_batch(texts)
+    except Exception as exc:
+        raise EmbeddingError(f"FastEmbed tokenizer preflight failed: {exc}") from exc
+    return [
+        index
+        for index, encoding in enumerate(encodings)
+        if bool(getattr(encoding, "overflowing", ()))
+    ]
+
+
 def _register_custom_models_if_needed() -> None:
     """Register models that fastembed >=0.4 dropped from its built-in catalog.
 
@@ -61,10 +150,22 @@ class OnnxEmbedder:
     # guarantee. Same don't-saturate-the-machine rationale as the
     # ``threads=4`` default (#640).
     preferred_concurrency = 1
+    # Optional duck-typed capability consumed by IndexEngine. Keeping it out
+    # of EmbeddingProvider preserves structural compatibility for existing
+    # fakes and out-of-tree providers while allowing path/index-only warning
+    # context for truncation events.
+    supports_input_context = True
 
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
+        # Runtime-mutable and deliberately detached from ``_config``. Config
+        # writers mutate/replace their candidate object before persistence;
+        # inference must not observe a rejected candidate through a shared
+        # reference. The setter is called only after a successful update.
+        self._onnx_batch_size = config.onnx_batch_size
         self._model: object | None = None  # fastembed.TextEmbedding
+        self._tokenizer: object | None = None
+        self._active_max_sequence_tokens: int | None = None
         # Observability flags read by ``GET /api/system/model-readiness``.
         # Plain attribute reads/writes — bool/Optional[str] assignment is
         # atomic under CPython, and the readiness endpoint is allowed to
@@ -147,9 +248,15 @@ class OnnxEmbedder:
             self._loading = True
             self._load_error = None
             try:
-                self._model = TextEmbedding(
+                model = TextEmbedding(
                     model_name=model_id, threads=threads, cache_dir=str(cache_dir)
                 )
+                tokenizer, active_limit = _configure_tokenizer_limit(
+                    model, self._config.max_sequence_tokens
+                )
+                self._tokenizer = tokenizer
+                self._active_max_sequence_tokens = active_limit
+                self._model = model
             except Exception as exc:
                 self._load_error = str(exc)
                 raise
@@ -165,10 +272,22 @@ class OnnxEmbedder:
     def model_name(self) -> str:
         return self._config.model
 
+    @property
+    def onnx_batch_size(self) -> int:
+        return self._onnx_batch_size
+
+    def set_onnx_batch_size(self, value: int) -> None:
+        """Atomically publish a validated runtime inference batch size."""
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 256:
+            raise ValueError("onnx_batch_size must be an integer between 1 and 256")
+        self._onnx_batch_size = value
+
     def _embed_sync(
         self,
         texts: list[str],
         on_progress: Callable[[int, int], None] | None = None,
+        source_path: str | None = None,
+        chunk_indices: list[int] | None = None,
     ) -> list[list[float]]:
         """Run inference synchronously — submitted to ``_infer_executor``.
 
@@ -180,19 +299,35 @@ class OnnxEmbedder:
         ``loop.call_soon_threadsafe`` (see ``embed_texts``).
         """
         model = self._get_model()
-        # Single ``model.embed()`` call — fastembed batches internally
-        # (default batch_size=256) so a 250-text input becomes ONE
-        # ORT session.run. Earlier we did Python-side chunking
-        # (``for batch in batches: model.embed(batch)``); benchmark
-        # showed +20% wall-clock regression vs single call because
-        # each ``model.embed()`` invocation pays per-call ORT setup
-        # cost. Stream-iterating the default-batched call recovers
-        # that to +2.3% while still surfacing per-yield progress.
+        # Snapshot once so a concurrent config update applies to the next
+        # inference call, never halfway through this generator.
+        batch_size = self._onnx_batch_size
+        truncated = _truncated_input_indexes(self._tokenizer, texts)
+        if truncated:
+            display_indices = chunk_indices or [index + 1 for index in range(len(texts))]
+            labels = [display_indices[index] for index in truncated]
+            shown_labels = labels[:20]
+            omitted = len(labels) - len(shown_labels)
+            label_summary = f"{shown_labels}"
+            if omitted:
+                label_summary += f" (+{omitted} more)"
+            logger.warning(
+                "ONNX embedding truncated %d input(s) to %s tokens (source=%s, %s=%s)",
+                len(truncated),
+                self._active_max_sequence_tokens or "model limit",
+                source_path or "<direct>",
+                "chunks" if source_path is not None else "inputs",
+                label_summary,
+            )
+
+        # One FastEmbed generator call retains the low-overhead streaming
+        # path, while its public ``batch_size`` argument bounds each ORT
+        # session.run. This avoids the former implicit FastEmbed default 256.
         if on_progress is None:
-            return [vec.tolist() for vec in model.embed(texts)]
+            return [vec.tolist() for vec in model.embed(texts, batch_size=batch_size)]
         total = len(texts)
         out: list[list[float]] = []
-        for vec in model.embed(texts):
+        for vec in model.embed(texts, batch_size=batch_size):
             out.append(vec.tolist())
             on_progress(len(out), total)
         return out
@@ -202,19 +337,35 @@ class OnnxEmbedder:
         texts: Sequence[str],
         *,
         on_progress: Callable[[int, int], None] | None = None,
+        source_path: str | None = None,
+        chunk_indices: Sequence[int] | None = None,
     ) -> list[list[float]]:
         if not texts:
             return []
         text_list = list(texts)
         total = len(text_list)
+        index_list = list(chunk_indices) if chunk_indices is not None else None
+        if index_list is not None and len(index_list) != total:
+            raise EmbeddingError(
+                f"chunk_indices has {len(index_list)} entries for {total} embedding inputs"
+            )
 
         loop = asyncio.get_running_loop()
 
         if on_progress is None:
             # Fast path — no callback plumbing, no cross-thread hops.
             try:
+                if source_path is None and index_list is None:
+                    return await loop.run_in_executor(
+                        self._infer_executor, self._embed_sync, text_list, None
+                    )
                 return await loop.run_in_executor(
-                    self._infer_executor, self._embed_sync, text_list, None
+                    self._infer_executor,
+                    self._embed_sync,
+                    text_list,
+                    None,
+                    source_path,
+                    index_list,
                 )
             except EmbeddingError:
                 raise
@@ -255,8 +406,17 @@ class OnnxEmbedder:
                 pass
 
         try:
+            if source_path is None and index_list is None:
+                return await loop.run_in_executor(
+                    self._infer_executor, self._embed_sync, text_list, _thread_cb
+                )
             return await loop.run_in_executor(
-                self._infer_executor, self._embed_sync, text_list, _thread_cb
+                self._infer_executor,
+                self._embed_sync,
+                text_list,
+                _thread_cb,
+                source_path,
+                index_list,
             )
         except EmbeddingError:
             raise
@@ -316,5 +476,7 @@ class OnnxEmbedder:
         with self._load_lock:
             self._closed = True
             self._model = None
+            self._tokenizer = None
+            self._active_max_sequence_tokens = None
         self._infer_executor.shutdown(wait=True, cancel_futures=True)
         gc.collect()
