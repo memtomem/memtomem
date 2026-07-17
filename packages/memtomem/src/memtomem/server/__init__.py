@@ -130,7 +130,11 @@ from memtomem.server.tools.multi_agent import mem_agent_register, mem_agent_sear
 from memtomem.server.tools.evaluation import mem_eval
 from memtomem.server.tools.consolidation import mem_consolidate, mem_consolidate_apply
 from memtomem.server.tools.reflection import mem_reflect, mem_reflect_save
-from memtomem.server.tools.search_history import mem_search_history, mem_search_suggest
+from memtomem.server.tools.search_history import (
+    mem_search_feedback,
+    mem_search_history,
+    mem_search_suggest,
+)
 from memtomem.server.tools.conflict import mem_conflict_check
 from memtomem.server.tools.importance import mem_importance_scan
 from memtomem.server.tools.importers import mem_import_notion, mem_import_obsidian
