@@ -37,7 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -47,7 +50,7 @@ from typing import TYPE_CHECKING, Literal
 from dataclasses import dataclass
 
 from dataclasses import replace as dataclass_replace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from memtomem.config import (
     MAX_CONTEXT_WINDOW_CHUNKS,
@@ -316,6 +319,12 @@ class RetrievalStats:
     # logits, Cohere emits [0, 1] relevance), so clients calibrating a
     # threshold need the model, not just the scale family.
     reranker_model: str | None = None
+    # Quality Lab observation envelope. ``query_run_id`` is present only when
+    # the local history commit succeeded; search availability never depends on
+    # observation persistence.
+    query_run_id: str | None = None
+    cache_hit: bool = False
+    latency_ms: float | None = None
 
 
 if TYPE_CHECKING:
@@ -366,6 +375,139 @@ class SearchPipeline:
 
         # LLM query expansion cache (cleared on invalidate_cache)
         self._expansion_cache: dict[str, str] = {}
+
+    async def _record_ranked_search(
+        self,
+        *,
+        query: str,
+        query_embedding: list[float],
+        results: list[SearchResult],
+        stats: RetrievalStats,
+        top_k: int,
+        origin: str,
+        namespace: str | list[str] | None,
+        scope: str | list[str] | None,
+        source_filter: str | None,
+        tag_filter: str | None,
+        metadata_filter: SearchMetadataFilter | None,
+        as_of_unix: int | None,
+        rrf_weights: list[float],
+    ) -> str | None:
+        """Persist a content-minimized ranked-search observation when supported.
+
+        Alternate storage backends that only implement legacy query history
+        keep the old fire-and-forget behavior and receive no public run ID.
+        """
+        # Avoid ``getattr(instance, ...)`` as the capability probe: dynamic
+        # mocks/proxies may fabricate any attribute. A real class method or an
+        # explicitly attached instance method counts as support, and the same
+        # bound callable is then used for dispatch.
+        class_saver = getattr(type(self._storage), "save_search_observation", None)
+        instance_has_saver = "save_search_observation" in vars(self._storage)
+        saver = (
+            getattr(self._storage, "save_search_observation")
+            if class_saver is not None or instance_has_saver
+            else None
+        )
+        if saver is None:
+            # Preserve the pre-Quality-Lab contract for alternate backends:
+            # cache hits returned before scheduling legacy history writes.
+            if stats.cache_hit:
+                return None
+
+            async def _save_legacy_history() -> None:
+                await self._storage.save_query_history(
+                    query,
+                    query_embedding,
+                    [str(result.chunk.id) for result in results[:top_k]],
+                    [result.score for result in results[:top_k]],
+                )
+
+            task = asyncio.create_task(_save_legacy_history())
+            task.add_done_callback(_bg_task_error_cb)
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+            return None
+
+        normalized_origin = (
+            origin
+            if origin in {"web", "cli", "mcp", "shell", "langgraph", "internal"}
+            else "internal"
+        )
+        if any("\uac00" <= char <= "\ud7a3" for char in query):
+            query_language = "ko"
+        elif any(char.isascii() and char.isalpha() for char in query):
+            query_language = "en"
+        else:
+            query_language = "other"
+
+        profile: dict[str, object] = {
+            "bm25_enabled": self._config.enable_bm25,
+            "dense_enabled": self._config.enable_dense,
+            "bm25_candidates": self._config.bm25_candidates,
+            "dense_candidates": self._config.dense_candidates,
+            "rrf_weights": list(rrf_weights),
+            "embedding_provider": type(self._embedder).__name__,
+            "embedding_model": getattr(self._embedder, "model_name", None),
+            "embedding_dimension": self._embedder.dimension,
+            "rerank_applied": stats.rerank_applied,
+            "reranker": stats.reranker_model,
+        }
+        canonical_profile = json.dumps(
+            profile, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        observation: dict[str, object] = {
+            "origin": normalized_origin,
+            "purpose": "search",
+            "query_language": query_language,
+            "top_k": top_k,
+            "filters": {
+                "namespace": namespace,
+                "scope": scope,
+                "has_source_filter": source_filter is not None,
+                "has_tag_filter": tag_filter is not None,
+                "has_metadata_filter": metadata_filter is not None,
+                "has_as_of": as_of_unix is not None,
+            },
+            "cache_hit": stats.cache_hit,
+            "latency_ms": stats.latency_ms,
+            "score_scale": stats.score_scale,
+            "reranker": stats.reranker_model,
+            "bm25_candidates": stats.bm25_candidates,
+            "dense_candidates": stats.dense_candidates,
+            "final_total": stats.final_total,
+            "bm25_degraded": stats.bm25_error is not None,
+            "dense_degraded": stats.dense_error is not None,
+            "profile_id": hashlib.sha256(canonical_profile.encode()).hexdigest(),
+            "profile": profile,
+        }
+        result_snapshot = [
+            {
+                "chunk_id": str(result.chunk.id),
+                "rank": result.rank,
+                "score": result.score,
+                "source_name": result.chunk.metadata.source_file.name,
+                "content_hash": result.chunk.content_hash,
+                "heading_hierarchy": list(result.chunk.metadata.heading_hierarchy),
+                "namespace": result.chunk.metadata.namespace,
+                "language": result.chunk.metadata.language,
+            }
+            for result in results[:top_k]
+        ]
+        run_id = str(uuid4())
+        try:
+            return await saver(
+                query,
+                query_embedding,
+                [str(result.chunk.id) for result in results[:top_k]],
+                [result.score for result in results[:top_k]],
+                run_id=run_id,
+                observation=observation,
+                result_snapshot=result_snapshot,
+            )
+        except Exception:
+            logger.debug("search observation persistence failed", exc_info=True)
+            return None
 
     @property
     def rerank_active(self) -> bool:
@@ -882,6 +1024,7 @@ class SearchPipeline:
         created_before: datetime | None = None,
         exclude_source_roots: tuple[Path, ...] | None = None,
         rerank: bool | None = None,
+        origin: str = "internal",
     ) -> tuple[list[SearchResult], RetrievalStats]:
         # ``rerank`` (#1766): None = follow server config; False = skip the
         # Stage 3b cross-encoder and collapse the candidate pool to top_k
@@ -928,8 +1071,10 @@ class SearchPipeline:
                 exclude_source_roots=normalized_exclusion_roots,
             )
 
+        original_query = query
         top_k = self._config.default_top_k if top_k is None else top_k
         effective_weights = rrf_weights or self._config.rrf_weights
+        started_at = time.perf_counter()
 
         # Lease the reranker generation for the whole ranked-search body
         # (#1777): hot reload retires (and eventually closes) these while a
@@ -940,8 +1085,6 @@ class SearchPipeline:
             apply_rerank = reranker is not None and rerank_cfg is not None and rerank is not False
 
             # Check TTL cache for identical queries
-            import time
-
             # ``as_of_unix`` is intentionally excluded from ``cache_key`` and
             # bypasses the cache entirely when explicit. Default-path (None)
             # callers fall through to ``int(time.time())`` below and reuse
@@ -968,7 +1111,28 @@ class SearchPipeline:
             if as_of_unix is None and cache_key in self._search_cache:
                 ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
                 if ver == self._cache_version and time.time() - ts < ttl_snapshot:
-                    return cached_results, cached_stats
+                    run_stats = dataclass_replace(
+                        cached_stats,
+                        query_run_id=None,
+                        cache_hit=True,
+                        latency_ms=round((time.perf_counter() - started_at) * 1000, 3),
+                    )
+                    run_stats.query_run_id = await self._record_ranked_search(
+                        query=original_query,
+                        query_embedding=[],
+                        results=cached_results,
+                        stats=run_stats,
+                        top_k=top_k,
+                        origin=origin,
+                        namespace=namespace,
+                        scope=scope,
+                        source_filter=source_filter,
+                        tag_filter=tag_filter,
+                        metadata_filter=metadata_filter,
+                        as_of_unix=as_of_unix,
+                        rrf_weights=effective_weights,
+                    )
+                    return cached_results, run_stats
                 self._search_cache.pop(cache_key, None)
 
             bm25_k = max(self._config.bm25_candidates, top_k)
@@ -1364,20 +1528,22 @@ class SearchPipeline:
                 self._bg_tasks.add(t)
                 t.add_done_callback(self._bg_tasks.discard)
 
-            # Save to query history (fire-and-forget)
-            async def _save_history():
-                emb = query_embedding if use_dense else []
-                await self._storage.save_query_history(
-                    query,
-                    emb,
-                    [str(r.chunk.id) for r in fused[:top_k]],
-                    [r.score for r in fused[:top_k]],
-                )
-
-            t2 = asyncio.create_task(_save_history())
-            t2.add_done_callback(_bg_task_error_cb)
-            self._bg_tasks.add(t2)
-            t2.add_done_callback(self._bg_tasks.discard)
+            stats.latency_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            stats.query_run_id = await self._record_ranked_search(
+                query=original_query,
+                query_embedding=query_embedding if use_dense else [],
+                results=fused,
+                stats=stats,
+                top_k=top_k,
+                origin=origin,
+                namespace=namespace,
+                scope=scope,
+                source_filter=source_filter,
+                tag_filter=tag_filter,
+                metadata_filter=metadata_filter,
+                as_of_unix=as_of_unix,
+                rrf_weights=effective_weights,
+            )
 
             # Store in TTL cache only if version hasn't changed during search.
             # Skip the write when ``as_of_unix`` was explicit so that a
@@ -1385,7 +1551,15 @@ class SearchPipeline:
             # (next default caller would otherwise be served a past-snapshot
             # filtering of the same query).
             if as_of_unix is None and self._cache_version == version_at_start:
-                self._search_cache[cache_key] = (time.time(), version_at_start, fused, stats)
+                cache_stats = dataclass_replace(
+                    stats, query_run_id=None, cache_hit=False, latency_ms=None
+                )
+                self._search_cache[cache_key] = (
+                    time.time(),
+                    version_at_start,
+                    fused,
+                    cache_stats,
+                )
                 # Evict old entries (keep max 50)
                 if len(self._search_cache) > 50:
                     try:

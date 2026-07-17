@@ -32,7 +32,10 @@ async def mem_search_history(
     lines = [f"Search History ({len(rows)} queries):"]
     for r in rows:
         result_count = len(r.get("result_chunk_ids", []))
-        lines.append(f'  [{r["created_at"]}] "{r["query_text"]}" -> {result_count} results')
+        run_suffix = f" run={r['run_id']}" if r.get("run_id") else ""
+        lines.append(
+            f'  [{r["created_at"]}]{run_suffix} "{r["query_text"]}" -> {result_count} results'
+        )
     return "\n".join(lines)
 
 

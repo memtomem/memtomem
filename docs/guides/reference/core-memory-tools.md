@@ -227,6 +227,19 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > are no results. `mm search --format json` carries the same values as
 > per-item `score_scale` / `reranker` keys.
 
+> **Quality Lab run ID**: every ranked search persisted by the local SQLite
+> backend receives a durable `query_run_id`. MCP structured output and the Web
+> search API expose it only after the observation commit succeeds, so it can be
+> used to attach later feedback without guessing which invocation produced a
+> result set. Cache hits receive distinct IDs. Filter-only browsing does not
+> create an observation, and an observation write failure never fails search.
+> The local snapshot stores ranks, scores, chunk IDs, content hashes, heading
+> hierarchy, namespaces, languages, and source **basenames**—not result content
+> or absolute paths. Existing query history still records the query text and is
+> pruned by the existing 90-day history policy. `mm search --format json` keeps
+> its current per-result schema; use MCP structured output or the Web API when
+> the run ID is needed.
+
 ### Tuning search weights
 
 Use `bm25_weight` and `dense_weight` to shift between keyword and semantic matching:

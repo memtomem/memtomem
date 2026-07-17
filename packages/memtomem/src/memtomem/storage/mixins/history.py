@@ -40,6 +40,50 @@ class HistoryMixin:
         if self._history_save_count % self._HISTORY_PRUNE_INTERVAL == 0:
             self._prune_old_history()
 
+    async def save_search_observation(
+        self,
+        query_text: str,
+        query_embedding: list[float],
+        result_chunk_ids: list[str],
+        result_scores: list[float],
+        *,
+        run_id: str,
+        observation: dict,
+        result_snapshot: list[dict],
+    ) -> str:
+        """Persist one ranked-search invocation and return its durable run ID.
+
+        This is intentionally separate from ``save_query_history`` so storage
+        backends that only implement the legacy history contract remain usable.
+        The pipeline advertises a run ID only after this local commit succeeds.
+        """
+        db = self._get_db()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        emb_blob = (
+            struct.pack(f"{len(query_embedding)}f", *query_embedding) if query_embedding else b""
+        )
+        db.execute(
+            """INSERT INTO query_history
+               (query_text, query_embedding, result_chunk_ids, result_scores,
+                run_id, observation_json, result_snapshot_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                query_text,
+                emb_blob,
+                json.dumps(result_chunk_ids),
+                json.dumps(result_scores),
+                run_id,
+                json.dumps(observation, ensure_ascii=False, sort_keys=True),
+                json.dumps(result_snapshot, ensure_ascii=False),
+                now,
+            ),
+        )
+        db.commit()
+        self._history_save_count += 1
+        if self._history_save_count % self._HISTORY_PRUNE_INTERVAL == 0:
+            self._prune_old_history()
+        return run_id
+
     def _prune_old_history(self) -> None:
         """Delete query history rows older than _HISTORY_MAX_AGE_DAYS."""
         cutoff = (
@@ -55,12 +99,15 @@ class HistoryMixin:
 
     async def get_query_history(self, limit: int = 20, since: str | None = None) -> list[dict]:
         db = self._get_db()
-        query = "SELECT query_text, result_chunk_ids, result_scores, created_at FROM query_history"
+        query = (
+            "SELECT query_text, result_chunk_ids, result_scores, created_at, "
+            "run_id, observation_json, result_snapshot_json FROM query_history"
+        )
         params: list = []
         if since:
             query += " WHERE created_at >= ?"
             params.append(since)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = db.execute(query, params).fetchall()
         return [
@@ -69,6 +116,9 @@ class HistoryMixin:
                 "result_chunk_ids": json.loads(r[1]) if r[1] else [],
                 "result_scores": json.loads(r[2]) if r[2] else [],
                 "created_at": r[3],
+                "run_id": r[4],
+                "observation": json.loads(r[5]) if r[5] else {},
+                "result_snapshot": json.loads(r[6]) if r[6] else [],
             }
             for r in rows
         ]
