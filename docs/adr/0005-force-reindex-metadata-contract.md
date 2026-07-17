@@ -167,6 +167,14 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
    - `test_force_reindex_updates_line_ranges_for_unchanged_after_body_edit`
    - `test_mem_edit_preserves_sibling_chunk_metadata`
    These names are the regression-guard documentation.
+
+> **2026-07 implementation amendment:** A content hash covers the body, not
+> `heading_hierarchy`, while both FTS and `retrieval_content` include headings.
+> The incremental diff therefore reads the stored hierarchy alongside each
+> hash. A hash match whose hierarchy changed keeps its existing chunk ID but is
+> promoted to `to_upsert`, refreshing the hierarchy, FTS row, descendant
+> `parent_context`, and embedding. Exact hash + hierarchy matches still take the
+> metadata-only line-range path.
 4. CHANGELOG entry under `## Unreleased` — `mem_edit` / `mem_delete` /
    `mm index --force` / `POST /reindex` no longer reset access stats
    or chunk IDs for unchanged chunks. Listed as a behavior change, not

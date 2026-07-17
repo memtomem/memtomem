@@ -17,7 +17,10 @@ from memtomem.cli._errors import raise_cli_error
 @click.option(
     "--force",
     is_flag=True,
-    help="Re-embed every chunk (use for embedding changes or index recovery)",
+    help=(
+        "Re-embed every chunk (use for embedding changes, index recovery, "
+        "or scope/namespace re-resolution)"
+    ),
 )
 @click.option("--namespace", "-n", default=None, help="Target namespace")
 @click.option(

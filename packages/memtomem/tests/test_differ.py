@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -106,3 +107,50 @@ class TestComputeDiff:
         assert len(result.unchanged) == 2
         assert result.to_upsert == []
         assert result.to_delete == []
+
+    def test_heading_change_promotes_hash_match_to_upsert_with_stable_id(self):
+        chunk = _mk("same body")
+        chunk.metadata = replace(chunk.metadata, heading_hierarchy=("New heading",))
+        existing_id = uuid4()
+        existing = {str(existing_id): (chunk.content_hash, ("Old heading",))}
+
+        result = compute_diff(existing, [chunk])
+
+        assert result.to_upsert == [chunk]
+        assert result.unchanged == []
+        assert result.to_delete == []
+        assert chunk.id == existing_id
+
+    def test_duplicate_hash_prefers_matching_heading_identity(self):
+        first, second = _mk("duplicate body"), _mk("duplicate body")
+        first.metadata = replace(first.metadata, heading_hierarchy=("Beta",))
+        second.metadata = replace(second.metadata, heading_hierarchy=("Alpha",))
+        alpha_id, beta_id = uuid4(), uuid4()
+        existing = {
+            str(alpha_id): (first.content_hash, ("Alpha",)),
+            str(beta_id): (first.content_hash, ("Beta",)),
+        }
+
+        result = compute_diff(existing, [first, second])
+
+        assert result.to_upsert == []
+        assert result.unchanged == [first, second]
+        assert first.id == beta_id
+        assert second.id == alpha_id
+
+    def test_renamed_duplicate_does_not_steal_later_exact_heading_id(self):
+        renamed, unchanged = _mk("duplicate body"), _mk("duplicate body")
+        renamed.metadata = replace(renamed.metadata, heading_hierarchy=("Gamma",))
+        unchanged.metadata = replace(unchanged.metadata, heading_hierarchy=("Alpha",))
+        alpha_id, beta_id = uuid4(), uuid4()
+        existing = {
+            str(alpha_id): (renamed.content_hash, ("Alpha",)),
+            str(beta_id): (renamed.content_hash, ("Beta",)),
+        }
+
+        result = compute_diff(existing, [renamed, unchanged])
+
+        assert result.to_upsert == [renamed]
+        assert result.unchanged == [unchanged]
+        assert renamed.id == beta_id
+        assert unchanged.id == alpha_id

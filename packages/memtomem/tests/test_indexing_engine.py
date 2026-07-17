@@ -2577,6 +2577,41 @@ class TestIncrementalIndexing:
         # embed_texts should have been called again
         assert mock_embedder.embed_texts.call_count > first_embed_count
 
+    async def test_heading_only_rename_refreshes_retrieval_state(self, components, memory_dir):
+        """A body-hash match with a new heading must refresh FTS and embedding."""
+        md_path = memory_dir / "heading_rename.md"
+        body = "The body remains byte-for-byte stable across the rename."
+        md_path.write_text(f"# OldHeadingZeta\n\n{body}\n", encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        before = await components.storage.list_chunks_by_source(md_path)
+        assert len(before) == 1
+        original_id = before[0].id
+        first_embed_count = mock_embedder.embed_texts.call_count
+        assert await components.storage.bm25_search("OldHeadingZeta", top_k=5)
+
+        md_path.write_text(f"# NewHeadingTheta\n\n{body}\n", encoding="utf-8")
+        stats = await components.index_engine.index_file(md_path)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert len(after) == 1
+        assert after[0].id == original_id
+        assert after[0].metadata.heading_hierarchy == ("# NewHeadingTheta",)
+        assert stats.indexed_chunks == 1
+        assert mock_embedder.embed_texts.call_count == first_embed_count + 1
+        embedded_texts = mock_embedder.embed_texts.call_args.args[0]
+        assert "NewHeadingTheta" in embedded_texts[0]
+        assert not await components.storage.bm25_search("OldHeadingZeta", top_k=5)
+        new_results = await components.storage.bm25_search("NewHeadingTheta", top_k=5)
+        assert [result.chunk.id for result in new_results] == [original_id]
+
     async def test_delete_section_removes_chunks(self, components, memory_dir):
         """Removing a section should delete its chunks."""
         md_path = memory_dir / "shrinking.md"

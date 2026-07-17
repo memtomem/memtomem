@@ -6,6 +6,7 @@ retrieval, access counting, size distribution, and embedding meta reset.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from pathlib import Path
 
@@ -191,6 +192,16 @@ class TestStorageExtended:
         hash_values = set(hashes.values())
         assert c1.content_hash in hash_values
         assert c2.content_hash in hash_values
+
+    async def test_get_chunk_index_state_includes_heading_hierarchy(self, components):
+        storage = components.storage
+        chunk = make_chunk(content="indexed state", source="state.md")
+        chunk.metadata = dataclasses.replace(chunk.metadata, heading_hierarchy=("Parent", "Child"))
+        await storage.upsert_chunks([chunk])
+
+        state = await storage.get_chunk_index_state(Path("/tmp/state.md"))
+
+        assert state == {str(chunk.id): (chunk.content_hash, ("Parent", "Child"))}
 
     # ---- get_embeddings_for_chunks -------------------------------------------
 

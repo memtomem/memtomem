@@ -292,7 +292,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
 }
 ```
 
-> **Read-only by default.** Without `--fix`, `mm memory doctor` reports and never writes. Apply the per-check remediation above — most commonly `mm index <dir>` to close a coverage gap. Reserve `--force` for embedding changes or suspected index corruption because it re-embeds unchanged chunks.
+> **Read-only by default.** Without `--fix`, `mm memory doctor` reports and never writes. Apply the per-check remediation above — most commonly `mm index <dir>` to close a coverage gap. Reserve `--force` for embedding changes, suspected index corruption, or explicit scope/namespace re-resolution after configuration changes because it re-embeds unchanged chunks. Plain indexing already detects heading-only changes and refreshes their retrieval metadata and embeddings.
 
 #### Fixing broken links
 

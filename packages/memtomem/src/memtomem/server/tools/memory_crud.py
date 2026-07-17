@@ -887,9 +887,9 @@ async def mem_delete(
             return sf_err
         assert sf_path is not None
         # Same per-file lock as the chunk branch (issue #1570) plus the
-        # cross-process sidecar (#1587): without both, a locked CRUD span's
-        # the edit's incremental ``index_file`` — in this process or another —
-        # lands after this delete and re-upserts the whole file, silently
+        # cross-process sidecar (#1587): without both locks, a concurrent
+        # incremental ``index_file`` — in this process or another — can land
+        # after this delete and re-upsert the whole file, silently
         # resurrecting the rows just removed. The Gate-B scope probe runs under
         # the locks too so it sees the same state the delete acts on.
         from memtomem.context._atomic import (

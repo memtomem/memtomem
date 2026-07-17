@@ -1513,6 +1513,25 @@ class SqliteBackend(
         ).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    async def get_chunk_index_state(
+        self, source_file: Path
+    ) -> dict[str, tuple[str, tuple[str, ...]]]:
+        """Return hash and retrieval-relevant hierarchy for a source's chunks."""
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT id, content_hash, heading_hierarchy FROM chunks WHERE source_file=?",
+            (norm_path(source_file),),
+        ).fetchall()
+        state: dict[str, tuple[str, tuple[str, ...]]] = {}
+        for chunk_id, content_hash, heading_json in rows:
+            try:
+                hierarchy = tuple(json.loads(heading_json))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Corrupted heading_hierarchy for chunk %s", chunk_id)
+                hierarchy = ()
+            state[chunk_id] = (content_hash, hierarchy)
+        return state
+
     async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
         """Return ``{content_hash: chunk_id}`` for hashes present in the DB.
 

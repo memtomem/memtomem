@@ -1199,8 +1199,8 @@ class IndexEngine:
         # ``importance_score`` (sqlite_backend.py UPDATE column list). Net
         # effect: force re-indexes content but keeps per-chunk personalization
         # and chunk identity. See ``docs/adr/0005-force-reindex-metadata-contract.md``.
-        existing_hashes = await self._storage.get_chunk_hashes(file_path)
-        diff_result = compute_diff(existing_hashes, new_chunks)
+        existing_state = await self._storage.get_chunk_index_state(file_path)
+        diff_result = compute_diff(existing_state, new_chunks)
         # ``new_chunk_ids`` in the return shape is documented as "freshly
         # created chunks" — callers like ``mem_consolidate_apply`` rely on
         # this distinction. Capture before any force-promotion so the
