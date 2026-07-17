@@ -54,6 +54,16 @@ class ContextBundle:
     score_scale: ScoreScale | None = None
     reranker: str | None = None
 
+    def __post_init__(self) -> None:
+        # The scale/model pair invariant (established by RetrievalStats: the
+        # pipeline stamps both together) holds for direct construction too —
+        # an inconsistent pair is a caller bug, rejected loudly rather than
+        # silently normalized at serialization.
+        if self.reranker is not None and self.score_scale != "rerank":
+            raise ValueError("reranker requires score_scale == 'rerank'")
+        if self.score_scale == "rerank" and self.reranker is None:
+            raise ValueError("score_scale == 'rerank' requires a reranker model id")
+
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "pinned": [block.as_dict() for block in self.pinned],
@@ -63,12 +73,11 @@ class ContextBundle:
             "omitted_block_ids": list(self.omitted_block_ids),
             "warnings": list(self.warnings),
         }
-        # The omission contract is structural: an empty retrieval leg carries
-        # no relevance scale, and a reranker id only accompanies the "rerank"
-        # scale — even if a caller stamped inconsistent fields on the bundle.
+        # The empty-retrieved omission is structural: an empty retrieval leg
+        # carries no relevance scale, even if a caller stamped one.
         if self.retrieved and self.score_scale is not None:
             payload["score_scale"] = self.score_scale
-            if self.score_scale == "rerank" and self.reranker is not None:
+            if self.reranker is not None:
                 payload["reranker"] = self.reranker
         return payload
 

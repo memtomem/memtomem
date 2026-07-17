@@ -350,14 +350,15 @@ def test_context_bundle_as_dict_enforces_empty_retrieved_omission():
     assert "reranker" not in payload
 
 
-def test_context_bundle_as_dict_ties_reranker_to_rerank_scale():
-    # reranker accompanies the "rerank" scale only; a directly constructed
-    # bundle with an inconsistent pair serializes without the reranker key.
+def test_context_bundle_rejects_inconsistent_scale_model_pairs():
+    # The scale/model pair invariant holds at construction: a reranker id
+    # only accompanies the "rerank" scale, and vice versa — inconsistent
+    # direct construction is a caller bug, rejected loudly.
     retrieved = ({"id": "c1", "content": "x", "source": "m.md", "namespace": "d", "score": 0.5},)
-    inconsistent = ContextBundle((), retrieved, 10, 5, (), (), "rrf", "model-x")
-    payload = inconsistent.as_dict()
-    assert payload["score_scale"] == "rrf"
-    assert "reranker" not in payload
+    with pytest.raises(ValueError, match="requires score_scale"):
+        ContextBundle((), retrieved, 10, 5, (), (), "rrf", "model-x")
+    with pytest.raises(ValueError, match="requires a reranker"):
+        ContextBundle((), retrieved, 10, 5, (), (), "rerank", None)
 
     consistent = ContextBundle((), retrieved, 10, 5, (), (), "rerank", "model-x")
     payload = consistent.as_dict()
