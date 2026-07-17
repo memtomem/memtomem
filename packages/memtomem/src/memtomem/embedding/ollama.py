@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaEmbedder:
+    # Remote HTTP embedding is latency-bound, so concurrent per-file
+    # ``embed_texts`` calls genuinely overlap; match the index engine's
+    # file-level cap to preserve pre-#1783 throughput. Intra-file batch
+    # fan-out is still self-limited by ``max_concurrent_batches`` below.
+    preferred_concurrency = 8
+
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
         self._client: httpx.AsyncClient | None = None

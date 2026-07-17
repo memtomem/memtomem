@@ -11,6 +11,9 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -127,6 +130,24 @@ class TestEmbeddingProviderProtocol:
         embedder = OpenAIEmbedder(_openai_config(dimension=1536, model="text-embedding-3-small"))
         assert embedder.dimension == 1536
         assert embedder.model_name == "text-embedding-3-small"
+
+    def test_preferred_concurrency_hints(self):
+        """#1783: local CPU inference advertises 1 (concurrent ``session.run``
+        multiplies peak activation memory); remote latency-bound providers
+        match the engine's file-level cap. Noop is inert but keeps the
+        contract uniform across built-ins."""
+        assert OnnxEmbedder(_onnx_config()).preferred_concurrency == 1
+        assert OllamaEmbedder(_ollama_config()).preferred_concurrency == 8
+        assert OpenAIEmbedder(_openai_config()).preferred_concurrency == 8
+        assert NoopEmbedder().preferred_concurrency == 8
+
+    def test_preferred_concurrency_read_is_side_effect_free(self):
+        """The engine reads the hint before any embedding happens — it must
+        never trigger the lazy (and potentially downloading) model load."""
+        embedder = OnnxEmbedder(_onnx_config())
+        _ = embedder.preferred_concurrency
+        assert embedder._model is None
+        assert embedder._loading is False
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +609,215 @@ class TestOnnxEmbedder:
         assert embedder._model is None
         await embedder.close()
         assert embedder._model is None
+
+    @pytest.mark.anyio
+    async def test_close_waits_for_loading_worker_no_resurrection(self):
+        """#1792 review: close() must drain the inference worker before
+        clearing ``_model``. If a worker is still inside ``_get_model()``
+        constructing the model when close() runs, a fire-and-forget
+        shutdown would let it re-assign the freshly-loaded model right after
+        close() nulled it — resurrecting the ORT session past close() and
+        leaking the mmap (#206). Pins: (a) close() blocks while the
+        constructor is in flight, and (b) ``_model`` is None afterwards."""
+        import numpy as np
+
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+
+        constructing = threading.Event()  # worker entered TextEmbedding(...)
+        release = threading.Event()  # unblocks construction
+
+        class _BlockingTextEmbedding:
+            def __init__(self, *a, **k):
+                constructing.set()
+                assert release.wait(timeout=10), "release never set"
+
+            def embed(self, texts):
+                return iter(np.array([0.0, 0.0]) for _ in texts)
+
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", _BlockingTextEmbedding),
+        ):
+            embed_task = asyncio.create_task(embedder.embed_texts(["x"]))
+            # Worker is now blocked inside the model constructor.
+            assert await asyncio.to_thread(constructing.wait, 10)
+
+            close_task = asyncio.create_task(embedder.close())
+            # close() must NOT complete while the constructor is in flight —
+            # proves it drains rather than clearing _model out from under the
+            # worker (which would resurrect the model on assignment).
+            await asyncio.sleep(0.1)
+            assert not close_task.done(), "close() returned before worker drained"
+
+            release.set()
+            await asyncio.wait_for(close_task, timeout=10)
+            await asyncio.wait_for(embed_task, timeout=10)
+
+        # The worker assigned _model during construction, but close()'s
+        # drain-then-clear ran strictly after that assignment.
+        assert embedder._model is None
+
+    @pytest.mark.anyio
+    async def test_get_model_after_close_refuses(self):
+        """The ``_closed`` latch covers *every* load path, not just inference
+        on ``_infer_executor``: any ``_get_model`` after close (e.g. a warmup
+        load on the default executor) must refuse rather than resurrect the
+        ORT session (#1792 review — warmup path)."""
+        embedder = OnnxEmbedder(_onnx_config())
+        await embedder.close()
+        # _get_model is the shared chokepoint for inference AND warmup loads.
+        with pytest.raises(EmbeddingError, match="closed"):
+            await asyncio.to_thread(embedder._get_model)
+        assert embedder._model is None
+
+    @pytest.mark.anyio
+    async def test_close_cancelled_still_clears_model(self):
+        """Cancelling the coroutine awaiting close() must not leave the model
+        alive: teardown runs in ``_close_sync`` on a worker thread, which
+        completes regardless (#1792 review — cancelled-close path)."""
+        import numpy as np
+
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+
+        constructing = threading.Event()
+        release = threading.Event()
+
+        class _BlockingTextEmbedding:
+            def __init__(self, *a, **k):
+                constructing.set()
+                assert release.wait(timeout=10), "release never set"
+
+            def embed(self, texts):
+                return iter(np.array([0.0, 0.0]) for _ in texts)
+
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", _BlockingTextEmbedding),
+        ):
+            embed_task = asyncio.create_task(embedder.embed_texts(["x"]))
+            assert await asyncio.to_thread(constructing.wait, 10)
+
+            close_task = asyncio.create_task(embedder.close())
+            await asyncio.sleep(0.05)  # let close() reach its run_in_executor await
+            close_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+
+            # Cancelled the await, but _close_sync keeps running on its thread.
+            release.set()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(embed_task, timeout=10)
+
+        # Poll briefly: the detached _close_sync finishes the teardown.
+        for _ in range(100):
+            if embedder._closed and embedder._model is None:
+                break
+            await asyncio.sleep(0.05)
+        assert embedder._closed is True
+        assert embedder._model is None
+
+    @staticmethod
+    def _blocking_model(stats, stats_lock, entered, release):
+        """A fake fastembed model whose ``embed`` records each entry and
+        blocks on ``release``, so a test can hold one inference open and
+        observe whether a second one starts."""
+
+        class _BlockingModel:
+            def embed(self, texts):
+                import numpy as np
+
+                with stats_lock:
+                    stats["entries"].append(texts[0] if texts else None)
+                    stats["inflight"] += 1
+                    stats["peak"] = max(stats["peak"], stats["inflight"])
+                entered.set()
+                assert release.wait(timeout=10), "release event never set"
+                with stats_lock:
+                    stats["inflight"] -= 1
+                return iter(np.array([0.0, 0.0]) for _ in texts)
+
+        return _BlockingModel()
+
+    @pytest.mark.anyio
+    async def test_inference_serialized_and_cancel_preserves_cap(self):
+        """#1783: the dedicated single-worker ``_infer_executor`` caps
+        concurrent ONNX inference at 1 and survives task cancellation.
+
+        Cancelling the coroutine awaiting a *running* inference cannot stop
+        it (ORT has no mid-run interrupt) and frees the async slot, but the
+        lone executor worker stays busy — so a follow-up ``embed_texts``
+        queues instead of starting a second concurrent ``session.run``.
+        """
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+        stats_lock = threading.Lock()
+        stats = {"entries": [], "inflight": 0, "peak": 0}
+        entered = threading.Event()
+        release = threading.Event()
+        embedder._model = self._blocking_model(stats, stats_lock, entered, release)
+
+        task2 = None
+        try:
+            task1 = asyncio.create_task(embedder.embed_texts(["first"]))
+            assert await asyncio.to_thread(entered.wait, 10)
+
+            # Cancelling task1 abandons the running worker; the executor's
+            # one thread is still occupied by "first".
+            task1.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task1
+
+            entered.clear()
+            task2 = asyncio.create_task(embedder.embed_texts(["second"]))
+            # "second" is queued behind the still-running "first"; it must
+            # not enter the model. A short settle window is a positive
+            # check that queuing holds (peak can only ever be 1 here).
+            await asyncio.sleep(0.1)
+            with stats_lock:
+                assert stats["entries"] == ["first"]
+                assert stats["peak"] == 1
+        finally:
+            release.set()
+
+        result = await asyncio.wait_for(task2, timeout=10)
+        assert result == [pytest.approx([0.0, 0.0])]
+        with stats_lock:
+            assert stats["entries"] == ["first", "second"]
+            assert stats["peak"] == 1
+
+    @pytest.mark.anyio
+    async def test_cancelled_queued_inference_never_runs(self):
+        """A call cancelled while *queued* (its future not yet started in the
+        executor) must never run — the dedicated executor cancels the queued
+        future. This is the property a threading-semaphore gate could not
+        give: there, an abandoned worker blocked on the gate would still run
+        its inference once the gate freed (#1792 review)."""
+        embedder = OnnxEmbedder(_onnx_config(dimension=2))
+        stats_lock = threading.Lock()
+        stats = {"entries": [], "inflight": 0, "peak": 0}
+        entered = threading.Event()
+        release = threading.Event()
+        embedder._model = self._blocking_model(stats, stats_lock, entered, release)
+
+        try:
+            task_a = asyncio.create_task(embedder.embed_texts(["active"]))
+            assert await asyncio.to_thread(entered.wait, 10)  # "active" holds the worker
+
+            # "queued" cannot start (worker busy); cancel it while queued.
+            task_q = asyncio.create_task(embedder.embed_texts(["queued"]))
+            await asyncio.sleep(0.05)
+            task_q.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task_q
+        finally:
+            release.set()
+
+        result_a = await asyncio.wait_for(task_a, timeout=10)
+        assert result_a == [pytest.approx([0.0, 0.0])]
+        # Let any (wrongly) un-cancelled queued future have its chance to run.
+        await asyncio.sleep(0.1)
+        with stats_lock:
+            assert "queued" not in stats["entries"]
+            assert stats["entries"] == ["active"]
 
     def test_threads_default_is_four(self):
         """Default caps ONNX at 4 cores so a bulk reindex doesn't pin every
