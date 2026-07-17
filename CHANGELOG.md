@@ -7,6 +7,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Named score scale in structured search output** (#1767) — `mem_search`
+  and `mem_agent_search` structured payloads now carry a top-level
+  `score_scale` (`rrf` / `bm25` / `dense` / `none` / `rerank`) plus `reranker`
+  (the rerank model id) so consumers can calibrate a `score` threshold instead
+  of inferring the scale from value ranges; the label is derived from the
+  returned results, so a reranker that silently falls back to fused order stays
+  truthful. `mm search --format json` carries the fields per item (its payload
+  is a bare list). Both omitted when empty; boosts (decay / access / importance,
+  all default-off) multiply on top of the named base scale.
 - **Context Compose schema 4** (#1791) — the composed bundle now names the
   retrieval leg's score scale at the top level (`score_scale`: `rrf` / `bm25`
   / `dense` / `none` / `rerank`, plus `reranker` with the model id when
