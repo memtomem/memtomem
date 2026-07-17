@@ -17,18 +17,20 @@ endpoint and the web hot-reload path already introspect (warmup is
 broader: readiness only inspects onnx/fastembed, warmup also warms the
 ``local`` reranker).
 
-Lazy-import discipline: module level stays stdlib-only so importing
-this from the lifespan's flag gate adds nothing to the flag-off
-handshake path.
+Lazy-import discipline: module level stays stdlib-only (plus the
+itself-stdlib-only ``memtomem._settlement`` helper) so importing this
+from the lifespan's flag gate adds nothing to the flag-off handshake
+path.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from memtomem._settlement import settle_shielded
 
 if TYPE_CHECKING:
     from memtomem.server.component_factory import Components
@@ -62,28 +64,12 @@ async def _warm_one(
     future = loop.run_in_executor(None, load_model)
     # A worker thread can't be interrupted — cancelling only the awaiting
     # task would leave the load running while shutdown closes components
-    # under it. Every settle-await stays shielded so repeated cancellation
-    # cannot cancel a load that is still queued in the executor. Once the
-    # load settles, preserve cancellation as the caller-visible outcome.
-    cancelled = False
-    while True:
-        try:
-            await asyncio.shield(future)
-            break
-        except asyncio.CancelledError:
-            cancelled = True
-            if future.done():
-                break
-        except BaseException:
-            if cancelled:
-                break
-            raise
-    if cancelled:
-        # Consume a failed/cancelled load in the completion race while
-        # preserving the pre-existing cancellation-wins contract.
-        with contextlib.suppress(BaseException):
-            future.result()
-        raise asyncio.CancelledError
+    # under it. ``settle_shielded`` owns the settlement contract (#1803,
+    # #1806): repeated cancellation never cancels the queued/running load,
+    # the first cancellation (message included) is re-raised once the load
+    # settles, and a load failure after cancellation is logged rather than
+    # displacing the cancellation.
+    await settle_shielded(future, what=f"{component} model load")
     return WarmupOutcome(component, provider, model, "loaded")
 
 

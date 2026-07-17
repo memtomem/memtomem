@@ -9,6 +9,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Sequence
 
+from memtomem._settlement import settle_shielded
 from memtomem.config import EmbeddingConfig
 from memtomem.embedding.aliases import resolve_embedder_id
 from memtomem.embedding.fastembed_cache import resolve_fastembed_cache_dir
@@ -450,28 +451,18 @@ class OnnxEmbedder:
     async def close(self) -> None:
         # Teardown runs entirely in ``_close_sync`` on a worker thread, off
         # the event loop, so the blocking ``_load_lock`` acquire / executor
-        # drain never stall the loop. Every await on the teardown future is
-        # ``shield``ed so cancellation of the awaiting task — first or
-        # repeated — can never propagate into the future and cancel a
-        # still-queued ``_close_sync`` before it starts (which would leave
-        # the model and executor alive; an already-running worker can't be
-        # interrupted anyway). On cancellation we keep settling until the
-        # future is done, then propagate. ``server/warmup.py`` uses the same
-        # repeated-shield settlement for model loads; keep both paths aligned
-        # so neither loses queued executor work (#1803).
+        # drain never stall the loop. ``settle_shielded`` owns the settlement
+        # contract, shared with ``server/warmup.py`` so the two paths can't
+        # drift (#1803, #1806): every await on the teardown future is
+        # shielded — cancellation of the awaiting task, first or repeated,
+        # can never cancel a still-queued ``_close_sync`` before it starts
+        # (which would leave the model and executor alive; an already-running
+        # worker can't be interrupted anyway). Once teardown settles, the
+        # first cancellation (message included) is re-raised; a teardown
+        # failure after cancellation is logged instead of displacing it.
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, self._close_sync)
-        cancelled = False
-        while True:
-            try:
-                await asyncio.shield(future)
-                break
-            except asyncio.CancelledError:
-                cancelled = True
-                if future.done():
-                    break
-        if cancelled:
-            raise asyncio.CancelledError
+        await settle_shielded(future, what="ONNX embedder teardown")
 
     def _close_sync(self) -> None:
         # Latch closed and drop the model under ``_load_lock`` — the same lock
