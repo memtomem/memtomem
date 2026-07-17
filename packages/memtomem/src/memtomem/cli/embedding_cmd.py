@@ -27,7 +27,12 @@ def embedding_reset(mode: str) -> None:
 
 
 async def _run(mode: str) -> None:
-    from memtomem.config import Mem2MemConfig, load_config_d, load_config_overrides
+    from memtomem.config import (
+        Mem2MemConfig,
+        embedding_policy_fingerprint,
+        load_config_d,
+        load_config_overrides,
+    )
     from memtomem.storage.sqlite_backend import SqliteBackend
 
     cfg = Mem2MemConfig()
@@ -43,6 +48,8 @@ async def _run(mode: str) -> None:
         dimension=cfg.embedding.dimension,
         embedding_provider=cfg.embedding.provider,
         embedding_model=cfg.embedding.model,
+        embedding_policy_fingerprint=embedding_policy_fingerprint(cfg.embedding),
+        embedding_max_sequence_tokens=cfg.embedding.max_sequence_tokens,
         strict_dim_check=False,
     )
     await storage.initialize()
@@ -56,10 +63,13 @@ async def _run(mode: str) -> None:
             click.echo(
                 f"  DB stored:  {stored['provider']}/{stored['model']} ({stored['dimension']}d)"
             )
+            if stored.get("max_sequence_tokens") is not None:
+                click.echo(f"  DB max sequence tokens: {stored['max_sequence_tokens']}")
         click.echo(
             f"  Config:     {cfg.embedding.provider}/{cfg.embedding.model} "
             f"({cfg.embedding.dimension}d)"
         )
+        click.echo(f"  Config max sequence tokens: {cfg.embedding.max_sequence_tokens}")
         if mismatch is None:
             click.echo(click.style("\nNo mismatch — DB and config are in sync.", fg="green"))
         else:
@@ -91,6 +101,8 @@ async def _run(mode: str) -> None:
             dimension=cfg.embedding.dimension,
             provider=cfg.embedding.provider,
             model=cfg.embedding.model,
+            policy_fingerprint=embedding_policy_fingerprint(cfg.embedding),
+            max_sequence_tokens=cfg.embedding.max_sequence_tokens,
         )
         click.echo(
             click.style(
@@ -99,7 +111,7 @@ async def _run(mode: str) -> None:
                 fg="green",
             )
         )
-        click.echo("All vectors deleted — run 'mm index <path>' to re-index.")
+        click.echo("All vectors deleted — run 'mm index --force <path>' to re-index.")
 
     elif internal_mode == "revert_to_stored":
         if mismatch is None:

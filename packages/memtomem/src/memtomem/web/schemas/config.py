@@ -13,6 +13,8 @@ class ConfigEmbeddingOut(BaseModel):
     dimension: int
     base_url: str
     batch_size: int
+    onnx_batch_size: int = 8
+    max_sequence_tokens: int = 1024
     api_key: str = "***"
     # ONNX Runtime intra-op thread cap. Default 4 (caps ONNX so a bulk
     # reindex doesn't pin every core); 0 = ORT default (all physical
@@ -151,6 +153,8 @@ class EmbeddingConfigInfo(BaseModel):
     dimension: int
     provider: str
     model: str
+    policy_fingerprint: str = ""
+    max_sequence_tokens: int | None = None
 
 
 class EmbeddingCoverage(BaseModel):
@@ -171,6 +175,7 @@ class EmbeddingStatusResponse(BaseModel):
     has_mismatch: bool
     dimension_mismatch: bool = False
     model_mismatch: bool = False
+    policy_mismatch: bool = False
     stored: EmbeddingConfigInfo | None = None
     configured: EmbeddingConfigInfo | None = None
     coverage: EmbeddingCoverage | None = None

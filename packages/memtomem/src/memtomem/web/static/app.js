@@ -2015,6 +2015,12 @@ function renderEmbMismatchBanner() {
       config: `${data.configured.provider}/${data.configured.model}`,
     }));
   }
+  if (data.policy_mismatch) {
+    parts.push(t('banner.emb_mismatch_policy', {
+      db: data.stored.max_sequence_tokens ?? t('common.model_limit'),
+      config: data.configured.max_sequence_tokens ?? t('common.model_limit'),
+    }));
+  }
   msgEl.textContent = t('banner.emb_mismatch', { details: parts.join(' / ') });
 }
 

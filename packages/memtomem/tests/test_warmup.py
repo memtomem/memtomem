@@ -370,9 +370,22 @@ class TestLoaderConcurrency:
 
     @staticmethod
     def _slow_ctor(calls: list):
+        class _Tokenizer:
+            def __init__(self) -> None:
+                self.truncation = {
+                    "max_length": 8192,
+                    "stride": 0,
+                    "strategy": "longest_first",
+                    "direction": "right",
+                }
+
+            def enable_truncation(self, *, max_length: int, **kwargs) -> None:
+                self.truncation = {**self.truncation, **kwargs, "max_length": max_length}
+
         class _Ctor:
             def __init__(self, *args, **kwargs) -> None:
                 calls.append((args, kwargs))
+                self.model = SimpleNamespace(tokenizer=_Tokenizer())
                 # Widen the race window so a missing lock surfaces reliably.
                 import time
 

@@ -285,6 +285,35 @@ async def test_config_patch_persist_timeout_reverts_runtime(home: Path, app, cli
     assert on_disk["search"]["default_top_k"] == 5
 
 
+async def test_onnx_batch_persist_timeout_does_not_change_live_embedder(
+    home: Path, app, client: AsyncClient
+):
+    _write_config(home, {"embedding": {"onnx_batch_size": 8}})
+    app.state.config = _hot_reload._build_fresh_config()
+    app.state.config_signature = _hot_reload.current_signature()
+
+    class StubEmbedder:
+        def __init__(self) -> None:
+            self.batch_size = 8
+
+        def set_onnx_batch_size(self, value: int) -> None:
+            self.batch_size = value
+
+    embedder = StubEmbedder()
+    app.state.embedder = embedder
+    with patch(
+        "memtomem.web.routes.system.save_config_overrides",
+        side_effect=TimeoutError("locked"),
+    ):
+        resp = await client.patch(
+            "/api/config?persist=true", json={"embedding": {"onnx_batch_size": 64}}
+        )
+
+    assert resp.status_code == 503
+    assert embedder.batch_size == 8
+    assert app.state.config.embedding.onnx_batch_size == 8
+
+
 async def test_memory_dirs_add_persist_timeout_reverts_runtime(
     home: Path, app, client: AsyncClient, tmp_path: Path
 ):

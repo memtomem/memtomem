@@ -14,6 +14,8 @@ import pytest
 
 from helpers import make_chunk
 from memtomem.models import NamespaceFilter
+from memtomem.config import StorageConfig
+from memtomem.storage.sqlite_backend import SqliteBackend
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +414,47 @@ class TestStorageExtended:
         assert storage.embedding_mismatch is None
         assert storage._dim_mismatch is None
         assert storage._model_mismatch is None
+
+    async def test_legacy_onnx_db_enters_policy_degraded_mode(self, tmp_path):
+        db_path = tmp_path / "legacy-policy.db"
+        cfg = StorageConfig(sqlite_path=db_path)
+
+        legacy = SqliteBackend(
+            cfg,
+            dimension=8,
+            embedding_provider="onnx",
+            embedding_model="test-model",
+        )
+        await legacy.initialize()
+        await legacy.close()
+
+        current = SqliteBackend(
+            cfg,
+            dimension=8,
+            embedding_provider="onnx",
+            embedding_model="test-model",
+            embedding_policy_fingerprint="onnx:v1:max_sequence_tokens=1024",
+            embedding_max_sequence_tokens=1024,
+        )
+        await current.initialize()
+        try:
+            mismatch = current.embedding_mismatch
+            assert mismatch is not None
+            assert mismatch["policy_mismatch"] is True
+            assert mismatch["stored"]["max_sequence_tokens"] == 0
+            assert mismatch["configured"]["max_sequence_tokens"] == 1024
+
+            await current.reset_embedding_meta(
+                dimension=8,
+                provider="onnx",
+                model="test-model",
+                policy_fingerprint="onnx:v1:max_sequence_tokens=1024",
+                max_sequence_tokens=1024,
+            )
+            assert current.embedding_mismatch is None
+            assert current.stored_embedding_info["max_sequence_tokens"] == 1024
+        finally:
+            await current.close()
 
     # ---- reset_all -----------------------------------------------------------
 

@@ -70,7 +70,20 @@ class EmbeddingConfig(ConfigModel):
     base_url: str = ""
     api_key: str = ""
     batch_size: int = 64
+    # Local FastEmbed/ONNX batch cap. Kept separate from ``batch_size`` so
+    # memory-safe CPU inference defaults do not reduce throughput for the
+    # latency-bound OpenAI/Ollama providers. FastEmbed defaults to 256; a
+    # single long input then pads that whole batch and can multiply activation
+    # RSS. Read on every embed call, so this setting is runtime-mutable.
+    onnx_batch_size: int = 8
     max_concurrent_batches: int = 4
+    # Actual tokenizer limit for local ONNX embedding. bge-m3 advertises an
+    # 8192-token context; one oversized chunk can therefore drive multi-GB
+    # attention activations even though indexing is sequential. ``0`` restores
+    # the model's own limit. Values above the model limit never widen it.
+    # Restart-required because FastEmbed caches the configured tokenizer with
+    # the model instance. Ignored by the network-bound providers.
+    max_sequence_tokens: int = 1024
     # ONNX Runtime intra-op thread cap for the local fastembed provider.
     # Default 4 — caps ONNX so a bulk reindex doesn't pin every physical
     # core and starve the web server / other apps. Live diagnosis of #640
@@ -117,11 +130,13 @@ class EmbeddingConfig(ConfigModel):
             raise ValueError("must be non-negative (0 = no embeddings)")
         return v
 
-    @field_validator("batch_size", "max_concurrent_batches")
+    @field_validator("batch_size", "onnx_batch_size", "max_concurrent_batches")
     @classmethod
     def must_be_positive(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError(f"{info.field_name} must be positive, got {v}")
+        if info.field_name == "onnx_batch_size" and v > 256:
+            raise ValueError("onnx_batch_size must be at most 256")
         return v
 
     @field_validator("threads")
@@ -131,12 +146,27 @@ class EmbeddingConfig(ConfigModel):
             raise ValueError("threads must be non-negative (0 = ORT default)")
         return v
 
+    @field_validator("max_sequence_tokens")
+    @classmethod
+    def max_sequence_tokens_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("max_sequence_tokens must be non-negative (0 = model limit)")
+        return v
+
     @field_validator("progress_threshold")
     @classmethod
     def progress_threshold_non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("progress_threshold must be non-negative (0 = always emit)")
         return v
+
+
+def embedding_policy_fingerprint(config: EmbeddingConfig) -> str:
+    """Stable identity for settings that change the generated vector space."""
+    provider = config.provider.strip().lower() or "none"
+    if provider == "onnx":
+        return f"onnx:v1:max_sequence_tokens={config.max_sequence_tokens}"
+    return f"{provider}:v1"
 
 
 class StorageConfig(ConfigModel):
@@ -980,7 +1010,7 @@ MUTABLE_FIELDS: dict[str, set[str]] = {
         "summary_max_input_chars",
         "summary_max_tokens",
     },
-    "embedding": {"batch_size", "progress_threshold"},
+    "embedding": {"batch_size", "onnx_batch_size", "progress_threshold"},
     "decay": {"enabled", "half_life_days"},
     "mmr": {"enabled", "lambda_param"},
     "namespace": {"default_namespace", "enable_auto_ns", "rules"},
@@ -1032,6 +1062,7 @@ FIELD_CONSTRAINTS: dict[str, dict] = {
     "indexing.summary_max_input_chars": {"type": int, "min": 200, "max": 50000},
     "indexing.summary_max_tokens": {"type": int, "min": 32, "max": 2048},
     "embedding.batch_size": {"type": int, "min": 1, "max": 1024},
+    "embedding.onnx_batch_size": {"type": int, "min": 1, "max": 256},
     "embedding.progress_threshold": {"type": int, "min": 0, "max": 100000},
     "decay.enabled": {"type": bool},
     "decay.half_life_days": {"type": float, "min": 0.1},

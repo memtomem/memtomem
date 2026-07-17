@@ -221,19 +221,30 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 | `MEMTOMEM_EMBEDDING__BASE_URL` | _(empty)_ | API endpoint URL (Ollama defaults to `http://localhost:11434` when unset) |
 | `MEMTOMEM_EMBEDDING__API_KEY` | _(empty)_ | API key (required for OpenAI) |
 | `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | Texts per embedding API call |
+| `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` | `8` | Texts per local FastEmbed/ONNX inference batch (runtime-mutable) |
+| `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` | `1024` | Actual-token cap per local ONNX input; `0` restores the model limit (restart required) |
 | `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Max parallel embedding requests |
 | `MEMTOMEM_EMBEDDING__THREADS` | `4` | ONNX intra-op thread cap for the local `fastembed` provider |
 | `MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD` | `32` | Show an embedding progress indicator once a batch exceeds this many texts |
 
 See [Embedding Providers](embeddings.md) for the supported model list and the dimension values you must use with each one.
 
+The ONNX sequence cap changes only the text sent to dense inference: stored
+chunk content and BM25 indexing remain complete. If an existing ONNX index was
+created before this cap was enabled, force-reindex every memory directory so
+old and new vectors use the same prefix policy. Set
+`MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=0` before restart to retain the
+model's previous maximum context instead.
+
 ## Reset Flow
 
-Changing the embedding provider, model, or dimension *after* content is
-indexed produces a **dimension mismatch**: the DB stores vectors of one
-shape, the runtime computes another, so semantic search silently falls
-back to BM25 only. The tool surface advertises the fix via a `fix` hint,
-and `mem_status` reports the mismatch under `warnings[]` (see below).
+Changing the embedding provider, model, dimension, or ONNX sequence-token
+policy *after* content is indexed produces an **embedding mismatch**. The DB
+stores a policy fingerprint alongside its vectors; on mismatch memtomem blocks
+index writes and disables dense retrieval while BM25 remains available. The
+tool surface advertises the fix via a `fix` hint, and `mem_status` reports the
+mismatch under `warnings[]` (see below). Pre-fingerprint ONNX databases are
+treated as using the native model limit (`max_sequence_tokens=0`).
 
 Resolving it is a two-step process — pick **one** of:
 
@@ -242,11 +253,11 @@ Resolving it is a two-step process — pick **one** of:
 
   ```bash
   uv run mm embedding-reset --mode apply-current   # drops old vectors
-  uv run mm index <memory_dir>                     # re-embed (repeat per memory_dir)
+  uv run mm index --force <memory_dir>             # re-embed (repeat per memory_dir)
   ```
 
   MCP equivalent: `mem_embedding_reset(mode="apply_current")` followed by
-  `mem_index(path="...")`.
+  `mem_index(path="...", force=true)`.
 
 - **Revert the runtime to the stored model (non-destructive, useful if the
   config drift was accidental):**
@@ -275,15 +286,17 @@ mismatch is detected:
 
 ```
 {"kind": "embedding_dim_mismatch",
- "stored":  {"provider": "...", "model": "...", "dimension": N},
- "configured": {"provider": "...", "model": "...", "dimension": M},
+ "stored":  {"provider": "...", "model": "...", "dimension": N,
+             "policy_fingerprint": "...", "max_sequence_tokens": 0},
+ "configured": {"provider": "...", "model": "...", "dimension": M,
+                "policy_fingerprint": "...", "max_sequence_tokens": 1024},
  "fix": "uv run mm embedding-reset --mode apply-current",
  "doc": "docs/guides/configuration.md#reset-flow"}
 ```
 
-The `kind` field is an open enum — new warning kinds (e.g. `stale_index`,
-`orphan_vectors`) may be added in future releases without changing the
-envelope shape.
+Policy-only drift uses `kind: "embedding_policy_mismatch"`. The `kind` field
+is an open enum — new warning kinds may be added in future releases without
+changing the envelope shape.
 
 ## Search
 

@@ -15,7 +15,8 @@
 // carries no hard-coded English labels — enforced by
 // ``test_no_hardcoded_config_labels`` in tests/test_i18n.py.
 const _CONFIG_LABEL_FIELDS = {
-  embedding: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'api_key', 'threads'],
+  embedding: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
+              'max_sequence_tokens', 'api_key', 'threads'],
   storage:   ['backend', 'sqlite_path', 'collection_name'],
   search:    ['default_top_k', 'bm25_candidates', 'dense_candidates', 'rrf_k',
               'enable_bm25', 'enable_dense', 'tokenizer', 'rrf_weights'],
@@ -28,10 +29,14 @@ const _CONFIG_LABEL_FIELDS = {
 };
 
 // Sections that are fully read-only (require restart)
-const _READONLY_SECTIONS = new Set(['embedding', 'storage']);
+const _READONLY_SECTIONS = new Set(['storage']);
 
 // Individual read-only fields within editable sections
 const _READONLY_FIELDS = {
+  embedding: new Set([
+    'provider', 'model', 'dimension', 'base_url', 'api_key', 'threads',
+    'max_sequence_tokens',
+  ]),
   indexing: new Set([]),
 };
 
@@ -603,7 +608,8 @@ async function loadConfig() {
 // (``test_no_hardcoded_config_labels`` only scans the localized fields).
 const _CONFIG_GUIDES = {
   embedding: {
-    items: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'api_key', 'threads'],
+    items: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
+            'max_sequence_tokens', 'api_key', 'threads'],
     envs: [
       'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
       'MEMTOMEM_EMBEDDING__MODEL=bge-m3',
@@ -611,6 +617,8 @@ const _CONFIG_GUIDES = {
       'MEMTOMEM_EMBEDDING__BASE_URL=http://localhost:11434',
       'MEMTOMEM_EMBEDDING__API_KEY=sk-...',
       'MEMTOMEM_EMBEDDING__BATCH_SIZE=64',
+      'MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=8',
+      'MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=1024',
       'MEMTOMEM_EMBEDDING__THREADS=4',
     ],
     howto: {

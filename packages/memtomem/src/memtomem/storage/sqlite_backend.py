@@ -190,12 +190,16 @@ class SqliteBackend(
         embedding_provider: str = "",
         embedding_model: str = "",
         *,
+        embedding_policy_fingerprint: str = "",
+        embedding_max_sequence_tokens: int | None = None,
         strict_dim_check: bool = True,
     ) -> None:
         self._config = config
         self._dimension = dimension
         self._embedding_provider = embedding_provider
         self._embedding_model = embedding_model
+        self._embedding_policy_fingerprint = embedding_policy_fingerprint
+        self._embedding_max_sequence_tokens = embedding_max_sequence_tokens
         # Relaxed mode is used by recovery tooling (``mm embedding-reset``)
         # to observe and fix a dim=0 / real-provider mismatch; production
         # entry points keep the default strict behavior so startup fails
@@ -206,6 +210,7 @@ class SqliteBackend(
         self._model_mismatch: tuple[str, str, str, str] | None = (
             None  # (stored_prov, stored_model, cfg_prov, cfg_model)
         )
+        self._policy_mismatch: tuple[str, str, int | None, int | None] | None = None
         self._meta: MetaManager | None = None
         self._ns: NamespaceOps | None = None
         self._in_transaction: bool = False
@@ -277,8 +282,24 @@ class SqliteBackend(
                 self._dimension,
                 self._embedding_provider,
                 self._embedding_model,
+                embedding_policy_fingerprint=self._embedding_policy_fingerprint,
+                embedding_max_sequence_tokens=self._embedding_max_sequence_tokens,
                 strict_dim_check=self._strict_dim_check,
             )
+            stored_policy = self._meta.get_meta("embedding_policy_fingerprint")
+            stored_max_raw = self._meta.get_meta("embedding_max_sequence_tokens")
+            stored_max = int(stored_max_raw) if stored_max_raw is not None else None
+            if (
+                self._embedding_policy_fingerprint
+                and stored_policy is not None
+                and stored_policy != self._embedding_policy_fingerprint
+            ):
+                self._policy_mismatch = (
+                    stored_policy,
+                    self._embedding_policy_fingerprint,
+                    stored_max,
+                    self._embedding_max_sequence_tokens,
+                )
             self._has_vec_table = (
                 self._db.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_vec'"
@@ -404,12 +425,18 @@ class SqliteBackend(
             self._dimension,
             self._embedding_provider,
             self._embedding_model,
+            self._embedding_policy_fingerprint,
+            self._embedding_max_sequence_tokens,
         )
 
     @property
     def embedding_mismatch(self) -> dict | None:
         """Return mismatch info dict if stored embedding config differs from current config, else None."""
-        if self._dim_mismatch is None and self._model_mismatch is None:
+        if (
+            self._dim_mismatch is None
+            and self._model_mismatch is None
+            and self._policy_mismatch is None
+        ):
             return None
         stored_dim = self._dim_mismatch[0] if self._dim_mismatch else self._dimension
         cfg_dim = self._dim_mismatch[1] if self._dim_mismatch else self._dimension
@@ -417,11 +444,44 @@ class SqliteBackend(
         stored_model = self._model_mismatch[1] if self._model_mismatch else self._embedding_model
         cfg_prov = self._model_mismatch[2] if self._model_mismatch else self._embedding_provider
         cfg_model = self._model_mismatch[3] if self._model_mismatch else self._embedding_model
+        stored_policy = (
+            self._policy_mismatch[0]
+            if self._policy_mismatch
+            else self._embedding_policy_fingerprint
+        )
+        cfg_policy = (
+            self._policy_mismatch[1]
+            if self._policy_mismatch
+            else self._embedding_policy_fingerprint
+        )
+        stored_max = (
+            self._policy_mismatch[2]
+            if self._policy_mismatch
+            else self._embedding_max_sequence_tokens
+        )
+        cfg_max = (
+            self._policy_mismatch[3]
+            if self._policy_mismatch
+            else self._embedding_max_sequence_tokens
+        )
         return {
             "dimension_mismatch": self._dim_mismatch is not None,
             "model_mismatch": self._model_mismatch is not None,
-            "stored": {"dimension": stored_dim, "provider": stored_prov, "model": stored_model},
-            "configured": {"dimension": cfg_dim, "provider": cfg_prov, "model": cfg_model},
+            "policy_mismatch": self._policy_mismatch is not None,
+            "stored": {
+                "dimension": stored_dim,
+                "provider": stored_prov,
+                "model": stored_model,
+                "policy_fingerprint": stored_policy,
+                "max_sequence_tokens": stored_max,
+            },
+            "configured": {
+                "dimension": cfg_dim,
+                "provider": cfg_prov,
+                "model": cfg_model,
+                "policy_fingerprint": cfg_policy,
+                "max_sequence_tokens": cfg_max,
+            },
         }
 
     def clear_embedding_mismatch(self) -> None:
@@ -433,12 +493,15 @@ class SqliteBackend(
         """
         self._dim_mismatch = None
         self._model_mismatch = None
+        self._policy_mismatch = None
 
     async def reset_embedding_meta(
         self,
         dimension: int,
         provider: str = "",
         model: str = "",
+        policy_fingerprint: str = "",
+        max_sequence_tokens: int | None = None,
     ) -> None:
         """Drop and recreate chunks_vec with *dimension*, updating all meta.
 
@@ -451,11 +514,21 @@ class SqliteBackend(
         db.execute("DROP TABLE IF EXISTS chunks_vec")
         db.execute("DROP TABLE IF EXISTS chunks_vec_info")
         self._dimension = dimension
-        self._meta.reset_embedding_meta(dimension, provider, model)
+        self._meta.reset_embedding_meta(
+            dimension,
+            provider,
+            model,
+            policy_fingerprint,
+            max_sequence_tokens,
+        )
         if provider:
             self._embedding_provider = provider
         if model:
             self._embedding_model = model
+        if policy_fingerprint:
+            self._embedding_policy_fingerprint = policy_fingerprint
+        if max_sequence_tokens is not None:
+            self._embedding_max_sequence_tokens = max_sequence_tokens
         if self._dimension > 0:
             db.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec

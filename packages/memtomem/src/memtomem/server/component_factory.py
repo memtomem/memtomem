@@ -13,7 +13,7 @@ from memtomem.chunking.markdown import MarkdownChunker
 from memtomem.chunking.registry import ChunkerRegistry
 from memtomem.chunking.restructured_text import ReStructuredTextChunker
 from memtomem.chunking.structured import StructuredChunker
-from memtomem.config import Mem2MemConfig
+from memtomem.config import Mem2MemConfig, embedding_policy_fingerprint
 from memtomem.embedding.factory import create_embedder
 from memtomem.errors import EmbeddingDimensionMismatchError
 from memtomem.indexing.engine import IndexEngine
@@ -117,6 +117,8 @@ async def create_components(
             dimension=config.embedding.dimension,
             embedding_provider=config.embedding.provider,
             embedding_model=config.embedding.model,
+            embedding_policy_fingerprint=embedding_policy_fingerprint(config.embedding),
+            embedding_max_sequence_tokens=config.embedding.max_sequence_tokens,
             strict_dim_check=False,
         )
         try:
@@ -133,6 +135,12 @@ async def create_components(
         await storage.close()
         raise
     assert embedder is not None
+
+    # Model/policy mismatches are non-fatal at schema initialization, but use
+    # the same degraded-mode signal as dimension mismatches so watchers and
+    # startup soft-sync cannot write mixed-vector data.
+    if embedding_broken is None:
+        embedding_broken = storage.embedding_mismatch
 
     try:
         # Build chunker registry with optional code chunkers

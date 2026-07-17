@@ -63,6 +63,8 @@ class FakeConfig:
         dimension = 768
         base_url = "http://localhost:11434"
         batch_size = 64
+        onnx_batch_size = 8
+        max_sequence_tokens = 1024
         api_key = ""
 
     class _Storage:
@@ -1727,6 +1729,32 @@ class TestConfigPatch:
         assert len(data["applied"]) == 1
         assert data["applied"][0]["field"] == "search.default_top_k"
         assert data["applied"][0]["new_value"] == "20"
+
+    async def test_patch_onnx_batch_size_runtime_field(self, app, client: AsyncClient):
+        resp = await client.patch(
+            "/api/config",
+            json={"embedding": {"onnx_batch_size": 4}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == [
+            {
+                "field": "embedding.onnx_batch_size",
+                "old_value": "8",
+                "new_value": "4",
+            }
+        ]
+        assert app.state.config.embedding.onnx_batch_size == 4
+
+    async def test_patch_sequence_cap_is_restart_only(self, client: AsyncClient):
+        resp = await client.patch(
+            "/api/config",
+            json={"embedding": {"max_sequence_tokens": 2048}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert "embedding.max_sequence_tokens: read-only field" in data["rejected"]
 
     async def test_patch_readonly_field_rejected(self, client: AsyncClient):
         """Patching a read-only field is rejected."""

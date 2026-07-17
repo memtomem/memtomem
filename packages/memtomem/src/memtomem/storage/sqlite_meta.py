@@ -43,12 +43,20 @@ class MetaManager:
         dimension: int,
         provider: str,
         model: str,
+        policy_fingerprint: str = "",
+        max_sequence_tokens: int | None = None,
     ) -> dict:
         """Return the embedding config actually stored in the DB."""
+        stored_max = self.get_meta("embedding_max_sequence_tokens")
         return {
             "dimension": dimension,
             "provider": self.get_meta("embedding_provider") or provider,
             "model": self.get_meta("embedding_model") or model,
+            "policy_fingerprint": self.get_meta("embedding_policy_fingerprint")
+            or policy_fingerprint,
+            "max_sequence_tokens": int(stored_max)
+            if stored_max is not None
+            else max_sequence_tokens,
         }
 
     # ---- reset ---------------------------------------------------------------
@@ -58,6 +66,8 @@ class MetaManager:
         dimension: int,
         provider: str,
         model: str,
+        policy_fingerprint: str = "",
+        max_sequence_tokens: int | None = None,
     ) -> None:
         """Update all embedding-related meta rows.
 
@@ -69,3 +79,7 @@ class MetaManager:
             self.set_meta("embedding_provider", provider)
         if model:
             self.set_meta("embedding_model", model)
+        if policy_fingerprint:
+            self.set_meta("embedding_policy_fingerprint", policy_fingerprint)
+        if max_sequence_tokens is not None:
+            self.set_meta("embedding_max_sequence_tokens", str(max_sequence_tokens))

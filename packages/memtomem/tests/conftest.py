@@ -347,6 +347,9 @@ async def onnx_components(tmp_path, monkeypatch):
     config.embedding.provider = "onnx"
     config.embedding.model = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     config.embedding.dimension = 384
+    # Keep the real FastEmbed golden path below the model's native 128-token
+    # limit so the test proves memtomem actively narrows the tokenizer.
+    config.embedding.max_sequence_tokens = 64
 
     import memtomem.config as _cfg
 

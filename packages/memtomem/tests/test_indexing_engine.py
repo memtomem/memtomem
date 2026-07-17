@@ -2415,6 +2415,33 @@ class _ConcurrencyRecordingEmbedder:
         pass
 
 
+class _ContextRecordingEmbedder(_ConcurrencyRecordingEmbedder):
+    supports_input_context = True
+
+    def __init__(self, dim: int = 1024) -> None:
+        super().__init__(dim)
+        self.context_calls: list[tuple[str | None, list[int] | None, int]] = []
+
+    async def embed_texts(
+        self,
+        texts,
+        *,
+        on_progress=None,
+        source_path=None,
+        chunk_indices=None,
+    ):
+        self.context_calls.append(
+            (source_path, list(chunk_indices) if chunk_indices is not None else None, len(texts))
+        )
+        return [[0.0] * self._dim for _ in texts]
+
+
+class _LegacyOnnxSignatureEmbedder(_ConcurrencyRecordingEmbedder):
+    # Mirrors an out-of-tree subclass that inherits OnnxEmbedder's capability
+    # flag but still overrides the pre-context method signature.
+    supports_input_context = True
+
+
 class TestEmbedConcurrency:
     """#1783: bulk ``index_path`` used to run up to 8 files' ``embed_texts``
     concurrently (the file-level semaphore was the only gate), multiplying
@@ -2517,6 +2544,88 @@ class TestEmbedConcurrency:
         assert stats.total_files == 2
         assert stats.indexed_chunks > 0
         assert not stats.errors
+
+    async def test_opted_in_provider_receives_source_and_full_chunk_positions(
+        self, components, memory_dir
+    ):
+        path = memory_dir / "context.md"
+        path.write_text(
+            "\n\n".join(
+                f"# Section {index}\n\n" + (f"content-{index} " * 120) for index in range(1, 4)
+            ),
+            encoding="utf-8",
+        )
+        embedder = _ContextRecordingEmbedder()
+        components.index_engine._embedder = embedder
+
+        result = await components.index_engine.index_file(path)
+
+        assert not result.errors
+        assert len(embedder.context_calls) == 1
+        source_path, chunk_indices, text_count = embedder.context_calls[0]
+        assert source_path == str(path)
+        assert chunk_indices == list(range(1, text_count + 1))
+        assert text_count >= 2
+
+    async def test_mock_capability_does_not_change_legacy_signature(self, components, memory_dir):
+        path = memory_dir / "legacy.md"
+        path.write_text("# Legacy\n\nContent.\n", encoding="utf-8")
+        embedder = _ConcurrencyRecordingEmbedder()
+        embedder.supports_input_context = MagicMock()
+        components.index_engine._embedder = embedder
+
+        result = await components.index_engine.index_file(path)
+
+        assert not result.errors
+        assert embedder.calls == 1
+
+    async def test_inherited_capability_with_legacy_signature_stays_compatible(
+        self, components, memory_dir
+    ):
+        path = memory_dir / "legacy-subclass.md"
+        path.write_text("# Legacy subclass\n\nContent.\n", encoding="utf-8")
+        embedder = _LegacyOnnxSignatureEmbedder()
+        components.index_engine._embedder = embedder
+
+        result = await components.index_engine.index_file(path)
+
+        assert not result.errors
+        assert embedder.calls == 1
+
+    async def test_embedding_policy_mismatch_blocks_index_writes(self, components, memory_dir):
+        path = memory_dir / "policy-mismatch.md"
+        path.write_text("# Must not index\n\nContent.\n", encoding="utf-8")
+        components.storage._policy_mismatch = (
+            "onnx:v1:max_sequence_tokens=0",
+            "onnx:v1:max_sequence_tokens=1024",
+            0,
+            1024,
+        )
+        try:
+            result = await components.index_engine.index_file(path)
+        finally:
+            components.storage.clear_embedding_mismatch()
+
+        assert result.indexed_chunks == 0
+        assert any("indexing is disabled" in error for error in result.errors)
+
+    async def test_bulk_policy_mismatch_deduplicates_errors(self, components, memory_dir):
+        for name in ("one.md", "two.md"):
+            (memory_dir / name).write_text(f"# {name}\n\nContent.\n", encoding="utf-8")
+        components.storage._policy_mismatch = (
+            "onnx:v1:max_sequence_tokens=0",
+            "onnx:v1:max_sequence_tokens=1024",
+            0,
+            1024,
+        )
+        try:
+            result = await components.index_engine.index_path(memory_dir)
+        finally:
+            components.storage.clear_embedding_mismatch()
+
+        assert result.indexed_chunks == 0
+        assert len(result.errors) == 1
+        assert "indexing is disabled" in result.errors[0]
 
     def test_resolve_embed_limit_validation(self):
         """Direct unit pins for ``_resolve_embed_limit`` — the integration

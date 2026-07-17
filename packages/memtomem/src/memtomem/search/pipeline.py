@@ -1155,7 +1155,11 @@ class SearchPipeline:
                     logger.debug("count_chunks_by_ns_prefix failed; skipping hint", exc_info=True)
 
             use_bm25 = self._config.enable_bm25
-            use_dense = self._config.enable_dense
+            # Never compare a query vector generated under the current policy
+            # with stored vectors from another policy/model/dimension. BM25
+            # remains available as the safe degraded path.
+            mismatch = getattr(self._storage, "embedding_mismatch", None)
+            use_dense = self._config.enable_dense and not isinstance(mismatch, dict)
             metadata_kwargs = (
                 {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
             )
