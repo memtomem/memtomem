@@ -1474,6 +1474,8 @@ class SqliteBackend(
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        *,
+        exhaustive: bool = False,
     ) -> list[SearchResult]:
         # bm25-only mode (dimension=0) — no chunks_vec table to query. Return
         # early instead of raising OperationalError that the search pipeline
@@ -1545,11 +1547,24 @@ class SqliteBackend(
         # common case, then jump to "essentially unbounded" before
         # giving up. Stop early when an attempt either returned
         # ``top_k`` rows OR already saw every embedding.
-        attempts = [
-            max(top_k * 5, 100),
-            max(top_k * 50, 1000),
-            total_vec_rows,
-        ]
+        #
+        # ``exhaustive`` (deterministic evaluation mode, #1802): sqlite-vec
+        # 0.1.9 prunes to the inner ``LIMIT`` with an unstable distance-only
+        # sort, so equal-distance rows straddling an adaptive cutoff are
+        # selected nondeterministically — a replay diff cannot tolerate that.
+        # Scanning every embedding once removes the inner cutoff entirely, so
+        # the outer stable ``ORDER BY sub.distance, ..., c.id`` fully
+        # determines selection. Costs one full-table KNN pass; acceptable
+        # because replay runs off the interactive hot path.
+        attempts = (
+            [total_vec_rows or 1]
+            if exhaustive
+            else [
+                max(top_k * 5, 100),
+                max(top_k * 50, 1000),
+                total_vec_rows,
+            ]
+        )
         rows: list = []
         for inner_k in attempts:
             inner_k = max(1, min(inner_k, total_vec_rows or inner_k))
