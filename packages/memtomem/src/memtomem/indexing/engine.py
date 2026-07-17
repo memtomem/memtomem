@@ -48,6 +48,28 @@ PathScope = Literal["configured", "explicit"]
 
 _MAX_INDEX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 
+# Max files whose ``_index_file`` pipelines run concurrently in a bulk
+# ``index_path`` run. Also the default and upper bound for the embedding
+# concurrency below.
+_FILE_CONCURRENCY = 8
+
+
+def _resolve_embed_limit(embedder: object) -> int:
+    """Resolve a provider's optional ``preferred_concurrency`` hint (#1783).
+
+    Accepts only a real ``int`` (``bool`` excluded), clamped to
+    ``[1, _FILE_CONCURRENCY]``; anything else — attribute absent, a Mock
+    auto-attribute from ``AsyncMock`` test embedders, a malformed
+    third-party value — falls back to ``_FILE_CONCURRENCY`` (the pre-#1783
+    behavior). See the contract comment on ``EmbeddingProvider`` in
+    ``embedding/base.py``.
+    """
+    hint = getattr(embedder, "preferred_concurrency", None)
+    if isinstance(hint, int) and not isinstance(hint, bool):
+        return max(1, min(_FILE_CONCURRENCY, hint))
+    return _FILE_CONCURRENCY
+
+
 # Built-in exclude patterns. Always applied in addition to user
 # ``IndexingConfig.exclude_patterns``; users cannot disable these. Secret and
 # noise tuples are kept separate for call-site clarity — secrets are a
@@ -511,7 +533,14 @@ class IndexEngine:
         if not files:
             return IndexingStats(0, 0, 0, 0, 0, 0.0)
 
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(_FILE_CONCURRENCY)
+        # Embedding gets its own, usually tighter, cap (#1783): the file
+        # semaphore alone let 8 files run ``embed_texts`` at once, which for
+        # the local CPU ONNX provider multiplied peak activation memory
+        # (~31 GB RSS on a 1.2 MB corpus) without adding throughput. Files
+        # still pipeline chunking/hash-diff/DB work under ``sem``; only the
+        # embed call itself queues on ``embed_sem``.
+        embed_sem = asyncio.Semaphore(_resolve_embed_limit(self._embedder))
 
         async def _bounded(fp: Path) -> IndexFileResult:
             async with sem:
@@ -521,6 +550,7 @@ class IndexEngine:
                     namespace=namespace,
                     force_unsafe=force_unsafe,
                     path_scope=path_scope,
+                    embed_semaphore=embed_sem,
                 )
 
         raw_results = await asyncio.gather(*[_bounded(f) for f in files], return_exceptions=True)
@@ -990,6 +1020,7 @@ class IndexEngine:
         force_unsafe: bool = False,
         already_scanned: bool = False,
         path_scope: PathScope = "configured",
+        embed_semaphore: asyncio.Semaphore | None = None,
     ) -> IndexFileResult:
         # Return shape: total/indexed/skipped/deleted (ints), errors (list[str]),
         # new_chunk_ids (list[UUID]). Early zero-result paths may omit
@@ -1220,10 +1251,17 @@ class IndexEngine:
                 self._progress_threshold == 0 or len(texts) > self._progress_threshold
             )
             try:
-                embeddings = await self._embedder.embed_texts(
-                    texts,
-                    on_progress=on_chunk_progress if emit_progress else None,
-                )
+                # Only the embed call queues on the embedding semaphore
+                # (bulk ``index_path`` runs only — single-file callers pass
+                # ``None``); everything around it stays governed by the
+                # file-level semaphore alone.
+                async with (
+                    embed_semaphore if embed_semaphore is not None else contextlib.nullcontext()
+                ):
+                    embeddings = await self._embedder.embed_texts(
+                        texts,
+                        on_progress=on_chunk_progress if emit_progress else None,
+                    )
                 if len(embeddings) != len(texts):
                     # Defense in depth against a short embedding array (issue
                     # #1563). The HTTP providers now assert per-batch, but a

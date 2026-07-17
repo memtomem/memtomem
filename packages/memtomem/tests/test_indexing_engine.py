@@ -18,6 +18,8 @@ from memtomem.indexing.engine import (
     _add_overlap,
     _estimate_tokens,
     _path_is_excluded,
+    _resolve_embed_limit,
+    _FILE_CONCURRENCY,
 )
 from memtomem.models import Chunk, ChunkMetadata
 from .helpers import set_home
@@ -2358,6 +2360,173 @@ class TestIndexPath:
         assert stats.indexed_chunks == stats.total_chunks
         assert stats.skipped_chunks == 0
         assert stats.duration_ms > 0
+
+
+# ===========================================================================
+# 8.a Embedding concurrency — dedicated semaphore + preferred_concurrency hint
+# ===========================================================================
+
+
+class _ConcurrencyRecordingEmbedder:
+    """Records peak concurrent ``embed_texts`` calls — pins the #1783
+    embedding semaphore. The ``sleep`` forces overlap to be observable:
+    without a gate, concurrently indexed files pile up inside it."""
+
+    def __init__(self, dim: int = 1024) -> None:  # matches the fixture DB's dimension
+        self._dim = dim
+        self._inflight = 0
+        self.peak = 0
+        self.calls = 0
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def model_name(self) -> str:
+        return "fake-concurrency"
+
+    async def embed_texts(self, texts, *, on_progress=None):
+        self.calls += 1
+        self._inflight += 1
+        self.peak = max(self.peak, self._inflight)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            self._inflight -= 1
+        return [[0.0] * self._dim for _ in texts]
+
+    async def embed_query(self, query: str):
+        return [0.0] * self._dim
+
+    async def close(self) -> None:
+        pass
+
+
+class TestEmbedConcurrency:
+    """#1783: bulk ``index_path`` used to run up to 8 files' ``embed_texts``
+    concurrently (the file-level semaphore was the only gate), multiplying
+    peak inference memory for local CPU providers. Embedding now queues on
+    a dedicated semaphore sized from the provider's optional
+    ``preferred_concurrency`` hint.
+    """
+
+    @staticmethod
+    def _write_files(memory_dir: Path, n: int) -> None:
+        for i in range(n):
+            (memory_dir / f"file{i}.md").write_text(
+                f"# File {i}\n\nContent number {i}.\n", encoding="utf-8"
+            )
+
+    async def test_hint_of_one_serializes_embedding_but_not_files(self, components, memory_dir):
+        """A provider advertising ``preferred_concurrency = 1`` (the ONNX
+        default) gets strictly serialized embeds while all files still index.
+
+        Also pins the *decouple* half of the contract: file pipelines must
+        still overlap (they queue at the embed semaphore, not at the file
+        semaphore), so ``peak == 1`` can't be satisfied by accidentally
+        serializing whole files or widening the embed gate around the full
+        ``_index_file`` pipeline."""
+        self._write_files(memory_dir, 6)
+        engine = components.index_engine
+        embedder = _ConcurrencyRecordingEmbedder()
+        embedder.preferred_concurrency = 1
+        engine._embedder = embedder
+
+        files_inflight = {"now": 0, "peak": 0}
+        original_index_file = engine._index_file
+
+        async def tracking_index_file(*args, **kwargs):
+            files_inflight["now"] += 1
+            files_inflight["peak"] = max(files_inflight["peak"], files_inflight["now"])
+            try:
+                return await original_index_file(*args, **kwargs)
+            finally:
+                files_inflight["now"] -= 1
+
+        engine._index_file = tracking_index_file
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.total_files == 6
+        assert stats.indexed_chunks > 0
+        assert not stats.errors
+        assert embedder.calls == 6
+        assert embedder.peak == 1
+        # While one file embeds, the others sit inside their own _index_file
+        # (queued at the embed gate) — multiple pipelines in flight at once.
+        assert files_inflight["peak"] >= 2
+
+    async def test_absent_hint_preserves_overlap(self, components, memory_dir):
+        """No ``preferred_concurrency`` attribute → default = file-level cap,
+        so embeds still overlap (pre-#1783 behavior for unknown providers).
+        ``>= 2`` (not == 8) keeps the assertion robust on slow CI runners."""
+        self._write_files(memory_dir, 6)
+        embedder = _ConcurrencyRecordingEmbedder()
+        components.index_engine._embedder = embedder
+
+        stats = await components.index_engine.index_path(memory_dir, recursive=True)
+
+        assert stats.total_files == 6
+        assert embedder.calls == 6
+        assert embedder.peak >= 2
+
+    async def test_zero_hint_clamps_to_one_without_deadlock(self, components, memory_dir):
+        """A pathological ``preferred_concurrency = 0`` must clamp to 1 —
+        a Semaphore(0) would deadlock the whole run."""
+        self._write_files(memory_dir, 3)
+        embedder = _ConcurrencyRecordingEmbedder()
+        embedder.preferred_concurrency = 0
+        components.index_engine._embedder = embedder
+
+        stats = await asyncio.wait_for(
+            components.index_engine.index_path(memory_dir, recursive=True), timeout=30
+        )
+
+        assert stats.total_files == 3
+        assert embedder.calls == 3
+        assert embedder.peak == 1
+
+    async def test_bare_asyncmock_embedder_still_indexes(self, components, memory_dir):
+        """A bare ``AsyncMock`` embedder auto-creates ``preferred_concurrency``
+        as a child Mock; the hint resolution must treat that as "no hint"
+        instead of feeding a Mock into ``min()`` (regression pin for the
+        existing AsyncMock test pattern in this file)."""
+        self._write_files(memory_dir, 2)
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        stats = await components.index_engine.index_path(memory_dir, recursive=True)
+
+        assert stats.total_files == 2
+        assert stats.indexed_chunks > 0
+        assert not stats.errors
+
+    def test_resolve_embed_limit_validation(self):
+        """Direct unit pins for ``_resolve_embed_limit`` — the integration
+        tests can't prove the upper clamp because the file-level semaphore
+        already caps observable concurrency at ``_FILE_CONCURRENCY``."""
+
+        class _Hinted:
+            def __init__(self, value):
+                self.preferred_concurrency = value
+
+        class _NoHint:
+            pass
+
+        assert _resolve_embed_limit(_Hinted(1)) == 1
+        assert _resolve_embed_limit(_Hinted(3)) == 3
+        assert _resolve_embed_limit(_Hinted(0)) == 1  # lower clamp
+        assert _resolve_embed_limit(_Hinted(-5)) == 1  # lower clamp
+        assert _resolve_embed_limit(_Hinted(99)) == _FILE_CONCURRENCY  # upper clamp
+        assert _resolve_embed_limit(_NoHint()) == _FILE_CONCURRENCY  # absent
+        assert _resolve_embed_limit(_Hinted(True)) == _FILE_CONCURRENCY  # bool rejected
+        assert _resolve_embed_limit(_Hinted("2")) == _FILE_CONCURRENCY  # non-int rejected
+        assert _resolve_embed_limit(AsyncMock()) == _FILE_CONCURRENCY  # Mock auto-attr
 
 
 # ===========================================================================

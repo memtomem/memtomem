@@ -14,6 +14,11 @@ class NoopEmbedder:
     index engine skips vector storage entirely.
     """
 
+    # Inert — the engine skips embedding when ``dimension == 0`` — but kept
+    # equal to the engine's file-level cap so the hint contract (base.py)
+    # holds for every built-in provider.
+    preferred_concurrency = 8
+
     @property
     def dimension(self) -> int:
         return 0

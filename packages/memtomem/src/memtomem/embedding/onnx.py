@@ -6,6 +6,7 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Sequence
 
 from memtomem.config import EmbeddingConfig
@@ -51,6 +52,16 @@ class OnnxEmbedder:
     Install the optional dependency: ``pip install memtomem[onnx]``
     """
 
+    # ORT ``session.run`` is CPU-bound: concurrent runs time-slice the same
+    # cores (the intra-op pool, ``EmbeddingConfig.threads``, is the real
+    # throughput limit) while each in-flight run allocates its own activation
+    # memory — 8 concurrent runs drove RSS to ~31 GB on a 1.2 MB corpus
+    # (#1783). Advertise 1 so the index engine serializes per-file embedding;
+    # the dedicated single-worker executor below is the matching hard
+    # guarantee. Same don't-saturate-the-machine rationale as the
+    # ``threads=4`` default (#640).
+    preferred_concurrency = 1
+
     def __init__(self, config: EmbeddingConfig) -> None:
         self._config = config
         self._model: object | None = None  # fastembed.TextEmbedding
@@ -63,8 +74,37 @@ class OnnxEmbedder:
         # Serializes the first load: the MCP request path and the opt-in
         # warmup task (#1621) can race into ``_get_model`` from different
         # threads — without the lock both would construct (and download)
-        # the model.
+        # the model. ``_closed`` is set under this same lock by ``close()``
+        # so that *every* load path (inference on ``_infer_executor``, warmup
+        # on the default executor) observes teardown and refuses to resurrect
+        # the model after close — see ``_get_model`` / ``close``.
         self._load_lock = threading.Lock()
+        self._closed = False
+        # Dedicated single-worker executor: the hard cap on concurrent ONNX
+        # inference, matching ``preferred_concurrency`` above. The engine's
+        # asyncio semaphore is only the normal-path scheduler — cancelling a
+        # coroutine awaiting the inference frees the async slot immediately
+        # but cannot stop an already-running ``session.run``, so a follow-up
+        # run could otherwise start a second inference alongside the
+        # abandoned one and recreate the memory amplification (#1783).
+        #
+        # Why a dedicated executor rather than ``asyncio.to_thread`` +
+        # a threading semaphore: with ``max_workers=1`` the executor *is* the
+        # serialization, and it is cancellation-aware in the way the shared
+        # default executor is not. A queued inference whose awaiting task is
+        # cancelled has its future cancelled *before it starts* and never
+        # runs; only the one already-executing run continues (it holds the
+        # lone worker), so the cap holds without cancelled work piling up as
+        # blocked threads in the process-wide default pool.
+        #
+        # Accepted trade-off: ``embed_query`` (search-time) also flows
+        # through this executor, so a query issued mid-reindex waits for the
+        # in-flight file's inference instead of running as an extra
+        # concurrent ``session.run`` — that extra run was part of the
+        # problem, and the wait is bounded by one file's embed.
+        self._infer_executor = ThreadPoolExecutor(
+            max_workers=self.preferred_concurrency, thread_name_prefix="onnx-embed"
+        )
 
     def _get_model(self) -> object:
         """Lazily initialise the fastembed model (downloads on first use).
@@ -77,6 +117,13 @@ class OnnxEmbedder:
         with self._load_lock:
             if self._model is not None:
                 return self._model
+            if self._closed:
+                # close() ran (or is running) — refuse to construct a model
+                # that would outlive teardown. Checked under ``_load_lock`` so
+                # it serializes with close()'s own clear: whichever wins, the
+                # loser sees a consistent state and no orphaned ORT session
+                # survives close (#1792 review, #206).
+                raise EmbeddingError("ONNX embedder is closed")
             try:
                 from fastembed import TextEmbedding  # type: ignore[import-untyped]
             except ImportError as exc:
@@ -123,12 +170,14 @@ class OnnxEmbedder:
         texts: list[str],
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[list[float]]:
-        """Run inference synchronously — called inside ``to_thread``.
+        """Run inference synchronously — submitted to ``_infer_executor``.
 
-        When ``on_progress`` is provided, iterate fastembed's generator
-        and fire after each yielded vector. The callback is called from
-        the worker thread; callers running on an asyncio loop must wrap
-        with ``loop.call_soon_threadsafe`` (see ``embed_texts``).
+        The single-worker executor serializes these calls, so there is no
+        in-body lock: concurrency is bounded by the pool size, not by this
+        method. When ``on_progress`` is provided, iterate fastembed's
+        generator and fire after each yielded vector. The callback runs on
+        the worker thread; callers on an asyncio loop wrap it with
+        ``loop.call_soon_threadsafe`` (see ``embed_texts``).
         """
         model = self._get_model()
         # Single ``model.embed()`` call — fastembed batches internally
@@ -159,10 +208,14 @@ class OnnxEmbedder:
         text_list = list(texts)
         total = len(text_list)
 
+        loop = asyncio.get_running_loop()
+
         if on_progress is None:
             # Fast path — no callback plumbing, no cross-thread hops.
             try:
-                return await asyncio.to_thread(self._embed_sync, text_list, None)
+                return await loop.run_in_executor(
+                    self._infer_executor, self._embed_sync, text_list, None
+                )
             except EmbeddingError:
                 raise
             except Exception as exc:
@@ -173,7 +226,6 @@ class OnnxEmbedder:
         # SSE stream) is event-loop-bound and not thread-safe. Wrap with
         # ``call_soon_threadsafe`` and throttle to at most ~20 ticks per
         # file so a 1000-text input doesn't fire 1000 cross-thread hops.
-        loop = asyncio.get_running_loop()
         last_reported = [0]
         step = max(1, total // 20)
         progress_warned = [False]
@@ -203,7 +255,9 @@ class OnnxEmbedder:
                 pass
 
         try:
-            return await asyncio.to_thread(self._embed_sync, text_list, _thread_cb)
+            return await loop.run_in_executor(
+                self._infer_executor, self._embed_sync, text_list, _thread_cb
+            )
         except EmbeddingError:
             raise
         except Exception as exc:
@@ -218,12 +272,49 @@ class OnnxEmbedder:
         return embeddings[0]
 
     async def close(self) -> None:
-        # Force-collect after dropping the fastembed reference: the underlying
-        # ORT InferenceSession holds an mmap on the model file plus thread-local
-        # arenas, and on Windows that handle can outlive ``self._model = None``
-        # long enough for pytest's tmp_path rmtree to fail with WinError 183
-        # on the next session. See #206.
+        # Teardown runs entirely in ``_close_sync`` on a worker thread, off
+        # the event loop, so the blocking ``_load_lock`` acquire / executor
+        # drain never stall the loop. Every await on the teardown future is
+        # ``shield``ed so cancellation of the awaiting task — first or
+        # repeated — can never propagate into the future and cancel a
+        # still-queued ``_close_sync`` before it starts (which would leave
+        # the model and executor alive; an already-running worker can't be
+        # interrupted anyway). On cancellation we keep settling until the
+        # future is done, then propagate. NOTE: ``server/warmup.py`` uses a
+        # weaker settle (bare ``await future`` after the first cancel) that
+        # a second cancellation can still pierce — don't copy that shape.
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, self._close_sync)
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(future)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if future.done():
+                    break
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def _close_sync(self) -> None:
+        # Latch closed and drop the model under ``_load_lock`` — the same lock
+        # every ``_get_model`` load path takes. This is what makes teardown
+        # complete for *all* loaders, not just inference on ``_infer_executor``:
+        #   * A loader mid-construction (inference or warmup on the default
+        #     executor) holds the lock, so this blocks until it has assigned
+        #     ``_model``; we then null it — its assignment strictly
+        #     happens-before our clear, no resurrection.
+        #   * A loader that arrives after sees ``_closed`` and refuses.
+        # Then drain the inference executor: cancel_futures drops queued work,
+        # wait=True joins the one running inference. Finally force-collect —
+        # the ORT InferenceSession holds an mmap + thread-local arenas that on
+        # Windows can outlive ``_model = None`` long enough to fail pytest's
+        # tmp_path rmtree with WinError 183 (#206).
         import gc
 
-        self._model = None
+        with self._load_lock:
+            self._closed = True
+            self._model = None
+        self._infer_executor.shutdown(wait=True, cancel_futures=True)
         gc.collect()
