@@ -245,21 +245,32 @@ class HistoryMixin:
             # BEGIN IMMEDIATE makes these unreachable in practice; classify
             # anyway so a constraint hit never leaks as an internal error.
             db.rollback()
-            return self._classify_feedback_integrity_error(db, exc, run_id, chunk_id, judgment)
+            return self._classify_feedback_integrity_error(
+                db, exc, run_id, chunk_id, judgment, replace=replace
+            )
         except Exception:
             db.rollback()
             raise
 
     def _classify_feedback_integrity_error(
-        self, db, exc: sqlite3.IntegrityError, run_id: str, chunk_id: str, judgment: str
+        self,
+        db,
+        exc: sqlite3.IntegrityError,
+        run_id: str,
+        chunk_id: str,
+        judgment: str,
+        *,
+        replace: bool = False,
     ) -> dict:
         """Map a constraint hit on the feedback write to its domain meaning.
 
         FK violation → the run was pruned between validation and insert
         (KeyError, same as an unknown run). Unique violation → a concurrent
         writer landed this (run_id, chunk_id) first: re-read and classify
-        exactly like the existing-row branch (idempotent success or
-        conflict). Anything else stays a StorageError.
+        exactly like the existing-row branch. Same judgment is an idempotent
+        success; a different judgment honors the caller's ``replace`` intent
+        — replacing (timestamp-audited) when set, else raising a conflict.
+        Anything else stays a StorageError.
         """
         message = str(exc).upper()
         if "FOREIGN KEY" in message:
@@ -271,12 +282,24 @@ class HistoryMixin:
                 (run_id, chunk_id),
             ).fetchone()
             if landed is not None:
-                if landed[0] == judgment:
-                    return self._feedback_row(run_id, chunk_id, judgment, landed[1], landed[2])
-                raise FeedbackConflictError(
-                    f"feedback for run {run_id!r} chunk {chunk_id!r} is already "
-                    f"{landed[0]!r}; pass replace=true to overwrite"
-                ) from exc
+                prev_judgment, created_at, updated_at = landed
+                if prev_judgment == judgment:
+                    return self._feedback_row(run_id, chunk_id, judgment, created_at, updated_at)
+                if not replace:
+                    raise FeedbackConflictError(
+                        f"feedback for run {run_id!r} chunk {chunk_id!r} is already "
+                        f"{prev_judgment!r}; pass replace=true to overwrite"
+                    ) from exc
+                new_updated = _next_audit_timestamp(updated_at)
+                db.execute(
+                    "UPDATE search_feedback SET judgment = ?, updated_at = ? "
+                    "WHERE run_id = ? AND chunk_id = ?",
+                    (judgment, new_updated, run_id, chunk_id),
+                )
+                db.commit()
+                return self._feedback_row(
+                    run_id, chunk_id, judgment, created_at, new_updated, replaced=True
+                )
         raise StorageError(f"feedback write failed: {exc}") from exc
 
     @staticmethod

@@ -157,9 +157,14 @@ class TestIntegrityClassification:
     classification helper directly against real rows."""
 
     @staticmethod
-    def _classify(storage, exc_message, judgment):
+    def _classify(storage, exc_message, judgment, *, replace=False):
         return storage._classify_feedback_integrity_error(
-            storage._get_db(), sqlite3.IntegrityError(exc_message), RUN_A, "c1", judgment
+            storage._get_db(),
+            sqlite3.IntegrityError(exc_message),
+            RUN_A,
+            "c1",
+            judgment,
+            replace=replace,
         )
 
     async def test_fk_violation_maps_to_unknown_run(self, storage):
@@ -182,6 +187,33 @@ class TestIntegrityClassification:
             self._classify(
                 storage, "UNIQUE constraint failed: search_feedback.run_id", "not_relevant"
             )
+
+    async def test_unique_violation_different_judgment_replaces_when_requested(self, storage):
+        # The losing writer carried replace=True: its explicit replacement
+        # intent must survive the reclassification path (#1811), not collapse
+        # into a conflict the caller has to retry.
+        await _seed_run(storage, RUN_A)
+        first = await storage.save_search_feedback(RUN_A, "c1", "relevant")
+        replaced = self._classify(
+            storage,
+            "UNIQUE constraint failed: search_feedback.run_id",
+            "not_relevant",
+            replace=True,
+        )
+        assert replaced["judgment"] == "not_relevant"
+        assert replaced["replaced"] is True and replaced["created"] is False
+        assert replaced["created_at"] == first["created_at"]  # created_at pinned
+        assert replaced["updated_at"] > first["updated_at"]  # updated_at advanced
+        # The replacement is durable, not just reported.
+        current = await storage.get_search_feedback(RUN_A)
+        assert current == [
+            {
+                "chunk_id": "c1",
+                "judgment": "not_relevant",
+                "created_at": replaced["created_at"],
+                "updated_at": replaced["updated_at"],
+            }
+        ]
 
     async def test_unrecognized_integrity_error_stays_storage_error(self, storage):
         with pytest.raises(StorageError, match="feedback write failed"):
