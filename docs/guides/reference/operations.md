@@ -173,7 +173,9 @@ a separate package; it communicates with memtomem core entirely through the MCP
 protocol — no direct code coupling. Enhanced composition is negotiated from
 `mem_do(action="version").capabilities`, not inferred from an installed package
 version: `context_compose` schema 2 enables scoped Pinned Context composition,
-schema 3 additionally preserves adjacent context-window chunks, and
+schema 3 additionally preserves adjacent context-window chunks, schema 4
+additionally names the retrieval leg's score scale (top-level
+`score_scale`/`reranker`, omitted when `retrieved` is empty), and
 `candidate_propose` schema 1 independently enables review-first proposals.
 
 ### How it works
