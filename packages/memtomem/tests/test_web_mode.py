@@ -775,6 +775,10 @@ def test_html_classification_matches_router_lists() -> None:
         # — it now lives in the normal Context Gateway surface and is no
         # longer expected to appear here.
         "harness-sessions",
+        # Quality Lab run inspection + relevance feedback (#1801); the
+        # ``search_runs`` router is dev-only alongside the other harness
+        # surfaces.
+        "harness-search-runs",
         "harness-scratch",
         "harness-procedures",
         "harness-health",
