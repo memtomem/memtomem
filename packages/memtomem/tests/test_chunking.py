@@ -32,12 +32,67 @@ class TestAdaptiveChunking:
         config = FakeIndexingConfig()
         config.chunk_overlap_tokens = 0
         chunker = MarkdownChunker(indexing_config=config)
-        body = "\n".join(f"- item {i}: " + "detail " * 10 for i in range(40))
+        body = "\n".join(f"- item {i:02d} " + "w" * 30 for i in range(20))
+        content = f"## Notes\n\n{body}"
 
-        chunks = chunker.chunk_file(Path("/test.md"), f"## Notes\n\n{body}")
+        chunks = chunker.chunk_file(Path("/test.md"), content)
 
         assert len(chunks) > 1
         assert all(len(chunk.content) <= config.max_chunk_tokens * 4 for chunk in chunks)
+        source_lines = content.splitlines()
+        for index, chunk in enumerate(chunks):
+            chunk_lines = chunk.content.splitlines()
+            actual_start = source_lines.index(chunk_lines[0]) + 1
+            actual_end = actual_start + len(chunk_lines) - 1
+
+            assert chunk_lines == source_lines[actual_start - 1 : actual_end]
+            assert chunk.metadata.start_line == (1 if index == 0 else actual_start)
+            assert chunk.metadata.end_line == actual_end
+            assert 1 <= chunk.metadata.start_line <= chunk.metadata.end_line <= len(source_lines)
+
+    def test_mid_part_fence_is_kept_atomic(self):
+        config = FakeIndexingConfig()
+        config.chunk_overlap_tokens = 0
+        config.paragraph_split_threshold = 200
+        chunker = MarkdownChunker(indexing_config=config)
+        code = "\n".join(f"    step_{i} = do_thing_number_{i}()" for i in range(12))
+        body = "intro line without punctuation\n```python\n" + code + "\n```"
+
+        chunks = chunker.chunk_file(Path("/test.md"), f"## Code\n\n{body}")
+
+        assert len(chunks) == 1
+        assert chunks[0].content == body
+        assert chunks[0].content.count("```") == 2
+        assert chunks[0].metadata.start_line == 1
+        assert chunks[0].metadata.end_line == len(f"## Code\n\n{body}".splitlines())
+
+    def test_sentence_fallback_preserves_source_spacing(self):
+        config = FakeIndexingConfig()
+        config.chunk_overlap_tokens = 0
+        config.paragraph_split_threshold = 200
+        chunker = MarkdownChunker(indexing_config=config)
+        body = " ".join(f"Sentence {i:02d} has enough words to split." for i in range(12))
+
+        chunks = chunker.chunk_file(Path("/test.md"), f"## Prose\n\n{body}")
+
+        assert len(chunks) > 1
+        assert " ".join(chunk.content for chunk in chunks) == body
+        assert [chunk.metadata.start_line for chunk in chunks] == [1] + [3] * (len(chunks) - 1)
+        assert all(chunk.metadata.end_line == 3 for chunk in chunks)
+
+    def test_word_fallback_preserves_source_spacing(self):
+        config = FakeIndexingConfig()
+        config.chunk_overlap_tokens = 0
+        config.paragraph_split_threshold = 200
+        chunker = MarkdownChunker(indexing_config=config)
+        body = " ".join(f"word{i:02d}" for i in range(60))
+
+        chunks = chunker.chunk_file(Path("/test.md"), f"## Words\n\n{body}")
+
+        assert len(chunks) > 1
+        assert " ".join(chunk.content for chunk in chunks) == body
+        assert [chunk.metadata.start_line for chunk in chunks] == [1] + [3] * (len(chunks) - 1)
+        assert all(chunk.metadata.end_line == 3 for chunk in chunks)
 
     def test_overlap_applied(self):
         config = FakeIndexingConfig()
