@@ -92,10 +92,10 @@ class TestCacheIsolation:
 
 class TestDecayPinning:
     @pytest.mark.asyncio
-    async def test_decay_pinned_to_as_of(self, bm25_only_components):
+    async def test_decay_pinned_to_as_of(self, bm25_only_components, monkeypatch):
         comp, _ = bm25_only_components
         storage, pipeline = comp.storage, comp.search_pipeline
-        pipeline._decay_config.enabled = True
+        monkeypatch.setattr(pipeline._decay_config, "enabled", True)
 
         await storage.upsert_chunks([_make_chunk("decay marker body", source="d.md")])
 

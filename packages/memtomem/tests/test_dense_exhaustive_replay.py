@@ -64,7 +64,7 @@ class TestExhaustiveThreading:
         assert seen == [True]
 
     @pytest.mark.asyncio
-    async def test_primary_and_rescue_legs_thread_exhaustive(self, components):
+    async def test_primary_leg_threads_exhaustive(self, components):
         storage, pipeline = components.storage, components.search_pipeline
         pipeline._embedder = _FakeEmbedder()
 
@@ -82,7 +82,7 @@ class TestExhaustiveThreading:
         storage.dense_search = _spy  # type: ignore[method-assign]
 
         await pipeline.search("thread", record=False)
-        assert seen and all(seen), "every dense leg must run exhaustive under replay"
+        assert seen and all(seen), "primary dense leg must run exhaustive under replay"
 
         seen.clear()
         await pipeline.search("thread", record=True)
@@ -91,3 +91,32 @@ class TestExhaustiveThreading:
 
             await asyncio.gather(*list(pipeline._bg_tasks), return_exceptions=True)
         assert seen and not any(seen), "normal search must not run exhaustive"
+
+    @pytest.mark.asyncio
+    async def test_rescue_leg_threads_exhaustive(self, components):
+        # The pipeline's rescue leg only fires with non-empty boost_sources
+        # (from session summaries), which the fixtures don't seed — so exercise
+        # ``_rescue_retrieval`` directly to prove its dense leg threads the flag.
+        storage, pipeline = components.storage, components.search_pipeline
+        chunk = _make_chunk("rescue marker body", source="rescue.md")
+        await storage.upsert_chunks([chunk])
+
+        seen: list[bool] = []
+        original = storage.dense_search
+
+        async def _spy(*args, **kwargs):
+            seen.append(kwargs.get("exhaustive", False))
+            return await original(*args, **kwargs)
+
+        storage.dense_search = _spy  # type: ignore[method-assign]
+
+        await pipeline._rescue_retrieval(
+            "rescue",
+            [0.1] * 1024,
+            top_k=5,
+            boost_sources={str(chunk.metadata.source_file)},
+            use_bm25=False,
+            use_dense=True,
+            exhaustive=True,
+        )
+        assert seen == [True]
