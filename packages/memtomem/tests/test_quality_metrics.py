@@ -53,6 +53,10 @@ class TestNdcg:
     def test_empty_relevance_is_zero(self):
         assert ndcg_at_k(["a"], {}, 2) == 0.0
 
+    def test_duplicate_id_bounded_at_one(self):
+        # A repeated relevant id must not inflate NDCG past 1.0.
+        assert ndcg_at_k(["a", "a"], {"a": 1.0}, 2) == pytest.approx(1.0)
+
 
 class TestPrecision:
     def test_fully_labeled_window(self):
@@ -114,3 +118,6 @@ class TestShimParity:
         assert ir_metrics.reciprocal_rank_at_k is reciprocal_rank_at_k
         assert ir_metrics.ndcg_at_k is ndcg_at_k
         assert ir_metrics.mean is mean
+        assert ir_metrics.precision_at_k is precision_at_k
+        assert ir_metrics.hit_rate_at_k is hit_rate_at_k
+        assert ir_metrics.recall_labeled_at_k is recall_labeled_at_k

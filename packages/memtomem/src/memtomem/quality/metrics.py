@@ -10,10 +10,11 @@ The ``retrieved`` argument is an ordered list of IDs from rank 1 downward.
 Identity note (#1802): the Quality Lab keys results by ``content_hash``, and
 several chunks can share one hash, so a ranking may contain duplicate IDs. The
 replay layer deduplicates by identity before calling these functions; as defense
-in depth, ``recall_at_k`` / ``recall_labeled_at_k`` / ``precision_at_k`` count
-*distinct* hits so a duplicated relevant item cannot push a rate above 1.0. For
-rankings of unique IDs (the existing retrieval-regression callers) this is
-identical to the previous occurrence-counting behavior.
+in depth, every metric here — ``recall_at_k``, ``recall_labeled_at_k``,
+``precision_at_k``, ``ndcg_at_k``, ``hit_rate_at_k`` — credits each distinct ID
+at most once within the top-k window, so a duplicated item cannot push a score
+above 1.0. For rankings of unique IDs (the existing retrieval-regression
+callers) this is identical to the previous occurrence-counting behavior.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def recall_at_k(retrieved: list[str], relevant: set[str] | frozenset[str], k: in
     """
     if k <= 0 or not relevant:
         return 0.0
-    hits = len(set(retrieved[:k]) & set(relevant))
+    hits = len(set(retrieved[:k]) & relevant)
     return hits / len(relevant)
 
 
@@ -76,11 +77,19 @@ def ndcg_at_k(retrieved: list[str], relevance: Mapping[str, float], k: int) -> f
 
     Missing IDs in ``relevance`` count as zero gain. Returns 0.0 when the ideal
     DCG is zero (no positive-relevance items known at all).
+
+    Each distinct ID is credited once, at its first-occurrence rank within the
+    top-k window — a repeated ID (hash conflation, see module note) neither
+    double-counts nor promotes a rank-(k+1) item, so NDCG stays bounded by 1.0.
     """
     if k <= 0 or not relevance:
         return 0.0
     dcg = 0.0
+    seen: set[str] = set()
     for rank, item in enumerate(retrieved[:k], start=1):
+        if item in seen:
+            continue
+        seen.add(item)
         gain = relevance.get(item, 0.0)
         if gain > 0:
             dcg += gain / math.log2(rank + 1)
@@ -104,7 +113,12 @@ def precision_at_k(
     retrieved — the result is ``None`` (report it as ``incomplete_labels``),
     which an aggregate must exclude rather than average in.
 
-    Counts distinct relevant hits over the distinct considered window.
+    The denominator is the *distinct* window size, not ``k`` and not
+    ``len(window)``: this deviates from textbook P@k in two ways — it shrinks
+    below ``k`` when fewer than ``k`` items are retrieved, and a duplicated
+    non-relevant item raises the score (e.g. ``["a", "b", "b"]`` with ``a``
+    relevant, ``b`` not → 1/2, not 1/3). Both follow from crediting each
+    distinct ID once, consistent with the other metrics here.
     """
     if k <= 0:
         return None
@@ -115,7 +129,7 @@ def precision_at_k(
     considered = set(window)
     if not considered <= labeled:
         return None
-    hits = len(considered & set(relevant))
+    hits = len(considered & relevant)
     return hits / len(considered)
 
 
@@ -123,7 +137,7 @@ def hit_rate_at_k(retrieved: list[str], relevant: set[str] | frozenset[str], k: 
     """1.0 if any relevant item appears in the top-k, else 0.0."""
     if k <= 0 or not relevant:
         return 0.0
-    return 1.0 if set(retrieved[:k]) & set(relevant) else 0.0
+    return 1.0 if set(retrieved[:k]) & relevant else 0.0
 
 
 def mean(values: Iterable[float]) -> float:
