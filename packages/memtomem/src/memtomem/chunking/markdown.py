@@ -201,6 +201,43 @@ def _split_on_bold_labels(text: str) -> list[str]:
     return parts or [text]
 
 
+def _split_oversized_part(text: str, max_chars: int) -> list[str]:
+    """Split one oversized non-fence part at its finest natural boundary."""
+    if len(text) <= max_chars:
+        return [text]
+    first_line = text.lstrip("\n").splitlines()[0] if text else ""
+    lines = text.splitlines()
+    if _FENCE_OPEN_RE.match(first_line) or (
+        lines and all(line.lstrip().startswith("|") for line in lines if line.strip())
+    ):
+        return [text]
+
+    separator = "\n" if len(lines) > 1 else " "
+    units = lines if len(lines) > 1 else _SENTENCE_RE.split(text)
+    result: list[str] = []
+    current = ""
+    for unit in units:
+        while len(unit) > max_chars:
+            cut = unit.rfind(" ", 0, max_chars + 1)
+            if cut <= 0:
+                cut = max_chars
+            if current:
+                result.append(current)
+                current = ""
+            result.append(unit[:cut].rstrip())
+            unit = unit[cut:].lstrip()
+        if current and len(current) + len(separator) + len(unit) > max_chars:
+            result.append(current)
+            current = unit
+        elif current:
+            current += separator + unit
+        else:
+            current = unit
+    if current:
+        result.append(current)
+    return result or [text]
+
+
 class MarkdownChunker:
     def __init__(self, indexing_config=None):
         self._max_tokens = 512
@@ -525,6 +562,11 @@ class MarkdownChunker:
             and not _FENCE_OPEN_RE.match(parts[0].lstrip("\n").splitlines()[0] if parts[0] else "")
         ):
             parts = _SENTENCE_RE.split(text)
+
+        # Paragraph splitting can produce several parts while one individual
+        # part is still oversized (for example, a long bullet list with no
+        # blank lines). Refine each such part before the size-based merge.
+        parts = [piece for part in parts for piece in _split_oversized_part(part, max_chars)]
 
         # Merge small parts into chunks respecting max_chars
         result: list[dict] = []

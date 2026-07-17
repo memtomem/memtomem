@@ -28,6 +28,17 @@ class TestAdaptiveChunking:
         chunks = chunker.chunk_file(Path("/test.md"), content)
         assert len(chunks) > 1
 
+    def test_oversized_bullet_list_without_blank_lines_is_split(self):
+        config = FakeIndexingConfig()
+        config.chunk_overlap_tokens = 0
+        chunker = MarkdownChunker(indexing_config=config)
+        body = "\n".join(f"- item {i}: " + "detail " * 10 for i in range(40))
+
+        chunks = chunker.chunk_file(Path("/test.md"), f"## Notes\n\n{body}")
+
+        assert len(chunks) > 1
+        assert all(len(chunk.content) <= config.max_chunk_tokens * 4 for chunk in chunks)
+
     def test_overlap_applied(self):
         config = FakeIndexingConfig()
         config.chunk_overlap_tokens = 10
