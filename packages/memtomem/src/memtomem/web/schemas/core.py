@@ -56,6 +56,9 @@ class RetrievalStatsOut(BaseModel):
     final_total: int = 0
     bm25_error: str | None = None
     dense_error: str | None = None
+    query_run_id: str | None = None
+    cache_hit: bool = False
+    latency_ms: float | None = None
 
 
 class DeleteResponse(BaseModel):

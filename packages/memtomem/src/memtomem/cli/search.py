@@ -134,6 +134,7 @@ async def _search(
             scope=scope,
             project_context_root=project_context_root,
             rerank=rerank,
+            origin="cli",
         )
 
     if not results and fmt in ("table", "plain"):

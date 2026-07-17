@@ -10,6 +10,7 @@ from memtomem.web.schemas.core import SearchResultOut, RetrievalStatsOut
 class SearchResponse(BaseModel):
     results: list[SearchResultOut]
     total: int
+    query_run_id: str | None = None
     retrieval_stats: RetrievalStatsOut | None = None
 
 

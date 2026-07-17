@@ -23,6 +23,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   #1781. Both keys are omitted when `retrieved` is empty, so clients should
   gate on the advertised `context_compose` schema version, not key presence.
   Schemas 2 and 3 remain immutable released contracts.
+
+- **Durable local search-run observations (Quality Lab foundation)** — ranked
+  searches now persist a unique `query_run_id`, retrieval profile, latency,
+  cache/degradation state, and a content-free result snapshot in SQLite. MCP
+  structured output and the Web search API expose the ID only after the local
+  commit succeeds; cache hits get distinct IDs, zero-result ranked searches are
+  recorded, filter-only browsing is excluded, and persistence failure never
+  interrupts search. Snapshots omit result content and absolute source paths;
+  existing query-history retention and CLI JSON output remain unchanged.
+  (#1799)
+
 - **Per-call rerank bypass** (#1766) — `mem_search` and `mem_context_compose`
   accept `rerank=false` (CLI: `mm search --no-rerank`, `mm pinned compose
   --no-rerank`) to skip the cross-encoder rerank stage and its candidate-pool

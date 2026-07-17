@@ -256,6 +256,13 @@ class TestFormatStructuredResults:
         parsed = json.loads(out)
         assert parsed == {"results": []}
 
+    def test_query_run_id_emitted_top_level(self):
+        import json
+
+        run_id = "e38ab6c7-4db4-4d68-8dca-93c1da2dcfe6"
+        parsed = json.loads(_format_structured_results([], query_run_id=run_id))
+        assert parsed == {"results": [], "query_run_id": run_id}
+
     def test_required_fields(self):
         import json
 

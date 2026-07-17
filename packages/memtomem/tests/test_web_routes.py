@@ -935,6 +935,16 @@ class TestSearch:
         assert result["score"] == pytest.approx(0.95)
         assert result["chunk"]["content"] == "test chunk content"
 
+    async def test_search_returns_durable_query_run_id(self, app, client: AsyncClient):
+        run_id = "e38ab6c7-4db4-4d68-8dca-93c1da2dcfe6"
+        app.state.search_pipeline.search.return_value[1].query_run_id = run_id
+
+        resp = await client.get("/api/search", params={"q": "hello world"})
+
+        assert resp.status_code == 200
+        assert resp.json()["query_run_id"] == run_id
+        assert resp.json()["retrieval_stats"]["query_run_id"] == run_id
+
     async def test_search_no_axis_returns_400(self, client: AsyncClient):
         """#750: ``q`` is now optional, but at least one of
         ``q``/``tag_filter``/``source_filter`` must be present — search
@@ -978,6 +988,7 @@ class TestSearch:
         assert kwargs["chunk_types"] == ["markdown_section"]
         assert kwargs["created_from"].tzinfo is not None
         assert kwargs["created_before"] > kwargs["created_from"]
+        assert kwargs["origin"] == "web"
 
     async def test_search_rejects_naive_or_reversed_date_bounds(self, client: AsyncClient):
         naive = await client.get("/api/search", params={"created_from": "2026-07-01T00:00:00"})
