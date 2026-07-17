@@ -50,6 +50,33 @@ class TestAdaptiveChunking:
             assert chunk.metadata.end_line == actual_end
             assert 1 <= chunk.metadata.start_line <= chunk.metadata.end_line <= len(source_lines)
 
+    def test_headingless_section_subchunk_lines_not_shifted(self):
+        # Regression for #1807: a headingless section (auto-memory shape —
+        # frontmatter + body, no markdown heading) starts directly at content,
+        # so ``body_offset`` must not count a phantom heading line. Before the
+        # fix every sub-chunk range drifted +1 and the last one pointed past
+        # the end of the file.
+        config = FakeIndexingConfig()
+        config.chunk_overlap_tokens = 0
+        chunker = MarkdownChunker(indexing_config=config)
+        frontmatter = "---\nname: sample\ntype: feedback\n---"
+        body = "\n".join(f"- item {i:02d} " + "w" * 30 for i in range(20))
+        content = f"{frontmatter}\n{body}"
+
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+
+        assert len(chunks) > 1
+        source_lines = content.splitlines()
+        for index, chunk in enumerate(chunks):
+            chunk_lines = chunk.content.splitlines()
+            actual_start = source_lines.index(chunk_lines[0]) + 1
+            actual_end = actual_start + len(chunk_lines) - 1
+
+            assert chunk_lines == source_lines[actual_start - 1 : actual_end]
+            assert chunk.metadata.start_line == (1 if index == 0 else actual_start)
+            assert chunk.metadata.end_line == actual_end
+            assert 1 <= chunk.metadata.start_line <= chunk.metadata.end_line <= len(source_lines)
+
     def test_mid_part_fence_is_kept_atomic(self):
         config = FakeIndexingConfig()
         config.chunk_overlap_tokens = 0
