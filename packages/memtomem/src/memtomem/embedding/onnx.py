@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import threading
 from collections.abc import Callable
@@ -275,21 +274,28 @@ class OnnxEmbedder:
     async def close(self) -> None:
         # Teardown runs entirely in ``_close_sync`` on a worker thread, off
         # the event loop, so the blocking ``_load_lock`` acquire / executor
-        # drain never stall the loop. ``shield`` + settle-on-cancel (same
-        # pattern as ``server/warmup.py``) makes the teardown survive
-        # cancellation of the awaiting task in BOTH phases: a bare await
-        # would cancel a still-queued ``_close_sync`` before it starts
-        # (leaving the model and executor alive), and an already-running
-        # worker can't be interrupted anyway — either way, keep the future
-        # alive, wait for it to settle, then propagate the cancellation.
+        # drain never stall the loop. Every await on the teardown future is
+        # ``shield``ed so cancellation of the awaiting task — first or
+        # repeated — can never propagate into the future and cancel a
+        # still-queued ``_close_sync`` before it starts (which would leave
+        # the model and executor alive; an already-running worker can't be
+        # interrupted anyway). On cancellation we keep settling until the
+        # future is done, then propagate. NOTE: ``server/warmup.py`` uses a
+        # weaker settle (bare ``await future`` after the first cancel) that
+        # a second cancellation can still pierce — don't copy that shape.
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, self._close_sync)
-        try:
-            await asyncio.shield(future)
-        except asyncio.CancelledError:
-            with contextlib.suppress(BaseException):
-                await future
-            raise
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(future)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if future.done():
+                    break
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _close_sync(self) -> None:
         # Latch closed and drop the model under ``_load_lock`` — the same lock

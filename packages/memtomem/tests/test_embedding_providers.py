@@ -755,6 +755,48 @@ class TestOnnxEmbedder:
             blocker_release.set()
             small.shutdown(wait=False)
 
+    @pytest.mark.anyio
+    async def test_close_double_cancel_still_tears_down(self):
+        """#1792 round 6: a SECOND cancellation delivered while close() is
+        already settling its cancelled teardown must not pierce through to
+        the queued ``_close_sync`` — an unshielded settle-await lets the
+        second cancel cancel the executor future and lose the teardown.
+        Every settle iteration is shielded, so teardown survives repeated
+        cancellation."""
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        embedder = OnnxEmbedder(_onnx_config())
+        embedder._model = MagicMock()
+
+        loop = asyncio.get_running_loop()
+        blocker_release = threading.Event()
+        small = _TPE(max_workers=1, thread_name_prefix="test-default")
+        loop.set_default_executor(small)
+        try:
+            blocker = loop.run_in_executor(None, blocker_release.wait, 10)
+            await asyncio.sleep(0.05)  # blocker occupies the lone worker
+
+            close_task = asyncio.create_task(embedder.close())
+            await asyncio.sleep(0.05)  # _close_sync submitted -> queued
+            close_task.cancel()
+            await asyncio.sleep(0.05)  # close() is now settling (shielded)
+            close_task.cancel()  # second cancel, mid-settle
+            await asyncio.sleep(0.05)
+
+            # Teardown still pending (worker blocked) — and still alive.
+            assert embedder._closed is False
+
+            blocker_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task
+            await blocker
+
+            assert embedder._closed is True
+            assert embedder._model is None
+        finally:
+            blocker_release.set()
+            small.shutdown(wait=False)
+
     @staticmethod
     def _blocking_model(stats, stats_lock, entered, release):
         """A fake fastembed model whose ``embed`` records each entry and
