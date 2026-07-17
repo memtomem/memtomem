@@ -22,9 +22,24 @@ class SearchRunListResponse(BaseModel):
 class SnapshotEntryOut(BaseModel):
     """One snapshotted result row, merged with its current judgment.
 
-    Mirrors the observation snapshot fields (source basename, hash — never
-    content or absolute paths) and stays permissive on optional metadata so
-    older snapshots render too.
+    Mirrors the observation snapshot fields (source basename, hash). Two
+    distinct guarantees, at two layers — don't conflate them:
+
+    * *Which* fields appear is bounded **here**. The field list below is a
+      **deliberate allowlist, not a permissive passthrough**: Pydantic's
+      default ``extra="ignore"`` is load-bearing, so any key the snapshot
+      writer grows later (#1799/#1800 surface) is dropped until it is added
+      here on purpose — the moment to make the privacy call. That stops a
+      future writer regression that adds a stray ``content`` or
+      absolute-path *key* from auto-surfacing. ``test_snapshot_out_is_an_allowlist``
+      pins the drop so it can't happen by accident (#1812).
+    * The *values* of the allowed fields (``source_name`` is a basename,
+      never an absolute path or raw text) are guaranteed **upstream** by the
+      writer's projection — ``search/pipeline.py`` snapshots
+      ``chunk.metadata.source_file.name``, never the full path or content.
+      This model relies on that projection; it does not re-sanitize field
+      contents, so it is not the place to catch a writer that mislabels a
+      value under an already-allowed key.
     """
 
     chunk_id: str
