@@ -207,7 +207,7 @@ mm memory doctor --fix --apply   # remove them from the index file
 ```
 ■ /Users/you/.claude/projects/-Users-you-Work-myproj/memory
   claude-memory · index=MEMORY.md · indexed 12/15
-  ! 3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir> --force`)
+  ! 3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir>`)
       - project_roadmap.md
       - feedback_review_style.md
       - user_role.md
@@ -230,7 +230,7 @@ Each dir header line reads `{category} · [index={index_file} ·] indexed {db_co
 
 | Check | Severity | What it means | Remediation |
 |-------|----------|---------------|-------------|
-| `db_coverage` | warn | On disk and indexable, but zero chunks in the DB — `mem_search` can't find it. | `mm index <dir> --force` |
+| `db_coverage` | warn | On disk and indexable, but zero chunks in the DB — `mem_search` can't find it. | `mm index <dir>` |
 | `stale_source` | **error** | A DB chunk's source file no longer exists on disk (deleted; chunks linger). | `mem_do(action="cleanup_orphans", params={"dry_run": false})` (see [Orphan cleanup](#orphan-cleanup)) |
 | `convention_violation` | **error** | An index/meta file (`MEMORY.md` / `README.md` for a `claude-memory` dir) was indexed as searchable content. | `mm purge --matching-excluded --apply` |
 | `broken_link` | **error** | A markdown pointer in the index file (`[title](target.md)`) resolves to a missing target or escapes the memory root. Wikilinks (`[[other-memo]]`) are never pointers — including the `[[memo]](note)` shape, where the parenthetical is prose rather than a destination (recognized only when the raw source accounts for every same-named label; an unattributable mix reports as `ambiguous_index_line` instead) — and are checked separately as `dangling_wikilink`. | `mm memory doctor --fix --apply` removes the `missing_target` subset (see [Fixing broken links](#fixing-broken-links)); fix or remove `outside_root` links by hand. |
@@ -268,7 +268,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
           "check": "db_coverage",
           "severity": "warn",
           "count": 3,
-          "summary": "3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir> --force`)",
+          "summary": "3/15 indexable file(s) have no DB chunks — `mem_search` can't find them (run `mm index <dir>`)",
           "items": ["project_roadmap.md", "feedback_review_style.md", "user_role.md"]
         },
         {
@@ -292,7 +292,7 @@ The exit code is `0` when clean or when only advisory (warn/info) findings exist
 }
 ```
 
-> **Read-only by default.** Without `--fix`, `mm memory doctor` reports and never writes. Apply the per-check remediation above — most commonly `mm index <dir> --force` to close a coverage gap.
+> **Read-only by default.** Without `--fix`, `mm memory doctor` reports and never writes. Apply the per-check remediation above — most commonly `mm index <dir>` to close a coverage gap. Reserve `--force` for embedding changes, suspected index corruption, or explicit scope/namespace re-resolution after configuration changes because it re-embeds unchanged chunks. Plain indexing already detects heading-only changes and refreshes their retrieval metadata and embeddings.
 
 #### Fixing broken links
 

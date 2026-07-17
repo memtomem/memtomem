@@ -1,6 +1,6 @@
 # ADR-0005: Force-reindex metadata preservation contract
 
-**Status:** Accepted
+**Status:** Accepted; amended by #1788
 **Date:** 2026-04-30
 **Context:** Issue #582 item 4.2 — review of `index_file(..., force=True)` and
 its effect on chunks the caller did not intend to modify.
@@ -92,6 +92,16 @@ force-path caller is most likely already trying to express:
 If a caller genuinely needs the old "hard reset" semantics, the path is
 explicit: delete by source, then index without force.
 
+### 2026-07-17 amendment — CRUD uses incremental reconciliation (#1788)
+
+The hash-aware force contract above remains valid for explicit CLI, MCP, and
+Web force-reindex requests. `mem_edit`, `mem_delete`, and Web chunk edits no
+longer need that expensive path: the normal diff now refreshes
+`start_line`/`end_line` for hash-matched chunks with a metadata-only update.
+Those CRUD surfaces therefore use `index_file(force=False)` and embed only new
+or changed chunks. Unchanged siblings retain their vector, FTS row, timestamps,
+identity, and personalization while their source locations move.
+
 ## Considered options
 
 1. **Tooltip-only — document the loss, change nothing.**
@@ -157,6 +167,14 @@ In rough order, all in `packages/memtomem/src/memtomem/`:
    - `test_force_reindex_updates_line_ranges_for_unchanged_after_body_edit`
    - `test_mem_edit_preserves_sibling_chunk_metadata`
    These names are the regression-guard documentation.
+
+> **2026-07 implementation amendment:** A content hash covers the body, not
+> `heading_hierarchy`, while both FTS and `retrieval_content` include headings.
+> The incremental diff therefore reads the stored hierarchy alongside each
+> hash. A hash match whose hierarchy changed keeps its existing chunk ID but is
+> promoted to `to_upsert`, refreshing the hierarchy, FTS row, descendant
+> `parent_context`, and embedding. Exact hash + hierarchy matches still take the
+> metadata-only line-range path.
 4. CHANGELOG entry under `## Unreleased` — `mem_edit` / `mem_delete` /
    `mm index --force` / `POST /reindex` no longer reset access stats
    or chunk IDs for unchanged chunks. Listed as a behavior change, not

@@ -7,6 +7,19 @@ from typing import Protocol, Sequence
 
 
 class EmbeddingProvider(Protocol):
+    # Optional capability (deliberately NOT a required Protocol member, so
+    # existing duck-typed fakes and out-of-tree providers stay structurally
+    # conformant): providers MAY expose ``preferred_concurrency: int`` — the
+    # maximum number of concurrent ``embed_texts`` calls the provider wants
+    # across files during a bulk index run. The index engine clamps the value
+    # to its file-level concurrency cap and falls back to that cap when the
+    # attribute is absent or not a real ``int`` (see
+    # ``indexing.engine._resolve_embed_limit``). Reading the attribute must be
+    # side-effect-free — in particular it must not trigger a model load.
+    # Local CPU providers should advertise a low value (concurrent inference
+    # multiplies peak activation memory without adding throughput, #1783);
+    # remote latency-bound providers can match the file cap.
+
     @property
     def dimension(self) -> int: ...
 

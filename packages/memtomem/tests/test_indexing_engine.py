@@ -18,6 +18,8 @@ from memtomem.indexing.engine import (
     _add_overlap,
     _estimate_tokens,
     _path_is_excluded,
+    _resolve_embed_limit,
+    _FILE_CONCURRENCY,
 )
 from memtomem.models import Chunk, ChunkMetadata
 from .helpers import set_home
@@ -2108,10 +2110,11 @@ class TestIndexFile:
             f"got {ac_after} (pre-fix would be 0)"
         )
 
-    async def test_force_reindex_refreshes_line_ranges_for_unchanged(self, components, memory_dir):
+    async def test_incremental_reindex_refreshes_line_ranges_without_reembedding_sibling(
+        self, components, memory_dir
+    ):
         """When a sibling chunk's body shifts line numbers, the unchanged chunk's
-        ``start_line`` / ``end_line`` columns must catch up — even with force=True
-        (which routes hash-matched chunks through the upsert UPDATE path).
+        line columns catch up without routing that sibling through embedding.
         """
         md_path = memory_dir / "shift.md"
         md_path.write_text(
@@ -2136,6 +2139,8 @@ class TestIndexFile:
         b_chunk_before = chunks_before[1]
         b_id = b_chunk_before.id
         b_start_before = b_chunk_before.metadata.start_line
+        b_content = b_chunk_before.content
+        mock_embedder.embed_texts.reset_mock()
 
         # Insert extra lines in section A so B's start_line shifts.
         md_path.write_text(
@@ -2143,21 +2148,27 @@ class TestIndexFile:
             "# Section B\n\n" + ("Body for section B.\n" * 5) + "\n",
             encoding="utf-8",
         )
-        await components.index_engine.index_file(md_path, force=True)
+        stats = await components.index_engine.index_file(md_path)
 
         b_chunk_after = await components.storage.get_chunk(b_id)
-        assert b_chunk_after is not None, "B chunk lost identity across force-reindex"
+        assert b_chunk_after is not None, "B chunk lost identity across incremental re-index"
         assert b_chunk_after.metadata.start_line > b_start_before, (
             f"B.start_line should reflect the upward shift; "
             f"before={b_start_before}, after={b_chunk_after.metadata.start_line}"
         )
+        assert stats.indexed_chunks == 1
+        assert stats.skipped_chunks >= 1
+        mock_embedder.embed_texts.assert_awaited_once()
+        embedded_texts = mock_embedder.embed_texts.await_args.args[0]
+        assert len(embedded_texts) == 1
+        assert b_content not in embedded_texts
 
     async def test_mem_edit_preserves_sibling_chunk_metadata(self, components, memory_dir):
         """End-to-end regression: mem_edit on chunk A leaves chunk B's
         ``access_count`` and ``id`` intact (the spike scenario from ADR-0005).
 
         Uses the same call pattern as ``server.tools.memory_crud.mem_edit``:
-        mutate the source file, then ``index_file(force=True)``.
+        mutate the source file, then incremental ``index_file``.
         """
         md_path = memory_dir / "edit_pair.md"
         md_path.write_text(
@@ -2183,18 +2194,21 @@ class TestIndexFile:
         await components.storage.increment_access([b_id])
 
         # Simulate mem_edit's body-only edit on chunk A: rewrite section A,
-        # leave section B byte-identical, then index_file(force=True).
+        # leave section B byte-identical, then incrementally re-index.
         md_path.write_text(
             "# Section A\n\n" + ("Body for section A. EDITED.\n" * 8) + "\n"
             "# Section B\n\n" + ("Body for section B.\n" * 8) + "\n",
             encoding="utf-8",
         )
-        await components.index_engine.index_file(md_path, force=True)
+        mock_embedder.embed_texts.reset_mock()
+        await components.index_engine.index_file(md_path)
 
         b_after = await components.storage.get_chunk(b_id)
         assert b_after is not None, "Sibling B should keep its UUID across mem_edit"
         ac = (await components.storage.get_access_counts([b_id]))[str(b_id)]
         assert ac == 1, f"Sibling B.access_count should be preserved; got {ac}"
+        mock_embedder.embed_texts.assert_awaited_once()
+        assert len(mock_embedder.embed_texts.await_args.args[0]) == 1
 
     async def test_force_reindex_deletes_vanished_chunks(self, components, memory_dir):
         """force=True must drop rows whose hash no longer appears in the file.
@@ -2361,6 +2375,173 @@ class TestIndexPath:
 
 
 # ===========================================================================
+# 8.a Embedding concurrency — dedicated semaphore + preferred_concurrency hint
+# ===========================================================================
+
+
+class _ConcurrencyRecordingEmbedder:
+    """Records peak concurrent ``embed_texts`` calls — pins the #1783
+    embedding semaphore. The ``sleep`` forces overlap to be observable:
+    without a gate, concurrently indexed files pile up inside it."""
+
+    def __init__(self, dim: int = 1024) -> None:  # matches the fixture DB's dimension
+        self._dim = dim
+        self._inflight = 0
+        self.peak = 0
+        self.calls = 0
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def model_name(self) -> str:
+        return "fake-concurrency"
+
+    async def embed_texts(self, texts, *, on_progress=None):
+        self.calls += 1
+        self._inflight += 1
+        self.peak = max(self.peak, self._inflight)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            self._inflight -= 1
+        return [[0.0] * self._dim for _ in texts]
+
+    async def embed_query(self, query: str):
+        return [0.0] * self._dim
+
+    async def close(self) -> None:
+        pass
+
+
+class TestEmbedConcurrency:
+    """#1783: bulk ``index_path`` used to run up to 8 files' ``embed_texts``
+    concurrently (the file-level semaphore was the only gate), multiplying
+    peak inference memory for local CPU providers. Embedding now queues on
+    a dedicated semaphore sized from the provider's optional
+    ``preferred_concurrency`` hint.
+    """
+
+    @staticmethod
+    def _write_files(memory_dir: Path, n: int) -> None:
+        for i in range(n):
+            (memory_dir / f"file{i}.md").write_text(
+                f"# File {i}\n\nContent number {i}.\n", encoding="utf-8"
+            )
+
+    async def test_hint_of_one_serializes_embedding_but_not_files(self, components, memory_dir):
+        """A provider advertising ``preferred_concurrency = 1`` (the ONNX
+        default) gets strictly serialized embeds while all files still index.
+
+        Also pins the *decouple* half of the contract: file pipelines must
+        still overlap (they queue at the embed semaphore, not at the file
+        semaphore), so ``peak == 1`` can't be satisfied by accidentally
+        serializing whole files or widening the embed gate around the full
+        ``_index_file`` pipeline."""
+        self._write_files(memory_dir, 6)
+        engine = components.index_engine
+        embedder = _ConcurrencyRecordingEmbedder()
+        embedder.preferred_concurrency = 1
+        engine._embedder = embedder
+
+        files_inflight = {"now": 0, "peak": 0}
+        original_index_file = engine._index_file
+
+        async def tracking_index_file(*args, **kwargs):
+            files_inflight["now"] += 1
+            files_inflight["peak"] = max(files_inflight["peak"], files_inflight["now"])
+            try:
+                return await original_index_file(*args, **kwargs)
+            finally:
+                files_inflight["now"] -= 1
+
+        engine._index_file = tracking_index_file
+
+        stats = await engine.index_path(memory_dir, recursive=True)
+
+        assert stats.total_files == 6
+        assert stats.indexed_chunks > 0
+        assert not stats.errors
+        assert embedder.calls == 6
+        assert embedder.peak == 1
+        # While one file embeds, the others sit inside their own _index_file
+        # (queued at the embed gate) — multiple pipelines in flight at once.
+        assert files_inflight["peak"] >= 2
+
+    async def test_absent_hint_preserves_overlap(self, components, memory_dir):
+        """No ``preferred_concurrency`` attribute → default = file-level cap,
+        so embeds still overlap (pre-#1783 behavior for unknown providers).
+        ``>= 2`` (not == 8) keeps the assertion robust on slow CI runners."""
+        self._write_files(memory_dir, 6)
+        embedder = _ConcurrencyRecordingEmbedder()
+        components.index_engine._embedder = embedder
+
+        stats = await components.index_engine.index_path(memory_dir, recursive=True)
+
+        assert stats.total_files == 6
+        assert embedder.calls == 6
+        assert embedder.peak >= 2
+
+    async def test_zero_hint_clamps_to_one_without_deadlock(self, components, memory_dir):
+        """A pathological ``preferred_concurrency = 0`` must clamp to 1 —
+        a Semaphore(0) would deadlock the whole run."""
+        self._write_files(memory_dir, 3)
+        embedder = _ConcurrencyRecordingEmbedder()
+        embedder.preferred_concurrency = 0
+        components.index_engine._embedder = embedder
+
+        stats = await asyncio.wait_for(
+            components.index_engine.index_path(memory_dir, recursive=True), timeout=30
+        )
+
+        assert stats.total_files == 3
+        assert embedder.calls == 3
+        assert embedder.peak == 1
+
+    async def test_bare_asyncmock_embedder_still_indexes(self, components, memory_dir):
+        """A bare ``AsyncMock`` embedder auto-creates ``preferred_concurrency``
+        as a child Mock; the hint resolution must treat that as "no hint"
+        instead of feeding a Mock into ``min()`` (regression pin for the
+        existing AsyncMock test pattern in this file)."""
+        self._write_files(memory_dir, 2)
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        stats = await components.index_engine.index_path(memory_dir, recursive=True)
+
+        assert stats.total_files == 2
+        assert stats.indexed_chunks > 0
+        assert not stats.errors
+
+    def test_resolve_embed_limit_validation(self):
+        """Direct unit pins for ``_resolve_embed_limit`` — the integration
+        tests can't prove the upper clamp because the file-level semaphore
+        already caps observable concurrency at ``_FILE_CONCURRENCY``."""
+
+        class _Hinted:
+            def __init__(self, value):
+                self.preferred_concurrency = value
+
+        class _NoHint:
+            pass
+
+        assert _resolve_embed_limit(_Hinted(1)) == 1
+        assert _resolve_embed_limit(_Hinted(3)) == 3
+        assert _resolve_embed_limit(_Hinted(0)) == 1  # lower clamp
+        assert _resolve_embed_limit(_Hinted(-5)) == 1  # lower clamp
+        assert _resolve_embed_limit(_Hinted(99)) == _FILE_CONCURRENCY  # upper clamp
+        assert _resolve_embed_limit(_NoHint()) == _FILE_CONCURRENCY  # absent
+        assert _resolve_embed_limit(_Hinted(True)) == _FILE_CONCURRENCY  # bool rejected
+        assert _resolve_embed_limit(_Hinted("2")) == _FILE_CONCURRENCY  # non-int rejected
+        assert _resolve_embed_limit(AsyncMock()) == _FILE_CONCURRENCY  # Mock auto-attr
+
+
+# ===========================================================================
 # 9. Incremental indexing — changed content
 # ===========================================================================
 
@@ -2395,6 +2576,41 @@ class TestIncrementalIndexing:
         assert stats2.indexed_chunks > 0
         # embed_texts should have been called again
         assert mock_embedder.embed_texts.call_count > first_embed_count
+
+    async def test_heading_only_rename_refreshes_retrieval_state(self, components, memory_dir):
+        """A body-hash match with a new heading must refresh FTS and embedding."""
+        md_path = memory_dir / "heading_rename.md"
+        body = "The body remains byte-for-byte stable across the rename."
+        md_path.write_text(f"# OldHeadingZeta\n\n{body}\n", encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        before = await components.storage.list_chunks_by_source(md_path)
+        assert len(before) == 1
+        original_id = before[0].id
+        first_embed_count = mock_embedder.embed_texts.call_count
+        assert await components.storage.bm25_search("OldHeadingZeta", top_k=5)
+
+        md_path.write_text(f"# NewHeadingTheta\n\n{body}\n", encoding="utf-8")
+        stats = await components.index_engine.index_file(md_path)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert len(after) == 1
+        assert after[0].id == original_id
+        assert after[0].metadata.heading_hierarchy == ("# NewHeadingTheta",)
+        assert stats.indexed_chunks == 1
+        assert mock_embedder.embed_texts.call_count == first_embed_count + 1
+        embedded_texts = mock_embedder.embed_texts.call_args.args[0]
+        assert "NewHeadingTheta" in embedded_texts[0]
+        assert not await components.storage.bm25_search("OldHeadingZeta", top_k=5)
+        new_results = await components.storage.bm25_search("NewHeadingTheta", top_k=5)
+        assert [result.chunk.id for result in new_results] == [original_id]
 
     async def test_delete_section_removes_chunks(self, components, memory_dir):
         """Removing a section should delete its chunks."""

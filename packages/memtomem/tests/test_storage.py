@@ -38,6 +38,66 @@ class TestChunkCRUD:
         result = await storage.get_chunk(uuid4())
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_update_chunk_line_ranges_leaves_payload_and_indexes_untouched(self, storage):
+        chunk = _make_chunk("line refresh payload")
+        chunk.embedding = [0.1] * 1024
+        await storage.upsert_chunks([chunk])
+        await storage.increment_access([chunk.id])
+
+        db = storage._get_db()
+        before = db.execute(
+            "SELECT rowid, content, content_hash, updated_at, access_count, "
+            "start_line, end_line FROM chunks WHERE id=?",
+            (str(chunk.id),),
+        ).fetchone()
+        before_fts = db.execute(
+            "SELECT content, source_file FROM chunks_fts WHERE rowid=?", (before[0],)
+        ).fetchone()
+        before_vec = db.execute(
+            "SELECT embedding FROM chunks_vec WHERE rowid=?", (before[0],)
+        ).fetchone()
+
+        chunk.metadata = dataclasses.replace(chunk.metadata, start_line=40, end_line=45)
+        assert await storage.update_chunk_line_ranges([chunk]) == 1
+        assert await storage.update_chunk_line_ranges([chunk]) == 0
+
+        after = db.execute(
+            "SELECT rowid, content, content_hash, updated_at, access_count, "
+            "start_line, end_line FROM chunks WHERE id=?",
+            (str(chunk.id),),
+        ).fetchone()
+        assert after[:5] == before[:5]
+        assert after[5:] == (40, 45)
+        assert (
+            db.execute(
+                "SELECT content, source_file FROM chunks_fts WHERE rowid=?", (after[0],)
+            ).fetchone()
+            == before_fts
+        )
+        assert (
+            db.execute("SELECT embedding FROM chunks_vec WHERE rowid=?", (after[0],)).fetchone()
+            == before_vec
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_chunk_line_ranges_swaps_duplicate_hash_positions(self, storage):
+        source = Path("/tmp/same-hash.md")
+        first = _make_chunk("same body", source=source)
+        second = _make_chunk("same body", source=source)
+        first.metadata = dataclasses.replace(first.metadata, start_line=10, end_line=10)
+        second.metadata = dataclasses.replace(second.metadata, start_line=20, end_line=20)
+        await storage.upsert_chunks([first, second])
+
+        first.metadata = dataclasses.replace(first.metadata, start_line=20, end_line=20)
+        second.metadata = dataclasses.replace(second.metadata, start_line=10, end_line=10)
+        assert await storage.update_chunk_line_ranges([first, second]) == 2
+
+        refreshed_first = await storage.get_chunk(first.id)
+        refreshed_second = await storage.get_chunk(second.id)
+        assert refreshed_first is not None and refreshed_first.metadata.start_line == 20
+        assert refreshed_second is not None and refreshed_second.metadata.start_line == 10
+
 
 class TestSearchMetadataFilters:
     def test_post_filter_treats_legacy_naive_timestamp_as_utc(self):

@@ -736,6 +736,67 @@ class SqliteBackend(
             raise StorageError(f"upsert_chunks failed, transaction rolled back: {exc}") from exc
         return len(chunks)
 
+    async def update_chunk_line_ranges(self, chunks: Sequence[Chunk]) -> int:
+        """Refresh line metadata for hash-matched chunks without rewriting content.
+
+        Incremental indexing reuses the stored UUID when content hashes match.
+        A sibling edit can still shift that chunk's source lines, though, so the
+        diff path must refresh ``start_line`` / ``end_line`` while leaving FTS,
+        vectors, timestamps, and personalization untouched (#1788).
+
+        The temporary negative line numbers avoid UNIQUE collisions when two
+        identical-content chunks move through one another: the uniqueness key
+        includes ``content_hash`` and ``start_line`` and SQLite checks it row by
+        row, even inside one transaction.
+        """
+        if not chunks:
+            return 0
+
+        db = self._get_db()
+        chunk_by_id = {str(chunk.id): chunk for chunk in chunks}
+        ids = list(chunk_by_id)
+        try:
+            rows = db.execute(
+                f"SELECT id, rowid, start_line, end_line FROM chunks "
+                f"WHERE id IN ({placeholders(len(ids))})",
+                ids,
+            ).fetchall()
+            changed = [
+                (chunk_by_id[row[0]], row[1])
+                for row in rows
+                if (
+                    row[2] != chunk_by_id[row[0]].metadata.start_line
+                    or row[3] != chunk_by_id[row[0]].metadata.end_line
+                )
+            ]
+            if not changed:
+                return 0
+
+            db.executemany(
+                "UPDATE chunks SET start_line=?, end_line=? WHERE id=?",
+                [(-rowid - 1, -rowid - 1, str(chunk.id)) for chunk, rowid in changed],
+            )
+            db.executemany(
+                "UPDATE chunks SET start_line=?, end_line=? WHERE id=?",
+                [
+                    (
+                        chunk.metadata.start_line,
+                        chunk.metadata.end_line,
+                        str(chunk.id),
+                    )
+                    for chunk, _ in changed
+                ],
+            )
+            if not self._in_transaction:
+                db.commit()
+        except Exception as exc:
+            if not self._in_transaction:
+                db.rollback()
+            raise StorageError(
+                f"update_chunk_line_ranges failed, transaction rolled back: {exc}"
+            ) from exc
+        return len(changed)
+
     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
         db = self._get_read_db()
         row = db.execute("SELECT * FROM chunks WHERE id=?", (str(chunk_id),)).fetchone()
@@ -1451,6 +1512,25 @@ class SqliteBackend(
             (norm_path(source_file),),
         ).fetchall()
         return {row[0]: row[1] for row in rows}
+
+    async def get_chunk_index_state(
+        self, source_file: Path
+    ) -> dict[str, tuple[str, tuple[str, ...]]]:
+        """Return hash and retrieval-relevant hierarchy for a source's chunks."""
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT id, content_hash, heading_hierarchy FROM chunks WHERE source_file=?",
+            (norm_path(source_file),),
+        ).fetchall()
+        state: dict[str, tuple[str, tuple[str, ...]]] = {}
+        for chunk_id, content_hash, heading_json in rows:
+            try:
+                hierarchy = tuple(json.loads(heading_json))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Corrupted heading_hierarchy for chunk %s", chunk_id)
+                hierarchy = ()
+            state[chunk_id] = (content_hash, hierarchy)
+        return state
 
     async def get_chunk_ids_by_hashes(self, content_hashes: Sequence[str]) -> dict[str, UUID]:
         """Return ``{content_hash: chunk_id}`` for hashes present in the DB.

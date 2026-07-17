@@ -121,6 +121,7 @@ def _format_structured_results(
     hints: list[str] | None = None,
     score_scale: str | None = None,
     reranker: str | None = None,
+    query_run_id: str | None = None,
 ) -> str:
     """JSON structured format for machine consumption.
 
@@ -166,6 +167,8 @@ def _format_structured_results(
         payload["score_scale"] = score_scale
     if reranker is not None:
         payload["reranker"] = reranker
+    if query_run_id is not None:
+        payload["query_run_id"] = query_run_id
     if hints:
         payload["hints"] = list(hints)
     return json.dumps(payload, ensure_ascii=False)

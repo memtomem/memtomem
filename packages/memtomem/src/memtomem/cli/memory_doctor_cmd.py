@@ -953,7 +953,7 @@ def _analyze_dir(
                 severity="warn",
                 summary=(
                     f"{len(uncovered)}/{len(disk_norm)} indexable file(s) have no DB "
-                    "chunks — `mem_search` can't find them (run `mm index <dir> --force`)"
+                    "chunks — `mem_search` can't find them (run `mm index <dir>`)"
                 ),
                 items=[p.name for p in uncovered],
             )

@@ -64,6 +64,39 @@ class TestDowngradeFence:
         finally:
             db.close()
 
+    def test_pre_observation_query_history_gets_additive_columns(self) -> None:
+        """Quality observation fields migrate without replacing legacy rows."""
+        db = _connect_with_vec()
+        try:
+            db.execute(
+                """CREATE TABLE query_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_text TEXT NOT NULL,
+                    query_embedding BLOB NOT NULL,
+                    result_chunk_ids TEXT NOT NULL,
+                    result_scores TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            db.execute(
+                "INSERT INTO query_history "
+                "(query_text, query_embedding, result_chunk_ids, result_scores, created_at) "
+                "VALUES ('legacy', X'', '[]', '[]', '2026-07-17T00:00:00+00:00')"
+            )
+
+            _create_tables(db)
+
+            columns = {row[1] for row in db.execute("PRAGMA table_info(query_history)")}
+            assert {"run_id", "observation_json", "result_snapshot_json"} <= columns
+            row = db.execute(
+                "SELECT query_text, run_id, observation_json, result_snapshot_json "
+                "FROM query_history"
+            ).fetchone()
+            assert row == ("legacy", None, "{}", "[]")
+            assert _stored_version(db) == str(SCHEMA_VERSION)
+        finally:
+            db.close()
+
     def test_pre_versioning_db_passes_and_gets_stamped(self) -> None:
         """Every existing install: meta table exists (legacy embedding keys)
         but has no ``schema_version`` row — must open and get stamped."""

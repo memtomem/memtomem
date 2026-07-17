@@ -7,6 +7,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Named score scale in structured search output** (#1767) — `mem_search`
+  and `mem_agent_search` structured payloads now carry a top-level
+  `score_scale` (`rrf` / `bm25` / `dense` / `none` / `rerank`) plus `reranker`
+  (the rerank model id) so consumers can calibrate a `score` threshold instead
+  of inferring the scale from value ranges; the label is derived from the
+  returned results, so a reranker that silently falls back to fused order stays
+  truthful. `mm search --format json` carries the fields per item (its payload
+  is a bare list). Both omitted when empty; boosts (decay / access / importance,
+  all default-off) multiply on top of the named base scale.
+- **Context Compose schema 4** (#1791) — the composed bundle now names the
+  retrieval leg's score scale at the top level (`score_scale`: `rrf` / `bm25`
+  / `dense` / `none` / `rerank`, plus `reranker` with the model id when
+  reranked), mirroring the fields `mem_search` structured output gained in
+  #1781. Both keys are omitted when `retrieved` is empty, so clients should
+  gate on the advertised `context_compose` schema version, not key presence.
+  Schemas 2 and 3 remain immutable released contracts.
+
+- **Durable local search-run observations (Quality Lab foundation)** — ranked
+  searches now persist a unique `query_run_id`, retrieval profile, latency,
+  cache/degradation state, and a content-minimized result snapshot in SQLite. MCP
+  structured output and the Web search API expose the ID only after the local
+  commit succeeds; cache hits get distinct IDs, zero-result ranked searches are
+  recorded, filter-only browsing is excluded, and persistence failure never
+  interrupts search. Snapshots omit result content and absolute source paths;
+  existing query-history retention and CLI JSON output remain unchanged.
+  (#1799)
+
 - **Per-call rerank bypass** (#1766) — `mem_search` and `mem_context_compose`
   accept `rerank=false` (CLI: `mm search --no-rerank`, `mm pinned compose
   --no-rerank`) to skip the cross-encoder rerank stage and its candidate-pool
@@ -17,6 +44,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Incremental CRUD re-indexing** (#1788) — `mem_edit`, `mem_delete`, and Web
+  chunk edits no longer force-re-embed every sibling chunk in the source file.
+  Hash-matched siblings keep their UUID, vector, FTS row, timestamps, and
+  personalization while a metadata-only update refreshes shifted source line
+  ranges. Explicit CLI/MCP/Web force re-indexing still re-embeds every chunk.
 - **Reranker hot-swap use-after-close** (#1777) — hot reload (disk config
   edit or `PATCH /api/config`) no longer closes the outgoing reranker while
   an in-flight search still holds it; the close is deferred until the last
@@ -3049,7 +3081,11 @@ ADR-0011 PR-A through PR-F changes that landed earlier in the cycle.
   `ON DELETE CASCADE` (target_id) / `ON DELETE SET NULL` (source_id),
   silently dropping consolidation-summary and provenance edges
   whenever a sibling chunk was edited. Contract recorded in
-  `docs/adr/0005-force-reindex-metadata-contract.md`. (#582 item 4.2)
+  `docs/adr/0005-force-reindex-metadata-contract.md`. Incremental indexing
+  also compares stored heading hierarchy for body-hash matches: heading-only
+  renames now keep the chunk ID but selectively refresh heading metadata, FTS
+  terms, descendant context, and embeddings instead of leaving the old heading
+  searchable. (#582 item 4.2)
 
 - **`POST /api/memory-dirs/add` indexes the registered directory by
   default now.** PR #571 introduced opt-in `auto_index` (default
