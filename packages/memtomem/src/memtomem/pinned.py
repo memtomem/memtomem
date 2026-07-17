@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -14,6 +14,9 @@ from memtomem.config import Mem2MemConfig, TargetScope
 from memtomem.context._atomic import atomic_write_text
 from memtomem.errors import ConfigError
 from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR, resolve_memory_scope_dir
+
+if TYPE_CHECKING:
+    from memtomem.search.pipeline import ScoreScale
 
 PINNED_BLOCK_MAX_CHARS = 2_000
 PINNED_TOTAL_MAX_CHARS = 6_000
@@ -46,9 +49,11 @@ class ContextBundle:
     used_chars: int
     omitted_block_ids: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    score_scale: ScoreScale | None = None
+    reranker: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "pinned": [block.as_dict() for block in self.pinned],
             "retrieved": list(self.retrieved),
             "max_chars": self.max_chars,
@@ -56,6 +61,11 @@ class ContextBundle:
             "omitted_block_ids": list(self.omitted_block_ids),
             "warnings": list(self.warnings),
         }
+        if self.score_scale is not None:
+            payload["score_scale"] = self.score_scale
+        if self.reranker is not None:
+            payload["reranker"] = self.reranker
+        return payload
 
 
 @dataclass(slots=True)
@@ -285,8 +295,10 @@ class ContextAssembler:
             used += len(block.content)
 
         retrieved: list[dict[str, Any]] = []
+        score_scale: ScoreScale | None = None
+        reranker: str | None = None
         if query and self.search_pipeline is not None and used < max_chars:
-            results, _ = await self.search_pipeline.search(
+            results, stats = await self.search_pipeline.search(
                 query=query,
                 top_k=top_k,
                 namespace=namespace,
@@ -317,6 +329,13 @@ class ContextAssembler:
                 retrieved.append(item)
                 matched.append((result, item))
                 emitted_chunk_ids.add(chunk_id)
+
+            # Scale labels describe the retrieval leg as a whole; budget
+            # truncation can empty `retrieved` even when the pipeline
+            # returned hits, and an empty leg carries no scale to name.
+            if retrieved:
+                score_scale = stats.score_scale
+                reranker = stats.reranker_model
 
             context_windows: list[_ContextWindowSelection] = []
             for result, item in matched:
@@ -384,6 +403,8 @@ class ContextAssembler:
             used_chars=used,
             omitted_block_ids=tuple(omitted),
             warnings=warnings,
+            score_scale=score_scale,
+            reranker=reranker,
         )
 
     @staticmethod

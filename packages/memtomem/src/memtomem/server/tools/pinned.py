@@ -122,6 +122,11 @@ async def mem_context_compose(
             the cross-encoder rerank stage — the fast path for latency-bounded
             callers. Omitted/``true`` = follow server config (``rerank.enabled``);
             ``true`` cannot enable reranking when the server has it disabled.
+
+    The bundle names the retrieval leg's score scale at the top level
+    (``score_scale``: ``rrf``/``bm25``/``dense``/``none``/``rerank``, plus
+    ``reranker`` with the model ID when reranked); both keys are omitted when
+    ``retrieved`` is empty. Pinned blocks carry no relevance scale.
     """
     app, store = await _store(ctx)
     bundle = await ContextAssembler(store, app.search_pipeline).compose(

@@ -7,6 +7,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Context Compose schema 4** (#1791) — the composed bundle now names the
+  retrieval leg's score scale at the top level (`score_scale`: `rrf` / `bm25`
+  / `dense` / `none` / `rerank`, plus `reranker` with the model id when
+  reranked), mirroring the fields `mem_search` structured output gained in
+  #1781. Both keys are omitted when `retrieved` is empty, so clients should
+  gate on the advertised `context_compose` schema version, not key presence.
+  Schemas 2 and 3 remain immutable released contracts.
 - **Per-call rerank bypass** (#1766) — `mem_search` and `mem_context_compose`
   accept `rerank=false` (CLI: `mm search --no-rerank`, `mm pinned compose
   --no-rerank`) to skip the cross-encoder rerank stage and its candidate-pool

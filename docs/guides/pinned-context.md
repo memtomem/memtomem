@@ -34,6 +34,11 @@ never cut in the middle and omitted ids are returned explicitly.
 `mem_context_compose` schema 2 accepts the same optional `namespace` and
 `context_window` retrieval controls used by search. Schema 3 additionally
 returns adjacent chunks under each retrieved item's optional `context` object.
+Schema 4 additionally names the retrieval leg's score scale at the top level
+of the bundle: `score_scale` (`rrf`, `bm25`, `dense`, `none`, or `rerank` —
+the same labels `mem_search` reports) plus `reranker` with the rerank model id
+when the scale is `rerank`. Both keys are omitted when `retrieved` is empty;
+pinned blocks carry no relevance scale.
 Matched hits retain schema 2 budget priority; de-duplicated adjacent chunks use
 only the remaining composed bundle character budget, selected globally by
 distance with hit rank and before/after as deterministic tie-breakers. Pinned
@@ -46,6 +51,10 @@ Schema 3 is a new capability instead of an in-place schema 2 change because
 schema 2 shipped in memtomem 0.3.9 without adjacent chunks in its response.
 Keeping that released contract immutable lets clients distinguish scoped
 composition from composition that also preserves visible context windows.
+Schema 4 follows the same rule: because `score_scale`/`reranker` are omitted
+for an empty `retrieved` list, a client cannot tell "server too old" from
+"no results" by key presence — the advertised schema version is the
+discovery mechanism.
 
 ## Review-first candidates
 

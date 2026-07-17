@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from memtomem.config import Mem2MemConfig
-from memtomem.pinned import ContextAssembler, PinnedContextStore
+from memtomem.pinned import ContextAssembler, ContextBundle, PinnedContextStore
+from memtomem.search.pipeline import RetrievalStats
 
 
 @pytest.fixture
@@ -88,7 +89,7 @@ async def test_compose_pinned_first_then_retrieval(pinned_store):
             assert kwargs["namespace"] == ["work", "shared"]
             assert kwargs["context_window"] == 2
             assert kwargs["exclude_source_roots"] == pinned_store.search_exclusion_roots()
-            return [result], None
+            return [result], RetrievalStats(score_scale="rrf")
 
     bundle = await ContextAssembler(pinned_store, Pipeline()).compose(
         "deployment", namespace=["work", "shared"], context_window=2
@@ -126,7 +127,7 @@ async def test_compose_schema_three_budgets_neighbors_and_preserves_source_order
 
     class Pipeline:
         async def search(self, **kwargs):
-            return [result], None
+            return [result], RetrievalStats(score_scale="rrf")
 
     bundle = await ContextAssembler(pinned_store, Pipeline()).compose(
         "deployment", max_chars=11, context_window=2
@@ -169,7 +170,7 @@ async def test_compose_schema_three_keeps_hit_when_neighbors_exceed_budget(pinne
 
     class Pipeline:
         async def search(self, **kwargs):
-            return [result], None
+            return [result], RetrievalStats(score_scale="rrf")
 
     bundle = await ContextAssembler(pinned_store, Pipeline()).compose(
         "deployment", max_chars=3, context_window=1
@@ -224,7 +225,7 @@ async def test_compose_schema_three_preserves_hits_and_deduplicates_context(pinn
 
     class Pipeline:
         async def search(self, **kwargs):
-            return results, None
+            return results, RetrievalStats(score_scale="rrf")
 
     bundle = await ContextAssembler(pinned_store, Pipeline()).compose(
         "deployment", max_chars=10, context_window=2
@@ -253,7 +254,7 @@ async def test_mem_context_compose_tool_threads_schema_three_scope(monkeypatch, 
             assert kwargs["namespace"] == "work"
             assert kwargs["context_window"] == 1
             assert kwargs["exclude_source_roots"] == pinned_store.search_exclusion_roots()
-            return [result], None
+            return [result], RetrievalStats(score_scale="rrf")
 
     app = SimpleNamespace(search_pipeline=Pipeline())
 
@@ -271,6 +272,85 @@ async def test_mem_context_compose_tool_threads_schema_three_scope(monkeypatch, 
 
     assert payload["pinned"][0]["content"] == "always visible"
     assert payload["retrieved"][0]["namespace"] == "work"
+    assert payload["score_scale"] == "rrf"
+    assert "reranker" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Top-level score_scale / reranker on the compose bundle (#1791)
+# ---------------------------------------------------------------------------
+
+
+def _retrieval_result(chunk_id: str = "chunk-1", content: str = "retrieved memory"):
+    chunk = SimpleNamespace(
+        id=chunk_id,
+        content=content,
+        metadata=SimpleNamespace(source_file="memory.md", namespace="work"),
+    )
+    return SimpleNamespace(chunk=chunk, score=0.9)
+
+
+def _pipeline(results, stats):
+    class Pipeline:
+        async def search(self, **kwargs):
+            return results, stats
+
+    return Pipeline()
+
+
+@pytest.mark.asyncio
+async def test_compose_names_score_scale_top_level_not_per_item(pinned_store):
+    pinned_store.set("profile", "always visible", priority=1)
+    pipeline = _pipeline([_retrieval_result()], RetrievalStats(score_scale="rrf"))
+    payload = (await ContextAssembler(pinned_store, pipeline).compose("deployment")).as_dict()
+    assert payload["score_scale"] == "rrf"
+    assert "reranker" not in payload
+    assert "score_scale" not in payload["retrieved"][0]
+    assert "score_scale" not in payload["pinned"][0]
+
+
+@pytest.mark.asyncio
+async def test_compose_rerank_scale_carries_reranker_model(pinned_store):
+    stats = RetrievalStats(score_scale="rerank", reranker_model="test-reranker-v1")
+    pipeline = _pipeline([_retrieval_result()], stats)
+    payload = (await ContextAssembler(pinned_store, pipeline).compose("deployment")).as_dict()
+    assert payload["score_scale"] == "rerank"
+    assert payload["reranker"] == "test-reranker-v1"
+
+
+@pytest.mark.asyncio
+async def test_compose_omits_scale_without_query(pinned_store):
+    pinned_store.set("profile", "always visible", priority=1)
+    pipeline = _pipeline([_retrieval_result()], RetrievalStats(score_scale="rrf"))
+    payload = (await ContextAssembler(pinned_store, pipeline).compose()).as_dict()
+    assert "score_scale" not in payload
+    assert "reranker" not in payload
+
+
+@pytest.mark.asyncio
+async def test_compose_omits_scale_when_budget_empties_retrieved(pinned_store):
+    pinned_store.set("profile", "x" * 100, priority=1)
+    stats = RetrievalStats(score_scale="rerank", reranker_model="test-reranker-v1")
+    pipeline = _pipeline([_retrieval_result(content="y" * 500)], stats)
+    payload = (
+        await ContextAssembler(pinned_store, pipeline).compose("deployment", max_chars=120)
+    ).as_dict()
+    assert payload["retrieved"] == []
+    assert "score_scale" not in payload
+    assert "reranker" not in payload
+
+
+def test_context_bundle_positional_construction_predates_scale_fields():
+    # The scale fields sit after every pre-#1791 field, so legacy positional
+    # construction keeps its meaning and the new fields default to omitted.
+    bundle = ContextBundle((), (), 10, 5, ("omitted-id",), ("warned",))
+    assert bundle.omitted_block_ids == ("omitted-id",)
+    assert bundle.warnings == ("warned",)
+    assert bundle.score_scale is None
+    assert bundle.reranker is None
+    payload = bundle.as_dict()
+    assert "score_scale" not in payload
+    assert "reranker" not in payload
 
 
 def test_delete_is_exact_and_confirmed_for_shared(pinned_store):
