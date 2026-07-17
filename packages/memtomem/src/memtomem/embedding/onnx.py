@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from collections.abc import Callable
@@ -272,14 +273,23 @@ class OnnxEmbedder:
         return embeddings[0]
 
     async def close(self) -> None:
-        # Teardown runs entirely in ``_close_sync`` on a worker thread, so the
-        # cleanup completes even if the awaiting coroutine is cancelled
-        # (cancelling ``run_in_executor`` abandons the await, not the thread) —
-        # a cancelled lifespan teardown still frees the model. Off the event
-        # loop also means the blocking ``_load_lock`` acquire / executor drain
-        # never stall it.
+        # Teardown runs entirely in ``_close_sync`` on a worker thread, off
+        # the event loop, so the blocking ``_load_lock`` acquire / executor
+        # drain never stall the loop. ``shield`` + settle-on-cancel (same
+        # pattern as ``server/warmup.py``) makes the teardown survive
+        # cancellation of the awaiting task in BOTH phases: a bare await
+        # would cancel a still-queued ``_close_sync`` before it starts
+        # (leaving the model and executor alive), and an already-running
+        # worker can't be interrupted anyway — either way, keep the future
+        # alive, wait for it to settle, then propagate the cancellation.
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._close_sync)
+        future = loop.run_in_executor(None, self._close_sync)
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            with contextlib.suppress(BaseException):
+                await future
+            raise
 
     def _close_sync(self) -> None:
         # Latch closed and drop the model under ``_load_lock`` — the same lock

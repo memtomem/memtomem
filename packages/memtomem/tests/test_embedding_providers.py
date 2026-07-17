@@ -700,21 +700,60 @@ class TestOnnxEmbedder:
             close_task = asyncio.create_task(embedder.close())
             await asyncio.sleep(0.05)  # let close() reach its run_in_executor await
             close_task.cancel()
+            # Unblock the loader so _close_sync (waiting on _load_lock) can
+            # finish — close() settles its teardown future before propagating
+            # the cancellation, so awaiting the cancelled task IS the proof
+            # that teardown completed.
+            release.set()
             with pytest.raises(asyncio.CancelledError):
                 await close_task
-
-            # Cancelled the await, but _close_sync keeps running on its thread.
-            release.set()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(embed_task, timeout=10)
 
-        # Poll briefly: the detached _close_sync finishes the teardown.
-        for _ in range(100):
-            if embedder._closed and embedder._model is None:
-                break
-            await asyncio.sleep(0.05)
         assert embedder._closed is True
         assert embedder._model is None
+
+    @pytest.mark.anyio
+    async def test_close_cancelled_while_queued_still_tears_down(self):
+        """#1792 round 5: cancelling close() while ``_close_sync`` is still
+        QUEUED in the default executor (no free worker yet) must not cancel
+        the teardown — a bare ``await run_in_executor`` would cancel the
+        not-yet-started future, leaving ``_model`` alive and the inference
+        executor running forever. The shield keeps the future alive; it runs
+        once a worker frees."""
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        embedder = OnnxEmbedder(_onnx_config())
+        embedder._model = MagicMock()
+
+        loop = asyncio.get_running_loop()
+        blocker_release = threading.Event()
+        # Single-worker default executor so _close_sync deterministically
+        # queues behind the blocker instead of starting.
+        small = _TPE(max_workers=1, thread_name_prefix="test-default")
+        loop.set_default_executor(small)
+        try:
+            blocker = loop.run_in_executor(None, blocker_release.wait, 10)
+            await asyncio.sleep(0.05)  # blocker occupies the lone worker
+
+            close_task = asyncio.create_task(embedder.close())
+            await asyncio.sleep(0.05)  # _close_sync submitted -> queued
+            close_task.cancel()
+
+            # Teardown cannot have run yet (worker still blocked) — and must
+            # not have been lost with the cancellation.
+            assert embedder._closed is False
+
+            blocker_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await close_task  # settles the shielded teardown, then raises
+            await blocker
+
+            assert embedder._closed is True
+            assert embedder._model is None
+        finally:
+            blocker_release.set()
+            small.shutdown(wait=False)
 
     @staticmethod
     def _blocking_model(stats, stats_lock, entered, release):
