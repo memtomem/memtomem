@@ -42,6 +42,7 @@ from memtomem.web.routes import (
     procedures,
     scratch,
     search,
+    search_runs,
     sessions,
     settings_sync,
     sources,
@@ -116,6 +117,7 @@ _PROD_ROUTERS: list[ModuleType] = [
 ]
 _DEV_ONLY_ROUTERS: list[ModuleType] = [
     namespaces,
+    search_runs,
     sessions,
     scratch,
     procedures,
