@@ -52,6 +52,7 @@ async def expand_query_headings(
     max_terms: int = 3,
     *,
     project_context_root: Path | None = None,
+    exhaustive: bool = False,
 ) -> str:
     """Expand query by appending related heading terms from dense search.
 
@@ -61,6 +62,11 @@ async def expand_query_headings(
     ``SearchPipeline.search`` call. Without it, expansion would
     silently sample only user-tier headings even when the outer
     search is pinned to a project context.
+
+    ``exhaustive`` propagates the caller's deterministic-evaluation mode
+    (#1802) into this leg's own dense probe: heading expansion changes the
+    query text, so a nondeterministic dense cutoff here would perturb the
+    whole downstream ranking during replay.
     """
     try:
         embedding = await embedder.embed_query(query)
@@ -68,6 +74,7 @@ async def expand_query_headings(
             embedding,
             top_k=3,
             project_context_root=project_context_root,
+            exhaustive=exhaustive,
         )
     except Exception:
         logger.warning("Heading expansion failed; returning original query", exc_info=True)

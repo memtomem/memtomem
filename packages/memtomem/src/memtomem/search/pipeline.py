@@ -760,6 +760,7 @@ class SearchPipeline:
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        exhaustive: bool = False,
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
 
@@ -811,6 +812,7 @@ class SearchPipeline:
                     namespace_filter=None,
                     scope_filter=scope_filter,
                     project_context_root=project_context_root,
+                    exhaustive=exhaustive,
                     **metadata_kwargs,
                 )
             except Exception:
@@ -891,6 +893,7 @@ class SearchPipeline:
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         exclude_source_roots: tuple[Path, ...] = (),
+        record: bool = True,
     ) -> tuple[list[SearchResult], RetrievalStats]:
         """Empty-query path (#750): enumerate by filter, skip retrievers.
 
@@ -959,7 +962,12 @@ class SearchPipeline:
         if self._decay_config.enabled and fused:
             from memtomem.search.decay import apply_score_decay
 
-            fused = apply_score_decay(fused, half_life_days=self._decay_config.half_life_days)
+            # Pin decay to the validity instant so replay is time-stable (#1802).
+            fused = apply_score_decay(
+                fused,
+                half_life_days=self._decay_config.half_life_days,
+                now=datetime.fromtimestamp(effective_as_of, tz=UTC),
+            )
 
         if self._access_config.enabled and fused:
             from memtomem.search.access import apply_access_boost
@@ -994,7 +1002,8 @@ class SearchPipeline:
 
         stats.final_total = len(fused)
 
-        if fused:
+        # Skipped under ``record=False`` (#1802) — replay mutates no counters.
+        if fused and record:
 
             async def _increment():
                 await self._storage.increment_access([r.chunk.id for r in fused])
@@ -1025,7 +1034,19 @@ class SearchPipeline:
         exclude_source_roots: tuple[Path, ...] | None = None,
         rerank: bool | None = None,
         origin: str = "internal",
+        record: bool = True,
     ) -> tuple[list[SearchResult], RetrievalStats]:
+        # ``record`` (#1802): the default (True) is today's behavior. False is
+        # the no-side-effects replay/evaluation mode — the call touches no
+        # persistent or cross-call state: it neither reads nor writes the TTL
+        # result cache or the LLM-expansion cache, does not increment access
+        # counters, and does not persist a query-run observation (so
+        # ``stats.query_run_id`` stays None). It also switches the dense legs
+        # to exhaustive KNN so equal-distance boundary rows are selected
+        # deterministically (see ``dense_search(exhaustive=...)``). Pair it
+        # with an explicit ``as_of_unix`` to pin validity + decay to a fixed
+        # instant for byte-reproducible replays.
+        #
         # ``rerank`` (#1766): None = follow server config; False = skip the
         # Stage 3b cross-encoder and collapse the candidate pool to top_k
         # (per-call fast path for latency-bounded callers); True = follow
@@ -1069,6 +1090,7 @@ class SearchPipeline:
                 project_context_root=project_context_root,
                 metadata_filter=metadata_filter,
                 exclude_source_roots=normalized_exclusion_roots,
+                record=record,
             )
 
         original_query = query
@@ -1108,7 +1130,10 @@ class SearchPipeline:
             )
             version_at_start = self._cache_version
             ttl_snapshot = self._cache_ttl
-            if as_of_unix is None and cache_key in self._search_cache:
+            # ``record=False`` (replay) bypasses the TTL result cache in both
+            # directions: it must never be served a cached result nor evict
+            # one, so a concurrent interactive search's cache is untouched.
+            if record and as_of_unix is None and cache_key in self._search_cache:
                 ts, ver, cached_results, cached_stats = self._search_cache[cache_key]
                 if ver == self._cache_version and time.time() - ts < ttl_snapshot:
                     run_stats = dataclass_replace(
@@ -1180,17 +1205,23 @@ class SearchPipeline:
                     # ADR-0011 PR-D round 11: thread the outer search's
                     # project context onto the heading-expansion's dense
                     # probe so it samples from the same scope set the
-                    # primary retrieval is pinned to.
+                    # primary retrieval is pinned to. ``exhaustive`` carries
+                    # replay's deterministic-dense mode into this leg too.
                     query = await expand_query_headings(
                         query,
                         self._storage,
                         self._embedder,
                         max_terms,
                         project_context_root=project_context_root,
+                        exhaustive=not record,
                     )
                 if strategy == "llm":
-                    if query in self._expansion_cache:
-                        query = self._expansion_cache[query]
+                    # Replay (``record=False``) neither reads nor writes the
+                    # expansion cache, so it cannot depend on nor mutate hidden
+                    # prior pipeline state.
+                    cached_expansion = self._expansion_cache.get(query) if record else None
+                    if cached_expansion is not None:
+                        query = cached_expansion
                     elif self._llm_provider is not None:
                         try:
                             original = query
@@ -1199,9 +1230,10 @@ class SearchPipeline:
                                 self._llm_provider,
                                 max_terms,  # type: ignore[arg-type]
                             )
-                            if len(self._expansion_cache) >= _EXPANSION_CACHE_MAX:
-                                self._expansion_cache.clear()
-                            self._expansion_cache[original] = query
+                            if record:
+                                if len(self._expansion_cache) >= _EXPANSION_CACHE_MAX:
+                                    self._expansion_cache.clear()
+                                self._expansion_cache[original] = query
                         except Exception:
                             logger.warning(
                                 "LLM query expansion failed, using original query",
@@ -1235,6 +1267,7 @@ class SearchPipeline:
                         namespace_filter=ns_filter,
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
+                        exhaustive=not record,
                         **metadata_kwargs,
                     )
                 except Exception as exc:
@@ -1299,6 +1332,7 @@ class SearchPipeline:
                             scope_filter=scope_filter,
                             project_context_root=project_context_root,
                             metadata_filter=metadata_filter,
+                            exhaustive=not record,
                         )
                         rescue_chunk_ids = {r.chunk.id for r in rescue_results}
                 except Exception:
@@ -1439,7 +1473,14 @@ class SearchPipeline:
             if self._decay_config.enabled and fused:
                 from memtomem.search.decay import apply_score_decay
 
-                fused = apply_score_decay(fused, half_life_days=self._decay_config.half_life_days)
+                # Pin decay to the same instant as validity (#1802): otherwise
+                # ``apply_score_decay`` defaults to wall clock and a replay with
+                # an explicit ``as_of_unix`` would still drift with real time.
+                fused = apply_score_decay(
+                    fused,
+                    half_life_days=self._decay_config.half_life_days,
+                    now=datetime.fromtimestamp(effective_as_of, tz=UTC),
+                )
 
             # Stage 5: MMR diversity re-ranking
             if self._mmr_config.enabled and not use_dense:
@@ -1521,8 +1562,11 @@ class SearchPipeline:
 
             stats.final_total = len(fused)
 
-            # Increment access counts for returned results (fire-and-forget)
-            if fused:
+            # Increment access counts for returned results (fire-and-forget).
+            # Skipped under ``record=False`` (#1802): replay must not mutate the
+            # counters that feed the access/importance boosts, or a later
+            # baseline-vs-candidate comparison would drift.
+            if fused and record:
 
                 async def _increment():
                     await self._storage.increment_access([r.chunk.id for r in fused])
@@ -1533,20 +1577,25 @@ class SearchPipeline:
                 t.add_done_callback(self._bg_tasks.discard)
 
             stats.latency_ms = round((time.perf_counter() - started_at) * 1000, 3)
-            stats.query_run_id = await self._record_ranked_search(
-                query=original_query,
-                query_embedding=query_embedding if use_dense else [],
-                results=fused,
-                stats=stats,
-                top_k=top_k,
-                origin=origin,
-                namespace=namespace,
-                scope=scope,
-                source_filter=source_filter,
-                tag_filter=tag_filter,
-                metadata_filter=metadata_filter,
-                as_of_unix=as_of_unix,
-                rrf_weights=effective_weights,
+            # Replay persists no observation, so no run id is minted.
+            stats.query_run_id = (
+                await self._record_ranked_search(
+                    query=original_query,
+                    query_embedding=query_embedding if use_dense else [],
+                    results=fused,
+                    stats=stats,
+                    top_k=top_k,
+                    origin=origin,
+                    namespace=namespace,
+                    scope=scope,
+                    source_filter=source_filter,
+                    tag_filter=tag_filter,
+                    metadata_filter=metadata_filter,
+                    as_of_unix=as_of_unix,
+                    rrf_weights=effective_weights,
+                )
+                if record
+                else None
             )
 
             # Store in TTL cache only if version hasn't changed during search.
@@ -1554,7 +1603,7 @@ class SearchPipeline:
             # historical-query result never overwrites the default-path slot
             # (next default caller would otherwise be served a past-snapshot
             # filtering of the same query).
-            if as_of_unix is None and self._cache_version == version_at_start:
+            if record and as_of_unix is None and self._cache_version == version_at_start:
                 cache_stats = dataclass_replace(
                     stats, query_run_id=None, cache_hit=False, latency_ms=None
                 )

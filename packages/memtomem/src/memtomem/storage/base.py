@@ -93,6 +93,8 @@ class StorageBackend(Protocol):
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
+        *,
+        exhaustive: bool = False,
     ) -> list[SearchResult]: ...
 
     # Metadata

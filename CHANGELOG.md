@@ -55,6 +55,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   Omitted/`true` follows `rerank.enabled`; `true` cannot force-enable
   reranking on a server that has it disabled.
 
+### Changed
+
+- **Historical searches decay to the requested instant** (#1802) — a search
+  with an explicit `as_of_unix` now applies time decay relative to that
+  instant instead of the wall clock, matching how validity filtering already
+  treats `as_of`. Default-path searches (no `as_of`) are unchanged. This makes
+  point-in-time queries reproducible and underpins the Quality Lab's
+  no-side-effects replay mode (new `record=False` on the internal search
+  pipeline), which additionally skips access-counter increments, run
+  observations, and both search caches.
+
 ### Fixed
 
 - **Incremental CRUD re-indexing** (#1788) — `mem_edit`, `mem_delete`, and Web
