@@ -177,6 +177,37 @@ class TestBoldLabelSplit:
         # At least one chunk should open with a bold label
         assert any(c.content.lstrip().startswith("**") for c in chunks)
 
+    def test_bold_label_split_line_ranges_match_source(self):
+        # Regression for #1794: bold-label parts are separated by a single
+        # ``\n`` (not a blank line), so the pre-#1793 ``+2`` per-part line
+        # accounting inflated the counter by a phantom line per entry and the
+        # recorded ranges drifted past — and eventually inverted beyond — the
+        # end of the file. Assert every sub-chunk's recorded range actually
+        # contains its content, the last untested split path with real
+        # multi-line spans.
+        config = FakeIndexingConfig()
+        config.chunk_overlap_tokens = 0
+        chunker = MarkdownChunker(indexing_config=config)
+        body = "\n".join(
+            f"**Label {i:02d}:** entry text with enough words to consume tokens here."
+            for i in range(12)
+        )
+        content = f"## Changelog\n\n{body}"
+
+        chunks = chunker.chunk_file(Path("/test.md"), content)
+
+        assert len(chunks) > 1
+        source_lines = content.splitlines()
+        for index, chunk in enumerate(chunks):
+            chunk_lines = chunk.content.splitlines()
+            actual_start = source_lines.index(chunk_lines[0]) + 1
+            actual_end = actual_start + len(chunk_lines) - 1
+
+            assert chunk_lines == source_lines[actual_start - 1 : actual_end]
+            assert chunk.metadata.start_line == (1 if index == 0 else actual_start)
+            assert chunk.metadata.end_line == actual_end
+            assert 1 <= chunk.metadata.start_line <= chunk.metadata.end_line <= len(source_lines)
+
     def test_single_bold_label_does_not_split(self):
         chunker = MarkdownChunker(indexing_config=FakeIndexingConfig())
         # A single **Note:** inside otherwise prose text — not enough
