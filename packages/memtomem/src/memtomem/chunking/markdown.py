@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -199,6 +200,74 @@ def _split_on_bold_labels(text: str) -> list[str]:
     if tail:
         parts.append(tail)
     return parts or [text]
+
+
+@dataclass(frozen=True)
+class _TextSpan:
+    text: str
+    start: int
+    end: int
+
+
+def _is_atomic_markdown_part(text: str) -> bool:
+    """Return whether *text* must stay intact because it contains a fence or table."""
+    lines = text.splitlines()
+    nonempty_lines = [line for line in lines if line.strip()]
+    return any(_FENCE_OPEN_RE.match(line) for line in lines) or (
+        bool(nonempty_lines) and all(line.lstrip().startswith("|") for line in nonempty_lines)
+    )
+
+
+def _locate_text_spans(text: str, parts: list[str]) -> list[_TextSpan]:
+    spans: list[_TextSpan] = []
+    cursor = 0
+    for part in parts:
+        if not part:
+            continue
+        start = text.find(part, cursor)
+        if start < 0:
+            return [_TextSpan(text, 0, len(text))]
+        end = start + len(part)
+        spans.append(_TextSpan(part, start, end))
+        cursor = end
+    return spans or [_TextSpan(text, 0, len(text))]
+
+
+def _split_oversized_part(text: str, max_chars: int) -> list[_TextSpan]:
+    """Split an oversized prose part while keeping fences and pipe tables atomic.
+
+    Exact source spans preserve separators and file-line accounting during merging.
+    """
+    whole = _TextSpan(text, 0, len(text))
+    if len(text) <= max_chars or _is_atomic_markdown_part(text):
+        return [whole]
+
+    lines = text.splitlines()
+    if len(lines) > 1:
+        natural_boundaries = [index + 1 for index, char in enumerate(text) if char == "\n"]
+    else:
+        natural_boundaries = [match.end() for match in _SENTENCE_RE.finditer(text)]
+
+    result: list[_TextSpan] = []
+    start = 0
+    while len(text) - start > max_chars:
+        limit = start + max_chars
+        cut = max(
+            (boundary for boundary in natural_boundaries if start < boundary <= limit),
+            default=0,
+        )
+        if cut == 0:
+            cut = limit
+            while cut > start and not text[cut - 1].isspace():
+                cut -= 1
+            if cut == start:
+                cut = limit
+        if text[start:cut].strip():
+            result.append(_TextSpan(text[start:cut], start, cut))
+        start = cut
+    if text[start:].strip():
+        result.append(_TextSpan(text[start:], start, len(text)))
+    return result or [whole]
 
 
 class MarkdownChunker:
@@ -519,61 +588,73 @@ class MarkdownChunker:
         # Last resort: split by sentences. Skipped entirely when the whole
         # section is inside one fenced block — sentence splitting a code
         # block would mangle it. The block is accepted as oversize instead.
-        if (
-            len(parts) == 1
-            and len(parts[0]) > max_chars
-            and not _FENCE_OPEN_RE.match(parts[0].lstrip("\n").splitlines()[0] if parts[0] else "")
-        ):
+        if len(parts) == 1 and len(parts[0]) > max_chars and not _is_atomic_markdown_part(parts[0]):
             parts = _SENTENCE_RE.split(text)
+
+        # Paragraph splitting can produce several parts while one individual
+        # part is still oversized (for example, a long bullet list with no
+        # blank lines). Refine each such part before the size-based merge while
+        # retaining exact character spans in the original section text.
+        located_parts = _locate_text_spans(text, parts)
+        text_parts: list[_TextSpan] = []
+        for part in located_parts:
+            # Preserve blank-separated single-line paragraphs; refine multiline
+            # structures or the sole part when no higher boundary split it.
+            should_refine = len(located_parts) == 1 or "\n" in part.text
+            pieces = (
+                _split_oversized_part(part.text, max_chars)
+                if should_refine
+                else [_TextSpan(part.text, 0, len(part.text))]
+            )
+            text_parts.extend(
+                _TextSpan(piece.text, part.start + piece.start, part.start + piece.end)
+                for piece in pieces
+            )
 
         # Merge small parts into chunks respecting max_chars
         result: list[dict] = []
         current = ""
-        current_start = base_line
-        # Seed the line counter with ``body_offset`` so file-line math is
-        # right after the caller stripped a header. Sub-chunk 1 keeps
-        # ``current_start = base_line`` (heading) until the first
-        # boundary; subsequent sub-chunks pick up
-        # ``base_line + line_offset`` and inherit the seed.
-        line_offset = body_offset
+        current_start = 0
+        current_end = 0
 
-        for part in parts:
-            if current and len(current) + len(part) + 2 > max_chars:
-                # ``line_offset`` was just incremented past the previous
-                # part *plus* its trailing ``\n\n`` separator (the ``+2``
-                # below). Subtract that separator so ``end_line`` lands
-                # on the part's last content line, not on the blank line
-                # between paragraphs — otherwise ``mem_edit``'s
-                # ``replace_chunk_body`` would absorb the gap on save.
-                result.append(
-                    {
-                        "text": current.strip(),
-                        "start_line": current_start,
-                        "end_line": base_line + line_offset - 2,
-                    }
-                )
+        def chunk_record(chunk_text: str, span_start: int, span_end: int) -> dict:
+            source_segment = text[span_start:span_end]
+            leading_chars = len(source_segment) - len(source_segment.lstrip())
+            trimmed_start = span_start + leading_chars
+            trimmed_end = span_start + len(source_segment.rstrip())
+            last_char = max(trimmed_start, trimmed_end - 1)
+            source_start_line = base_line + body_offset + text.count("\n", 0, trimmed_start)
+            source_end_line = base_line + body_offset + text.count("\n", 0, last_char)
+            return {
+                "text": chunk_text.strip(),
+                # Keep the first sub-chunk anchored to its heading for mem_edit.
+                "start_line": base_line if not result else source_start_line,
+                "end_line": source_end_line,
+            }
+
+        for part in text_parts:
+            separator = text[current_end : part.start] if current else ""
+            if current and len(current) + len(separator) + len(part.text) > max_chars:
+                result.append(chunk_record(current, current_start, current_end))
                 # Apply overlap
                 if overlap_chars > 0:
                     overlap_text = current[-overlap_chars:]
-                    current = overlap_text + "\n\n" + part
+                    current = overlap_text + "\n\n" + part.text
                 else:
-                    current = part
-                current_start = base_line + line_offset
+                    current = part.text
+                current_start = part.start
+                current_end = part.end
             else:
                 if current:
-                    current += "\n\n" + part
+                    current += separator + part.text
+                    current_end = part.end
                 else:
-                    current = part
-            line_offset += part.count("\n") + 2
+                    current = part.text
+                    current_start = part.start
+                    current_end = part.end
 
         if current.strip():
-            result.append(
-                {
-                    "text": current.strip(),
-                    "start_line": current_start,
-                    "end_line": section["end_line"],
-                }
-            )
+            result.append(chunk_record(current, current_start, current_end))
 
         # Mark overlap
         for i, r in enumerate(result):
