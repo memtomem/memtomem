@@ -127,8 +127,11 @@ class HistoryMixin:
         ).isoformat(timespec="seconds")
         db = self._get_db()
         deleted = db.execute("DELETE FROM query_history WHERE created_at < ?", (cutoff,)).rowcount
+        # Commit unconditionally: the DELETE opens an implicit transaction
+        # even when it matches zero rows, and leaving it open makes the next
+        # explicit BEGIN IMMEDIATE (save_search_feedback) fail.
+        db.commit()
         if deleted:
-            db.commit()
             _log.info(
                 "Pruned %d old query_history rows (>%d days)", deleted, self._HISTORY_MAX_AGE_DAYS
             )
@@ -242,12 +245,39 @@ class HistoryMixin:
             # BEGIN IMMEDIATE makes these unreachable in practice; classify
             # anyway so a constraint hit never leaks as an internal error.
             db.rollback()
-            if "FOREIGN KEY" in str(exc).upper():
-                raise KeyError(f"run_id {run_id!r} not found") from exc
-            raise StorageError(f"feedback write failed: {exc}") from exc
+            return self._classify_feedback_integrity_error(db, exc, run_id, chunk_id, judgment)
         except Exception:
             db.rollback()
             raise
+
+    def _classify_feedback_integrity_error(
+        self, db, exc: sqlite3.IntegrityError, run_id: str, chunk_id: str, judgment: str
+    ) -> dict:
+        """Map a constraint hit on the feedback write to its domain meaning.
+
+        FK violation → the run was pruned between validation and insert
+        (KeyError, same as an unknown run). Unique violation → a concurrent
+        writer landed this (run_id, chunk_id) first: re-read and classify
+        exactly like the existing-row branch (idempotent success or
+        conflict). Anything else stays a StorageError.
+        """
+        message = str(exc).upper()
+        if "FOREIGN KEY" in message:
+            raise KeyError(f"run_id {run_id!r} not found") from exc
+        if "UNIQUE" in message:
+            landed = db.execute(
+                "SELECT judgment, created_at, updated_at FROM search_feedback "
+                "WHERE run_id = ? AND chunk_id = ?",
+                (run_id, chunk_id),
+            ).fetchone()
+            if landed is not None:
+                if landed[0] == judgment:
+                    return self._feedback_row(run_id, chunk_id, judgment, landed[1], landed[2])
+                raise FeedbackConflictError(
+                    f"feedback for run {run_id!r} chunk {chunk_id!r} is already "
+                    f"{landed[0]!r}; pass replace=true to overwrite"
+                ) from exc
+        raise StorageError(f"feedback write failed: {exc}") from exc
 
     @staticmethod
     def _feedback_row(
