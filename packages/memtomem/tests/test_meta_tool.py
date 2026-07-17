@@ -241,7 +241,7 @@ class TestMemVersion:
     async def test_capabilities_stm_bridge(self):
         parsed = json.loads(await mem_version())
         capabilities = parsed["capabilities"]
-        assert capabilities["context_compose"] == {"schema_version": 3}
+        assert capabilities["context_compose"] == {"schema_version": 4}
         assert capabilities["candidate_propose"] == {"schema_version": 1}
         assert "context_compose" in ACTIONS
         assert "candidate_propose" in ACTIONS
