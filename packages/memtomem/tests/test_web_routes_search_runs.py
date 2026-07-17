@@ -120,6 +120,31 @@ class TestRunDetail:
         assert judged["feedback_updated_at"] == "2026-07-17T00:00:00.000002+00:00"
         assert unjudged["chunk_id"] == "c2" and unjudged["judgment"] is None
 
+    async def test_snapshot_out_is_an_allowlist(self, app, client):
+        # SnapshotEntryOut is a deliberate allowlist, not a passthrough
+        # (#1812): a key the snapshot writer grows later — including a writer
+        # regression that leaked raw content or an absolute path — must be
+        # dropped, never auto-surfaced. This response is the privacy boundary.
+        app.state.storage.get_search_run.return_value = {
+            **RUN_DETAIL,
+            "result_snapshot": [
+                {
+                    **RUN_DETAIL["result_snapshot"][0],
+                    "novelty_score": 0.42,  # benign future field
+                    "content": "raw secret text",  # writer-regression leak
+                    "source_path": "/Users/someone/private/note.md",  # absolute path
+                }
+            ],
+        }
+        resp = await client.get(f"/api/search/runs/{RUN_ID}")
+        assert resp.status_code == 200
+        entry = resp.json()["results"][0]
+        assert "novelty_score" not in entry
+        assert "content" not in entry
+        assert "source_path" not in entry
+        # The declared safe fields still render.
+        assert entry["source_name"] == "note.md" and entry["content_hash"] == "abc"
+
     async def test_unknown_run_maps_to_404(self, app, client):
         app.state.storage.get_search_run.side_effect = KeyError("run_id 'x' not found")
         resp = await client.get("/api/search/runs/x")
