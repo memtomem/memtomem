@@ -34,6 +34,7 @@ from memtomem.config import (
     memory_dir_kind,
     save_config_overrides,
 )
+from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.search.reranker.factory import create_reranker
 from memtomem.storage.sqlite_helpers import norm_path
 from memtomem.tools.memory_writer import append_entry
@@ -708,11 +709,7 @@ async def patch_config(
 
                 if onnx_batch_changed:
                     embedder = getattr(request.app.state, "embedder", None)
-                    class_setter = getattr(type(embedder), "set_onnx_batch_size", None)
-                    setter = getattr(embedder, "set_onnx_batch_size", None)
-                    if callable(setter):
-                        if callable(class_setter) or "set_onnx_batch_size" in vars(embedder):
-                            setter(config.embedding.onnx_batch_size)
+                    publish_onnx_batch_size(embedder, config.embedding.onnx_batch_size)
 
                 if applied or rerank_changed:
                     search_pipeline.invalidate_cache()

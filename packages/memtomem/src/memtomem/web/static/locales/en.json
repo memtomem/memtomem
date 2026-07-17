@@ -1265,6 +1265,7 @@
   "shortcut.toggle_shortcuts": "Toggle this help",
 
   "common.loading": "Loading...",
+  "common.model_limit": "model limit",
   "common.retry": "Retry",
   "common.technical_details": "Technical details",
   "common.refresh": "Refresh",

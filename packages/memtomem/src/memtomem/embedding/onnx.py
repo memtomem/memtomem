@@ -71,7 +71,11 @@ def _configure_tokenizer_limit(
     return tokenizer, applied_limit
 
 
-def _truncated_input_indexes(tokenizer: object | None, texts: list[str]) -> list[int]:
+def _truncated_input_indexes(
+    tokenizer: object | None,
+    texts: list[str],
+    max_sequence_tokens: int | None = None,
+) -> list[int]:
     """Return zero-based indexes truncated by the configured tokenizer."""
 
     if tokenizer is None:
@@ -84,6 +88,16 @@ def _truncated_input_indexes(tokenizer: object | None, texts: list[str]) -> list
             # every token/overflow object for a whole file at once. FastEmbed
             # still performs its own batched tokenization for inference.
             for index, text in enumerate(texts):
+                # Byte-level tokenizers cannot emit more tokens than ASCII
+                # bytes plus special tokens. Skip exact preflight for the
+                # common short-ASCII path, but keep it for non-ASCII and long
+                # inputs where a chars/token heuristic could miss truncation.
+                if (
+                    max_sequence_tokens is not None
+                    and text.isascii()
+                    and len(text) + 8 <= max_sequence_tokens
+                ):
+                    continue
                 if bool(getattr(encode(text), "overflowing", ())):
                     truncated.append(index)
         except Exception as exc:
@@ -302,7 +316,9 @@ class OnnxEmbedder:
         # Snapshot once so a concurrent config update applies to the next
         # inference call, never halfway through this generator.
         batch_size = self._onnx_batch_size
-        truncated = _truncated_input_indexes(self._tokenizer, texts)
+        truncated = _truncated_input_indexes(
+            self._tokenizer, texts, self._active_max_sequence_tokens
+        )
         if truncated:
             display_indices = chunk_indices or [index + 1 for index in range(len(texts))]
             labels = [display_indices[index] for index in truncated]

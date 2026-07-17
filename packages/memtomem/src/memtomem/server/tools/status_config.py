@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from memtomem import __version__
+from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -561,12 +562,7 @@ async def mem_config(
             # Invalidate search cache so changes take effect immediately.
             app.search_pipeline.invalidate_cache()
             if key == "embedding.onnx_batch_size":
-                class_setter = getattr(type(app.embedder), "set_onnx_batch_size", None)
-                setter = getattr(app.embedder, "set_onnx_batch_size", None)
-                if callable(setter) and (
-                    callable(class_setter) or "set_onnx_batch_size" in vars(app.embedder)
-                ):
-                    setter(app.config.embedding.onnx_batch_size)
+                publish_onnx_batch_size(app.embedder, app.config.embedding.onnx_batch_size)
             # Rebuild FTS index when tokenizer changes.
             if key == "search.tokenizer":
                 from memtomem.storage.fts_tokenizer import set_tokenizer

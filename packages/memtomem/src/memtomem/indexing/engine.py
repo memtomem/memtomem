@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import inspect
 import logging
 import os
-import inspect
 import stat as stat_module
 import time
 from collections.abc import Callable, Iterable
@@ -616,7 +616,7 @@ class IndexEngine:
             skipped_chunks=sum(r["skipped"] for r in file_results),
             deleted_chunks=sum(r["deleted"] for r in file_results),
             duration_ms=duration,
-            errors=tuple(all_errors),
+            errors=tuple(dict.fromkeys(all_errors)),
             new_chunk_ids=tuple(all_new_chunk_ids),
             resolved_namespaces=tuple(resolved_ns),
             blocked_files=len(blocked_paths),
@@ -1611,7 +1611,7 @@ class IndexEngine:
                 "skipped_chunks": agg["skipped"],
                 "deleted_chunks": agg["deleted"],
                 "duration_ms": round(duration, 1),
-                "errors": all_errors,
+                "errors": list(dict.fromkeys(all_errors)),
                 "resolved_namespaces": resolved_ns_for_event,
                 "blocked_files": agg["blocked"],
                 "blocked_paths": blocked_paths,

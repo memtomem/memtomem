@@ -1265,6 +1265,7 @@
   "shortcut.toggle_shortcuts": "이 도움말 표시/숨기기",
 
   "common.loading": "로딩 중...",
+  "common.model_limit": "모델 한도",
   "common.retry": "다시 시도",
   "common.technical_details": "기술 세부정보",
   "common.refresh": "새로고침",

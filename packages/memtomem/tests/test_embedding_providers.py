@@ -24,6 +24,7 @@ from memtomem.embedding.factory import create_embedder
 from memtomem.embedding.noop import NoopEmbedder
 from memtomem.embedding.ollama import OllamaEmbedder
 from memtomem.embedding.onnx import OnnxEmbedder
+from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.embedding.openai import OpenAIEmbedder
 from memtomem.embedding.retry import parse_retry_after, with_retry
 from memtomem.errors import ConfigError, EmbeddingError
@@ -547,6 +548,7 @@ class _FakeTokenizer:
         }
         self.truncated_inputs = truncated_inputs or set()
         self.enable_calls: list[dict] = []
+        self.encode_calls: list[str] = []
 
     def enable_truncation(self, **kwargs) -> None:
         self.enable_calls.append(kwargs)
@@ -556,6 +558,7 @@ class _FakeTokenizer:
         return [_FakeEncoding(truncated=text in self.truncated_inputs) for text in texts]
 
     def encode(self, text):
+        self.encode_calls.append(text)
         return _FakeEncoding(truncated=text in self.truncated_inputs)
 
 
@@ -604,6 +607,14 @@ class TestOnnxEmbedder:
         embedder.set_onnx_batch_size(4)
         assert embedder.onnx_batch_size == 4
 
+    def test_runtime_batch_publisher_rejects_dynamic_mock_capability(self):
+        assert publish_onnx_batch_size(AsyncMock(), 4) is False
+
+    def test_runtime_batch_publisher_accepts_concrete_capability(self):
+        embedder = OnnxEmbedder(_onnx_config(onnx_batch_size=8))
+        assert publish_onnx_batch_size(embedder, 4) is True
+        assert embedder.onnx_batch_size == 4
+
     @pytest.mark.anyio
     async def test_tokenizer_cap_and_onnx_batch_forwarded(self):
         model, tokenizer = _make_tokenized_embedding_model([[0.1, 0.2, 0.3]])
@@ -626,6 +637,19 @@ class TestOnnxEmbedder:
         ]
         model.embed.assert_called_once_with(["hello"], batch_size=8)
         assert embedder._active_max_sequence_tokens == 1024
+        assert tokenizer.encode_calls == []
+
+    @pytest.mark.anyio
+    async def test_non_ascii_input_keeps_exact_truncation_preflight(self):
+        model, tokenizer = _make_tokenized_embedding_model([[0.1]])
+        embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=1024, dimension=1))
+        embedder._model = model
+        embedder._tokenizer = tokenizer
+        embedder._active_max_sequence_tokens = 1024
+
+        await embedder.embed_texts(["짧은 입력"])
+
+        assert tokenizer.encode_calls == ["짧은 입력"]
 
     @pytest.mark.anyio
     async def test_tokenizer_cap_zero_preserves_model_limit(self):
@@ -663,7 +687,7 @@ class TestOnnxEmbedder:
 
     @pytest.mark.anyio
     async def test_truncation_warning_uses_context_without_content(self, caplog):
-        sensitive = "do-not-log-this-content"
+        sensitive = "do-not-log-this-content-" * 50
         model, tokenizer = _make_tokenized_embedding_model(
             [[0.1], [0.2]], truncated_inputs={sensitive}
         )

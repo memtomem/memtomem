@@ -49,6 +49,7 @@ from memtomem.config import (
     load_config_d,
     load_config_overrides,
 )
+from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.search.reranker.base import close_reranker_safely
 
 if TYPE_CHECKING:
@@ -335,10 +336,7 @@ async def apply_runtime_config_changes(
 
     if onnx_batch_changed and app is not None:
         embedder = getattr(app.state, "embedder", None)
-        class_setter = getattr(type(embedder), "set_onnx_batch_size", None)
-        setter = getattr(embedder, "set_onnx_batch_size", None)
-        if callable(setter) and (callable(class_setter) or "set_onnx_batch_size" in vars(embedder)):
-            setter(new_cfg.embedding.onnx_batch_size)
+        publish_onnx_batch_size(embedder, new_cfg.embedding.onnx_batch_size)
 
     if tokenizer_changed and storage is not None:
         from memtomem.storage.fts_tokenizer import set_tokenizer

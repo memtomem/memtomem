@@ -2609,6 +2609,24 @@ class TestEmbedConcurrency:
         assert result.indexed_chunks == 0
         assert any("indexing is disabled" in error for error in result.errors)
 
+    async def test_bulk_policy_mismatch_deduplicates_errors(self, components, memory_dir):
+        for name in ("one.md", "two.md"):
+            (memory_dir / name).write_text(f"# {name}\n\nContent.\n", encoding="utf-8")
+        components.storage._policy_mismatch = (
+            "onnx:v1:max_sequence_tokens=0",
+            "onnx:v1:max_sequence_tokens=1024",
+            0,
+            1024,
+        )
+        try:
+            result = await components.index_engine.index_path(memory_dir)
+        finally:
+            components.storage.clear_embedding_mismatch()
+
+        assert result.indexed_chunks == 0
+        assert len(result.errors) == 1
+        assert "indexing is disabled" in result.errors[0]
+
     def test_resolve_embed_limit_validation(self):
         """Direct unit pins for ``_resolve_embed_limit`` — the integration
         tests can't prove the upper clamp because the file-level semaphore
