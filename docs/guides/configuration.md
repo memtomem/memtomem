@@ -223,6 +223,7 @@ in-memory cache doesn't re-pin the dropped values on the next save.
 | `MEMTOMEM_EMBEDDING__BATCH_SIZE` | `64` | Texts per embedding API call |
 | `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` | `8` | Texts per local FastEmbed/ONNX inference batch (runtime-mutable) |
 | `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` | `1024` | Actual-token cap per local ONNX input; `0` restores the model limit (restart required) |
+| `MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA` | `false` | Cache CPU allocations for reuse; disabled by default to release peak RSS after local ONNX indexing (restart required) |
 | `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` | `4` | Max parallel embedding requests |
 | `MEMTOMEM_EMBEDDING__THREADS` | `4` | ONNX intra-op thread cap for the local `fastembed` provider |
 | `MEMTOMEM_EMBEDDING__PROGRESS_THRESHOLD` | `32` | Show an embedding progress indicator once a batch exceeds this many texts |
@@ -235,6 +236,12 @@ created before this cap was enabled, force-reindex every memory directory so
 old and new vectors use the same prefix policy. Set
 `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=0` before restart to retain the
 model's previous maximum context instead.
+
+The ONNX CPU memory arena changes allocator reuse only, so toggling it does not
+change the embedding policy fingerprint and does not require re-indexing. It is
+a restart-only setting because ORT session options are fixed at model load. The
+default `false` releases peak allocations after indexing; set it to `true` only
+for an explicit compatibility or throughput trade-off.
 
 ## Reset Flow
 
