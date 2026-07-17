@@ -67,9 +67,11 @@ How to read the stats:
 
 ### Force re-index
 
-After switching embedding models, upgrading memtomem, or for a clean
-rebuild, pass `force=True` — every chunk is re-embedded regardless of
-hash match, so they all show up under `Indexed`:
+After switching embedding models or when recovering suspected vector/index
+corruption, pass `force=True` — every chunk is re-embedded regardless of hash
+match, so they all show up under `Indexed`. A first index or ordinary content
+edit does not need force; the incremental path embeds new hashes and refreshes
+shifted line metadata without rewriting unchanged chunks:
 
 ```
 mem_index(path="~/notes", force=True)

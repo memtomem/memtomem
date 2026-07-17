@@ -1300,6 +1300,9 @@ class IndexEngine:
             if diff_result.to_delete:
                 await self._storage.delete_chunks(diff_result.to_delete)
 
+            if diff_result.unchanged:
+                await self._storage.update_chunk_line_ranges(diff_result.unchanged)
+
             if diff_result.to_upsert:
                 await self._storage.upsert_chunks(diff_result.to_upsert)
 

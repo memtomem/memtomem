@@ -99,7 +99,7 @@ async def _locked_chunk(
        under us — this is what closes the cross-process hole #1570 left open.
     3. Re-fetch *under both locks* so ``start_line`` / ``end_line`` reflect any
        CRUD write that committed while we waited (chunk UUIDs are stable across
-       ``index_file(force=True)``, ADR-0005).
+       incremental re-index, ADR-0005 and #1788).
 
     If ``memory-migrate`` grabbed L2 first and moved the file between the
     unlocked fetch and our re-fetch, the fresh chunk's ``source_file`` differs;
@@ -153,7 +153,7 @@ async def _mutate_file_and_reindex(
     mutate: Callable[[], None],
     op: str,
 ) -> tuple[IndexingStats | None, str | None]:
-    """Backup-read → ``mutate`` → force re-index, rolling back on failure.
+    """Backup-read → ``mutate`` → incremental re-index, rolling back on failure.
 
     Shared tail of ``mem_edit`` and ``mem_delete``'s chunk branch so the
     rollback contract lives in exactly one place. The caller MUST hold the
@@ -170,17 +170,13 @@ async def _mutate_file_and_reindex(
     original = await asyncio.to_thread(source_file.read_text, encoding="utf-8")
     try:
         await asyncio.to_thread(mutate)
-        stats = await app.index_engine.index_file(
-            source_file, force=True, already_scanned=True, lock_held=True
-        )
+        stats = await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         app.search_pipeline.invalidate_cache()
         return stats, None
     except Exception as exc:
         await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")
         try:
-            await app.index_engine.index_file(
-                source_file, force=True, already_scanned=True, lock_held=True
-            )
+            await app.index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         except Exception:
             logger.warning("Rollback re-index also failed", exc_info=True)
         app.search_pipeline.invalidate_cache()
@@ -892,10 +888,10 @@ async def mem_delete(
         assert sf_path is not None
         # Same per-file lock as the chunk branch (issue #1570) plus the
         # cross-process sidecar (#1587): without both, a locked CRUD span's
-        # ``index_file(force=True)`` — in this process or another — lands after
-        # this delete and re-upserts the whole file, silently resurrecting the
-        # rows just removed. The Gate-B scope probe runs under the locks too so
-        # it sees the same state the delete acts on.
+        # the edit's incremental ``index_file`` — in this process or another —
+        # lands after this delete and re-upserts the whole file, silently
+        # resurrecting the rows just removed. The Gate-B scope probe runs under
+        # the locks too so it sees the same state the delete acts on.
         from memtomem.context._atomic import (
             _CRUD_SIDECAR_LOCK_BUDGET_S,
             _lock_path_for,

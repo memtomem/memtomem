@@ -44,6 +44,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Incremental CRUD re-indexing** (#1788) — `mem_edit`, `mem_delete`, and Web
+  chunk edits no longer force-re-embed every sibling chunk in the source file.
+  Hash-matched siblings keep their UUID, vector, FTS row, timestamps, and
+  personalization while a metadata-only update refreshes shifted source line
+  ranges. Explicit CLI/MCP/Web force re-indexing still re-embeds every chunk.
 - **Reranker hot-swap use-after-close** (#1777) — hot reload (disk config
   edit or `PATCH /api/config`) no longer closes the outgoing reranker while
   an in-flight search still holds it; the close is deferred until the last

@@ -121,16 +121,15 @@ class TestMemEditConcurrency:
         entered = asyncio.Event()
         release = asyncio.Event()
         real_index = app.index_engine.index_file
-        force_calls = 0
+        reindex_calls = 0
 
         async def gated_index(path, *args, **kwargs):
-            nonlocal force_calls
-            if kwargs.get("force"):
-                force_calls += 1
-                if force_calls == 1:  # the edit's forward re-index
-                    entered.set()
-                    await release.wait()
-                    raise RuntimeError("boom")
+            nonlocal reindex_calls
+            reindex_calls += 1
+            if reindex_calls == 1:  # the edit's forward re-index
+                entered.set()
+                await release.wait()
+                raise RuntimeError("boom")
             return await real_index(path, *args, **kwargs)
 
         app.index_engine.index_file = gated_index  # type: ignore[method-assign]
@@ -196,7 +195,7 @@ class TestMemEditConcurrency:
 class TestBulkDeleteSerialization:
     """The bulk ``mem_delete`` branches (``source_file=`` / ``namespace=``)
     only remove index rows, so a concurrent locked CRUD span whose
-    ``index_file(force=True)`` lands *after* the bulk delete re-upserts the
+    incremental ``index_file`` lands *after* the bulk delete re-upserts the
     whole file and silently resurrects the rows the delete just removed.
     Both branches must serialize on the same per-file lock(s).
     """
@@ -223,7 +222,7 @@ class TestBulkDeleteSerialization:
         real_index = app.index_engine.index_file
 
         async def gated_index(path, *args, **kwargs):
-            if kwargs.get("force") and not entered.is_set():
+            if not entered.is_set():
                 entered.set()
                 await release.wait()
             return await real_index(path, *args, **kwargs)

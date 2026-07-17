@@ -14,7 +14,11 @@ from memtomem.cli._errors import raise_cli_error
 @click.command()
 @click.argument("path", default=".", required=False)
 @click.option("--recursive/--no-recursive", default=True, help="Recurse into subdirectories")
-@click.option("--force", is_flag=True, help="Force re-index (ignore hashes)")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-embed every chunk (use for embedding changes or index recovery)",
+)
 @click.option("--namespace", "-n", default=None, help="Target namespace")
 @click.option(
     "--debounce-window",
