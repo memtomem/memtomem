@@ -258,6 +258,61 @@ class TestLifespanWarmup:
 
 class TestShutdownThreadSettlement:
     @pytest.mark.asyncio
+    async def test_double_cancel_still_settles_queued_loader(self):
+        """#1803: repeated cancellation must not cancel a queued load while
+        ``_warm_one`` is already settling the first cancellation.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from memtomem.server.warmup import _warm_one
+
+        blocker_started = threading.Event()
+        blocker_release = threading.Event()
+        load_calls: list[bool] = []
+
+        def occupy_worker() -> None:
+            blocker_started.set()
+            blocker_release.wait(timeout=10)
+
+        class _QueuedLocalModel:
+            _model: object | None = None
+
+            def _get_model(self) -> object:
+                load_calls.append(True)
+                self._model = object()
+                return self._model
+
+        loop = asyncio.get_running_loop()
+        small = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-default")
+        blocker = small.submit(occupy_worker)
+        assert blocker_started.wait(timeout=5), "default-executor blocker did not start"
+        loop.set_default_executor(small)
+
+        holder = _QueuedLocalModel()
+        task = asyncio.create_task(_warm_one("embedder", "onnx", "model", holder))
+        try:
+            await asyncio.sleep(0)  # submit the model load behind the blocker
+            task.cancel()
+            await asyncio.sleep(0)  # enter the first shielded settle iteration
+            assert not task.done()
+
+            task.cancel()
+            await asyncio.sleep(0)  # deliver the second cancellation mid-settle
+            assert not task.done(), "second cancel must not lose the queued load"
+            assert load_calls == []
+
+            blocker_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            blocker.result(timeout=5)
+
+            assert load_calls == [True]
+            assert holder._model is not None
+        finally:
+            blocker_release.set()
+            small.shutdown(wait=False)
+
+    @pytest.mark.asyncio
     async def test_close_waits_for_inflight_loader_thread(self, isolated_state, monkeypatch):
         """Cancelling the warmup task can't interrupt a loader *thread* —
         ``close()`` must wait for it to settle before tearing components

@@ -60,17 +60,30 @@ async def _warm_one(
         return WarmupOutcome(component, provider, model, "already-loaded")
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(None, load_model)
-    try:
-        await asyncio.shield(future)
-    except asyncio.CancelledError:
-        # A worker thread can't be interrupted — cancelling only the
-        # awaiting task would leave the load running while shutdown
-        # closes components under it. Wait for the in-flight load to
-        # settle (``close()`` awaits this task after cancelling), then
-        # propagate the cancellation.
+    # A worker thread can't be interrupted — cancelling only the awaiting
+    # task would leave the load running while shutdown closes components
+    # under it. Every settle-await stays shielded so repeated cancellation
+    # cannot cancel a load that is still queued in the executor. Once the
+    # load settles, preserve cancellation as the caller-visible outcome.
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(future)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if future.done():
+                break
+        except BaseException:
+            if cancelled:
+                break
+            raise
+    if cancelled:
+        # Consume a failed/cancelled load in the completion race while
+        # preserving the pre-existing cancellation-wins contract.
         with contextlib.suppress(BaseException):
-            await future
-        raise
+            future.result()
+        raise asyncio.CancelledError
     return WarmupOutcome(component, provider, model, "loaded")
 
 

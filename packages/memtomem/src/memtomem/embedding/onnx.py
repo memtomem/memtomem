@@ -280,9 +280,9 @@ class OnnxEmbedder:
         # still-queued ``_close_sync`` before it starts (which would leave
         # the model and executor alive; an already-running worker can't be
         # interrupted anyway). On cancellation we keep settling until the
-        # future is done, then propagate. NOTE: ``server/warmup.py`` uses a
-        # weaker settle (bare ``await future`` after the first cancel) that
-        # a second cancellation can still pierce — don't copy that shape.
+        # future is done, then propagate. ``server/warmup.py`` uses the same
+        # repeated-shield settlement for model loads; keep both paths aligned
+        # so neither loses queued executor work (#1803).
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, self._close_sync)
         cancelled = False
