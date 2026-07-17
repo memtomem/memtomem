@@ -65,6 +65,7 @@ class FakeConfig:
         batch_size = 64
         onnx_batch_size = 8
         max_sequence_tokens = 1024
+        onnx_cpu_mem_arena = False
         api_key = ""
 
     class _Storage:
@@ -1755,6 +1756,16 @@ class TestConfigPatch:
         data = resp.json()
         assert data["applied"] == []
         assert "embedding.max_sequence_tokens: read-only field" in data["rejected"]
+
+    async def test_patch_cpu_mem_arena_is_restart_only(self, client: AsyncClient):
+        resp = await client.patch(
+            "/api/config",
+            json={"embedding": {"onnx_cpu_mem_arena": True}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["applied"] == []
+        assert "embedding.onnx_cpu_mem_arena: read-only field" in data["rejected"]
 
     async def test_patch_readonly_field_rejected(self, client: AsyncClient):
         """Patching a read-only field is rejected."""

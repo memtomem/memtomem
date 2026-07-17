@@ -19,11 +19,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from memtomem.config import EmbeddingConfig
+from memtomem.config import EmbeddingConfig, embedding_policy_fingerprint
 from memtomem.embedding.factory import create_embedder
 from memtomem.embedding.noop import NoopEmbedder
 from memtomem.embedding.ollama import OllamaEmbedder
-from memtomem.embedding.onnx import OnnxEmbedder
+from memtomem.embedding.onnx import OnnxEmbedder, _verify_cpu_mem_arena
 from memtomem.embedding.runtime import publish_onnx_batch_size
 from memtomem.embedding.openai import OpenAIEmbedder
 from memtomem.embedding.retry import parse_retry_after, with_retry
@@ -522,12 +522,15 @@ class TestOpenAIEmbedder:
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_embedding_model(vectors: list[list[float]]):
+def _make_fake_embedding_model(vectors: list[list[float]], *, cpu_mem_arena: bool = False):
     """Return a mock fastembed TextEmbedding whose embed() yields vectors."""
     import numpy as np
 
     model = MagicMock()
     model.embed.return_value = iter(np.array(v) for v in vectors)
+    session_options = MagicMock()
+    session_options.enable_cpu_mem_arena = cpu_mem_arena
+    model.model.model.get_session_options.return_value = session_options
     return model
 
 
@@ -584,6 +587,38 @@ class TestOnnxEmbedder:
         config = EmbeddingConfig(provider="onnx", model="bge-m3", dimension=1024)
         assert config.onnx_batch_size == 8
         assert config.max_sequence_tokens == 1024
+        assert config.onnx_cpu_mem_arena is False
+
+    @pytest.mark.parametrize("requested", [False, True])
+    @pytest.mark.anyio
+    async def test_cpu_mem_arena_forwarded_and_verified(self, requested):
+        model = _make_fake_embedding_model([[0.1, 0.2, 0.3]], cpu_mem_arena=requested)
+        embedder = OnnxEmbedder(_onnx_config(onnx_cpu_mem_arena=requested, dimension=3))
+        with (
+            patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
+            patch("fastembed.TextEmbedding", return_value=model) as mock_te,
+        ):
+            await embedder.embed_texts(["hello"])
+
+        assert mock_te.call_args.kwargs["enable_cpu_mem_arena"] is requested
+
+    def test_cpu_mem_arena_false_fails_closed_on_unknown_layout(self):
+        with pytest.raises(EmbeddingError, match="refusing unsafe ONNX fallback"):
+            _verify_cpu_mem_arena(object(), False)
+
+    def test_cpu_mem_arena_true_is_unknown_layout_escape_hatch(self, caplog):
+        _verify_cpu_mem_arena(object(), True)
+        assert "explicitly requests the ORT-compatible default" in caplog.text
+
+    def test_cpu_mem_arena_mismatch_fails(self):
+        model = _make_fake_embedding_model([[0.1]], cpu_mem_arena=True)
+        with pytest.raises(EmbeddingError, match="did not apply"):
+            _verify_cpu_mem_arena(model, False)
+
+    def test_cpu_mem_arena_does_not_change_vector_policy(self):
+        disabled = _onnx_config(onnx_cpu_mem_arena=False)
+        enabled = _onnx_config(onnx_cpu_mem_arena=True)
+        assert embedding_policy_fingerprint(disabled) == embedding_policy_fingerprint(enabled)
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -678,9 +713,11 @@ class TestOnnxEmbedder:
     @pytest.mark.anyio
     async def test_missing_fastembed_tokenizer_fails_loud(self):
         embedder = OnnxEmbedder(_onnx_config(max_sequence_tokens=1024))
+        model = _make_fake_embedding_model([[0.1]])
+        model.model.tokenizer = None
         with (
             patch("memtomem.embedding.onnx._register_custom_models_if_needed"),
-            patch("fastembed.TextEmbedding", return_value=MagicMock()),
+            patch("fastembed.TextEmbedding", return_value=model),
         ):
             with pytest.raises(EmbeddingError, match="refusing unsafe ONNX fallback"):
                 await embedder.embed_texts(["hello"])
@@ -809,6 +846,10 @@ class TestOnnxEmbedder:
             def __init__(self, *a, **k):
                 constructing.set()
                 assert release.wait(timeout=10), "release never set"
+                self.model = MagicMock()
+                session_options = MagicMock()
+                session_options.enable_cpu_mem_arena = False
+                self.model.model.get_session_options.return_value = session_options
 
             def embed(self, texts, *, batch_size=256):
                 return iter(np.array([0.0, 0.0]) for _ in texts)

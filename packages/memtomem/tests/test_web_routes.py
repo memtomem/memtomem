@@ -77,6 +77,7 @@ class FakeConfig:
         batch_size = 64
         onnx_batch_size = 8
         max_sequence_tokens = 1024
+        onnx_cpu_mem_arena = False
         api_key = ""
         threads = 4
 
@@ -518,6 +519,7 @@ class TestConfig:
         assert data["embedding"]["threads"] == 4
         assert data["embedding"]["onnx_batch_size"] == 8
         assert data["embedding"]["max_sequence_tokens"] == 1024
+        assert data["embedding"]["onnx_cpu_mem_arena"] is False
         assert "search" in data
         assert "indexing" in data
         assert "decay" in data
@@ -575,6 +577,7 @@ class TestConfig:
             "namespace",
         }
         # Comparand values come through, not app.state.config values.
+        assert data["embedding"]["onnx_cpu_mem_arena"] is False
         assert data["mmr"]["enabled"] is True
         assert data["search"]["default_top_k"] == 25
 

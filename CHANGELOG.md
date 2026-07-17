@@ -68,6 +68,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Local ONNX CPU allocations are released after indexing** (#1784) — the
+  FastEmbed/ONNX provider now disables ORT's CPU memory arena by default, which
+  prevents multi-GB peak allocations from remaining in process RSS after a
+  sequential indexing run. The restart-only
+  `embedding.onnx_cpu_mem_arena=true` escape hatch restores ORT's allocator
+  reuse behavior. This changes allocation reuse only: vectors and the stored
+  embedding policy are unchanged, so existing indexes do not need rebuilding.
 - **Incremental CRUD re-indexing** (#1788) — `mem_edit`, `mem_delete`, and Web
   chunk edits no longer force-re-embed every sibling chunk in the source file.
   Hash-matched siblings keep their UUID, vector, FTS row, timestamps, and

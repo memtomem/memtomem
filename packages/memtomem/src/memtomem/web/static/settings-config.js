@@ -16,7 +16,7 @@
 // ``test_no_hardcoded_config_labels`` in tests/test_i18n.py.
 const _CONFIG_LABEL_FIELDS = {
   embedding: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
-              'max_sequence_tokens', 'api_key', 'threads'],
+              'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads'],
   storage:   ['backend', 'sqlite_path', 'collection_name'],
   search:    ['default_top_k', 'bm25_candidates', 'dense_candidates', 'rrf_k',
               'enable_bm25', 'enable_dense', 'tokenizer', 'rrf_weights'],
@@ -35,7 +35,7 @@ const _READONLY_SECTIONS = new Set(['storage']);
 const _READONLY_FIELDS = {
   embedding: new Set([
     'provider', 'model', 'dimension', 'base_url', 'api_key', 'threads',
-    'max_sequence_tokens',
+    'max_sequence_tokens', 'onnx_cpu_mem_arena',
   ]),
   indexing: new Set([]),
 };
@@ -609,7 +609,7 @@ async function loadConfig() {
 const _CONFIG_GUIDES = {
   embedding: {
     items: ['provider', 'model', 'dimension', 'base_url', 'batch_size', 'onnx_batch_size',
-            'max_sequence_tokens', 'api_key', 'threads'],
+            'max_sequence_tokens', 'onnx_cpu_mem_arena', 'api_key', 'threads'],
     envs: [
       'MEMTOMEM_EMBEDDING__PROVIDER=ollama',
       'MEMTOMEM_EMBEDDING__MODEL=bge-m3',
@@ -619,6 +619,7 @@ const _CONFIG_GUIDES = {
       'MEMTOMEM_EMBEDDING__BATCH_SIZE=64',
       'MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=8',
       'MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=1024',
+      'MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA=false',
       'MEMTOMEM_EMBEDDING__THREADS=4',
     ],
     howto: {

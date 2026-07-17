@@ -333,6 +333,7 @@ def _build_config_response(
             batch_size=cfg.embedding.batch_size,
             onnx_batch_size=cfg.embedding.onnx_batch_size,
             max_sequence_tokens=cfg.embedding.max_sequence_tokens,
+            onnx_cpu_mem_arena=cfg.embedding.onnx_cpu_mem_arena,
             api_key="***" if cfg.embedding.api_key else "",
             threads=cfg.embedding.threads,
         ),

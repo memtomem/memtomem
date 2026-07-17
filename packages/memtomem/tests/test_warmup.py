@@ -533,7 +533,11 @@ class TestLoaderConcurrency:
         class _Ctor:
             def __init__(self, *args, **kwargs) -> None:
                 calls.append((args, kwargs))
-                self.model = SimpleNamespace(tokenizer=_Tokenizer())
+                session_options = SimpleNamespace(
+                    enable_cpu_mem_arena=kwargs.get("enable_cpu_mem_arena", True)
+                )
+                session = SimpleNamespace(get_session_options=lambda: session_options)
+                self.model = SimpleNamespace(tokenizer=_Tokenizer(), model=session)
                 # Widen the race window so a missing lock surfaces reliably.
                 import time
 

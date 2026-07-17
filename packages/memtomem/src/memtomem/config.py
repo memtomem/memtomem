@@ -84,6 +84,13 @@ class EmbeddingConfig(ConfigModel):
     # Restart-required because FastEmbed caches the configured tokenizer with
     # the model instance. Ignored by the network-bound providers.
     max_sequence_tokens: int = 1024
+    # Disable ONNX Runtime's CPU memory arena by default. The arena can retain
+    # multi-GB peak allocations after a long local indexing run even when
+    # inference is serialized. This changes allocator reuse only, not vectors,
+    # so it deliberately stays outside the embedding policy fingerprint.
+    # Restart-required because ORT session options are fixed at model load.
+    # Set true only as an explicit compatibility/throughput escape hatch.
+    onnx_cpu_mem_arena: bool = False
     # ONNX Runtime intra-op thread cap for the local fastembed provider.
     # Default 4 — caps ONNX so a bulk reindex doesn't pin every physical
     # core and starve the web server / other apps. Live diagnosis of #640
