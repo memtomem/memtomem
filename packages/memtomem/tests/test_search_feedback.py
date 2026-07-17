@@ -183,6 +183,29 @@ class TestIntegrityClassification:
                 storage, "UNIQUE constraint failed: search_feedback.run_id", "not_relevant"
             )
 
+    async def test_replace_intent_collapses_to_conflict_and_leaves_row_unchanged(self, storage):
+        """#1811: the reclassification path is read-only by design. Even when
+        the losing caller passed replace=True, a different landed judgment
+        collapses to a conflict here (no unlocked write) — the row is left
+        exactly as the winner wrote it, and recovery is a retry through the
+        normal locked path. The helper is deliberately replace-agnostic, so
+        the collapse holds regardless of the caller's intent."""
+        await _seed_run(storage, RUN_A)
+        winner = await storage.save_search_feedback(RUN_A, "c1", "relevant")
+        with pytest.raises(FeedbackConflictError, match="replace=true"):
+            self._classify(
+                storage, "UNIQUE constraint failed: search_feedback.run_id", "not_relevant"
+            )
+        # No unlocked write happened: the winner's row is untouched.
+        assert _feedback_rows(storage) == [
+            (RUN_A, "c1", "relevant", winner["created_at"], winner["updated_at"])
+        ]
+        # Recovery: a retry through the normal locked path performs the replace.
+        replaced = await storage.save_search_feedback(RUN_A, "c1", "not_relevant", replace=True)
+        assert replaced["replaced"] is True
+        assert replaced["created_at"] == winner["created_at"]
+        assert replaced["updated_at"] > winner["updated_at"]
+
     async def test_unrecognized_integrity_error_stays_storage_error(self, storage):
         with pytest.raises(StorageError, match="feedback write failed"):
             self._classify(

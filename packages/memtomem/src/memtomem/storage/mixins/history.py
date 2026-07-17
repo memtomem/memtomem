@@ -257,9 +257,20 @@ class HistoryMixin:
 
         FK violation → the run was pruned between validation and insert
         (KeyError, same as an unknown run). Unique violation → a concurrent
-        writer landed this (run_id, chunk_id) first: re-read and classify
-        exactly like the existing-row branch (idempotent success or
-        conflict). Anything else stays a StorageError.
+        writer landed this (run_id, chunk_id) first: re-read and classify.
+        Same judgment is an idempotent success; a different judgment is a
+        conflict; anything else stays a StorageError.
+
+        This path is **read-only by design** (#1811). It runs *after*
+        ``db.rollback()``, i.e. outside the ``BEGIN IMMEDIATE`` that
+        serializes the main write, so it must not perform a write here: an
+        unlocked read-modify-write would race a concurrent judgment change
+        or a prune's cascade-delete (a zero-row UPDATE would still report
+        success). A different judgment therefore raises a conflict even when
+        the losing caller passed ``replace=True`` — the caller's replacement
+        intent deliberately collapses to a conflict on this defense-in-depth
+        branch. Recovery is a plain retry through the normal locked path,
+        which then performs the replace correctly.
         """
         message = str(exc).upper()
         if "FOREIGN KEY" in message:
@@ -273,6 +284,8 @@ class HistoryMixin:
             if landed is not None:
                 if landed[0] == judgment:
                     return self._feedback_row(run_id, chunk_id, judgment, landed[1], landed[2])
+                # Different judgment: see docstring — replace intent
+                # collapses to a conflict here rather than an unlocked write.
                 raise FeedbackConflictError(
                     f"feedback for run {run_id!r} chunk {chunk_id!r} is already "
                     f"{landed[0]!r}; pass replace=true to overwrite"
