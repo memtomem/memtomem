@@ -81,6 +81,7 @@ async def search(
             namespace=namespace,
             context_window=context_window if context_window > 0 else None,
             project_context_root=project_context_root,
+            origin="web",
         )
     except Exception as exc:
         logger.error("Search failed: %s", exc, exc_info=True)
@@ -89,5 +90,6 @@ async def search(
     return SearchResponse(
         results=out,
         total=len(out),
+        query_run_id=rstats.query_run_id,
         retrieval_stats=RetrievalStatsOut(**vars(rstats)),
     )

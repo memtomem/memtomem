@@ -206,6 +206,7 @@ async def mem_search(
         scope=scope,
         project_context_root=project_context_root,
         rerank=rerank,
+        origin="mcp",
     )
 
     # Build trust-UX hints shared across formats: archive filter count and a
@@ -252,7 +253,9 @@ async def mem_search(
 
         if effective_format == "structured":
             all_hints = hints + empty_hints
-            return _format_structured_results([], hints=all_hints or None)
+            return _format_structured_results(
+                [], hints=all_hints or None, query_run_id=stats.query_run_id
+            )
 
         if (source_filter or tag_filter) and stats.fused_total > 0:
             return (
@@ -281,6 +284,7 @@ async def mem_search(
             hints=hints or None,
             score_scale=stats.score_scale,
             reranker=stats.reranker_model,
+            query_run_id=stats.query_run_id,
         )
     else:
         is_verbose = effective_format == "verbose"

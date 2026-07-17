@@ -405,10 +405,34 @@ def create_tables(
             query_embedding BLOB NOT NULL,
             result_chunk_ids TEXT NOT NULL,
             result_scores TEXT NOT NULL,
+            run_id TEXT,
+            observation_json TEXT NOT NULL DEFAULT '{}',
+            result_snapshot_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL
         )
     """)
+    # Additive Quality Lab observation fields. Older 0.3.x binaries safely
+    # ignore these columns, so this does not require a schema-generation bump.
+    existing_history_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(query_history)").fetchall()
+    }
+    observation_columns = {
+        "run_id": "ALTER TABLE query_history ADD COLUMN run_id TEXT",
+        "observation_json": (
+            "ALTER TABLE query_history ADD COLUMN observation_json TEXT NOT NULL DEFAULT '{}'"
+        ),
+        "result_snapshot_json": (
+            "ALTER TABLE query_history ADD COLUMN result_snapshot_json TEXT NOT NULL DEFAULT '[]'"
+        ),
+    }
+    for column_name, col_sql in observation_columns.items():
+        if column_name not in existing_history_columns:
+            db.execute(col_sql)
     db.execute("CREATE INDEX IF NOT EXISTS idx_query_history_created ON query_history(created_at)")
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_query_history_run_id "
+        "ON query_history(run_id) WHERE run_id IS NOT NULL"
+    )
 
     db.execute("""
         CREATE TABLE IF NOT EXISTS namespace_metadata (
