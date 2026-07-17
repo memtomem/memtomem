@@ -356,12 +356,16 @@ class MarkdownChunker:
                     )
                 )
             else:
-                # Body offset from the heading line: 1 (heading itself) +
+                # Body offset from the section's first line: the heading
+                # itself (when the section has one — headingless sections
+                # start directly at content, so counting a phantom heading
+                # would shift every sub-chunk range one line down, #1807) +
                 # blank lines stripped by .strip() before the blockquote +
                 # blockquote group + trailing blanks. ``_split_section``
                 # uses this to seed its internal line counter so sub-chunk
                 # boundaries map back to real file lines.
-                body_offset = 1 + leading_strip_lines + blockquote_strip_lines
+                heading_line = 1 if section["hierarchy"] else 0
+                body_offset = heading_line + leading_strip_lines + blockquote_strip_lines
                 sub_chunks = self._split_section(text, section, body_offset=body_offset)
                 for sc in sub_chunks:
                     chunks.append(
