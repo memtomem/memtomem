@@ -89,7 +89,7 @@ async def mutate_source_and_reindex(
     source_file: Path,
     mutate: Callable[[], None],
 ) -> IndexingStats:
-    """Backup-read → ``mutate`` (in a worker thread) → force re-index with
+    """Backup-read → ``mutate`` (in a worker thread) → incremental re-index with
     ``lock_held=True``, restoring the pre-image and re-raising on failure.
 
     The caller MUST already hold ``source_file``'s sidecar (via
@@ -101,15 +101,11 @@ async def mutate_source_and_reindex(
     original = await asyncio.to_thread(source_file.read_text, encoding="utf-8")
     try:
         await asyncio.to_thread(mutate)
-        return await index_engine.index_file(
-            source_file, force=True, already_scanned=True, lock_held=True
-        )
+        return await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
     except Exception:
         await asyncio.to_thread(source_file.write_text, original, encoding="utf-8")
         try:
-            await index_engine.index_file(
-                source_file, force=True, already_scanned=True, lock_held=True
-            )
+            await index_engine.index_file(source_file, already_scanned=True, lock_held=True)
         except Exception:
             logger.warning("Rollback re-index also failed", exc_info=True)
         raise

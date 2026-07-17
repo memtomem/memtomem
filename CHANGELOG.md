@@ -44,6 +44,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Incremental CRUD re-indexing** (#1788) — `mem_edit`, `mem_delete`, and Web
+  chunk edits no longer force-re-embed every sibling chunk in the source file.
+  Hash-matched siblings keep their UUID, vector, FTS row, timestamps, and
+  personalization while a metadata-only update refreshes shifted source line
+  ranges. Explicit CLI/MCP/Web force re-indexing still re-embeds every chunk.
 - **Reranker hot-swap use-after-close** (#1777) — hot reload (disk config
   edit or `PATCH /api/config`) no longer closes the outgoing reranker while
   an in-flight search still holds it; the close is deferred until the last
@@ -3076,7 +3081,11 @@ ADR-0011 PR-A through PR-F changes that landed earlier in the cycle.
   `ON DELETE CASCADE` (target_id) / `ON DELETE SET NULL` (source_id),
   silently dropping consolidation-summary and provenance edges
   whenever a sibling chunk was edited. Contract recorded in
-  `docs/adr/0005-force-reindex-metadata-contract.md`. (#582 item 4.2)
+  `docs/adr/0005-force-reindex-metadata-contract.md`. Incremental indexing
+  also compares stored heading hierarchy for body-hash matches: heading-only
+  renames now keep the chunk ID but selectively refresh heading metadata, FTS
+  terms, descendant context, and embeddings instead of leaving the old heading
+  searchable. (#582 item 4.2)
 
 - **`POST /api/memory-dirs/add` indexes the registered directory by
   default now.** PR #571 introduced opt-in `auto_index` (default

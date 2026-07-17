@@ -99,6 +99,7 @@ async def test_mutate_source_and_reindex_success(tmp_path):
     assert src.read_text(encoding="utf-8") == "mutated\n"
     # index_file was called with lock_held=True (caller owns the sidecar).
     assert engine.index_file.await_args.kwargs["lock_held"] is True
+    assert not engine.index_file.await_args.kwargs.get("force", False)
 
 
 @pytest.mark.asyncio
@@ -117,6 +118,7 @@ async def test_mutate_source_and_reindex_rolls_back_on_failure(tmp_path):
     # File restored to its pre-image; both the forward and rollback reindex ran.
     assert src.read_text(encoding="utf-8") == "orig\n"
     assert engine.index_file.await_count == 2
+    assert all(not call.kwargs.get("force", False) for call in engine.index_file.await_args_list)
 
 
 # ------------------------------------------------------------- CLI mm mem add

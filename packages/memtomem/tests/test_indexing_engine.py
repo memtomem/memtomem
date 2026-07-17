@@ -2110,10 +2110,11 @@ class TestIndexFile:
             f"got {ac_after} (pre-fix would be 0)"
         )
 
-    async def test_force_reindex_refreshes_line_ranges_for_unchanged(self, components, memory_dir):
+    async def test_incremental_reindex_refreshes_line_ranges_without_reembedding_sibling(
+        self, components, memory_dir
+    ):
         """When a sibling chunk's body shifts line numbers, the unchanged chunk's
-        ``start_line`` / ``end_line`` columns must catch up — even with force=True
-        (which routes hash-matched chunks through the upsert UPDATE path).
+        line columns catch up without routing that sibling through embedding.
         """
         md_path = memory_dir / "shift.md"
         md_path.write_text(
@@ -2138,6 +2139,8 @@ class TestIndexFile:
         b_chunk_before = chunks_before[1]
         b_id = b_chunk_before.id
         b_start_before = b_chunk_before.metadata.start_line
+        b_content = b_chunk_before.content
+        mock_embedder.embed_texts.reset_mock()
 
         # Insert extra lines in section A so B's start_line shifts.
         md_path.write_text(
@@ -2145,21 +2148,27 @@ class TestIndexFile:
             "# Section B\n\n" + ("Body for section B.\n" * 5) + "\n",
             encoding="utf-8",
         )
-        await components.index_engine.index_file(md_path, force=True)
+        stats = await components.index_engine.index_file(md_path)
 
         b_chunk_after = await components.storage.get_chunk(b_id)
-        assert b_chunk_after is not None, "B chunk lost identity across force-reindex"
+        assert b_chunk_after is not None, "B chunk lost identity across incremental re-index"
         assert b_chunk_after.metadata.start_line > b_start_before, (
             f"B.start_line should reflect the upward shift; "
             f"before={b_start_before}, after={b_chunk_after.metadata.start_line}"
         )
+        assert stats.indexed_chunks == 1
+        assert stats.skipped_chunks >= 1
+        mock_embedder.embed_texts.assert_awaited_once()
+        embedded_texts = mock_embedder.embed_texts.await_args.args[0]
+        assert len(embedded_texts) == 1
+        assert b_content not in embedded_texts
 
     async def test_mem_edit_preserves_sibling_chunk_metadata(self, components, memory_dir):
         """End-to-end regression: mem_edit on chunk A leaves chunk B's
         ``access_count`` and ``id`` intact (the spike scenario from ADR-0005).
 
         Uses the same call pattern as ``server.tools.memory_crud.mem_edit``:
-        mutate the source file, then ``index_file(force=True)``.
+        mutate the source file, then incremental ``index_file``.
         """
         md_path = memory_dir / "edit_pair.md"
         md_path.write_text(
@@ -2185,18 +2194,21 @@ class TestIndexFile:
         await components.storage.increment_access([b_id])
 
         # Simulate mem_edit's body-only edit on chunk A: rewrite section A,
-        # leave section B byte-identical, then index_file(force=True).
+        # leave section B byte-identical, then incrementally re-index.
         md_path.write_text(
             "# Section A\n\n" + ("Body for section A. EDITED.\n" * 8) + "\n"
             "# Section B\n\n" + ("Body for section B.\n" * 8) + "\n",
             encoding="utf-8",
         )
-        await components.index_engine.index_file(md_path, force=True)
+        mock_embedder.embed_texts.reset_mock()
+        await components.index_engine.index_file(md_path)
 
         b_after = await components.storage.get_chunk(b_id)
         assert b_after is not None, "Sibling B should keep its UUID across mem_edit"
         ac = (await components.storage.get_access_counts([b_id]))[str(b_id)]
         assert ac == 1, f"Sibling B.access_count should be preserved; got {ac}"
+        mock_embedder.embed_texts.assert_awaited_once()
+        assert len(mock_embedder.embed_texts.await_args.args[0]) == 1
 
     async def test_force_reindex_deletes_vanished_chunks(self, components, memory_dir):
         """force=True must drop rows whose hash no longer appears in the file.
@@ -2564,6 +2576,41 @@ class TestIncrementalIndexing:
         assert stats2.indexed_chunks > 0
         # embed_texts should have been called again
         assert mock_embedder.embed_texts.call_count > first_embed_count
+
+    async def test_heading_only_rename_refreshes_retrieval_state(self, components, memory_dir):
+        """A body-hash match with a new heading must refresh FTS and embedding."""
+        md_path = memory_dir / "heading_rename.md"
+        body = "The body remains byte-for-byte stable across the rename."
+        md_path.write_text(f"# OldHeadingZeta\n\n{body}\n", encoding="utf-8")
+
+        mock_embedder = AsyncMock()
+        mock_embedder.embed_texts = AsyncMock(
+            side_effect=lambda texts, **_: [[0.1] * 1024 for _ in texts]
+        )
+        mock_embedder.dimension = 1024
+        components.index_engine._embedder = mock_embedder
+
+        await components.index_engine.index_file(md_path)
+        before = await components.storage.list_chunks_by_source(md_path)
+        assert len(before) == 1
+        original_id = before[0].id
+        first_embed_count = mock_embedder.embed_texts.call_count
+        assert await components.storage.bm25_search("OldHeadingZeta", top_k=5)
+
+        md_path.write_text(f"# NewHeadingTheta\n\n{body}\n", encoding="utf-8")
+        stats = await components.index_engine.index_file(md_path)
+
+        after = await components.storage.list_chunks_by_source(md_path)
+        assert len(after) == 1
+        assert after[0].id == original_id
+        assert after[0].metadata.heading_hierarchy == ("# NewHeadingTheta",)
+        assert stats.indexed_chunks == 1
+        assert mock_embedder.embed_texts.call_count == first_embed_count + 1
+        embedded_texts = mock_embedder.embed_texts.call_args.args[0]
+        assert "NewHeadingTheta" in embedded_texts[0]
+        assert not await components.storage.bm25_search("OldHeadingZeta", top_k=5)
+        new_results = await components.storage.bm25_search("NewHeadingTheta", top_k=5)
+        assert [result.chunk.id for result in new_results] == [original_id]
 
     async def test_delete_section_removes_chunks(self, components, memory_dir):
         """Removing a section should delete its chunks."""
