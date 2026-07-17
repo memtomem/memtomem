@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -314,73 +313,84 @@ class TestCrossConnection:
 
 
 class TestConcurrentContention:
-    """Real lock contention through BEGIN IMMEDIATE: two backends on one DB
-    file, each driven from its own thread (the write connection is
-    thread-bound), released together by a barrier. Whichever loses the lock
-    race observes the winner's committed row — the outcome invariants below
-    hold for either ordering.
+    """Deterministic lock contention through BEGIN IMMEDIATE.
+
+    The main thread holds an explicit BEGIN IMMEDIATE with an uncommitted
+    feedback row before the writer thread is allowed to call
+    ``save_search_feedback`` — the writer *must* block at its own
+    BEGIN IMMEDIATE (verified while the lock is held) and can only proceed
+    after the seeded row commits, so the overlap is guaranteed rather than
+    left to scheduler timing. The writer backend initializes before the
+    lock is taken because ``initialize()`` itself writes.
     """
 
-    @staticmethod
-    def _submit_from_thread(db_path: Path, judgment: str, barrier, results: dict, key: str):
-        async def run():
-            cfg = StorageConfig()
-            cfg.sqlite_path = db_path
-            backend = SqliteBackend(cfg, dimension=8)
-            await backend.initialize()
-            try:
-                barrier.wait(timeout=10)
-                return await backend.save_search_feedback(RUN_A, "c1", judgment)
-            finally:
-                await backend.close()
+    _LANDED_AT = "2026-07-17T00:00:00.000001+00:00"
 
-        def target():
-            try:
-                results[key] = asyncio.run(run())
-            except Exception as exc:  # collected for assertion, not swallowed
-                results[key] = exc
-
-        thread = threading.Thread(target=target)
-        thread.start()
-        return thread
-
-    async def _race(self, tmp_path, judgments: tuple[str, str]) -> tuple[dict, SqliteBackend]:
+    async def _contend(self, tmp_path, writer_judgment: str):
         cfg = StorageConfig()
         cfg.sqlite_path = tmp_path / "contended.db"
         seed = SqliteBackend(cfg, dimension=8)
         await seed.initialize()
         await _seed_run(seed, RUN_A)
 
-        barrier = threading.Barrier(2)
+        ready = threading.Event()
+        go = threading.Event()
         results: dict = {}
-        threads = [
-            self._submit_from_thread(cfg.sqlite_path, judgment, barrier, results, key)
-            for key, judgment in zip(("x", "y"), judgments)
-        ]
-        for thread in threads:
-            thread.join(timeout=30)
-            assert not thread.is_alive()
-        return results, seed
 
-    async def test_simultaneous_identical_submissions(self, tmp_path):
-        results, seed = await self._race(tmp_path, ("relevant", "relevant"))
+        def writer():
+            async def run():
+                backend = SqliteBackend(cfg, dimension=8)
+                await backend.initialize()
+                try:
+                    ready.set()
+                    go.wait(timeout=10)
+                    return await backend.save_search_feedback(RUN_A, "c1", writer_judgment)
+                finally:
+                    await backend.close()
+
+            try:
+                results["writer"] = asyncio.run(run())
+            except Exception as exc:  # collected for assertion, not swallowed
+                results["writer"] = exc
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert ready.wait(timeout=30)
+
+        db = seed._get_db()
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO search_feedback (run_id, chunk_id, judgment, created_at, updated_at) "
+            "VALUES (?, 'c1', 'relevant', ?, ?)",
+            (RUN_A, self._LANDED_AT, self._LANDED_AT),
+        )
+        go.set()
+        # The writer is now inside save_search_feedback; with our reserved
+        # lock held its BEGIN IMMEDIATE cannot proceed. Give it real time to
+        # arrive there, then prove it is still blocked.
+        thread.join(timeout=1.0)
+        assert thread.is_alive(), "writer finished while the lock was held — no contention"
+        db.commit()  # release: the writer resumes and sees the landed row
+
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+        return results["writer"], seed
+
+    async def test_blocked_identical_submission_lands_idempotent(self, tmp_path):
+        outcome, seed = await self._contend(tmp_path, "relevant")
         try:
-            for outcome in results.values():
-                assert isinstance(outcome, dict), outcome
-            assert sorted(o["created"] for o in results.values()) == [False, True]
+            assert isinstance(outcome, dict), outcome
+            assert outcome["created"] is False and outcome["replaced"] is False
+            assert outcome["updated_at"] == self._LANDED_AT
             assert len(_feedback_rows(seed)) == 1
         finally:
             await seed.close()
 
-    async def test_simultaneous_conflicting_submissions(self, tmp_path):
-        results, seed = await self._race(tmp_path, ("relevant", "not_relevant"))
+    async def test_blocked_conflicting_submission_raises_conflict(self, tmp_path):
+        outcome, seed = await self._contend(tmp_path, "not_relevant")
         try:
-            outcomes = list(results.values())
-            winners = [o for o in outcomes if isinstance(o, dict)]
-            losers = [o for o in outcomes if isinstance(o, FeedbackConflictError)]
-            assert len(winners) == 1 and len(losers) == 1, outcomes
+            assert isinstance(outcome, FeedbackConflictError), outcome
             rows = _feedback_rows(seed)
-            assert len(rows) == 1
-            assert rows[0][2] == winners[0]["judgment"]
+            assert len(rows) == 1 and rows[0][2] == "relevant"
         finally:
             await seed.close()
