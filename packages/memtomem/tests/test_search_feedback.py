@@ -316,12 +316,13 @@ class TestConcurrentContention:
     """Deterministic lock contention through BEGIN IMMEDIATE.
 
     The main thread holds an explicit BEGIN IMMEDIATE with an uncommitted
-    feedback row before the writer thread is allowed to call
-    ``save_search_feedback`` — the writer *must* block at its own
-    BEGIN IMMEDIATE (verified while the lock is held) and can only proceed
-    after the seeded row commits, so the overlap is guaranteed rather than
-    left to scheduler timing. The writer backend initializes before the
-    lock is taken because ``initialize()`` itself writes.
+    feedback row before the writer thread's ``save_search_feedback`` can
+    commit. A ``set_trace_callback`` on the writer connection fires the
+    ``began`` event the instant the writer's own ``BEGIN IMMEDIATE``
+    statement starts executing — so we prove the writer actually reached
+    the contended lock (not merely that its thread hasn't finished) before
+    releasing. The writer backend initializes before the lock is taken
+    because ``initialize()`` itself writes.
     """
 
     _LANDED_AT = "2026-07-17T00:00:00.000001+00:00"
@@ -335,17 +336,25 @@ class TestConcurrentContention:
 
         ready = threading.Event()
         go = threading.Event()
+        began = threading.Event()
         results: dict = {}
 
         def writer():
             async def run():
                 backend = SqliteBackend(cfg, dimension=8)
                 await backend.initialize()
+
+                def trace(statement: str) -> None:
+                    if statement.strip().upper().startswith("BEGIN IMMEDIATE"):
+                        began.set()
+
+                backend._get_db().set_trace_callback(trace)
                 try:
                     ready.set()
                     go.wait(timeout=10)
                     return await backend.save_search_feedback(RUN_A, "c1", writer_judgment)
                 finally:
+                    backend._get_db().set_trace_callback(None)
                     await backend.close()
 
             try:
@@ -359,18 +368,22 @@ class TestConcurrentContention:
 
         db = seed._get_db()
         db.execute("BEGIN IMMEDIATE")
-        db.execute(
-            "INSERT INTO search_feedback (run_id, chunk_id, judgment, created_at, updated_at) "
-            "VALUES (?, 'c1', 'relevant', ?, ?)",
-            (RUN_A, self._LANDED_AT, self._LANDED_AT),
-        )
-        go.set()
-        # The writer is now inside save_search_feedback; with our reserved
-        # lock held its BEGIN IMMEDIATE cannot proceed. Give it real time to
-        # arrive there, then prove it is still blocked.
-        thread.join(timeout=1.0)
-        assert thread.is_alive(), "writer finished while the lock was held — no contention"
-        db.commit()  # release: the writer resumes and sees the landed row
+        try:
+            db.execute(
+                "INSERT INTO search_feedback (run_id, chunk_id, judgment, created_at, updated_at) "
+                "VALUES (?, 'c1', 'relevant', ?, ?)",
+                (RUN_A, self._LANDED_AT, self._LANDED_AT),
+            )
+            go.set()
+            # The trace callback fires as the writer's BEGIN IMMEDIATE starts
+            # executing; it then blocks on our reserved lock. Waiting for this
+            # event proves the writer reached the contended statement.
+            assert began.wait(timeout=30), "writer never reached BEGIN IMMEDIATE"
+            # It cannot have completed: our lock is still held.
+            assert thread.is_alive()
+            assert not results
+        finally:
+            db.commit()  # release: the writer resumes and sees the landed row
 
         thread.join(timeout=30)
         assert not thread.is_alive()
