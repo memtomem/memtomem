@@ -107,7 +107,7 @@ class HistoryMixin:
         if since:
             query += " WHERE created_at >= ?"
             params.append(since)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = db.execute(query, params).fetchall()
         return [

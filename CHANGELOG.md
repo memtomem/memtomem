@@ -26,7 +26,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 - **Durable local search-run observations (Quality Lab foundation)** — ranked
   searches now persist a unique `query_run_id`, retrieval profile, latency,
-  cache/degradation state, and a content-free result snapshot in SQLite. MCP
+  cache/degradation state, and a content-minimized result snapshot in SQLite. MCP
   structured output and the Web search API expose the ID only after the local
   commit succeeds; cache hits get distinct IDs, zero-result ranked searches are
   recorded, filter-only browsing is excluded, and persistence failure never

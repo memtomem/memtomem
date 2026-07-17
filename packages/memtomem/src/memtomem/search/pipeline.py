@@ -398,8 +398,22 @@ class SearchPipeline:
         Alternate storage backends that only implement legacy query history
         keep the old fire-and-forget behavior and receive no public run ID.
         """
-        saver = getattr(type(self._storage), "save_search_observation", None)
+        # Avoid ``getattr(instance, ...)`` as the capability probe: dynamic
+        # mocks/proxies may fabricate any attribute. A real class method or an
+        # explicitly attached instance method counts as support, and the same
+        # bound callable is then used for dispatch.
+        class_saver = getattr(type(self._storage), "save_search_observation", None)
+        instance_has_saver = "save_search_observation" in vars(self._storage)
+        saver = (
+            getattr(self._storage, "save_search_observation")
+            if class_saver is not None or instance_has_saver
+            else None
+        )
         if saver is None:
+            # Preserve the pre-Quality-Lab contract for alternate backends:
+            # cache hits returned before scheduling legacy history writes.
+            if stats.cache_hit:
+                return None
 
             async def _save_legacy_history() -> None:
                 await self._storage.save_query_history(
@@ -482,7 +496,7 @@ class SearchPipeline:
         ]
         run_id = str(uuid4())
         try:
-            return await getattr(self._storage, "save_search_observation")(
+            return await saver(
                 query,
                 query_embedding,
                 [str(result.chunk.id) for result in results[:top_k]],

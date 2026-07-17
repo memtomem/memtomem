@@ -413,16 +413,21 @@ def create_tables(
     """)
     # Additive Quality Lab observation fields. Older 0.3.x binaries safely
     # ignore these columns, so this does not require a schema-generation bump.
-    for col_sql in (
-        "ALTER TABLE query_history ADD COLUMN run_id TEXT",
-        "ALTER TABLE query_history ADD COLUMN observation_json TEXT NOT NULL DEFAULT '{}'",
-        "ALTER TABLE query_history ADD COLUMN result_snapshot_json TEXT NOT NULL DEFAULT '[]'",
-    ):
-        try:
+    existing_history_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(query_history)").fetchall()
+    }
+    observation_columns = {
+        "run_id": "ALTER TABLE query_history ADD COLUMN run_id TEXT",
+        "observation_json": (
+            "ALTER TABLE query_history ADD COLUMN observation_json TEXT NOT NULL DEFAULT '{}'"
+        ),
+        "result_snapshot_json": (
+            "ALTER TABLE query_history ADD COLUMN result_snapshot_json TEXT NOT NULL DEFAULT '[]'"
+        ),
+    }
+    for column_name, col_sql in observation_columns.items():
+        if column_name not in existing_history_columns:
             db.execute(col_sql)
-        except sqlite3.OperationalError as e:
-            if "duplicate column" not in str(e).lower():
-                raise
     db.execute("CREATE INDEX IF NOT EXISTS idx_query_history_created ON query_history(created_at)")
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_query_history_run_id "

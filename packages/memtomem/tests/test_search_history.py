@@ -49,8 +49,9 @@ class TestSearchHistory:
         await storage.save_query_history("query3", [], [], [])
         history = await storage.get_query_history(limit=2)
         assert len(history) == 2
-        # Most recent first
-        assert history[0]["query_text"] == "query3"
+        # Deterministic newest-first order even when second-precision
+        # ``created_at`` values collide.
+        assert [row["query_text"] for row in history] == ["query3", "query2"]
 
     @pytest.mark.asyncio
     async def test_suggest_prefix(self, storage):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -9,6 +10,7 @@ from uuid import UUID
 from helpers import StubCtx
 from memtomem.server.context import AppContext
 from memtomem.server.tools.search import mem_search
+from memtomem.search.pipeline import SearchPipeline
 
 
 async def _index_quality_note(components, memory_dir):
@@ -126,3 +128,64 @@ async def test_mcp_structured_search_exposes_committed_run_id(bm25_only_componen
     row = (await components.storage.get_query_history(limit=1))[0]
     assert row["run_id"] == payload["query_run_id"]
     assert row["observation"]["origin"] == "mcp"
+
+
+async def test_legacy_backend_keeps_fire_and_forget_and_skips_cache_hit_history(
+    bm25_only_components,
+):
+    components, memory_dir = bm25_only_components
+    await _index_quality_note(components, memory_dir)
+
+    class LegacyStorageProxy:
+        def __init__(self, delegate):
+            self._delegate = delegate
+            self.save_query_history = AsyncMock()
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+    legacy_storage = LegacyStorageProxy(components.storage)
+    pipeline = SearchPipeline(
+        storage=legacy_storage,  # type: ignore[arg-type]
+        embedder=components.embedder,
+        config=components.config.search,
+    )
+
+    results, first = await pipeline.search("telemetry", origin="internal")
+    await asyncio.sleep(0)
+    cached_results, second = await pipeline.search("telemetry", origin="internal")
+    await asyncio.sleep(0)
+
+    assert results and cached_results
+    assert first.query_run_id is None
+    assert second.query_run_id is None
+    assert second.cache_hit is True
+    legacy_storage.save_query_history.assert_awaited_once()
+
+
+async def test_explicit_instance_observation_capability_is_used(bm25_only_components):
+    components, memory_dir = bm25_only_components
+    await _index_quality_note(components, memory_dir)
+
+    class InstanceCapabilityProxy:
+        def __init__(self, delegate):
+            self._delegate = delegate
+            self.save_search_observation = AsyncMock(
+                side_effect=lambda *args, **kwargs: kwargs["run_id"]
+            )
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+    proxy = InstanceCapabilityProxy(components.storage)
+    pipeline = SearchPipeline(
+        storage=proxy,  # type: ignore[arg-type]
+        embedder=components.embedder,
+        config=components.config.search,
+    )
+
+    results, stats = await pipeline.search("telemetry", origin="internal")
+
+    assert results
+    assert stats.query_run_id is not None
+    proxy.save_search_observation.assert_awaited_once()
