@@ -968,3 +968,20 @@ def test_validate_path_accepts_project_memory_dirs(tmp_path):
     bogus.write_text("x")
     out, err = memory_crud._validate_path(str(bogus), [user_dir], [project_dir])
     assert err is not None
+
+
+def test_validate_path_empty_memory_dirs_no_cwd_fallback(tmp_path):
+    """#1768 — no silent cwd fallback: a relative user-tier path with empty
+    ``memory_dirs`` errors naming the config field; project-tier absolute
+    paths keep validating against ``project_memory_dirs`` alone.
+    """
+    out, err = memory_crud._validate_path("note.md", [], None)
+    assert out is None
+    assert "indexing.memory_dirs is empty" in err
+
+    project_dir = tmp_path / "proj" / ".memtomem" / "memories"
+    project_dir.mkdir(parents=True)
+    team_file = project_dir / "team.md"
+    out, err = memory_crud._validate_path(str(team_file), [], [project_dir])
+    assert err is None
+    assert out == team_file.resolve()

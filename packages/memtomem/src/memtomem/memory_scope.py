@@ -16,12 +16,19 @@ both surfaces.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from memtomem.config import TargetScope
+from memtomem.errors import ConfigError
 
 
 DEFAULT_USER_MEMORY_DIR = Path("~/.memtomem/memories")
+
+EMPTY_MEMORY_DIRS_ERROR = (
+    "indexing.memory_dirs is empty — no memory directories configured. "
+    "Run 'mm init' first or add a directory to ~/.memtomem/config.json."
+)
 
 
 class MemoryScopeError(ValueError):
@@ -31,6 +38,22 @@ class MemoryScopeError(ValueError):
     plain string error messages for MCP tool returns) catch and rewrap
     so each layer surfaces user-facing errors in its native vocabulary.
     """
+
+
+def require_user_base(memory_dirs: Sequence[Path | str]) -> Path:
+    """Return the user-tier base directory (``memory_dirs[0]``), expanded and resolved.
+
+    An empty ``indexing.memory_dirs`` is a valid "index nothing" state
+    (#1768): read surfaces degrade gracefully, but any write that needs
+    the user-tier base must refuse with an error that names the config
+    field instead of crashing with ``IndexError``.
+
+    Raises:
+        ConfigError: When ``memory_dirs`` is empty.
+    """
+    if not memory_dirs:
+        raise ConfigError(EMPTY_MEMORY_DIRS_ERROR)
+    return Path(memory_dirs[0]).expanduser().resolve()
 
 
 def resolve_memory_scope_dir(

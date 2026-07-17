@@ -25,10 +25,16 @@ _MEMORY_SCOPE_CHOICES = list(get_args(TargetScope))
 def _resolve_memory_scope_dir(
     scope: TargetScope,
     project_root: Path | None,
-    user_base: Path,
+    user_base: Path | None = None,
 ) -> Path:
-    """ADR-0011 scope → directory, surfaced as ``ClickException`` for the CLI."""
+    """ADR-0011 scope → directory, surfaced as ``ClickException`` for the CLI.
+
+    ``user_base`` is only meaningful for ``scope="user"``; project tiers
+    resolve from ``project_root`` alone (#1768).
+    """
     try:
+        if user_base is None:
+            return _resolve_memory_scope_dir_core(scope, project_root)
         return _resolve_memory_scope_dir_core(scope, project_root, user_base)
     except MemoryScopeError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -196,14 +202,18 @@ async def _add(
         # read from ``indexing.memory_dirs[0]`` so the CLI agrees with
         # MCP ``_mem_add_core`` and ``mm context memory-migrate`` —
         # users who remap ``memory_dirs`` would otherwise see split
-        # writes between CLI and MCP. The hardcoded literal stays only
-        # as a fallback for the (unsupported) empty-list case.
-        mdirs = comp.config.indexing.memory_dirs
-        if mdirs:
-            user_base = Path(mdirs[0]).expanduser()
+        # writes between CLI and MCP. An empty list refuses instead of
+        # falling back to the historical literal: the "index nothing"
+        # state must not write into a directory the active config
+        # disabled (#1768). Project tiers resolve independently.
+        if scope == "user":
+            from memtomem.memory_scope import require_user_base
+
+            base = _resolve_memory_scope_dir(
+                scope, project_root, require_user_base(comp.config.indexing.memory_dirs)
+            )
         else:
-            user_base = Path("~/.memtomem/memories").expanduser()
-        base = _resolve_memory_scope_dir(scope, project_root, user_base)
+            base = _resolve_memory_scope_dir(scope, project_root)
         if scope != "user":
             from memtomem.memory_scope import (
                 is_project_tier_registered,

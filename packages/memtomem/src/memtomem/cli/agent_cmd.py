@@ -297,12 +297,16 @@ async def _run_share(chunk_id: str, target: str, force_unsafe: bool = False) -> 
             else "Shared: memory"
         )
 
-        if not comp.config.indexing.memory_dirs:
-            raise click.ClickException("No memory directories configured. Run `mm init` first.")
         from datetime import datetime, timezone
-        from pathlib import Path
 
-        base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
+        from memtomem.cli._errors import raise_cli_error
+        from memtomem.errors import ConfigError
+        from memtomem.memory_scope import require_user_base
+
+        try:
+            base = require_user_base(comp.config.indexing.memory_dirs)
+        except ConfigError as exc:
+            raise_cli_error(exc)
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         path = base / f"{date_str}.md"
         append_entry(path, chunk.content, title=title, tags=tags)

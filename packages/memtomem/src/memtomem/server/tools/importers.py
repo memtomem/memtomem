@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from memtomem.errors import ConfigError
+from memtomem.memory_scope import require_user_base
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -38,9 +40,10 @@ async def mem_import_notion(
     if not export_path.exists():
         return f"Error: Path not found: {export_path}"
 
-    if not app.config.indexing.memory_dirs:
-        return "Error: no memory directories configured. Run 'mm init' first."
-    memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+    try:
+        memory_dir = require_user_base(app.config.indexing.memory_dirs)
+    except ConfigError as exc:
+        return f"Error: {exc}"
     output_dir = memory_dir / "_imported" / "notion"
 
     from memtomem.config import classify_scope
@@ -137,9 +140,10 @@ async def mem_import_obsidian(
     if not vault.exists() or not vault.is_dir():
         return f"Error: Obsidian vault not found: {vault}"
 
-    if not app.config.indexing.memory_dirs:
-        return "Error: no memory directories configured. Run 'mm init' first."
-    memory_dir = Path(app.config.indexing.memory_dirs[0]).expanduser().resolve()
+    try:
+        memory_dir = require_user_base(app.config.indexing.memory_dirs)
+    except ConfigError as exc:
+        return f"Error: {exc}"
     output_dir = memory_dir / "_imported" / "obsidian"
 
     from memtomem.config import classify_scope

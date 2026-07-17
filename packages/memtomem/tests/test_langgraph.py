@@ -558,7 +558,7 @@ class TestAddPrivacyGate:
 
         result = await store.add("content")
 
-        assert result == {"error": "No memory directories configured. Run 'mm init' first."}
+        assert "indexing.memory_dirs is empty" in result["error"]
         assert len(guard_calls) == 1
         assert append_calls == []
 
