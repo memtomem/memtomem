@@ -449,9 +449,37 @@ def create_tables(
         if column_name not in existing_history_columns:
             db.execute(col_sql)
     db.execute("CREATE INDEX IF NOT EXISTS idx_query_history_created ON query_history(created_at)")
+    # The run_id unique index started life partial (WHERE run_id IS NOT NULL,
+    # #1800). search_feedback references query_history(run_id), and SQLite
+    # only accepts a non-partial unique index as an FK parent key, so rebuild
+    # the partial variant in place. NULL run_ids (legacy rows) stay valid: a
+    # non-partial unique index treats NULLs as distinct.
+    run_id_index_sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_query_history_run_id'"
+    ).fetchone()
+    if run_id_index_sql and run_id_index_sql[0] and "WHERE" in run_id_index_sql[0].upper():
+        db.execute("DROP INDEX idx_query_history_run_id")
     db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_query_history_run_id "
-        "ON query_history(run_id) WHERE run_id IS NOT NULL"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_query_history_run_id ON query_history(run_id)"
+    )
+
+    # Explicit relevance judgments attached to one observed run (#1801).
+    # Rows hold only IDs, the judgment, and audit timestamps — never result
+    # content, paths, or query text (observation privacy boundary). The
+    # cascade keeps history pruning/reset from orphaning feedback.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS search_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL REFERENCES query_history(run_id) ON DELETE CASCADE,
+            chunk_id TEXT NOT NULL,
+            judgment TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_search_feedback_run_chunk "
+        "ON search_feedback(run_id, chunk_id)"
     )
 
     db.execute("""

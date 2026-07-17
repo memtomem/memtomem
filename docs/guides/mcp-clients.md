@@ -453,7 +453,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Multi-Agent** | `mem_agent_register`, `mem_agent_search`, `mem_agent_share` |
 | **Consolidation** | `mem_consolidate`, `mem_consolidate_apply` |
 | **Reflection** | `mem_reflect`, `mem_reflect_save` |
-| **History** | `mem_search_history`, `mem_search_suggest` |
+| **History** | `mem_search_history`, `mem_search_feedback`, `mem_search_suggest` |
 | **Conflict** | `mem_conflict_check` |
 | **Importance** | `mem_importance_scan` |
 | **Entity** | `mem_entity_scan`, `mem_entity_search` |
@@ -473,7 +473,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (96 current tools plus the deprecated `mem_context_migrate` alias, 97 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (97 current tools plus the deprecated `mem_context_migrate` alias, 98 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.

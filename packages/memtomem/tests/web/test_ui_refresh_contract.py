@@ -59,7 +59,7 @@ def test_changed_static_assets_bump_cache_versions() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
 
     assert "/style.css?v=137" in html
-    assert "/app.js?v=154" in html
+    assert "/app.js?v=155" in html
     assert "/settings-config.js?v=18" in html
 
 

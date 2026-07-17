@@ -222,6 +222,104 @@ class TestDowngradeFence:
             db.close()
 
 
+class TestSearchFeedbackSchema:
+    """Additive #1801 migration: the ``search_feedback`` table and the
+    partial→non-partial rebuild of ``idx_query_history_run_id`` (an FK
+    parent key must be backed by a non-partial unique index)."""
+
+    @staticmethod
+    def _run_id_index_sql(db: sqlite3.Connection) -> str:
+        row = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_query_history_run_id'"
+        ).fetchone()
+        assert row is not None
+        return row[0]
+
+    def test_fresh_db_creates_feedback_table_and_indexes(self) -> None:
+        db = _connect_with_vec()
+        try:
+            _create_tables(db)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(search_feedback)")}
+            assert columns == {"id", "run_id", "chunk_id", "judgment", "created_at", "updated_at"}
+            unique = db.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND name='idx_search_feedback_run_chunk'"
+            ).fetchone()
+            assert unique is not None and "UNIQUE" in unique[0]
+            assert "WHERE" not in self._run_id_index_sql(db).upper()
+            assert _stored_version(db) == str(SCHEMA_VERSION)
+        finally:
+            db.close()
+
+    def test_partial_run_id_index_rebuilt_with_legacy_nulls(self) -> None:
+        """A #1800-era DB has the partial unique index and NULL-run_id legacy
+        rows; the rebuild must keep those rows and yield a working FK parent."""
+        db = _connect_with_vec()
+        try:
+            db.execute(
+                """CREATE TABLE query_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_text TEXT NOT NULL,
+                    query_embedding BLOB NOT NULL,
+                    result_chunk_ids TEXT NOT NULL,
+                    result_scores TEXT NOT NULL,
+                    run_id TEXT,
+                    observation_json TEXT NOT NULL DEFAULT '{}',
+                    result_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            db.execute(
+                "CREATE UNIQUE INDEX idx_query_history_run_id "
+                "ON query_history(run_id) WHERE run_id IS NOT NULL"
+            )
+            for _ in range(2):  # two NULL run_ids must both survive the rebuild
+                db.execute(
+                    "INSERT INTO query_history "
+                    "(query_text, query_embedding, result_chunk_ids, result_scores, created_at) "
+                    "VALUES ('legacy', X'', '[]', '[]', '2026-07-17T00:00:00+00:00')"
+                )
+            db.execute(
+                "INSERT INTO query_history "
+                "(query_text, query_embedding, result_chunk_ids, result_scores, run_id, "
+                "created_at) VALUES ('run', X'', '[]', '[]', 'run-1', '2026-07-17T00:00:00+00:00')"
+            )
+
+            _create_tables(db)
+
+            assert "WHERE" not in self._run_id_index_sql(db).upper()
+            assert db.execute("SELECT COUNT(*) FROM query_history").fetchone()[0] == 3
+
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute(
+                "INSERT INTO search_feedback "
+                "(run_id, chunk_id, judgment, created_at, updated_at) "
+                "VALUES ('run-1', 'c1', 'relevant', '2026-07-17T00:00:00+00:00', "
+                "'2026-07-17T00:00:00+00:00')"
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                db.execute(
+                    "INSERT INTO search_feedback "
+                    "(run_id, chunk_id, judgment, created_at, updated_at) "
+                    "VALUES ('no-such-run', 'c1', 'relevant', '2026-07-17T00:00:00+00:00', "
+                    "'2026-07-17T00:00:00+00:00')"
+                )
+            db.execute("DELETE FROM query_history WHERE run_id = 'run-1'")
+            assert db.execute("SELECT COUNT(*) FROM search_feedback").fetchone()[0] == 0
+        finally:
+            db.close()
+
+    def test_rebuild_is_idempotent(self) -> None:
+        db = _connect_with_vec()
+        try:
+            _create_tables(db)
+            first = self._run_id_index_sql(db)
+            _create_tables(db)
+            assert self._run_id_index_sql(db) == first
+        finally:
+            db.close()
+
+
 class TestBackendInitialize:
     async def test_backend_initialize_raises_and_leaves_db_untouched(self, tmp_path: Path) -> None:
         """End-to-end: ``SqliteBackend.initialize()`` refuses a newer DB with

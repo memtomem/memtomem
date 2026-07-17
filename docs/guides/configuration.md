@@ -922,7 +922,7 @@ The keys may come either from the config surface above or from the Langfuse SDK'
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (38 incl. `mem_do`), `full` (96 current tools + deprecated `mem_context_migrate` alias) |
+| `MEMTOMEM_TOOL_MODE` | `core` | Which MCP names are exposed: `core` (9), `standard` (38 incl. `mem_do`), `full` (97 current tools + deprecated `mem_context_migrate` alias) |
 
 In `core` mode, use `mem_do(action="...", params={...})` to access any of the 70+ non-core actions. Fewer tools means less context usage for AI agents.
 

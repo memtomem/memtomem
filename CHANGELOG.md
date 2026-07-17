@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **Explicit relevance feedback for search runs (Quality Lab)** (#1801) —
+  a committed `query_run_id` now accepts local judgments (`relevant` /
+  `not_relevant`) for chunks in that run's snapshot: new `search_feedback`
+  SQLite table (FK `ON DELETE CASCADE` to the observation, so history
+  pruning/reset never orphans feedback), `mem_search_feedback` MCP tool
+  (`mem_do(action="search_feedback")` in core/standard modes), and dev-mode
+  Web API + Settings → Search Runs inspection panel. Identical resubmission
+  is idempotent; a different judgment requires an explicit `replace=true`
+  and is audited by a strictly increasing microsecond `updated_at`. Unknown
+  run IDs / out-of-snapshot chunks are rejected without partial writes;
+  feedback rows store only IDs, judgments, and timestamps, and search never
+  reads them.
+
 - **Named score scale in structured search output** (#1767) — `mem_search`
   and `mem_agent_search` structured payloads now carry a top-level
   `score_scale` (`rrf` / `bm25` / `dense` / `none` / `rerank`) plus `reranker`

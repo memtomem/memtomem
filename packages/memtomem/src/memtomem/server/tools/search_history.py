@@ -42,6 +42,63 @@ async def mem_search_history(
 @mcp.tool()
 @tool_handler
 @register("analytics")
+async def mem_search_feedback(
+    run_id: str,
+    chunk_id: str | None = None,
+    judgment: str | None = None,
+    replace: bool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Record or list relevance judgments for one observed search run.
+
+    With ``judgment`` (requires ``chunk_id``): record "relevant" or
+    "not_relevant" for that snapshotted result. Resubmitting the same
+    judgment is a no-op; a different judgment needs ``replace=True``.
+    Without ``judgment``: list the run's current judgments.
+
+    Args:
+        run_id: The query_run_id returned by a ranked search.
+        chunk_id: Chunk from that run's result snapshot to judge.
+        judgment: One of "relevant" / "not_relevant"; omit to read.
+        replace: Allow overwriting a different existing judgment.
+    """
+    if judgment is None:
+        if chunk_id is not None:
+            return "Error: judgment is required when chunk_id is given."
+        if replace:
+            return "Error: replace is only valid when judgment is given."
+        app = await _get_app_initialized(ctx)
+        judgments = await app.storage.get_search_feedback(run_id)
+        if not judgments:
+            return f"No feedback recorded for run {run_id}."
+        lines = [f"Feedback for run {run_id} ({len(judgments)} judgments):"]
+        for j in judgments:
+            lines.append(f"  {j['chunk_id']}: {j['judgment']} (updated {j['updated_at']})")
+        return "\n".join(lines)
+
+    if chunk_id is None:
+        return "Error: chunk_id is required when judgment is given."
+    app = await _get_app_initialized(ctx)
+    saved = await app.storage.save_search_feedback(run_id, chunk_id, judgment, replace=replace)
+    if saved["created"]:
+        return (
+            f"Feedback recorded: run={run_id} chunk={chunk_id} "
+            f"judgment={saved['judgment']} (created {saved['created_at']})"
+        )
+    if saved["replaced"]:
+        return (
+            f"Feedback replaced: run={run_id} chunk={chunk_id} -> "
+            f"{saved['judgment']} (updated {saved['updated_at']})"
+        )
+    return (
+        f"Feedback unchanged: run={run_id} chunk={chunk_id} already "
+        f"{saved['judgment']} (created {saved['created_at']})"
+    )
+
+
+@mcp.tool()
+@tool_handler
+@register("analytics")
 async def mem_search_suggest(
     prefix: str,
     limit: int = 5,

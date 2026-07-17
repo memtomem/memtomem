@@ -565,6 +565,7 @@ class SqliteBackend(
             "chunk_relations",
             "chunk_entities",
             "access_log",
+            "search_feedback",
             "query_history",
             "namespace_metadata",
             "memory_policies",

@@ -1,5 +1,6 @@
 /**
- * Tab Help System + Harness panels (Sessions, Scratch, Procedures, Health).
+ * Tab Help System + Harness panels (Sessions, Search Runs, Scratch,
+ * Procedures, Health).
  *
  * Depends on globals from app.js. Loaded AFTER app.js.
  */
@@ -161,6 +162,110 @@ function _renderSessionEventRows(events) {
 
 qs('session-events-close')?.addEventListener('click', () => hide(qs('session-events-panel')));
 qs('sessions-refresh-btn')?.addEventListener('click', loadHarnessSessions);
+
+// ── Harness: Search Runs (Quality Lab #1801) ──
+//
+// Every server-derived value goes through escapeHtml (query text is user
+// input; snapshot metadata is file-derived) and IDs placed in URLs through
+// encodeURIComponent — do not copy the unescaped sessions interpolation.
+
+async function loadHarnessSearchRuns() {
+  const list = qs('search-runs-list');
+  renderPageState(list, { kind: 'loading', message: t('common.loading') });
+  try {
+    const data = await api('GET', '/api/search/runs?limit=50');
+    if (!data.runs.length) {
+      renderPageState(list, { kind: 'empty', message: t('settings.search_runs.empty') });
+      return;
+    }
+    list.innerHTML = '<table class="harness-table"><thead><tr>' +
+      '<th>Time</th><th>Query</th><th>Origin</th><th>Results</th><th>Feedback</th><th></th>' +
+      '</tr></thead><tbody>' +
+      data.runs.map(r => `<tr>
+          <td>${relativeTime(r.created_at)}</td>
+          <td>${escapeHtml(truncate(r.query_text, 60))}</td>
+          <td class="mono">${escapeHtml(r.origin || '—')}</td>
+          <td>${Number(r.result_count) || 0}</td>
+          <td>${Number(r.feedback_count) || 0}</td>
+          <td><button class="btn-ghost btn-xs" data-action="search-run-inspect" data-id="${escapeAttr(r.run_id)}">${t('settings.search_runs.inspect')}</button></td>
+        </tr>`).join('') +
+      '</tbody></table>';
+  } catch (e) {
+    renderPageState(list, { kind: 'error', message: t('settings.search_runs.load_failed'), detail: e.message, retry: loadHarnessSearchRuns });
+  }
+}
+
+async function showSearchRunDetail(runId) {
+  const panel = qs('search-run-detail-panel');
+  const list = qs('search-run-detail');
+  qs('search-run-detail-title').textContent =
+    `${t('settings.search_runs.detail_title')}: ${runId.slice(0, 8)}...`;
+  show(panel);
+  list.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
+  try {
+    const d = await api('GET', `/api/search/runs/${encodeURIComponent(runId)}`);
+    const o = d.observation || {};
+    const meta = [
+      `origin=${escapeHtml(o.origin || '—')}`,
+      `top_k=${Number(o.top_k) || '—'}`,
+      o.latency_ms != null ? `latency=${Number(o.latency_ms)}ms` : '',
+      `cache_hit=${o.cache_hit ? 'yes' : 'no'}`,
+      o.profile_id ? `profile=${escapeHtml(String(o.profile_id).slice(0, 8))}` : '',
+    ].filter(Boolean).join(' · ');
+    const judgeBtn = (rw, judgment) =>
+      `<button class="btn-ghost btn-xs${rw.judgment === judgment ? ' active' : ''}"
+        data-action="search-run-judge" data-id="${escapeAttr(runId)}"
+        data-chunk="${escapeAttr(rw.chunk_id)}" data-judgment="${judgment}">
+        ${t(`settings.search_runs.judgment_${judgment}`)}</button>`;
+    list.innerHTML = `
+      <div class="muted-sm">“${escapeHtml(truncate(d.query_text, 120))}” — ${relativeTime(d.created_at)}</div>
+      <div class="muted-sm mono">${meta}</div>
+      <table class="harness-table"><thead><tr>
+        <th>#</th><th>Source</th><th>Score</th><th>Judgment</th><th></th>
+      </tr></thead><tbody>` +
+      d.results.map(rw => `<tr>
+          <td>${Number(rw.rank) || '—'}</td>
+          <td>${escapeHtml(truncate(rw.source_name || rw.chunk_id, 48))}</td>
+          <td>${rw.score != null ? Number(rw.score).toFixed(3) : '—'}</td>
+          <td>${rw.judgment ? `<span class="badge">${escapeHtml(rw.judgment)}</span>` : '—'}</td>
+          <td>${judgeBtn(rw, 'relevant')} ${judgeBtn(rw, 'not_relevant')}</td>
+        </tr>`).join('') +
+      '</tbody></table>';
+  } catch (e) {
+    renderPageState(list, { kind: 'error', message: t('settings.search_runs.load_failed'), detail: e.message, retry: () => showSearchRunDetail(runId) });
+  }
+}
+
+async function submitSearchRunJudgment(runId, chunkId, judgment) {
+  const post = (replace) => api(
+    'POST',
+    `/api/search/runs/${encodeURIComponent(runId)}/feedback`,
+    { chunk_id: chunkId, judgment, replace },
+  );
+  try {
+    await post(false);
+  } catch (e) {
+    // 409 = a different judgment exists; replacement is a deliberate act.
+    if (e && e.status === 409) {
+      if (!confirm(t('settings.search_runs.replace_confirm'))) return;
+      try {
+        await post(true);
+      } catch (e2) {
+        showToast(t('settings.search_runs.save_failed', { error: e2.message }), 'error');
+        return;
+      }
+    } else {
+      showToast(t('settings.search_runs.save_failed', { error: e.message }), 'error');
+      return;
+    }
+  }
+  showToast(t('settings.search_runs.saved'), 'success');
+  showSearchRunDetail(runId);
+  loadHarnessSearchRuns();
+}
+
+qs('search-runs-refresh-btn')?.addEventListener('click', loadHarnessSearchRuns);
+qs('search-run-detail-close')?.addEventListener('click', () => hide(qs('search-run-detail-panel')));
 
 // ── Harness: Working Memory (Scratch) ──
 

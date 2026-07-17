@@ -242,6 +242,21 @@ mem_search(query="deploy pipeline", as_of="2025-Q3")    # historical query
 > its current per-result schema; use MCP structured output or the Web API when
 > the run ID is needed.
 
+> **Relevance feedback**: a committed run ID accepts explicit judgments for
+> chunks that appear in that run's snapshot, via
+> `mem_do(action="search_feedback", params={"run_id": "...", "chunk_id": "...",
+> "judgment": "relevant"})` — the closed vocabulary is `relevant` /
+> `not_relevant`. Resubmitting the same judgment is a no-op; a different
+> judgment is rejected until the call is repeated with `"replace": true`, and
+> replacements are audited by a strictly increasing `updated_at` timestamp
+> while `created_at` marks the original. Omit `judgment` to list a run's
+> current judgments. Unknown run IDs and chunks outside the run's snapshot are
+> rejected without partial writes. Feedback rows store only IDs, the judgment,
+> and timestamps — never result content or paths — follow the same 90-day
+> retention as the observation they belong to, and are never read by search
+> itself. `mm web` (dev mode) adds a Settings → Search Runs panel for the same
+> loop.
+
 ### Tuning search weights
 
 Use `bm25_weight` and `dense_weight` to shift between keyword and semantic matching:

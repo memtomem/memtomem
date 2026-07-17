@@ -74,6 +74,16 @@ class ConfigError(Mem2MemError):
     """Configuration error."""
 
 
+class FeedbackConflictError(ValueError):
+    """Raised when relevance feedback would silently overwrite a different judgment.
+
+    Subclasses :class:`ValueError` (not :class:`Mem2MemError`) on purpose:
+    the MCP ``tool_handler`` already surfaces ``ValueError`` as a plain
+    ``Error: ...`` string, while the Web layer can catch this specific type
+    and answer 409 before the generic ``ValueError``→400 handler applies.
+    """
+
+
 class RetryableError(Exception):
     """Error that can be resolved by retrying (e.g., network timeout, rate limit)."""
 
