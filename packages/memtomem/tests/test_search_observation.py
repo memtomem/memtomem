@@ -54,6 +54,38 @@ async def test_ranked_search_persists_durable_secret_free_observation(
     assert "content" not in row["result_snapshot"][0]
 
 
+async def test_snapshot_source_name_is_a_basename_never_a_path(bm25_only_components):
+    """Value-level pin for the snapshot writer's projection (#1815).
+
+    ``SnapshotEntryOut`` deliberately does not re-sanitize field contents
+    (#1813) — the guarantee that ``source_name`` is a bare basename lives
+    at the writer. A writer change that records an absolute or relative
+    path must fail here, not surface through ``GET /api/search/runs``.
+    """
+    components, memory_dir = bm25_only_components
+    nested = memory_dir / "projects" / "alpha"
+    nested.mkdir(parents=True)
+    note = nested / "pinned.md"
+    note.write_text("# Pin\n\nBasename invariant probe content.\n", encoding="utf-8")
+    await components.index_engine.index_file(note)
+
+    results, stats = await components.search_pipeline.search(
+        "basename invariant probe", top_k=5, origin="web"
+    )
+
+    assert results
+    row = (await components.storage.get_query_history(limit=1))[0]
+    assert row["run_id"] == stats.query_run_id
+    assert row["result_snapshot"]
+    for entry in row["result_snapshot"]:
+        source_name = entry["source_name"]
+        assert source_name == note.name
+        # Both separators: catches a path leak regardless of the OS the
+        # writer ran on (POSIX "/" and Windows "\\").
+        assert "/" not in source_name
+        assert "\\" not in source_name
+
+
 async def test_zero_result_ranked_search_still_gets_run_id(bm25_only_components):
     components, memory_dir = bm25_only_components
     await _index_quality_note(components, memory_dir)
