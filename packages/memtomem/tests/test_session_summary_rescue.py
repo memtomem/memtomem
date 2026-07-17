@@ -397,7 +397,11 @@ class TestPipelineEndToEndRescue:
             namespace_filter=None,
             scope_filter=None,
             project_context_root=None,
+            **kwargs,
         ):
+            # ``**kwargs`` absorbs keyword-only additions to the real
+            # ``dense_search`` signature (e.g. ``exhaustive`` from the replay
+            # path, #1802) so this double stays call-compatible.
             dense_calls.append(
                 {
                     "project_context_root": project_context_root,
