@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import yaml
 
@@ -15,8 +15,10 @@ from memtomem.context._atomic import atomic_write_text
 from memtomem.errors import ConfigError
 from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR, resolve_memory_scope_dir
 
-if TYPE_CHECKING:
-    from memtomem.search.pipeline import ScoreScale
+# Runtime import (not TYPE_CHECKING): the alias must resolve for
+# typing.get_type_hints(ContextBundle) — this is a public payload dataclass
+# and reflection-based consumers may introspect it.
+from memtomem.search.pipeline import ScoreScale
 
 PINNED_BLOCK_MAX_CHARS = 2_000
 PINNED_TOTAL_MAX_CHARS = 6_000
@@ -61,9 +63,11 @@ class ContextBundle:
             "omitted_block_ids": list(self.omitted_block_ids),
             "warnings": list(self.warnings),
         }
-        if self.score_scale is not None:
+        # The omission contract is structural: an empty retrieval leg carries
+        # no relevance scale, even if a caller stamped one on the bundle.
+        if self.retrieved and self.score_scale is not None:
             payload["score_scale"] = self.score_scale
-        if self.reranker is not None:
+        if self.retrieved and self.reranker is not None:
             payload["reranker"] = self.reranker
         return payload
 

@@ -340,6 +340,26 @@ async def test_compose_omits_scale_when_budget_empties_retrieved(pinned_store):
     assert "reranker" not in payload
 
 
+def test_context_bundle_as_dict_enforces_empty_retrieved_omission():
+    # The omission contract must hold structurally, not only via compose():
+    # a directly constructed bundle with an empty retrieval leg serializes
+    # without scale keys even when the fields are stamped.
+    bundle = ContextBundle((), (), 10, 5, (), (), "rerank", "model-x")
+    payload = bundle.as_dict()
+    assert "score_scale" not in payload
+    assert "reranker" not in payload
+
+
+def test_context_bundle_annotations_resolve_at_runtime():
+    # ScoreScale must be importable at runtime, not TYPE_CHECKING-only —
+    # reflection-based consumers introspect this public payload dataclass.
+    import typing
+
+    hints = typing.get_type_hints(ContextBundle)
+    assert "score_scale" in hints
+    assert "reranker" in hints
+
+
 def test_context_bundle_positional_construction_predates_scale_fields():
     # The scale fields sit after every pre-#1791 field, so legacy positional
     # construction keeps its meaning and the new fields default to omitted.
