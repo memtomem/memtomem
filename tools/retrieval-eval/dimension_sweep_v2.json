@@ -1,0 +1,1848 @@
+{
+  "cache_stats": {
+    "hits": 4680,
+    "misses": 312
+  },
+  "deltas": {
+    "dense": {
+      "bge_m3_128": {
+        "cross_language": {
+          "macro": {
+            "mrr@10": -0.143541,
+            "ndcg@10": -0.17631,
+            "recall@10": -0.186524
+          },
+          "zero_hit_count": 18
+        },
+        "english": {
+          "macro": {
+            "mrr@10": -0.126289,
+            "ndcg@10": -0.146478,
+            "recall@10": -0.202283
+          },
+          "zero_hit_count": 13
+        },
+        "korean": {
+          "macro": {
+            "mrr@10": -0.151785,
+            "ndcg@10": -0.170151,
+            "recall@10": -0.190376
+          },
+          "zero_hit_count": 8
+        }
+      },
+      "bge_m3_256": {
+        "cross_language": {
+          "macro": {
+            "mrr@10": -0.084319,
+            "ndcg@10": -0.106588,
+            "recall@10": -0.110518
+          },
+          "zero_hit_count": 10
+        },
+        "english": {
+          "macro": {
+            "mrr@10": -0.096342,
+            "ndcg@10": -0.095556,
+            "recall@10": -0.12381
+          },
+          "zero_hit_count": 6
+        },
+        "korean": {
+          "macro": {
+            "mrr@10": -0.112718,
+            "ndcg@10": -0.113128,
+            "recall@10": -0.137976
+          },
+          "zero_hit_count": 7
+        }
+      },
+      "bge_m3_512": {
+        "cross_language": {
+          "macro": {
+            "mrr@10": -0.039014,
+            "ndcg@10": -0.045769,
+            "recall@10": -0.042577
+          },
+          "zero_hit_count": 4
+        },
+        "english": {
+          "macro": {
+            "mrr@10": -0.019742,
+            "ndcg@10": -0.028218,
+            "recall@10": -0.023413
+          },
+          "zero_hit_count": 0
+        },
+        "korean": {
+          "macro": {
+            "mrr@10": -0.062295,
+            "ndcg@10": -0.047466,
+            "recall@10": -0.039345
+          },
+          "zero_hit_count": 3
+        }
+      }
+    },
+    "fused": {
+      "bge_m3_128": {
+        "cross_language": {
+          "macro": {
+            "mrr@10": -0.075182,
+            "ndcg@10": -0.08356,
+            "recall@10": -0.076685
+          },
+          "zero_hit_count": 7
+        },
+        "english": {
+          "macro": {
+            "mrr@10": -0.055773,
+            "ndcg@10": -0.070505,
+            "recall@10": -0.071726
+          },
+          "zero_hit_count": 2
+        },
+        "korean": {
+          "macro": {
+            "mrr@10": -0.046243,
+            "ndcg@10": -0.086872,
+            "recall@10": -0.110278
+          },
+          "zero_hit_count": 4
+        }
+      },
+      "bge_m3_256": {
+        "cross_language": {
+          "macro": {
+            "mrr@10": -0.035199,
+            "ndcg@10": -0.045108,
+            "recall@10": -0.041874
+          },
+          "zero_hit_count": 1
+        },
+        "english": {
+          "macro": {
+            "mrr@10": -0.017063,
+            "ndcg@10": -0.033986,
+            "recall@10": -0.033334
+          },
+          "zero_hit_count": -1
+        },
+        "korean": {
+          "macro": {
+            "mrr@10": 0.003942,
+            "ndcg@10": -0.040085,
+            "recall@10": -0.062381
+          },
+          "zero_hit_count": 0
+        }
+      },
+      "bge_m3_512": {
+        "cross_language": {
+          "macro": {
+            "mrr@10": -0.008883,
+            "ndcg@10": -0.011284,
+            "recall@10": -0.009895
+          },
+          "zero_hit_count": -1
+        },
+        "english": {
+          "macro": {
+            "mrr@10": -0.013703,
+            "ndcg@10": -0.022644,
+            "recall@10": -0.020834
+          },
+          "zero_hit_count": -1
+        },
+        "korean": {
+          "macro": {
+            "mrr@10": 0.014842,
+            "ndcg@10": -0.009401,
+            "recall@10": -0.037659
+          },
+          "zero_hit_count": 1
+        }
+      }
+    }
+  },
+  "dims": [
+    1024,
+    512,
+    256,
+    128
+  ],
+  "families": [
+    "bge_m3"
+  ],
+  "methodology": "retrieval-v2-dimension-sweep",
+  "modes": [
+    "fused",
+    "dense"
+  ],
+  "profiles": {
+    "bge_m3_dense_1024": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          0.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.2,
+            "en|direct|mrr@10": 0.87,
+            "en|direct|ndcg@10": 0.717117,
+            "en|direct|recall@10": 0.698214,
+            "en|direct|same_language_precision@10": 0.47,
+            "en|genre_primary|cross_language_relevant@10": 2.3,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.525952,
+            "en|genre_primary|mrr@10": 0.525952,
+            "en|genre_primary|ndcg@10": 0.432293,
+            "en|genre_primary|recall@10": 0.4625,
+            "en|genre_primary|same_language_precision@10": 0.5,
+            "en|multi_topic|cross_language_relevant@10": 2.2,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.816667,
+            "en|multi_topic|ndcg@10": 0.612131,
+            "en|multi_topic|recall@10": 0.350824,
+            "en|multi_topic|same_language_precision@10": 0.51,
+            "en|negation|constraint_success@10": 0.6,
+            "en|negation|cross_language_relevant@10": 0.8,
+            "en|negation|hard_negative_hits@10": 2.1,
+            "en|negation|mrr@10": 0.55,
+            "en|negation|ndcg@10": 0.535907,
+            "en|negation|recall@10": 0.7,
+            "en|negation|same_language_precision@10": 0.52,
+            "en|paraphrase|cross_language_relevant@10": 1.2,
+            "en|paraphrase|mrr@10": 0.558333,
+            "en|paraphrase|ndcg@10": 0.416503,
+            "en|paraphrase|recall@10": 0.3975,
+            "en|paraphrase|same_language_precision@10": 0.6,
+            "en|underspecified|cross_language_relevant@10": 1.0,
+            "en|underspecified|mrr@10": 0.761111,
+            "en|underspecified|ndcg@10": 0.460803,
+            "en|underspecified|recall@10": 0.39619,
+            "en|underspecified|same_language_precision@10": 0.64,
+            "ko|direct|cross_language_relevant@10": 1.9,
+            "ko|direct|mrr@10": 0.733333,
+            "ko|direct|ndcg@10": 0.662838,
+            "ko|direct|recall@10": 0.67381,
+            "ko|direct|same_language_precision@10": 0.65,
+            "ko|genre_primary|cross_language_relevant@10": 1.2,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.66,
+            "ko|genre_primary|mrr@10": 0.66,
+            "ko|genre_primary|ndcg@10": 0.45003,
+            "ko|genre_primary|recall@10": 0.4625,
+            "ko|genre_primary|same_language_precision@10": 0.62,
+            "ko|multi_topic|cross_language_relevant@10": 1.7,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.77,
+            "ko|multi_topic|ndcg@10": 0.557875,
+            "ko|multi_topic|recall@10": 0.317729,
+            "ko|multi_topic|same_language_precision@10": 0.65,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|cross_language_relevant@10": 0.5,
+            "ko|negation|hard_negative_hits@10": 1.5,
+            "ko|negation|mrr@10": 0.418452,
+            "ko|negation|ndcg@10": 0.445432,
+            "ko|negation|recall@10": 0.7,
+            "ko|negation|same_language_precision@10": 0.65,
+            "ko|paraphrase|cross_language_relevant@10": 1.6,
+            "ko|paraphrase|mrr@10": 0.625,
+            "ko|paraphrase|ndcg@10": 0.514462,
+            "ko|paraphrase|recall@10": 0.515714,
+            "ko|paraphrase|same_language_precision@10": 0.54,
+            "ko|underspecified|cross_language_relevant@10": 1.1,
+            "ko|underspecified|mrr@10": 0.664286,
+            "ko|underspecified|ndcg@10": 0.393489,
+            "ko|underspecified|recall@10": 0.337857,
+            "ko|underspecified|same_language_precision@10": 0.59
+          },
+          "embedding": {
+            "dimension": 1024,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.426,
+            "p95": 3.556
+          },
+          "macro": {
+            "mrr@10": 0.662761,
+            "ndcg@10": 0.516573,
+            "recall@10": 0.50107
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 7
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.833333,
+            "en|direct|ndcg@10": 0.769177,
+            "en|direct|recall@10": 0.825,
+            "en|genre_primary|genre_hit@1": 0.2,
+            "en|genre_primary|genre_mrr@10": 0.429286,
+            "en|genre_primary|mrr@10": 0.429286,
+            "en|genre_primary|ndcg@10": 0.407543,
+            "en|genre_primary|recall@10": 0.55,
+            "en|multi_topic|intent_coverage@10": 1.0,
+            "en|multi_topic|mrr@10": 0.883333,
+            "en|multi_topic|ndcg@10": 0.629926,
+            "en|multi_topic|recall@10": 0.581548,
+            "en|negation|constraint_success@10": 0.6,
+            "en|negation|hard_negative_hits@10": 1.4,
+            "en|negation|mrr@10": 0.474286,
+            "en|negation|ndcg@10": 0.551519,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.483333,
+            "en|paraphrase|ndcg@10": 0.419872,
+            "en|paraphrase|recall@10": 0.491667,
+            "en|underspecified|mrr@10": 0.7625,
+            "en|underspecified|ndcg@10": 0.540134,
+            "en|underspecified|recall@10": 0.575
+          },
+          "embedding": {
+            "dimension": 1024,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.544,
+            "p95": 3.396
+          },
+          "macro": {
+            "mrr@10": 0.644345,
+            "ndcg@10": 0.553029,
+            "recall@10": 0.637203
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 4
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.75,
+            "ko|direct|ndcg@10": 0.739691,
+            "ko|direct|recall@10": 0.875,
+            "ko|genre_primary|genre_hit@1": 0.4,
+            "ko|genre_primary|genre_mrr@10": 0.625,
+            "ko|genre_primary|mrr@10": 0.625,
+            "ko|genre_primary|ndcg@10": 0.603216,
+            "ko|genre_primary|recall@10": 0.775,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.686667,
+            "ko|multi_topic|ndcg@10": 0.529661,
+            "ko|multi_topic|recall@10": 0.521667,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|hard_negative_hits@10": 1.4,
+            "ko|negation|mrr@10": 0.461667,
+            "ko|negation|ndcg@10": 0.571032,
+            "ko|negation|recall@10": 0.9,
+            "ko|paraphrase|mrr@10": 0.7,
+            "ko|paraphrase|ndcg@10": 0.608437,
+            "ko|paraphrase|recall@10": 0.666667,
+            "ko|underspecified|mrr@10": 0.48,
+            "ko|underspecified|ndcg@10": 0.396466,
+            "ko|underspecified|recall@10": 0.458333
+          },
+          "embedding": {
+            "dimension": 1024,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.512,
+            "p95": 2.923
+          },
+          "macro": {
+            "mrr@10": 0.617222,
+            "ndcg@10": 0.574751,
+            "recall@10": 0.699444
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 3
+        }
+      }
+    },
+    "bge_m3_dense_128": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          0.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 1.6,
+            "en|direct|mrr@10": 0.7125,
+            "en|direct|ndcg@10": 0.537763,
+            "en|direct|recall@10": 0.522024,
+            "en|direct|same_language_precision@10": 0.46,
+            "en|genre_primary|cross_language_relevant@10": 1.6,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.566667,
+            "en|genre_primary|mrr@10": 0.566667,
+            "en|genre_primary|ndcg@10": 0.344823,
+            "en|genre_primary|recall@10": 0.3125,
+            "en|genre_primary|same_language_precision@10": 0.42,
+            "en|multi_topic|cross_language_relevant@10": 1.4,
+            "en|multi_topic|intent_coverage@10": 0.8,
+            "en|multi_topic|mrr@10": 0.625,
+            "en|multi_topic|ndcg@10": 0.449196,
+            "en|multi_topic|recall@10": 0.263114,
+            "en|multi_topic|same_language_precision@10": 0.49,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|cross_language_relevant@10": 0.4,
+            "en|negation|hard_negative_hits@10": 1.6,
+            "en|negation|mrr@10": 0.395,
+            "en|negation|ndcg@10": 0.361568,
+            "en|negation|recall@10": 0.5,
+            "en|negation|same_language_precision@10": 0.49,
+            "en|paraphrase|cross_language_relevant@10": 0.7,
+            "en|paraphrase|mrr@10": 0.414286,
+            "en|paraphrase|ndcg@10": 0.189382,
+            "en|paraphrase|recall@10": 0.153571,
+            "en|paraphrase|same_language_precision@10": 0.51,
+            "en|underspecified|cross_language_relevant@10": 0.4,
+            "en|underspecified|mrr@10": 0.583333,
+            "en|underspecified|ndcg@10": 0.254182,
+            "en|underspecified|recall@10": 0.164286,
+            "en|underspecified|same_language_precision@10": 0.56,
+            "ko|direct|cross_language_relevant@10": 1.2,
+            "ko|direct|mrr@10": 0.636667,
+            "ko|direct|ndcg@10": 0.443988,
+            "ko|direct|recall@10": 0.411905,
+            "ko|direct|same_language_precision@10": 0.67,
+            "ko|genre_primary|cross_language_relevant@10": 0.9,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.695833,
+            "ko|genre_primary|mrr@10": 0.695833,
+            "ko|genre_primary|ndcg@10": 0.411963,
+            "ko|genre_primary|recall@10": 0.3875,
+            "ko|genre_primary|same_language_precision@10": 0.75,
+            "ko|multi_topic|cross_language_relevant@10": 1.2,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.531667,
+            "ko|multi_topic|ndcg@10": 0.392692,
+            "ko|multi_topic|recall@10": 0.251557,
+            "ko|multi_topic|same_language_precision@10": 0.64,
+            "ko|negation|constraint_success@10": 0.2,
+            "ko|negation|cross_language_relevant@10": 0.2,
+            "ko|negation|hard_negative_hits@10": 1.5,
+            "ko|negation|mrr@10": 0.232897,
+            "ko|negation|ndcg@10": 0.260863,
+            "ko|negation|recall@10": 0.45,
+            "ko|negation|same_language_precision@10": 0.66,
+            "ko|paraphrase|cross_language_relevant@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.460119,
+            "ko|paraphrase|ndcg@10": 0.224327,
+            "ko|paraphrase|recall@10": 0.195595,
+            "ko|paraphrase|same_language_precision@10": 0.55,
+            "ko|underspecified|cross_language_relevant@10": 0.5,
+            "ko|underspecified|mrr@10": 0.376667,
+            "ko|underspecified|ndcg@10": 0.212409,
+            "ko|underspecified|recall@10": 0.1625,
+            "ko|underspecified|same_language_precision@10": 0.53
+          },
+          "embedding": {
+            "dimension": 128,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.021,
+            "p95": 3.142
+          },
+          "macro": {
+            "mrr@10": 0.51922,
+            "ndcg@10": 0.340263,
+            "recall@10": 0.314546
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 25
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.695833,
+            "en|direct|ndcg@10": 0.610979,
+            "en|direct|recall@10": 0.675,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.516667,
+            "en|genre_primary|mrr@10": 0.516667,
+            "en|genre_primary|ndcg@10": 0.347847,
+            "en|genre_primary|recall@10": 0.375,
+            "en|multi_topic|intent_coverage@10": 0.85,
+            "en|multi_topic|mrr@10": 0.566667,
+            "en|multi_topic|ndcg@10": 0.470885,
+            "en|multi_topic|recall@10": 0.42619,
+            "en|negation|constraint_success@10": 0.4,
+            "en|negation|hard_negative_hits@10": 1.2,
+            "en|negation|mrr@10": 0.416667,
+            "en|negation|ndcg@10": 0.461807,
+            "en|negation|recall@10": 0.6,
+            "en|paraphrase|mrr@10": 0.2625,
+            "en|paraphrase|ndcg@10": 0.182335,
+            "en|paraphrase|recall@10": 0.183333,
+            "en|underspecified|mrr@10": 0.65,
+            "en|underspecified|ndcg@10": 0.365455,
+            "en|underspecified|recall@10": 0.35
+          },
+          "embedding": {
+            "dimension": 128,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.136,
+            "p95": 2.905
+          },
+          "macro": {
+            "mrr@10": 0.518056,
+            "ndcg@10": 0.406551,
+            "recall@10": 0.43492
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 17
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.44,
+            "ko|direct|ndcg@10": 0.515036,
+            "ko|direct|recall@10": 0.641667,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.7125,
+            "ko|genre_primary|mrr@10": 0.7125,
+            "ko|genre_primary|ndcg@10": 0.519709,
+            "ko|genre_primary|recall@10": 0.575,
+            "ko|multi_topic|intent_coverage@10": 0.95,
+            "ko|multi_topic|mrr@10": 0.539286,
+            "ko|multi_topic|ndcg@10": 0.398799,
+            "ko|multi_topic|recall@10": 0.429405,
+            "ko|negation|constraint_success@10": 0.2,
+            "ko|negation|hard_negative_hits@10": 1.3,
+            "ko|negation|mrr@10": 0.2575,
+            "ko|negation|ndcg@10": 0.362013,
+            "ko|negation|recall@10": 0.7,
+            "ko|paraphrase|mrr@10": 0.458333,
+            "ko|paraphrase|ndcg@10": 0.317433,
+            "ko|paraphrase|recall@10": 0.35,
+            "ko|underspecified|mrr@10": 0.385,
+            "ko|underspecified|ndcg@10": 0.314607,
+            "ko|underspecified|recall@10": 0.358333
+          },
+          "embedding": {
+            "dimension": 128,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.303,
+            "p95": 3.512
+          },
+          "macro": {
+            "mrr@10": 0.465437,
+            "ndcg@10": 0.4046,
+            "recall@10": 0.509068
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 11
+        }
+      }
+    },
+    "bge_m3_dense_256": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          0.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.0,
+            "en|direct|mrr@10": 0.87,
+            "en|direct|ndcg@10": 0.635013,
+            "en|direct|recall@10": 0.631548,
+            "en|direct|same_language_precision@10": 0.41,
+            "en|genre_primary|cross_language_relevant@10": 2.0,
+            "en|genre_primary|genre_hit@1": 0.5,
+            "en|genre_primary|genre_mrr@10": 0.645397,
+            "en|genre_primary|mrr@10": 0.645397,
+            "en|genre_primary|ndcg@10": 0.432595,
+            "en|genre_primary|recall@10": 0.4375,
+            "en|genre_primary|same_language_precision@10": 0.45,
+            "en|multi_topic|cross_language_relevant@10": 1.7,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.825,
+            "en|multi_topic|ndcg@10": 0.545081,
+            "en|multi_topic|recall@10": 0.288205,
+            "en|multi_topic|same_language_precision@10": 0.54,
+            "en|negation|constraint_success@10": 0.4,
+            "en|negation|cross_language_relevant@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.7,
+            "en|negation|mrr@10": 0.386111,
+            "en|negation|ndcg@10": 0.367795,
+            "en|negation|recall@10": 0.55,
+            "en|negation|same_language_precision@10": 0.53,
+            "en|paraphrase|cross_language_relevant@10": 1.0,
+            "en|paraphrase|mrr@10": 0.387897,
+            "en|paraphrase|ndcg@10": 0.227556,
+            "en|paraphrase|recall@10": 0.204762,
+            "en|paraphrase|same_language_precision@10": 0.52,
+            "en|underspecified|cross_language_relevant@10": 1.1,
+            "en|underspecified|mrr@10": 0.684286,
+            "en|underspecified|ndcg@10": 0.402287,
+            "en|underspecified|recall@10": 0.336905,
+            "en|underspecified|same_language_precision@10": 0.64,
+            "ko|direct|cross_language_relevant@10": 1.6,
+            "ko|direct|mrr@10": 0.554167,
+            "ko|direct|ndcg@10": 0.555721,
+            "ko|direct|recall@10": 0.60119,
+            "ko|direct|same_language_precision@10": 0.67,
+            "ko|genre_primary|cross_language_relevant@10": 1.2,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.679167,
+            "ko|genre_primary|mrr@10": 0.679167,
+            "ko|genre_primary|ndcg@10": 0.398327,
+            "ko|genre_primary|recall@10": 0.375,
+            "ko|genre_primary|same_language_precision@10": 0.62,
+            "ko|multi_topic|cross_language_relevant@10": 1.3,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.647619,
+            "ko|multi_topic|ndcg@10": 0.458765,
+            "ko|multi_topic|recall@10": 0.262582,
+            "ko|multi_topic|same_language_precision@10": 0.61,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|cross_language_relevant@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.5,
+            "ko|negation|mrr@10": 0.373333,
+            "ko|negation|ndcg@10": 0.348089,
+            "ko|negation|recall@10": 0.5,
+            "ko|negation|same_language_precision@10": 0.62,
+            "ko|paraphrase|cross_language_relevant@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.468333,
+            "ko|paraphrase|ndcg@10": 0.284382,
+            "ko|paraphrase|recall@10": 0.257262,
+            "ko|paraphrase|same_language_precision@10": 0.59,
+            "ko|underspecified|cross_language_relevant@10": 0.8,
+            "ko|underspecified|mrr@10": 0.42,
+            "ko|underspecified|ndcg@10": 0.264206,
+            "ko|underspecified|recall@10": 0.241667,
+            "ko|underspecified|same_language_precision@10": 0.52
+          },
+          "embedding": {
+            "dimension": 256,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.024,
+            "p95": 2.851
+          },
+          "macro": {
+            "mrr@10": 0.578442,
+            "ndcg@10": 0.409985,
+            "recall@10": 0.390552
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 17
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.745833,
+            "en|direct|ndcg@10": 0.670698,
+            "en|direct|recall@10": 0.7,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.495,
+            "en|genre_primary|mrr@10": 0.495,
+            "en|genre_primary|ndcg@10": 0.424333,
+            "en|genre_primary|recall@10": 0.525,
+            "en|multi_topic|intent_coverage@10": 0.9,
+            "en|multi_topic|mrr@10": 0.814286,
+            "en|multi_topic|ndcg@10": 0.552849,
+            "en|multi_topic|recall@10": 0.46369,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.2,
+            "en|negation|mrr@10": 0.378333,
+            "en|negation|ndcg@10": 0.457939,
+            "en|negation|recall@10": 0.7,
+            "en|paraphrase|mrr@10": 0.22123,
+            "en|paraphrase|ndcg@10": 0.226324,
+            "en|paraphrase|recall@10": 0.291667,
+            "en|underspecified|mrr@10": 0.633333,
+            "en|underspecified|ndcg@10": 0.412695,
+            "en|underspecified|recall@10": 0.4
+          },
+          "embedding": {
+            "dimension": 256,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.197,
+            "p95": 2.943
+          },
+          "macro": {
+            "mrr@10": 0.548003,
+            "ndcg@10": 0.457473,
+            "recall@10": 0.513393
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 10
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.472619,
+            "ko|direct|ndcg@10": 0.630676,
+            "ko|direct|recall@10": 0.875,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.683333,
+            "ko|genre_primary|mrr@10": 0.683333,
+            "ko|genre_primary|ndcg@10": 0.533056,
+            "ko|genre_primary|recall@10": 0.65,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.543333,
+            "ko|multi_topic|ndcg@10": 0.425215,
+            "ko|multi_topic|recall@10": 0.402143,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|hard_negative_hits@10": 1.2,
+            "ko|negation|mrr@10": 0.336667,
+            "ko|negation|ndcg@10": 0.400492,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.564286,
+            "ko|paraphrase|ndcg@10": 0.411133,
+            "ko|paraphrase|recall@10": 0.4,
+            "ko|underspecified|mrr@10": 0.426786,
+            "ko|underspecified|ndcg@10": 0.369166,
+            "ko|underspecified|recall@10": 0.441667
+          },
+          "embedding": {
+            "dimension": 256,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.149,
+            "p95": 2.481
+          },
+          "macro": {
+            "mrr@10": 0.504504,
+            "ndcg@10": 0.461623,
+            "recall@10": 0.561468
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 10
+        }
+      }
+    },
+    "bge_m3_dense_512": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          0.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.2,
+            "en|direct|mrr@10": 0.864286,
+            "en|direct|ndcg@10": 0.708082,
+            "en|direct|recall@10": 0.706548,
+            "en|direct|same_language_precision@10": 0.44,
+            "en|genre_primary|cross_language_relevant@10": 2.2,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.579167,
+            "en|genre_primary|mrr@10": 0.579167,
+            "en|genre_primary|ndcg@10": 0.442791,
+            "en|genre_primary|recall@10": 0.4625,
+            "en|genre_primary|same_language_precision@10": 0.46,
+            "en|multi_topic|cross_language_relevant@10": 2.0,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.81,
+            "en|multi_topic|ndcg@10": 0.576092,
+            "en|multi_topic|recall@10": 0.310256,
+            "en|multi_topic|same_language_precision@10": 0.49,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|cross_language_relevant@10": 0.6,
+            "en|negation|hard_negative_hits@10": 1.7,
+            "en|negation|mrr@10": 0.47,
+            "en|negation|ndcg@10": 0.444723,
+            "en|negation|recall@10": 0.6,
+            "en|negation|same_language_precision@10": 0.54,
+            "en|paraphrase|cross_language_relevant@10": 1.4,
+            "en|paraphrase|mrr@10": 0.46,
+            "en|paraphrase|ndcg@10": 0.370681,
+            "en|paraphrase|recall@10": 0.410833,
+            "en|paraphrase|same_language_precision@10": 0.53,
+            "en|underspecified|cross_language_relevant@10": 0.9,
+            "en|underspecified|mrr@10": 0.766667,
+            "en|underspecified|ndcg@10": 0.425417,
+            "en|underspecified|recall@10": 0.332738,
+            "en|underspecified|same_language_precision@10": 0.6,
+            "ko|direct|cross_language_relevant@10": 1.7,
+            "ko|direct|mrr@10": 0.666667,
+            "ko|direct|ndcg@10": 0.604388,
+            "ko|direct|recall@10": 0.644643,
+            "ko|direct|same_language_precision@10": 0.7,
+            "ko|genre_primary|cross_language_relevant@10": 1.1,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.658333,
+            "ko|genre_primary|mrr@10": 0.658333,
+            "ko|genre_primary|ndcg@10": 0.435351,
+            "ko|genre_primary|recall@10": 0.425,
+            "ko|genre_primary|same_language_precision@10": 0.64,
+            "ko|multi_topic|cross_language_relevant@10": 1.6,
+            "ko|multi_topic|intent_coverage@10": 0.95,
+            "ko|multi_topic|mrr@10": 0.706111,
+            "ko|multi_topic|ndcg@10": 0.512302,
+            "ko|multi_topic|recall@10": 0.283919,
+            "ko|multi_topic|same_language_precision@10": 0.64,
+            "ko|negation|constraint_success@10": 0.6,
+            "ko|negation|cross_language_relevant@10": 0.5,
+            "ko|negation|hard_negative_hits@10": 1.2,
+            "ko|negation|mrr@10": 0.391667,
+            "ko|negation|ndcg@10": 0.411611,
+            "ko|negation|recall@10": 0.65,
+            "ko|negation|same_language_precision@10": 0.66,
+            "ko|paraphrase|cross_language_relevant@10": 1.3,
+            "ko|paraphrase|mrr@10": 0.594444,
+            "ko|paraphrase|ndcg@10": 0.413036,
+            "ko|paraphrase|recall@10": 0.392738,
+            "ko|paraphrase|same_language_precision@10": 0.55,
+            "ko|underspecified|cross_language_relevant@10": 1.0,
+            "ko|underspecified|mrr@10": 0.517619,
+            "ko|underspecified|ndcg@10": 0.305178,
+            "ko|underspecified|recall@10": 0.282738,
+            "ko|underspecified|same_language_precision@10": 0.57
+          },
+          "embedding": {
+            "dimension": 512,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.199,
+            "p95": 3.306
+          },
+          "macro": {
+            "mrr@10": 0.623747,
+            "ndcg@10": 0.470804,
+            "recall@10": 0.458493
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 11
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.883333,
+            "en|direct|ndcg@10": 0.778532,
+            "en|direct|recall@10": 0.8,
+            "en|genre_primary|genre_hit@1": 0.2,
+            "en|genre_primary|genre_mrr@10": 0.450952,
+            "en|genre_primary|mrr@10": 0.450952,
+            "en|genre_primary|ndcg@10": 0.388819,
+            "en|genre_primary|recall@10": 0.5,
+            "en|multi_topic|intent_coverage@10": 1.0,
+            "en|multi_topic|mrr@10": 0.816667,
+            "en|multi_topic|ndcg@10": 0.571546,
+            "en|multi_topic|recall@10": 0.491071,
+            "en|negation|constraint_success@10": 0.6,
+            "en|negation|hard_negative_hits@10": 1.3,
+            "en|negation|mrr@10": 0.447222,
+            "en|negation|ndcg@10": 0.52946,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.418333,
+            "en|paraphrase|ndcg@10": 0.369386,
+            "en|paraphrase|recall@10": 0.516667,
+            "en|underspecified|mrr@10": 0.731111,
+            "en|underspecified|ndcg@10": 0.511125,
+            "en|underspecified|recall@10": 0.575
+          },
+          "embedding": {
+            "dimension": 512,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.345,
+            "p95": 3.114
+          },
+          "macro": {
+            "mrr@10": 0.624603,
+            "ndcg@10": 0.524811,
+            "recall@10": 0.61379
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 4
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.625,
+            "ko|direct|ndcg@10": 0.700826,
+            "ko|direct|recall@10": 0.875,
+            "ko|genre_primary|genre_hit@1": 0.4,
+            "ko|genre_primary|genre_mrr@10": 0.608333,
+            "ko|genre_primary|mrr@10": 0.608333,
+            "ko|genre_primary|ndcg@10": 0.551686,
+            "ko|genre_primary|recall@10": 0.65,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.633333,
+            "ko|multi_topic|ndcg@10": 0.482972,
+            "ko|multi_topic|recall@10": 0.460595,
+            "ko|negation|constraint_success@10": 0.6,
+            "ko|negation|hard_negative_hits@10": 1.2,
+            "ko|negation|mrr@10": 0.429167,
+            "ko|negation|ndcg@10": 0.543868,
+            "ko|negation|recall@10": 0.9,
+            "ko|paraphrase|mrr@10": 0.63,
+            "ko|paraphrase|ndcg@10": 0.531718,
+            "ko|paraphrase|recall@10": 0.608333,
+            "ko|underspecified|mrr@10": 0.40373,
+            "ko|underspecified|ndcg@10": 0.352639,
+            "ko|underspecified|recall@10": 0.466667
+          },
+          "embedding": {
+            "dimension": 512,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.263,
+            "p95": 2.688
+          },
+          "macro": {
+            "mrr@10": 0.554927,
+            "ndcg@10": 0.527285,
+            "recall@10": 0.660099
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 6
+        }
+      }
+    },
+    "bge_m3_fused_1024": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.6,
+            "en|direct|mrr@10": 0.9,
+            "en|direct|ndcg@10": 0.816334,
+            "en|direct|recall@10": 0.819048,
+            "en|direct|same_language_precision@10": 0.51,
+            "en|genre_primary|cross_language_relevant@10": 1.4,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.475952,
+            "en|genre_primary|mrr@10": 0.475952,
+            "en|genre_primary|ndcg@10": 0.358166,
+            "en|genre_primary|recall@10": 0.3625,
+            "en|genre_primary|same_language_precision@10": 0.69,
+            "en|multi_topic|cross_language_relevant@10": 2.7,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.833333,
+            "en|multi_topic|ndcg@10": 0.756297,
+            "en|multi_topic|recall@10": 0.45478,
+            "en|multi_topic|same_language_precision@10": 0.62,
+            "en|negation|constraint_success@10": 0.6,
+            "en|negation|cross_language_relevant@10": 0.6,
+            "en|negation|hard_negative_hits@10": 2.4,
+            "en|negation|mrr@10": 0.6,
+            "en|negation|ndcg@10": 0.526617,
+            "en|negation|recall@10": 0.6,
+            "en|negation|same_language_precision@10": 0.68,
+            "en|paraphrase|cross_language_relevant@10": 0.2,
+            "en|paraphrase|mrr@10": 0.333333,
+            "en|paraphrase|ndcg@10": 0.212316,
+            "en|paraphrase|recall@10": 0.194643,
+            "en|paraphrase|same_language_precision@10": 0.86,
+            "en|underspecified|cross_language_relevant@10": 1.0,
+            "en|underspecified|mrr@10": 0.683333,
+            "en|underspecified|ndcg@10": 0.481465,
+            "en|underspecified|recall@10": 0.402738,
+            "en|underspecified|same_language_precision@10": 0.74,
+            "ko|direct|cross_language_relevant@10": 1.4,
+            "ko|direct|mrr@10": 0.82,
+            "ko|direct|ndcg@10": 0.651054,
+            "ko|direct|recall@10": 0.646429,
+            "ko|direct|same_language_precision@10": 0.78,
+            "ko|genre_primary|cross_language_relevant@10": 0.4,
+            "ko|genre_primary|genre_hit@1": 0.6,
+            "ko|genre_primary|genre_mrr@10": 0.75,
+            "ko|genre_primary|mrr@10": 0.75,
+            "ko|genre_primary|ndcg@10": 0.466595,
+            "ko|genre_primary|recall@10": 0.425,
+            "ko|genre_primary|same_language_precision@10": 0.88,
+            "ko|multi_topic|cross_language_relevant@10": 0.6,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.753333,
+            "ko|multi_topic|ndcg@10": 0.517288,
+            "ko|multi_topic|recall@10": 0.269799,
+            "ko|multi_topic|same_language_precision@10": 0.87,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|cross_language_relevant@10": 0.2,
+            "ko|negation|hard_negative_hits@10": 1.6,
+            "ko|negation|mrr@10": 0.411786,
+            "ko|negation|ndcg@10": 0.352102,
+            "ko|negation|recall@10": 0.5,
+            "ko|negation|same_language_precision@10": 0.91,
+            "ko|paraphrase|cross_language_relevant@10": 0.5,
+            "ko|paraphrase|mrr@10": 0.62,
+            "ko|paraphrase|ndcg@10": 0.364874,
+            "ko|paraphrase|recall@10": 0.320119,
+            "ko|paraphrase|same_language_precision@10": 0.86,
+            "ko|underspecified|cross_language_relevant@10": 0.8,
+            "ko|underspecified|mrr@10": 0.519444,
+            "ko|underspecified|ndcg@10": 0.383584,
+            "ko|underspecified|recall@10": 0.341786,
+            "ko|underspecified|same_language_precision@10": 0.82
+          },
+          "embedding": {
+            "dimension": 1024,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.458,
+            "p95": 3.477
+          },
+          "macro": {
+            "mrr@10": 0.64171,
+            "ndcg@10": 0.490558,
+            "recall@10": 0.444737
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 15
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.85,
+            "en|direct|ndcg@10": 0.840799,
+            "en|direct|recall@10": 0.9,
+            "en|genre_primary|genre_hit@1": 0.2,
+            "en|genre_primary|genre_mrr@10": 0.395,
+            "en|genre_primary|mrr@10": 0.395,
+            "en|genre_primary|ndcg@10": 0.365118,
+            "en|genre_primary|recall@10": 0.45,
+            "en|multi_topic|intent_coverage@10": 1.0,
+            "en|multi_topic|mrr@10": 0.9,
+            "en|multi_topic|ndcg@10": 0.729603,
+            "en|multi_topic|recall@10": 0.644048,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.5,
+            "en|negation|mrr@10": 0.523611,
+            "en|negation|ndcg@10": 0.587835,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.335,
+            "en|paraphrase|ndcg@10": 0.281042,
+            "en|paraphrase|recall@10": 0.358333,
+            "en|underspecified|mrr@10": 0.7,
+            "en|underspecified|ndcg@10": 0.62058,
+            "en|underspecified|recall@10": 0.675
+          },
+          "embedding": {
+            "dimension": 1024,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 21.719,
+            "p95": 23.258
+          },
+          "macro": {
+            "mrr@10": 0.617268,
+            "ndcg@10": 0.570829,
+            "recall@10": 0.637897
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 9
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.82,
+            "ko|direct|ndcg@10": 0.786025,
+            "ko|direct|recall@10": 0.9,
+            "ko|genre_primary|genre_hit@1": 0.6,
+            "ko|genre_primary|genre_mrr@10": 0.766667,
+            "ko|genre_primary|mrr@10": 0.766667,
+            "ko|genre_primary|ndcg@10": 0.676002,
+            "ko|genre_primary|recall@10": 0.75,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.72,
+            "ko|multi_topic|ndcg@10": 0.550651,
+            "ko|multi_topic|recall@10": 0.471667,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.5,
+            "ko|negation|mrr@10": 0.285,
+            "ko|negation|ndcg@10": 0.384295,
+            "ko|negation|recall@10": 0.7,
+            "ko|paraphrase|mrr@10": 0.614286,
+            "ko|paraphrase|ndcg@10": 0.526074,
+            "ko|paraphrase|recall@10": 0.616667,
+            "ko|underspecified|mrr@10": 0.411905,
+            "ko|underspecified|ndcg@10": 0.439512,
+            "ko|underspecified|recall@10": 0.508333
+          },
+          "embedding": {
+            "dimension": 1024,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 22.134,
+            "p95": 23.19
+          },
+          "macro": {
+            "mrr@10": 0.602976,
+            "ndcg@10": 0.560427,
+            "recall@10": 0.657778
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 7
+        }
+      }
+    },
+    "bge_m3_fused_128": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 1.8,
+            "en|direct|mrr@10": 0.8,
+            "en|direct|ndcg@10": 0.67311,
+            "en|direct|recall@10": 0.61369,
+            "en|direct|same_language_precision@10": 0.51,
+            "en|genre_primary|cross_language_relevant@10": 1.1,
+            "en|genre_primary|genre_hit@1": 0.3,
+            "en|genre_primary|genre_mrr@10": 0.483333,
+            "en|genre_primary|mrr@10": 0.483333,
+            "en|genre_primary|ndcg@10": 0.33449,
+            "en|genre_primary|recall@10": 0.3125,
+            "en|genre_primary|same_language_precision@10": 0.65,
+            "en|multi_topic|cross_language_relevant@10": 2.2,
+            "en|multi_topic|intent_coverage@10": 0.85,
+            "en|multi_topic|mrr@10": 0.85,
+            "en|multi_topic|ndcg@10": 0.684699,
+            "en|multi_topic|recall@10": 0.384945,
+            "en|multi_topic|same_language_precision@10": 0.65,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|cross_language_relevant@10": 0.5,
+            "en|negation|hard_negative_hits@10": 2.7,
+            "en|negation|mrr@10": 0.533333,
+            "en|negation|ndcg@10": 0.464284,
+            "en|negation|recall@10": 0.6,
+            "en|negation|same_language_precision@10": 0.7,
+            "en|paraphrase|cross_language_relevant@10": 0.3,
+            "en|paraphrase|mrr@10": 0.199167,
+            "en|paraphrase|ndcg@10": 0.175626,
+            "en|paraphrase|recall@10": 0.197024,
+            "en|paraphrase|same_language_precision@10": 0.88,
+            "en|underspecified|cross_language_relevant@10": 1.0,
+            "en|underspecified|mrr@10": 0.529167,
+            "en|underspecified|ndcg@10": 0.40637,
+            "en|underspecified|recall@10": 0.396905,
+            "en|underspecified|same_language_precision@10": 0.7,
+            "ko|direct|cross_language_relevant@10": 1.2,
+            "ko|direct|mrr@10": 0.675,
+            "ko|direct|ndcg@10": 0.517192,
+            "ko|direct|recall@10": 0.494643,
+            "ko|direct|same_language_precision@10": 0.74,
+            "ko|genre_primary|cross_language_relevant@10": 0.4,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.683333,
+            "ko|genre_primary|mrr@10": 0.683333,
+            "ko|genre_primary|ndcg@10": 0.371734,
+            "ko|genre_primary|recall@10": 0.325,
+            "ko|genre_primary|same_language_precision@10": 0.9,
+            "ko|multi_topic|cross_language_relevant@10": 0.3,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.8,
+            "ko|multi_topic|ndcg@10": 0.450149,
+            "ko|multi_topic|recall@10": 0.222985,
+            "ko|multi_topic|same_language_precision@10": 0.85,
+            "ko|negation|constraint_success@10": 0.1,
+            "ko|negation|cross_language_relevant@10": 0.2,
+            "ko|negation|hard_negative_hits@10": 1.4,
+            "ko|negation|mrr@10": 0.195,
+            "ko|negation|ndcg@10": 0.223063,
+            "ko|negation|recall@10": 0.4,
+            "ko|negation|same_language_precision@10": 0.91,
+            "ko|paraphrase|cross_language_relevant@10": 0.1,
+            "ko|paraphrase|mrr@10": 0.486667,
+            "ko|paraphrase|ndcg@10": 0.241642,
+            "ko|paraphrase|recall@10": 0.183095,
+            "ko|paraphrase|same_language_precision@10": 0.85,
+            "ko|underspecified|cross_language_relevant@10": 0.6,
+            "ko|underspecified|mrr@10": 0.563333,
+            "ko|underspecified|ndcg@10": 0.341616,
+            "ko|underspecified|recall@10": 0.285833,
+            "ko|underspecified|same_language_precision@10": 0.83
+          },
+          "embedding": {
+            "dimension": 128,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 1.99,
+            "p95": 2.899
+          },
+          "macro": {
+            "mrr@10": 0.566528,
+            "ndcg@10": 0.406998,
+            "recall@10": 0.368052
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 22
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.8,
+            "en|direct|ndcg@10": 0.726026,
+            "en|direct|recall@10": 0.725,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.519444,
+            "en|genre_primary|mrr@10": 0.519444,
+            "en|genre_primary|ndcg@10": 0.38607,
+            "en|genre_primary|recall@10": 0.425,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.82,
+            "en|multi_topic|ndcg@10": 0.643906,
+            "en|multi_topic|recall@10": 0.547024,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.7,
+            "en|negation|mrr@10": 0.501786,
+            "en|negation|ndcg@10": 0.57104,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.226786,
+            "en|paraphrase|ndcg@10": 0.21657,
+            "en|paraphrase|recall@10": 0.325,
+            "en|underspecified|mrr@10": 0.500952,
+            "en|underspecified|ndcg@10": 0.458333,
+            "en|underspecified|recall@10": 0.575
+          },
+          "embedding": {
+            "dimension": 128,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.065,
+            "p95": 2.847
+          },
+          "macro": {
+            "mrr@10": 0.561495,
+            "ndcg@10": 0.500324,
+            "recall@10": 0.566171
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 11
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.675,
+            "ko|direct|ndcg@10": 0.65268,
+            "ko|direct|recall@10": 0.725,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.686667,
+            "ko|genre_primary|mrr@10": 0.686667,
+            "ko|genre_primary|ndcg@10": 0.568503,
+            "ko|genre_primary|recall@10": 0.675,
+            "ko|multi_topic|intent_coverage@10": 0.9,
+            "ko|multi_topic|mrr@10": 0.858333,
+            "ko|multi_topic|ndcg@10": 0.538538,
+            "ko|multi_topic|recall@10": 0.468333,
+            "ko|negation|constraint_success@10": 0.3,
+            "ko|negation|hard_negative_hits@10": 1.2,
+            "ko|negation|mrr@10": 0.206111,
+            "ko|negation|ndcg@10": 0.301135,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.439286,
+            "ko|paraphrase|ndcg@10": 0.383839,
+            "ko|paraphrase|recall@10": 0.475,
+            "ko|underspecified|mrr@10": 0.475,
+            "ko|underspecified|ndcg@10": 0.396637,
+            "ko|underspecified|recall@10": 0.341667
+          },
+          "embedding": {
+            "dimension": 128,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.032,
+            "p95": 2.388
+          },
+          "macro": {
+            "mrr@10": 0.556733,
+            "ndcg@10": 0.473555,
+            "recall@10": 0.5475
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 11
+        }
+      }
+    },
+    "bge_m3_fused_256": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.2,
+            "en|direct|mrr@10": 0.9,
+            "en|direct|ndcg@10": 0.743547,
+            "en|direct|recall@10": 0.719048,
+            "en|direct|same_language_precision@10": 0.5,
+            "en|genre_primary|cross_language_relevant@10": 1.4,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.541667,
+            "en|genre_primary|mrr@10": 0.541667,
+            "en|genre_primary|ndcg@10": 0.375725,
+            "en|genre_primary|recall@10": 0.375,
+            "en|genre_primary|same_language_precision@10": 0.66,
+            "en|multi_topic|cross_language_relevant@10": 2.4,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.9,
+            "en|multi_topic|ndcg@10": 0.7245,
+            "en|multi_topic|recall@10": 0.408278,
+            "en|multi_topic|same_language_precision@10": 0.64,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|cross_language_relevant@10": 0.4,
+            "en|negation|hard_negative_hits@10": 2.5,
+            "en|negation|mrr@10": 0.533333,
+            "en|negation|ndcg@10": 0.455215,
+            "en|negation|recall@10": 0.55,
+            "en|negation|same_language_precision@10": 0.74,
+            "en|paraphrase|cross_language_relevant@10": 0.2,
+            "en|paraphrase|mrr@10": 0.233333,
+            "en|paraphrase|ndcg@10": 0.17199,
+            "en|paraphrase|recall@10": 0.16369,
+            "en|paraphrase|same_language_precision@10": 0.88,
+            "en|underspecified|cross_language_relevant@10": 1.1,
+            "en|underspecified|mrr@10": 0.620833,
+            "en|underspecified|ndcg@10": 0.452846,
+            "en|underspecified|recall@10": 0.402738,
+            "en|underspecified|same_language_precision@10": 0.73,
+            "ko|direct|cross_language_relevant@10": 1.3,
+            "ko|direct|mrr@10": 0.86,
+            "ko|direct|ndcg@10": 0.619451,
+            "ko|direct|recall@10": 0.615476,
+            "ko|direct|same_language_precision@10": 0.77,
+            "ko|genre_primary|cross_language_relevant@10": 0.4,
+            "ko|genre_primary|genre_hit@1": 0.5,
+            "ko|genre_primary|genre_mrr@10": 0.683333,
+            "ko|genre_primary|mrr@10": 0.683333,
+            "ko|genre_primary|ndcg@10": 0.421866,
+            "ko|genre_primary|recall@10": 0.4,
+            "ko|genre_primary|same_language_precision@10": 0.9,
+            "ko|multi_topic|cross_language_relevant@10": 0.5,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.747619,
+            "ko|multi_topic|ndcg@10": 0.487934,
+            "ko|multi_topic|recall@10": 0.229414,
+            "ko|multi_topic|same_language_precision@10": 0.85,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|cross_language_relevant@10": 0.2,
+            "ko|negation|hard_negative_hits@10": 1.7,
+            "ko|negation|mrr@10": 0.25873,
+            "ko|negation|ndcg@10": 0.269806,
+            "ko|negation|recall@10": 0.45,
+            "ko|negation|same_language_precision@10": 0.89,
+            "ko|paraphrase|cross_language_relevant@10": 0.1,
+            "ko|paraphrase|mrr@10": 0.515952,
+            "ko|paraphrase|ndcg@10": 0.280401,
+            "ko|paraphrase|recall@10": 0.246548,
+            "ko|paraphrase|same_language_precision@10": 0.86,
+            "ko|underspecified|cross_language_relevant@10": 0.7,
+            "ko|underspecified|mrr@10": 0.483333,
+            "ko|underspecified|ndcg@10": 0.342124,
+            "ko|underspecified|recall@10": 0.274167,
+            "ko|underspecified|same_language_precision@10": 0.79
+          },
+          "embedding": {
+            "dimension": 256,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.037,
+            "p95": 2.772
+          },
+          "macro": {
+            "mrr@10": 0.606511,
+            "ndcg@10": 0.44545,
+            "recall@10": 0.402863
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 16
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.8125,
+            "en|direct|ndcg@10": 0.785337,
+            "en|direct|recall@10": 0.825,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.536667,
+            "en|genre_primary|mrr@10": 0.536667,
+            "en|genre_primary|ndcg@10": 0.410534,
+            "en|genre_primary|recall@10": 0.475,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.9,
+            "en|multi_topic|ndcg@10": 0.704379,
+            "en|multi_topic|recall@10": 0.627381,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.6,
+            "en|negation|mrr@10": 0.51,
+            "en|negation|ndcg@10": 0.57762,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.311111,
+            "en|paraphrase|ndcg@10": 0.234685,
+            "en|paraphrase|recall@10": 0.275,
+            "en|underspecified|mrr@10": 0.530952,
+            "en|underspecified|ndcg@10": 0.508503,
+            "en|underspecified|recall@10": 0.625
+          },
+          "embedding": {
+            "dimension": 256,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.192,
+            "p95": 2.986
+          },
+          "macro": {
+            "mrr@10": 0.600205,
+            "ndcg@10": 0.536843,
+            "recall@10": 0.604563
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 8
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.861111,
+            "ko|direct|ndcg@10": 0.759742,
+            "ko|direct|recall@10": 0.875,
+            "ko|genre_primary|genre_hit@1": 0.6,
+            "ko|genre_primary|genre_mrr@10": 0.729167,
+            "ko|genre_primary|mrr@10": 0.729167,
+            "ko|genre_primary|ndcg@10": 0.632754,
+            "ko|genre_primary|recall@10": 0.75,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.8,
+            "ko|multi_topic|ndcg@10": 0.517293,
+            "ko|multi_topic|recall@10": 0.380714,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.4,
+            "ko|negation|mrr@10": 0.247778,
+            "ko|negation|ndcg@10": 0.331881,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.518452,
+            "ko|paraphrase|ndcg@10": 0.449332,
+            "ko|paraphrase|recall@10": 0.575,
+            "ko|underspecified|mrr@10": 0.485,
+            "ko|underspecified|ndcg@10": 0.431052,
+            "ko|underspecified|recall@10": 0.391667
+          },
+          "embedding": {
+            "dimension": 256,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.124,
+            "p95": 2.53
+          },
+          "macro": {
+            "mrr@10": 0.606918,
+            "ndcg@10": 0.520342,
+            "recall@10": 0.595397
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 7
+        }
+      }
+    },
+    "bge_m3_fused_512": {
+      "search": {
+        "bm25_candidates": 50,
+        "dense_candidates": 50,
+        "reranker_model": null,
+        "reranker_pool": null,
+        "rrf_k": 60,
+        "rrf_weights": [
+          1.0,
+          1.0
+        ],
+        "top_k": 10
+      },
+      "tracks": {
+        "cross_language": {
+          "aggregate": {
+            "en|direct|cross_language_relevant@10": 2.5,
+            "en|direct|mrr@10": 0.85,
+            "en|direct|ndcg@10": 0.817485,
+            "en|direct|recall@10": 0.814881,
+            "en|direct|same_language_precision@10": 0.5,
+            "en|genre_primary|cross_language_relevant@10": 1.7,
+            "en|genre_primary|genre_hit@1": 0.4,
+            "en|genre_primary|genre_mrr@10": 0.584286,
+            "en|genre_primary|mrr@10": 0.584286,
+            "en|genre_primary|ndcg@10": 0.392418,
+            "en|genre_primary|recall@10": 0.4,
+            "en|genre_primary|same_language_precision@10": 0.64,
+            "en|multi_topic|cross_language_relevant@10": 2.3,
+            "en|multi_topic|intent_coverage@10": 0.85,
+            "en|multi_topic|mrr@10": 0.9,
+            "en|multi_topic|ndcg@10": 0.72474,
+            "en|multi_topic|recall@10": 0.41652,
+            "en|multi_topic|same_language_precision@10": 0.63,
+            "en|negation|constraint_success@10": 0.6,
+            "en|negation|cross_language_relevant@10": 0.6,
+            "en|negation|hard_negative_hits@10": 2.3,
+            "en|negation|mrr@10": 0.6,
+            "en|negation|ndcg@10": 0.523903,
+            "en|negation|recall@10": 0.6,
+            "en|negation|same_language_precision@10": 0.72,
+            "en|paraphrase|cross_language_relevant@10": 0.2,
+            "en|paraphrase|mrr@10": 0.283333,
+            "en|paraphrase|ndcg@10": 0.201707,
+            "en|paraphrase|recall@10": 0.207143,
+            "en|paraphrase|same_language_precision@10": 0.83,
+            "en|underspecified|cross_language_relevant@10": 1.0,
+            "en|underspecified|mrr@10": 0.62,
+            "en|underspecified|ndcg@10": 0.465933,
+            "en|underspecified|recall@10": 0.406071,
+            "en|underspecified|same_language_precision@10": 0.7,
+            "ko|direct|cross_language_relevant@10": 1.4,
+            "ko|direct|mrr@10": 0.814286,
+            "ko|direct|ndcg@10": 0.631442,
+            "ko|direct|recall@10": 0.646429,
+            "ko|direct|same_language_precision@10": 0.77,
+            "ko|genre_primary|cross_language_relevant@10": 0.4,
+            "ko|genre_primary|genre_hit@1": 0.6,
+            "ko|genre_primary|genre_mrr@10": 0.783333,
+            "ko|genre_primary|mrr@10": 0.783333,
+            "ko|genre_primary|ndcg@10": 0.472953,
+            "ko|genre_primary|recall@10": 0.425,
+            "ko|genre_primary|same_language_precision@10": 0.89,
+            "ko|multi_topic|cross_language_relevant@10": 0.6,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.725,
+            "ko|multi_topic|ndcg@10": 0.502539,
+            "ko|multi_topic|recall@10": 0.261941,
+            "ko|multi_topic|same_language_precision@10": 0.84,
+            "ko|negation|constraint_success@10": 0.5,
+            "ko|negation|cross_language_relevant@10": 0.2,
+            "ko|negation|hard_negative_hits@10": 1.5,
+            "ko|negation|mrr@10": 0.379167,
+            "ko|negation|ndcg@10": 0.325429,
+            "ko|negation|recall@10": 0.45,
+            "ko|negation|same_language_precision@10": 0.91,
+            "ko|paraphrase|cross_language_relevant@10": 0.3,
+            "ko|paraphrase|mrr@10": 0.545238,
+            "ko|paraphrase|ndcg@10": 0.312551,
+            "ko|paraphrase|recall@10": 0.268333,
+            "ko|paraphrase|same_language_precision@10": 0.85,
+            "ko|underspecified|cross_language_relevant@10": 0.8,
+            "ko|underspecified|mrr@10": 0.509286,
+            "ko|underspecified|ndcg@10": 0.380185,
+            "ko|underspecified|recall@10": 0.321786,
+            "ko|underspecified|same_language_precision@10": 0.82
+          },
+          "embedding": {
+            "dimension": 512,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.157,
+            "p95": 3.183
+          },
+          "macro": {
+            "mrr@10": 0.632827,
+            "ndcg@10": 0.479274,
+            "recall@10": 0.434842
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 14
+        },
+        "english": {
+          "aggregate": {
+            "en|direct|mrr@10": 0.85,
+            "en|direct|ndcg@10": 0.851529,
+            "en|direct|recall@10": 0.9,
+            "en|genre_primary|genre_hit@1": 0.2,
+            "en|genre_primary|genre_mrr@10": 0.408333,
+            "en|genre_primary|mrr@10": 0.408333,
+            "en|genre_primary|ndcg@10": 0.359525,
+            "en|genre_primary|recall@10": 0.45,
+            "en|multi_topic|intent_coverage@10": 0.95,
+            "en|multi_topic|mrr@10": 0.95,
+            "en|multi_topic|ndcg@10": 0.717199,
+            "en|multi_topic|recall@10": 0.610714,
+            "en|negation|constraint_success@10": 0.5,
+            "en|negation|hard_negative_hits@10": 1.6,
+            "en|negation|mrr@10": 0.506944,
+            "en|negation|ndcg@10": 0.574742,
+            "en|negation|recall@10": 0.8,
+            "en|paraphrase|mrr@10": 0.311111,
+            "en|paraphrase|ndcg@10": 0.241195,
+            "en|paraphrase|recall@10": 0.291667,
+            "en|underspecified|mrr@10": 0.595,
+            "en|underspecified|ndcg@10": 0.544919,
+            "en|underspecified|recall@10": 0.65
+          },
+          "embedding": {
+            "dimension": 512,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.456,
+            "p95": 3.282
+          },
+          "macro": {
+            "mrr@10": 0.603565,
+            "ndcg@10": 0.548185,
+            "recall@10": 0.617063
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 8
+        },
+        "korean": {
+          "aggregate": {
+            "ko|direct|mrr@10": 0.814286,
+            "ko|direct|ndcg@10": 0.776192,
+            "ko|direct|recall@10": 0.9,
+            "ko|genre_primary|genre_hit@1": 0.7,
+            "ko|genre_primary|genre_mrr@10": 0.816667,
+            "ko|genre_primary|mrr@10": 0.816667,
+            "ko|genre_primary|ndcg@10": 0.725499,
+            "ko|genre_primary|recall@10": 0.825,
+            "ko|multi_topic|intent_coverage@10": 0.85,
+            "ko|multi_topic|mrr@10": 0.758333,
+            "ko|multi_topic|ndcg@10": 0.542929,
+            "ko|multi_topic|recall@10": 0.437381,
+            "ko|negation|constraint_success@10": 0.4,
+            "ko|negation|hard_negative_hits@10": 1.4,
+            "ko|negation|mrr@10": 0.261667,
+            "ko|negation|ndcg@10": 0.344846,
+            "ko|negation|recall@10": 0.6,
+            "ko|paraphrase|mrr@10": 0.547619,
+            "ko|paraphrase|ndcg@10": 0.465296,
+            "ko|paraphrase|recall@10": 0.508333,
+            "ko|underspecified|mrr@10": 0.508333,
+            "ko|underspecified|ndcg@10": 0.451391,
+            "ko|underspecified|recall@10": 0.45
+          },
+          "embedding": {
+            "dimension": 512,
+            "model": "BAAI/bge-m3",
+            "provider": "onnx"
+          },
+          "latency_ms": {
+            "p50": 2.378,
+            "p95": 2.868
+          },
+          "macro": {
+            "mrr@10": 0.617818,
+            "ndcg@10": 0.551026,
+            "recall@10": 0.620119
+          },
+          "reranker": {
+            "enabled": false,
+            "model": null,
+            "pool": null,
+            "provider": null
+          },
+          "zero_hit_count": 8
+        }
+      }
+    }
+  },
+  "queries": 120,
+  "runs": 1,
+  "schema_version": 1,
+  "search": {
+    "candidate_k": 50,
+    "rrf_k": 60,
+    "top_k": 10
+  }
+}
