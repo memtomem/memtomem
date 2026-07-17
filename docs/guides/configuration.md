@@ -353,6 +353,16 @@ running).
 > behavior (config-write without the seed scan) — useful for staging a
 > large folder before a controlled `mm index` run.
 
+An **empty list** (`"memory_dirs": []`, set by editing `config.json` or
+via the env override) is a valid "index nothing" state — useful for
+keeping a throwaway server's file watcher off your live memory
+directories. Search and project-tier operations keep working, and read
+surfaces like `mem_context_compose` simply return no user-tier pinned
+blocks. Writes that need the user-tier base directory (`mem_add`
+without a project scope, `mem_pinned_set`, approving a review
+candidate) refuse with a configuration error naming
+`indexing.memory_dirs` instead of writing anywhere else.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEMTOMEM_INDEXING__MEMORY_DIRS` | `["~/.memtomem/memories"]` (+ provider folders selected in `mm init`) | Directories watched for reactive re-index (see above) |

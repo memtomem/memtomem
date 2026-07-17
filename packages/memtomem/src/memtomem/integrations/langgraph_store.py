@@ -37,7 +37,7 @@ from memtomem.config import EmbeddingConfig, Mem2MemConfig, TargetScope
 from memtomem.context._atomic import atomic_write_text
 from memtomem.embedding.base import EmbeddingProvider
 from memtomem.embedding.factory import create_embedder
-from memtomem.memory_scope import resolve_memory_scope_dir
+from memtomem.memory_scope import require_user_base, resolve_memory_scope_dir
 
 _TOKEN_RE = re.compile(r"[\w.-]+", re.UNICODE)
 
@@ -160,12 +160,15 @@ class MemtomemBaseStore(BaseStore):
 
             load_config_d(config)
             load_config_overrides(config)
-            user_base = Path(config.indexing.memory_dirs[0]).expanduser()
-            base = resolve_memory_scope_dir(
-                scope,
-                Path(project_root).expanduser().resolve() if project_root else None,
-                user_base,
-            )
+            project = Path(project_root).expanduser().resolve() if project_root else None
+            if scope == "user":
+                # Raises ConfigError on empty ``memory_dirs`` — this store
+                # mkdirs its root, so it needs a real write target (#1768).
+                base = resolve_memory_scope_dir(
+                    scope, project, require_user_base(config.indexing.memory_dirs)
+                )
+            else:
+                base = resolve_memory_scope_dir(scope, project)
             root = base / "langgraph-store"
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)

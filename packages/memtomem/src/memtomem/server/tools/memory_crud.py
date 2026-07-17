@@ -214,7 +214,7 @@ def _validate_path(
     on failure.
     """
     raw = Path(path_str).expanduser()
-    user_bases = [Path(d).expanduser().resolve() for d in (memory_dirs or [Path(".")])]
+    user_bases = [Path(d).expanduser().resolve() for d in memory_dirs]
     project_bases = [Path(d).expanduser().resolve() for d in (project_memory_dirs or [])]
     bases = user_bases + project_bases
 
@@ -242,8 +242,9 @@ def _validate_path(
         )
 
         try:
-            user_base = user_bases[0] if user_bases else Path("~/.memtomem/memories")
-            base = resolve_memory_scope_dir(scope, project_root, user_base=user_base)
+            # ``user_base`` is unused for project tiers — don't index a
+            # possibly-empty ``memory_dirs`` here (#1768).
+            base = resolve_memory_scope_dir(scope, project_root)
         except MemoryScopeError as exc:
             return None, f"Error: {exc}"
         target = (base / raw).resolve()
@@ -251,6 +252,10 @@ def _validate_path(
         # Resolve relative paths against the first user-tier memory_dir.
         # Project-tier roots are absolute-only; mixing them in here would
         # surprise existing callers that pass plain filenames.
+        if not user_bases:
+            from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR
+
+            return None, f"Error: {EMPTY_MEMORY_DIRS_ERROR}"
         target = (user_bases[0] / raw).resolve()
 
     if not any(target.is_relative_to(b) for b in bases):
@@ -446,17 +451,23 @@ async def _mem_add_core(
         # ``mem_add(scope='project_shared')`` would still write to the
         # user-tier path even though the gate accepted the call — the
         # CLI/MCP divergence flagged in PR-D review.
+        from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
             MemoryScopeError,
             is_project_tier_registered,
             project_tier_registration_error,
+            require_user_base,
             resolve_memory_scope_dir,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
 
         if effective_scope == "user":
-            base = mdirs[0] if mdirs else Path(".")
-            base = Path(base).expanduser().resolve()
+            # No silent cwd fallback: an empty ``memory_dirs`` must name
+            # the config field, not write under the server's cwd (#1768).
+            try:
+                base = require_user_base(mdirs)
+            except ConfigError as exc:
+                return (f"Error: {exc}", None)
         else:
             # ADR-0011 PR-D review round 7: prefer the explicit
             # ``project_root_override`` (set by ``mem_consolidate_apply``
@@ -467,9 +478,7 @@ async def _mem_add_core(
             if project_root_override is not None:
                 project_root = project_root_override
             try:
-                base = resolve_memory_scope_dir(
-                    effective_scope, project_root, user_base=Path(mdirs[0])
-                )
+                base = resolve_memory_scope_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return (f"Error: {exc}", None)
             # ADR-0011: refuse if the resolved tier directory is not
@@ -1174,23 +1183,27 @@ async def mem_batch_add(
         # ``_mem_add_core`` so MCP ``mem_batch_add(scope='project_shared')``
         # lands in the project's ``.memtomem/memories/`` directory, not
         # the user-tier path.
+        from memtomem.errors import ConfigError
         from memtomem.memory_scope import (
             MemoryScopeError,
             is_project_tier_registered,
             project_tier_registration_error,
+            require_user_base,
             resolve_memory_scope_dir,
         )
         from memtomem.server.tools.search import _resolve_project_context_root
 
         if effective_scope == "user":
-            base = mdirs[0] if mdirs else Path(".")
-            base = Path(base).expanduser().resolve()
+            # No silent cwd fallback: an empty ``memory_dirs`` must name
+            # the config field, not write under the server's cwd (#1768).
+            try:
+                base = require_user_base(mdirs)
+            except ConfigError as exc:
+                return f"Error: {exc}"
         else:
             project_root = _resolve_project_context_root(app)
             try:
-                base = resolve_memory_scope_dir(
-                    effective_scope, project_root, user_base=Path(mdirs[0])
-                )
+                base = resolve_memory_scope_dir(effective_scope, project_root)
             except MemoryScopeError as exc:
                 return f"Error: {exc}"
             # ADR-0011 PR-D round 6: refuse if the resolved tier dir is

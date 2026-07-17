@@ -4943,10 +4943,12 @@ async def _memory_migrate_run(
         _lock_path_for,
         async_file_lock,
     )
+    from memtomem.errors import ConfigError
     from memtomem.memory_scope import (
         MemoryScopeError,
         is_project_tier_registered,
         project_tier_registration_error,
+        require_user_base,
         resolve_memory_scope_dir,
     )
 
@@ -5000,12 +5002,21 @@ async def _memory_migrate_run(
         # Use the configured user-tier directory rather than the
         # ``~/.memtomem/memories`` default — keeps CLI behaviour consistent
         # with the active config (and lets tests isolate via ``memory_dirs``).
-        mdirs = comp.config.indexing.memory_dirs
-        user_base = Path(mdirs[0]) if mdirs else Path("~/.memtomem/memories")
+        # A migration touching the user tier refuses on an empty
+        # ``memory_dirs`` instead of falling back to the historical
+        # literal: ``--apply`` moves files, and the "index nothing" state
+        # must not move them into or out of a directory the active config
+        # disabled (#1768). Project-to-project migrations resolve
+        # independently of the user tier.
         try:
-            from_dir = resolve_memory_scope_dir(from_scope, project_root, user_base=user_base)
-            to_dir = resolve_memory_scope_dir(to_scope, project_root, user_base=user_base)
-        except MemoryScopeError as exc:
+            if "user" in (from_scope, to_scope):
+                user_base = require_user_base(comp.config.indexing.memory_dirs)
+                from_dir = resolve_memory_scope_dir(from_scope, project_root, user_base=user_base)
+                to_dir = resolve_memory_scope_dir(to_scope, project_root, user_base=user_base)
+            else:
+                from_dir = resolve_memory_scope_dir(from_scope, project_root)
+                to_dir = resolve_memory_scope_dir(to_scope, project_root)
+        except (MemoryScopeError, ConfigError) as exc:
             raise click.ClickException(str(exc)) from exc
 
         # ADR-0011: the migrated row's scope/project_root only become

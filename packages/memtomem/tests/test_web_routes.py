@@ -4696,3 +4696,54 @@ class TestChunkCrudCrossProcessLock:
         async with async_file_lock(_lock_path_for(target), timeout=5.0):
             resp = await client.post("/api/add", json={"content": "hello", "file": "pinned.md"})
         assert resp.status_code == 503
+
+
+class TestConfigErrorHandler:
+    """#1768 — a loadable-but-unusable configuration surfaces as 409 with a
+    field-naming detail, not the opaque generic 500."""
+
+    async def test_config_error_surfaces_as_409_with_field_name(self, app, client: AsyncClient):
+        from fastapi.routing import APIRoute
+
+        from memtomem.errors import ConfigError
+        from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR
+
+        async def _boom():
+            raise ConfigError(EMPTY_MEMORY_DIRS_ERROR)
+
+        # Insert ahead of the dev-mode SPA catch-all, which would
+        # otherwise shadow any route appended after app creation.
+        app.router.routes.insert(0, APIRoute("/api/__test-config-error", _boom, methods=["GET"]))
+
+        resp = await client.get("/api/__test-config-error")
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "indexing.memory_dirs is empty" in detail
+
+    async def test_api_add_empty_memory_dirs_409_without_legacy_fallback_write(
+        self, app, client: AsyncClient
+    ):
+        """Pre-fix ``/api/add`` substituted ``~/.memtomem/memories`` when
+        ``memory_dirs`` was empty and wrote there (#1768)."""
+        app.state.config.indexing.memory_dirs = []
+        resp = await client.post("/api/add", json={"content": "hello"})
+        assert resp.status_code == 409
+        assert "indexing.memory_dirs is empty" in resp.json()["detail"]
+
+    async def test_scratch_promote_default_target_empty_memory_dirs_409(
+        self, app, client: AsyncClient
+    ):
+        """Pre-fix the default (no ``file``) promotion crashed on ``bases[0]``
+        → generic 500; must be 409 with no write and no promote mark."""
+        app.state.config.indexing.memory_dirs = []
+        app.state.storage.scratch_get = AsyncMock(
+            return_value={"key": "note", "value": "promote me"}
+        )
+        app.state.storage.scratch_promote = AsyncMock()
+
+        with patch("memtomem.tools.memory_writer.append_entry") as appender:
+            resp = await client.post("/api/scratch/note/promote", json={})
+        assert resp.status_code == 409
+        assert "indexing.memory_dirs is empty" in resp.json()["detail"]
+        appender.assert_not_called()
+        app.state.storage.scratch_promote.assert_not_called()

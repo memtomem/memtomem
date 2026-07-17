@@ -263,6 +263,19 @@ def create_app(lifespan=None, mode: WebMode = "prod") -> FastAPI:
         msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
         return JSONResponse(status_code=400, content={"detail": msg})
 
+    # An unusable-but-loadable configuration (e.g. empty
+    # ``indexing.memory_dirs``, #1768) is an operational conflict, not an
+    # internal defect — surface the field-naming message with 409, matching
+    # ``deps.require_configured``, instead of the opaque generic 500.
+    from memtomem.errors import ConfigError
+
+    @app.exception_handler(ConfigError)
+    async def config_error_handler(request: Request, exc: ConfigError) -> JSONResponse:
+        import re
+
+        msg = re.sub(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}", "<path>", str(exc))
+        return JSONResponse(status_code=409, content={"detail": msg})
+
     @app.exception_handler(KeyError)
     async def key_error_handler(request: Request, exc: KeyError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "Not found"})

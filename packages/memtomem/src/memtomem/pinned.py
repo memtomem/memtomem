@@ -12,7 +12,8 @@ import yaml
 from memtomem import privacy
 from memtomem.config import Mem2MemConfig, TargetScope
 from memtomem.context._atomic import atomic_write_text
-from memtomem.memory_scope import resolve_memory_scope_dir
+from memtomem.errors import ConfigError
+from memtomem.memory_scope import EMPTY_MEMORY_DIRS_ERROR, resolve_memory_scope_dir
 
 PINNED_BLOCK_MAX_CHARS = 2_000
 PINNED_TOTAL_MAX_CHARS = 6_000
@@ -96,10 +97,18 @@ class PinnedContextStore:
     ) -> None:
         self.config = config
         self.project_root = project_root.resolve() if project_root else None
-        self.user_base = Path(config.indexing.memory_dirs[0]).expanduser().resolve()
+        # Empty ``memory_dirs`` is a valid "index nothing" state (#1768):
+        # the store constructs, reads skip the user tier, and only writes
+        # that need the user-tier base refuse (via ``_base``).
+        mdirs = config.indexing.memory_dirs
+        self.user_base: Path | None = Path(mdirs[0]).expanduser().resolve() if mdirs else None
 
     def _base(self, scope: TargetScope) -> Path:
-        return resolve_memory_scope_dir(scope, self.project_root, self.user_base) / "pinned"
+        if scope == "user":
+            if self.user_base is None:
+                raise ConfigError(EMPTY_MEMORY_DIRS_ERROR)
+            return resolve_memory_scope_dir(scope, self.project_root, self.user_base) / "pinned"
+        return resolve_memory_scope_dir(scope, self.project_root) / "pinned"
 
     def search_exclusion_roots(self) -> tuple[Path, ...]:
         """Return every in-scope pinned root, independent of parsing or shadowing."""
@@ -108,7 +117,11 @@ class PinnedContextStore:
             if self.project_root is not None
             else ("user",)
         )
-        return tuple(self._base(scope).resolve(strict=False) for scope in scopes)
+        return tuple(
+            self._base(scope).resolve(strict=False)
+            for scope in scopes
+            if not (scope == "user" and self.user_base is None)
+        )
 
     def _path(self, scope: TargetScope, block_id: str, agent_id: str | None) -> Path:
         block_id = _validate_id(block_id, "block id")
@@ -167,6 +180,8 @@ class PinnedContextStore:
         scope: TargetScope = "user",
         agent_id: str | None = None,
     ) -> PinnedBlock | None:
+        if scope == "user" and self.user_base is None:
+            return None
         path = self._path(scope, block_id, agent_id)
         try:
             text = path.read_text(encoding="utf-8")
@@ -199,6 +214,8 @@ class PinnedContextStore:
         return existed
 
     def _read_scope(self, scope: TargetScope) -> list[PinnedBlock]:
+        if scope == "user" and self.user_base is None:
+            return []
         base = self._base(scope)
         if not base.exists():
             return []

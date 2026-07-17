@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import click
 
@@ -174,7 +173,9 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
                         async_file_lock,
                     )
 
-                    base = Path(comp.config.indexing.memory_dirs[0]).expanduser().resolve()
+                    from memtomem.memory_scope import require_user_base
+
+                    base = require_user_base(comp.config.indexing.memory_dirs)
                     target = base / f"{datetime.now(timezone.utc):%Y-%m-%d}.md"
                     write_location = str(target)
                     async with async_file_lock(
@@ -227,7 +228,13 @@ async def _decide(candidate_id: str, decision: str, reviewer: str, reason: str) 
 @click.option("--reason", default="")
 def approve(candidate_id: str, reviewer: str, reason: str) -> None:
     """Approve and persist a candidate."""
-    asyncio.run(_decide(candidate_id, "approved", reviewer, reason))
+    from memtomem.cli._errors import raise_cli_error
+    from memtomem.errors import ConfigError
+
+    try:
+        asyncio.run(_decide(candidate_id, "approved", reviewer, reason))
+    except ConfigError as e:
+        raise_cli_error(e)
 
 
 @review.command("reject")

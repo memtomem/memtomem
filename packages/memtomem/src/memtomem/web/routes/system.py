@@ -1805,26 +1805,22 @@ async def add_memory(
             },
         )
 
-    # Write-surface parity with MCP ``mem_add``: route the default-dated
-    # file to the configured user-tier ``memory_dirs[0]``. Before this
-    # fix the route hardcoded ``~/.memtomem/memories``, ignoring the
-    # user's configured destination and silently diverging from MCP and
-    # CLI which already honor ``memory_dirs[0]``. The historical default
-    # remains as a last-resort fallback when no dirs are configured at
-    # all (``require_configured`` already guards the common case).
-    mdirs = config.indexing.memory_dirs
-    user_base = Path(mdirs[0] if mdirs else "~/.memtomem/memories").expanduser().resolve()
-
     # ADR-0011 §4 PR-F slice 4: resolve the canonical-residency base
     # directory per tier. User tier stays on ``memory_dirs[0]`` for
-    # back-compat. Project tiers route through ``resolve_memory_scope_dir``
-    # against the server's project root so writes land in
-    # ``<proj>/.memtomem/memories[/.local]/`` — the same path the MCP
-    # ``mem_add(scope=...)`` flow uses. Refuses unregistered project-tier
-    # dirs upfront so the row's persisted scope cannot diverge from what
-    # the read surface / watcher can actually see.
+    # write-surface parity with MCP ``mem_add`` and the CLI; an empty
+    # ``memory_dirs`` refuses with ``ConfigError`` → 409 instead of
+    # falling back to the historical ``~/.memtomem/memories`` — the
+    # "index nothing" state must not silently write into a directory the
+    # active config disabled (#1768). Project tiers route through
+    # ``resolve_memory_scope_dir`` against the server's project root so
+    # writes land in ``<proj>/.memtomem/memories[/.local]/`` — the same
+    # path the MCP ``mem_add(scope=...)`` flow uses. Refuses unregistered
+    # project-tier dirs upfront so the row's persisted scope cannot
+    # diverge from what the read surface / watcher can actually see.
     if req.scope == "user":
-        base = user_base
+        from memtomem.memory_scope import require_user_base
+
+        base = require_user_base(config.indexing.memory_dirs)
     else:
         from memtomem.memory_scope import (
             MemoryScopeError,
@@ -1851,7 +1847,7 @@ async def add_memory(
         if project_root is None:
             project_root = Path(server_project_root)
         try:
-            base = resolve_memory_scope_dir(req.scope, project_root, user_base=user_base)
+            base = resolve_memory_scope_dir(req.scope, project_root)
         except MemoryScopeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not is_project_tier_registered(base, pmdirs):
