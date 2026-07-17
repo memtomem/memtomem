@@ -41,6 +41,10 @@ PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
 PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
   tools/retrieval-eval/sweep_k_v2.py --runs 1 --stage all \
   --output tools/retrieval-eval/k_sweep_v2.json
+
+PYTHONHASHSEED=0 OMP_NUM_THREADS=1 uv run python \
+  tools/retrieval-eval/sweep_dimensions.py \
+  --output tools/retrieval-eval/dimension_sweep_v2.json
 ```
 
 Run an individual stage only for investigation and write it outside the
@@ -153,3 +157,27 @@ cost, and it does not compare reranker enabled versus disabled. See
 [`K_SWEEP_REPORT.md`](./K_SWEEP_REPORT.md) for the gates, rejection reasons,
 metrics, and limitations, and [`k_sweep_v2.json`](./k_sweep_v2.json) for the
 raw artifact.
+
+## Dimension-truncation sweep (issue #1787)
+
+`dimension_sweep_v2.json` records a one-run evaluation of Matryoshka-style
+truncation of the default 1024-dim `BAAI/bge-m3` vectors — slicing each vector to
+a shorter prefix and re-normalizing to unit L2 — at dimensions `1024/512/256/128`,
+in both the fused (BM25 + RRF weights `[1.0, 1.0]`) and dense-only (weights
+`[0.0, 1.0]`) pipeline. Truncation is applied by a `TruncatingEmbedder` wrapper
+installed via a monkeypatch on `component_factory.create_embedder`; no production
+code is changed, and native full-dimension vectors are cached so each unique text
+is embedded once for the whole sweep.
+
+bge-m3 is not MRL-trained, and the sweep confirms naive truncation degrades
+retrieval at every reduced dimension: dense-only macro Recall@10 falls
+`-0.035/-0.124/-0.193` at `512/256/128`, and even after BM25 + RRF masks part of
+the loss, fused macro Recall@10 still falls `-0.023/-0.046/-0.086` — beyond the
+`-0.01` materiality threshold at every step. The conclusion is to prefer
+MRL-native model presets (open question 2) over truncation if lower-dimensional
+vectors are wanted. The `--include-nomic` flag adds `nomic-embed-text-v1.5`
+tracks, but without task-prefix support in `OnnxEmbedder` those numbers are a
+lower bound only; a fair MRL-native comparison is deferred follow-up work. See
+[`DIMENSION_SWEEP_REPORT.md`](./DIMENSION_SWEEP_REPORT.md) for the full tables,
+control cross-check, and recommendations, and
+[`dimension_sweep_v2.json`](./dimension_sweep_v2.json) for the raw artifact.
