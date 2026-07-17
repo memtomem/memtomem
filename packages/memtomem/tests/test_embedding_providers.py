@@ -908,8 +908,12 @@ class TestOnnxEmbedder:
         loop = asyncio.get_running_loop()
         blocker_release = threading.Event()
         # Single-worker default executor so _close_sync deterministically
-        # queues behind the blocker instead of starting.
+        # queues behind the blocker instead of starting. Capture the loop's
+        # current default (no public getter) and restore it in the finally so
+        # later run_in_executor(None, ...) callers on shared loops don't
+        # inherit our shut-down pool (#1806).
         small = _TPE(max_workers=1, thread_name_prefix="test-default")
+        prev_executor = getattr(loop, "_default_executor", None)
         loop.set_default_executor(small)
         try:
             blocker = loop.run_in_executor(None, blocker_release.wait, 10)
@@ -932,7 +936,8 @@ class TestOnnxEmbedder:
             assert embedder._model is None
         finally:
             blocker_release.set()
-            small.shutdown(wait=False)
+            loop._default_executor = prev_executor
+            small.shutdown(wait=True)
 
     @pytest.mark.anyio
     async def test_close_double_cancel_still_tears_down(self):
@@ -950,6 +955,7 @@ class TestOnnxEmbedder:
         loop = asyncio.get_running_loop()
         blocker_release = threading.Event()
         small = _TPE(max_workers=1, thread_name_prefix="test-default")
+        prev_executor = getattr(loop, "_default_executor", None)
         loop.set_default_executor(small)
         try:
             blocker = loop.run_in_executor(None, blocker_release.wait, 10)
@@ -974,7 +980,8 @@ class TestOnnxEmbedder:
             assert embedder._model is None
         finally:
             blocker_release.set()
-            small.shutdown(wait=False)
+            loop._default_executor = prev_executor
+            small.shutdown(wait=True)
 
     @staticmethod
     def _blocking_model(stats, stats_lock, entered, release):

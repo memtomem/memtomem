@@ -260,7 +260,10 @@ class TestShutdownThreadSettlement:
     @pytest.mark.asyncio
     async def test_double_cancel_still_settles_queued_loader(self):
         """#1803: repeated cancellation must not cancel a queued load while
-        ``_warm_one`` is already settling the first cancellation.
+        ``_warm_one`` is already settling the first cancellation. #1806: the
+        *first* cancellation's ``task.cancel(msg)`` message must survive
+        settlement (a later cancel must not overwrite it), and the test must
+        hand the loop back a usable default executor.
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -286,23 +289,29 @@ class TestShutdownThreadSettlement:
         small = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-default")
         blocker = small.submit(occupy_worker)
         assert blocker_started.wait(timeout=5), "default-executor blocker did not start"
+        # ``set_default_executor`` has no public getter or reset, so capture
+        # the loop's current default through the private attribute and put it
+        # back in the ``finally``. Under module-/session-scoped loops a later
+        # ``run_in_executor(None, ...)`` caller must not inherit our shut-down
+        # single-worker pool; restoring ``None`` re-enables lazy creation.
+        prev_executor = getattr(loop, "_default_executor", None)
         loop.set_default_executor(small)
 
         holder = _QueuedLocalModel()
         task = asyncio.create_task(_warm_one("embedder", "onnx", "model", holder))
         try:
             await asyncio.sleep(0)  # submit the model load behind the blocker
-            task.cancel()
+            task.cancel("first shutdown")
             await asyncio.sleep(0)  # enter the first shielded settle iteration
             assert not task.done()
 
-            task.cancel()
+            task.cancel("second shutdown")
             await asyncio.sleep(0)  # deliver the second cancellation mid-settle
             assert not task.done(), "second cancel must not lose the queued load"
             assert load_calls == []
 
             blocker_release.set()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError, match="first shutdown"):
                 await task
             blocker.result(timeout=5)
 
@@ -310,7 +319,47 @@ class TestShutdownThreadSettlement:
             assert holder._model is not None
         finally:
             blocker_release.set()
-            small.shutdown(wait=False)
+            loop._default_executor = prev_executor
+            small.shutdown(wait=True)
+
+        # The loop must leave this test with a usable default executor —
+        # recreated lazily by the loop itself now that ours is gone.
+        assert await loop.run_in_executor(None, lambda: "usable") == "usable"
+
+    @pytest.mark.asyncio
+    async def test_loader_failure_after_cancellation_preserves_cancellation(self, caplog):
+        """#1806 precedence policy: once a cancellation has been caught,
+        a loader failure during settlement is logged, not raised — the
+        first cancellation (message included) stays the caller-visible
+        outcome.
+        """
+        from memtomem.server.warmup import _warm_one
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _FailingModel:
+            _model: object | None = None
+
+            def _get_model(self) -> object:
+                entered.set()
+                release.wait(timeout=10)
+                raise RuntimeError("load exploded")
+
+        task = asyncio.create_task(_warm_one("embedder", "onnx", "model", _FailingModel()))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel("shutdown: app context closing")
+        await asyncio.sleep(0)  # enter the shielded settle iteration
+        release.set()
+
+        with caplog.at_level("WARNING", logger="memtomem._settlement"):
+            with pytest.raises(asyncio.CancelledError, match="shutdown: app context closing"):
+                await task
+
+        assert any(
+            "embedder model load failed while settling a cancellation" in rec.getMessage()
+            for rec in caplog.records
+        ), "suppressed load failure must be logged, never silently dropped"
 
     @pytest.mark.asyncio
     async def test_close_waits_for_inflight_loader_thread(self, isolated_state, monkeypatch):
@@ -349,6 +398,105 @@ class TestShutdownThreadSettlement:
         # thread must have settled — never abandoned mid-load.
         assert settled == [True], "close() returned before the loader thread settled"
         assert task.done()
+
+    @staticmethod
+    def _onnx_embedder():
+        from memtomem.config import EmbeddingConfig
+        from memtomem.embedding.onnx import OnnxEmbedder
+
+        return OnnxEmbedder(EmbeddingConfig(provider="onnx"))
+
+    @pytest.mark.asyncio
+    async def test_close_double_cancel_preserves_first_message(self, monkeypatch):
+        """#1806: ``OnnxEmbedder.close`` shares the warmup settlement
+        contract — repeated cancellation keeps settling, and the first
+        ``task.cancel(msg)`` message is the one re-raised.
+        """
+        from memtomem.embedding.onnx import OnnxEmbedder
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_close(self: OnnxEmbedder) -> None:
+            entered.set()
+            release.wait(timeout=10)
+
+        monkeypatch.setattr(OnnxEmbedder, "_close_sync", blocking_close)
+        embedder = self._onnx_embedder()
+        try:
+            task = asyncio.create_task(embedder.close())
+            await asyncio.to_thread(entered.wait, 5)
+            task.cancel("lifespan teardown")
+            await asyncio.sleep(0)  # enter the first shielded settle iteration
+            assert not task.done()
+
+            task.cancel("second teardown")
+            await asyncio.sleep(0)  # deliver the second cancellation mid-settle
+            assert not task.done(), "second cancel must not abandon the teardown"
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError, match="lifespan teardown"):
+                await task
+        finally:
+            release.set()
+            embedder._infer_executor.shutdown(wait=False)
+
+    @pytest.mark.asyncio
+    async def test_close_failure_after_cancellation_preserves_cancellation(
+        self, monkeypatch, caplog
+    ):
+        """#1806 precedence policy, ONNX side: a teardown failure during
+        settlement must not displace the cancellation (it used to win) —
+        it is logged and the cancellation is re-raised.
+        """
+        from memtomem.embedding.onnx import OnnxEmbedder
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def failing_close(self: OnnxEmbedder) -> None:
+            entered.set()
+            release.wait(timeout=10)
+            raise RuntimeError("teardown exploded")
+
+        monkeypatch.setattr(OnnxEmbedder, "_close_sync", failing_close)
+        embedder = self._onnx_embedder()
+        try:
+            task = asyncio.create_task(embedder.close())
+            await asyncio.to_thread(entered.wait, 5)
+            task.cancel("lifespan teardown")
+            await asyncio.sleep(0)  # enter the shielded settle iteration
+            release.set()
+
+            with caplog.at_level("WARNING", logger="memtomem._settlement"):
+                with pytest.raises(asyncio.CancelledError, match="lifespan teardown"):
+                    await task
+
+            assert any(
+                "ONNX embedder teardown failed while settling a cancellation" in rec.getMessage()
+                for rec in caplog.records
+            ), "suppressed teardown failure must be logged, never silently dropped"
+        finally:
+            release.set()
+            embedder._infer_executor.shutdown(wait=False)
+
+    @pytest.mark.asyncio
+    async def test_close_failure_without_cancellation_propagates(self, monkeypatch):
+        """#1806 precedence policy, other leg: with no cancellation pending,
+        a teardown failure reaches the caller unchanged.
+        """
+        from memtomem.embedding.onnx import OnnxEmbedder
+
+        def failing_close(self: OnnxEmbedder) -> None:
+            raise RuntimeError("teardown exploded")
+
+        monkeypatch.setattr(OnnxEmbedder, "_close_sync", failing_close)
+        embedder = self._onnx_embedder()
+        try:
+            with pytest.raises(RuntimeError, match="teardown exploded"):
+                await embedder.close()
+        finally:
+            embedder._infer_executor.shutdown(wait=False)
 
 
 class TestLoaderConcurrency:
