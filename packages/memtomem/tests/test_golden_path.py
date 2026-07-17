@@ -72,6 +72,8 @@ class TestOnnxGoldenPath:
         await comp.embedder.embed_texts(["load the real tokenizer"])
         tokenizer = comp.embedder._tokenizer
         assert tokenizer is not None
+        session_options = comp.embedder._model.model.model.get_session_options()
+        assert session_options.enable_cpu_mem_arena is False
         # This compact model has a native 128-token limit; the fixture requests
         # 64 so this proves the pinned FastEmbed tokenizer is actively narrowed.
         assert tokenizer.truncation["max_length"] == 64

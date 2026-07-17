@@ -15,6 +15,7 @@ class ConfigEmbeddingOut(BaseModel):
     batch_size: int
     onnx_batch_size: int = 8
     max_sequence_tokens: int = 1024
+    onnx_cpu_mem_arena: bool = False
     api_key: str = "***"
     # ONNX Runtime intra-op thread cap. Default 4 (caps ONNX so a bulk
     # reindex doesn't pin every core); 0 = ORT default (all physical

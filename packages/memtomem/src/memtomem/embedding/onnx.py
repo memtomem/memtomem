@@ -72,6 +72,50 @@ def _configure_tokenizer_limit(
     return tokenizer, applied_limit
 
 
+def _verify_cpu_mem_arena(model: object, requested: bool) -> None:
+    """Verify FastEmbed applied the requested ORT CPU arena setting.
+
+    FastEmbed accepts arbitrary keyword arguments. Without inspecting the
+    loaded ORT session, a future layout/API change could silently ignore the
+    memory-safety default and restore multi-GB retained RSS.
+    """
+
+    inner_model = getattr(model, "model", None)
+    session = getattr(inner_model, "model", None)
+    get_session_options = getattr(session, "get_session_options", None)
+    if not callable(get_session_options):
+        if requested:
+            logger.warning(
+                "FastEmbed session layout does not expose ORT arena state; "
+                "continuing because embedding.onnx_cpu_mem_arena=true "
+                "explicitly requests the ORT-compatible default"
+            )
+            return
+        raise EmbeddingError(
+            "FastEmbed session layout is incompatible with "
+            "embedding.onnx_cpu_mem_arena; refusing unsafe ONNX fallback. "
+            "Set embedding.onnx_cpu_mem_arena=true to use the ORT default explicitly."
+        )
+
+    try:
+        actual = get_session_options().enable_cpu_mem_arena
+    except Exception as exc:
+        if requested:
+            logger.warning("Could not verify the explicitly enabled ORT CPU memory arena: %s", exc)
+            return
+        raise EmbeddingError(
+            "Could not verify embedding.onnx_cpu_mem_arena on the loaded "
+            "FastEmbed session; refusing unsafe ONNX fallback. Set "
+            "embedding.onnx_cpu_mem_arena=true to use the ORT default explicitly."
+        ) from exc
+
+    if not isinstance(actual, bool) or actual is not requested:
+        raise EmbeddingError(
+            "FastEmbed did not apply embedding.onnx_cpu_mem_arena "
+            f"(requested={requested}, actual={actual!r}); refusing to continue."
+        )
+
+
 def _truncated_input_indexes(
     tokenizer: object | None,
     texts: list[str],
@@ -255,17 +299,22 @@ class OnnxEmbedder:
             threads = self._config.threads or None
             cache_dir = resolve_fastembed_cache_dir()
             logger.info(
-                "Loading ONNX embedding model %s (threads=%s, cache_dir=%s) …",
+                "Loading ONNX embedding model %s (threads=%s, cpu_mem_arena=%s, cache_dir=%s) …",
                 model_id,
                 threads if threads is not None else "ORT default",
+                self._config.onnx_cpu_mem_arena,
                 cache_dir,
             )
             self._loading = True
             self._load_error = None
             try:
                 model = TextEmbedding(
-                    model_name=model_id, threads=threads, cache_dir=str(cache_dir)
+                    model_name=model_id,
+                    threads=threads,
+                    cache_dir=str(cache_dir),
+                    enable_cpu_mem_arena=self._config.onnx_cpu_mem_arena,
                 )
+                _verify_cpu_mem_arena(model, self._config.onnx_cpu_mem_arena)
                 tokenizer, active_limit = _configure_tokenizer_limit(
                     model, self._config.max_sequence_tokens
                 )

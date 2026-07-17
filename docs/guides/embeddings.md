@@ -58,11 +58,12 @@ export MEMTOMEM_EMBEDDING__DIMENSION=1024
 
 > **Note:** `bge-m3` is ~2.3 GB on disk — a substantial download, and much larger than the Ollama models below. For lightweight English-only search, use `all-MiniLM-L6-v2` or `bge-small-en-v1.5`.
 
-Local ONNX inference uses two memory-safe bounds by default:
+Local ONNX inference uses memory-safe batching, sequence, and allocator defaults:
 
 ```bash
 export MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE=8
 export MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS=1024
+export MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA=false
 ```
 
 The sequence cap is enforced by the model's actual tokenizer. When an input is
@@ -70,6 +71,12 @@ longer, the dense vector represents its prefix while stored content and BM25
 still cover the complete chunk. Set the cap to `0` to restore the model's own
 limit. Changing the cap requires a restart and a force-reindex of existing ONNX
 content to keep vector generation consistent.
+
+The CPU memory arena is disabled so ONNX Runtime returns peak allocations after
+indexing instead of retaining them in the process RSS for reuse. This allocator
+setting does not change vectors or require re-indexing, but it is fixed when the
+model session loads, so changing it requires a restart. Set it to `true` only as
+an explicit compatibility or throughput escape hatch.
 
 ## Ollama (local server)
 
@@ -126,4 +133,4 @@ If you switch the embedding model after indexing, run `mm embedding-reset` to de
 
 ## Tuning Throughput
 
-See [`configuration.md#embedding`](configuration.md#embedding) for the provider-specific controls. `MEMTOMEM_EMBEDDING__BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` tune remote providers; `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` bound local FastEmbed activation memory.
+See [`configuration.md#embedding`](configuration.md#embedding) for the provider-specific controls. `MEMTOMEM_EMBEDDING__BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_CONCURRENT_BATCHES` tune remote providers; `MEMTOMEM_EMBEDDING__ONNX_BATCH_SIZE` and `MEMTOMEM_EMBEDDING__MAX_SEQUENCE_TOKENS` bound local FastEmbed activation memory, while `MEMTOMEM_EMBEDDING__ONNX_CPU_MEM_ARENA=false` prevents peak allocations from remaining cached in process RSS.
