@@ -1428,11 +1428,15 @@ class SqliteBackend(
             # importance, validity) activate. Score sits at the
             # trailing position after the chunk columns — see
             # ``_chunks_table_column_count`` consumer below.
+            # Trailing ``c.id`` is the unique final tiebreak (#516): equal
+            # ``fts.rank`` rows within the same scope priority would otherwise
+            # take arbitrary SQLite order, so repeated queries / reopened
+            # connections could reorder them and destabilize replay diffs.
             sql = f"""SELECT c.*, fts.rank
                    FROM chunks_fts fts
                    JOIN chunks c ON c.rowid = fts.rowid
                    WHERE chunks_fts MATCH ? {ns_clause} {scope_clause} {metadata_clause}
-                   ORDER BY fts.rank, {tie_break}
+                   ORDER BY fts.rank, {tie_break}, c.id
                    LIMIT ?"""
 
             # Try AND first (default FTS5 behaviour)
@@ -1522,8 +1526,14 @@ class SqliteBackend(
                    LIMIT ?
                ) sub
                JOIN chunks c ON c.rowid = sub.rowid {ns_clause} {scope_clause} {metadata_clause}
-               ORDER BY sub.distance, {tie_break}
+               ORDER BY sub.distance, {tie_break}, c.id
                LIMIT ?"""
+        # Trailing ``c.id`` gives the outer ordering a unique final tiebreak
+        # (#516). Note this only stabilizes rows the inner KNN actually
+        # returned; sqlite-vec 0.1.9 prunes to the inner ``LIMIT`` with an
+        # unstable distance-only sort, so equal-distance rows straddling that
+        # inner cutoff are a separate concern handled by the exhaustive
+        # evaluation path (see ``dense_search`` replay mode).
 
         # Total embedding rows — the upper bound for a meaningful
         # KNN K. Cheap; sqlite stores chunks_vec row counts in its
