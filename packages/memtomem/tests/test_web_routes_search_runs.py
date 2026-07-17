@@ -153,8 +153,7 @@ class TestPostFeedback:
 
     async def test_conflict_maps_to_409(self, app, client):
         app.state.storage.save_search_feedback.side_effect = FeedbackConflictError(
-            "feedback for run 'r' chunk 'c1' is already 'relevant'; "
-            "pass replace=true to overwrite"
+            "feedback for run 'r' chunk 'c1' is already 'relevant'; pass replace=true to overwrite"
         )
         resp = await client.post(
             f"/api/search/runs/{RUN_ID}/feedback",
@@ -195,7 +194,5 @@ class TestDevOnlyPin:
         prod_app = create_app(lifespan=None, mode="prod")
         transport = ASGITransport(app=prod_app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            resp = await c.request(
-                method, path, json={"chunk_id": "c1", "judgment": "relevant"}
-            )
+            resp = await c.request(method, path, json={"chunk_id": "c1", "judgment": "relevant"})
         assert resp.status_code == 404

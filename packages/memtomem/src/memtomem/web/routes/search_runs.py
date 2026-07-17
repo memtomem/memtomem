@@ -44,9 +44,7 @@ async def get_search_run(
 ) -> SearchRunDetailResponse:
     """One run: query, observation metadata, ranked snapshot + judgments."""
     run = await storage.get_search_run(run_id)
-    judgments = {
-        j["chunk_id"]: j for j in await storage.get_search_feedback(run_id)
-    }
+    judgments = {j["chunk_id"]: j for j in await storage.get_search_feedback(run_id)}
     results = []
     for entry in run["result_snapshot"]:
         judgment = judgments.get(entry.get("chunk_id"))

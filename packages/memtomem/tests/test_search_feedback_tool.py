@@ -115,14 +115,18 @@ async def test_search_stays_independent_of_feedback(bm25_only_components):
     await mem_search_feedback(  # type: ignore[arg-type]
         run_id=run_id, chunk_id=chunk_id, judgment="relevant", ctx=ctx
     )
-    before = components.storage._get_db().execute(
-        "SELECT run_id, chunk_id, judgment, created_at, updated_at FROM search_feedback"
-    ).fetchall()
+    before = (
+        components.storage._get_db()
+        .execute("SELECT run_id, chunk_id, judgment, created_at, updated_at FROM search_feedback")
+        .fetchall()
+    )
 
     results, stats = await components.search_pipeline.search("relevance feedback", top_k=5)
 
     assert results and stats.query_run_id != run_id
-    after = components.storage._get_db().execute(
-        "SELECT run_id, chunk_id, judgment, created_at, updated_at FROM search_feedback"
-    ).fetchall()
+    after = (
+        components.storage._get_db()
+        .execute("SELECT run_id, chunk_id, judgment, created_at, updated_at FROM search_feedback")
+        .fetchall()
+    )
     assert after == before

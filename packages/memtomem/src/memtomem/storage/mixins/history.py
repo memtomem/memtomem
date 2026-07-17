@@ -271,11 +271,15 @@ class HistoryMixin:
         }
 
     def _require_search_run(self, run_id: str) -> tuple:
-        row = self._get_db().execute(
-            "SELECT run_id, query_text, created_at, observation_json, result_snapshot_json "
-            "FROM query_history WHERE run_id = ?",
-            (run_id,),
-        ).fetchone()
+        row = (
+            self._get_db()
+            .execute(
+                "SELECT run_id, query_text, created_at, observation_json, result_snapshot_json "
+                "FROM query_history WHERE run_id = ?",
+                (run_id,),
+            )
+            .fetchone()
+        )
         if row is None:
             raise KeyError(f"run_id {run_id!r} not found")
         return row
@@ -283,11 +287,15 @@ class HistoryMixin:
     async def get_search_feedback(self, run_id: str) -> list[dict]:
         """Current judgments for one observed run, ordered by chunk_id."""
         self._require_search_run(run_id)
-        rows = self._get_db().execute(
-            "SELECT chunk_id, judgment, created_at, updated_at FROM search_feedback "
-            "WHERE run_id = ? ORDER BY chunk_id",
-            (run_id,),
-        ).fetchall()
+        rows = (
+            self._get_db()
+            .execute(
+                "SELECT chunk_id, judgment, created_at, updated_at FROM search_feedback "
+                "WHERE run_id = ? ORDER BY chunk_id",
+                (run_id,),
+            )
+            .fetchall()
+        )
         return [
             {"chunk_id": r[0], "judgment": r[1], "created_at": r[2], "updated_at": r[3]}
             for r in rows

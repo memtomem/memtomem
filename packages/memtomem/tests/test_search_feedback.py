@@ -38,9 +38,11 @@ async def _seed_run(storage, run_id: str, chunk_ids: list[str] | None = None) ->
 
 
 def _feedback_rows(storage) -> list[tuple]:
-    return storage._get_db().execute(
-        "SELECT run_id, chunk_id, judgment, created_at, updated_at FROM search_feedback"
-    ).fetchall()
+    return (
+        storage._get_db()
+        .execute("SELECT run_id, chunk_id, judgment, created_at, updated_at FROM search_feedback")
+        .fetchall()
+    )
 
 
 class TestSaveSearchFeedback:
