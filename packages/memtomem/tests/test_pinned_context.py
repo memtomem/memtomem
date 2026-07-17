@@ -350,6 +350,21 @@ def test_context_bundle_as_dict_enforces_empty_retrieved_omission():
     assert "reranker" not in payload
 
 
+def test_context_bundle_as_dict_ties_reranker_to_rerank_scale():
+    # reranker accompanies the "rerank" scale only; a directly constructed
+    # bundle with an inconsistent pair serializes without the reranker key.
+    retrieved = ({"id": "c1", "content": "x", "source": "m.md", "namespace": "d", "score": 0.5},)
+    inconsistent = ContextBundle((), retrieved, 10, 5, (), (), "rrf", "model-x")
+    payload = inconsistent.as_dict()
+    assert payload["score_scale"] == "rrf"
+    assert "reranker" not in payload
+
+    consistent = ContextBundle((), retrieved, 10, 5, (), (), "rerank", "model-x")
+    payload = consistent.as_dict()
+    assert payload["score_scale"] == "rerank"
+    assert payload["reranker"] == "model-x"
+
+
 def test_context_bundle_annotations_resolve_at_runtime():
     # ScoreScale must be importable at runtime, not TYPE_CHECKING-only —
     # reflection-based consumers introspect this public payload dataclass.

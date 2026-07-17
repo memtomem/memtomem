@@ -64,11 +64,12 @@ class ContextBundle:
             "warnings": list(self.warnings),
         }
         # The omission contract is structural: an empty retrieval leg carries
-        # no relevance scale, even if a caller stamped one on the bundle.
+        # no relevance scale, and a reranker id only accompanies the "rerank"
+        # scale — even if a caller stamped inconsistent fields on the bundle.
         if self.retrieved and self.score_scale is not None:
             payload["score_scale"] = self.score_scale
-        if self.retrieved and self.reranker is not None:
-            payload["reranker"] = self.reranker
+            if self.score_scale == "rerank" and self.reranker is not None:
+                payload["reranker"] = self.reranker
         return payload
 
 
