@@ -68,6 +68,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **"Delete ALL data" now clears every table, including newer-schema ones**
+  (#1826) — `reset_all` (`mm reset`, `mem_reset`, Web `POST /reset`) enumerates
+  tables from `sqlite_master` instead of a hardcoded list, closing a
+  downgrade→reset→upgrade privacy gap: an older binary resetting a DB written by
+  a newer one (which passes the downgrade fence, since additive tables don't bump
+  `SCHEMA_VERSION`) previously left the newer tables' rows behind. It also fixes
+  tables the old list already missed on the current binary — `schedules`,
+  `canonical_entities`, assertions/edges, and the idempotency ledger survived a
+  reset; `chunk_links` and the memory-candidate tables were emptied only via a
+  fragile, unreported FK cascade. Query-planner statistics (`ANALYZE`) and
+  AUTOINCREMENT counters are cleared too, so a reset DB matches a fresh one, and
+  per-table counts in the receipt are now real (including FTS/vector). If a
+  virtual table's module is unavailable the wipe is best-effort and the reset
+  fails closed rather than reporting a false success.
 - **Local ONNX CPU allocations are released after indexing** (#1784) — the
   FastEmbed/ONNX provider now disables ORT's CPU memory arena by default, which
   prevents multi-GB peak allocations from remaining in process RSS after a
