@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from memtomem.errors import EvalCaseError, EvalCaseNotFoundError
+from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
 from memtomem.web.app import create_app
 
 RUN_ID = "11111111-1111-4111-8111-111111111111"
@@ -153,6 +153,15 @@ class TestPromote:
         )
         resp = await client.post("/api/quality/cases", json={"run_id": RUN_ID})
         assert resp.status_code == 409
+
+    async def test_malformed_name_maps_to_422(self, app, client):
+        # A validation failure (bad shape / secret-shaped) is a 422, not a 409
+        # state conflict.
+        app.state.storage.promote_search_run.side_effect = EvalCaseValidationError(
+            "eval case name contains a secret-shaped token and was refused"
+        )
+        resp = await client.post("/api/quality/cases", json={"run_id": RUN_ID, "name": "some-name"})
+        assert resp.status_code == 422
 
     async def test_collision_message_with_not_found_still_409(self, app, client):
         # Adversarial: a name-collision message that contains the substring

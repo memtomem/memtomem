@@ -3,20 +3,24 @@
 Dev-only surface (see ``_DEV_ONLY_ROUTERS``): list evaluation cases, promote a
 labeled search run into a durable case, and replay cases into a deterministic
 retrieval-quality report. Advisory only; replay reports are ephemeral (run
-live, returned as JSON — never persisted) and content-free by construction.
+live, returned as JSON — never persisted). Reports carry no chunk text or
+absolute paths, but DO include each case's name (secret-scanned at promotion)
+and its raw, unsanitized query text — see ``web.schemas.quality`` for the full
+privacy contract.
 
-Error mapping is router-local: :class:`EvalCaseNotFoundError` -> 404, every
-other :class:`EvalCaseError` (no feedback, unreplayable filters, project scope,
-name collision) -> 409, mirroring the ``FeedbackConflictError`` -> 409
-precedent in ``search_runs``. Classification is by exception type, never by
-message text (messages interpolate user-controlled names).
+Error mapping is router-local, by exception type (never message text —
+messages interpolate user-controlled names): :class:`EvalCaseNotFoundError` ->
+404, :class:`EvalCaseValidationError` (malformed / secret-shaped name) -> 422,
+every other :class:`EvalCaseError` (no feedback, unreplayable filters, project
+scope, name collision — genuine state conflicts) -> 409, mirroring the
+``FeedbackConflictError`` -> 409 precedent in ``search_runs``.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from memtomem.errors import EvalCaseError, EvalCaseNotFoundError
+from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
 from memtomem.quality.replay import replay_cases
 from memtomem.quality.state import current_fingerprints
 from memtomem.web.deps import get_config, get_search_pipeline, get_storage
@@ -32,8 +36,13 @@ router = APIRouter(prefix="/quality", tags=["quality"])
 
 
 def _eval_case_http(exc: EvalCaseError) -> HTTPException:
-    """404 for missing run/case, 409 for every other eval-case refusal."""
-    status = 404 if isinstance(exc, EvalCaseNotFoundError) else 409
+    """Map by type: 404 missing, 422 malformed input, 409 state conflict."""
+    if isinstance(exc, EvalCaseNotFoundError):
+        status = 404
+    elif isinstance(exc, EvalCaseValidationError):
+        status = 422
+    else:
+        status = 409
     return HTTPException(status_code=status, detail=str(exc))
 
 

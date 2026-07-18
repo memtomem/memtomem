@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from memtomem.errors import EvalCaseError, EvalCaseNotFoundError
+from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
 from memtomem.models import ScopeFilter
 from memtomem.privacy import scan as _privacy_scan
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
@@ -73,10 +73,12 @@ def _now_iso() -> str:
 #: short, path-safe labels — never free-form prose, absolute paths, or secrets.
 #: Mirrors ``context._names.validate_name`` without importing across the
 #: storage→context layer boundary, and additionally runs the secret-class
-#: privacy scanner (the report's "no secrets" guarantee must hold for the name,
-#: not only chunk content). Applied at every write ingress (promote + import)
-#: so the redaction exemption's "short label, no free-text" rationale holds for
-#: all surfaces (#1802 PR-5).
+#: privacy scanner so the *name field* a report emits carries no secret. (This
+#: is a per-field guarantee for the name only; the report's raw query text is
+#: verbatim user input and is NOT sanitized — see the surface docstrings.)
+#: Applied at every write ingress (promote + import) so the redaction
+#: exemption's "short label, no free-text" rationale holds for all surfaces
+#: (#1802 PR-5).
 _EVAL_CASE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _EVAL_CASE_NAME_MAX_LEN = 64
 
@@ -93,24 +95,26 @@ def _validate_eval_case_name(name: str | None) -> str | None:
     if name is None:
         return None
     if not isinstance(name, str):
-        raise EvalCaseError(f"eval case name must be a string, got {type(name).__name__}")
+        raise EvalCaseValidationError(f"eval case name must be a string, got {type(name).__name__}")
     if not name.strip():
-        raise EvalCaseError("eval case name must not be blank")
+        raise EvalCaseValidationError("eval case name must not be blank")
     # Secret scan FIRST, before any error that interpolates the value — a long
     # or odd-charset credential (e.g. github_pat_… > 64 chars) must never be
     # echoed by the "too long" / "must match" messages below.
     if _privacy_scan(name):
-        raise EvalCaseError("eval case name contains a secret-shaped token and was refused")
+        raise EvalCaseValidationError(
+            "eval case name contains a secret-shaped token and was refused"
+        )
     if len(name) > _EVAL_CASE_NAME_MAX_LEN:
-        raise EvalCaseError(
+        raise EvalCaseValidationError(
             f"eval case name {name!r} is too long (len {len(name)} > {_EVAL_CASE_NAME_MAX_LEN})"
         )
     if name in (".", ".."):
-        raise EvalCaseError(f"eval case name {name!r} is a reserved path token")
+        raise EvalCaseValidationError(f"eval case name {name!r} is a reserved path token")
     if name.startswith("-"):
-        raise EvalCaseError(f"eval case name {name!r} must not start with a dash")
+        raise EvalCaseValidationError(f"eval case name {name!r} must not start with a dash")
     if not _EVAL_CASE_NAME_RE.fullmatch(name):
-        raise EvalCaseError(
+        raise EvalCaseValidationError(
             f"eval case name {name!r} must match [A-Za-z0-9._-]+ "
             "(no whitespace, slash, or control characters)"
         )

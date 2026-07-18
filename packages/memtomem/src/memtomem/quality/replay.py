@@ -21,6 +21,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from memtomem.errors import EvalCaseError
+from memtomem.privacy import scan as _privacy_scan
 from memtomem.quality import metrics
 from memtomem.quality.fingerprints import case_set_fingerprint
 from memtomem.quality.state import current_fingerprints, nondeterministic_stages
@@ -42,6 +43,28 @@ __all__ = [
 
 REPLAY_REPORT_SCHEMA_VERSION = 1
 REPLAY_REPORT_KIND = "replay_report"
+
+#: Placeholder emitted in a report when a case name would leak. Write ingress
+#: (promote + import) secret-scans names, but rows promoted before that
+#: validator shipped (#1825 was on ``main`` first) can carry a secret- or
+#: path-bearing name — so the emit boundary redacts defensively too, keeping the
+#: report's guarantee independent of how a row was written (#1802 PR-5).
+_REDACTED_NAME = "[redacted-name]"
+
+
+def _report_safe_name(name: object) -> object:
+    """Redact a case name that would leak a secret or an absolute path.
+
+    Only the privacy-relevant failures are redacted (secret hit / path
+    separator); benign legacy labels — including ones that predate the shape
+    validator — pass through unchanged.
+    """
+    if not isinstance(name, str):
+        return name
+    if "/" in name or "\\" in name or _privacy_scan(name):
+        return _REDACTED_NAME
+    return name
+
 
 #: Upper bound on ``as_of_unix`` (accepted range is 0 [1970-01-01] ..
 #: 32_503_680_000 [3000-01-01]). The pinned instant flows into
@@ -202,7 +225,7 @@ def _replay_case_report(
 
     return {
         "case_id": case["case_id"],
-        "name": case["name"],
+        "name": _report_safe_name(case["name"]),
         "version": case["version"],
         "status": case["status"],
         "query_text": case["query_text"],

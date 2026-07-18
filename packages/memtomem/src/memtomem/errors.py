@@ -75,6 +75,16 @@ class EvalCaseNotFoundError(EvalCaseError):
     """
 
 
+class EvalCaseValidationError(EvalCaseError):
+    """Raised when eval-case input is malformed (bad name shape, secret-shaped
+    label, …) — a request-validation failure, not a state conflict.
+
+    A distinct subclass so the web surface can map it to HTTP 422 while genuine
+    state conflicts (name collision, no feedback, unreplayable filters) stay
+    409.
+    """
+
+
 class EmbeddingError(Mem2MemError):
     """Embedding provider error."""
 
