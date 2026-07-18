@@ -50,6 +50,7 @@ from memtomem.context._names import (
 )
 from memtomem.context._runtime_targets import (
     DiffRow,
+    resolve_import_runtimes,
     runtime_artifact_listing,
     runtime_fanout_root,
 )
@@ -866,6 +867,7 @@ def extract_skills_to_canonical(
     *,
     scope: TargetScope = "project_shared",
     source_scope: TargetScope | None = None,
+    source_runtime: str | None = None,
     force_unsafe_import: bool = False,
     dry_run: bool = False,
     surface: str = "cli_context_init",
@@ -942,7 +944,16 @@ def extract_skills_to_canonical(
 
     When ``only_name`` is set, every runtime entry with a different name is
     silently skipped before any validation/dedupe work.
+
+    ``source_runtime`` (ADR-0030 §12) narrows the scan to a single runtime
+    directory; ``None`` keeps the full first-wins order. An invalid or
+    export-only value raises ``ValueError`` up front — before the
+    ``project_local`` short-circuit — so a bad selection is always loud.
+    Note that with ``source_runtime`` set, ``runtime_candidates`` lists only
+    the scanned runtime; a caller enumerating all candidates (the pull
+    picker) must call with ``source_runtime=None``.
     """
+    runtimes = resolve_import_runtimes("skills", source_runtime)
     if scope == "project_local":
         return ExtractResult(
             imported=[],
@@ -975,7 +986,7 @@ def extract_skills_to_canonical(
     def _lock_timeout() -> float:
         return max(0.0, lock_deadline - time.monotonic())
 
-    for runtime in ("claude", "gemini", "codex", "kimi"):
+    for runtime in runtimes:
         try:
             runtime_dir = runtime_fanout_root("skills", runtime, source_scope_eff, project_root)
         except KeyError:

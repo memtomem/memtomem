@@ -51,6 +51,7 @@ from memtomem.context._atomic_reverse import (
 )
 from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
+    resolve_import_runtimes,
     runtime_artifact_names,
     runtime_fanout_root,
 )
@@ -783,6 +784,7 @@ def extract_agents_to_canonical(
     only_name: str | None = None,
     *,
     scope: TargetScope = "project_shared",
+    source_runtime: str | None = None,
     force_unsafe_import: bool = False,
     dry_run: bool = False,
     surface: str = "cli_context_init",
@@ -833,7 +835,15 @@ def extract_agents_to_canonical(
     Layout policy: new agents (no existing canonical) land in directory
     layout per ADR-0008. Existing flat-layout entries are preserved by
     PR-C — migration to directory layout is a separate command (PR-D).
+
+    ``source_runtime`` (ADR-0030 §12) narrows the scan to a single runtime;
+    only ``claude`` / ``gemini`` are pull-eligible for agents (codex/kimi
+    are export-only). ``None`` keeps the full first-wins order. An invalid
+    value raises ``ValueError`` before the ``project_local`` short-circuit.
+    With ``source_runtime`` set, ``runtime_candidates`` lists only the
+    scanned runtime — enumerate all candidates with ``source_runtime=None``.
     """
+    runtimes = resolve_import_runtimes("agents", source_runtime)
     if scope == "project_local":
         # ADR §3 — gitignored draft tier has no runtime fan-out, so there
         # is nothing to import. Loud-emit (NO_PROJECT_FANOUT_FOR_RUNTIME)
@@ -865,7 +875,7 @@ def extract_agents_to_canonical(
             "agent_name": agent_name,
         }
 
-    for runtime in ("claude", "gemini"):
+    for runtime in runtimes:
         import_passthrough_runtime(
             runtime,
             artifact_label="agents",
