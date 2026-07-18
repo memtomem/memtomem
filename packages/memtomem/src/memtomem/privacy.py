@@ -475,6 +475,19 @@ def scan(text: str, patterns: tuple[str, ...] | None = None) -> list[RedactionHi
     return hits
 
 
+def has_emit_risk(text: str) -> bool:
+    """True if ``text`` would leak a secret or a filesystem path when emitted.
+
+    The shared core of the report emit-boundary: a string is unsafe to echo
+    into a report/verdict/log when it carries a path separator (``/`` or ``\\``,
+    the absolute-path shape) or matches a secret pattern. Callers layer their
+    own extra restrictions on top (e.g. the gate's reason sanitizer also bars
+    control characters and caps length); the secret + path check lives here so
+    the replay report and the quality gate cannot drift apart.
+    """
+    return "/" in text or "\\" in text or bool(scan(text))
+
+
 _lock = Lock()
 _outcomes: dict[str, int] = {o: 0 for o in _VALID_OUTCOMES}
 _by_tool: dict[str, dict[str, int]] = defaultdict(lambda: {o: 0 for o in _VALID_OUTCOMES})

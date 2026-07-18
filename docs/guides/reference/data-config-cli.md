@@ -301,6 +301,7 @@ mm quality export --out cases.json     # export a portable case-set envelope (--
 mm quality import cases.json           # import a case-set envelope (--replace to overwrite by case_id)
 mm quality replay --out base.json      # replay cases into a deterministic report (--as-of pins time; --format table|json)
 mm quality compare base.json cand.json # diff two replay reports (--fail-on-regression opts into a blocking gate)
+mm quality gate base.json cand.json --policy policy.json  # gate a comparison against a policy file: exit 0 pass / 1 violation / 2 bad input
 
 # Multi-agent memory — per-agent scopes (see the MCP server's multi-agent workflow)
 mm agent register planner --description "research agent"  # register an agent id (optional --color)

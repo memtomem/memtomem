@@ -232,3 +232,120 @@ class TestCompareGate:
         return self._write(
             tmp_path, name, _one_case_report("c1", ["x", "r"], ["r"], profile=profile)
         )
+
+
+class TestGateCommand:
+    def _write(self, tmp_path, name, doc):
+        p = tmp_path / name
+        p.write_text(json.dumps(doc))
+        return str(p)
+
+    def _reports(self, tmp_path, *, regressed: bool):
+        base = self._write(tmp_path, "base.json", _one_case_report("c1", ["r"], ["r"], profile="p"))
+        cand_retrieved = ["x", "r"] if regressed else ["r"]
+        cand = self._write(
+            tmp_path, "cand.json", _one_case_report("c1", cand_retrieved, ["r"], profile="p")
+        )
+        return base, cand
+
+    def _policy(self, tmp_path, **kw):
+        return self._write(
+            tmp_path, "policy.json", {"schema_version": 1, "kind": "replay_gate_policy", **kw}
+        )
+
+    def test_pass_exits_zero(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=False)
+        policy = self._policy(tmp_path, max_verdict_counts={"regressed": 0})
+        result = CliRunner().invoke(
+            quality, ["gate", base, cand, "--policy", policy, "--format", "json"]
+        )
+        assert result.exit_code == 0
+        verdict = json.loads(result.output)
+        assert verdict["pass"] is True
+        assert verdict["kind"] == "replay_gate_verdict"
+
+    def test_violation_exits_one_with_verdict_emitted(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=True)
+        policy = self._policy(tmp_path, max_verdict_counts={"regressed": 0})
+        result = CliRunner().invoke(
+            quality, ["gate", base, cand, "--policy", policy, "--format", "json"]
+        )
+        assert result.exit_code == 1
+        # exit 1, but the verdict is still emitted before exiting.
+        verdict = json.loads(result.output)
+        assert verdict["pass"] is False
+        assert verdict["violations"][0]["rule"] == "verdict_count"
+
+    def test_malformed_policy_exits_two(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=False)
+        policy = self._policy(tmp_path, max_verdict_counts={"bogus": 0})
+        result = CliRunner().invoke(quality, ["gate", base, cand, "--policy", policy])
+        assert result.exit_code == 2
+
+    def test_malformed_report_exits_two(self, tmp_path):
+        base, _ = self._reports(tmp_path, regressed=False)
+        bad = tmp_path / "bad.json"
+        bad.write_text("{ not json")
+        policy = self._policy(tmp_path)
+        result = CliRunner().invoke(quality, ["gate", base, str(bad), "--policy", policy])
+        assert result.exit_code == 2
+        # Error references the input by role, never by filesystem path.
+        assert str(bad) not in result.output
+        assert "candidate" in result.output
+
+    def test_missing_input_exits_two_without_path(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=False)
+        missing = str(tmp_path / "nope" / "ghost-policy.json")
+        result = CliRunner().invoke(quality, ["gate", base, cand, "--policy", missing])
+        assert result.exit_code == 2
+        # Click's exists=True would have echoed the literal path — it must not.
+        assert missing not in result.output
+        assert "ghost-policy.json" not in result.output
+        assert "policy" in result.output
+
+    def test_directory_input_exits_two_without_path(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=False)
+        result = CliRunner().invoke(quality, ["gate", str(tmp_path), cand, "--policy", base])
+        assert result.exit_code == 2
+        assert str(tmp_path) not in result.output
+        assert "baseline" in result.output
+
+    def test_invalid_utf8_exits_two(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=False)
+        bad = tmp_path / "bad-utf8.json"
+        bad.write_bytes(b"\xff\xfe not utf-8")
+        result = CliRunner().invoke(quality, ["gate", base, cand, "--policy", str(bad)])
+        assert result.exit_code == 2
+        assert str(bad) not in result.output
+
+    def test_out_and_comparison_out_write_canonical_bytes(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=False)
+        policy = self._policy(tmp_path, min_compared_cases=1)
+        out = tmp_path / "verdict.json"
+        cmp_out = tmp_path / "comparison.json"
+        result = CliRunner().invoke(
+            quality,
+            [
+                "gate",
+                base,
+                cand,
+                "--policy",
+                policy,
+                "--out",
+                str(out),
+                "--comparison-out",
+                str(cmp_out),
+            ],
+        )
+        assert result.exit_code == 0
+        assert json.loads(out.read_text())["kind"] == "replay_gate_verdict"
+        assert out.read_text().endswith("\n")
+        assert json.loads(cmp_out.read_text())["kind"] == "replay_comparison"
+
+    def test_table_format_renders_violations(self, tmp_path):
+        base, cand = self._reports(tmp_path, regressed=True)
+        policy = self._policy(tmp_path, max_verdict_counts={"regressed": 0})
+        result = CliRunner().invoke(quality, ["gate", base, cand, "--policy", policy])
+        assert result.exit_code == 1
+        assert "gate: FAIL" in result.output
+        assert "verdict_count" in result.output

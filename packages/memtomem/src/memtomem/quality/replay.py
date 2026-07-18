@@ -21,7 +21,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from memtomem.errors import EvalCaseError
-from memtomem.privacy import scan as _privacy_scan
+from memtomem.privacy import has_emit_risk as _has_emit_risk
 from memtomem.quality import metrics
 from memtomem.quality.fingerprints import case_set_fingerprint
 from memtomem.quality.state import current_fingerprints, nondeterministic_stages
@@ -61,7 +61,7 @@ def _report_safe_name(name: object) -> object:
     """
     if not isinstance(name, str):
         return name
-    if "/" in name or "\\" in name or _privacy_scan(name):
+    if _has_emit_risk(name):
         return _REDACTED_NAME
     return name
 
