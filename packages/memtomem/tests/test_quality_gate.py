@@ -332,11 +332,30 @@ def test_required_flag_violation():
             "kind": "replay_gate_policy",
             "aggregate_delta_floors": {"ndcg": float("inf")},
         },
+        # allowlist reason over the length cap is rejected at the schema level.
+        {
+            "schema_version": 1,
+            "kind": "replay_gate_policy",
+            "allowlist": [{"case_id": "a", "reason": "x" * 201}],
+        },
     ],
 )
 def test_invalid_policies_rejected(bad):
     with pytest.raises(EvalCaseValidationError):
         load_policy(bad)
+
+
+def test_verdict_key_drift_fails_loud():
+    # A comparison whose case status is outside the gate's known vocabulary
+    # must raise a descriptive error, not a bare KeyError.
+    comparison = {
+        "compatibility": {},
+        "aggregate_deltas": {"cohort_size": 0},
+        "summary": {},
+        "cases": [{"case_id": "x", "name": None, "status": "teleported"}],
+    }
+    with pytest.raises(ValueError, match="unknown verdict key 'teleported'"):
+        evaluate_gate(comparison, _pol())
 
 
 def test_floor_written_as_int_is_accepted():

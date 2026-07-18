@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import click
 
@@ -408,7 +409,7 @@ def _render_gate_table(verdict: dict) -> None:
         click.echo(f"  warning: {w}")
 
 
-def _read_json_role(path: str, role: str):
+def _read_json_role(path: str, role: str) -> Any:
     """Read a JSON input, mapping any failure to a path-free exit-2 error.
 
     Handles missing/unreadable files and directories (``OSError``), invalid

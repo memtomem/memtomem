@@ -35,6 +35,7 @@ from typing import Any, Literal
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     StrictBool,
     StrictStr,
     ValidationError,
@@ -151,12 +152,19 @@ class RequireFlags(BaseModel):
 
 
 class AllowlistEntry(BaseModel):
-    """A per-case waiver: exclude one ``compared`` case from counts + floors."""
+    """A per-case waiver: exclude one ``compared`` case from counts + floors.
+
+    ``reason`` is emitted into the verdict, so it must survive the emit
+    boundary: a reason containing a path separator (``/`` or ``\\``) or a
+    secret shape is redacted wholesale to ``[redacted-reason]`` (see
+    :func:`_safe_reason`). Keep reasons plain prose + issue refs — avoid slashes
+    (write "n a" or "see #1840", not "n/a"). Capped at ``_REASON_MAX_LEN``.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     case_id: StrictStr
-    reason: StrictStr
+    reason: StrictStr = Field(max_length=_REASON_MAX_LEN)
 
     @field_validator("case_id", "reason")
     @classmethod
@@ -340,6 +348,12 @@ def evaluate_gate(comparison: dict[str, Any], policy: GatePolicy) -> dict[str, A
         if case["case_id"] in effective_allowlisted:
             continue
         key = _verdict_key(case)
+        if key not in tally:
+            # compare's classification/status vocabulary drifted from the gate's
+            # _SUMMARY_KEYS — fail loud with the offending key rather than a bare
+            # KeyError (test_summary_keys_match_compare_report guards the common
+            # case, but this covers the full classification range too).
+            raise ValueError(f"comparison emitted unknown verdict key {key!r}")
         tally[key] += 1
         ids_by_key[key].append(case["case_id"])
 
