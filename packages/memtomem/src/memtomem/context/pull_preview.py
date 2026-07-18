@@ -371,15 +371,22 @@ def _read_store(
             return True, iter_skill_payload_files(store_dir), None
         except OSError as exc:
             return True, None, exc
-    # agents / commands — reuse the ADR-0008 flat/dir resolver. Its
-    # ``Path.is_file()`` probes propagate a non-ENOENT ``OSError`` (e.g. an
-    # unreadable canonical dir raises PermissionError, not False), so guard the
-    # resolution itself — a permission failure is a ``store_error`` row, never a
-    # 500 (Codex code review Blocker; fail closed like the skills stat above).
-    try:
-        resolved = _resolve_canonical_atomic(kind, name, scope, project_root)
-    except OSError as exc:
-        return True, None, exc
+    # agents / commands. Fail-closed presence probe of BOTH candidate layouts
+    # via ``os.stat`` FIRST, so a permission-hidden Store copy is a
+    # deterministic ``store_error`` on every platform (Codex code review
+    # Blocker; the CI-observed drift): the ADR-0008 resolver uses
+    # ``Path.is_file()``, which SWALLOWS ``EACCES`` into ``False`` on macOS but
+    # RAISES it on Linux — relying on it made the unreadable-dir case resolve to
+    # ``new`` on macOS and ``store_error`` on Linux. ``os.stat`` raises on both.
+    canonical_root = canonical_artifact_dir(kind, scope, project_root)
+    dir_filename = _atomic_dir_filename(kind)
+    for candidate in (canonical_root / name / dir_filename, canonical_root / f"{name}.md"):
+        _present, err = _probe_present(candidate)
+        if err is not None:
+            return True, None, err
+    # Both candidates cleanly probed (present or ENOENT) → use the shared
+    # resolver for the layout decision (valid dir wins over valid flat).
+    resolved = _resolve_canonical_atomic(kind, name, scope, project_root)
     if resolved is None:
         return False, None, None
     path, _layout = resolved
@@ -387,6 +394,17 @@ def _read_store(
         return True, [("", path.read_bytes())], None
     except OSError as exc:
         return True, None, exc
+
+
+def _atomic_dir_filename(kind: ArtifactKind) -> str:
+    """The ADR-0008 dir-layout manifest filename for agents / commands."""
+    if kind == "agents":
+        from memtomem.context.agents import AGENT_DIR_FILENAME
+
+        return AGENT_DIR_FILENAME
+    from memtomem.context.commands import COMMAND_DIR_FILENAME
+
+    return COMMAND_DIR_FILENAME
 
 
 def _resolve_canonical_atomic(
@@ -397,17 +415,12 @@ def _resolve_canonical_atomic(
 ) -> tuple[Path, str] | None:
     from memtomem.context._atomic_reverse import resolve_artifact_under_root
 
-    if kind == "agents":
-        from memtomem.context.agents import AGENT_DIR_FILENAME as dir_filename
-    else:
-        from memtomem.context.commands import COMMAND_DIR_FILENAME as dir_filename
-
     canonical_root = canonical_artifact_dir(kind, scope, project_root)
     return resolve_artifact_under_root(
         canonical_root,
         name,
         artifact_label=kind,
-        dir_filename=dir_filename,
+        dir_filename=_atomic_dir_filename(kind),
         logger=logger,
     )
 

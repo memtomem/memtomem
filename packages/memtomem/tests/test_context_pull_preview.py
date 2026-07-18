@@ -321,9 +321,21 @@ def test_agent_store_permission_is_store_error_not_500(home: Path, proj: Path) -
     seed_multi_runtime(proj, "agents", "bot", {"claude": body})
     agents_root = canonical_artifact_dir("agents", "project_shared", proj)
     (agents_root / "bot").mkdir(parents=True)  # dir layout so resolver stats it
-    (agents_root / "bot" / "agent.md").write_text(body, encoding="utf-8")
+    hidden = agents_root / "bot" / "agent.md"
+    hidden.write_text(body, encoding="utf-8")
     os.chmod(agents_root / "bot", 0o000)
     try:
+        # Self-validate the precondition: if this environment doesn't actually
+        # deny stat of a child under a 000 dir (unusual FS / elevated
+        # privileges), the store_error scenario can't arise — skip rather than
+        # assert it. Guards against the CI drift that Path.is_file() showed here.
+        try:
+            os.stat(hidden)
+            skip = True
+        except PermissionError:
+            skip = False
+        if skip:
+            pytest.skip("filesystem does not enforce 000-dir permission for this process")
         pv = preview_pull("agents", "bot", scope="project_shared", project_root=proj)
     finally:
         os.chmod(agents_root / "bot", 0o755)
