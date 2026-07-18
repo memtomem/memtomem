@@ -54,9 +54,91 @@ _UNREPLAYABLE_FILTER_KEYS = (
     "has_as_of",
 )
 
+#: The only filter keys a portable eval case may carry. ``namespace`` / ``scope``
+#: are the replayable subset promotion records; ``unreplayable`` is a
+#: provenance-only marker (which unrecorded filters the run had). Anything else
+#: was never recorded with enough fidelity to replay — see
+#: :func:`validate_portable_filters`.
+_PORTABLE_FILTER_KEYS = frozenset({"namespace", "scope", "unreplayable"})
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _reject_path_shaped(field: str, value: object) -> None:
+    """Reject filesystem-path-shaped namespace/scope tokens (#1802).
+
+    Namespace/scope tokens are colon-delimited (``archive:session:*``,
+    ``project_shared``), never paths. A value containing a path separator is
+    almost certainly an absolute source path that must not ride into a replay
+    report — the artifact privacy guarantee bans absolute source paths.
+    """
+    items = value if isinstance(value, list) else [value]
+    for item in items:
+        if isinstance(item, str) and ("/" in item or "\\" in item):
+            raise EvalCaseError(
+                f"case filter {field!r} value {item!r} looks like a filesystem path; "
+                "namespace/scope tokens are colon-delimited, never paths"
+            )
+
+
+def validate_portable_filters(db: sqlite3.Connection, filters: object) -> None:
+    """Validate a case's ``filters`` against the portable vocabulary (#1802).
+
+    A portable case may carry only replayable, path-free, non-project filters:
+
+    - ``namespace`` / ``scope`` — each ``str | list[str] | None`` (the
+      ``ScopeFilter``/``NamespaceFilter`` parser contract), never a filesystem
+      path, and ``scope`` never reaching a project tier (``project_context_root``
+      is not portable, so replay would widen it cross-project — the same reason
+      promotion refuses project scopes);
+    - ``unreplayable`` — a non-empty, bounded list of known ``has_*`` markers,
+      provenance only (the case is excluded from aggregates at replay).
+
+    Applied at *every* boundary that can introduce a case — import, promotion,
+    and replay-report assembly — so an unsupported or malformed filter can
+    neither be silently ignored at replay nor leak a path into the artifact.
+    Raises :class:`EvalCaseError` on any violation.
+    """
+    if filters is None:
+        return
+    if not isinstance(filters, dict):
+        raise EvalCaseError("case 'filters' must be an object")
+    unknown = set(filters) - _PORTABLE_FILTER_KEYS
+    if unknown:
+        raise EvalCaseError(
+            f"case 'filters' has unsupported keys {sorted(unknown)}; "
+            f"only {sorted(_PORTABLE_FILTER_KEYS)} are replayable"
+        )
+    for field in ("namespace", "scope"):
+        if field not in filters or filters[field] is None:
+            continue
+        value = filters[field]
+        if isinstance(value, list):
+            if not all(isinstance(v, str) for v in value):
+                raise EvalCaseError(f"case filter {field!r} list must contain only strings")
+        elif not isinstance(value, str):
+            raise EvalCaseError(f"case filter {field!r} must be a string, list of strings, or null")
+        _reject_path_shaped(field, value)
+    scope = filters.get("scope")
+    if scope is not None and _scope_implies_project(db, scope):
+        raise EvalCaseError(
+            f"case filter 'scope'={scope!r} reaches a project tier; project_context_root is "
+            "not portable, so replay would widen it cross-project"
+        )
+    if "unreplayable" in filters:
+        marks = filters["unreplayable"]
+        if (
+            not isinstance(marks, list)
+            or not marks
+            or len(marks) > len(_UNREPLAYABLE_FILTER_KEYS)
+            or any(m not in _UNREPLAYABLE_FILTER_KEYS for m in marks)
+        ):
+            raise EvalCaseError(
+                "case filter 'unreplayable' must be a non-empty list of "
+                f"{sorted(_UNREPLAYABLE_FILTER_KEYS)}"
+            )
 
 
 def _scope_implies_project(db: sqlite3.Connection, scope: object) -> bool:
@@ -156,14 +238,16 @@ class EvalCaseMixin:
             snapshot = json.loads(snapshot_json or "[]")
 
             filters = observation.get("filters", {}) if isinstance(observation, dict) else {}
-            if not allow_unreplayable_filters:
-                offending = [k for k in _UNREPLAYABLE_FILTER_KEYS if filters.get(k)]
-                if offending:
-                    raise EvalCaseError(
-                        f"run {run_id!r} carries unreplayable filters {offending} "
-                        "(only their presence was recorded, not their values); "
-                        "pass allow_unreplayable_filters=True to promote anyway"
-                    )
+            # Computed regardless of the override so it can be persisted below —
+            # a promoted-with-override case records which filters it can't replay
+            # so PR-4 replay flags it and excludes it from aggregates.
+            offending = [k for k in _UNREPLAYABLE_FILTER_KEYS if filters.get(k)]
+            if offending and not allow_unreplayable_filters:
+                raise EvalCaseError(
+                    f"run {run_id!r} carries unreplayable filters {offending} "
+                    "(only their presence was recorded, not their values); "
+                    "pass allow_unreplayable_filters=True to promote anyway"
+                )
             if _scope_implies_project(db, filters.get("scope")):
                 raise EvalCaseError(
                     f"run {run_id!r} is project-scoped (scope={filters.get('scope')!r}); "
@@ -199,10 +283,18 @@ class EvalCaseMixin:
                 raise EvalCaseError(
                     f"run {run_id!r} has a non-numeric top_k {raw_top_k!r}"
                 ) from None
-            case_filters = {
+            case_filters: dict[str, Any] = {
                 "namespace": filters.get("namespace"),
                 "scope": filters.get("scope"),
             }
+            if offending:
+                # Provenance for PR-4 replay: which filters this case can't
+                # reproduce (promoted only because the caller opted in). Replay
+                # flags it and excludes it from aggregate metrics.
+                case_filters["unreplayable"] = sorted(offending)
+            # Same portable-vocabulary gate import uses, so a promoted case can
+            # never carry a path-shaped or project-reaching filter into a report.
+            validate_portable_filters(db, case_filters)
             case_id = str(uuid4())
             now = _now_iso()
             try:
@@ -480,15 +572,19 @@ class EvalCaseMixin:
         # replace=True (unlike duplicate names, which the owner check rejects), so
         # reject it here to keep the two identity axes consistent.
         seen_case_ids: set[str] = set()
+        db = self._get_db()
         for case in cases:
             self._validate_import_case(case)
+            # Portable-filter gate (keys, value types, path-shaped + project-tier
+            # scope rejection). Needs a db connection for the project-scope
+            # check, so it lives here rather than in the static validator.
+            validate_portable_filters(db, case.get("filters") if isinstance(case, dict) else None)
             cid = case.get("case_id") if isinstance(case, dict) else None
             if cid is not None:
                 if cid in seen_case_ids:
                     raise EvalCaseError(f"duplicate case_id {cid!r} in import payload")
                 seen_case_ids.add(cid)
 
-        db = self._get_db()
         db.execute("BEGIN IMMEDIATE")
         try:
             imported = 0
@@ -745,3 +841,13 @@ class EvalCaseMixin:
             )
             .fetchall()
         )
+
+    def validate_case_filters(self, filters: object) -> None:
+        """Validate a case's ``filters`` against the portable vocabulary.
+
+        Public wrapper over :func:`validate_portable_filters` that supplies this
+        backend's own read connection (needed for the project-scope check), so
+        callers such as the replay engine don't reach into ``_get_read_db``.
+        Raises :class:`~memtomem.errors.EvalCaseError` on any violation.
+        """
+        validate_portable_filters(self._get_read_db(), filters)

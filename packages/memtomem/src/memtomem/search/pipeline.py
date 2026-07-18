@@ -41,7 +41,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -325,6 +325,24 @@ class RetrievalStats:
     query_run_id: str | None = None
     cache_hit: bool = False
     latency_ms: float | None = None
+    # Quality Lab replay degradation telemetry (#1802). These make
+    # otherwise-silent ranking-affecting fallbacks observable so a replay can
+    # exclude a case whose ranking did not reflect the requested profile. All
+    # three are pure telemetry — they never change search behavior.
+    #
+    # ``expansion_failed``: a Stage-0 query-expansion helper (tags / headings /
+    # LLM) caught an error and fell back to the un-expanded query. Any strategy,
+    # including either component of ``strategy="both"``.
+    expansion_failed: bool = False
+    # ``rescue_failed``: a session-summary rescue sub-step (summary lookup, link
+    # walk, batch load, or a rescue retrieval leg) caught an error and returned
+    # an empty rescue contribution — the leg silently degraded to two-leg fusion.
+    rescue_failed: bool = False
+    # ``dense_suppressed_mismatch``: dense retrieval was configured
+    # (``enable_dense``) but suppressed for this call because the stored
+    # embeddings were written under a different policy/model/dimension
+    # (``storage.embedding_mismatch``). The ranking silently dropped to BM25-only.
+    dense_suppressed_mismatch: bool = False
 
 
 if TYPE_CHECKING:
@@ -520,6 +538,21 @@ class SearchPipeline:
         return self._reranker is not None and self._rerank_config is not None
 
     @property
+    def llm_provider(self) -> LLMProvider | None:
+        """The wired LLM provider (read-only).
+
+        Read by the Quality Lab (#1802) to classify whether LLM query expansion
+        makes replay nondeterministic — a config knob alone is not enough, since
+        ``strategy="llm"`` with no provider wired never calls a model.
+        """
+        return self._llm_provider
+
+    @property
+    def storage(self) -> StorageBackend:
+        """The storage backend this pipeline reads (read-only)."""
+        return self._storage
+
+    @property
     def _reranker(self) -> object | None:
         return self._rerank_entry.reranker
 
@@ -675,6 +708,7 @@ class SearchPipeline:
         query: str,
         scope_filter: ScopeFilter | None = None,
         project_context_root: Path | None = None,
+        report_failure: Callable[[], None] | None = None,
     ) -> set[str]:
         """Stage-1 enrichment lookup against ``archive:session:*``.
 
@@ -713,6 +747,8 @@ class SearchPipeline:
             )
         except Exception:
             _log_rescue_failure("summary_lookup", "session-summary lookup failed; skipping rescue")
+            if report_failure is not None:
+                report_failure()
             return set()
 
         threshold = cfg.expansion_score_threshold
@@ -734,6 +770,8 @@ class SearchPipeline:
                 _log_rescue_failure(
                     "links_walk", "get_chunks_shared_from failed for summary %s", r.chunk.id
                 )
+                if report_failure is not None:
+                    report_failure()
                 continue
             for link in links:
                 target_chunk_ids.append(link.target_id)
@@ -745,6 +783,8 @@ class SearchPipeline:
             chunks_map = await self._storage.get_chunks_batch(target_chunk_ids)
         except Exception:
             _log_rescue_failure("chunks_batch", "get_chunks_batch failed for rescue targets")
+            if report_failure is not None:
+                report_failure()
             return set()
 
         return {str(c.metadata.source_file) for c in chunks_map.values()}
@@ -761,6 +801,7 @@ class SearchPipeline:
         project_context_root: Path | None = None,
         metadata_filter: SearchMetadataFilter | None = None,
         exhaustive: bool = False,
+        report_failure: Callable[[], None] | None = None,
     ) -> list[SearchResult]:
         """Parallel BM25+dense retrieval restricted to boost_sources.
 
@@ -799,6 +840,8 @@ class SearchPipeline:
                 )
             except Exception:
                 _log_rescue_failure("bm25_leg", "rescue bm25 leg failed")
+                if report_failure is not None:
+                    report_failure()
                 return []
             return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
 
@@ -817,6 +860,8 @@ class SearchPipeline:
                 )
             except Exception:
                 _log_rescue_failure("dense_leg", "rescue dense leg failed")
+                if report_failure is not None:
+                    report_failure()
                 return []
             return [r for r in hits if str(r.chunk.metadata.source_file) in boost_sources]
 
@@ -1184,12 +1229,14 @@ class SearchPipeline:
             # with stored vectors from another policy/model/dimension. BM25
             # remains available as the safe degraded path.
             mismatch = getattr(self._storage, "embedding_mismatch", None)
+            dense_suppressed_mismatch = self._config.enable_dense and isinstance(mismatch, dict)
             use_dense = self._config.enable_dense and not isinstance(mismatch, dict)
             metadata_kwargs = (
                 {"metadata_filter": metadata_filter} if metadata_filter is not None else {}
             )
 
             # Stage 0: Query expansion
+            expansion_failed = False
             if self._expansion_config and getattr(self._expansion_config, "enabled", False):
                 from memtomem.search.expansion import (
                     expand_query_headings,
@@ -1199,8 +1246,20 @@ class SearchPipeline:
 
                 strategy = getattr(self._expansion_config, "strategy", "tags")
                 max_terms = getattr(self._expansion_config, "max_terms", 3)
+
+                # Quality Lab (#1802): any expansion helper that catches an error
+                # and falls back to the un-expanded query trips this flag, so a
+                # replay can mark the case degraded. ``report_failure`` is a
+                # no-op-by-default out-param on the helpers — passing it changes
+                # nothing about their fallback behavior.
+                def _mark_expansion_failed() -> None:
+                    nonlocal expansion_failed
+                    expansion_failed = True
+
                 if strategy in ("tags", "both"):
-                    query = await expand_query_tags(query, self._storage, max_terms)
+                    query = await expand_query_tags(
+                        query, self._storage, max_terms, report_failure=_mark_expansion_failed
+                    )
                 if strategy in ("headings", "both"):
                     # ADR-0011 PR-D round 11: thread the outer search's
                     # project context onto the heading-expansion's dense
@@ -1214,6 +1273,7 @@ class SearchPipeline:
                         max_terms,
                         project_context_root=project_context_root,
                         exhaustive=not record,
+                        report_failure=_mark_expansion_failed,
                     )
                 if strategy == "llm":
                     # Replay (``record=False``) neither reads nor writes the
@@ -1239,6 +1299,7 @@ class SearchPipeline:
                                 "LLM query expansion failed, using original query",
                                 exc_info=True,
                             )
+                            expansion_failed = True
 
             # Stage 1 + 2: run enabled retrievers concurrently
             bm25_results: list[SearchResult] = []
@@ -1295,6 +1356,8 @@ class SearchPipeline:
                 dense_error=dense_error,
                 hidden_system_ns=hidden_system_ns,
                 rerank_applied=apply_rerank,
+                expansion_failed=expansion_failed,
+                dense_suppressed_mismatch=dense_suppressed_mismatch,
             )
 
             # Stage 1 enrichment (RFC P1 Phase C): session-summary rescue.
@@ -1315,11 +1378,19 @@ class SearchPipeline:
                 and self._session_summary_config is not None
                 and self._session_summary_config.expansion_lookup_top_k > 0
             ):
+                # Quality Lab (#1802): any rescue sub-step that catches an error
+                # and returns an empty contribution trips this, so a replay marks
+                # the case degraded. Pure telemetry — the rescue leg's existing
+                # degrade-to-two-leg-fusion behavior is unchanged.
+                def _mark_rescue_failed() -> None:
+                    stats.rescue_failed = True
+
                 try:
                     boost_sources = await self._session_summary_boost_sources(
                         query,
                         scope_filter=scope_filter,
                         project_context_root=project_context_root,
+                        report_failure=_mark_rescue_failed,
                     )
                     if boost_sources:
                         rescue_results = await self._rescue_retrieval(
@@ -1333,10 +1404,12 @@ class SearchPipeline:
                             project_context_root=project_context_root,
                             metadata_filter=metadata_filter,
                             exhaustive=not record,
+                            report_failure=_mark_rescue_failed,
                         )
                         rescue_chunk_ids = {r.chunk.id for r in rescue_results}
                 except Exception:
                     _log_rescue_failure("rescue_wiring", "session-summary rescue leg failed")
+                    stats.rescue_failed = True
 
             # Stage 3: fusion (or single-retriever passthrough)
             # When reranking is active, widen the candidate pool so the

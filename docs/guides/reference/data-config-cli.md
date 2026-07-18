@@ -243,6 +243,7 @@ The complete v0.3.11 top-level command catalog is grouped below. Run `mm
 | First use and core memory | `init`, `status`, `add`, `index`, `search`, `recall`, `memory`, `mem`, `pinned`, `review` |
 | Configuration and lifecycle | `config`, `embedding-reset`, `warmup`, `version`, `upgrade`, `reset`, `purge`, `gc`, `uninstall` |
 | Organization and automation | `tags`, `agent`, `session`, `activity`, `schedule`, `watchdog` |
+| Retrieval quality | `quality` |
 | Import and synchronization | `ingest`, `context`, `wiki`, `sync-doctor` |
 | Interfaces and utilities | `web`, `shell` |
 
@@ -288,6 +289,18 @@ mm tags list                           # list every tag with its chunk count
 mm tags rename old new --apply         # rename a tag across all chunks
 mm tags merge a b --into c --apply     # fold tags a, b into c
 mm tags delete stale --apply           # drop a tag from all chunks
+
+# Retrieval quality — promote labeled search runs into eval cases, then replay
+# them to measure retrieval quality and compare two retrieval profiles.
+# Reports are deterministic JSON and carry no result content or absolute paths.
+mm quality promote <run_id> --name q1  # promote a labeled search run into a durable eval case
+mm quality cases                       # list eval cases (--status active|archived, --format table|json)
+mm quality show q1                     # show one case with its labels
+mm quality status q1 archived          # archive/reactivate a case
+mm quality export --out cases.json     # export a portable case-set envelope (--case to select)
+mm quality import cases.json           # import a case-set envelope (--replace to overwrite by case_id)
+mm quality replay --out base.json      # replay cases into a deterministic report (--as-of pins time; --format table|json)
+mm quality compare base.json cand.json # diff two replay reports (--fail-on-regression opts into a blocking gate)
 
 # Multi-agent memory — per-agent scopes (see the MCP server's multi-agent workflow)
 mm agent register planner --description "research agent"  # register an agent id (optional --color)
