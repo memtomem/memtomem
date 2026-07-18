@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
-from memtomem.context._names import GENERATOR_VENDOR
+from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
+from memtomem.context._runtime_targets import IMPORT_SOURCE_RUNTIMES
 from memtomem.context.projects import sync_skip_reason
+from memtomem.context.pull_preview import preview_pull
+from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.context.status import (
     ProjectStatus,
     classify_status,
@@ -27,6 +31,7 @@ from memtomem.web.routes._errors import _classify_exception, _error, _redact_mes
 from memtomem.web.routes.context_projects import _discover_for, resolve_scope_root
 from memtomem.web.schemas.context import (
     ContextOverviewResponse,
+    ContextPullPreviewResponse,
     ContextRuntimesResponse,
     ContextStatusAllResponse,
 )
@@ -707,4 +712,97 @@ async def context_status_all(
             "executed": len(entries) - counts["skipped"],
             **counts,
         },
+    }
+
+
+# Absolute-path run (POSIX or Windows), ≥2 segments — mirrors the app-level
+# ValueError handler's scrub. ``sanitize_diff_reason`` only strips the project
+# root + ``$HOME``; a runtime dir symlinked OUTSIDE both (e.g. a shared volume)
+# can still embed its resolved absolute path in an OSError reason, so this
+# backstop replaces any residual absolute path before the reason hits the wire
+# (Codex code review — the canonical-path redaction rule, MCP/web redact).
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}")
+
+
+def _redact_pull_reason(reason: str | None, project_root: Path) -> str | None:
+    """Redact a pull-preview candidate ``reason`` for the wire (defense in depth)."""
+    cleaned = sanitize_diff_reason(reason, project_root)
+    if cleaned is None:
+        return None
+    return _ABS_PATH_RE.sub("<path>", cleaned)
+
+
+@router.get(
+    "/context/{kind}/{name}/pull-preview",
+    response_model=ContextPullPreviewResponse,
+)
+async def context_pull_preview(
+    kind: str,
+    name: str,
+    project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        "project_shared",
+        description=(
+            "Destination canonical tier the Pull would land in. "
+            "project_local is rejected — it has no runtime fan-out to pull "
+            "FROM (ADR-0011 §3, ADR-0030 §11)."
+        ),
+    ),
+) -> dict:
+    """Read-only Pull preview: what would a Pull of ``name`` land, per runtime.
+
+    ADR-0030 PR-B. For each runtime that has the artifact on disk, reports the
+    two-axis ``content_status`` / ``gate_status`` (:mod:`context.pull_preview`)
+    plus the §5 ambiguity signal. No writes, no privacy-counter mutation — the
+    engine runs off the event loop (per-tree filesystem reads). Every path in
+    the engine's ``reason`` text is display-sanitized (``sanitize_diff_reason``)
+    before it reaches the wire; the two status axes are closed ``Literal`` sets.
+    """
+    if kind not in IMPORT_SOURCE_RUNTIMES:
+        raise _error(
+            400,
+            "validation",
+            f"kind {kind!r} has no Pull sources; choose one of: "
+            f"{', '.join(IMPORT_SOURCE_RUNTIMES)}.",
+        )
+    if target_scope == "project_local":
+        raise _error(
+            400,
+            "validation",
+            "project_local has no runtime fan-out to pull from (ADR-0011 §3); "
+            "pull into user or project_shared instead.",
+        )
+    try:
+        validated = validate_name(name, kind=f"{kind[:-1]} name")
+    except InvalidNameError as exc:
+        raise _error(400, "validation", str(exc))
+
+    artifact_kind = cast(ArtifactKind, kind)
+    preview = await asyncio.to_thread(
+        preview_pull,
+        artifact_kind,
+        validated,
+        scope=target_scope,
+        project_root=project_root,
+    )
+    return {
+        "kind": preview.kind,
+        "name": preview.name,
+        "target_scope": preview.scope,
+        "store_present": preview.store_present,
+        "candidates": [
+            {
+                "runtime": c.runtime,
+                "content_status": c.content_status,
+                "gate_status": c.gate_status,
+                "importable": c.importable,
+                "landing_group": c.landing_group,
+                "override_warning": c.override_warning,
+                "reason": _redact_pull_reason(c.reason, project_root),
+            }
+            for c in preview.candidates
+        ],
+        "distinct_landing_count": preview.distinct_landing_count,
+        "ambiguous": preview.ambiguous,
+        "auto_source": preview.auto_source,
     }

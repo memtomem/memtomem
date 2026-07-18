@@ -72,6 +72,8 @@ __all__ = [
     "ContextSyncProjectExecuted",
     "ContextSyncProjectFailed",
     "ContextSyncProjectSkipped",
+    "ContextPullPreviewCandidate",
+    "ContextPullPreviewResponse",
     "ContextWikiInstalls",
 ]
 
@@ -465,3 +467,44 @@ class ContextImportNeedsConfirmation(BaseModel):
     reason: str
     host_targets: list[str]
     plan: ContextImportReport
+
+
+# ── GET /context/{kind}/{name}/pull-preview (ADR-0030 PR-B) ──────────────
+
+
+class ContextPullPreviewCandidate(BaseModel):
+    """One runtime's Pull-preview row (ADR-0030 §4). Two orthogonal axes.
+
+    ``content_status`` / ``gate_status`` are CLOSED sets the route constructs
+    from :mod:`memtomem.context.pull_preview` — ``Literal`` (not open ``str``)
+    so a token spelled ``not importable`` vs ``not_importable`` 500s loudly
+    (per this module's ground rules; ``test_context_pull_preview.py`` pins the
+    parity with the engine enums). ``reason`` is display-sanitized at the
+    route (``sanitize_diff_reason``) — never the raw engine text."""
+
+    runtime: str
+    content_status: Literal[
+        "new", "differs", "identical", "landing_error", "store_error", "not_importable"
+    ]
+    gate_status: Literal["ok", "blocked", "requires_unsafe_confirmation"] | None
+    importable: bool
+    landing_group: int | None
+    override_warning: bool
+    reason: str | None
+
+
+class ContextPullPreviewResponse(BaseModel):
+    """Read-only Pull preview for one ``(kind, name, target_scope)``.
+
+    ``ambiguous`` (>1 distinct landing group, or a fail-closed landing error)
+    and ``auto_source`` are the §5 signal the CLI/Web Pull surfaces enforce a
+    refusal on later (PR-C/PR-D); this response only reports them."""
+
+    kind: str
+    name: str
+    target_scope: str
+    store_present: bool
+    candidates: list[ContextPullPreviewCandidate]
+    distinct_landing_count: int
+    ambiguous: bool
+    auto_source: str | None

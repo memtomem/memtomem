@@ -200,3 +200,16 @@ async def test_status_all_wire_shape(client, tmp_path: Path) -> None:
     resp = await client.get("/api/context/status-all")
     assert resp.status_code == 200
     _assert_matches_golden("status_all", resp.json())
+
+
+@pytest.mark.asyncio
+async def test_pull_preview_wire_shape(client, cwd_root: Path) -> None:
+    """ADR-0030 PR-B — a divergent two-candidate skill pins the pull-preview
+    wire (both axes, the §5 signal, and the candidate row shape)."""
+    for runtime_dir, marker in ((".claude", "stale"), (".agents", "fresh")):
+        d = cwd_root / runtime_dir / "skills" / "demo"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_bytes(f"---\nname: demo\n---\n{marker}\n".encode())
+    resp = await client.get("/api/context/skills/demo/pull-preview")
+    assert resp.status_code == 200, resp.text
+    _assert_matches_golden("pull_preview", resp.json())

@@ -1,0 +1,29 @@
+{
+  "kind": "str",
+  "name": "str",
+  "target_scope": "str",
+  "store_present": "bool",
+  "candidates": [
+    {
+      "runtime": "str",
+      "content_status": "str",
+      "gate_status": "str",
+      "importable": "bool",
+      "landing_group": "int",
+      "override_warning": "bool",
+      "reason": "null"
+    },
+    {
+      "runtime": "str",
+      "content_status": "str",
+      "gate_status": "str",
+      "importable": "bool",
+      "landing_group": "int",
+      "override_warning": "bool",
+      "reason": "null"
+    }
+  ],
+  "distinct_landing_count": "int",
+  "ambiguous": "bool",
+  "auto_source": "null"
+}

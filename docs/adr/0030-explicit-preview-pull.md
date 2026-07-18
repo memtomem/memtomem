@@ -85,15 +85,25 @@ The pull preview has its own vocabulary, distinct from the push-diff
 `DiffRow` contract (consumed positionally; not extended), and it is
 **two orthogonal axes**, not one status set:
 
-- **`content_status`** — the Store↔candidate content relation: `new`
-  (Store has no copy), `differs`, `identical`, `error` (unreadable
-  source, TOML parse failure — an error is a preview **row**, never a
-  500), `not importable` (export-only runtimes: codex/kimi agents,
-  codex commands; display-only rows).
+- **`content_status`** — the Store↔candidate content relation. The
+  frozen wire tokens (PR-B, a `Literal` on the response model so a
+  misspelling 500s) are `new` (Store has no copy), `differs`,
+  `identical`, and two distinct error phases (an error is always a
+  preview **row**, never a 500): `landing_error` — the would-land bytes
+  could not be computed (unreadable source, TOML parse failure), and
+  `store_error` — the would-land bytes WERE computed but the current
+  Store copy could not be read. Plus `not_importable` (export-only
+  runtimes: codex/kimi agents, codex commands; display-only rows). The
+  two error phases are split because they participate in §5 differently
+  (see there).
 - **`gate_status`** — the privacy-gate outcome for the destination
-  tier: `ok`, **`blocked`** (hard-refusing tier, e.g.
-  `project_shared`), **`requires unsafe confirmation`**
-  (force-bypassable tiers).
+  tier: `ok`, **`blocked`** (hard-refusing tier, e.g. `project_shared`),
+  **`requires_unsafe_confirmation`** (force-bypassable tiers), or `null`
+  for a `not_importable` or `landing_error` row (nothing scannable). For
+  skills the gate scans the **full copier surface** (everything a Pull
+  would land, including a runtime's top-level `overrides/`/`versions/`),
+  not the payload subset used for `content_status` — else a secret under
+  runtime metadata would preview `ok` yet be copied unscanned.
 
 A candidate can be `differs` **and** `blocked` at the same time —
 collapsing the axes would lose the drift information §1's probe needs.
@@ -117,18 +127,28 @@ refusal rule keys off the number of **distinct contents that would land
 in the Store** — for gemini commands that is the converted canonical
 Markdown, not the raw TOML — and not the runtime count:
 
+  Distinctness is judged over the **full copier surface** (everything a
+  Pull lands), not the payload subset: two candidates with matching
+  visible content but differing top-level metadata land different trees
+  and must not be auto-selected. PR-B computes this signal (an
+  `ambiguous` flag + an `auto_source`); the refusal it drives is
+  enforced by the CLI/Web at apply time (PR-C/PR-D), not by the preview.
+
 - All candidates byte-identical (post-conversion): auto-select in the
   existing priority order and disclose the duplicates.
 - More than one distinct landing content: CLI `--apply` and the Web
   dialog refuse until the user picks a source (`source_conflict`).
 - **Fail closed on incomputable content**: if any content-bearing
   candidate's landing bytes cannot be computed (`content_status:
-  error`), auto-selection is off — the Pull requires an explicit
+  landing_error`), auto-selection is off — the Pull requires an explicit
   `--from` even if the remaining readable candidates agree. An
-  unreadable copy might be the divergent one.
-- `not importable` rows are display-only and never participate in the
-  distinct-content count; `blocked` candidates' content **does**
-  participate (the gate blocks the write, not the comparison).
+  unreadable copy might be the divergent one. A `store_error` candidate,
+  by contrast, **does** participate: its landing bytes WERE computed
+  (only the Store side was unreadable), so it groups normally.
+- `not_importable` rows are display-only and never participate in the
+  distinct-content count; `blocked` / `requires_unsafe_confirmation`
+  (gate) candidates' content **does** participate (the gate blocks the
+  write, not the comparison).
 - The batch surfaces (`mm context init --include`, the section-level
   Web import) keep first-wins unchanged.
 

@@ -23,12 +23,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import click
 
 from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
+
+# Pull-preview Gate A vocabulary (ADR-0030 §4). The gate outcome as a
+# non-raising status, distinct from :class:`GateAOutcome` (the write-path
+# proceed/skip/abort union). Lives with the gate so preview and import can't
+# spell the tokens differently. ``requires_unsafe_confirmation`` is a
+# force-bypassable tier (user / project_local); ``blocked`` is the hard-refuse
+# tier (project_shared) — the same split ``apply_gate_a`` enforces by raising.
+GateStatus = Literal["ok", "blocked", "requires_unsafe_confirmation"]
 
 
 def format_project_shared_block_message(
@@ -200,3 +209,47 @@ def apply_gate_a(
         # silently dropping the write.
         raise RuntimeError(f"enforce_write_guard returned unexpected decision: {guard.decision!r}")
     return GateAProceed()
+
+
+def classify_gate_status(
+    content_text: str,
+    *,
+    scope: TargetScope,
+    surface: str,
+) -> GateStatus:
+    """Side-effect-free Gate A classification for the pull preview (ADR-0030 §4).
+
+    Unlike :func:`apply_gate_a` (the write path), this NEVER writes, NEVER
+    raises for ``project_shared``, and NEVER mutates privacy counters or emits
+    an audit line — it answers "what would the gate decide for a plain Pull
+    (no ``--force-unsafe-import``) into ``scope``?" so a preview can show a
+    ``blocked`` row instead of a 500.
+
+    It calls :func:`privacy.enforce_write_guard` with ``force_unsafe=False``
+    and ``record_outcome=False``. With ``force_unsafe=False`` the guard only
+    ever returns ``"pass"`` or ``"blocked"`` (``"bypassed"`` /
+    ``"blocked_project_shared"`` require the bypass flag), so:
+
+      * ``pass``    → ``"ok"``
+      * ``blocked`` → ``"blocked"`` for ``project_shared`` (hard-refuse tier,
+        ADR-0011 §5), else ``"requires_unsafe_confirmation"`` (a real Pull
+        could force-bypass this tier).
+
+    Any other decision is a privacy-enum drift and fails loud (mirrors
+    :func:`apply_gate_a`), rather than silently mislabeling a gate outcome.
+    """
+    guard = privacy.enforce_write_guard(
+        content_text,
+        surface=surface,
+        force_unsafe=False,
+        scope=scope,
+        audit_context=None,
+        record_outcome=False,
+    )
+    if guard.decision == "pass":
+        return "ok"
+    if guard.decision == "blocked":
+        return "blocked" if scope == "project_shared" else "requires_unsafe_confirmation"
+    raise RuntimeError(
+        f"enforce_write_guard(force_unsafe=False) returned unexpected decision: {guard.decision!r}"
+    )
