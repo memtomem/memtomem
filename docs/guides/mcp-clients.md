@@ -466,6 +466,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Data** | `mem_export`, `mem_import` |
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
+| **Quality Lab** | `mem_quality_replay` (replay stored eval cases into a deterministic retrieval-quality report; promote/compare stay on `mm quality`) |
 | **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync`, `mem_context_memory_migrate`, `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version`, `mem_context_promote` — cross-runtime artifact sync (`mm context`). Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
 | **Pinned Context** | `mem_pinned_list`, `mem_pinned_get`, `mem_pinned_set`, `mem_pinned_delete`, `mem_context_compose` |
 | **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_review`, `mem_candidate_recover` |
@@ -473,7 +474,7 @@ uses, so the output is identical. Useful as a sanity check between
 
 \* Requires `MEMTOMEM_TOOL_MODE=full`. In `core` or `standard` mode, use `mm config` (CLI) or the Web UI Settings tab instead.
 
-> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (97 current tools plus the deprecated `mem_context_migrate` alias, 98 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
+> **Tool mode**: Set `MEMTOMEM_TOOL_MODE` to `core` (9 names, default), `standard` (38 names), or `full` (98 current tools plus the deprecated `mem_context_migrate` alias, 99 registered names) to control how many tools are exposed. In `core` mode, use `mem_do(action="...", params={...})` to access any non-core action. Fewer tools = less context usage for AI agents.
 
 `mem_candidate_propose(content, source, source_ref, idempotency_key)` lets an
 external agent submit a review candidate without writing durable memory.

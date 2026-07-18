@@ -64,7 +64,7 @@ open a new shell. If an install appears stale, re-run it with `--refresh`.
 - **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
 - **🕸️ LangGraph Store** — optional `MemtomemBaseStore` supplies tuple-namespace JSON persistence and search
 
-The full surface contains **97 current tools** plus the deprecated
+The full surface contains **98 current tools** plus the deprecated
 `mem_context_migrate` compatibility alias. It includes the Pinned Context actions
 (`mem_pinned_list/get/set/delete`, `mem_context_compose`) and review-first
 formation actions (`mem_formation_scan`, `mem_candidate_propose/list/review/recover`). See the

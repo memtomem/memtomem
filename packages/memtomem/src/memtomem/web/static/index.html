@@ -944,6 +944,13 @@
             <span class="nav-sub" data-i18n="settings.nav.search_runs_sub">Quality Lab feedback</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-quality" data-group="runtime">
+          <span class="nav-icon" aria-hidden="true">◈</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.quality">Quality Lab</span>
+            <span class="nav-sub" data-i18n="settings.nav.quality_sub">Eval cases &amp; replay</span>
+          </span>
+        </button>
         <button class="settings-nav-btn" data-ui-tier="dev" data-section="harness-scratch" data-group="runtime">
           <span class="nav-icon" aria-hidden="true">✎</span>
           <span class="nav-labels">
@@ -1203,6 +1210,26 @@
               <button id="search-run-detail-close" class="btn-ghost btn-xs" data-i18n="settings.search_runs.detail_close">Close</button>
             </div>
             <div id="search-run-detail" class="harness-events"></div>
+          </div>
+        </div>
+
+        <!-- Harness: Quality Lab (#1802 PR-5) -->
+        <div class="settings-section" id="settings-harness-quality">
+          <p class="settings-section-desc" data-i18n="settings.quality.desc">Durable evaluation cases promoted from labeled search runs; replay them into a deterministic retrieval-quality report.</p>
+          <div class="harness-header">
+            <h2 data-i18n="settings.quality.title">Quality Lab</h2>
+            <button id="quality-refresh-btn" class="btn-ghost" data-i18n="settings.quality.refresh">Refresh</button>
+            <button id="quality-replay-btn" class="btn-ghost" data-i18n="settings.quality.replay">Run replay</button>
+          </div>
+          <div id="quality-cases-list" class="harness-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+          <div id="quality-report-panel" class="harness-detail" hidden>
+            <div class="harness-detail-header">
+              <h3 data-i18n="settings.quality.report_title">Replay Report</h3>
+              <button id="quality-report-close" class="btn-ghost btn-xs" data-i18n="settings.quality.report_close">Close</button>
+            </div>
+            <div id="quality-report" class="harness-events"></div>
           </div>
         </div>
 
@@ -1806,13 +1833,13 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=7"></script>
-  <script src="/app.js?v=155"></script>
+  <script src="/app.js?v=156"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=19"></script>
   <script src="/sources-memory-dirs.js?v=15"></script>
   <script src="/settings-maintenance.js?v=5"></script>
   <script src="/settings-namespaces.js?v=12"></script>
-  <script src="/settings-harness.js?v=7"></script>
+  <script src="/settings-harness.js?v=8"></script>
   <script src="/settings-hooks-watchdog.js?v=21"></script>
   <script src="/timeline.js?v=4"></script>
   <script src="/context-gateway-core.js?v=3"></script>

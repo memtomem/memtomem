@@ -135,6 +135,7 @@ from memtomem.server.tools.search_history import (
     mem_search_history,
     mem_search_suggest,
 )
+from memtomem.server.tools.quality import mem_quality_replay
 from memtomem.server.tools.conflict import mem_conflict_check
 from memtomem.server.tools.importance import mem_importance_scan
 from memtomem.server.tools.importers import mem_import_notion, mem_import_obsidian

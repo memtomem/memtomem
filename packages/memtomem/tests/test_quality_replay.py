@@ -101,6 +101,28 @@ class TestDeterminism:
         assert "SENTINEL-PATH" not in blob
         assert "/tmp/" not in blob
 
+    async def test_legacy_secret_or_path_name_is_redacted_at_emit(self, bm25_only_components):
+        # A row promoted before the name validator shipped (#1825 was on main
+        # first) can carry a secret- or path-bearing name. The emit boundary
+        # redacts it so the report guarantee holds regardless of write path.
+        comp, _ = bm25_only_components
+        storage, pipeline = comp.storage, comp.search_pipeline
+        hashes = await _seed(storage, [("alpha beta gamma", "a.md")])
+        await storage.import_eval_cases(
+            _envelope([_case("c-legacy", "alpha", [(hashes[0], "relevant")], name="ok-name")])
+        )
+        # Simulate a legacy row by writing a hostile name directly, bypassing
+        # the write-time validator.
+        db = storage._get_db()
+        db.execute(
+            "UPDATE eval_cases SET name = ? WHERE case_id = ?",
+            ("AKIAIOSFODNN7EXAMPLE", "c-legacy"),
+        )
+        db.commit()
+        report = await replay_cases(storage, pipeline, comp.config, as_of_unix=1)
+        assert report["cases"][0]["name"] == "[redacted-name]"
+        assert "AKIAIOSFODNN7EXAMPLE" not in serialize_report(report)
+
 
 class TestNoSideEffects:
     async def test_replay_mutates_nothing(self, bm25_only_components):

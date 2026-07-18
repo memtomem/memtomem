@@ -20,13 +20,15 @@ policy lives in :mod:`memtomem.quality.fingerprints`.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from memtomem.errors import EvalCaseError
+from memtomem.errors import EvalCaseError, EvalCaseNotFoundError, EvalCaseValidationError
 from memtomem.models import ScopeFilter
+from memtomem.privacy import scan as _privacy_scan
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
 from memtomem.storage.sqlite_scope import _scopes_glob_clause, _scopes_in_clause
 
@@ -64,6 +66,59 @@ _PORTABLE_FILTER_KEYS = frozenset({"namespace", "scope", "unreplayable"})
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+#: Eval-case names double as CLI selectors (``mm quality show <name>``,
+#: ``replay --case <name>``) and are echoed into replay reports, so they must be
+#: short, path-safe labels — never free-form prose, absolute paths, or secrets.
+#: Mirrors ``context._names.validate_name`` without importing across the
+#: storage→context layer boundary, and additionally runs the secret-class
+#: privacy scanner so the *name field* a report emits carries no secret. (This
+#: is a per-field guarantee for the name only; the report's raw query text is
+#: verbatim user input and is NOT sanitized — see the surface docstrings.)
+#: Applied at every write ingress (promote + import) so the redaction
+#: exemption's "short label, no free-text" rationale holds for all surfaces
+#: (#1802 PR-5).
+_EVAL_CASE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_EVAL_CASE_NAME_MAX_LEN = 64
+
+
+def _validate_eval_case_name(name: str | None) -> str | None:
+    """Return *name* if it is a valid eval-case label, else raise EvalCaseError.
+
+    ``None`` (no name) passes through. Enforces ``1 <= len <= 64``, the
+    ``[A-Za-z0-9._-]+`` charset (no whitespace / slash / control chars), no
+    leading dash (CLI-flag collision), not the ``.``/``..`` path tokens, and no
+    secret-class token (a credential-shaped label would otherwise persist and
+    surface in replay reports). The secret-hit error never echoes the value.
+    """
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise EvalCaseValidationError(f"eval case name must be a string, got {type(name).__name__}")
+    if not name.strip():
+        raise EvalCaseValidationError("eval case name must not be blank")
+    # Secret scan FIRST, before any error that interpolates the value — a long
+    # or odd-charset credential (e.g. github_pat_… > 64 chars) must never be
+    # echoed by the "too long" / "must match" messages below.
+    if _privacy_scan(name):
+        raise EvalCaseValidationError(
+            "eval case name contains a secret-shaped token and was refused"
+        )
+    if len(name) > _EVAL_CASE_NAME_MAX_LEN:
+        raise EvalCaseValidationError(
+            f"eval case name {name!r} is too long (len {len(name)} > {_EVAL_CASE_NAME_MAX_LEN})"
+        )
+    if name in (".", ".."):
+        raise EvalCaseValidationError(f"eval case name {name!r} is a reserved path token")
+    if name.startswith("-"):
+        raise EvalCaseValidationError(f"eval case name {name!r} must not start with a dash")
+    if not _EVAL_CASE_NAME_RE.fullmatch(name):
+        raise EvalCaseValidationError(
+            f"eval case name {name!r} must match [A-Za-z0-9._-]+ "
+            "(no whitespace, slash, or control characters)"
+        )
+    return name
 
 
 def _reject_path_shaped(field: str, value: object) -> None:
@@ -217,6 +272,7 @@ class EvalCaseMixin:
         for key in ("profile", "corpus", "index"):
             if key not in fingerprints:
                 raise EvalCaseError(f"fingerprints must include {key!r}")
+        name = _validate_eval_case_name(name)
         if getattr(self, "_in_transaction", False):
             # transaction() suppresses commits but takes no lock — running here
             # would drop the BEGIN IMMEDIATE serialization (mirrors
@@ -232,7 +288,7 @@ class EvalCaseMixin:
                 (run_id,),
             ).fetchone()
             if run is None:
-                raise EvalCaseError(f"run_id {run_id!r} not found")
+                raise EvalCaseNotFoundError(f"run_id {run_id!r} not found")
             query_text, observation_json, snapshot_json = run
             observation = json.loads(observation_json or "{}")
             snapshot = json.loads(snapshot_json or "[]")
@@ -423,7 +479,7 @@ class EvalCaseMixin:
         ).fetchone()
         if by_name is not None:
             return by_name[0]
-        raise EvalCaseError(f"eval case {case_id_or_name!r} not found")
+        raise EvalCaseNotFoundError(f"eval case {case_id_or_name!r} not found")
 
     async def get_eval_case(self, case_id_or_name: str) -> dict[str, Any]:
         """One case with its labels, looked up by case_id then by name."""
@@ -437,7 +493,7 @@ class EvalCaseMixin:
             (case_id,),
         ).fetchone()
         if row is None:
-            raise EvalCaseError(f"eval case {case_id_or_name!r} not found")
+            raise EvalCaseNotFoundError(f"eval case {case_id_or_name!r} not found")
         labels = db.execute(
             "SELECT chunk_id, content_hash, judgment, created_at FROM eval_case_labels "
             "WHERE case_id = ? ORDER BY content_hash",
@@ -621,6 +677,7 @@ class EvalCaseMixin:
         name = case.get("name")
         if name is not None and not isinstance(name, str):
             raise EvalCaseError("imported case 'name' must be a string or null")
+        _validate_eval_case_name(name)
         source_run_id = case.get("source_run_id")
         if source_run_id is not None and not isinstance(source_run_id, str):
             raise EvalCaseError("imported case 'source_run_id' must be a string or null")

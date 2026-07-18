@@ -101,6 +101,8 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "decay.expire_old_chunks",
         "dedup.merge_duplicates",
         "export.import_memories",
+        "quality.promote_quality_case",
+        "quality.run_quality_replay",
         "scratch.delete_scratch",
         "scratch.promote_scratch",
         "scratch.set_scratch",
@@ -206,6 +208,17 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "search_runs.save_search_feedback": (
         "body is IDs echoed from prior server output plus a closed-vocabulary "
         "judgment validated in storage; no free-text content is persisted"
+    ),
+    # Quality Lab (#1802 PR-5). Replay is read-only (no persistence at all).
+    # Promote copies query_text + labels from an already-observed run in
+    # query_history (validated at search time); the request body carries only a
+    # run_id (ID), an optional short name label (like a tag/namespace name), and
+    # a bool — no free-text content ingress.
+    "quality.run_quality_replay": "read-only replay; no content is persisted",
+    "quality.promote_quality_case": (
+        "body is a run_id plus an optional short name label and a bool; the "
+        "persisted case content is copied from an already-validated observed run, "
+        "not free text from this request"
     ),
     "sources.delete_source": "delete-only, no payload",
     "sources.regenerate_summaries": (

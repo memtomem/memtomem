@@ -21,6 +21,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from memtomem.errors import EvalCaseError
+from memtomem.privacy import scan as _privacy_scan
 from memtomem.quality import metrics
 from memtomem.quality.fingerprints import case_set_fingerprint
 from memtomem.quality.state import current_fingerprints, nondeterministic_stages
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 __all__ = [
     "REPLAY_REPORT_SCHEMA_VERSION",
     "REPLAY_REPORT_KIND",
+    "MAX_AS_OF_UNIX",
     "STAGE_OUTCOME_KEYS",
     "replay_cases",
     "serialize_report",
@@ -41,6 +43,36 @@ __all__ = [
 
 REPLAY_REPORT_SCHEMA_VERSION = 1
 REPLAY_REPORT_KIND = "replay_report"
+
+#: Placeholder emitted in a report when a case name would leak. Write ingress
+#: (promote + import) secret-scans names, but rows promoted before that
+#: validator shipped (#1825 was on ``main`` first) can carry a secret- or
+#: path-bearing name — so the emit boundary redacts defensively too, keeping the
+#: report's guarantee independent of how a row was written (#1802 PR-5).
+_REDACTED_NAME = "[redacted-name]"
+
+
+def _report_safe_name(name: object) -> object:
+    """Redact a case name that would leak a secret or an absolute path.
+
+    Only the privacy-relevant failures are redacted (secret hit / path
+    separator); benign legacy labels — including ones that predate the shape
+    validator — pass through unchanged.
+    """
+    if not isinstance(name, str):
+        return name
+    if "/" in name or "\\" in name or _privacy_scan(name):
+        return _REDACTED_NAME
+    return name
+
+
+#: Upper bound on ``as_of_unix`` (accepted range is 0 [1970-01-01] ..
+#: 32_503_680_000 [3000-01-01]). The pinned instant flows into
+#: ``datetime.fromtimestamp`` via time-decay; an out-of-range value would raise
+#: deep in the pipeline (a 500 on the web surface / opaque MCP error) instead
+#: of a clean validation failure. Guarded once here so every surface
+#: (CLI / MCP / web) inherits the same bound.
+MAX_AS_OF_UNIX = 32_503_680_000
 
 #: The canonical per-case stage-outcome keys (all booleans). One fixed set,
 #: shared with the compare validator so every replayed case reports exactly
@@ -193,7 +225,7 @@ def _replay_case_report(
 
     return {
         "case_id": case["case_id"],
-        "name": case["name"],
+        "name": _report_safe_name(case["name"]),
         "version": case["version"],
         "status": case["status"],
         "query_text": case["query_text"],
@@ -224,6 +256,11 @@ async def replay_cases(
     Runs each case through ``pipeline.search(..., record=False)`` — no access
     counters, observations, or cache reads/writes are mutated.
     """
+    if as_of_unix is not None and not 0 <= as_of_unix <= MAX_AS_OF_UNIX:
+        raise ValueError(
+            f"as_of_unix must be between 0 and {MAX_AS_OF_UNIX} "
+            f"(a representable unix timestamp), got {as_of_unix}"
+        )
     pinned_as_of = int(time.time()) if as_of_unix is None else int(as_of_unix)
     live_fps, knobs = current_fingerprints(storage, config)
     nd_stages = nondeterministic_stages(config, pipeline)

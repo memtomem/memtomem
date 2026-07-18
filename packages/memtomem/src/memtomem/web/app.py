@@ -40,6 +40,7 @@ from memtomem.web.routes import (
     namespaces,
     namespaces_read,
     procedures,
+    quality,
     scratch,
     search,
     search_runs,
@@ -122,6 +123,7 @@ _DEV_ONLY_ROUTERS: list[ModuleType] = [
     scratch,
     procedures,
     evaluation,
+    quality,  # Quality Lab eval cases + replay (#1802 PR-5)
     watchdog,
     context_mutations,
     wiki_mutations,
