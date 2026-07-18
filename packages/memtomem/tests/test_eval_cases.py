@@ -115,6 +115,34 @@ class TestPromotion:
         with pytest.raises(EvalCaseError, match="no feedback"):
             await storage.promote_search_run(RUN_A, fingerprints=FP)
 
+    @pytest.mark.parametrize(
+        "bad_name",
+        [
+            "has spaces",
+            "path/like",
+            "back\\slash",
+            "-leading-dash",
+            "with\nnewline",
+            "x" * 65,
+        ],
+    )
+    async def test_refuses_malformed_name(self, storage, bad_name):
+        # Names double as CLI selectors and are echoed into reports, so they
+        # must be short path-safe labels — no prose / paths / control chars
+        # (#1802 PR-5). Shared validator, applied at every write ingress.
+        await _seed_labeled_run(storage)
+        with pytest.raises(EvalCaseError):
+            await storage.promote_search_run(RUN_A, name=bad_name, fingerprints=FP)
+        # The rejected promotion left nothing behind.
+        assert await storage.list_eval_cases() == []
+
+    async def test_default_full_run_id_name_is_valid(self, storage):
+        # The web surface defaults an omitted name to ``run-<full run_id>`` — a
+        # 40-char [a-f0-9-] label that must pass the shared name validator.
+        await _seed_labeled_run(storage)
+        case = await storage.promote_search_run(RUN_A, name=f"run-{RUN_A}", fingerprints=FP)
+        assert case["name"] == f"run-{RUN_A}"
+
     async def test_requires_all_fingerprints(self, storage):
         await _seed_labeled_run(storage)
         with pytest.raises(EvalCaseError, match="fingerprints must include"):
@@ -360,6 +388,8 @@ class TestExportImport:
             ({"filters": "notadict"}, "filters"),
             ({"promoted_fingerprints": "nope"}, "promoted_fingerprints"),
             ({"name": 123}, "name"),
+            ({"name": "has spaces"}, "name"),
+            ({"name": "x" * 65}, "too long"),
             # Nested non-scalars must raise EvalCaseError, never a raw
             # TypeError (unhashable in a frozenset test) or SQLite binding error.
             ({"status": []}, "status"),

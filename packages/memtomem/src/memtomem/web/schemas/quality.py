@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from memtomem.quality.replay import MAX_AS_OF_UNIX
+
 
 class EvalCaseSummary(BaseModel):
     case_id: str
@@ -63,7 +65,7 @@ class PromoteCaseOut(BaseModel):
 
 class ReplayIn(BaseModel):
     cases: list[str] | None = None
-    as_of_unix: int | None = Field(None, ge=0)
+    as_of_unix: int | None = Field(None, ge=0, le=MAX_AS_OF_UNIX)
 
     @field_validator("cases")
     @classmethod

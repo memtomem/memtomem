@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from memtomem.quality.replay import replay_cases, serialize_report
+from memtomem.quality.replay import MAX_AS_OF_UNIX, replay_cases, serialize_report
 from memtomem.server import mcp
 from memtomem.server.context import CtxType, _get_app_initialized
 from memtomem.server.error_handler import tool_handler
@@ -41,8 +41,11 @@ async def mem_quality_replay(
         # sneak in as 1/0.
         if isinstance(as_of_unix, bool) or not isinstance(as_of_unix, int):
             return "Error: as_of_unix must be an integer unix timestamp."
-        if as_of_unix < 0:
-            return f"Error: as_of_unix must be a non-negative unix timestamp, got {as_of_unix}."
+        if not 0 <= as_of_unix <= MAX_AS_OF_UNIX:
+            return (
+                f"Error: as_of_unix must be between 0 and {MAX_AS_OF_UNIX} "
+                f"(a representable unix timestamp), got {as_of_unix}."
+            )
 
     selectors = [c.strip() for c in cases] or None if cases is not None else None
 

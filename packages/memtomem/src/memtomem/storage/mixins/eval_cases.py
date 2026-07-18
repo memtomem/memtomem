@@ -20,6 +20,7 @@ policy lives in :mod:`memtomem.quality.fingerprints`.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -64,6 +65,46 @@ _PORTABLE_FILTER_KEYS = frozenset({"namespace", "scope", "unreplayable"})
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+#: Eval-case names double as CLI selectors (``mm quality show <name>``,
+#: ``replay --case <name>``) and are echoed into replay reports, so they must be
+#: short, path-safe labels — never free-form prose, absolute paths, or secrets.
+#: Mirrors ``context._names.validate_name`` without importing across the
+#: storage→context layer boundary. Applied at every write ingress (promote +
+#: import) so the redaction exemption's "short label, no free-text" rationale
+#: holds for all surfaces (#1802 PR-5).
+_EVAL_CASE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_EVAL_CASE_NAME_MAX_LEN = 64
+
+
+def _validate_eval_case_name(name: str | None) -> str | None:
+    """Return *name* if it is a valid eval-case label, else raise EvalCaseError.
+
+    ``None`` (no name) passes through. Enforces ``1 <= len <= 64``, the
+    ``[A-Za-z0-9._-]+`` charset (no whitespace / slash / control chars), no
+    leading dash (CLI-flag collision), and not the ``.``/``..`` path tokens.
+    """
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise EvalCaseError(f"eval case name must be a string, got {type(name).__name__}")
+    if not name.strip():
+        raise EvalCaseError("eval case name must not be blank")
+    if len(name) > _EVAL_CASE_NAME_MAX_LEN:
+        raise EvalCaseError(
+            f"eval case name {name!r} is too long (len {len(name)} > {_EVAL_CASE_NAME_MAX_LEN})"
+        )
+    if name in (".", ".."):
+        raise EvalCaseError(f"eval case name {name!r} is a reserved path token")
+    if name.startswith("-"):
+        raise EvalCaseError(f"eval case name {name!r} must not start with a dash")
+    if not _EVAL_CASE_NAME_RE.fullmatch(name):
+        raise EvalCaseError(
+            f"eval case name {name!r} must match [A-Za-z0-9._-]+ "
+            "(no whitespace, slash, or control characters)"
+        )
+    return name
 
 
 def _reject_path_shaped(field: str, value: object) -> None:
@@ -217,6 +258,7 @@ class EvalCaseMixin:
         for key in ("profile", "corpus", "index"):
             if key not in fingerprints:
                 raise EvalCaseError(f"fingerprints must include {key!r}")
+        name = _validate_eval_case_name(name)
         if getattr(self, "_in_transaction", False):
             # transaction() suppresses commits but takes no lock — running here
             # would drop the BEGIN IMMEDIATE serialization (mirrors
@@ -621,6 +663,7 @@ class EvalCaseMixin:
         name = case.get("name")
         if name is not None and not isinstance(name, str):
             raise EvalCaseError("imported case 'name' must be a string or null")
+        _validate_eval_case_name(name)
         source_run_id = case.get("source_run_id")
         if source_run_id is not None and not isinstance(source_run_id, str):
             raise EvalCaseError("imported case 'source_run_id' must be a string or null")

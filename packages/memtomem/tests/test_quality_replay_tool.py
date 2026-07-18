@@ -121,6 +121,11 @@ async def test_validation_errors_are_strings(bm25_only_components):
     blank = await mem_quality_replay(cases=["  "], ctx=ctx)  # type: ignore[arg-type]
     assert blank.startswith("Error: cases")
 
+    from memtomem.quality.replay import MAX_AS_OF_UNIX
+
+    huge = await mem_quality_replay(as_of_unix=MAX_AS_OF_UNIX + 1, ctx=ctx)  # type: ignore[arg-type]
+    assert huge.startswith("Error: as_of_unix")
+
 
 async def test_raw_type_abuse_via_mem_do_never_raises(bm25_only_components):
     """mem_do dispatches to the raw fn with unvalidated params — type-confused

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "REPLAY_REPORT_SCHEMA_VERSION",
     "REPLAY_REPORT_KIND",
+    "MAX_AS_OF_UNIX",
     "STAGE_OUTCOME_KEYS",
     "replay_cases",
     "serialize_report",
@@ -41,6 +42,13 @@ __all__ = [
 
 REPLAY_REPORT_SCHEMA_VERSION = 1
 REPLAY_REPORT_KIND = "replay_report"
+
+#: Upper bound on ``as_of_unix`` (1000-01-01 .. 3000-01-01). The pinned instant
+#: flows into ``datetime.fromtimestamp`` via time-decay; an out-of-range value
+#: would raise deep in the pipeline (a 500 on the web surface / opaque MCP
+#: error) instead of a clean validation failure. Guarded once here so every
+#: surface (CLI / MCP / web) inherits the same bound.
+MAX_AS_OF_UNIX = 32_503_680_000
 
 #: The canonical per-case stage-outcome keys (all booleans). One fixed set,
 #: shared with the compare validator so every replayed case reports exactly
@@ -224,6 +232,11 @@ async def replay_cases(
     Runs each case through ``pipeline.search(..., record=False)`` — no access
     counters, observations, or cache reads/writes are mutated.
     """
+    if as_of_unix is not None and not 0 <= as_of_unix <= MAX_AS_OF_UNIX:
+        raise ValueError(
+            f"as_of_unix must be between 0 and {MAX_AS_OF_UNIX} "
+            f"(a representable unix timestamp), got {as_of_unix}"
+        )
     pinned_as_of = int(time.time()) if as_of_unix is None else int(as_of_unix)
     live_fps, knobs = current_fingerprints(storage, config)
     nd_stages = nondeterministic_stages(config, pipeline)

@@ -199,6 +199,12 @@ class TestReplay:
         resp = await client.post("/api/quality/replay", json={"as_of_unix": -1})
         assert resp.status_code == 422
 
+    async def test_out_of_range_as_of_rejected(self, client):
+        from memtomem.quality.replay import MAX_AS_OF_UNIX
+
+        resp = await client.post("/api/quality/replay", json={"as_of_unix": MAX_AS_OF_UNIX + 1})
+        assert resp.status_code == 422
+
     async def test_bool_as_of_rejected(self, client):
         resp = await client.post("/api/quality/replay", json={"as_of_unix": True})
         assert resp.status_code == 422
