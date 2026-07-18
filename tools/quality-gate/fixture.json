@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "kind": "quality_gate_fixture",
+  "description": "Deterministic BM25-only replay fixture for the #1833 CI quality gate. Reuses the audited corpus_v2 fixture corpus; relevance is declared per case as file globs (relevant_globs) resolved to chunk content_hashes at refresh time. No embedder is downloaded (embedding.provider=none); as_of is pinned far in the future so temporal decay is stable.",
+  "as_of_unix": 1893456000,
+  "corpus_dir": "packages/memtomem/tests/fixtures/corpus_v2",
+  "config_overrides": {
+    "embedding": {
+      "provider": "none",
+      "dimension": 1024
+    },
+    "search": {
+      "enable_dense": false
+    }
+  },
+  "case_defs": [
+    {
+      "case_id": "qg-en-security-mtls",
+      "name": "en-security-mtls",
+      "query_text": "enforce STRICT mTLS via Istio PeerAuthentication",
+      "top_k": 5,
+      "relevant_globs": ["en/security/runbook.md"]
+    },
+    {
+      "case_id": "qg-en-cost-hpa-minreplicas",
+      "name": "en-cost-hpa-minreplicas",
+      "query_text": "right-size cluster by lowering HPA minReplicas",
+      "top_k": 5,
+      "relevant_globs": ["en/cost_optimization/runbook.md"]
+    },
+    {
+      "case_id": "qg-en-k8s-failedgetresourcemetric",
+      "name": "en-k8s-failedgetresourcemetric",
+      "query_text": "HPA FailedGetResourceMetric diagnosis with metrics-server",
+      "top_k": 5,
+      "relevant_globs": ["en/k8s/troubleshooting.md"]
+    },
+    {
+      "case_id": "qg-en-observability-blackbox-exporter",
+      "name": "en-observability-blackbox-exporter",
+      "query_text": "Blackbox Exporter over RUM for external availability",
+      "top_k": 5,
+      "relevant_globs": ["en/observability/adr.md"]
+    },
+    {
+      "case_id": "qg-en-postgres-unused-indexes",
+      "name": "en-postgres-unused-indexes",
+      "query_text": "write latency degradation from unused postgres indexes",
+      "top_k": 5,
+      "relevant_globs": ["en/postgres/troubleshooting.md"]
+    },
+    {
+      "case_id": "qg-en-caching-maxmemory-policy",
+      "name": "en-caching-maxmemory-policy",
+      "query_text": "set Redis maxmemory-policy and monitor evictions",
+      "top_k": 5,
+      "relevant_globs": ["en/caching/runbook.md"]
+    },
+    {
+      "case_id": "qg-ko-security-access-key-leak",
+      "name": "ko-security-access-key-leak",
+      "query_text": "AWS 액세스 키 유출 GitHub Actions 로그 노출 대응",
+      "top_k": 5,
+      "relevant_globs": ["ko/security/postmortem.md"]
+    },
+    {
+      "case_id": "qg-ko-cost-idle-ec2",
+      "name": "ko-cost-idle-ec2",
+      "query_text": "유휴 시간대에도 EC2 비용이 내려가지 않음",
+      "top_k": 5,
+      "relevant_globs": ["ko/cost_optimization/troubleshooting.md"]
+    },
+    {
+      "case_id": "qg-ko-k8s-pvc-expand",
+      "name": "ko-k8s-pvc-expand",
+      "query_text": "PVC 용량 확장 절차 kubectl edit pvc",
+      "top_k": 5,
+      "relevant_globs": ["ko/k8s/runbook.md"]
+    },
+    {
+      "case_id": "qg-ko-observability-topk-cardinality",
+      "name": "ko-observability-topk-cardinality",
+      "query_text": "topk 카디널리티 식별 metric_relabel_configs drop",
+      "top_k": 5,
+      "relevant_globs": ["ko/observability/troubleshooting.md"]
+    },
+    {
+      "case_id": "qg-ko-postgres-pg-partman",
+      "name": "ko-postgres-pg-partman",
+      "query_text": "시계열 저장 pg_partman 파티셔닝 채택",
+      "top_k": 5,
+      "relevant_globs": ["ko/postgres/adr.md"]
+    },
+    {
+      "case_id": "qg-ko-caching-sentinel",
+      "name": "ko-caching-sentinel",
+      "query_text": "Redis Cluster 대신 Master-Replica Sentinel 채택",
+      "top_k": 5,
+      "relevant_globs": ["ko/caching/adr.md"]
+    }
+  ]
+}

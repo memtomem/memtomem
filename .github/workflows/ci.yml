@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      refresh_baseline:
+        description: "Regenerate the quality-gate baseline (cases.json + baseline_replay.json) and upload it as an artifact instead of running the check."
+        type: boolean
+        default: false
   # schedule:
   #   - cron: "17 5 * * *"   # nightly — enable once LLM secrets are provisioned
 
@@ -142,6 +147,49 @@ jobs:
           PYTHONHASHSEED: "0"
           OMP_NUM_THREADS: "1"
         run: uv run python tools/retrieval-eval/check_baseline_v2.py
+
+  quality-gate:
+    name: quality-gate (BM25 replay)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+      # Ubuntu is the canonical baseline producer; pin the interpreter so a
+      # workflow_dispatch refresh reproduces the committed assets (see
+      # tools/quality-gate/README.md). The check step also benefits from it.
+      - run: uv python pin 3.12
+      - run: uv sync --frozen
+      # Advisory during the introduction window: report drift without blocking
+      # the PR. Flipping to required = delete this one `continue-on-error` line
+      # (separate follow-up PR). Thresholds live in policy.json, never here.
+      - name: Replay quality gate (advisory)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.refresh_baseline) }}
+        continue-on-error: true
+        env:
+          PYTHONHASHSEED: "0"
+          OMP_NUM_THREADS: "1"
+        run: uv run python tools/quality-gate/run_gate.py
+      # Canonical refresh: regenerate the assets on Ubuntu and upload them for a
+      # maintainer to review + commit. Records the Python + SQLite versions.
+      - name: Refresh canonical baseline
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_baseline }}
+        env:
+          PYTHONHASHSEED: "0"
+          OMP_NUM_THREADS: "1"
+        run: |
+          uv run python tools/quality-gate/run_gate.py --refresh-baseline
+          uv run python -c "import sqlite3, sys; open('tools/quality-gate/versions.txt', 'w').write(f'python={sys.version.split()[0]}\nsqlite={sqlite3.sqlite_version}\n')"
+      - name: Upload regenerated baseline
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_baseline }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quality-gate-baseline
+          path: |
+            tools/quality-gate/cases.json
+            tools/quality-gate/baseline_replay.json
+            tools/quality-gate/versions.txt
 
   test-llm-nightly:
     name: llm-nightly (optional)

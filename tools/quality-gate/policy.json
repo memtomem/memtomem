@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "kind": "replay_gate_policy",
+  "description": "CI gate for the #1833 BM25-only replay fixture. Baseline and candidate run the same fixed profile over the same corpus, so any ranking movement is unintended drift: every verdict class except 'unchanged' is capped at 0, and each metric aggregate delta must not drop below 0. corpus_match / index_match are intentionally NOT required — both fold wall-clock timestamps and machine-hashed paths into their fingerprints, so a committed baseline can never match a freshly indexed candidate (see README). Labels are complete over the corpus (target-file chunks relevant, every other corpus chunk not_relevant), so precision is comparable and stable for every case; the precision floor then catches a same-corpus candidate that appends an off-target (labelled not_relevant) result after the rank-1 hit — rank metrics stay flat but precision drops. The residual it cannot catch — a corpus change that introduces an unlabelled chunk, dropping a case from the precision cohort — is documented in the README and left for the required-flip PR.",
+  "require": {
+    "case_set_match": true,
+    "profile_match": true,
+    "as_of_match": true,
+    "deterministic_inputs": true
+  },
+  "max_verdict_counts": {
+    "improved": 0,
+    "regressed": 0,
+    "mixed": 0,
+    "version_mismatch": 0,
+    "definition_mismatch": 0,
+    "baseline_only": 0,
+    "candidate_only": 0,
+    "excluded": 0,
+    "baseline_degraded": 0,
+    "candidate_degraded": 0,
+    "both_degraded": 0
+  },
+  "aggregate_delta_floors": {
+    "hit_rate": 0.0,
+    "reciprocal_rank": 0.0,
+    "recall_labeled": 0.0,
+    "ndcg": 0.0,
+    "precision": 0.0
+  },
+  "min_compared_cases": 12,
+  "allowlist": []
+}
