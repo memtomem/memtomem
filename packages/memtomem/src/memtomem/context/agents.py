@@ -840,6 +840,8 @@ def extract_agents_to_canonical(
     only ``claude`` / ``gemini`` are pull-eligible for agents (codex/kimi
     are export-only). ``None`` keeps the full first-wins order. An invalid
     value raises ``ValueError`` before the ``project_local`` short-circuit.
+    With ``source_runtime`` set, ``runtime_candidates`` lists only the
+    scanned runtime — enumerate all candidates with ``source_runtime=None``.
     """
     runtimes = resolve_import_runtimes("agents", source_runtime)
     if scope == "project_local":

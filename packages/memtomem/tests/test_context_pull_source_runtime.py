@@ -176,6 +176,17 @@ def test_commands_source_runtime_claude_skips_toml(home: Path, proj: Path) -> No
     assert "gemini" not in result.runtime_candidates.get("greet", [])
 
 
-def test_commands_source_runtime_invalid_raises(home: Path, proj: Path) -> None:
-    with pytest.raises(ValueError, match="export-only for commands|unknown runtime"):
+def test_commands_source_runtime_kimi_unsupported_message(home: Path, proj: Path) -> None:
+    """Kimi has no command fan-out at all — the error says 'no support', not
+    'export-only' (which would wrongly imply Kimi renders commands)."""
+    with pytest.raises(ValueError, match="has no commands support"):
         extract_commands_to_canonical(proj, scope="project_shared", source_runtime="kimi")
+
+
+def test_seed_multi_runtime_uses_real_suffix_for_codex_agents(home: Path, proj: Path) -> None:
+    """The fixture writes the filename the runtime actually uses (codex agents
+    are .toml, not .md) so a seeded fixture is one the engine would read."""
+    written = seed_multi_runtime(
+        proj, "agents", "bot", {"codex": "x = 1\n"}, scope="project_shared"
+    )
+    assert written["codex"].suffix == ".toml"

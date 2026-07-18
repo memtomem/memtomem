@@ -152,20 +152,43 @@ def resolve_import_runtimes(artifact: ArtifactKind, source_runtime: str | None) 
     priority tuple — byte-compatible with the pre-ADR-0030 hardcoded
     loops. A non-None value must be pull-eligible for this artifact kind
     (:data:`IMPORT_SOURCE_RUNTIMES`); otherwise raise ``ValueError`` with
-    a message that names the export-only case explicitly so the CLI/web
-    surfaces can translate it without re-deriving the reason.
+    a precise reason the CLI/web surfaces can translate without
+    re-deriving it: a known runtime that *renders* this kind but is not
+    imported from it is "export-only"; a known runtime with no fan-out at
+    all for this kind is "not supported"; anything else is "unknown".
     """
     eligible = IMPORT_SOURCE_RUNTIMES[artifact]
     if source_runtime is None:
         return eligible
     if source_runtime in eligible:
         return (source_runtime,)
+    choices = ", ".join(eligible)
     if source_runtime in KNOWN_RUNTIMES:
+        if _has_any_fanout(artifact, source_runtime):
+            raise ValueError(
+                f"runtime {source_runtime!r} is export-only for {artifact} — it cannot be "
+                f"pulled from; choose one of: {choices}"
+            )
         raise ValueError(
-            f"runtime {source_runtime!r} is export-only for {artifact} — it cannot be "
-            f"pulled from; choose one of: {', '.join(eligible)}"
+            f"runtime {source_runtime!r} has no {artifact} support — nothing to pull from; "
+            f"choose one of: {choices}"
         )
-    raise ValueError(f"unknown runtime {source_runtime!r}; choose one of: {', '.join(eligible)}")
+    raise ValueError(f"unknown runtime {source_runtime!r}; choose one of: {choices}")
+
+
+def _has_any_fanout(artifact: ArtifactKind, runtime: str) -> bool:
+    """True if ``runtime`` has a fan-out target for ``artifact`` at any scope.
+
+    Distinguishes an *export-only* runtime (renders the kind, so it has a
+    fan-out target, but the import side deliberately does not read it —
+    e.g. Codex agents) from one with *no support at all* for the kind
+    (no fan-out anywhere — e.g. Kimi commands). Keyed off the single
+    source of truth so the two cases can never be mislabeled.
+    """
+    return any(
+        RUNTIME_FANOUT_TABLE.get((artifact, runtime, scope)) is not None
+        for scope in ("user", "project_shared", "project_local")
+    )
 
 
 def runtime_fanout_root(

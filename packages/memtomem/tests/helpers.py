@@ -7,7 +7,9 @@ from uuid import uuid4
 
 import pytest
 
+from memtomem.config import TargetScope
 from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context.migrate import _NON_SKILL_FANOUT_SUFFIX
 from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
@@ -106,7 +108,7 @@ def seed_multi_runtime(
     name: str,
     per_runtime: dict[str, str],
     *,
-    scope: str = "project_shared",
+    scope: TargetScope = "project_shared",
 ) -> dict[str, Path]:
     """Seed the same artifact ``name`` into several runtime dirs with divergent bytes.
 
@@ -116,23 +118,32 @@ def seed_multi_runtime(
     a runtime label (``"claude"``, ``"gemini"``, ``"codex"``, ``"kimi"``) to the
     body that runtime's copy should carry.
 
-    - skills land as ``<runtime_dir>/<name>/SKILL.md`` (tree layout).
-    - commands under the gemini runtime land as ``<name>.toml`` (the format
-      that runtime uses); every other (kind, runtime) lands as ``<name>.md``.
+    The on-disk filename matches what each runtime actually uses so a seeded
+    fixture is one the extract engines would really read (else the test could
+    false-green): skills land as ``<name>/SKILL.md`` (tree layout); every other
+    kind uses :data:`memtomem.context.migrate._NON_SKILL_FANOUT_SUFFIX` — the
+    same per-(kind, runtime) suffix table the fan-out / cleanup paths use, so
+    e.g. codex agents are ``.toml`` and kimi agents ``.yaml``, not ``.md``. An
+    unmapped (kind, runtime) raises rather than silently writing a file the
+    engine will ignore.
 
     Returns the map of runtime label → the file that was written, for assertion.
     """
     written: dict[str, Path] = {}
     for runtime, body in per_runtime.items():
-        runtime_dir = runtime_fanout_root(kind, runtime, scope, project_root)  # type: ignore[arg-type]
+        runtime_dir = runtime_fanout_root(kind, runtime, scope, project_root)
         if runtime_dir is None:
             continue
         if kind == "skills":
             dest = runtime_dir / name / "SKILL.md"
-        elif kind == "commands" and runtime == "gemini":
-            dest = runtime_dir / f"{name}.toml"
         else:
-            dest = runtime_dir / f"{name}.md"
+            try:
+                suffix = _NON_SKILL_FANOUT_SUFFIX[kind][runtime]
+            except KeyError as exc:
+                raise ValueError(
+                    f"seed_multi_runtime: no filename convention for ({kind}, {runtime})"
+                ) from exc
+            dest = runtime_dir / f"{name}{suffix}"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(body, encoding="utf-8")
         written[runtime] = dest

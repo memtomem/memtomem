@@ -580,8 +580,11 @@ def extract_commands_to_canonical(
     ``source_runtime`` (ADR-0030 §12) narrows the scan to a single runtime,
     gating the Claude passthrough and the Gemini TOML branch independently;
     only ``claude`` / ``gemini`` are pull-eligible (codex prompts are
-    export-only). ``None`` keeps both branches (first-wins). An invalid
-    value raises ``ValueError`` before the ``project_local`` short-circuit.
+    export-only; kimi has no command support). ``None`` keeps both branches
+    (first-wins). An invalid value raises ``ValueError`` before the
+    ``project_local`` short-circuit. With ``source_runtime`` set,
+    ``runtime_candidates`` lists only the scanned runtime — enumerate all
+    candidates with ``source_runtime=None``.
     """
     runtimes = resolve_import_runtimes("commands", source_runtime)
     if scope == "project_local":

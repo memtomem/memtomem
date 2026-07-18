@@ -949,6 +949,9 @@ def extract_skills_to_canonical(
     directory; ``None`` keeps the full first-wins order. An invalid or
     export-only value raises ``ValueError`` up front — before the
     ``project_local`` short-circuit — so a bad selection is always loud.
+    Note that with ``source_runtime`` set, ``runtime_candidates`` lists only
+    the scanned runtime; a caller enumerating all candidates (the pull
+    picker) must call with ``source_runtime=None``.
     """
     runtimes = resolve_import_runtimes("skills", source_runtime)
     if scope == "project_local":
