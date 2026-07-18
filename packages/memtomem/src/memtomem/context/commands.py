@@ -51,7 +51,7 @@ from memtomem.context._atomic_reverse import (
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
 from memtomem.context._names import InvalidNameError, Layout, validate_name
-from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context._runtime_targets import resolve_import_runtimes, runtime_fanout_root
 from memtomem.context._sync_atomic import (
     ON_DROP_LEVELS,
     AtomicSyncAdapter,
@@ -528,6 +528,7 @@ def extract_commands_to_canonical(
     only_name: str | None = None,
     *,
     scope: TargetScope = "project_shared",
+    source_runtime: str | None = None,
     force_unsafe_import: bool = False,
     dry_run: bool = False,
     surface: str = "cli_context_init",
@@ -575,7 +576,14 @@ def extract_commands_to_canonical(
     Layout policy: new commands (no existing canonical) land in directory
     layout per ADR-0008. Existing flat-layout entries are preserved by
     PR-C — migration to directory layout is a separate command (PR-D).
+
+    ``source_runtime`` (ADR-0030 §12) narrows the scan to a single runtime,
+    gating the Claude passthrough and the Gemini TOML branch independently;
+    only ``claude`` / ``gemini`` are pull-eligible (codex prompts are
+    export-only). ``None`` keeps both branches (first-wins). An invalid
+    value raises ``ValueError`` before the ``project_local`` short-circuit.
     """
+    runtimes = resolve_import_runtimes("commands", source_runtime)
     if scope == "project_local":
         return ExtractResult(
             imported=[],
@@ -608,35 +616,36 @@ def extract_commands_to_canonical(
         }
 
     # ── Claude branch — byte-level passthrough (Markdown + YAML) ──
-    import_passthrough_runtime(
-        "claude",
-        artifact_label="commands",
-        dir_filename=COMMAND_DIR_FILENAME,
-        name_kind="command name",
-        message_kind="command",
-        audit_context=_claude_audit_context,
-        canonical_root=canonical_root,
-        project_root=project_root,
-        overwrite=overwrite,
-        scope=scope,
-        force_unsafe_import=force_unsafe_import,
-        dry_run=dry_run,
-        surface=surface,
-        only_name=only_name,
-        imported=imported,
-        skipped=skipped,
-        seen=seen,
-        source_runtimes=source_runtimes,
-        runtime_candidates=runtime_candidates,
-        logger=logger,
-    )
+    if "claude" in runtimes:
+        import_passthrough_runtime(
+            "claude",
+            artifact_label="commands",
+            dir_filename=COMMAND_DIR_FILENAME,
+            name_kind="command name",
+            message_kind="command",
+            audit_context=_claude_audit_context,
+            canonical_root=canonical_root,
+            project_root=project_root,
+            overwrite=overwrite,
+            scope=scope,
+            force_unsafe_import=force_unsafe_import,
+            dry_run=dry_run,
+            surface=surface,
+            only_name=only_name,
+            imported=imported,
+            skipped=skipped,
+            seen=seen,
+            source_runtimes=source_runtimes,
+            runtime_candidates=runtime_candidates,
+            logger=logger,
+        )
 
     # ── Gemini branch — TOML → canonical Markdown conversion ──
     try:
         gemini_dir = runtime_fanout_root("commands", "gemini", scope, project_root)
     except KeyError:
         gemini_dir = None
-    if gemini_dir is not None and gemini_dir.is_dir():
+    if "gemini" in runtimes and gemini_dir is not None and gemini_dir.is_dir():
         gemini_label = f"gemini ({gemini_dir})"
         for toml_file in sorted(gemini_dir.glob("*.toml")):
             cmd_name = toml_file.stem

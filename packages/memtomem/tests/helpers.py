@@ -7,6 +7,8 @@ from uuid import uuid4
 
 import pytest
 
+from memtomem.context._runtime_targets import runtime_fanout_root
+from memtomem.context.scope_resolver import ArtifactKind
 from memtomem.models import Chunk, ChunkMetadata
 from memtomem.server.context import AppContext
 
@@ -96,6 +98,45 @@ class StubCtx:
 
         self.request_context = _RC()
         self.request_context.lifespan_context = app
+
+
+def seed_multi_runtime(
+    project_root: Path,
+    kind: ArtifactKind,
+    name: str,
+    per_runtime: dict[str, str],
+    *,
+    scope: str = "project_shared",
+) -> dict[str, Path]:
+    """Seed the same artifact ``name`` into several runtime dirs with divergent bytes.
+
+    Resolves each runtime directory through :func:`runtime_fanout_root` so the
+    fixture can never drift from ``RUNTIME_FANOUT_TABLE`` — a runtime whose
+    fan-out is ``None`` for this (kind, scope) is skipped. ``per_runtime`` maps
+    a runtime label (``"claude"``, ``"gemini"``, ``"codex"``, ``"kimi"``) to the
+    body that runtime's copy should carry.
+
+    - skills land as ``<runtime_dir>/<name>/SKILL.md`` (tree layout).
+    - commands under the gemini runtime land as ``<name>.toml`` (the format
+      that runtime uses); every other (kind, runtime) lands as ``<name>.md``.
+
+    Returns the map of runtime label → the file that was written, for assertion.
+    """
+    written: dict[str, Path] = {}
+    for runtime, body in per_runtime.items():
+        runtime_dir = runtime_fanout_root(kind, runtime, scope, project_root)  # type: ignore[arg-type]
+        if runtime_dir is None:
+            continue
+        if kind == "skills":
+            dest = runtime_dir / name / "SKILL.md"
+        elif kind == "commands" and runtime == "gemini":
+            dest = runtime_dir / f"{name}.toml"
+        else:
+            dest = runtime_dir / f"{name}.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(body, encoding="utf-8")
+        written[runtime] = dest
+    return written
 
 
 def make_chunk(

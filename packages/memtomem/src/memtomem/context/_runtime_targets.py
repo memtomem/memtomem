@@ -129,6 +129,45 @@ RUNTIME_FANOUT_TABLE: dict[tuple[ArtifactKind, str, TargetScope], Path | None] =
 KNOWN_RUNTIMES: tuple[str, ...] = ("claude", "gemini", "codex", "kimi")
 
 
+# Per-artifact-kind Pull source vocabulary (ADR-0030 §12). This is the
+# FIRST-CLASS answer to "which runtimes can an artifact be imported FROM",
+# which is NOT the same as ``KNOWN_RUNTIMES``: the extract engines only
+# read Claude and Gemini for agents/commands (codex/kimi are export-only
+# renderers — Codex CLI prompts are user-only by design and Kimi has no
+# importer branch). Pickers, ``source_runtime`` validation, and the pull
+# preview all key off this table so a UI can never offer an un-pullable
+# runtime and the engines can never drift from it. The order matters: it
+# is the deterministic first-wins priority for the batch import path.
+IMPORT_SOURCE_RUNTIMES: dict[ArtifactKind, tuple[str, ...]] = {
+    "skills": KNOWN_RUNTIMES,
+    "agents": ("claude", "gemini"),
+    "commands": ("claude", "gemini"),
+}
+
+
+def resolve_import_runtimes(artifact: ArtifactKind, source_runtime: str | None) -> tuple[str, ...]:
+    """Return the runtime scan order for an import, honoring ``source_runtime``.
+
+    ``source_runtime is None`` (the default) returns the full per-kind
+    priority tuple — byte-compatible with the pre-ADR-0030 hardcoded
+    loops. A non-None value must be pull-eligible for this artifact kind
+    (:data:`IMPORT_SOURCE_RUNTIMES`); otherwise raise ``ValueError`` with
+    a message that names the export-only case explicitly so the CLI/web
+    surfaces can translate it without re-deriving the reason.
+    """
+    eligible = IMPORT_SOURCE_RUNTIMES[artifact]
+    if source_runtime is None:
+        return eligible
+    if source_runtime in eligible:
+        return (source_runtime,)
+    if source_runtime in KNOWN_RUNTIMES:
+        raise ValueError(
+            f"runtime {source_runtime!r} is export-only for {artifact} — it cannot be "
+            f"pulled from; choose one of: {', '.join(eligible)}"
+        )
+    raise ValueError(f"unknown runtime {source_runtime!r}; choose one of: {', '.join(eligible)}")
+
+
 def runtime_fanout_root(
     artifact: ArtifactKind,
     runtime: str,
