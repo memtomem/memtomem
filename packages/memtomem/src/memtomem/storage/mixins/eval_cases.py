@@ -841,3 +841,13 @@ class EvalCaseMixin:
             )
             .fetchall()
         )
+
+    def validate_case_filters(self, filters: object) -> None:
+        """Validate a case's ``filters`` against the portable vocabulary.
+
+        Public wrapper over :func:`validate_portable_filters` that supplies this
+        backend's own read connection (needed for the project-scope check), so
+        callers such as the replay engine don't reach into ``_get_read_db``.
+        Raises :class:`~memtomem.errors.EvalCaseError` on any violation.
+        """
+        validate_portable_filters(self._get_read_db(), filters)

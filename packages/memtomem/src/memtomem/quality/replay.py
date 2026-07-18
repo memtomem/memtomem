@@ -24,7 +24,6 @@ from memtomem.errors import EvalCaseError
 from memtomem.quality import metrics
 from memtomem.quality.fingerprints import case_set_fingerprint
 from memtomem.quality.state import current_fingerprints, nondeterministic_stages
-from memtomem.storage.mixins.eval_cases import validate_portable_filters
 
 if TYPE_CHECKING:
     from memtomem.config import Mem2MemConfig
@@ -34,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "REPLAY_REPORT_SCHEMA_VERSION",
     "REPLAY_REPORT_KIND",
+    "STAGE_OUTCOME_KEYS",
     "replay_cases",
     "serialize_report",
     "report_case_to_fingerprint_input",
@@ -43,8 +43,9 @@ REPLAY_REPORT_SCHEMA_VERSION = 1
 REPLAY_REPORT_KIND = "replay_report"
 
 #: The canonical per-case stage-outcome keys (all booleans). One fixed set,
-#: mirrored by the compare validator — every replayed case reports all six.
-_STAGE_OUTCOME_KEYS = (
+#: shared with the compare validator so every replayed case reports exactly
+#: these six and a seventh outcome cannot drift the two modules apart.
+STAGE_OUTCOME_KEYS = (
     "bm25_error",
     "dense_error",
     "dense_suppressed_mismatch",
@@ -172,6 +173,9 @@ def _replay_case_report(
 
     flags: list[str] = []
     if explicitly_selected and case["status"] == "archived":
+        # An archived case only runs when named explicitly (--case). We treat
+        # that as intent, so it is flagged but STILL counted in the aggregate;
+        # only degradation / unreplayable / invalid filters exclude a case.
         flags.append("archived")
     for axis, drifted in stale.items():
         if drifted:
@@ -200,7 +204,7 @@ def _replay_case_report(
         "labels": {"relevant": sorted(relevant), "not_relevant": sorted(not_relevant)},
         "retrieved": retrieved,
         "metrics": case_metrics,
-        "stage_outcomes": {k: stage_outcomes[k] for k in _STAGE_OUTCOME_KEYS},
+        "stage_outcomes": {k: stage_outcomes[k] for k in STAGE_OUTCOME_KEYS},
         "included_in_aggregate": included,
     }
 
@@ -226,7 +230,6 @@ async def replay_cases(
 
     ordered_ids, explicit_ids, archived_skipped = await _select_case_ids(storage, case_ids)
 
-    read_db = storage._get_read_db()
     case_reports: list[dict[str, Any]] = []
     for cid in ordered_ids:
         case = await storage.get_eval_case(cid)
@@ -236,7 +239,7 @@ async def replay_cases(
         # (values nulled), and the case is excluded from aggregates.
         invalid_filters = False
         try:
-            validate_portable_filters(read_db, case.get("filters"))
+            storage.validate_case_filters(case.get("filters"))
         except EvalCaseError:
             invalid_filters = True
 
@@ -327,7 +330,9 @@ async def replay_cases(
     }
 
     counts = {
-        "selected": len(case_reports),
+        # ``replayed`` is the number of cases in this report. (A separate
+        # ``selected`` count was dropped as redundant — every selected case is
+        # replayed; ``archived_skipped`` covers what selection left out.)
         "replayed": len(case_reports),
         "archived_skipped": archived_skipped,
         "stale": sum(1 for c in case_reports if any(c["stale"].values())),

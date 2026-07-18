@@ -330,6 +330,16 @@ class TestValidation:
         with pytest.raises(EvalCaseError):
             compare_reports(base, bad)
 
+    def test_retrieved_longer_than_top_k_rejected(self):
+        base = _report([_case("c1", retrieved=["r"], relevant=["r"], top_k=1)])
+        bad = copy.deepcopy(base)
+        # Pad the ranking past top_k with a consistent extra item (rank == pos).
+        bad["cases"][0]["retrieved"].append(
+            {"content_hash": "extra", "score": 0.5, "rank": 2, "source": "bm25"}
+        )
+        with pytest.raises(EvalCaseError):
+            compare_reports(base, bad)
+
     def test_single_field_degraded_tamper_rejected(self):
         # A genuinely degraded candidate whose "degraded" flag is stripped to
         # dodge the gate (status would flip candidate_degraded → excluded) must

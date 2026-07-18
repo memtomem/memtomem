@@ -538,6 +538,21 @@ class SearchPipeline:
         return self._reranker is not None and self._rerank_config is not None
 
     @property
+    def llm_provider(self) -> LLMProvider | None:
+        """The wired LLM provider (read-only).
+
+        Read by the Quality Lab (#1802) to classify whether LLM query expansion
+        makes replay nondeterministic — a config knob alone is not enough, since
+        ``strategy="llm"`` with no provider wired never calls a model.
+        """
+        return self._llm_provider
+
+    @property
+    def storage(self) -> StorageBackend:
+        """The storage backend this pipeline reads (read-only)."""
+        return self._storage
+
+    @property
     def _reranker(self) -> object | None:
         return self._rerank_entry.reranker
 

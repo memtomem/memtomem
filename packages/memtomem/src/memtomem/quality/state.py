@@ -95,24 +95,20 @@ def nondeterministic_stages(config: Mem2MemConfig, pipeline: SearchPipeline) -> 
 
     # LLM expansion re-calls the model on every replay (record=False bypasses the
     # expansion cache), but only when a provider is actually wired.
-    if qe_enabled and strategy == "llm" and pipeline._llm_provider is not None:
+    if qe_enabled and strategy == "llm" and pipeline.llm_provider is not None:
         stages.append("query_expansion_llm")
 
     # A remote reranker (Cohere) is a network call; only counts when a reranker
-    # is actually attached to the active generation.
+    # is actually attached to the active generation (``rerank_active``).
     rerank = config.rerank
-    if (
-        rerank.enabled
-        and rerank.provider == "cohere"
-        and pipeline._rerank_entry.reranker is not None
-    ):
+    if rerank.enabled and rerank.provider == "cohere" and pipeline.rerank_active:
         stages.append("rerank_remote")
 
     # A remote embedder is reached by ANY effectively-active embedding consumer:
     # the primary dense leg (config + no embedding mismatch) OR heading/both
     # query expansion, which embeds independently of the primary leg.
     if config.embedding.provider in _REMOTE_EMBEDDING_PROVIDERS:
-        mismatch = getattr(pipeline._storage, "embedding_mismatch", None)
+        mismatch = getattr(pipeline.storage, "embedding_mismatch", None)
         primary_dense = config.search.enable_dense and not isinstance(mismatch, dict)
         heading_expansion = qe_enabled and strategy in ("headings", "both")
         if primary_dense or heading_expansion:

@@ -29,6 +29,7 @@ from memtomem.quality.fingerprints import case_set_fingerprint
 from memtomem.quality.replay import (
     REPLAY_REPORT_KIND,
     REPLAY_REPORT_SCHEMA_VERSION,
+    STAGE_OUTCOME_KEYS,
     report_case_to_fingerprint_input,
 )
 
@@ -48,14 +49,9 @@ _EPSILON = 1e-9
 #: separately (it joins only when comparable on both sides).
 _DELTA_METRICS = ("hit_rate", "reciprocal_rank", "recall_labeled", "ndcg")
 
-_STAGE_OUTCOME_KEYS = (
-    "bm25_error",
-    "dense_error",
-    "dense_suppressed_mismatch",
-    "expansion_failed",
-    "rerank_fallback",
-    "rescue_failed",
-)
+# Stage-outcome keys are defined once in the replay module and shared here so a
+# seventh outcome cannot drift the producer and the validator apart.
+_STAGE_OUTCOME_KEYS = STAGE_OUTCOME_KEYS
 
 
 def serialize_comparison(comparison: dict[str, Any]) -> str:
@@ -243,6 +239,13 @@ def _validate_labels(case: dict[str, Any], side: str, cid: str) -> None:
 def _validate_retrieved(case: dict[str, Any], side: str, cid: str) -> None:
     retrieved = _require_type(
         case.get("retrieved"), list, f"{side} case {cid!r} 'retrieved' must be a list"
+    )
+    # Replay emits at most top_k deduplicated results; a longer list is malformed
+    # (metrics only read the top-k prefix, so it can't forge a score, but a padded
+    # ranking would still misrepresent what was retrieved).
+    _require(
+        len(retrieved) <= case["top_k"],
+        f"{side} case {cid!r} 'retrieved' has more than top_k items",
     )
     for i, item in enumerate(retrieved, start=1):
         _require(isinstance(item, dict), f"{side} case {cid!r} retrieved item must be an object")
