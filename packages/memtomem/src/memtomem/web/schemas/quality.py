@@ -6,11 +6,11 @@ any key the storage layer grows later is dropped until added here on purpose).
 
 The replay **response** is the raw report dict returned by
 ``memtomem.quality.replay.replay_cases`` — no response_model, no re-projection.
-The engine guarantees no chunk text, no absolute paths, and no secrets (pinned
-by ``test_quality_replay.py``); retrieved rows are content hashes + scores +
-metrics only. The report DOES include each case's query text and name (they
-enter only via opt-in promotion, secret-scanned there), so it is as sensitive
-as the queries behind it — there is nothing to re-sanitize at this layer.
+Retrieved rows carry no chunk text and no absolute paths (pinned by
+``test_quality_replay.py``): content hashes + scores + metrics only. The report
+DOES include each case's name (secret-scanned at promotion) and its raw query
+text, which is NOT sanitized — a report is only as sensitive as the queries
+promoted into it. There is nothing to re-sanitize at this layer.
 """
 
 from __future__ import annotations

@@ -96,6 +96,11 @@ def _validate_eval_case_name(name: str | None) -> str | None:
         raise EvalCaseError(f"eval case name must be a string, got {type(name).__name__}")
     if not name.strip():
         raise EvalCaseError("eval case name must not be blank")
+    # Secret scan FIRST, before any error that interpolates the value — a long
+    # or odd-charset credential (e.g. github_pat_… > 64 chars) must never be
+    # echoed by the "too long" / "must match" messages below.
+    if _privacy_scan(name):
+        raise EvalCaseError("eval case name contains a secret-shaped token and was refused")
     if len(name) > _EVAL_CASE_NAME_MAX_LEN:
         raise EvalCaseError(
             f"eval case name {name!r} is too long (len {len(name)} > {_EVAL_CASE_NAME_MAX_LEN})"
@@ -109,9 +114,6 @@ def _validate_eval_case_name(name: str | None) -> str | None:
             f"eval case name {name!r} must match [A-Za-z0-9._-]+ "
             "(no whitespace, slash, or control characters)"
         )
-    if _privacy_scan(name):
-        # Never echo the value — it is a secret. Report type/index only.
-        raise EvalCaseError("eval case name contains a secret-shaped token and was refused")
     return name
 
 

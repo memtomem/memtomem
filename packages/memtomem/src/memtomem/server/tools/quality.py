@@ -20,11 +20,11 @@ async def mem_quality_replay(
     """Replay stored evaluation cases into a deterministic retrieval-quality report.
 
     Runs each selected case through the search pipeline in no-side-effects mode
-    and returns the canonical JSON replay report (advisory). The report carries
-    no chunk text, no absolute paths, and no secrets; retrieved rows are content
-    hashes + scores + metrics only. It DOES include each case's query text and
-    name — these enter only via explicit opt-in promotion (secret-scanned at
-    promotion), so treat a report as sensitive as the queries it was built from.
+    and returns the canonical JSON replay report (advisory). Retrieved rows
+    carry no chunk text and no absolute paths — content hashes + scores +
+    metrics only. The report DOES include each case's name (secret-scanned at
+    promotion) and its raw query text, which is NOT sanitized: a report is only
+    as sensitive as the queries promoted into it, so treat it accordingly.
     Also reachable as ``mem_do(action="quality_replay")``.
 
     Args:

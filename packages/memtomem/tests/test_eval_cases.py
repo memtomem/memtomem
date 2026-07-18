@@ -149,10 +149,13 @@ class TestPromotion:
         # the report's "no secrets" guarantee must cover them. The error must
         # not echo the secret value back (#1802 PR-5).
         await _seed_labeled_run(storage)
-        secret = "AKIAIOSFODNN7EXAMPLE"
-        with pytest.raises(EvalCaseError, match="secret") as exc:
-            await storage.promote_search_run(RUN_A, name=secret, fingerprints=FP)
-        assert secret not in str(exc.value)
+        # Short in-charset credential AND a long one that would otherwise trip
+        # the "too long" branch first and echo the value — the scan must run
+        # before any value-interpolating error.
+        for secret in ("AKIAIOSFODNN7EXAMPLE", "github_pat_" + "A" * 70):
+            with pytest.raises(EvalCaseError, match="secret") as exc:
+                await storage.promote_search_run(RUN_A, name=secret, fingerprints=FP)
+            assert secret not in str(exc.value)
         assert await storage.list_eval_cases() == []
 
     async def test_requires_all_fingerprints(self, storage):
