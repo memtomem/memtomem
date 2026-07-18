@@ -143,6 +143,18 @@ class TestPromotion:
         case = await storage.promote_search_run(RUN_A, name=f"run-{RUN_A}", fingerprints=FP)
         assert case["name"] == f"run-{RUN_A}"
 
+    async def test_refuses_secret_shaped_name_without_echoing(self, storage):
+        # A credential-shaped name passes the shape charset but must be refused
+        # by the secret-class scan — names are echoed into replay reports, so
+        # the report's "no secrets" guarantee must cover them. The error must
+        # not echo the secret value back (#1802 PR-5).
+        await _seed_labeled_run(storage)
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        with pytest.raises(EvalCaseError, match="secret") as exc:
+            await storage.promote_search_run(RUN_A, name=secret, fingerprints=FP)
+        assert secret not in str(exc.value)
+        assert await storage.list_eval_cases() == []
+
     async def test_requires_all_fingerprints(self, storage):
         await _seed_labeled_run(storage)
         with pytest.raises(EvalCaseError, match="fingerprints must include"):
@@ -390,6 +402,7 @@ class TestExportImport:
             ({"name": 123}, "name"),
             ({"name": "has spaces"}, "name"),
             ({"name": "x" * 65}, "too long"),
+            ({"name": "AKIAIOSFODNN7EXAMPLE"}, "secret"),
             # Nested non-scalars must raise EvalCaseError, never a raw
             # TypeError (unhashable in a frozenset test) or SQLite binding error.
             ({"status": []}, "status"),

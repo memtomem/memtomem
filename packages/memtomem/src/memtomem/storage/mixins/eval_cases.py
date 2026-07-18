@@ -28,6 +28,7 @@ from uuid import uuid4
 
 from memtomem.errors import EvalCaseError, EvalCaseNotFoundError
 from memtomem.models import ScopeFilter
+from memtomem.privacy import scan as _privacy_scan
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
 from memtomem.storage.sqlite_scope import _scopes_glob_clause, _scopes_in_clause
 
@@ -71,9 +72,11 @@ def _now_iso() -> str:
 #: ``replay --case <name>``) and are echoed into replay reports, so they must be
 #: short, path-safe labels — never free-form prose, absolute paths, or secrets.
 #: Mirrors ``context._names.validate_name`` without importing across the
-#: storage→context layer boundary. Applied at every write ingress (promote +
-#: import) so the redaction exemption's "short label, no free-text" rationale
-#: holds for all surfaces (#1802 PR-5).
+#: storage→context layer boundary, and additionally runs the secret-class
+#: privacy scanner (the report's "no secrets" guarantee must hold for the name,
+#: not only chunk content). Applied at every write ingress (promote + import)
+#: so the redaction exemption's "short label, no free-text" rationale holds for
+#: all surfaces (#1802 PR-5).
 _EVAL_CASE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _EVAL_CASE_NAME_MAX_LEN = 64
 
@@ -83,7 +86,9 @@ def _validate_eval_case_name(name: str | None) -> str | None:
 
     ``None`` (no name) passes through. Enforces ``1 <= len <= 64``, the
     ``[A-Za-z0-9._-]+`` charset (no whitespace / slash / control chars), no
-    leading dash (CLI-flag collision), and not the ``.``/``..`` path tokens.
+    leading dash (CLI-flag collision), not the ``.``/``..`` path tokens, and no
+    secret-class token (a credential-shaped label would otherwise persist and
+    surface in replay reports). The secret-hit error never echoes the value.
     """
     if name is None:
         return None
@@ -104,6 +109,9 @@ def _validate_eval_case_name(name: str | None) -> str | None:
             f"eval case name {name!r} must match [A-Za-z0-9._-]+ "
             "(no whitespace, slash, or control characters)"
         )
+    if _privacy_scan(name):
+        # Never echo the value — it is a secret. Report type/index only.
+        raise EvalCaseError("eval case name contains a secret-shaped token and was refused")
     return name
 
 
