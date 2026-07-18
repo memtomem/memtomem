@@ -144,6 +144,9 @@ class TestPromotion:
             RUN_A, fingerprints=FP, allow_unreplayable_filters=True
         )
         assert case["case_id"]
+        # The override records which filters can't be replayed so PR-4 replay
+        # flags the case and excludes it from aggregate metrics (#1802).
+        assert case["filters"]["unreplayable"] == [flag]
 
     @pytest.mark.parametrize(
         "scope",

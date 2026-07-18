@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from memtomem.embedding.base import EmbeddingProvider
@@ -20,12 +21,22 @@ async def expand_query_tags(
     query: str,
     storage: StorageBackend,
     max_terms: int = 3,
+    *,
+    report_failure: Callable[[], None] | None = None,
 ) -> str:
-    """Expand query by appending matching tag names."""
+    """Expand query by appending matching tag names.
+
+    ``report_failure`` (#1802) is an optional no-op-by-default callback invoked
+    when expansion catches an error and falls back to the original query. It lets
+    a caller (the replay engine) observe the otherwise-silent degradation without
+    changing the fallback behavior — the function still returns the plain query.
+    """
     try:
         tag_counts = await storage.get_tag_counts()
     except Exception:
         logger.warning("Tag expansion failed; returning original query", exc_info=True)
+        if report_failure is not None:
+            report_failure()
         return query
 
     query_lower = query.lower()
@@ -53,6 +64,7 @@ async def expand_query_headings(
     *,
     project_context_root: Path | None = None,
     exhaustive: bool = False,
+    report_failure: Callable[[], None] | None = None,
 ) -> str:
     """Expand query by appending related heading terms from dense search.
 
@@ -67,6 +79,10 @@ async def expand_query_headings(
     (#1802) into this leg's own dense probe: heading expansion changes the
     query text, so a nondeterministic dense cutoff here would perturb the
     whole downstream ranking during replay.
+
+    ``report_failure`` (#1802): optional no-op-by-default callback invoked on the
+    catch-and-fallback path, so a replay can observe the silent degradation. The
+    fallback behavior (return the un-expanded query) is unchanged.
     """
     try:
         embedding = await embedder.embed_query(query)
@@ -78,6 +94,8 @@ async def expand_query_headings(
         )
     except Exception:
         logger.warning("Heading expansion failed; returning original query", exc_info=True)
+        if report_failure is not None:
+            report_failure()
         return query
 
     terms: list[str] = []

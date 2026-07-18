@@ -2091,7 +2091,11 @@ class SqliteBackend(
         rows = db.execute(
             "SELECT value, COUNT(*) as cnt "
             "FROM chunks, json_each(chunks.tags) "
-            "GROUP BY value ORDER BY cnt DESC"
+            # ``value ASC`` breaks count ties deterministically so tag-strategy
+            # query expansion (which truncates to max_terms) is order-stable
+            # across runs — a replay-determinism requirement (#1802). Completes
+            # the #516/#1817 tie-break series for the tags leg.
+            "GROUP BY value ORDER BY cnt DESC, value ASC"
         ).fetchall()
         return [(row[0], row[1]) for row in rows]
 

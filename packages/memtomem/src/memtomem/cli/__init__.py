@@ -52,6 +52,7 @@ def _register() -> None:
     from memtomem.cli.memory import add, recall
     from memtomem.cli.memory_doctor_cmd import memory
     from memtomem.cli.pinned_cmd import pinned
+    from memtomem.cli.quality_cmd import quality
     from memtomem.cli.review_cmd import review
     from memtomem.cli.purge_cmd import purge
     from memtomem.cli.reset_cmd import reset
@@ -77,6 +78,7 @@ def _register() -> None:
     cli.add_command(mem)
     cli.add_command(memory)
     cli.add_command(pinned)
+    cli.add_command(quality)
     cli.add_command(review)
     cli.add_command(index)
     cli.add_command(ingest)
