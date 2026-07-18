@@ -54,6 +54,16 @@ class SchemaDowngradeError(StorageError):
     """
 
 
+class EvalCaseError(StorageError):
+    """Raised when promoting or mutating a quality-lab evaluation case fails.
+
+    Covers unpromotable runs (no feedback, unreplayable filters, project-scoped
+    without a recorded root), name collisions, and conflicting per-hash labels
+    (#1802). Subclasses :class:`StorageError` — the eval-case layer is storage,
+    and no surface maps a distinct HTTP status to it yet.
+    """
+
+
 class EmbeddingError(Mem2MemError):
     """Embedding provider error."""
 

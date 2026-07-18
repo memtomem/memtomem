@@ -482,6 +482,54 @@ def create_tables(
         "ON search_feedback(run_id, chunk_id)"
     )
 
+    # Durable evaluation cases promoted from labeled search runs (#1802, Quality
+    # Lab). A case is a self-contained copy of a run's query + labels, decoupled
+    # from query_history so it survives the 90-day history prune — hence
+    # source_run_id is provenance only, NOT a foreign key. Fingerprints captured
+    # at promotion time are display/drift context only; they never gate replay
+    # (compare is replay-report-to-replay-report). Labels key on content_hash
+    # (the durable chunk identity across re-indexing); chunk_id is a re-resolvable
+    # cache and stays NULL after import.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS eval_cases (
+            case_id TEXT PRIMARY KEY,
+            name TEXT,
+            query_text TEXT NOT NULL,
+            top_k INTEGER NOT NULL,
+            filters_json TEXT NOT NULL DEFAULT '{}',
+            source_run_id TEXT,
+            promoted_profile_fingerprint TEXT NOT NULL,
+            promoted_corpus_fingerprint TEXT NOT NULL,
+            promoted_index_fingerprint TEXT NOT NULL,
+            promotion_snapshot_json TEXT NOT NULL DEFAULT '[]',
+            version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    # Partial unique index is safe here: nothing references eval_cases(name) as
+    # an FK parent, so the non-partial-index requirement (see the run_id rebuild
+    # above) does not apply.
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_cases_name "
+        "ON eval_cases(name) WHERE name IS NOT NULL"
+    )
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS eval_case_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL REFERENCES eval_cases(case_id) ON DELETE CASCADE,
+            chunk_id TEXT,
+            content_hash TEXT NOT NULL,
+            judgment TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_case_labels_case_hash "
+        "ON eval_case_labels(case_id, content_hash)"
+    )
+
     db.execute("""
         CREATE TABLE IF NOT EXISTS namespace_metadata (
             namespace TEXT PRIMARY KEY,
