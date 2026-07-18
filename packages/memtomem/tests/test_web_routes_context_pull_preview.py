@@ -126,6 +126,19 @@ def test_redact_pull_reason_strips_external_path(tmp_path: Path) -> None:
     assert "<path>" in out
 
 
+def test_redact_pull_reason_strips_path_with_spaces(tmp_path: Path) -> None:
+    """A mount name with a space must be scrubbed whole, not up to the first
+    space (PR review — the [\\w.-] class left `` Drive/...`` on the wire)."""
+    from memtomem.web.routes.context_gateway import _redact_pull_reason
+
+    reason = "[Errno 13] Permission denied: '/Volumes/My Drive/rt/skills/demo/SKILL.md'"
+    out = _redact_pull_reason(reason, tmp_path)
+    assert out is not None
+    assert "Drive" not in out
+    assert "skills" not in out
+    assert "<path>" in out
+
+
 def test_redact_pull_reason_keeps_path_free_diagnostic(tmp_path: Path) -> None:
     """A path-free TOML parse message survives redaction intact (useful signal)."""
     from memtomem.web.routes.context_gateway import _redact_pull_reason

@@ -715,13 +715,17 @@ async def context_status_all(
     }
 
 
-# Absolute-path run (POSIX or Windows), ≥2 segments — mirrors the app-level
-# ValueError handler's scrub. ``sanitize_diff_reason`` only strips the project
-# root + ``$HOME``; a runtime dir symlinked OUTSIDE both (e.g. a shared volume)
-# can still embed its resolved absolute path in an OSError reason, so this
-# backstop replaces any residual absolute path before the reason hits the wire
-# (Codex code review — the canonical-path redaction rule, MCP/web redact).
-_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][\w.\-]+){2,}")
+# Absolute-path run (POSIX or Windows), ≥2 segments. ``sanitize_diff_reason``
+# only strips the project root + ``$HOME``; a runtime dir symlinked OUTSIDE both
+# (e.g. a shared volume) can still embed its resolved absolute path in an
+# OSError reason, so this backstop replaces any residual absolute path before
+# the reason hits the wire (Codex + PR review — the canonical-path redaction
+# rule, MCP/web redact). Each segment is anything up to the next separator,
+# quote, or newline — spaces INCLUDED so a mount like ``/Volumes/My Drive/x`` is
+# scrubbed whole rather than leaving `` Drive/x`` on the wire (the app-level
+# ``[\w.\-]`` scrub stops at the first space). OSError paths are quoted, so
+# matching through spaces cannot bleed into surrounding prose in practice.
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
 
 
 def _redact_pull_reason(reason: str | None, project_root: Path) -> str | None:

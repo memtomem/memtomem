@@ -47,6 +47,7 @@ ambiguity signal is *computed* here; the refusal it drives is enforced at
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 from dataclasses import dataclass
@@ -64,6 +65,8 @@ from memtomem.context._runtime_targets import (
 )
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 from memtomem.context.versioning import _MANIFEST_FILENAME, _VERSIONS_DIRNAME
+
+logger = logging.getLogger(__name__)
 
 # The gate ``surface`` tag for preview scans. Inert for counters/audit
 # (``classify_gate_status`` passes ``record_outcome=False``), but a distinct
@@ -398,7 +401,6 @@ def _resolve_canonical_atomic(
         from memtomem.context.agents import AGENT_DIR_FILENAME as dir_filename
     else:
         from memtomem.context.commands import COMMAND_DIR_FILENAME as dir_filename
-    import logging
 
     canonical_root = canonical_artifact_dir(kind, scope, project_root)
     return resolve_artifact_under_root(
@@ -406,7 +408,7 @@ def _resolve_canonical_atomic(
         name,
         artifact_label=kind,
         dir_filename=dir_filename,
-        logger=logging.getLogger(__name__),
+        logger=logger,
     )
 
 
