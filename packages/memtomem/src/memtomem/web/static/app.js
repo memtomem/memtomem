@@ -1789,6 +1789,7 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'export') { resetExportPanel(); loadNamespaceDropdowns(); }
   if (sectionName === 'harness-sessions') loadHarnessSessions();
   if (sectionName === 'harness-search-runs') loadHarnessSearchRuns();
+  if (sectionName === 'harness-quality') loadHarnessQuality();
   if (sectionName === 'harness-scratch') loadHarnessScratch();
   if (sectionName === 'harness-procedures') loadHarnessProcedures();
   if (sectionName === 'harness-health') { loadHarnessHealth(); loadWatchdogStatus(); }
@@ -8391,6 +8392,8 @@ document.addEventListener('click', (e) => {
     showSearchRunDetail(el.dataset.id);
   } else if (action === 'search-run-judge') {
     submitSearchRunJudgment(el.dataset.id, el.dataset.chunk, el.dataset.judgment);
+  } else if (action === 'search-run-promote') {
+    promoteSearchRun(el.dataset.id);
   } else if (action === 'scratch-delete') {
     deleteScratchEntry(el.dataset.key);
   } else if (action === 'scratch-promote') {

@@ -779,6 +779,9 @@ def test_html_classification_matches_router_lists() -> None:
         # ``search_runs`` router is dev-only alongside the other harness
         # surfaces.
         "harness-search-runs",
+        # Quality Lab eval cases + replay (#1802 PR-5); the ``quality`` router
+        # is dev-only alongside the other harness surfaces.
+        "harness-quality",
         "harness-scratch",
         "harness-procedures",
         "harness-health",

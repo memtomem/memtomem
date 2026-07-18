@@ -59,8 +59,30 @@ class EvalCaseError(StorageError):
 
     Covers unpromotable runs (no feedback, unreplayable filters, project-scoped
     without a recorded root), name collisions, and conflicting per-hash labels
-    (#1802). Subclasses :class:`StorageError` — the eval-case layer is storage,
-    and no surface maps a distinct HTTP status to it yet.
+    (#1802). Subclasses :class:`StorageError` — the eval-case layer is storage.
+    The web quality router maps by type: :class:`EvalCaseNotFoundError` -> 404,
+    :class:`EvalCaseValidationError` (malformed input) -> 422, and every other
+    :class:`EvalCaseError` (state conflicts) -> 409.
+    """
+
+
+class EvalCaseNotFoundError(EvalCaseError):
+    """Raised when a referenced run or evaluation case does not exist.
+
+    A distinct subclass so surfaces can map it to a not-found status (HTTP 404)
+    without inspecting the message text — message-substring classification is
+    unsafe because messages interpolate user-controlled names (a case literally
+    named ``"baseline not found"`` would misclassify a name collision as 404).
+    """
+
+
+class EvalCaseValidationError(EvalCaseError):
+    """Raised when eval-case input is malformed (bad name shape, secret-shaped
+    label, …) — a request-validation failure, not a state conflict.
+
+    A distinct subclass so the web surface can map it to HTTP 422 while genuine
+    state conflicts (name collision, no feedback, unreplayable filters) stay
+    409.
     """
 
 

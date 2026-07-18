@@ -220,6 +220,7 @@ async function showSearchRunDetail(runId) {
     list.innerHTML = `
       <div class="muted-sm">“${escapeHtml(truncate(d.query_text, 120))}” — ${relativeTime(d.created_at)}</div>
       <div class="muted-sm mono">${meta}</div>
+      <div><button class="btn-ghost btn-xs" data-action="search-run-promote" data-id="${escapeAttr(runId)}">${t('settings.search_runs.promote')}</button></div>
       <table class="harness-table"><thead><tr>
         <th>#</th><th>Source</th><th>Score</th><th>Judgment</th><th></th>
       </tr></thead><tbody>` +
@@ -266,6 +267,111 @@ async function submitSearchRunJudgment(runId, chunkId, judgment) {
 
 qs('search-runs-refresh-btn')?.addEventListener('click', loadHarnessSearchRuns);
 qs('search-run-detail-close')?.addEventListener('click', () => hide(qs('search-run-detail-panel')));
+
+// ── Harness: Quality Lab (#1802 PR-5) ──
+//
+// Dev-only advisory panel: list evaluation cases and replay them into a
+// deterministic report. Replay runs cases serially server-side, so the POST
+// uses a long timeout and the button is disabled while in flight. A job/poll
+// design is deliberately not used — case sets are small by construction
+// (promotion is a manual act) and this surface is dev-only.
+
+async function loadHarnessQuality() {
+  const list = qs('quality-cases-list');
+  renderPageState(list, { kind: 'loading', message: t('common.loading') });
+  try {
+    const data = await api('GET', '/api/quality/cases');
+    if (!data.cases.length) {
+      renderPageState(list, { kind: 'empty', message: t('settings.quality.empty') });
+      return;
+    }
+    list.innerHTML = '<table class="harness-table"><thead><tr>' +
+      '<th>Case</th><th>Name</th><th>Status</th><th>Labels</th><th>Query</th><th>Created</th>' +
+      '</tr></thead><tbody>' +
+      data.cases.map(c => `<tr>
+          <td class="mono">${escapeHtml(c.case_id.slice(0, 8))}</td>
+          <td title="${escapeAttr(c.name || '')}">${escapeHtml(truncate(c.name || '—', 24))}</td>
+          <td><span class="badge">${escapeHtml(c.status)}</span></td>
+          <td>${Number(c.label_count) || 0}</td>
+          <td>${escapeHtml(truncate(c.query_text, 60))}</td>
+          <td>${relativeTime(c.created_at)}</td>
+        </tr>`).join('') +
+      '</tbody></table>';
+  } catch (e) {
+    renderPageState(list, { kind: 'error', message: t('settings.quality.load_failed'), detail: e.message, retry: loadHarnessQuality });
+  }
+}
+
+async function runQualityReplay() {
+  const panel = qs('quality-report-panel');
+  const report = qs('quality-report');
+  const btn = qs('quality-replay-btn');
+  show(panel);
+  report.innerHTML = `<div class="spinner-panel"></div>${srLoading()}`;
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/quality/replay', {}, { timeout: 120_000 });
+    renderQualityReport(data);
+  } catch (e) {
+    renderPageState(report, { kind: 'error', message: t('settings.quality.replay_failed'), detail: e.message, retry: runQualityReplay });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderQualityReport(rep) {
+  const report = qs('quality-report');
+  const counts = rep.counts || {};
+  const agg = rep.aggregate || {};
+  const header = [
+    `replayed=${Number(counts.replayed) || 0}`,
+    `archived_skipped=${Number(counts.archived_skipped) || 0}`,
+    `degraded=${Number(counts.degraded) || 0}`,
+    `excluded=${Number(counts.excluded_from_aggregate) || 0}`,
+    rep.as_of_unix != null ? `as_of=${Number(rep.as_of_unix)}` : '',
+  ].filter(Boolean).join(' · ');
+  const warn = rep.deterministic === false
+    ? `<div class="muted-sm">⚠ ${escapeHtml(t('settings.quality.nondeterministic', { stages: (rep.nondeterministic_stages || []).join(', ') }))}</div>`
+    : '';
+  const fmt = (v) => (v == null ? 'n/a' : Number(v).toFixed(3));
+  const rows = (rep.cases || []).map(c => {
+    const m = c.metrics || {};
+    const label = c.name || (c.case_id || '').slice(0, 8);
+    const flags = (c.flags || []).map(f => `<span class="badge">${escapeHtml(f)}</span>`).join(' ');
+    return `<tr>
+        <td title="${escapeAttr(c.case_id || '')}">${escapeHtml(truncate(label, 24))}</td>
+        <td>${m.hit_rate == null ? 'n/a' : Number(m.hit_rate).toFixed(0)}</td>
+        <td>${fmt(m.reciprocal_rank)}</td>
+        <td>${fmt(m.recall_labeled)}</td>
+        <td>${fmt(m.ndcg)}</td>
+        <td>${m.precision == null ? 'n/a' : Number(m.precision).toFixed(3)}</td>
+        <td>${flags}</td>
+      </tr>`;
+  }).join('');
+  report.innerHTML = `
+    <div class="muted-sm mono">${escapeHtml(header)}</div>
+    ${warn}
+    <table class="harness-table"><thead><tr>
+      <th>Case</th><th>hit</th><th>rr</th><th>recall</th><th>ndcg</th><th>p</th><th>Flags</th>
+    </tr></thead><tbody>${rows}</tbody></table>
+    <div class="muted-sm">${escapeHtml(t('settings.quality.aggregate'))}: ` +
+    `hit_rate=${fmt(agg.mean_hit_rate)} · mrr=${fmt(agg.mrr)} · ` +
+    `recall=${fmt(agg.mean_recall_labeled)} · ndcg=${fmt(agg.mean_ndcg)} ` +
+    `(${Number(agg.evaluated_cases) || 0})</div>`;
+}
+
+async function promoteSearchRun(runId) {
+  try {
+    const resp = await api('POST', '/api/quality/cases', { run_id: runId });
+    showToast(t('settings.search_runs.promote_success', { case: (resp.case_id || '').slice(0, 8) }), 'success');
+  } catch (e) {
+    showToast(t('settings.search_runs.promote_failed', { error: e.message }), 'error');
+  }
+}
+
+qs('quality-refresh-btn')?.addEventListener('click', loadHarnessQuality);
+qs('quality-replay-btn')?.addEventListener('click', runQualityReplay);
+qs('quality-report-close')?.addEventListener('click', () => hide(qs('quality-report-panel')));
 
 // ── Harness: Working Memory (Scratch) ──
 
