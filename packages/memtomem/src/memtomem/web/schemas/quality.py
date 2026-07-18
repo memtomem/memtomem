@@ -18,12 +18,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from memtomem.quality.replay import MAX_AS_OF_UNIX
 
 
 class EvalCaseSummary(BaseModel):
+    # Explicit allowlist: any key the storage layer grows later is dropped until
+    # added here on purpose (privacy boundary). extra="ignore" is Pydantic's
+    # default, but declared here so the intent is visible in the model itself,
+    # not just the module docstring / test_summary_is_an_allowlist.
+    model_config = ConfigDict(extra="ignore")
+
     case_id: str
     name: str | None = None
     query_text: str

@@ -29,7 +29,8 @@ async def mem_quality_replay(
     Also reachable as ``mem_do(action="quality_replay")``.
 
     Args:
-        cases: Case ids or names to replay (default: all active cases).
+        cases: Case ids or names to replay (default: all active cases). An
+            empty list behaves like omitting it — every active case is replayed.
         as_of_unix: Pin temporal validity + decay to this unix time (default: now).
     """
     # mem_do dispatches to this raw function with unvalidated params, so the
@@ -51,7 +52,12 @@ async def mem_quality_replay(
                 f"(a representable unix timestamp), got {as_of_unix}."
             )
 
-    selectors = [c.strip() for c in cases] or None if cases is not None else None
+    # Empty list ⇒ all active cases (parity with the CLI's --case-omitted
+    # behavior), so an empty/omitted selection both resolve to None.
+    if cases:
+        selectors: list[str] | None = [c.strip() for c in cases]
+    else:
+        selectors = None
 
     app = await _get_app_initialized(ctx)
     report = await replay_cases(
