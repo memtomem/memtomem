@@ -304,6 +304,126 @@ def _render_compare_table(result: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# policy gate                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+class GateInputError(click.ClickException):
+    """Bad gate input (unreadable/malformed report or policy).
+
+    Exit code 2 distinguishes "the gate could not run" from a genuine policy
+    violation (exit 1) and from success (exit 0), so CI can tell an
+    infrastructure failure apart from a real quality regression. Messages
+    reference inputs by role ("baseline"/"candidate"/"policy"), never by
+    filesystem path, to keep the emit boundary clean on failure.
+    """
+
+    exit_code = 2
+
+
+@quality.command("gate")
+@click.argument("baseline", type=click.Path())
+@click.argument("candidate", type=click.Path())
+@click.option(
+    "--policy",
+    "policy_path",
+    required=True,
+    type=click.Path(),
+    help="Committed gate-policy JSON file.",
+)
+@click.option("--out", type=click.Path(dir_okay=False), default=None, help="Write verdict to file.")
+@click.option(
+    "--comparison-out",
+    type=click.Path(dir_okay=False),
+    default=None,
+    help="Also write the intermediate comparison to file.",
+)
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+def gate(
+    baseline: str,
+    candidate: str,
+    policy_path: str,
+    out: str | None,
+    comparison_out: str | None,
+    fmt: str,
+) -> None:
+    """Gate two replay reports against a policy (baseline vs candidate).
+
+    Computes the comparison internally, then evaluates it against the policy
+    file. Exit 0 = pass, 1 = policy violation (verdict still emitted first),
+    2 = invalid input. Runs on an unconfigured machine — no storage needed.
+    """
+    _gate(baseline, candidate, policy_path, out, comparison_out, fmt)
+
+
+def _gate(
+    baseline: str,
+    candidate: str,
+    policy_path: str,
+    out: str | None,
+    comparison_out: str | None,
+    fmt: str,
+) -> None:
+    from memtomem.errors import EvalCaseError
+    from memtomem.quality.compare import compare_reports, serialize_comparison
+    from memtomem.quality.gate import evaluate_gate, load_policy, serialize_gate_verdict
+
+    baseline_doc = _read_json_role(baseline, "baseline")
+    candidate_doc = _read_json_role(candidate, "candidate")
+    policy_doc = _read_json_role(policy_path, "policy")
+
+    try:
+        comparison = compare_reports(baseline_doc, candidate_doc)
+        policy = load_policy(policy_doc)
+    except EvalCaseError as e:
+        # Both report validation (compare) and policy validation raise the
+        # EvalCaseError family; map every such failure to exit 2 without
+        # echoing the raw message verbatim (it may interpolate a case_id).
+        raise GateInputError(f"gate input rejected: {type(e).__name__}") from e
+
+    verdict = evaluate_gate(comparison, policy)
+    canonical = serialize_gate_verdict(verdict)
+    if comparison_out:
+        _write_file(comparison_out, serialize_comparison(comparison))
+    if out:
+        _write_file(out, canonical)
+
+    if fmt == "json":
+        click.echo(canonical, nl=False)
+    else:
+        _render_gate_table(verdict)
+
+    if not verdict["pass"]:
+        raise SystemExit(1)
+
+
+def _render_gate_table(verdict: dict) -> None:
+    click.echo(f"gate: {'PASS' if verdict['pass'] else 'FAIL'}")
+    for v in verdict["violations"]:
+        detail = ", ".join(f"{k}={v[k]}" for k in v if k != "rule")
+        click.echo(f"  violation: {v['rule']} ({detail})")
+    for a in verdict["allowlisted"]:
+        click.echo(f"  allowlisted: {a['case_id']} [{a['status']}] — {a['reason']}")
+    for w in verdict["warnings"]:
+        click.echo(f"  warning: {w}")
+
+
+def _read_json_role(path: str, role: str):
+    """Read a JSON input, mapping any failure to a path-free exit-2 error.
+
+    Handles missing/unreadable files and directories (``OSError``), invalid
+    UTF-8 (``UnicodeError``), and malformed JSON (``JSONDecodeError``) — all as
+    a role-only message so the filesystem path never reaches the output.
+    """
+    import pathlib
+
+    try:
+        return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
+        raise GateInputError(f"{role} is not a readable valid JSON file: {type(e).__name__}") from e
+
+
+# --------------------------------------------------------------------------- #
 # helpers                                                                      #
 # --------------------------------------------------------------------------- #
 
