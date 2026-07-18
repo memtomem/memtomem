@@ -156,7 +156,11 @@ def test_gemini_command_landing_is_converted_md(home: Path, proj: Path) -> None:
     converted = _gemini_toml_to_canonical(toml)
     canon = canonical_artifact_dir("commands", "project_shared", proj) / "greet"
     canon.mkdir(parents=True)
-    (canon / "command.md").write_text(converted, encoding="utf-8")
+    # Mirror the real engine (atomic_write_text → LF bytes, no platform newline
+    # translation): the landing bytes come from the converter (always LF), so a
+    # write_text() store fixture would gain CRLF on Windows and read as
+    # ``differs`` (CRLF fixture flake — feedback_test_tooling_catalog).
+    (canon / "command.md").write_bytes(converted.encode("utf-8"))
     pv2 = preview_pull("commands", "greet", scope="project_shared", project_root=proj)
     assert _cand(pv2, "gemini").content_status == "identical"
 
