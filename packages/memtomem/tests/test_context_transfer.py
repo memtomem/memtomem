@@ -813,8 +813,10 @@ def test_pair_lock_held_across_both_roots_sorted(two_projects, monkeypatch):
         acquired.append(lock_path)
         return real(lock_path, timeout=timeout)
 
-    # _acquire_pair_lock lives in (and reads) the migrate module namespace.
-    monkeypatch.setattr("memtomem.context.migrate._file_lock", logging_lock)
+    # ADR-0030 §6: transfer now serializes via the name-keyed
+    # ``acquire_canonical_locks`` (``_canonical_txn`` namespace), not the
+    # path-keyed ``migrate._acquire_pair_lock``.
+    monkeypatch.setattr("memtomem.context._canonical_txn._file_lock", logging_lock)
 
     transfer_artifact(
         "agents",
@@ -827,6 +829,7 @@ def test_pair_lock_held_across_both_roots_sorted(two_projects, monkeypatch):
         apply_=True,
     )
 
+    # Name-keyed lock identity: ``<store>/.foo.lock`` regardless of layout.
     src_lock = _lock_path_for(two_projects["a"] / ".memtomem" / "agents" / "foo")
     dst_lock = _lock_path_for(two_projects["b"] / ".memtomem" / "agents" / "foo")
     assert acquired == sorted([src_lock, dst_lock], key=str)
@@ -840,16 +843,16 @@ def test_destination_appeared_during_lock(two_projects, monkeypatch):
         two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN
     )
     dst_dir = _canonical_root(two_projects, "agents", "project_shared", "b") / "foo"
-    real_pair_lock = transfer_mod._acquire_pair_lock
+    real_locks = transfer_mod.acquire_canonical_locks
 
     @contextlib.contextmanager
-    def racing_pair_lock(path_a: Path, path_b: Path, *, timeout: float | None = None):
-        with real_pair_lock(path_a, path_b, timeout=timeout):
+    def racing_locks(specs, *, timeout: float | None = None):
+        with real_locks(specs, timeout=timeout):
             dst_dir.mkdir(parents=True)
             (dst_dir / "agent.md").write_text("---\nname: foo\n---\n\nracer\n", encoding="utf-8")
             yield
 
-    monkeypatch.setattr(transfer_mod, "_acquire_pair_lock", racing_pair_lock)
+    monkeypatch.setattr(transfer_mod, "acquire_canonical_locks", racing_locks)
 
     with pytest.raises(click.ClickException, match="appeared during lock acquire"):
         transfer_artifact(
@@ -1385,7 +1388,7 @@ def test_lock_timeout_budget_shared_across_pair(two_projects, monkeypatch):
     import contextlib as _ctx
     import time as _time
 
-    import memtomem.context.migrate as migrate_mod
+    import memtomem.context._canonical_txn as txn_mod
 
     _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
     seen: list[float | None] = []
@@ -1398,7 +1401,7 @@ def test_lock_timeout_budget_shared_across_pair(two_projects, monkeypatch):
         with real(lock_path, timeout=timeout):
             yield
 
-    monkeypatch.setattr(migrate_mod, "_file_lock", slow_lock)
+    monkeypatch.setattr(txn_mod, "_file_lock", slow_lock)
 
     transfer_artifact(
         "agents",
@@ -1423,7 +1426,7 @@ def test_lock_timeout_budget_shared_across_pair(two_projects, monkeypatch):
 def test_lock_timeout_default_none_passes_unbounded(two_projects, monkeypatch):
     """Default ``lock_timeout=None`` keeps the historical blocking waits —
     every CLI/MCP call site is byte-for-byte unaffected."""
-    import memtomem.context.migrate as migrate_mod
+    import memtomem.context._canonical_txn as txn_mod
 
     _write_canonical(two_projects, "agents", "project_shared", "a", "foo", _AGENT_BODY_CLEAN)
     seen: list[float | None] = []
@@ -1433,7 +1436,7 @@ def test_lock_timeout_default_none_passes_unbounded(two_projects, monkeypatch):
         seen.append(timeout)
         return real(lock_path, timeout=timeout)
 
-    monkeypatch.setattr(migrate_mod, "_file_lock", logging_lock)
+    monkeypatch.setattr(txn_mod, "_file_lock", logging_lock)
 
     transfer_artifact(
         "agents",

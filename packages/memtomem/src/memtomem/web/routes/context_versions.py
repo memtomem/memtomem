@@ -41,6 +41,7 @@ from pydantic import BaseModel
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
+from memtomem.context._canonical_txn import versioning_op_locked
 from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context.agents import resolve_canonical_agent
 from memtomem.context.commands import resolve_canonical_command
@@ -332,12 +333,17 @@ async def create_artifact_version(
             # The builtin TimeoutError from an expired lock budget lands in
             # the same 503 arm as the outer asyncio.timeout.
             async with _gateway_lock:
+                # ADR-0030 §6: the snapshot read runs under the canonical name
+                # lock (then create_version's versions.json lock) so a
+                # concurrent Pull/CRUD can't tear the snapshot. One shared
+                # budget spans both acquisitions.
                 record = await asyncio.to_thread(
-                    versioning.create_version,
+                    versioning_op_locked,
                     artifact_dir,
-                    working_file,
-                    note=note,
-                    lock_timeout=_VERSIONS_LOCK_BUDGET_S,
+                    timeout=_VERSIONS_LOCK_BUDGET_S,
+                    op=lambda lt: versioning.create_version(
+                        artifact_dir, working_file, note=note, lock_timeout=lt
+                    ),
                 )
     except TimeoutError:
         raise _error(503, "busy", "Version create timed out — another sync may be in progress")
@@ -516,19 +522,20 @@ async def promote_artifact_label(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                # Offloaded + lock-budgeted like create (the engine blocks on
-                # the cross-process sidecar lock); the follow-up manifest read
-                # rides the same worker thread.
-                def _promote_and_load() -> versioning.VersionsManifest:
-                    versioning.promote_label(
-                        artifact_dir,
-                        label,
-                        body.version,
-                        lock_timeout=_VERSIONS_LOCK_BUDGET_S,
-                    )
+                # ADR-0030 §6: canonical name lock FIRST, then versions.json —
+                # so a transfer moving the whole artifact dir can't race the
+                # pointer move (Codex B4). The follow-up manifest read rides the
+                # same worker thread, under the canonical lock.
+                def _promote_and_load(lt: float | None) -> versioning.VersionsManifest:
+                    versioning.promote_label(artifact_dir, label, body.version, lock_timeout=lt)
                     return versioning.load_manifest(artifact_dir)
 
-                manifest = await asyncio.to_thread(_promote_and_load)
+                manifest = await asyncio.to_thread(
+                    versioning_op_locked,
+                    artifact_dir,
+                    timeout=_VERSIONS_LOCK_BUDGET_S,
+                    op=_promote_and_load,
+                )
     except TimeoutError:
         raise _error(503, "busy", "Label promote timed out — another sync may be in progress")
     except VersionError as exc:
@@ -567,14 +574,17 @@ async def delete_artifact_label(
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                # Same offload + lock budget as create/promote.
-                def _delete_and_load() -> versioning.VersionsManifest:
-                    versioning.delete_label(
-                        artifact_dir, label, lock_timeout=_VERSIONS_LOCK_BUDGET_S
-                    )
+                # Same canonical→versions.json order as promote (Codex B4).
+                def _delete_and_load(lt: float | None) -> versioning.VersionsManifest:
+                    versioning.delete_label(artifact_dir, label, lock_timeout=lt)
                     return versioning.load_manifest(artifact_dir)
 
-                manifest = await asyncio.to_thread(_delete_and_load)
+                manifest = await asyncio.to_thread(
+                    versioning_op_locked,
+                    artifact_dir,
+                    timeout=_VERSIONS_LOCK_BUDGET_S,
+                    op=_delete_and_load,
+                )
     except TimeoutError:
         raise _error(503, "busy", "Label delete timed out — another sync may be in progress")
     except VersionError as exc:

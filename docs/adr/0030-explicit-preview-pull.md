@@ -172,12 +172,35 @@ process-local gateway lock only), and atomic-file Push
 (`context/_sync_atomic.py`) write canonicals without one — so another
 process could write B after snapshot(A) and before replace(C), losing B.
 PR-B2 therefore makes the **canonical sidecar lock mandatory for every
-first-party canonical mutation and for the snapshot read**, across CLI,
-Web, and MCP surfaces. Lock ordering is normative: acquire the
-canonical sidecar lock(s) first (sorted, when more than one), then the
-`versions.json` lock; `create_version()`'s own lock guards only the
-manifest transaction and is insufficient alone. Non-first-party writers
-(editors, shells) remain outside the guarantee, as with fan-out today.
+first-party mutation of a reverse-import canonical — skills, agents, and
+commands — and for the snapshot read**, across CLI, Web, and MCP
+surfaces. Lock ordering is normative: acquire the canonical sidecar
+lock(s) first (sorted, when more than one), then the child sidecar the
+operation needs — the `versions.json` lock (version/label ops) or the
+wiki `lock.json` lock (install/update); `create_version()`'s own lock
+guards only the manifest transaction and is insufficient alone.
+Non-first-party writers (editors, shells) remain outside the guarantee,
+as with fan-out today.
+
+The lock **identity is name-keyed and layout-independent**
+(`<canonical_root>/.{name}.lock`) so a Pull, a flat→dir migrate, a
+cross-scope transfer, and a version op on one artifact all contend on a
+single lock regardless of flat/dir layout; every writer resolves the
+destination *inside* the lock so a layout conversion cannot strand a
+stale-path write. The coverage is delivered in two PRs: **PR-B2a** makes
+the lock authoritative across all those mutation sites (reverse import,
+web CRUD, version create/enable/promote/delete-label, transfer, migrate,
+wiki install/update, the first-party validation seeder) with behavior
+otherwise unchanged; **PR-B2b** then layers the snapshot-first overwrite
+and the skills/flat refusals on top.
+
+**Out of scope (tracked follow-up):** MCP-server canonicals
+(`.mcp.json`) are not a Pull target, and their web CRUD
+(gateway-lock-only) versus cross-project copy (path-keyed
+`.{name}.json.lock`) cross-process gap is **pre-existing** — not
+introduced or worsened by this campaign. Unifying them onto the
+name-keyed canonical lock is deferred to a separate change; this ADR's
+mandatory-lock scope is the reverse-import kinds above.
 
 Flat-layout canonicals (pre-ADR-0008 installs) are **refused** with a
 remediation hint pointing at the existing `mm context migrate` flat→dir

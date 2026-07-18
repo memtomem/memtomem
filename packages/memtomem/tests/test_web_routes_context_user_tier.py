@@ -25,6 +25,7 @@ Every test isolates HOME via ``set_home`` — user-tier paths
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -825,3 +826,131 @@ class TestImportSkillToUserLibrary:
             json={"allow_host_writes": True},
         )
         assert r.status_code == 404, r.text
+
+
+class TestUserTierDeleteConfirmationUnderLock:
+    """ADR-0030 §6: a user-tier delete re-evaluates the host-write confirmation
+    UNDER the canonical lock. If the artifact was absent at the pre-lock gate
+    but a concurrent create/transfer materializes it while the delete waits for
+    the lock, the delete must return a ``needs_confirmation`` envelope — never
+    silently remove the unconfirmed user-tier artifact."""
+
+    @pytest.mark.anyio
+    async def test_skill_appearing_under_lock_needs_confirmation(
+        self, client: AsyncClient, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.web.routes import context_skills as cs
+
+        name = "ghost"
+        skill_dir = home / ".memtomem" / "skills" / name
+        real_lock = cs.canonical_sidecar_lock
+
+        @contextlib.contextmanager
+        def _lock_then_race_create(root, n, *, timeout=None):
+            # Absent at the pre-lock gate (empty host_targets → gate open); a
+            # concurrent create lands exactly as the delete acquires C0.
+            with real_lock(root, n, timeout=timeout):
+                if not skill_dir.exists():
+                    skill_dir.mkdir(parents=True)
+                    (skill_dir / SKILL_MANIFEST).write_text("# raced\n", encoding="utf-8")
+                yield
+
+        monkeypatch.setattr(cs, "canonical_sidecar_lock", _lock_then_race_create)
+
+        r = await client.delete("/api/context/skills/ghost", params={"target_scope": "user"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "needs_confirmation"
+        assert body["confirm"] == "allow_host_writes"
+        # The raced skill SURVIVES — not deleted without confirmation.
+        assert skill_dir.exists()
+
+    @pytest.mark.anyio
+    async def test_agent_appearing_under_lock_needs_confirmation(
+        self, client: AsyncClient, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.web.routes import _atomic_kind as ak
+
+        agent_file = home / ".memtomem" / "agents" / "ghost.md"
+        real_lock = ak.canonical_sidecar_lock
+
+        @contextlib.contextmanager
+        def _lock_then_race_create(root, n, *, timeout=None):
+            with real_lock(root, n, timeout=timeout):
+                if not agent_file.exists():
+                    agent_file.parent.mkdir(parents=True, exist_ok=True)
+                    agent_file.write_text(_AGENT_CONTENT, encoding="utf-8")
+                yield
+
+        monkeypatch.setattr(ak, "canonical_sidecar_lock", _lock_then_race_create)
+
+        r = await client.delete("/api/context/agents/ghost", params={"target_scope": "user"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "needs_confirmation"
+        assert body["confirm"] == "allow_host_writes"
+        assert agent_file.exists()
+
+    @pytest.mark.anyio
+    async def test_skill_cascade_runtime_target_appearing_after_gate_survives(
+        self, client: AsyncClient, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A user-tier cascade runtime target that appears AFTER the under-lock
+        gate (fan-out writers don't share the canonical lock) must NOT be deleted
+        without confirmation: delete acts only on the gate-confirmed snapshot,
+        never a re-scan."""
+        from memtomem.web.routes import context_skills as cs
+
+        name = "ghost"
+        runtime_target = home / ".claude" / "skills" / name
+        real_gate = cs.host_write_gate
+        calls = {"n": 0}
+
+        def _gate_then_race_create(*args, **kwargs):
+            # host_write_gate runs twice: the pre-lock fast-path (n==1) and the
+            # authoritative under-lock gate (n==2). Fire the fan-out create only
+            # on the under-lock call — i.e. AFTER the under-lock cascade capture,
+            # exactly the window fan-out writers can race (they don't hold C0).
+            calls["n"] += 1
+            if calls["n"] == 2 and not runtime_target.exists():
+                runtime_target.mkdir(parents=True)
+                (runtime_target / SKILL_MANIFEST).write_text("# raced\n", encoding="utf-8")
+            return real_gate(*args, **kwargs)
+
+        monkeypatch.setattr(cs, "host_write_gate", _gate_then_race_create)
+
+        r = await client.delete(
+            "/api/context/skills/ghost", params={"target_scope": "user", "cascade": "true"}
+        )
+        assert r.status_code == 200
+        assert r.json()["deleted"] == []
+        # The raced runtime copy SURVIVES — never in the confirmed snapshot.
+        assert runtime_target.exists()
+
+    @pytest.mark.anyio
+    async def test_agent_cascade_runtime_target_appearing_after_gate_survives(
+        self, client: AsyncClient, home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from memtomem.web.routes import _atomic_kind as ak
+
+        name = "ghost"
+        runtime_target = home / ".claude" / "agents" / f"{name}.md"
+        real_gate = ak.host_write_gate
+        calls = {"n": 0}
+
+        def _gate_then_race_create(*args, **kwargs):
+            # Fire only on the under-lock gate (n==2), after the cascade capture.
+            calls["n"] += 1
+            if calls["n"] == 2 and not runtime_target.exists():
+                runtime_target.parent.mkdir(parents=True, exist_ok=True)
+                runtime_target.write_text(_AGENT_CONTENT, encoding="utf-8")
+            return real_gate(*args, **kwargs)
+
+        monkeypatch.setattr(ak, "host_write_gate", _gate_then_race_create)
+
+        r = await client.delete(
+            "/api/context/agents/ghost", params={"target_scope": "user", "cascade": "true"}
+        )
+        assert r.status_code == 200
+        assert r.json()["deleted"] == []
+        assert runtime_target.exists()

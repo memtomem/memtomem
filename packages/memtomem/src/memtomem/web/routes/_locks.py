@@ -28,17 +28,29 @@ Two independent locks serialize different write paths:
   two concurrent ``POST /api/settings-sync`` cannot interleave; it does NOT,
   on its own, serialize against a separate-process writer (a CLI
   ``mm context sync`` or the MCP server). Cross-process safety is layer 2,
-  provided per-engine by :mod:`memtomem.context._atomic`, and it is
-  asymmetric because each engine's write shape differs:
+  provided per-engine by :mod:`memtomem.context._atomic`.
+
+  **Canonical mutations (ADR-0030 §6)** — every first-party write to a
+  reverse-import canonical (skills / agents / commands: Pull, CRUD, version &
+  label ops, transfer, migrate, wiki install/update) now holds the name-keyed,
+  layout-independent canonical sidecar lock
+  (``context/_canonical_txn.canonical_sidecar_lock``,
+  ``<canonical_root>/.{name}.lock``). The full web lock order is
+  **``_gateway_lock`` → sorted canonical sidecar(s) → ``versions.json`` /
+  ``lock.json``**; the blocking ``_file_lock`` runs in ``asyncio.to_thread``
+  so it never sits on the event loop (holding ``_gateway_lock`` there is safe
+  because it serializes in-process callers, so the worker never self-contends).
+
+  Fan-out (Push) stays asymmetric — it writes RUNTIME targets, not canonicals:
 
   - **skills** hold a ``portalocker`` ``_file_lock`` across the whole
-    move-aside → rename-in staging swap (``context.skills`` batch + single
-    paths), so a cross-process skill sync is fully serialized.
-  - **agents / commands** take no file lock: each runtime artifact is written
-    with a single full-content atomic ``os.replace`` (torn-file-proof on its
-    own), and partial cross-file fan-out is intentional by design
+    move-aside → rename-in staging swap, so a cross-process skill sync is
+    fully serialized.
+  - **agents / commands** fan-out takes no file lock: each runtime artifact is
+    written with a single full-content atomic ``os.replace`` (torn-file-proof
+    on its own), and partial cross-file fan-out is intentional by design
     (``context._sync_atomic``), so there is no read-modify-write window to
-    guard.
+    guard. (Their *canonical* writes DO take the C0 lock above.)
   - **settings** hold a per-target ``_file_lock`` across read-merge-write in
     ``context.settings.generate_all_settings``; the ``st_mtime_ns`` recheck is
     kept as a second layer that also catches a non-gateway direct disk edit.

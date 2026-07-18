@@ -1792,18 +1792,20 @@ def test_cli_update_all_re_walks_dirty_at_apply_time(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Execute phase MUST re-classify the dest tree at apply time — exactly
-    one extra ``is_asset_dirty`` call per actionable project (#1247 id 13).
+    """Execute phase MUST re-classify the dest tree at apply time (#1247 id 13),
+    and again UNDER the canonical lock (ADR-0030 §6).
 
     Inverted pin: this test previously asserted ``call_count == 1`` ("the
     execute phase consumes the cached dirty_report, no re-walk") — which
     pinned the bug. The confirm prompt between classify and execute is
     unbounded, so gating writes on the classify-time report silently
     clobbered edits made during the prompt (and ``--force`` baked too few
-    files). Now: classify walks once for the preview table, and
-    ``_apply_update`` walks once for the gate. Total = 2 per actionable
-    project; a count of 1 means apply-time gating regressed to the stale
-    snapshot, 3+ means an accidental extra walk crept in.
+    files). Now: classify walks once for the preview table, ``_apply_update``
+    walks once for the pre-lock fast-path gate, and once more INSIDE the
+    canonical lock (ADR-0030 §6) — the authoritative re-classification that
+    catches a first-party edit landing between the pre-lock walk and the lock.
+    Total = 3 per actionable project; fewer means apply-time or under-lock
+    gating regressed to a stale snapshot.
     """
     _initialized_wiki(wiki_root)
     _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
@@ -1833,8 +1835,9 @@ def test_cli_update_all_re_walks_dirty_at_apply_time(
     result = runner.invoke(context_group, ["update", "skill", "foo", "--all", "--yes", "--force"])
 
     assert result.exit_code == 0, result.output
-    # 2 = classification's preview walk + _apply_update's gate walk.
-    assert call_count["n"] == 2
+    # 3 = classification's preview walk + _apply_update's pre-lock gate walk +
+    # the under-lock authoritative re-classification (ADR-0030 §6).
+    assert call_count["n"] == 3
 
 
 def test_single_asset_update_walks_dirty_exactly_once(
@@ -1842,9 +1845,11 @@ def test_single_asset_update_walks_dirty_exactly_once(
     project_cwd: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The non-batch path has no confirm prompt between classify and apply,
-    so moving the walk into ``_apply_update`` (#1247 id 13) must not add a
-    second walk there: ``_update_asset`` no longer pre-computes.
+    """The non-batch path has no confirm prompt between classify and apply, so
+    ``_update_asset`` doesn't pre-compute (#1247 id 13) — the walk lives in
+    ``_apply_update``. Since ADR-0030 §6 that path walks twice: once for the
+    pre-lock fast-path gate, then once more UNDER the canonical lock (the
+    authoritative re-classification that catches an edit landing in the gap).
     """
     _initialized_wiki(wiki_root)
     _seed_wiki_skill(wiki_root, "foo", {"SKILL.md": b"v1\n"})
@@ -1863,7 +1868,9 @@ def test_single_asset_update_walks_dirty_exactly_once(
     result = update_skill(project_cwd, "foo")
 
     assert result.was_no_op is False
-    assert call_count["n"] == 1
+    # 2 = _apply_update's pre-lock fast-path gate walk + the under-lock
+    # authoritative re-classification (ADR-0030 §6).
+    assert call_count["n"] == 2
 
 
 # ── #1247 id 13: edits during the --all confirm prompt ──────────────────

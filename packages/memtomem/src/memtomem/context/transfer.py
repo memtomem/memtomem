@@ -57,6 +57,7 @@ import secrets
 import shlex
 import shutil
 import stat
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -89,11 +90,11 @@ from memtomem.context.lockfile import (
     LockfileError,
     digests_from_entry,
 )
+from memtomem.context._canonical_txn import acquire_canonical_locks
 from memtomem.context.migrate import (
     _DIR_MANIFEST,
     SCOPE_MIGRATABLE_KINDS,
     MigratePartialError,
-    _acquire_pair_lock,
     _detect_source_scope,
     _existing_fanout_targets,
     _promote_move,
@@ -367,12 +368,17 @@ def _carry_provenance(
     dst_path: Path,
     dst_root: Path,
     plan: _ProvenancePlan,
+    *,
+    lock_timeout: float | None = None,
 ) -> tuple[ProvenanceCarry, str | None, ProvenanceSkipCode | None]:
     """Verify the promoted bytes and upsert the destination ``lock.json`` entry.
 
-    Best-effort by contract (issue #1275): runs AFTER the artifact pair
-    lock releases, and no failure here may fail or un-commit the
-    transfer — every refusal degrades to ``not_carried`` with a loud log.
+    Best-effort by contract (issue #1275): no failure here may fail or
+    un-commit the transfer — every refusal degrades to ``not_carried`` with a
+    loud log. Since ADR-0030 §6 this runs INSIDE the canonical-lock span
+    (canonical → lock.json order, bounded by the shared ``lock_timeout``) so a
+    concurrent wiki reinstall/upsert can't interleave; best-effort is enforced
+    by the caller's ``try/except``, not by releasing the lock.
 
     The promoted tree is REHASHED and required to equal the source
     entry's digest map exactly (keys and values). This closes the
@@ -432,6 +438,7 @@ def _carry_provenance(
             files=sorted(rehashed),
             files_commit=plan.wiki_commit,
             digests=rehashed,
+            lock_timeout=lock_timeout,
         )
     except (LockfileError, OSError) as exc:
         logger.warning(
@@ -753,25 +760,30 @@ def transfer_artifact(
        cross-project ``user→user`` degenerate (user tier is global).
     3. Refuse on destination collision (Row 15 parity: no ``--force``
        overwrite; replace verb remains a follow-up).
-    4. Acquire BOTH sidecar locks in sorted order
-       (``_acquire_pair_lock`` — ``str(lock_path)`` sort is a total
-       order across two project roots).
+    4. Acquire BOTH name-keyed canonical locks in sorted order
+       (``acquire_canonical_locks`` on ``(src_store, name)`` +
+       ``(dst_store, dst_name)`` — ``str(lock_path)`` sort is a total
+       order across two project roots; ADR-0030 §6).
     5. Stage via rename (EXDEV → copy fallback), Gate A scan on staging
        iff ``to_scope == "project_shared"``, promote via ``os.replace``.
        Rollback preserves "staging deleted only when the bytes are
        verified safe elsewhere".
-    6. Outside the pair lock (bookkeeping must never fail a committed
-       move): for a shared→shared transfer, carry the install
+    6. Still INSIDE the canonical-lock span (ADR-0030 §6 — so a wiki
+       reinstall can't interleave; bookkeeping stays best-effort via
+       try/except, not by releasing the lock, and shares the canonical
+       deadline): for a shared→shared transfer, carry the install
        provenance to the destination ``lock.json`` when the source was
        classified clean pre-stage AND the promoted bytes rehash to the
        source entry's exact digest map (A-4 #1275; see
        :func:`_classify_provenance_carry` / :func:`_carry_provenance`);
        then drop the source project's entry when moving out of
-       ``project_shared``; then clean stale SOURCE runtime fan-out
-       under the two-root contract (discovery at the source root,
-       override/render verification against the destination root).
-       Destination fan-out is NOT generated — the result carries
-       ``needs_sync`` + the exact follow-up sync command.
+       ``project_shared``.
+    7. AFTER the locks release, clean stale SOURCE runtime fan-out
+       (runtime targets, not canonicals) under the two-root contract
+       (discovery at the source root, override/render verification
+       against the destination root). Destination fan-out is NOT
+       generated — the result carries ``needs_sync`` + the exact
+       follow-up sync command.
 
     Copy mode replaces step 5's staging with a byte copy
     (:func:`_stage_copy`, source never consumed), applies the optional
@@ -913,7 +925,19 @@ def transfer_artifact(
 
     # ── apply path ───────────────────────────────────────────────────
     notes: tuple[str, ...] = ()
-    with _acquire_pair_lock(src_path, dst_path, timeout=lock_timeout):
+    # ADR-0030 §6: name-keyed canonical locks (layout-independent), so this
+    # transfer serializes with a Pull / migrate / version op on the same
+    # artifact name — the path-keyed pair lock did not. ``dst_name`` may differ
+    # from ``name`` (copy --as rename). ONE monotonic deadline spans the
+    # canonical locks AND the downstream lock.json bookkeeping (upsert on carry,
+    # remove_entry on the source), so a web worker can't outlive its route
+    # timeout mutating provenance after the canonical locks release.
+    _txn_deadline = None if lock_timeout is None else time.monotonic() + lock_timeout
+
+    def _lock_remaining() -> float | None:
+        return None if _txn_deadline is None else max(0.0, _txn_deadline - time.monotonic())
+
+    with acquire_canonical_locks([(src_store, name), (dst_store, dst_name)], timeout=lock_timeout):
         # Re-check dst inside the lock window — some other process could
         # have created it between the dry-run preview and the apply
         # phase, even with our own lock-pair held (the writer would have
@@ -923,8 +947,8 @@ def transfer_artifact(
 
         # Provenance classification must run while the SOURCE tree still
         # exists (move staging consumes it). Read-only; the write half
-        # (`_carry_provenance`) runs after the lock releases and re-verifies
-        # the promoted bytes, so an edit slipping in between cannot be
+        # (`_carry_provenance`) runs below, still INSIDE this lock span, and
+        # re-verifies the promoted bytes, so an edit slipping in cannot be
         # blessed (the equality gate there is the actual TOCTOU close).
         provenance_plan = _plan_provenance()
 
@@ -1112,39 +1136,37 @@ def transfer_artifact(
                         dst_path=dst_path,
                     ) from exc
 
-    # Lock released. Bookkeeping + source fan-out cleanup — all
-    # deliberately OUTSIDE the artifact pair lock: ``Lockfile``
-    # serializes on its own sidecar lock, and a bookkeeping or partial
-    # fan-out cleanup failure must not roll back the committed transfer.
-    #
-    # Provenance carry-over (A-4 #1275) runs FIRST, in both modes, so a
-    # shared→shared move upserts the destination entry before dropping
-    # the source one — the carried record never has a gap where neither
-    # project tracks the artifact.
-    provenance, provenance_reason, provenance_reason_code = _provenance_fields(provenance_plan)
-    if provenance_plan is not None and provenance_plan.carry:
-        assert dst_root is not None  # shared→shared implies a project root
-        provenance, provenance_reason, provenance_reason_code = _carry_provenance(
-            kind, dst_name, dst_path, dst_root, provenance_plan
-        )
+        # Lockfile bookkeeping runs INSIDE the canonical lock span (ADR-0030 §6
+        # / Codex M): a concurrent wiki reinstall/upsert of this artifact must
+        # not interleave between the committed move and the source-entry drop,
+        # or transfer could delete a freshly reinstalled entry. It stays
+        # best-effort — the try/except (NOT releasing the lock) is what
+        # guarantees a bookkeeping failure never rolls back the committed
+        # transfer. Order: canonical (held) → lock.json (each ``Lockfile`` op
+        # takes its own sidecar beneath us).
+        #
+        # Provenance carry-over (A-4 #1275) runs FIRST, in both modes, so a
+        # shared→shared move upserts the destination entry before dropping the
+        # source one — the carried record never has a gap where neither project
+        # tracks the artifact.
+        provenance, provenance_reason, provenance_reason_code = _provenance_fields(provenance_plan)
+        if provenance_plan is not None and provenance_plan.carry:
+            assert dst_root is not None  # shared→shared implies a project root
+            provenance, provenance_reason, provenance_reason_code = _carry_provenance(
+                kind, dst_name, dst_path, dst_root, provenance_plan, lock_timeout=_lock_remaining()
+            )
 
-    fanout_cleaned: list[Path] = []
-    fanout_backed_up: list[Path] = []
-    if mode == "move":
-        # The wiki-install lockfile (``lock.json``) only tracks
-        # project_shared installs; moving an artifact OUT of project_shared
-        # leaves its entry dangling, and `mm context status` would then
-        # iterate that entry, find the canonical gone, and report the
-        # (now-moved) artifact as "missing" (#1123 B4-1). Drop the stale
-        # entry — at the SOURCE project's lockfile, unconditionally: even
-        # when the carry-over above declined or failed, the source
-        # canonical is gone and a dangling entry is pure status noise.
-        # Best-effort: the canonical move already committed inside the
-        # lock above, so a lock.json bookkeeping failure must NOT undo or
-        # fail the move — log loudly and continue.
-        if src_scope == "project_shared" and src_root is not None:
+        if mode == "move" and src_scope == "project_shared" and src_root is not None:
+            # The wiki-install lockfile (``lock.json``) only tracks
+            # project_shared installs; moving an artifact OUT of project_shared
+            # leaves its entry dangling, and `mm context status` would then
+            # iterate that entry, find the canonical gone, and report the
+            # (now-moved) artifact as "missing" (#1123 B4-1). Drop the stale
+            # entry at the SOURCE project's lockfile, unconditionally: even when
+            # the carry-over above declined or failed, the source canonical is
+            # gone and a dangling entry is pure status noise.
             try:
-                Lockfile.at(src_root).remove_entry(kind, name)
+                Lockfile.at(src_root).remove_entry(kind, name, lock_timeout=_lock_remaining())
             except Exception as exc:  # bookkeeping must never fail a committed move
                 logger.warning(
                     "transfer: failed to drop stale lock.json entry for %s/%s "
@@ -1155,10 +1177,16 @@ def transfer_artifact(
                     exc,
                 )
 
-        # Cleanup stale src runtime fan-out (best-effort). Two-root
-        # contract: discovery walks the SOURCE root's runtime tree;
-        # expected-render / override verification reads the canonical at
-        # its DESTINATION location (overrides travel with the artifact).
+    # Lock released. Source runtime fan-out cleanup touches runtime targets
+    # (``~/.claude`` etc.), never the canonical, and can be slow — so it runs
+    # OUTSIDE the canonical lock (best-effort; a partial cleanup must not fail
+    # the committed transfer).
+    fanout_cleaned: list[Path] = []
+    fanout_backed_up: list[Path] = []
+    if mode == "move":
+        # Two-root contract: discovery walks the SOURCE root's runtime tree;
+        # expected-render / override verification reads the canonical at its
+        # DESTINATION location (overrides travel with the artifact).
         fanout_cleaned, fanout_backed_up = _remove_runtime_fanout_for(
             kind,
             name,
