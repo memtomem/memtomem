@@ -60,8 +60,9 @@ class EvalCaseError(StorageError):
     Covers unpromotable runs (no feedback, unreplayable filters, project-scoped
     without a recorded root), name collisions, and conflicting per-hash labels
     (#1802). Subclasses :class:`StorageError` — the eval-case layer is storage.
-    The web quality router maps :class:`EvalCaseNotFoundError` to HTTP 404 and
-    every other :class:`EvalCaseError` (state conflicts) to 409.
+    The web quality router maps by type: :class:`EvalCaseNotFoundError` -> 404,
+    :class:`EvalCaseValidationError` (malformed input) -> 422, and every other
+    :class:`EvalCaseError` (state conflicts) -> 409.
     """
 
 

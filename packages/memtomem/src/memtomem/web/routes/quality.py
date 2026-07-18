@@ -4,9 +4,9 @@ Dev-only surface (see ``_DEV_ONLY_ROUTERS``): list evaluation cases, promote a
 labeled search run into a durable case, and replay cases into a deterministic
 retrieval-quality report. Advisory only; replay reports are ephemeral (run
 live, returned as JSON — never persisted). Reports carry no chunk text or
-absolute paths, but DO include each case's name (secret-scanned at promotion)
-and its raw, unsanitized query text — see ``web.schemas.quality`` for the full
-privacy contract.
+absolute paths, but DO include each case's name (secret-scanned at promotion,
+defensively redacted at emit for legacy rows) and its raw, unsanitized query
+text — see ``web.schemas.quality`` for the full privacy contract.
 
 Error mapping is router-local, by exception type (never message text —
 messages interpolate user-controlled names): :class:`EvalCaseNotFoundError` ->

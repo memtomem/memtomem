@@ -8,9 +8,10 @@ The replay **response** is the raw report dict returned by
 ``memtomem.quality.replay.replay_cases`` — no response_model, no re-projection.
 Retrieved rows carry no chunk text and no absolute paths (pinned by
 ``test_quality_replay.py``): content hashes + scores + metrics only. The report
-DOES include each case's name (secret-scanned at promotion) and its raw query
-text, which is NOT sanitized — a report is only as sensitive as the queries
-promoted into it. There is nothing to re-sanitize at this layer.
+DOES include each case's name (secret-scanned at promotion, and defensively
+redacted at report emit if a legacy row carries a secret or path) and its raw
+query text, which is NOT sanitized — a report is only as sensitive as the
+queries promoted into it. There is nothing to re-sanitize at this layer.
 """
 
 from __future__ import annotations

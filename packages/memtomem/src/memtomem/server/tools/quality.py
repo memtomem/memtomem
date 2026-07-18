@@ -23,8 +23,9 @@ async def mem_quality_replay(
     and returns the canonical JSON replay report (advisory). Retrieved rows
     carry no chunk text and no absolute paths — content hashes + scores +
     metrics only. The report DOES include each case's name (secret-scanned at
-    promotion) and its raw query text, which is NOT sanitized: a report is only
-    as sensitive as the queries promoted into it, so treat it accordingly.
+    promotion, and defensively redacted at emit if a legacy row carries a secret
+    or path) and its raw query text, which is NOT sanitized: a report is only as
+    sensitive as the queries promoted into it, so treat it accordingly.
     Also reachable as ``mem_do(action="quality_replay")``.
 
     Args:

@@ -2,9 +2,9 @@
 
 The router is dev-only and a thin translation layer over storage + the replay
 engine. Error mapping is router-local by exception *type*:
-``EvalCaseNotFoundError``→404, every other ``EvalCaseError``→409. Storage and
-the replay engine are mocked — the real contracts are pinned in
-``test_eval_cases.py`` / ``test_quality_replay.py``.
+``EvalCaseNotFoundError``→404, ``EvalCaseValidationError``→422, every other
+``EvalCaseError``→409. Storage and the replay engine are mocked — the real
+contracts are pinned in ``test_eval_cases.py`` / ``test_quality_replay.py``.
 """
 
 from __future__ import annotations
