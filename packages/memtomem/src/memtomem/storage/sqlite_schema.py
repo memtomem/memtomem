@@ -38,6 +38,13 @@ _UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
 # whenever create_tables gains a migration an older binary must not run
 # under. Same-or-older stored versions always pass (migrations stay
 # additive + idempotent); only stored > SCHEMA_VERSION is fatal.
+#
+# Adding a plain user-data table needs no bump: SqliteBackend.reset_all is
+# version-agnostic (enumerates sqlite_master), so an older binary resetting a
+# newer DB still wipes tables it doesn't know by name (#1826). This holds only
+# for disposable user-data tables — a new virtual-table module an older binary
+# can't DROP, or a trigger that repopulates a cleared table, falls outside that
+# envelope and DOES require a bump.
 SCHEMA_VERSION = 1
 
 _SCHEMA_VERSION_KEY = "schema_version"

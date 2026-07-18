@@ -85,6 +85,40 @@ _REBUILD_FTS_BATCH_SIZE = 1000
 _AI_SUMMARY_KEY_PREFIX = "ai_summary:"
 
 
+def _quote_ident(name: str) -> str:
+    """Quote a SQLite identifier for interpolation into DDL/DML.
+
+    ``reset_all`` interpolates table names discovered from ``sqlite_master``
+    (including tables an older binary has never heard of), so bracket quoting
+    (``[name]``) is unsafe — a valid identifier containing ``]`` would produce
+    invalid SQL and abort a privacy reset. Double-quote with embedded ``"``
+    doubled per the SQL standard.
+    """
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _is_virtual_table_sql(sql: str | None) -> bool:
+    """True if a ``sqlite_master.sql`` string declares a virtual table.
+
+    Token-based (not ``startswith``) so casing/whitespace of the stored DDL
+    cannot misclassify. The ``sql`` text is present regardless of whether the
+    virtual table's module is currently registered on the connection.
+    """
+    if not sql:
+        return False
+    return sql.upper().split()[:3] == ["CREATE", "VIRTUAL", "TABLE"]
+
+
+def _is_missing_module_error(exc: sqlite3.OperationalError) -> bool:
+    """True only for the ``no such module`` case (a vtab whose module is absent).
+
+    Used to positively classify the fail-closed fallback path in ``reset_all``
+    so unrelated ``OperationalError``s (corruption, I/O, locking) re-raise
+    instead of triggering shadow-table surgery.
+    """
+    return "no such module" in str(exc).lower()
+
+
 def _classify_startup_error(exc: BaseException, stage: str) -> StorageStartupError:
     sqlite_code = getattr(exc, "sqlite_errorcode", None)
     base_code = sqlite_code & 0xFF if isinstance(sqlite_code, int) else None
@@ -546,56 +580,196 @@ class SqliteBackend(
         """Backward-compatible wrapper around reset_embedding_meta()."""
         await self.reset_embedding_meta(dimension=new_dimension)
 
+    def _classify_tables(
+        self, rows: list[tuple[str, str | None]]
+    ) -> tuple[set[str], set[str], list[str]]:
+        """Split ``sqlite_master`` rows into (virtual, shadow, user) name sets.
+
+        - ``virtual`` — tables whose ``sql`` declares ``CREATE VIRTUAL TABLE``.
+        - ``shadow`` — the internal b-tree tables backing a virtual table.
+          ``PRAGMA main.table_list``'s ``shadow`` classification is authoritative
+          and preferred: it distinguishes a genuine shadow (which a direct
+          ``DELETE`` would corrupt, and which is cleared via the vtab's own
+          ``DELETE``/``DROP``) from a real user table that merely shares the
+          ``<vtab>_`` prefix (e.g. ``chunks_fts_private``), which MUST be wiped.
+          Two narrow additions cover its gaps:
+            * vec0 reports its ``<vtab>_vector_chunks<NN>`` store as a plain
+              ``table``, so that specific suffix is added back.
+            * When ``table_list`` is unavailable (SQLite < 3.37) the ``<vtab>_``
+              prefix is the only signal — it over-skips prefix-collision real
+              tables, but that is the lesser evil vs. corrupting a real shadow
+              with a direct ``DELETE`` on ancient SQLite. Schema-qualified
+              (``main.``) so an attached DB's shadow can't mask a ``main`` table.
+        - ``user`` — everything else except ``sqlite_%`` internals and the
+          preserved ``_memtomem_meta``.
+        """
+        db = self._get_db()
+        all_names = {name for name, _ in rows}
+        virtual = {name for name, sql in rows if _is_virtual_table_sql(sql)}
+
+        shadow: set[str] = set()
+        table_list_ok = False
+        try:
+            for row in db.execute("PRAGMA main.table_list").fetchall():
+                table_list_ok = True
+                tname, ttype = row[1], row[2]
+                if ttype == "shadow":
+                    shadow.add(tname)
+        except sqlite3.OperationalError:
+            table_list_ok = False
+
+        if table_list_ok:
+            # vec0's vector store is typed ``table`` by table_list — add it back.
+            shadow |= {
+                name
+                for name in all_names
+                if name not in virtual
+                and any(name.startswith(v + "_vector_chunks") for v in virtual)
+            }
+        else:
+            # No authoritative signal — fall back to the prefix rule.
+            shadow |= {
+                name
+                for name in all_names
+                if name not in virtual and any(name.startswith(v + "_") for v in virtual)
+            }
+
+        user = [
+            name
+            for name in all_names
+            if not name.startswith("sqlite_")
+            and name != "_memtomem_meta"
+            and name not in virtual
+            and name not in shadow
+        ]
+        return virtual, shadow, user
+
+    def _reset_unknown_virtual_table(
+        self,
+        db: sqlite3.Connection,
+        name: str,
+        shadow_names: set[str],
+        allow_fallback: bool,
+    ) -> tuple[int, bool]:
+        """Clear a virtual table the running binary didn't create.
+
+        Returns ``(row_count, incomplete)``. If the vtab's module is registered
+        the table is dropped cleanly (``create_tables`` recreates it on a newer
+        binary). If the module is **absent** (older binary opening a newer DB —
+        the #1826 downgrade case), ``COUNT``/``DROP`` raise ``no such module``;
+        we fall back to deleting rows from the vtab's shadow tables (plain
+        b-trees to a module-less connection) and return ``incomplete=True`` so
+        the caller can fail closed. Any non-missing-module error re-raises.
+
+        Takes ``db`` explicitly (rather than ``self._get_db()``) so the failure
+        path is testable against a real module-less connection. Never commits —
+        transaction ownership stays with ``reset_all``.
+        """
+        q = _quote_ident(name)
+        try:
+            count = db.execute(f"SELECT COUNT(*) FROM {q}").fetchone()[0]
+            db.execute(f"DROP TABLE {q}")
+            return count, False
+        except sqlite3.OperationalError as exc:
+            if not _is_missing_module_error(exc):
+                raise
+            if not allow_fallback:
+                # Inside a transaction() CM an inner commit would break the
+                # CM's rollback contract, and a best-effort wipe can't be
+                # proven complete — refuse and let the outer block roll back.
+                raise StorageError(
+                    f"reset incomplete: table {name!r} uses an unknown module; "
+                    "re-run reset standalone (not inside a transaction) on an "
+                    "up-to-date binary"
+                ) from exc
+            for shadow in sorted(s for s in shadow_names if s.startswith(name + "_")):
+                db.execute(f"DELETE FROM {_quote_ident(shadow)}")
+            return 0, True
+
     async def reset_all(self) -> dict[str, int]:
         """Drop all user data and reinitialize an empty schema.
 
-        Deletes every row from chunks, FTS, vectors, and all auxiliary tables
-        (access_log, query_history, sessions, etc.).  The ``_memtomem_meta``
+        Version-agnostic: enumerates every non-system table from
+        ``sqlite_master`` rather than a hardcoded list, so tables added by a
+        newer binary (or missed from an older list) are cleared too — closing
+        the downgrade→reset→upgrade privacy gap in #1826. The ``_memtomem_meta``
         table is preserved so embedding config survives, *except* for
-        ``ai_summary:*`` rows — those carry user-derived prose generated
-        from indexed source content and must respect the "Delete ALL data"
-        contract just like the chunks they were summarising.
+        ``ai_summary:*`` rows — those carry user-derived prose generated from
+        indexed source content and must respect the "Delete ALL data" contract
+        just like the chunks they were summarising.
 
-        Returns a dict mapping table name → number of deleted rows.
+        Runs inside a single write transaction with ``defer_foreign_keys=ON``
+        so deletion order is irrelevant (every table ends empty by commit). The
+        pragma must be set inside a real transaction — set with no open
+        transaction it survives a rollback — so an owned reset issues
+        ``BEGIN IMMEDIATE`` first; when borrowed by ``transaction()`` the prior
+        pragma value is restored before returning.
+
+        Returns a dict mapping table name → pre-reset row count (per-table, not
+        aliased). ``sqlite_stat*``/``sqlite_sequence`` bookkeeping is wiped but
+        omitted from the dict. If a virtual table's module is unavailable the
+        wipe is best-effort and the method raises ``StorageError`` after
+        committing what it could — success is never reported for a reset that
+        can't be proven complete.
         """
         db = self._get_db()
-        # Tables to clear, in dependency-safe order (children before parents).
-        tables = [
-            "session_events",
-            "sessions",
-            "working_memory",
-            "chunk_relations",
-            "chunk_entities",
-            "access_log",
-            "eval_case_labels",
-            "eval_cases",
-            "search_feedback",
-            "query_history",
-            "namespace_metadata",
-            "memory_policies",
-            "health_snapshots",
-        ]
+        owns_txn = not self._in_transaction
+        prior_defer = db.execute("PRAGMA defer_foreign_keys").fetchone()[0]
         deleted: dict[str, int] = {}
+        incomplete: list[str] = []
         try:
-            for tbl in tables:
-                exists = db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
-                ).fetchone()
-                if exists:
-                    count = db.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
-                    db.execute(f"DELETE FROM [{tbl}]")
-                    deleted[tbl] = count
+            # Take the write lock before enumerating, so a concurrent writer
+            # can't add a table between enumeration and deletion. The
+            # ``transaction()`` CM only flips ``_in_transaction`` — it does NOT
+            # begin a DB transaction — so gate on ``db.in_transaction``, not on
+            # ownership: a reset that is the first statement inside the CM still
+            # needs its own BEGIN IMMEDIATE.
+            if not db.in_transaction:
+                db.execute("BEGIN IMMEDIATE")
+            db.execute("PRAGMA defer_foreign_keys = ON")
 
-            # Core content tables
-            chunk_count = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            db.execute("DELETE FROM chunks")
-            deleted["chunks"] = chunk_count
+            rows: list[tuple[str, str | None]] = db.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            all_names = {name for name, _ in rows}
+            virtual_names, shadow_names, user_tables = self._classify_tables(rows)
 
-            # FTS virtual table — DELETE removes all content rows
-            db.execute("DELETE FROM chunks_fts")
-            deleted["chunks_fts"] = chunk_count
+            # Snapshot ALL counts before any DELETE. Cascades fire immediately
+            # even under deferred FKs, so counting lazily would under-report
+            # children emptied via ON DELETE CASCADE (e.g. chunk_links).
+            for tbl in user_tables:
+                deleted[tbl] = db.execute(f"SELECT COUNT(*) FROM {_quote_ident(tbl)}").fetchone()[0]
+            # Known virtual tables are always module-backed on the running
+            # binary; snapshot their real counts (no chunk_count aliasing).
+            if "chunks_fts" in virtual_names:
+                deleted["chunks_fts"] = db.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+            deleted["chunks_vec"] = (
+                db.execute("SELECT COUNT(*) FROM chunks_vec").fetchone()[0]
+                if "chunks_vec" in virtual_names
+                else 0
+            )
 
-            # Vector virtual table — drop + recreate is safest for vec0
+            # Virtual tables this binary didn't create (newer-schema tables).
+            # Processed BEFORE the plain-table deletes: an external-content FTS5
+            # table counts by reading its backing table, so emptying plain
+            # tables first would zero its pre-reset count.
+            for name in sorted(virtual_names - {"chunks_fts", "chunks_vec"}):
+                count, was_incomplete = self._reset_unknown_virtual_table(
+                    db, name, shadow_names, owns_txn
+                )
+                deleted[name] = count
+                if was_incomplete:
+                    incomplete.append(name)
+
+            # Plain user tables.
+            for tbl in user_tables:
+                db.execute(f"DELETE FROM {_quote_ident(tbl)}")
+
+            # FTS virtual table — DELETE removes all content rows.
+            if "chunks_fts" in virtual_names:
+                db.execute("DELETE FROM chunks_fts")
+
+            # Vector virtual table — drop + recreate is safest for vec0.
             db.execute("DROP TABLE IF EXISTS chunks_vec")
             db.execute("DROP TABLE IF EXISTS chunks_vec_info")
             if self._dimension > 0:
@@ -606,7 +780,15 @@ class SqliteBackend(
                 self._has_vec_table = True
             else:
                 self._has_vec_table = False
-            deleted["chunks_vec"] = chunk_count
+
+            # Query-planner statistics and AUTOINCREMENT counters carry
+            # user-derived state; wipe so a reset DB matches a fresh one.
+            # Omitted from the returned receipt (bookkeeping, not user tables).
+            for name in all_names:
+                if name.startswith("sqlite_stat"):
+                    db.execute(f"DELETE FROM {_quote_ident(name)}")
+            if "sqlite_sequence" in all_names:
+                db.execute("DELETE FROM sqlite_sequence")
 
             # AI summary cache lives in ``_memtomem_meta`` (the table is
             # otherwise preserved for embedding config). Rows under the
@@ -626,12 +808,32 @@ class SqliteBackend(
             )
             deleted["ai_summaries"] = ai_summary_count
 
-            if not self._in_transaction:
+            if owns_txn:
                 db.commit()
+            else:
+                # Borrowed transaction: restore the caller's FK-check timing.
+                db.execute(f"PRAGMA defer_foreign_keys = {int(prior_defer)}")
+        except StorageError:
+            # A fail-closed refusal from inside a transaction() CM — preserve
+            # its remediation message (the outer CM performs the rollback).
+            if owns_txn:
+                db.rollback()
+            raise
         except Exception as exc:
-            if not self._in_transaction:
+            if owns_txn:
                 db.rollback()
             raise StorageError(f"reset_all failed, transaction rolled back: {exc}") from exc
+
+        # Raised OUTSIDE the try/except: the wipe above is committed, so this
+        # must not be no-op-rolled-back or rewrapped as "transaction rolled
+        # back". Best-effort shadow deletion of an unknown-module vtab can't be
+        # proven complete, so fail closed rather than report success.
+        if incomplete:
+            raise StorageError(
+                "reset incomplete: table(s) "
+                + ", ".join(sorted(incomplete))
+                + " use unknown module(s); re-run reset on an up-to-date binary"
+            )
         return deleted
 
     # ---- chunk CRUD ----------------------------------------------------------
