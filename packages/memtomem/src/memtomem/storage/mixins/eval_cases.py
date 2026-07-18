@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from memtomem.errors import EvalCaseError
+from memtomem.errors import EvalCaseError, EvalCaseNotFoundError
 from memtomem.models import ScopeFilter
 from memtomem.storage.mixins.history import FEEDBACK_JUDGMENTS
 from memtomem.storage.sqlite_scope import _scopes_glob_clause, _scopes_in_clause
@@ -232,7 +232,7 @@ class EvalCaseMixin:
                 (run_id,),
             ).fetchone()
             if run is None:
-                raise EvalCaseError(f"run_id {run_id!r} not found")
+                raise EvalCaseNotFoundError(f"run_id {run_id!r} not found")
             query_text, observation_json, snapshot_json = run
             observation = json.loads(observation_json or "{}")
             snapshot = json.loads(snapshot_json or "[]")
@@ -423,7 +423,7 @@ class EvalCaseMixin:
         ).fetchone()
         if by_name is not None:
             return by_name[0]
-        raise EvalCaseError(f"eval case {case_id_or_name!r} not found")
+        raise EvalCaseNotFoundError(f"eval case {case_id_or_name!r} not found")
 
     async def get_eval_case(self, case_id_or_name: str) -> dict[str, Any]:
         """One case with its labels, looked up by case_id then by name."""
@@ -437,7 +437,7 @@ class EvalCaseMixin:
             (case_id,),
         ).fetchone()
         if row is None:
-            raise EvalCaseError(f"eval case {case_id_or_name!r} not found")
+            raise EvalCaseNotFoundError(f"eval case {case_id_or_name!r} not found")
         labels = db.execute(
             "SELECT chunk_id, content_hash, judgment, created_at FROM eval_case_labels "
             "WHERE case_id = ? ORDER BY content_hash",

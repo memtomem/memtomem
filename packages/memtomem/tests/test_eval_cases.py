@@ -13,7 +13,7 @@ import json
 import pytest
 
 from memtomem.config import StorageConfig
-from memtomem.errors import EvalCaseError
+from memtomem.errors import EvalCaseError, EvalCaseNotFoundError
 from memtomem.storage.sqlite_backend import SqliteBackend
 
 RUN_A = "11111111-1111-4111-8111-111111111111"
@@ -105,7 +105,9 @@ class TestPromotion:
         assert {lab["chunk_id"] for lab in case["labels"]} == {"c1", "c2"}
 
     async def test_refuses_unknown_run(self, storage):
-        with pytest.raises(EvalCaseError, match="not found"):
+        # The typed subclass lets the web surface map this to 404 without
+        # message-substring matching (#1802 PR-5).
+        with pytest.raises(EvalCaseNotFoundError, match="not found"):
             await storage.promote_search_run(RUN_A, fingerprints=FP)
 
     async def test_refuses_run_without_feedback(self, storage):
@@ -239,7 +241,7 @@ class TestRetrieval:
         assert by_id["case_id"] == by_name["case_id"]
 
     async def test_get_missing_raises(self, storage):
-        with pytest.raises(EvalCaseError, match="not found"):
+        with pytest.raises(EvalCaseNotFoundError, match="not found"):
             await storage.get_eval_case("nope")
 
     async def test_set_status_bumps_updated_at(self, storage):
