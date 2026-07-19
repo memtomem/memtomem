@@ -770,7 +770,7 @@ def test_q_pr3_settings_zero_total_renders_empty(page, mm_web_url: str) -> None:
 # ``/api/context/overview`` per-status counts — no new wire fields. Three
 # pointer phrasings, fixed priority order:
 #
-#   1. ``missing_target > 0``  → "Run Sync All to push N missing entries."
+#   1. ``missing_target > 0``  → "Run Push All to push N missing entries."
 #                                 (data-action=sync-all)
 #   2. ``out_of_sync > 0``     → "Open <leaf> to resolve N differences."
 #                                 (data-action=leaf, direction-neutral)
@@ -990,7 +990,7 @@ def test_pointer_priority_order_with_all_three_counts(page, mm_web_url: str) -> 
     then ``out_of_sync`` (direction-neutral resolve), then
     ``missing_canonical`` (pull unambiguous). The order encodes the
     least-ambiguous-action-first heuristic; flipping it would surface
-    the leaf-import line above the dashboard-Sync-All line and re-
+    the leaf-import line above the dashboard-Push-All line and re-
     introduce the "which action do I take" ambiguity ADR-0009 was
     written to remove.
     """
@@ -1025,7 +1025,7 @@ def test_pointer_priority_order_with_all_three_counts(page, mm_web_url: str) -> 
     )
 
     texts = [(pointers.nth(i).text_content() or "").strip() for i in range(3)]
-    # missing_target = 3 → "Run Sync All to push 3 missing entries."
+    # missing_target = 3 → "Run Push All to push 3 missing entries."
     assert "3" in texts[0] and "Push All" in texts[0], (
         f"first pointer must be missing_target (count=3, Sync All); got: {texts[0]!r}"
     )
@@ -1280,7 +1280,7 @@ def test_parse_error_does_not_suppress_other_pointers(page, mm_web_url: str) -> 
     """U11 / ADR-0009 §2 mixed-combination rule: one unparseable file must not
     hide the remediation pointers for the OTHER statuses on the same tile.
     Pre-change the pointer block was gated on ``parseError === 0``, so a tile
-    with 1 parse error and 2 missing-target entries lost its "Run Sync All"
+    with 1 parse error and 2 missing-target entries lost its "Run Push All"
     line exactly when sync work was pending.
     """
     install_default_stubs(page)

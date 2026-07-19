@@ -457,7 +457,7 @@
   "settings.ctx.active": "선택됨",
   "settings.ctx.select": "선택",
   "settings.ctx.sync_started": "프로젝트 내보내는 중...",
-  "settings.ctx.matrix_sync_disabled_title": "로컬 초안이거나 누락된 프로젝트는 런타임으로 내보내지 않습니다",
+  "settings.ctx.matrix_sync_disabled_title": "로컬 초안이거나 누락된 프로젝트는 런타임으로 동기화하지 않습니다",
   "settings.ctx.matrix_sync_not_enrolled_title": "비활성 — 프로젝트 보드에서 이 프로젝트를 활성화하면 동기화할 수 있습니다",
   "settings.ctx.matrix_sync_paused_title": "동기화 중지됨 — 프로젝트 보드에서 재개하세요",
   "settings.ctx.error_sync_paused": "프로젝트 동기화가 중지되었습니다 — 프로젝트 보드에서 재개하세요.",

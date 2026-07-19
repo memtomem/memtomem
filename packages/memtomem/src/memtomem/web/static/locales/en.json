@@ -457,7 +457,7 @@
   "settings.ctx.active": "Selected",
   "settings.ctx.select": "Select",
   "settings.ctx.sync_started": "Pushing project...",
-  "settings.ctx.matrix_sync_disabled_title": "No runtime push for local drafts or missing projects",
+  "settings.ctx.matrix_sync_disabled_title": "No runtime sync for local drafts or missing projects",
   "settings.ctx.matrix_sync_not_enrolled_title": "Not active — activate this project on the Projects board to sync it",
   "settings.ctx.matrix_sync_paused_title": "Sync paused — resume it on the Projects board",
   "settings.ctx.error_sync_paused": "Project sync is paused — resume it on the Projects board.",

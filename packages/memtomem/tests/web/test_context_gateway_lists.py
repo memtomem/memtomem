@@ -707,7 +707,7 @@ def test_missing_canonical_remediation_lists_project_shared_cli_commands(
     )
     banner.wait_for(timeout=5_000)
     text = banner.text_content() or ""
-    assert "Click Pull" in text, f"project_shared remediation should mention web Import: {text!r}"
+    assert "Click Pull" in text, f"project_shared remediation should mention web Pull: {text!r}"
     assert (
         "mm context init --include=agents,commands,skills "
         "--scope project_shared --confirm-project-shared"
