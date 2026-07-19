@@ -115,6 +115,30 @@ describe('Global library section (ADR-0030 PR-F2)', () => {
     expect(navDot(window).hidden).toBe(false);
   });
 
+  it('renders an error-verdict row with its (redacted) reason, no badge-drift, no Pull', async () => {
+    const { window } = await boot();
+    installFetch(window, { statusGlobal: async () => jsonOk({
+      scope: 'user',
+      store: { skills: 1, agents: 0, commands: 0 },
+      runtime_coverage: [],
+      pull_drift: {
+        has_pull_drift: false, total: 1, differs: 0, errors: 1, identical: 0,
+        rows: [{ kind: 'skills', name: 'broken', verdict: 'error', runtimes: [], reason: 'permission denied' }],
+      },
+    }) });
+    await window.loadCtxGlobal();
+    await flush();
+
+    // The error row shows its server-redacted reason (escaped at the sink)...
+    expect(driftBadge(window, 'error')).not.toBeNull();
+    const reason = window.document.querySelector('.ctx-global-row-reason');
+    expect(reason).not.toBeNull();
+    expect(reason.textContent).toContain('permission denied');
+    // ...and is neither pullable nor drift (an error is indeterminate).
+    expect(window.document.querySelectorAll('.ctx-global-pull-btn').length).toBe(0);
+    expect(navDot(window).hidden).toBe(true);
+  });
+
   it('shows the in-sync summary, no Pull button, and no nav dot for a clean Store', async () => {
     const { window } = await boot();
     installFetch(window, { statusGlobal: async () => jsonOk(cleanPayload()) });
