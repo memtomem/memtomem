@@ -39,7 +39,6 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from memtomem.context import _skip_reasons as skip_codes
-from memtomem.context._atomic import atomic_write_text
 from memtomem.context._atomic_reverse import (
     canonical_artifact_name,
     diff_atomic_artifact,
@@ -47,6 +46,11 @@ from memtomem.context._atomic_reverse import (
     list_canonical_artifacts,
     resolve_artifact_extract_target,
     resolve_artifact_under_root,
+)
+from memtomem.context._canonical_txn import (
+    _CANONICAL_LOCK_BUDGET_S,
+    new_lock_budget,
+    write_canonical_locked,
 )
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.config import TargetScope
@@ -618,6 +622,10 @@ def extract_commands_to_canonical(
             "command_name": cmd_name,
         }
 
+    # One shared canonical-lock budget for the whole call (claude passthrough +
+    # gemini TOML branch), so a batch import is bounded by one budget (§6).
+    lock_remaining = new_lock_budget()
+
     # ── Claude branch — byte-level passthrough (Markdown + YAML) ──
     if "claude" in runtimes:
         import_passthrough_runtime(
@@ -641,6 +649,7 @@ def extract_commands_to_canonical(
             source_runtimes=source_runtimes,
             runtime_candidates=runtime_candidates,
             logger=logger,
+            lock_remaining=lock_remaining,
         )
 
     # ── Gemini branch — TOML → canonical Markdown conversion ──
@@ -717,8 +726,43 @@ def extract_commands_to_canonical(
             # ``dry_run`` records the would-import target but skips the write
             # so the preview never mutates disk (rank-10).
             if not dry_run:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_text(dst, canonical_content)
+
+                def _resolve() -> tuple[Path, Layout]:
+                    # Re-resolve under the lock (ADR-0030 §6) — layout may have
+                    # changed (flat→dir migrate) since the pre-lock resolve.
+                    return resolve_artifact_extract_target(
+                        canonical_root,
+                        cmd_name,
+                        artifact_label="commands",
+                        dir_filename=COMMAND_DIR_FILENAME,
+                        logger=logger,
+                    )
+
+                try:
+                    write_outcome, dst, layout = write_canonical_locked(
+                        canonical_root,
+                        cmd_name,
+                        # Byte-identical to the prior ``atomic_write_text`` (utf-8).
+                        canonical_content.encode("utf-8"),
+                        resolve_target=_resolve,
+                        overwrite=overwrite,
+                        lock_timeout=lock_remaining(),
+                    )
+                except TimeoutError:
+                    reason = (
+                        "another process held the canonical destination lock past "
+                        f"the {_CANONICAL_LOCK_BUDGET_S:g}s acquisition budget — "
+                        "re-run the import to retry"
+                    )
+                    skipped.append((cmd_name, reason, skip_codes.LOCK_TIMEOUT))
+                    logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                    continue
+                if write_outcome == "exists":
+                    reason = "canonical exists (use --overwrite)"
+                    skipped.append((cmd_name, reason, skip_codes.CANONICAL_EXISTS))
+                    logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                    seen[cmd_name] = gemini_label
+                    continue
             imported.append((dst, layout))
             seen[cmd_name] = gemini_label
             source_runtimes[cmd_name] = "gemini"

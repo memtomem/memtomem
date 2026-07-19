@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 
 from memtomem.context import versioning
+from memtomem.context._canonical_txn import versioning_op_locked
 from memtomem.context._atomic import atomic_write_text
 from memtomem.context.agents import (
     AGENT_DIR_FILENAME,
@@ -1649,34 +1650,41 @@ def version_create_cmd(artifact_type: str, name: str, note: str, scope_flag: str
             f"to adopt a flat-layout file (wiki-installed assets: "
             f"`mm context migrate {artifact_type} {name}`)."
         )
-    # Gate A on the snapshot bytes (ADR-0011 trust boundary): creating a version
-    # is a new write into a git-tracked tree for project_shared, so a privacy
-    # hit must hard-refuse before versions/vN.md lands. user / project_local
-    # are permissive (the working file already holds the content locally, so a
-    # snapshot adds no exposure) — raise_or_collect only raises for
-    # project_shared and returns a skip tuple (ignored here) otherwise.
-    # Read ONCE and snapshot the SAME bytes (source_bytes=) so a concurrent edit
-    # between scan and write cannot slip unscanned bytes into the version.
-    try:
-        snapshot_bytes = working_file.read_bytes()
-    except OSError as exc:
-        raise click.ClickException(f"cannot read {working_file}: {exc}") from exc
-    file_scan = scan_text_content(
-        snapshot_bytes.decode("utf-8", errors="replace"),
-        source_path=working_file,
-        surface="cli_context_version_create",
-        scope=scope,
-        project_root=root,
-    )
-    if file_scan.decision in ("blocked", "blocked_project_shared"):
+
+    def _create_locked(lt: float | None) -> versioning.VersionRecord:
+        # ADR-0030 §6: read + Gate-A scan + snapshot all run INSIDE the canonical
+        # lock (C0), so a concurrent Pull/CRUD edit landing between the read and
+        # the version write cannot slip unscanned / stale bytes into the snapshot.
+        # Gate A on the snapshot bytes (ADR-0011 trust boundary): a version write
+        # into a git-tracked project_shared tree must hard-refuse a privacy hit
+        # before versions/vN.md lands; user / project_local are permissive
+        # (raise_or_collect only raises for project_shared).
         try:
-            raise_or_collect(file_scan, scope=scope, kind=artifact_type[:-1], artifact_name=name)
-        except PrivacyScanError as exc:
-            raise click.ClickException(exc.message) from exc
-    try:
-        record = versioning.create_version(
-            artifact_dir, working_file, note=note, source_bytes=snapshot_bytes
+            snapshot_bytes = working_file.read_bytes()
+        except OSError as exc:
+            raise click.ClickException(f"cannot read {working_file}: {exc}") from exc
+        file_scan = scan_text_content(
+            snapshot_bytes.decode("utf-8", errors="replace"),
+            source_path=working_file,
+            surface="cli_context_version_create",
+            scope=scope,
+            project_root=root,
         )
+        if file_scan.decision in ("blocked", "blocked_project_shared"):
+            try:
+                raise_or_collect(
+                    file_scan, scope=scope, kind=artifact_type[:-1], artifact_name=name
+                )
+            except PrivacyScanError as exc:
+                raise click.ClickException(exc.message) from exc
+        return versioning.create_version(
+            artifact_dir, working_file, note=note, source_bytes=snapshot_bytes, lock_timeout=lt
+        )
+
+    try:
+        # Canonical name lock → versions.json (blocking, the CLI's historical
+        # Ctrl-C-able wait).
+        record = versioning_op_locked(artifact_dir, timeout=None, op=_create_locked)
     except versioning.VersionError as exc:
         raise click.ClickException(str(exc)) from exc
     click.secho(f"Created {artifact_type}/{name} version {record.tag}", fg="green")
@@ -1699,7 +1707,12 @@ def version_promote_cmd(
     """
     artifact_dir, _, _, _ = _resolve_version_target(artifact_type, name, scope_flag)
     try:
-        versioning.promote_label(artifact_dir, label, version)
+        # ADR-0030 §6 (Codex B4): canonical name lock first, then versions.json.
+        versioning_op_locked(
+            artifact_dir,
+            timeout=None,
+            op=lambda lt: versioning.promote_label(artifact_dir, label, version, lock_timeout=lt),
+        )
     except versioning.VersionError as exc:
         raise click.ClickException(str(exc)) from exc
     click.secho(f"Promoted {artifact_type}/{name}: {label} → {version}", fg="green")
@@ -1760,8 +1773,13 @@ def version_delete_label_cmd(
             f"version store — run `mm context version enable {artifact_type} {name}` first."
         )
     try:
-        versioning.delete_label(artifact_dir, label)
-        manifest = versioning.load_manifest(artifact_dir)
+        # ADR-0030 §6 (Codex B4): canonical name lock first, then versions.json;
+        # the manifest read rides the same lock span.
+        def _delete(lt: float | None) -> versioning.VersionsManifest:
+            versioning.delete_label(artifact_dir, label, lock_timeout=lt)
+            return versioning.load_manifest(artifact_dir)
+
+        manifest = versioning_op_locked(artifact_dir, timeout=None, op=_delete)
     except versioning.VersionError as exc:
         raise click.ClickException(str(exc)) from exc
     click.secho(f"Dropped label {label!r} from {artifact_type}/{name}", fg="green")

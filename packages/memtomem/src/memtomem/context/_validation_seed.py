@@ -46,6 +46,7 @@ from typing import Any
 
 from memtomem.config import TargetScope
 from memtomem.context._atomic import atomic_write_bytes, atomic_write_text
+from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.mcp_servers import CANONICAL_MCP_SERVER_ROOT, PROJECT_MCP_CONFIG
 from memtomem.context.scope_resolver import ArtifactKind
@@ -140,7 +141,13 @@ def seed_adr0026_validation_states(project_root: Path) -> dict[str, Any]:
         f"# {SKILL_OUT_OF_SYNC}\n\nStore version (v2): reviews diffs for correctness.\n"
     )
     review_claude_stale = f"# {SKILL_OUT_OF_SYNC}\n\nRuntime version (v1): older copy in Claude.\n"
-    _write_lf(skill_canon / SKILL_OUT_OF_SYNC / SKILL_MANIFEST, review_canonical)
+    # ADR-0030 §6: this first-party seeder writes canonical Store skills and can
+    # target a live project via ``mm context validate-seed --force``, so its
+    # canonical writes take the name-keyed lock like every other first-party
+    # writer. The runtime-fan-out writes below are runtime targets, not
+    # canonicals, and stay unlocked.
+    with canonical_sidecar_lock(skill_canon, SKILL_OUT_OF_SYNC):
+        _write_lf(skill_canon / SKILL_OUT_OF_SYNC / SKILL_MANIFEST, review_canonical)
     for runtime, root in skill_runtimes.items():
         body = review_claude_stale if runtime == _RUNTIME else review_canonical
         _write_lf(root / SKILL_OUT_OF_SYNC / SKILL_MANIFEST, body)
@@ -148,7 +155,8 @@ def seed_adr0026_validation_states(project_root: Path) -> dict[str, Any]:
     # (f) IN SYNC — canonical byte-identical in every skill runtime (baseline +
     # the P5 "already synced, what does Sync do to it?" item).
     in_sync_body = f"# {SKILL_IN_SYNC}\n\nWrites Conventional Commit messages.\n"
-    _write_lf(skill_canon / SKILL_IN_SYNC / SKILL_MANIFEST, in_sync_body)
+    with canonical_sidecar_lock(skill_canon, SKILL_IN_SYNC):
+        _write_lf(skill_canon / SKILL_IN_SYNC / SKILL_MANIFEST, in_sync_body)
     for root in skill_runtimes.values():
         _write_lf(root / SKILL_IN_SYNC / SKILL_MANIFEST, in_sync_body)
 

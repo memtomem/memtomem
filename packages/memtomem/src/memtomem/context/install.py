@@ -49,6 +49,7 @@ from memtomem.context._atomic import (
     is_copy_skipped_rel,
     iter_installed_files,
 )
+from memtomem.context._canonical_txn import canonical_lock_shared_budget
 from memtomem.context._names import validate_name
 from memtomem.context.dirty import DirtyReport, is_asset_dirty
 from memtomem.context.lockfile import (
@@ -801,27 +802,44 @@ def _install_asset(
         ),
     )
 
-    # Commit-true extraction (#1643): bytes come from git objects at the
-    # pinned commit, never the worktree, so the lockfile's digests/
-    # files_commit claims below are literally true. copy_asset_at_commit
-    # does its own dest.parent.mkdir + tmpdir-adjacent materialization and
-    # applies the same skip predicate as the old copytree.
-    digest_map = wiki.copy_asset_at_commit(wiki_commit, asset_type, validated, dest)
+    # ADR-0030 §6: hold the name-keyed canonical lock across the canonical
+    # write + lock.json upsert (canonical → lock.json order, one shared budget)
+    # so a concurrent Pull / transfer / migrate can't race the fresh install.
+    with canonical_lock_shared_budget(dest.parent, validated, timeout=lock_timeout) as _remaining:
+        # ADR-0030 §6: re-check dest + lockfile entry INSIDE C0. The pre-lock
+        # check above (has_dest/has_lock) can go stale — a concurrent CRUD /
+        # Pull / install could have created the dest or lock.json entry while we
+        # waited for the lock, and copying over it would silently clobber
+        # instead of refusing. The pre-lock check keeps the rich remediation
+        # message for the common case; this is the narrow race guard.
+        if dest.exists() or lock.read_entry(asset_type, validated) is not None:
+            raise AlreadyInstalledError(
+                f"{asset_type}/{validated}: appeared during install lock "
+                f"acquisition (dest or lockfile entry now present); run "
+                f"`mm context update {asset_type.removesuffix('s')} {validated}` "
+                f"to refresh from wiki HEAD."
+            )
+        # Commit-true extraction (#1643): bytes come from git objects at the
+        # pinned commit, never the worktree, so the lockfile's digests/
+        # files_commit claims below are literally true. copy_asset_at_commit
+        # does its own dest.parent.mkdir + tmpdir-adjacent materialization and
+        # applies the same skip predicate as the old copytree.
+        digest_map = wiki.copy_asset_at_commit(wiki_commit, asset_type, validated, dest)
 
-    # files= derives from the extractor's WRITTEN set (#1247 id 15) — and the
-    # source is now an immutable commit, so no concurrent wiki addition can
-    # be absorbed into the manifest as if wiki-shipped.
-    installed_at = installed_at_from_dest(dest)
-    lock.upsert_entry(
-        asset_type,
-        validated,
-        wiki_commit=wiki_commit,
-        installed_at=installed_at,
-        files=sorted(digest_map),
-        files_commit=wiki_commit,
-        digests=digest_map,
-        lock_timeout=lock_timeout,
-    )
+        # files= derives from the extractor's WRITTEN set (#1247 id 15) — and
+        # the source is now an immutable commit, so no concurrent wiki addition
+        # can be absorbed into the manifest as if wiki-shipped.
+        installed_at = installed_at_from_dest(dest)
+        lock.upsert_entry(
+            asset_type,
+            validated,
+            wiki_commit=wiki_commit,
+            installed_at=installed_at,
+            files=sorted(digest_map),
+            files_commit=wiki_commit,
+            digests=digest_map,
+            lock_timeout=_remaining(),
+        )
 
     return InstallResult(
         asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),
@@ -1578,57 +1596,89 @@ def _apply_update(
             name=name,
         )
 
-    bak_paths: list[Path] = []
-    for f in files_to_bak:
-        bak = f.with_suffix(f.suffix + ".bak")
-        # shutil.copy2 preserves user edit's mtime — atomic_write_bytes
-        # would lose it. Race window between copy2 and the pinned
-        # extraction is sub-ms; acceptable for v1. Overwrite-if-exists
-        # policy (prior .bak from earlier --force gets replaced).
-        shutil.copy2(f, bak)
-        bak_paths.append(bak)
+    # ADR-0030 §6: hold the name-keyed canonical lock across the whole
+    # destination mutation (.bak → copy → reconcile → lock.json upsert) so a
+    # concurrent Pull / transfer / migrate / version op on this artifact
+    # serializes with the wiki update instead of racing it. One shared budget
+    # spans the canonical lock and the ``lock.json`` acquisition (canonical →
+    # lock.json order).
+    with canonical_lock_shared_budget(dest.parent, name, timeout=lock_timeout) as _remaining:
+        # ADR-0030 §6: re-classify dirtiness INSIDE C0. The pre-lock
+        # ``dirty_report`` (and the ``files_to_bak`` derived from it) can go
+        # stale — a first-party edit (a CRUD save / Pull, now serialized on this
+        # same lock) can land between that check and this acquisition. Re-run
+        # ``is_asset_dirty`` so a fresh edit is refused (no --force) or backed up
+        # (--force) instead of being clobbered without a .bak.
+        dirty_locked = is_asset_dirty(project_root, asset_type, name, lock_entry=lock_entry)
+        if dirty_locked.reason == "dirty" and not force:
+            raise StaleInstallError(
+                f"{asset_type}/{name}: {dirty_locked.summary()} "
+                f"since install at {dirty_locked.installed_at}; pass --force to overwrite "
+                f"(each modified file gets a .bak sibling; deleted files are restored)"
+            )
+        if force and dirty_locked.reason == "dirty" and dirty_locked.dirty_files != files_to_bak:
+            # A fresh edit appeared under the lock — back up the current dirty
+            # set (scanned for secrets like the pre-lock set) before overwrite.
+            files_to_bak = dirty_locked.dirty_files
+            _gate_a_scan_dirty_files(
+                files_to_bak,
+                surface=surface,
+                project_root=project_root,
+                asset_type=asset_type,
+                name=name,
+            )
 
-    # Commit-true extraction (#1652): bytes come from git objects at the
-    # pinned commit, never the worktree, so the lockfile's digests/
-    # files_commit claims below are literally true. copy_asset_at_commit
-    # does its own dest.parent.mkdir + tmpdir-adjacent materialization and
-    # applies the same skip predicate as the old copytree.
-    digest_map = wiki.copy_asset_at_commit(wiki_commit, asset_type, name, dest)
+        bak_paths: list[Path] = []
+        for f in files_to_bak:
+            bak = f.with_suffix(f.suffix + ".bak")
+            # shutil.copy2 preserves user edit's mtime — atomic_write_bytes
+            # would lose it. Race window between copy2 and the pinned
+            # extraction is sub-ms; acceptable for v1. Overwrite-if-exists
+            # policy (prior .bak from earlier --force gets replaced).
+            shutil.copy2(f, bak)
+            bak_paths.append(bak)
 
-    # Mirror semantics (#1247): drop dest files the pin no longer ships.
-    # Membership is the extractor's RETURNED written set, not a re-walk of
-    # the wiki (#1247 id 15 impl gate; the source is now an immutable
-    # commit — #1652 — so the walk-a-different-snapshot hazard the
-    # worktree copy had is closed by construction, and the returned map
-    # remains the single provenance surface).
-    # The map shares the extractor's skip rules by construction, covering
-    # B5's symlink concern (a wiki file replaced by a symlink is absent
-    # from the map, so the old regular file in dest reconciles away). The
-    # guard epoch is the PRE-update install timestamp (the same basis
-    # ``dirty_report`` classified against) — the freshly captured value
-    # below is >= every current mtime and would approve deleting
-    # anything. ``old_digests`` likewise comes from the OLD entry.
-    files_removed = _reconcile_removed_files(
-        dest,
-        src_has=lambda rel: rel in digest_map,
-        old_installed_at_epoch=installed_at_epoch_from_entry(lock_entry),
-        baked=frozenset(files_to_bak),
-        manifest=manifest_from_entry(lock_entry),
-        old_digests=digests_from_entry(lock_entry),
-    )
+        # Commit-true extraction (#1652): bytes come from git objects at the
+        # pinned commit, never the worktree, so the lockfile's digests/
+        # files_commit claims below are literally true. copy_asset_at_commit
+        # does its own dest.parent.mkdir + tmpdir-adjacent materialization and
+        # applies the same skip predicate as the old copytree.
+        digest_map = wiki.copy_asset_at_commit(wiki_commit, asset_type, name, dest)
 
-    installed_at = installed_at_from_dest(dest)
-    lock = Lockfile.at(project_root)
-    lock.upsert_entry(
-        asset_type,
-        name,
-        wiki_commit=wiki_commit,
-        installed_at=installed_at,
-        files=sorted(digest_map),
-        files_commit=wiki_commit,
-        digests=digest_map,
-        lock_timeout=lock_timeout,
-    )
+        # Mirror semantics (#1247): drop dest files the pin no longer ships.
+        # Membership is the extractor's RETURNED written set, not a re-walk of
+        # the wiki (#1247 id 15 impl gate; the source is now an immutable
+        # commit — #1652 — so the walk-a-different-snapshot hazard the
+        # worktree copy had is closed by construction, and the returned map
+        # remains the single provenance surface).
+        # The map shares the extractor's skip rules by construction, covering
+        # B5's symlink concern (a wiki file replaced by a symlink is absent
+        # from the map, so the old regular file in dest reconciles away). The
+        # guard epoch is the PRE-update install timestamp (the same basis
+        # ``dirty_report`` classified against) — the freshly captured value
+        # below is >= every current mtime and would approve deleting
+        # anything. ``old_digests`` likewise comes from the OLD entry.
+        files_removed = _reconcile_removed_files(
+            dest,
+            src_has=lambda rel: rel in digest_map,
+            old_installed_at_epoch=installed_at_epoch_from_entry(lock_entry),
+            baked=frozenset(files_to_bak),
+            manifest=manifest_from_entry(lock_entry),
+            old_digests=digests_from_entry(lock_entry),
+        )
+
+        installed_at = installed_at_from_dest(dest)
+        lock = Lockfile.at(project_root)
+        lock.upsert_entry(
+            asset_type,
+            name,
+            wiki_commit=wiki_commit,
+            installed_at=installed_at,
+            files=sorted(digest_map),
+            files_commit=wiki_commit,
+            digests=digest_map,
+            lock_timeout=_remaining(),
+        )
 
     old_wiki_commit = cast(str, lock_entry.get("wiki_commit", ""))
 
@@ -2326,45 +2376,73 @@ def _apply_pinned_install(
             name=name,
         )
 
-    bak_paths: list[Path] = []
-    for f in files_to_bak:
-        bak = f.with_suffix(f.suffix + ".bak")
-        shutil.copy2(f, bak)
-        bak_paths.append(bak)
-
-    digest_map = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
-
-    # Mirror semantics (#1247): a re-extraction over an existing dest must
-    # also retire dest-only leftovers (pre-B1 additive-update residue,
-    # carried files from a different pin). Membership comes from the pin's
-    # ls-tree set — the extraction tmpdir is internal to
-    # ``copy_asset_at_commit`` (design-gate M2).
-    files_removed: tuple[Path, ...] = ()
-    if classification.state in ("skip", "refuse"):
-        expected = set(wiki.asset_files_at_commit(pin, asset_type, name))
-        entry = classification.lock_entry or {}
-        files_removed = _reconcile_removed_files(
-            dest,
-            src_has=lambda rel: rel in expected,
-            old_installed_at_epoch=installed_at_epoch_from_entry(entry),
-            baked=frozenset(files_to_bak),
-            manifest=manifest_from_entry(entry),
-            old_digests=digests_from_entry(entry),
+    # ADR-0030 §6: hold the name-keyed canonical lock across the destination
+    # mutation (.bak → copy → reconcile → lock.json upsert), same as the fresh
+    # install / update paths. This path has no ``lock_timeout`` axis — it blocks
+    # (the historical ``install --all`` behavior); ``_remaining()`` returns None.
+    with canonical_lock_shared_budget(dest.parent, name, timeout=None) as _remaining:
+        # ADR-0030 §6: re-classify dirtiness INSIDE C0 (see _apply_update). A
+        # first-party edit (CRUD/Pull, now C0-serialized) landing between the
+        # pre-lock ``report`` and this acquisition is refused (no --force) or
+        # backed up (--force), never clobbered without a .bak.
+        report_locked = is_asset_dirty(
+            project_root, asset_type, name, lock_entry=classification.lock_entry
         )
+        if report_locked.reason == "dirty" and not force:
+            raise StaleInstallError(
+                f"{asset_type}/{name}: {report_locked.summary()} since classification; "
+                f"pass --force to overwrite (each modified file gets a .bak sibling)"
+            )
+        if force and report_locked.reason == "dirty" and report_locked.dirty_files != files_to_bak:
+            files_to_bak = report_locked.dirty_files
+            _gate_a_scan_dirty_files(
+                files_to_bak,
+                surface=surface,
+                project_root=project_root,
+                asset_type=asset_type,
+                name=name,
+            )
 
-    installed_at = installed_at_from_dest(dest)
-    lock = Lockfile.at(project_root)
-    # CRITICAL: wiki_commit stays at the pin we just restored to —
-    # install --all is reproducibility (Option A), not "advance to HEAD".
-    lock.upsert_entry(
-        asset_type,
-        name,
-        wiki_commit=pin,
-        installed_at=installed_at,
-        files=sorted(digest_map),
-        files_commit=pin,
-        digests=digest_map,
-    )
+        bak_paths: list[Path] = []
+        for f in files_to_bak:
+            bak = f.with_suffix(f.suffix + ".bak")
+            shutil.copy2(f, bak)
+            bak_paths.append(bak)
+
+        digest_map = wiki.copy_asset_at_commit(pin, asset_type, name, dest)
+
+        # Mirror semantics (#1247): a re-extraction over an existing dest must
+        # also retire dest-only leftovers (pre-B1 additive-update residue,
+        # carried files from a different pin). Membership comes from the pin's
+        # ls-tree set — the extraction tmpdir is internal to
+        # ``copy_asset_at_commit`` (design-gate M2).
+        files_removed: tuple[Path, ...] = ()
+        if classification.state in ("skip", "refuse"):
+            expected = set(wiki.asset_files_at_commit(pin, asset_type, name))
+            entry = classification.lock_entry or {}
+            files_removed = _reconcile_removed_files(
+                dest,
+                src_has=lambda rel: rel in expected,
+                old_installed_at_epoch=installed_at_epoch_from_entry(entry),
+                baked=frozenset(files_to_bak),
+                manifest=manifest_from_entry(entry),
+                old_digests=digests_from_entry(entry),
+            )
+
+        installed_at = installed_at_from_dest(dest)
+        lock = Lockfile.at(project_root)
+        # CRITICAL: wiki_commit stays at the pin we just restored to —
+        # install --all is reproducibility (Option A), not "advance to HEAD".
+        lock.upsert_entry(
+            asset_type,
+            name,
+            wiki_commit=pin,
+            installed_at=installed_at,
+            files=sorted(digest_map),
+            files_commit=pin,
+            digests=digest_map,
+            lock_timeout=_remaining(),
+        )
 
     return InstallResult(
         asset_type=cast('Literal["skills", "agents", "commands"]', asset_type),

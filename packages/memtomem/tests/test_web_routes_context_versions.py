@@ -541,7 +541,10 @@ class TestLockBudgetOffload:
         monkeypatch.setattr(versioning, "create_version", _spy)
         r = await client.post("/api/context/agents/reviewer/versions", json={})
         assert r.status_code == 200
-        assert seen["lock_timeout"] == 30.0
+        # ADR-0030 §6: the op now runs under the canonical name lock first, so
+        # its lock_timeout is the REMAINING shared budget (slightly < the 30.0
+        # constant after the canonical acquire), not the raw constant.
+        assert seen["lock_timeout"] is not None and 0.0 < seen["lock_timeout"] <= 30.0
 
     @pytest.mark.anyio
     async def test_promote_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
@@ -554,7 +557,8 @@ class TestLockBudgetOffload:
         monkeypatch.setattr(versioning, "promote_label", _spy)
         r = await client.put("/api/context/agents/reviewer/labels/staging", json={"version": "v1"})
         assert r.status_code == 200
-        assert seen["lock_timeout"] == 30.0
+        # Remaining shared budget after the canonical acquire (ADR-0030 §6).
+        assert seen["lock_timeout"] is not None and 0.0 < seen["lock_timeout"] <= 30.0
 
     @pytest.mark.anyio
     async def test_delete_threads_lock_budget_kwarg(self, client, tmp_path, monkeypatch):
@@ -567,7 +571,8 @@ class TestLockBudgetOffload:
         monkeypatch.setattr(versioning, "delete_label", _spy)
         r = await client.delete("/api/context/agents/reviewer/labels/staging")
         assert r.status_code == 200
-        assert seen["lock_timeout"] == 30.0
+        # Remaining shared budget after the canonical acquire (ADR-0030 §6).
+        assert seen["lock_timeout"] is not None and 0.0 < seen["lock_timeout"] <= 30.0
 
     @pytest.mark.anyio
     async def test_held_sidecar_lock_expires_budget_to_503(self, client, tmp_path, monkeypatch):
