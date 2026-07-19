@@ -104,6 +104,36 @@ SNAPSHOT_REQUIRES_DIR_LAYOUT: Final = "snapshot_requires_dir_layout"
 # human reason carries the underlying error.
 SNAPSHOT_FAILED: Final = "snapshot_failed"
 
+# Explicit Pull (ADR-0030 §5, PR-C) apply-time refusals — emitted by
+# ``pull_apply.prepare_pull`` / ``commit_pull`` in ``PullApplyResult.reason_code``.
+#
+# ``SOURCE_CONFLICT`` — more than one distinct landing content is available and
+# no explicit ``--from`` runtime was given (or an importable candidate's landing
+# bytes could not be computed, which fails closed to the same refusal). The user
+# must pick a source; the result carries the candidate rows grouped by
+# ``landing_group`` so the CLI/UI can list the choices.
+SOURCE_CONFLICT: Final = "source_conflict"
+# ``NOTHING_IMPORTABLE`` — no importable, present, computable candidate exists
+# for this (kind, name, scope), or an explicit ``--from`` runtime has no copy to
+# pull. Distinct from ``source_conflict`` (which HAS candidates but they
+# disagree): here there is nothing to select.
+NOTHING_IMPORTABLE: Final = "nothing_importable"
+# ``SELECTED_LANDING_ERROR`` — an explicit ``--from`` runtime WAS chosen but its
+# landing bytes could not be computed (unreadable source, invalid TOML, a skill
+# tree missing SKILL.md). Fail-closed with no fallback to another runtime — the
+# user asked for that specific source.
+SELECTED_LANDING_ERROR: Final = "selected_landing_error"
+# ``PLAN_STALE`` — the destination changed between the previewed/confirmed plan
+# and the commit (created, deleted, or its bytes changed). Refused rather than
+# overwrite a state the user never previewed; remediation is to re-run.
+PLAN_STALE: Final = "plan_stale"
+# ``WRITE_FAILED`` — an unexpected operational error while writing the captured
+# bytes (a raw ``OSError`` from the canonical write, or a skills exclusive
+# promotion failure such as ``ENOTSUP`` on a filesystem without atomic
+# no-replace rename). Typed catch-all so every surface (CLI/web/MCP) can
+# translate uniformly; the human reason carries the underlying error.
+WRITE_FAILED: Final = "write_failed"
+
 # Transfer install-provenance skip codes (A-4 #1275) — emitted in
 # ``TransferResult.provenance_reason_code`` when a project_shared →
 # project_shared transfer does NOT carry the source's ``lock.json`` entry
@@ -162,4 +192,9 @@ SkipCode = Literal[
     "skills_overwrite_unsupported",
     "snapshot_requires_dir_layout",
     "snapshot_failed",
+    "source_conflict",
+    "nothing_importable",
+    "selected_landing_error",
+    "plan_stale",
+    "write_failed",
 ]

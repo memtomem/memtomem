@@ -113,6 +113,18 @@ every runtime gets the same copy. A change you make directly in a runtime's
 config directory is overwritten the next time you Sync that artifact — Import it
 first if you want to keep it.
 
+When the same artifact name exists in more than one runtime with different
+content — the freshest copy in `.gemini/`, a stale one in `.claude/` —
+`mm context pull <kind> <name>` previews each runtime candidate before it
+writes anything: what would land in the Store, and whether the privacy gate
+would allow it. It is source-selectable and preview-first — a plain dry-run by
+default, `--apply` to execute. If the candidates diverge, `--apply` refuses
+until you name one with `--from <runtime>`, so a stale copy can never silently
+win. (Section-level batch Import keeps its existing first-wins behavior; `pull`
+is the single-artifact, choose-your-source path.) The complementary
+`mm context sync --runtime <name>` restricts a Sync's fan-out to specific
+runtimes.
+
 ## Where copies live — the "Stored in" tiers
 
 Every stored artifact sits at one of three tiers (the **Stored in** axis in the

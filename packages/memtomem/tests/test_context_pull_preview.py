@@ -233,6 +233,51 @@ def test_preview_does_not_mutate_privacy_counters(
     assert calls == []
 
 
+# ── include_content: --diff capture (ADR-0030 PR-C R2 Major 1) ────────────
+
+
+def test_include_content_populates_full_surface_and_store(home: Path, proj: Path) -> None:
+    """``include_content=True`` captures each candidate's FULL copier surface
+    onto ``content`` and the Store payload onto ``store_content`` (the CLI
+    ``--diff`` inputs)."""
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "runtime v")})
+    _seed_store_skill(proj, "s", "store v")
+    pv = preview_pull(
+        "skills", "s", scope="project_shared", project_root=proj, include_content=True
+    )
+    cand = _cand(pv, "claude")
+    assert cand.content is not None
+    assert any(rel == "SKILL.md" for rel, _ in cand.content)
+    assert pv.store_content is not None
+    assert any(rel == "SKILL.md" for rel, _ in pv.store_content)
+
+
+def test_include_content_defaults_none_wire_safe(home: Path, proj: Path) -> None:
+    """Without ``include_content`` the raw-byte fields stay ``None`` — the wire
+    boundaries never serialize them."""
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "v")})
+    _seed_store_skill(proj, "s", "old")
+    pv = preview_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert all(c.content is None for c in pv.candidates)
+    assert pv.store_content is None
+
+
+def test_include_content_gemini_command_is_converted_markdown(home: Path, proj: Path) -> None:
+    """A gemini command's captured content is the CONVERTED canonical Markdown,
+    not the raw TOML (parity with the landing surface ``content_status`` uses)."""
+    seed_multi_runtime(
+        proj, "commands", "c", {"gemini": 'description = "d"\nprompt = "hello body"\n'}
+    )
+    pv = preview_pull(
+        "commands", "c", scope="project_shared", project_root=proj, include_content=True
+    )
+    cand = _cand(pv, "gemini")
+    assert cand.content is not None
+    (_rel, data) = cand.content[0]
+    assert b"prompt =" not in data  # not raw TOML
+    assert b"hello body" in data
+
+
 # ── Blocker regression: gate scans the FULL copier surface ────────────────
 
 

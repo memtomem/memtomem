@@ -123,6 +123,14 @@ class PullCandidate:
     # Raw, UNSANITIZED engine text for *_error rows (may embed absolute paths).
     # Web/MCP boundaries sanitize; the CLI prints verbatim (DiffRow contract).
     reason: str | None
+    # The would-land FULL copier surface as sorted ``(posix_relpath, bytes)``,
+    # populated ONLY when ``preview_pull(..., include_content=True)`` (the CLI
+    # ``--diff`` path); ``None`` otherwise. The full surface — not the payload
+    # subset — so a ``--diff`` can show metadata-only divergence
+    # (``overrides/`` / ``versions/``) that drives ``source_conflict`` yet
+    # leaves the payload identical (ADR-0030 §4/§5). CLI-only: the web/MCP wire
+    # boundaries never serialize it (raw bytes, unredacted).
+    content: tuple[tuple[str, bytes], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +152,12 @@ class PullPreview:
     # Runtime auto-selected when unambiguous (priority-first of the single
     # group); None when ambiguous or nothing importable is landable.
     auto_source: str | None
+    # The current Store PAYLOAD as sorted ``(posix_relpath, bytes)``, populated
+    # ONLY when ``include_content=True`` (the ``--diff`` store side); ``None``
+    # otherwise (and when the Store is absent or unreadable). The SAME read
+    # ``content_status`` used, so a ``--diff`` can never disagree with the
+    # rendered status. CLI-only, never serialized on the wire.
+    store_content: tuple[tuple[str, bytes], ...] | None = None
 
 
 def iter_skill_payload_files(root: Path) -> list[tuple[str, bytes]]:
@@ -291,8 +305,17 @@ def _read_landing(
     if kind == "skills":
         skill_dir = path.parent
         full = _read_skill_tree(skill_dir)
+        manifest_name = _skill_manifest_name()
+        manifest = next((data for rel, data in full if rel == manifest_name), None)
+        if manifest is None:
+            # ``SKILL.md`` vanished between the presence probe and the tree read
+            # (or the dir holds only excluded internals): a captured tree with
+            # no manifest is not a valid skill, and staging it would promote an
+            # invalid canonical. Fail closed → the caller maps it to
+            # ``landing_error`` (parity with ``skills._stage_skill``, which
+            # refuses a manifest-less source).
+            raise FileNotFoundError(f"source skill missing {manifest_name}: {skill_dir}")
         payload = [(rel, data) for rel, data in full if _is_payload_relpath(rel)]
-        manifest = next((data for rel, data in full if rel == _skill_manifest_name()), b"")
         return full, payload, manifest
     if kind == "commands" and runtime == "gemini":
         from memtomem.context.commands import _gemini_toml_to_canonical
@@ -425,22 +448,45 @@ def _resolve_canonical_atomic(
     )
 
 
-def preview_pull(
+@dataclass
+class _Collected:
+    """The one collection pass shared by preview and apply (ADR-0030 PR-C).
+
+    ``preview_pull`` and ``pull_apply.prepare_pull`` both build their §5 signal
+    from this SAME object so the enforced refusal can never drift from the
+    displayed preview. The Store bytes are captured here (not re-read) so
+    ``content_status``, ``store_content`` (``--diff``), and the plan
+    precondition all reference one read.
+    """
+
+    store_present: bool
+    store_payload: list[tuple[str, bytes]] | None
+    store_err: OSError | None
+    working: list[_Cand]
+
+
+def _collect(
     kind: ArtifactKind,
     name: str,
     *,
     scope: TargetScope,
     project_root: Path | None,
-) -> PullPreview:
-    """Build the read-only Pull preview for ``(kind, name, scope)``.
+    scan_gate: bool = True,
+) -> _Collected:
+    """Read the Store + every runtime candidate once, capturing landing bytes.
 
-    Pure: no disk writes, no privacy-counter mutation, no audit lines. Reads
-    the real ``~``/project canonical + override + runtime trees (no injected
-    base — that would split-brain the Store comparison against override
-    resolution; tests isolate via ``HOME``).
+    Pure/read-only (no writes, no privacy-counter mutation, no audit). Each
+    importable, present, computable candidate carries its captured
+    ``landing_full`` / ``landing_payload`` — the bytes a Pull WOULD land — so a
+    downstream commit can write exactly what was judged. ``kind`` must be a key
+    of :data:`IMPORT_SOURCE_RUNTIMES` (a bad kind is a ``KeyError``).
 
-    ``kind`` must be a key of :data:`IMPORT_SOURCE_RUNTIMES` (the caller — the
-    web route — validates and 400s otherwise; a bad kind here is a KeyError).
+    ``scan_gate=False`` skips the per-candidate ``classify_gate_status`` scan
+    (leaving ``gate_status=None``): the apply path (``pull_apply.prepare_pull``)
+    runs its OWN single audited Gate A decision over just the selected
+    candidate, so scanning every candidate here too would double-scan the
+    selected payload and waste a full-tree scan on the rest. The preview keeps
+    the default so its table can show a per-candidate gate column.
     """
     eligible = set(IMPORT_SOURCE_RUNTIMES[kind])
     store_present, store_payload, store_err = _read_store(kind, name, scope, project_root)
@@ -508,7 +554,7 @@ def preview_pull(
             )
             continue
 
-        gate = _gate_landing(landing_full, scope)
+        gate = _gate_landing(landing_full, scope) if scan_gate else None
         override = _override_warning(kind, name, runtime, scope, project_root, override_raw)
         content = _content_status(store_present, store_payload, store_err, landing_payload)
         # A store_error row carries the (unsanitized) Store read error as its
@@ -527,7 +573,39 @@ def preview_pull(
             )
         )
 
-    distinct, ambiguous, auto_source = _group_and_resolve(working)
+    return _Collected(
+        store_present=store_present,
+        store_payload=store_payload,
+        store_err=store_err,
+        working=working,
+    )
+
+
+def preview_pull(
+    kind: ArtifactKind,
+    name: str,
+    *,
+    scope: TargetScope,
+    project_root: Path | None,
+    include_content: bool = False,
+) -> PullPreview:
+    """Build the read-only Pull preview for ``(kind, name, scope)``.
+
+    Pure: no disk writes, no privacy-counter mutation, no audit lines. Reads
+    the real ``~``/project canonical + override + runtime trees (no injected
+    base — that would split-brain the Store comparison against override
+    resolution; tests isolate via ``HOME``).
+
+    ``kind`` must be a key of :data:`IMPORT_SOURCE_RUNTIMES` (the caller — the
+    web route — validates and 400s otherwise; a bad kind here is a KeyError).
+
+    ``include_content=True`` additionally captures the FULL copier surface onto
+    each candidate's ``content`` and the Store payload onto ``store_content``
+    for the CLI ``--diff`` — CLI-only; the web/MCP wire boundaries never
+    serialize those raw-byte fields (they default ``None``).
+    """
+    collected = _collect(kind, name, scope=scope, project_root=project_root)
+    distinct, ambiguous, auto_source = _group_and_resolve(collected.working)
     candidates = [
         PullCandidate(
             runtime=c.runtime,
@@ -537,18 +615,26 @@ def preview_pull(
             landing_group=c.landing_group,
             override_warning=c.override_warning,
             reason=c.reason,
+            content=(
+                tuple(c.landing_full) if include_content and c.landing_full is not None else None
+            ),
         )
-        for c in working
+        for c in collected.working
     ]
     return PullPreview(
         kind=kind,
         name=name,
         scope=scope,
-        store_present=store_present,
+        store_present=collected.store_present,
         candidates=candidates,
         distinct_landing_count=distinct,
         ambiguous=ambiguous,
         auto_source=auto_source,
+        store_content=(
+            tuple(collected.store_payload)
+            if include_content and collected.store_payload is not None
+            else None
+        ),
     )
 
 
