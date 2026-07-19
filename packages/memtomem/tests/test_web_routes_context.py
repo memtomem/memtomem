@@ -1313,6 +1313,25 @@ class TestImportSkills:
         skipped_codes = {s["reason_code"] for s in data["skipped"]}
         assert "canonical_exists" in skipped_codes
 
+    @pytest.mark.anyio
+    async def test_import_overwrite_existing_skill_refused_on_wire(
+        self, client: AsyncClient, tmp_path: Path
+    ):
+        # Overwriting an existing skill is refused at the engine level until
+        # tree snapshots land (ADR-0030 §6); the refusal reaches the wire as a
+        # typed skip (the Overwrite checkbox no longer silently clobbers).
+        _make_skill(tmp_path, "already")
+        _make_runtime_skill(tmp_path, ".claude/skills", "already", "# Different\n")
+        r = await client.post(
+            "/api/context/skills/import",
+            json={"overwrite": True},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["imported"] == []
+        skipped_codes = {s["reason_code"] for s in data["skipped"]}
+        assert "skills_overwrite_unsupported" in skipped_codes
+
 
 class TestImportOneSkill:
     @pytest.mark.anyio

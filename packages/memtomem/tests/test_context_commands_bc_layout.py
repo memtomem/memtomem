@@ -120,17 +120,21 @@ def test_parse_flat_layout_with_filename_command(tmp_path: Path) -> None:
 # ── extract_commands_to_canonical layout policy ────────────────────────
 
 
-def test_extract_preserves_flat_layout_when_only_flat_exists(
+def test_extract_refuses_overwrite_of_flat_layout(
     tmp_path: Path,
 ) -> None:
-    _write_flat_command(tmp_path, "legacy")
+    """An overwrite-import onto a flat-layout canonical is refused (ADR-0030
+    §6) — no versions/ store to snapshot into. Flat left untouched."""
+    flat = _write_flat_command(tmp_path, "legacy")
+    original = flat.read_text()
     runtime = tmp_path / ".claude/commands"
     runtime.mkdir(parents=True)
     (runtime / "legacy.md").write_text(SAMPLE_COMMAND.replace("Simple", "UPDATED"))
-    extract_commands_to_canonical(tmp_path, overwrite=True)
+    result = extract_commands_to_canonical(tmp_path, overwrite=True)
+    assert result.imported == []
+    assert [s[2] for s in result.skipped] == ["snapshot_requires_dir_layout"]
     flat_path = tmp_path / CANONICAL_COMMAND_ROOT / "legacy.md"
-    assert flat_path.is_file()
-    assert "UPDATED" in flat_path.read_text()
+    assert flat_path.read_text() == original
     assert not (tmp_path / CANONICAL_COMMAND_ROOT / "legacy" / "command.md").exists()
 
 

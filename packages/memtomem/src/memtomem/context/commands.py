@@ -49,6 +49,7 @@ from memtomem.context._atomic_reverse import (
 )
 from memtomem.context._canonical_txn import (
     _CANONICAL_LOCK_BUDGET_S,
+    SnapshotError,
     new_lock_budget,
     write_canonical_locked,
 )
@@ -688,6 +689,19 @@ def extract_commands_to_canonical(
                 logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                 seen[cmd_name] = gemini_label
                 continue
+            if dst.exists() and overwrite and layout == "flat":
+                # Overwrite-import is snapshot-first (ADR-0030 §6); a flat
+                # ``<name>.md`` has no ``versions/`` store to snapshot into.
+                # Refuse pre-lock so a ``dry_run`` preview matches a real run.
+                reason = (
+                    "cannot overwrite a flat-layout canonical (no version store to "
+                    "snapshot into) — run `mm context migrate` to convert it to "
+                    "directory layout first"
+                )
+                skipped.append((cmd_name, reason, skip_codes.SNAPSHOT_REQUIRES_DIR_LAYOUT))
+                logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                seen[cmd_name] = gemini_label
+                continue
             try:
                 canonical_content = _gemini_toml_to_canonical(toml_file)
             except (tomllib.TOMLDecodeError, OSError):
@@ -746,16 +760,23 @@ def extract_commands_to_canonical(
                         canonical_content.encode("utf-8"),
                         resolve_target=_resolve,
                         overwrite=overwrite,
+                        snapshot_note="pre-overwrite snapshot (import from gemini)",
                         lock_timeout=lock_remaining(),
                     )
                 except TimeoutError:
                     reason = (
-                        "another process held the canonical destination lock past "
-                        f"the {_CANONICAL_LOCK_BUDGET_S:g}s acquisition budget — "
-                        "re-run the import to retry"
+                        "another process held the canonical destination lock (or its "
+                        f"version store) past the {_CANONICAL_LOCK_BUDGET_S:g}s "
+                        "acquisition budget — re-run the import to retry"
                     )
                     skipped.append((cmd_name, reason, skip_codes.LOCK_TIMEOUT))
                     logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                    continue
+                except SnapshotError as exc:
+                    reason = f"could not snapshot the current canonical before overwrite: {exc}"
+                    skipped.append((cmd_name, reason, skip_codes.SNAPSHOT_FAILED))
+                    logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                    seen[cmd_name] = gemini_label
                     continue
                 if write_outcome == "exists":
                     reason = "canonical exists (use --overwrite)"
@@ -763,6 +784,21 @@ def extract_commands_to_canonical(
                     logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
                     seen[cmd_name] = gemini_label
                     continue
+                if write_outcome == "flat_refused":
+                    # Under-lock backstop for a concurrent dir→flat migrate.
+                    reason = (
+                        "cannot overwrite a flat-layout canonical (no version store to "
+                        "snapshot into) — run `mm context migrate` first"
+                    )
+                    skipped.append((cmd_name, reason, skip_codes.SNAPSHOT_REQUIRES_DIR_LAYOUT))
+                    logger.warning("skip %s from %s: %s", cmd_name, gemini_label, reason)
+                    seen[cmd_name] = gemini_label
+                    continue
+                # ``created`` / ``overwritten`` / ``identical`` → imported. A
+                # future outcome must be handled, not silently imported — raise
+                # (not ``assert``, which ``python -O`` strips).
+                if write_outcome not in ("created", "overwritten", "identical"):
+                    raise RuntimeError(f"unhandled canonical write outcome: {write_outcome!r}")
             imported.append((dst, layout))
             seen[cmd_name] = gemini_label
             source_runtimes[cmd_name] = "gemini"

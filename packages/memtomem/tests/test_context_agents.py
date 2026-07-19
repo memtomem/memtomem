@@ -412,6 +412,50 @@ class TestExtractAgentsToCanonical:
         assert result.runtime_candidates == {"helper": ["claude", "gemini"]}
 
     def test_overwrite_flag(self, tmp_path):
+        """Overwrite onto a DIR-layout canonical snapshots the pre-image into
+        versions/ then replaces (ADR-0030 §6, B2b snapshot-first)."""
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        new_content = SAMPLE_MINIMAL_AGENT.replace("Generic helper", "UPDATED")
+        (claude_dir / "helper.md").write_text(new_content, encoding="utf-8")
+
+        canonical = tmp_path / CANONICAL_AGENT_ROOT / "helper" / "agent.md"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("old", encoding="utf-8")
+
+        result = extract_agents_to_canonical(tmp_path)
+        assert result.imported == []
+        assert len(result.skipped) == 1
+        assert result.skipped[0][2] == "canonical_exists"
+        assert canonical.read_text(encoding="utf-8") == "old"
+
+        result = extract_agents_to_canonical(tmp_path, overwrite=True)
+        assert len(result.imported) == 1
+        assert "UPDATED" in canonical.read_text(encoding="utf-8")
+        # Pre-image snapshotted before the overwrite.
+        assert (canonical.parent / "versions" / "v1.md").read_text(encoding="utf-8") == "old"
+
+    def test_overwrite_dry_run_dir_layout_accrues_no_snapshot(self, tmp_path):
+        """A dry_run overwrite of a DIR-layout canonical previews the would-import
+        target but never accrues a snapshot (the whole write — snapshot included —
+        sits under ``if not dry_run:``). Preview never mutates disk."""
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        new_content = SAMPLE_MINIMAL_AGENT.replace("Generic helper", "UPDATED")
+        (claude_dir / "helper.md").write_text(new_content, encoding="utf-8")
+
+        canonical = tmp_path / CANONICAL_AGENT_ROOT / "helper" / "agent.md"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("old", encoding="utf-8")
+
+        result = extract_agents_to_canonical(tmp_path, overwrite=True, dry_run=True)
+        assert len(result.imported) == 1  # would-import preview
+        assert canonical.read_text(encoding="utf-8") == "old"  # untouched
+        assert not (canonical.parent / "versions").exists()  # no snapshot accrued
+
+    def test_overwrite_flat_layout_refused(self, tmp_path):
+        """A flat-layout canonical has no versions/ store to snapshot into, so
+        an overwrite-import is refused with a migrate hint (ADR-0030 §6)."""
         claude_dir = tmp_path / ".claude/agents"
         claude_dir.mkdir(parents=True)
         new_content = SAMPLE_MINIMAL_AGENT.replace("Generic helper", "UPDATED")
@@ -421,15 +465,18 @@ class TestExtractAgentsToCanonical:
         canonical.parent.mkdir(parents=True)
         canonical.write_text("old", encoding="utf-8")
 
-        result = extract_agents_to_canonical(tmp_path)
+        result = extract_agents_to_canonical(tmp_path, overwrite=True)
         assert result.imported == []
         assert len(result.skipped) == 1
-        assert "canonical exists" in result.skipped[0][1]
-        assert canonical.read_text(encoding="utf-8") == "old"
+        assert result.skipped[0][2] == "snapshot_requires_dir_layout"
+        assert "mm context migrate" in result.skipped[0][1]
+        assert canonical.read_text(encoding="utf-8") == "old"  # untouched
 
-        result = extract_agents_to_canonical(tmp_path, overwrite=True)
-        assert len(result.imported) == 1
-        assert "UPDATED" in canonical.read_text(encoding="utf-8")
+        # The refusal fires under dry_run too (preview/real parity — dry_run
+        # never reaches the lock, so the pre-lock fast path must catch it).
+        preview = extract_agents_to_canonical(tmp_path, overwrite=True, dry_run=True)
+        assert preview.imported == []
+        assert [s[2] for s in preview.skipped] == ["snapshot_requires_dir_layout"]
 
     def test_ignores_codex_toml(self, tmp_path):
         # Even when a Codex TOML exists, extract does not try to import it.

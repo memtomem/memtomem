@@ -79,12 +79,15 @@ def test_write_canonical_locked_created_overwritten_exists(tmp_path: Path):
     assert outcome == "exists"
     assert dst.read_bytes() == b"v1"
 
-    # exists + overwrite → replace (B2a clobbers; snapshot lands in B2b).
+    # exists + overwrite → snapshot the pre-image into versions/ then replace
+    # (B2b snapshot-first).
     outcome, _, _ = write_canonical_locked(
         root, "foo", b"v2", resolve_target=_resolver(dst), overwrite=True
     )
     assert outcome == "overwritten"
     assert dst.read_bytes() == b"v2"
+    # The old bytes are preserved as v1 in the per-artifact version store.
+    assert (dst.parent / "versions" / "v1.md").read_bytes() == b"v1"
 
 
 def test_write_canonical_locked_resolves_inside_the_lock(tmp_path: Path):
@@ -109,6 +112,184 @@ def test_write_canonical_locked_resolves_inside_the_lock(tmp_path: Path):
     assert calls == ["resolved"]
     assert (outcome, got) == ("created", dir_dst)
     assert not flat.exists() and dir_dst.read_bytes() == b"x"
+
+
+# ── write_canonical_locked: B2b overwrite branches ────────────────────────────
+
+
+def test_overwrite_identical_is_noop_no_snapshot(tmp_path: Path):
+    """A byte-identical overwrite writes nothing and accrues no version (the
+    version store has no GC, so an unchanged re-import must not spam vN.md)."""
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"same", resolve_target=_resolver(dst), overwrite=False)
+    mtime_before = dst.stat().st_mtime_ns
+
+    outcome, _, _ = write_canonical_locked(
+        root, "foo", b"same", resolve_target=_resolver(dst), overwrite=True
+    )
+    assert outcome == "identical"
+    assert dst.read_bytes() == b"same"
+    assert not (dst.parent / "versions").exists()
+    assert not (dst.parent / "versions.json").exists()
+    assert dst.stat().st_mtime_ns == mtime_before  # no rewrite
+
+
+def test_overwrite_snapshot_records_note(tmp_path: Path):
+    """The snapshot_note is threaded into the version manifest."""
+    from memtomem.context import versioning
+
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"v1", resolve_target=_resolver(dst), overwrite=False)
+    write_canonical_locked(
+        root,
+        "foo",
+        b"v2",
+        resolve_target=_resolver(dst),
+        overwrite=True,
+        snapshot_note="pre-overwrite snapshot (import from claude)",
+    )
+    manifest = versioning.load_manifest(dst.parent)
+    assert manifest.versions["v1"].note == "pre-overwrite snapshot (import from claude)"
+
+
+def test_overwrite_flat_layout_is_refused(tmp_path: Path):
+    """A flat-layout canonical has no versions/ store, so overwrite is refused
+    (no write) rather than clobbered unsnapshotted."""
+    root = tmp_path / "agents"
+    flat = root / "foo.md"
+    root.mkdir(parents=True)
+    flat.write_bytes(b"orig")
+
+    outcome, got_dst, layout = write_canonical_locked(
+        root, "foo", b"new", resolve_target=_resolver(flat, layout="flat"), overwrite=True
+    )
+    assert (outcome, layout) == ("flat_refused", "flat")
+    assert flat.read_bytes() == b"orig"  # untouched
+
+
+def test_overwrite_snapshots_accrue_v1_v2(tmp_path: Path):
+    """Successive differing overwrites snapshot each pre-image as v1, v2, …"""
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"v1", resolve_target=_resolver(dst), overwrite=False)
+    write_canonical_locked(root, "foo", b"v2", resolve_target=_resolver(dst), overwrite=True)
+    write_canonical_locked(root, "foo", b"v3", resolve_target=_resolver(dst), overwrite=True)
+
+    assert dst.read_bytes() == b"v3"
+    assert (dst.parent / "versions" / "v1.md").read_bytes() == b"v1"
+    assert (dst.parent / "versions" / "v2.md").read_bytes() == b"v2"
+
+
+def test_overwrite_snapshot_failure_is_fail_closed(tmp_path: Path):
+    """If the snapshot can't be taken (a malformed versions.json), the write is
+    aborted and the destination is left untouched — SnapshotError, not clobber."""
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"v1", resolve_target=_resolver(dst), overwrite=False)
+    # Corrupt the manifest so create_version's load raises VersionError.
+    (dst.parent / "versions.json").write_text("]not json[")
+
+    with pytest.raises(txn.SnapshotError):
+        write_canonical_locked(root, "foo", b"v2", resolve_target=_resolver(dst), overwrite=True)
+    assert dst.read_bytes() == b"v1"  # untouched
+
+
+def test_overwrite_snapshot_oserror_is_wrapped_fail_closed(tmp_path: Path, monkeypatch):
+    """A raw OSError from the version-store write (disk full, EACCES) is wrapped
+    as a durable SnapshotError — not left to abort the whole import — and the
+    canonical is untouched (Codex M1)."""
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"v1", resolve_target=_resolver(dst), overwrite=False)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(txn.versioning, "create_version", boom)
+    with pytest.raises(txn.SnapshotError):
+        write_canonical_locked(root, "foo", b"v2", resolve_target=_resolver(dst), overwrite=True)
+    assert dst.read_bytes() == b"v1"  # untouched (fail-closed)
+
+
+def test_overwrite_child_lock_timeout_fails_closed(tmp_path: Path):
+    """A foreign holder of the versions.json child lock surfaces as a
+    TimeoutError (mapped by callers to lock_timeout), bounded by the budget —
+    not a fresh child allowance — and the canonical is untouched."""
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"v1", resolve_target=_resolver(dst), overwrite=False)
+
+    from memtomem.context import versioning
+
+    child_lock = _lock_path_for(versioning.versions_json_path(dst.parent))
+    with _file_lock(child_lock, timeout=None):
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError):
+            write_canonical_locked(
+                root,
+                "foo",
+                b"v2",
+                resolve_target=_resolver(dst),
+                overwrite=True,
+                lock_timeout=0.2,
+            )
+        elapsed = time.monotonic() - t0
+    assert elapsed < 2.0  # bounded by the budget, not a fresh 30s
+    assert dst.read_bytes() == b"v1"  # untouched (fail-closed)
+
+
+def test_overwrite_snapshot_budget_is_shared_not_fresh(tmp_path: Path, monkeypatch):
+    """The child versions.json lock receives the REMAINING budget after the
+    canonical acquisition, not a fresh full allowance (Codex M3 — the weak
+    elapsed-bound test could not tell the two apart). Hold the canonical lock in
+    a background thread for a measured window so the overwrite must wait; the
+    budget create_version sees must reflect that consumed time."""
+    root = tmp_path / "agents"
+    dst = root / "foo" / "agent.md"
+    write_canonical_locked(root, "foo", b"v1", resolve_target=_resolver(dst), overwrite=False)
+
+    captured: dict[str, float | None] = {}
+    real_create = txn.versioning.create_version
+
+    def spy(*a, **k):
+        captured["lock_timeout"] = k.get("lock_timeout")
+        return real_create(*a, **k)
+
+    monkeypatch.setattr(txn.versioning, "create_version", spy)
+
+    hold_s = 0.4
+    budget_s = 5.0
+    lock_path = canonical_lock_path(root, "foo")
+    holding = threading.Event()
+
+    def _hold():
+        with _file_lock(lock_path, timeout=None):
+            holding.set()
+            time.sleep(hold_s)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert holding.wait(2.0)  # the canonical lock is genuinely held
+
+    write_canonical_locked(
+        root,
+        "foo",
+        b"v2",
+        resolve_target=_resolver(dst),
+        overwrite=True,
+        lock_timeout=budget_s,
+    )
+    holder.join(2.0)
+
+    # The child got the shared remaining budget: strictly less than the full
+    # ``budget_s`` by roughly the ``hold_s`` the canonical acquisition consumed.
+    # A fresh-budget bug would forward the full ``budget_s`` unchanged.
+    assert captured["lock_timeout"] is not None
+    assert captured["lock_timeout"] < budget_s - (hold_s / 2)
+    assert dst.read_bytes() == b"v2"
+    assert (dst.parent / "versions" / "v1.md").read_bytes() == b"v1"
 
 
 # ── acquire_canonical_locks ───────────────────────────────────────────────────

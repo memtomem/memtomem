@@ -81,6 +81,29 @@ VERSION_NOT_FOUND: Final = "version_not_found"
 # ``latest`` / no-label sync on a flat artifact is unaffected.
 VERSIONING_REQUIRES_DIR_LAYOUT: Final = "versioning_requires_dir_layout"
 
+# Overwrite-Pull refusals (ADR-0030 §6, PR-B2b). An overwrite-import of an
+# EXISTING canonical is snapshot-first for agents/commands, but two shapes are
+# refused rather than clobbered:
+#
+# ``SKILLS_OVERWRITE_UNSUPPORTED`` — a skills Store entry already exists and
+# ``overwrite=True`` was requested. Skills are directory trees, so a snapshot is
+# a tree snapshot (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G); until
+# that ships, only a ``new`` skills Pull is allowed. Remediation: delete the
+# canonical skill first, then re-import.
+SKILLS_OVERWRITE_UNSUPPORTED: Final = "skills_overwrite_unsupported"
+# ``SNAPSHOT_REQUIRES_DIR_LAYOUT`` — an overwrite-import targets a FLAT-layout
+# agents/commands canonical (``<name>.md``), which has no per-artifact
+# ``versions/`` store to snapshot the pre-image into. Refused with no write;
+# remediation points at ``mm context migrate`` (flat→dir). Distinct from
+# ``VERSIONING_REQUIRES_DIR_LAYOUT`` (a sync-side label/version resolution
+# skip) — this fires on the import/overwrite path.
+SNAPSHOT_REQUIRES_DIR_LAYOUT: Final = "snapshot_requires_dir_layout"
+# ``SNAPSHOT_FAILED`` — the pre-overwrite snapshot itself failed (the current
+# canonical could not be read, or the version store write failed). Fail-closed:
+# the destination was left untouched rather than clobbered unsnapshotted. The
+# human reason carries the underlying error.
+SNAPSHOT_FAILED: Final = "snapshot_failed"
+
 # Transfer install-provenance skip codes (A-4 #1275) — emitted in
 # ``TransferResult.provenance_reason_code`` when a project_shared →
 # project_shared transfer does NOT carry the source's ``lock.json`` entry
@@ -136,4 +159,7 @@ SkipCode = Literal[
     "label_not_found",
     "version_not_found",
     "versioning_requires_dir_layout",
+    "skills_overwrite_unsupported",
+    "snapshot_requires_dir_layout",
+    "snapshot_failed",
 ]

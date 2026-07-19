@@ -24,6 +24,7 @@ import logging
 import os
 import secrets
 import shutil
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -372,15 +373,100 @@ def _promote_race_conflict(exc: OSError) -> bool:
     return exc.errno in (errno.ENOTEMPTY, errno.EEXIST)
 
 
-def _promote_staging(staging: Path, dst: Path) -> None:
-    """Atomic-replace ``dst`` with ``staging`` (same-fs precondition).
+def _rename_no_replace(staging: Path, dst: Path) -> None:
+    """Atomically rename ``staging`` to an absent ``dst`` or fail closed.
 
-    Cross-platform via :func:`os.replace`. When ``dst`` already exists,
-    moves it aside first then renames staging into place; rolls back on
-    any failure during the swap window (``feedback_stage_before_mutation_revert.md``).
-    Raises the :func:`_target_conflict` refusal (``NotADirectoryError`` /
-    ``IsADirectoryError``) when ``dst`` holds non-skill content.
+    Directory promotion needs an OS no-replace primitive: plain POSIX
+    :func:`os.rename` may replace an empty destination directory, leaving a
+    shell/editor writer's ``mkdir`` → ``SKILL.md`` sequence vulnerable. Linux
+    and macOS expose the required flag only through native APIs, so call those
+    lazily via :mod:`ctypes`; Windows :func:`os.rename` is already exclusive.
+
+    A missing native symbol or unsupported platform/filesystem is loud
+    ``ENOTSUP``. Never degrade to ``exists()`` + :func:`os.replace`, which
+    would recreate the race this helper closes (#1839).
     """
+    if staging.parent != dst.parent:
+        raise OSError(
+            errno.EXDEV,
+            "atomic no-replace skill promote requires a shared parent directory",
+            str(dst),
+        )
+
+    if sys.platform == "win32":
+        # Python's Windows contract refuses every existing destination.
+        os.rename(staging, dst)
+        return
+
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    staging_bytes = os.fsencode(staging)
+    dst_bytes = os.fsencode(dst)
+    unsupported_errno = getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)
+
+    if sys.platform.startswith("linux"):
+        try:
+            rename = getattr(libc, "renameat2")
+        except AttributeError:
+            raise OSError(
+                unsupported_errno,
+                "atomic no-replace directory rename is unavailable",
+                str(dst),
+            ) from None
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        # Linux <fcntl.h>: AT_FDCWD=-100; <stdio.h>: RENAME_NOREPLACE=1.
+        args = (-100, staging_bytes, -100, dst_bytes, 1)
+    elif sys.platform == "darwin":
+        try:
+            rename = getattr(libc, "renamex_np")
+        except AttributeError:
+            raise OSError(
+                unsupported_errno,
+                "atomic no-replace directory rename is unavailable",
+                str(dst),
+            ) from None
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        # Darwin <sys/stdio.h>: RENAME_EXCL=0x00000004.
+        args = (staging_bytes, dst_bytes, 0x00000004)
+    else:
+        raise OSError(
+            unsupported_errno,
+            "atomic no-replace directory rename is unavailable",
+            str(dst),
+        )
+
+    ctypes.set_errno(0)
+    if rename(*args) != 0:
+        native_errno = ctypes.get_errno() or errno.EIO
+        raise OSError(native_errno, os.strerror(native_errno), str(dst))
+
+
+def _promote_staging(
+    staging: Path,
+    dst: Path,
+    *,
+    replace_existing: bool = True,
+) -> None:
+    """Promote ``staging`` into ``dst`` (same-fs precondition).
+
+    ``replace_existing=True`` preserves the sync/copy contract: move an existing
+    skill aside, rename staging into place, and roll back on failure. With
+    ``False`` (runtime→canonical imports), one native exclusive rename installs
+    a new skill or raises ``EEXIST`` without touching the destination (#1839).
+    """
+    if not replace_existing:
+        _rename_no_replace(staging, dst)
+        return
+
     conflict = _target_conflict(dst)
     if conflict is not None:
         raise conflict
@@ -898,7 +984,9 @@ def extract_skills_to_canonical(
     becomes a typed ``lock_timeout`` skip. Only non-gateway writers (manual
     shell, editor) can still race the promote — those surface as typed
     ``target_conflict`` skips for the verified race shapes and re-raise
-    loud otherwise.
+    loud otherwise. A new import's final promote is an OS-level no-replace
+    rename, so an external writer that lands a valid skill during staging is
+    preserved rather than moved aside (#1839).
 
     ADR-0011 PR-E2: ``scope`` selects both the canonical destination
     (:func:`canonical_artifact_dir`) and the source runtime root
@@ -1018,20 +1106,38 @@ def extract_skills_to_canonical(
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                 continue
             dst = canonical_root / skill_name
-            if dst.exists() and not overwrite:
-                reason = "canonical exists (use --overwrite)"
-                skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+            if dst.exists():
+                if not overwrite:
+                    reason = "canonical exists (use --overwrite)"
+                    skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
+                    seen[skill_name] = runtime_label
+                    continue
+                # ``--overwrite`` onto a canonical dst holding non-skill content
+                # (or a plain file) would make copy_skill's promote raise
+                # mid-import — typed skip instead (#1229). Checked BEFORE the
+                # overwrite refusal below so junk gets the precise "add a
+                # SKILL.md or remove it" remediation rather than the generic
+                # skills-overwrite refusal. Checked for dry-run too, so the
+                # preview's skip decisions match the real run.
+                conflict = _target_conflict(dst)
+                if conflict is not None:
+                    skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
+                    logger.warning("skip %s from %s: %s", skill_name, runtime_label, conflict)
+                    seen[skill_name] = runtime_label
+                    continue
+                # An existing skill Store entry + ``--overwrite``. Overwriting a
+                # skill means snapshotting its whole directory tree first
+                # (ADR-0022 invariant 7 / ADR-0030 §10, deferred to PR-G) — until
+                # that ships, only a ``new`` skills Pull is allowed; refuse
+                # rather than clobber unsnapshotted. Remediation: delete the
+                # canonical skill first, then re-import. Fires for dry-run too.
+                reason = (
+                    "overwriting an existing skill needs directory-tree snapshots "
+                    "(a future release) — delete the canonical skill first to re-import"
+                )
+                skipped.append((skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED))
                 logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
-                seen[skill_name] = runtime_label
-                continue
-            # ``--overwrite`` onto a canonical dst holding non-skill content
-            # (or a plain file) would make copy_skill's promote raise
-            # mid-import — typed skip instead (#1229). Checked for dry-run
-            # too, so the preview's skip decisions match the real run.
-            conflict = _target_conflict(dst)
-            if conflict is not None:
-                skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
-                logger.warning("skip %s from %s: %s", skill_name, runtime_label, conflict)
                 seen[skill_name] = runtime_label
                 continue
 
@@ -1152,13 +1258,36 @@ def extract_skills_to_canonical(
                     # canonical dst (previously unreachable for the import
                     # path, which relied on discovery filtering alone).
                     _reap_stale_internal_dirs(dst)
-                    # Re-check the no-overwrite contract under the lock: a
-                    # parallel importer can land dst between the lock-free
-                    # preflight above and our acquisition, and replacing its
-                    # fresh import would violate ``overwrite=False``.
-                    if dst.exists() and not overwrite:
-                        reason = "canonical exists (use --overwrite)"
-                        skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                    # Re-check the existence contract under the lock: a parallel
+                    # importer can land dst between the lock-free preflight above
+                    # and our acquisition. Mirrors the pre-lock branch exactly so
+                    # a racing overwrite gets the same refusal (never clobber a
+                    # freshly imported skill).
+                    if dst.exists():
+                        if not overwrite:
+                            reason = "canonical exists (use --overwrite)"
+                            skipped.append((skill_name, reason, skip_codes.CANONICAL_EXISTS))
+                            logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
+                            seen[skill_name] = runtime_label
+                            continue
+                        conflict = _target_conflict(dst)
+                        if conflict is not None:
+                            skipped.append((skill_name, str(conflict), skip_codes.TARGET_CONFLICT))
+                            logger.warning(
+                                "skip %s from %s: %s", skill_name, runtime_label, conflict
+                            )
+                            seen[skill_name] = runtime_label
+                            continue
+                        # Existing skill + overwrite: refused until tree snapshots
+                        # land (PR-G) — same as the pre-lock preflight.
+                        reason = (
+                            "overwriting an existing skill needs directory-tree "
+                            "snapshots (a future release) — delete the canonical "
+                            "skill first to re-import"
+                        )
+                        skipped.append(
+                            (skill_name, reason, skip_codes.SKILLS_OVERWRITE_UNSUPPORTED)
+                        )
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, reason)
                         seen[skill_name] = runtime_label
                         continue
@@ -1175,7 +1304,12 @@ def extract_skills_to_canonical(
                         logger.warning("skip %s from %s: %s", skill_name, runtime_label, exc)
                         continue
                     try:
-                        _promote_staging(staging, dst)
+                        # Every skill write that reaches this point is a NEW
+                        # import: #1838 refuses existing-skill overwrites above,
+                        # including when ``overwrite=True``. Use one exclusive
+                        # rename so a manual writer landing dst after the
+                        # under-lock re-check can never be moved aside (#1839).
+                        _promote_staging(staging, dst, replace_existing=False)
                     except OSError as exc:
                         # Verified destination races (refusal pair +
                         # ENOTEMPTY/EEXIST from a NON-gateway writer — the
