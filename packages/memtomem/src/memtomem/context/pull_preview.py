@@ -686,3 +686,183 @@ def _group_and_resolve(working: list[_Cand]) -> tuple[int, bool, str | None]:
             None,
         )
     return distinct, ambiguous, auto_source
+
+
+# ── ADR-0030 §1 stage-1 pull-direction drift probe ──────────────────────
+#
+# Detection is automatic; writes never are (ADR-0030 §1). This probe answers
+# ONE question over a whole canonical Store — "does any pull-eligible runtime
+# hold a copy that differs from the Store?" — to feed the user-tier portal's
+# "runtime copy differs from Store — Preview/Pull" badge (PR-F). It is the
+# reduced, cheap sibling of :func:`preview_pull`: it reuses the SAME collection
+# pass (:func:`_collect`) with ``scan_gate=False`` so a Store-wide sweep never
+# runs the per-file Gate A privacy scan — the badge needs only
+# ``content_status``, which ``_collect`` computes unconditionally. The full
+# two-axis preview (with the gate column) is computed lazily, per artifact, only
+# when the user actually opens a Pull.
+
+# The kinds a Pull can target (keys of IMPORT_SOURCE_RUNTIMES). Pinned so the
+# probe and the eligibility table cannot drift.
+_PULL_DRIFT_KINDS: tuple[ArtifactKind, ...] = ("skills", "agents", "commands")
+
+# A REDUCED view of ContentStatus for the portal badge: ``differs`` (a runtime
+# copy diverges — the definite drift the badge fires on), ``error`` (the Store
+# or a runtime copy was unreadable, so drift is indeterminate), ``identical``
+# (nothing pull-eligible diverges — in sync or no runtime copy to pull).
+PullDriftVerdict = Literal["differs", "identical", "error"]
+
+
+@dataclass(frozen=True)
+class PullDriftRow:
+    """One Store artifact's pull-direction drift verdict (ADR-0030 §1)."""
+
+    kind: ArtifactKind
+    name: str
+    verdict: PullDriftVerdict
+    # Runtimes whose copy differs from the Store (``verdict == "differs"``);
+    # empty otherwise.
+    runtimes: tuple[str, ...]
+    # Raw, UNSANITIZED diagnostic for ``verdict == "error"`` (may embed absolute
+    # paths). The web/MCP wire boundary redacts it (``_redact_pull_reason``);
+    # None otherwise.
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class PullDriftSummary:
+    """Store-wide pull-direction drift summary for the user-tier portal (PR-F)."""
+
+    scope: TargetScope
+    rows: tuple[PullDriftRow, ...]
+    differs: int
+    errors: int
+    identical: int
+    total: int
+
+    @property
+    def has_pull_drift(self) -> bool:
+        """Whether the badge/glance-dot fires — a definite runtime divergence.
+
+        Only ``differs`` counts: an ``error`` row is an *unknown*, surfaced as a
+        separate check-failed hint, not asserted as drift (ADR-0009 direction
+        framing — never claim a state we could not compute)."""
+        return self.differs > 0
+
+
+def _store_artifact_names(
+    kind: ArtifactKind, scope: TargetScope, project_root: Path | None
+) -> list[str]:
+    """Canonical names present in the Store for ``kind`` (name-dispatch by layout).
+
+    Mirrors the overview handler's derivation so the probe can never disagree
+    with what a Pull would target. ``user`` scope ignores ``project_root``
+    (``canonical_artifact_dir`` resolves ``~/.memtomem/<kind>``); the listers
+    require a ``Path``, so a harmless home sentinel is passed when None.
+    """
+    root = project_root if project_root is not None else Path.home()
+    if kind == "skills":
+        from memtomem.context.skills import list_canonical_skills
+
+        return [p.name for p in list_canonical_skills(root, scope=scope)]
+    if kind == "agents":
+        from memtomem.context.agents import canonical_agent_name, list_canonical_agents
+
+        return [
+            canonical_agent_name(p, layout)
+            for p, layout in list_canonical_agents(root, scope=scope)
+        ]
+    if kind == "commands":
+        from memtomem.context.commands import canonical_command_name, list_canonical_commands
+
+        return [
+            canonical_command_name(p, layout)
+            for p, layout in list_canonical_commands(root, scope=scope)
+        ]
+    raise ValueError(f"kind {kind!r} is not a Pull target")  # pragma: no cover
+
+
+def _drift_row(
+    kind: ArtifactKind, name: str, *, scope: TargetScope, project_root: Path | None
+) -> PullDriftRow:
+    """Reduce one artifact's ``_collect`` pass to a badge verdict (read-only).
+
+    Priority: a definite ``differs`` wins over an ``error`` (an unreadable
+    copy must not mask a divergence we CAN see); ``error`` wins over
+    ``identical`` (a store/landing read failure is indeterminate, not "in
+    sync"). A per-artifact collection failure is caught and reported as an
+    ``error`` row so one unreadable artifact can't blank the whole portal.
+    """
+    try:
+        collected = _collect(kind, name, scope=scope, project_root=project_root, scan_gate=False)
+    except OSError as exc:  # store/runtime walk failed outright — surface, don't crash
+        return PullDriftRow(kind=kind, name=name, verdict="error", runtimes=(), reason=str(exc))
+
+    differing = [
+        c.runtime for c in collected.working if c.importable and c.content_status == "differs"
+    ]
+    if differing:
+        return PullDriftRow(
+            kind=kind, name=name, verdict="differs", runtimes=tuple(differing), reason=None
+        )
+
+    errored = [
+        c
+        for c in collected.working
+        if c.importable and c.content_status in ("store_error", "landing_error")
+    ]
+    if errored:
+        # A store_error row may carry a None reason; take the first non-None one.
+        reason = next((c.reason for c in errored if c.reason is not None), None)
+        return PullDriftRow(kind=kind, name=name, verdict="error", runtimes=(), reason=reason)
+
+    # An unreadable Store with NO runtime copy present yields no candidate row at
+    # all, so ``store_err`` rides on ``_Collected`` alone — it must still be an
+    # ``error`` (indeterminate), never fall through to ``identical`` (Codex F1).
+    if collected.store_err is not None:
+        return PullDriftRow(
+            kind=kind, name=name, verdict="error", runtimes=(), reason=str(collected.store_err)
+        )
+
+    # No divergence, no error → in sync. NOTE a ``new`` candidate (Store absent
+    # yet a runtime holds a landable copy) also lands here — but the probe only
+    # visits names ``_store_artifact_names`` already resolved in the Store, and
+    # the lister + ``_read_store`` resolve the SAME canonical path, so a listed
+    # name is ``store_present`` and ``new`` cannot arise. This fall-through is the
+    # deliberate resting state for that coupling; if the lister/reader ever
+    # diverge, a stray ``new`` reads as "not drift" (safe), not a crash.
+    return PullDriftRow(kind=kind, name=name, verdict="identical", runtimes=(), reason=None)
+
+
+def probe_pull_drift(
+    *, scope: TargetScope = "user", project_root: Path | None = None
+) -> PullDriftSummary:
+    """Read-only pull-direction drift summary over a canonical Store (ADR-0030 §1).
+
+    For every artifact already in the Store (skills/agents/commands), report
+    whether any pull-eligible runtime holds a DIFFERENT copy. Pure: no writes,
+    no privacy-counter mutation, no audit lines — it reuses :func:`_collect`
+    with ``scan_gate=False`` so a whole-Store sweep costs one Store read plus up
+    to ``len(KNOWN_RUNTIMES)`` runtime-tree reads per artifact and runs NO
+    Gate A privacy scans. Never raises for a single bad artifact (those become
+    ``error`` rows).
+
+    ``scope`` defaults to ``user`` (the ``~/.memtomem`` global Store — the only
+    consumer today, the PR-F portal); ``project_root`` is required for a project
+    tier and ignored for ``user``.
+    """
+    rows: list[PullDriftRow] = []
+    for kind in _PULL_DRIFT_KINDS:
+        for name in _store_artifact_names(kind, scope, project_root):
+            rows.append(_drift_row(kind, name, scope=scope, project_root=project_root))
+
+    differs = sum(1 for r in rows if r.verdict == "differs")
+    errors = sum(1 for r in rows if r.verdict == "error")
+    identical = sum(1 for r in rows if r.verdict == "identical")
+    return PullDriftSummary(
+        scope=scope,
+        rows=tuple(rows),
+        differs=differs,
+        errors=errors,
+        identical=identical,
+        total=len(rows),
+    )

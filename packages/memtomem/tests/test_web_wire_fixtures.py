@@ -231,3 +231,20 @@ async def test_pull_apply_wire_shape(client, cwd_root: Path) -> None:
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "source_conflict"
     _assert_matches_golden("pull_apply", resp.json())
+
+
+@pytest.mark.asyncio
+async def test_status_global_wire_shape(client, fake_home: Path) -> None:
+    """ADR-0030 PR-F — a divergent user-tier skill pins the global-status wire:
+    store counts, the runtime-coverage list, and a POPULATED pull-drift row
+    (nesting + field order the ``verdict`` Literal parity test cannot cover)."""
+    store = fake_home / ".memtomem" / "skills" / "demo"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "SKILL.md").write_bytes(b"---\nname: demo\n---\nstore v1\n")
+    runtime = fake_home / ".claude" / "skills" / "demo"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "SKILL.md").write_bytes(b"---\nname: demo\n---\nruntime v2\n")
+    resp = await client.get("/api/context/status-global")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["pull_drift"]["rows"], "golden must pin a populated drift row"
+    _assert_matches_golden("status_global", resp.json())

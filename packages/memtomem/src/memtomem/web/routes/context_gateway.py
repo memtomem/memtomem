@@ -19,7 +19,7 @@ from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate
 from memtomem.context._runtime_targets import IMPORT_SOURCE_RUNTIMES, resolve_import_runtimes
 from memtomem.context.projects import sync_skip_reason
 from memtomem.context.pull_apply import PullApplyResult, PullPlan, commit_pull, prepare_pull
-from memtomem.context.pull_preview import preview_pull
+from memtomem.context.pull_preview import preview_pull, probe_pull_drift
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 from memtomem.context.status import (
     ProjectStatus,
@@ -39,6 +39,7 @@ from memtomem.web.schemas.context import (
     ContextPullPreviewResponse,
     ContextRuntimesResponse,
     ContextStatusAllResponse,
+    ContextStatusGlobalResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -814,6 +815,72 @@ async def context_pull_preview(
         "distinct_landing_count": preview.distinct_landing_count,
         "ambiguous": preview.ambiguous,
         "auto_source": preview.auto_source,
+    }
+
+
+# ── GET /context/status-global — user-tier portal (ADR-0030 §9 + §1, PR-F) ──
+
+
+@router.get("/context/status-global", response_model=ContextStatusGlobalResponse)
+async def context_status_global() -> dict:
+    """User-tier global portal status — ADR-0030 §9 + §1 (PR-F).
+
+    The user tier is one global ``~/.memtomem`` Store with no per-project
+    fan-out, so it does NOT ride the ``project_shared``-only
+    ``/context/status-all`` fleet endpoint — it gets this parameterless sibling
+    (no ``target_scope`` query to abuse; user-only by construction). Reports the
+    global-library inventory counts, host runtime coverage, and a READ-ONLY
+    pull-direction drift summary (does any runtime copy differ from the Store?).
+    No writes, no privacy-counter mutation; the probe runs off the event loop
+    (per-tree filesystem reads). Every error ``reason`` is display-sanitized
+    (``_redact_pull_reason``) — no absolute paths on the wire.
+    """
+    from memtomem.context.runtime_coverage import compute_runtime_coverage
+
+    home = Path.home()
+    summary, coverage = await asyncio.gather(
+        asyncio.to_thread(probe_pull_drift, scope="user", project_root=None),
+        asyncio.to_thread(compute_runtime_coverage, home),
+    )
+
+    # Inventory counts fall out of the drift rows (one row per Store artifact) —
+    # no second Store walk.
+    store = {
+        "skills": sum(1 for r in summary.rows if r.kind == "skills"),
+        "agents": sum(1 for r in summary.rows if r.kind == "agents"),
+        "commands": sum(1 for r in summary.rows if r.kind == "commands"),
+    }
+    return {
+        "scope": "user",
+        "store": store,
+        "runtime_coverage": [
+            {
+                "name": str(entry["name"]),
+                "available": bool(entry["available"]),
+                # compute_runtime_coverage omits these when the registry probe
+                # found no client; this module forbids optional keys.
+                "installed": entry.get("installed"),
+                "memtomem_registered": entry.get("memtomem_registered"),
+            }
+            for entry in coverage
+        ],
+        "pull_drift": {
+            "has_pull_drift": summary.has_pull_drift,
+            "total": summary.total,
+            "differs": summary.differs,
+            "errors": summary.errors,
+            "identical": summary.identical,
+            "rows": [
+                {
+                    "kind": r.kind,
+                    "name": r.name,
+                    "verdict": r.verdict,
+                    "runtimes": list(r.runtimes),
+                    "reason": _redact_pull_reason(r.reason, home),
+                }
+                for r in summary.rows
+            ],
+        },
     }
 
 
