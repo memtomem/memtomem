@@ -37,6 +37,7 @@ export const CTX_GATEWAY_SCRIPTS = [
   'context-gateway-conflict.js',
   'context-gateway-detail.js',
   'context-gateway-actions.js',
+  'context-gateway-pull.js',
 ];
 
 // Concatenate the fragments in load order for the rare suite that greps the

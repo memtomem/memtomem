@@ -2514,6 +2514,42 @@ select:focus-visible {
 .ctx-mc-preview { color: var(--muted); font-size: 0.82rem; line-height: 1.5; margin: -4px 0 12px; overflow-wrap: anywhere; }
 .ctx-mc-warning { color: var(--warning, #b58900); font-size: 0.82rem; font-weight: 600; line-height: 1.5; margin: -4px 0 12px; overflow-wrap: anywhere; }
 
+/* ── ADR-0030 PR-D2: Pull picker (#ctx-pull-modal) ──
+   The candidate table is a radio list of tools that have the artifact, each
+   with the two-axis content/privacy badges. Reuses the Move/Copy field/radio
+   primitives above and the shared design tokens (theme-aware in both modes). */
+.ctx-pull-candidates { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.ctx-pull-loading { color: var(--muted); font-size: 0.82rem; margin: 4px 2px; }
+.ctx-pull-candidate {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+  padding: 6px 8px; border-radius: var(--radius); cursor: pointer;
+  font-size: 0.85rem; color: var(--text);
+}
+.ctx-pull-candidate:hover { background: color-mix(in srgb, var(--muted) 8%, transparent); }
+.ctx-pull-candidate input[type="radio"] { cursor: pointer; }
+.ctx-pull-candidate-disabled { cursor: default; color: var(--muted); }
+.ctx-pull-candidate-disabled:hover { background: none; }
+.ctx-pull-radio-spacer { display: inline-block; width: 13px; }
+.ctx-pull-runtime { font-weight: 600; }
+/* Badge/tag TEXT stays var(--text) for a11y contrast in both themes — the
+   status is carried by the label word ("clean" / "blocked" / "differs"), so the
+   tinted background is a decorative, non-load-bearing color cue. */
+.ctx-pull-badge {
+  font-size: 0.68rem; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent); color: var(--text);
+}
+.ctx-pull-content-new,
+.ctx-pull-gate-ok { background: color-mix(in srgb, var(--green) 26%, transparent); }
+.ctx-pull-content-differs,
+.ctx-pull-gate-requires_unsafe_confirmation { background: color-mix(in srgb, var(--warning, #b58900) 30%, transparent); }
+.ctx-pull-content-landing_error,
+.ctx-pull-content-store_error,
+.ctx-pull-gate-blocked { background: color-mix(in srgb, var(--danger) 26%, transparent); }
+.ctx-pull-auto,
+.ctx-pull-override { font-size: 0.68rem; font-weight: 600; color: var(--text); opacity: 0.85; }
+.ctx-pull-check-row { display: flex; align-items: center; gap: 8px; margin: 2px 2px 12px; font-size: 0.85rem; color: var(--text); cursor: pointer; user-select: none; }
+.ctx-pull-check-row input[type="checkbox"] { cursor: pointer; }
+
 /* ── Sprint 2: Copy / Markdown Preview / Syntax Highlight ── */
 .editor-label-row {
   display: flex; align-items: center; justify-content: space-between;

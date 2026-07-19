@@ -489,10 +489,18 @@ async function loadCtxDetail(type, name, opts = {}) {
     const _mcBtn = _ctxCanMoveCopy(type)
       ? `<button class="btn-ghost ctx-detail-move-copy-btn" data-i18n="settings.ctx.move_copy" data-i18n-title="settings.ctx.move_copy_tooltip" title="${escapeHtml(t('settings.ctx.move_copy_tooltip'))}">${t('settings.ctx.move_copy')}</button>`
       : '';
+    // "Pull from a tool…" (ADR-0030 PR-D2): source-selectable Pull of a possibly
+    // fresher tool copy over the existing canonical (overwrite). Offered for the
+    // Pull-eligible kinds (skills/agents/commands); the picker itself gates the
+    // destination tier + privacy, so this is NOT in the write-block sweep.
+    const _pullBtn = (typeof _ctxCanPull === 'function' && _ctxCanPull(type))
+      ? `<button class="btn-ghost ctx-detail-pull-btn" data-i18n="settings.ctx.pull" data-i18n-title="settings.ctx.pull_tooltip" title="${escapeHtml(t('settings.ctx.pull_tooltip'))}">${t('settings.ctx.pull')}</button>`
+      : '';
     html += `<div class="ctx-detail-header">
       <h2 class="ctx-detail-name" id="ctx-detail-name-${type}" tabindex="-1">${escapeHtml(name)}</h2>
       <div style="display:flex;gap:6px">
         <button class="btn-ghost ctx-detail-edit-btn" data-i18n="settings.ctx.edit" data-i18n-title="settings.ctx.edit_tooltip" title="${escapeHtml(t('settings.ctx.edit_tooltip'))}">${t('settings.ctx.edit')}</button>
+        ${_pullBtn}
         ${_mcBtn}
         <button class="btn-ghost btn-danger ctx-detail-delete-btn" data-i18n="settings.ctx.delete" data-i18n-title="settings.ctx.delete_tooltip" title="${escapeHtml(t('settings.ctx.delete_tooltip'))}">${t('settings.ctx.delete')}</button>
       </div>
@@ -843,6 +851,9 @@ async function loadCtxDetail(type, name, opts = {}) {
     detailEl.querySelector('.ctx-detail-move-copy-btn')?.addEventListener('click', () => {
       _ctxOpenMoveCopyModal(type, name);
     });
+    detailEl.querySelector('.ctx-detail-pull-btn')?.addEventListener('click', () => {
+      if (typeof window.ctxOpenPullModal === 'function') window.ctxOpenPullModal(type, name);
+    });
 
     // Per-item Edit / Delete buttons just landed in ``detailEl``; mirror
     // the section-level gate so they pick up the tier filter without
@@ -1050,10 +1061,18 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
              ${escapeHtml(t('settings.ctx.import_to_user'))}
            </button>`
         : '';
+      // "Pull from a tool…" (ADR-0030 PR-D2) — the source-selectable, preview-
+      // first path for the runtime-only artifact (the ADR's motivating case: a
+      // stale copy silently beating a fresher one on a plain first-runtime-wins
+      // import). Offered alongside the legacy one-click Import.
+      const pullBtn = (typeof _ctxCanPull === 'function' && _ctxCanPull(type))
+        ? `<button class="btn-ghost ctx-runtime-pull-btn">${escapeHtml(t('settings.ctx.pull'))}</button>`
+        : '';
       html += `<div class="ctx-edit-actions" style="margin-top:12px">
         <button class="btn-primary ctx-runtime-only-import" data-type="${escapeHtml(type)}">
           ${escapeHtml(t('settings.ctx.import_this').replace('{type}', _ctxTypeNameSingular(type)))}
         </button>
+        ${pullBtn}
         ${userLibBtn}
       </div>`;
     }
@@ -1061,6 +1080,10 @@ async function _ctxLoadRuntimeOnlyDetail(type, name, detailEl, opts = {}) {
     html += '</div>';
     detailEl.innerHTML = html;
     if (opts.focusOnLoad) _ctxFocusDetail(detailEl);
+
+    detailEl.querySelector('.ctx-runtime-pull-btn')?.addEventListener('click', () => {
+      if (typeof window.ctxOpenPullModal === 'function') window.ctxOpenPullModal(type, name);
+    });
 
     detailEl.querySelector('.ctx-runtime-only-import')?.addEventListener('click', async () => {
       const btn = detailEl.querySelector('.ctx-runtime-only-import');

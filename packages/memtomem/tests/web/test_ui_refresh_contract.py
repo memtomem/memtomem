@@ -58,7 +58,7 @@ def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
 def test_changed_static_assets_bump_cache_versions() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert "/style.css?v=137" in html
+    assert "/style.css?v=138" in html
     assert "/app.js?v=156" in html
     assert "/settings-harness.js?v=8" in html
     assert "/settings-config.js?v=19" in html
