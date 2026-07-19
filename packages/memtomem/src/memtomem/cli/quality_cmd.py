@@ -489,16 +489,24 @@ async def _experiment(
     # the --baseline FLAG (not the file's content) decides whether a baseline doc
     # is required, so an explicit but falsy document ({}, null) is validated and
     # rejected rather than silently treated as "use the ambient config".
-    baseline_json = _read_json_role(baseline_path, "baseline profile") if baseline_path else None
+    # Gate on the FLAG's presence (is not None), never on the file content's
+    # truthiness: a supplied but falsy document/policy ({}, null, "") must be
+    # validated and rejected, not silently treated as "absent". A --policy file
+    # of `null` that read as "no policy" would silently disable gating.
+    baseline_json = (
+        _read_json_role(baseline_path, "baseline profile") if baseline_path is not None else None
+    )
     profile_jsons = [
         _read_json_role(path, f"profile #{i + 1}") for i, path in enumerate(profile_paths)
     ]
-    policy_json = _read_json_role(policy_path, "policy") if policy_path else None
+    policy_json = _read_json_role(policy_path, "policy") if policy_path is not None else None
 
-    baseline_doc = _load_doc_role(baseline_json, "baseline profile") if baseline_path else None
+    baseline_doc = (
+        _load_doc_role(baseline_json, "baseline profile") if baseline_path is not None else None
+    )
     candidate_docs = [_load_doc_role(j, f"profile #{i + 1}") for i, j in enumerate(profile_jsons)]
     policy = None
-    if policy_json is not None:
+    if policy_path is not None:
         try:
             policy = load_policy(policy_json)
         except EvalCaseError as e:

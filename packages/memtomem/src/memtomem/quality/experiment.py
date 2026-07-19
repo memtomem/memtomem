@@ -14,10 +14,15 @@ Determinism and isolation are inherited, not re-invented:
   :func:`memtomem.quality.profiles.apply_profile` (pure) and run on its own
   transient component stack, so the user's project/global configuration is never
   mutated.
-- Because every replay reads the same live database, the corpus/index/case-set
-  fingerprints must match across all reports; :func:`assemble_experiment`
-  asserts this and fails loudly on drift rather than emitting a misleading
-  aggregate comparison.
+- Because every replay reads the same live database, the profile-INDEPENDENT
+  fingerprints must be stable: the ``corpus`` and ``case_set`` axes are asserted
+  equal across all reports, and a full profile-independent corpus/index snapshot
+  is taken from storage before and after the run (see ``_shared_snapshot``) to
+  catch a concurrent writer. The per-report ``index`` fingerprint is *not*
+  compared across reports — it legitimately varies by profile, since
+  ``current_fingerprints`` folds access-count / link artifacts in only when a
+  profile reads them — so a candidate that enables those stages is not mistaken
+  for drift.
 """
 
 from __future__ import annotations

@@ -579,6 +579,45 @@ class TestExperiment:
         candidate_warning = result.output.index("warning: rerank_provider_model_mismatch")
         assert baseline_warning < candidate_header < candidate_warning
 
+    def test_null_policy_is_rejected_not_silently_disabled(self, monkeypatch, tmp_path):
+        # A --policy file of `null` must NOT read as "no policy" and pass — that
+        # would silently disable gating on a failing candidate.
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned(policy_supplied=True, gate_pass=False))
+        policy = tmp_path / "policy.json"
+        policy.write_text("null")
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--profile", self._profile(tmp_path, "cand-a"), "--policy", str(policy)],
+        )
+        assert result.exit_code == 2
+        assert "policy rejected" in result.output
+
+    def test_empty_baseline_path_is_rejected(self, monkeypatch, tmp_path):
+        # --baseline "" (e.g. an unset CI variable) is a supplied flag → validate
+        # and reject, never silently fall back to the ambient config.
+        comp = SimpleNamespace()
+        run = self._patch_run(monkeypatch, comp, self._canned())
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--baseline", "", "--profile", self._profile(tmp_path, "cand-a")],
+        )
+        assert result.exit_code == 2
+        assert run.call_count == 0
+
+    def test_null_baseline_is_rejected(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        run = self._patch_run(monkeypatch, comp, self._canned())
+        bad = tmp_path / "null.json"
+        bad.write_text("null")
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--baseline", str(bad), "--profile", self._profile(tmp_path, "cand-a")],
+        )
+        assert result.exit_code == 2
+        assert run.call_count == 0
+        assert "baseline profile rejected" in result.output
+
     def test_missing_as_of_warns_not_reproducible(self, monkeypatch, tmp_path):
         comp = SimpleNamespace()
         self._patch_run(monkeypatch, comp, self._canned())
