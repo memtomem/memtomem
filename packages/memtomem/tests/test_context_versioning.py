@@ -292,6 +292,173 @@ class TestManifest:
         assert v.next_version_tag(m) == "v4"  # max+1, not count
 
 
+class TestSchemaCompat:
+    """Forward-compat prep for tree-layout entries (ADR-0030 §10, PR-G1).
+
+    Readers refuse a NEWER schema loudly; writers round-trip fields they do not
+    own. Both directions are pinned so a build that predates the tree layout can
+    never silently strip a later writer's ``schema_version`` / per-entry
+    ``layout`` during an ordinary ``promote`` / ``delete-label`` cycle.
+    """
+
+    def _seed_with_unknown_fields(self, artifact_dir, working):
+        """A real v1 plus fields this build does not own, written to disk."""
+        v.create_version(artifact_dir, working)
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["future_top_level"] = {"campaign": 2}
+        raw["versions"]["v1"]["layout"] = "tree"
+        (artifact_dir / "versions.json").write_text(json.dumps(raw), encoding="utf-8")
+        return raw
+
+    def test_promote_preserves_unknown_fields(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        self._seed_with_unknown_fields(artifact_dir, working)
+
+        v.promote_label(artifact_dir, "production", "v1")
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        # The mutation really happened (guards against a no-op passing vacuously)…
+        assert raw["labels"] == {"production": "v1"}
+        # …and the unknown fields survived it.
+        assert raw["future_top_level"] == {"campaign": 2}
+        assert raw["versions"]["v1"]["layout"] == "tree"
+
+    def test_delete_label_preserves_unknown_fields(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        self._seed_with_unknown_fields(artifact_dir, working)
+        v.promote_label(artifact_dir, "production", "v1")
+
+        v.delete_label(artifact_dir, "production")
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert raw["labels"] == {}  # the mutation really happened
+        assert raw["future_top_level"] == {"campaign": 2}
+        assert raw["versions"]["v1"]["layout"] == "tree"
+
+    def test_create_version_preserves_unknown_fields(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        self._seed_with_unknown_fields(artifact_dir, working)
+
+        working.write_text(_AGENT_TEMPLATE.format(marker="B", desc="v"), encoding="utf-8")
+        v.create_version(artifact_dir, working)
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert "v2" in raw["versions"]  # the mutation really happened
+        assert raw["future_top_level"] == {"campaign": 2}
+        assert raw["versions"]["v1"]["layout"] == "tree"
+
+    def test_unknown_fields_reach_the_dataclasses(self, tmp_path):
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        self._seed_with_unknown_fields(artifact_dir, working)
+
+        manifest = v.load_manifest(artifact_dir)
+
+        assert manifest.extra == {"future_top_level": {"campaign": 2}}
+        assert manifest.versions["v1"].extra == {"layout": "tree"}
+        # Known keys are NOT duplicated into extra.
+        assert "versions" not in manifest.extra
+        assert "created_at" not in manifest.versions["v1"].extra
+
+    def test_legacy_manifest_gains_schema_version(self, tmp_path):
+        """A schema-less manifest round-trips unchanged except the added field."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        raw_before = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw_before.pop("schema_version", None)
+        (artifact_dir / "versions.json").write_text(json.dumps(raw_before), encoding="utf-8")
+
+        assert v.load_manifest(artifact_dir).schema_version == v.SCHEMA_VERSION
+        v.promote_label(artifact_dir, "production", "v1")
+
+        raw_after = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert raw_after["schema_version"] == v.SCHEMA_VERSION
+        assert raw_after["versions"] == raw_before["versions"]
+
+    def test_refuses_newer_schema_version(self, tmp_path):
+        artifact_dir, _ = _make_dir_agent(tmp_path)
+        (artifact_dir / "versions.json").write_text(
+            json.dumps({"schema_version": v.SCHEMA_VERSION + 1, "versions": {}, "labels": {}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(v.UnsupportedSchemaVersionError, match="schema_version"):
+            v.load_manifest(artifact_dir)
+
+    def test_schema_gate_runs_before_shape_checks(self, tmp_path):
+        """Ordering is load-bearing: a newer schema may legitimately change the
+        shape of ``versions``/``labels``, so the schema refusal must win over
+        the shape validation rather than reporting a confusing shape error."""
+        artifact_dir, _ = _make_dir_agent(tmp_path)
+        (artifact_dir / "versions.json").write_text(
+            json.dumps({"schema_version": v.SCHEMA_VERSION + 1, "versions": [], "labels": 3}),
+            encoding="utf-8",
+        )
+        with pytest.raises(v.UnsupportedSchemaVersionError, match="schema_version"):
+            v.load_manifest(artifact_dir)
+
+    def test_newer_schema_fails_writes_closed(self, tmp_path):
+        """The invariant that actually prevents corruption: a mutator refuses a
+        newer-schema manifest too (every one loads under the lock before saving),
+        so an old build cannot rewrite — and thereby strip — a newer file."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["schema_version"] = v.SCHEMA_VERSION + 1
+        before = json.dumps(raw)
+        (artifact_dir / "versions.json").write_text(before, encoding="utf-8")
+
+        with pytest.raises(v.UnsupportedSchemaVersionError):
+            v.promote_label(artifact_dir, "production", "v1")
+        with pytest.raises(v.UnsupportedSchemaVersionError):
+            v.delete_label(artifact_dir, "production")
+        with pytest.raises(v.UnsupportedSchemaVersionError):
+            v.create_version(artifact_dir, working)
+        # Refused means untouched, not partially rewritten.
+        assert (artifact_dir / "versions.json").read_text(encoding="utf-8") == before
+
+    def test_known_keys_win_over_extra(self, tmp_path):
+        """``extra`` is attacker-controlled content if a manifest is tampered
+        with — it must never shadow a field this build owns."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+
+        manifest = v.load_manifest(artifact_dir)
+        manifest.extra["versions"] = {"vBOGUS": {}}
+        manifest.extra["labels"] = {"evil": "v1"}
+        manifest.extra["schema_version"] = 999
+        manifest.versions["v1"].extra["created_at"] = "hacked"
+        manifest.versions["v1"].extra["note"] = "hacked"
+        v._save_manifest(artifact_dir, manifest)
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert list(raw["versions"]) == ["v1"]
+        assert raw["labels"] == {}
+        assert raw["schema_version"] == v.SCHEMA_VERSION
+        assert raw["versions"]["v1"]["created_at"] != "hacked"
+        assert raw["versions"]["v1"]["note"] != "hacked"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            0,  # not positive
+            -1,
+            True,  # isinstance(True, int) is True — must NOT read as 1
+            False,
+            "1",  # str
+            1.0,  # float
+            [1],
+        ],
+        ids=["zero", "negative", "true", "false", "str", "float", "list"],
+    )
+    def test_refuses_malformed_schema_version(self, tmp_path, bad):
+        artifact_dir, _ = _make_dir_agent(tmp_path)
+        (artifact_dir / "versions.json").write_text(
+            json.dumps({"schema_version": bad, "versions": {}, "labels": {}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(v.VersionError, match="schema_version"):
+            v.load_manifest(artifact_dir)
+
+
 class TestConcurrency:
     def test_concurrent_create_no_overwrite(self, tmp_path):
         """Two threads calling create_version must not both allocate v1 — the
