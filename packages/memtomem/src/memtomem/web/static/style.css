@@ -4360,6 +4360,43 @@ body.app-simple [data-ui-adv="advanced"] { display: none; }
    about an absent root. */
 .ctx-scope-badge--status-error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
 
+/* ── ADR-0030 PR-F: Global library (user-tier ~/.memtomem Store) landing ── */
+/* Pull-direction drift glance-dot on the nav button (mirrors wiki-nav-dirty);
+   the warning tone matches the push-side ctx-scope-badge--drift. */
+.ctx-global-nav-dot {
+  display: inline-block; width: 8px; height: 8px; margin-left: 6px;
+  border-radius: 50%; background: var(--yellow); flex: 0 0 auto;
+}
+.ctx-global-scope-chip {
+  background: rgba(123, 127, 150, 0.12); color: var(--muted);
+  border: 1px solid var(--border); font-weight: 500;
+}
+.ctx-global-inventory {
+  display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 16px;
+  color: var(--text-secondary);
+}
+.ctx-global-count strong { color: var(--text-primary); }
+.ctx-global-drift-summary { margin: 4px 0 12px; color: var(--text-secondary); }
+.ctx-global-drift-summary--drift { color: var(--yellow); }
+.ctx-global-rows { display: flex; flex-direction: column; gap: 6px; }
+.ctx-global-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+}
+.ctx-global-row-kind { color: var(--muted); font-size: 0.85em; min-width: 72px; }
+.ctx-global-row-name { font-weight: 600; color: var(--text-primary); }
+.ctx-global-row-runtimes, .ctx-global-row-reason {
+  color: var(--text-secondary); font-size: 0.9em;
+}
+.ctx-global-pull-btn { margin-left: auto; }
+.ctx-global-badge { padding: 1px 8px; border-radius: 999px; font-size: 0.8em; font-weight: 600; }
+.ctx-global-badge--differs { background: rgba(243, 156, 18, 0.15); color: var(--yellow); }
+.ctx-global-badge--identical { background: rgba(123, 127, 150, 0.12); color: var(--muted); }
+.ctx-global-badge--error { background: rgba(224, 90, 90, 0.15); color: var(--danger); }
+.ctx-global-empty, .ctx-global-loading, .ctx-global-error {
+  color: var(--text-secondary); padding: 8px 0;
+}
+
 /* Registry read-failure banner (#1692) — non-blocking warning above the
    Portal board; the roster still renders below it (server-cwd / scan rows
    survive a degraded registry). Warning tone, matching the header banners. */

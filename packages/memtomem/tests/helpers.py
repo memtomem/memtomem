@@ -48,6 +48,7 @@ CTX_GATEWAY_JS_FILES = (
     "context-gateway-detail.js",
     "context-gateway-actions.js",
     "context-gateway-pull.js",
+    "context-gateway-global.js",
 )
 
 

@@ -368,6 +368,13 @@ function _ctxHandlePullResult(state, res) {
       if (typeof loadCtxList === 'function') loadCtxList(state.kind);
       if (typeof loadCtxDetail === 'function') loadCtxDetail(state.kind, state.name);
     }
+    // A user-tier Pull reconciles a Global-library (ADR-0030 PR-F) drift row —
+    // refresh that section + its nav glance-dot so the reconciled row/dot don't
+    // linger stale. loadCtxGlobal is supersession-guarded and repaints the static
+    // section body even when Global isn't the visible section.
+    if (state.tier === 'user' && typeof window.loadCtxGlobal === 'function') {
+      window.loadCtxGlobal();
+    }
     return;
   }
   const message = res.ok
@@ -409,7 +416,7 @@ function _ctxPullClose(state) {
   }
 }
 
-function _ctxOpenPullModal(kind, name) {
+function _ctxOpenPullModal(kind, name, defaultTier) {
   const modalEl = qs('ctx-pull-modal');
   if (!modalEl || !_ctxCanPull(kind)) return;
   // A prior session (a double / programmatic reopen) must be torn down first —
@@ -420,18 +427,22 @@ function _ctxOpenPullModal(kind, name) {
   _ctxResetPullControls(modalEl);
 
   // Default the destination tier to project_shared (the pull-preview route's
-  // default) — the user can switch to their personal library. Pin the effective
-  // project scope ONCE (like the Move/Copy modal's ``srcScopeIdEff``) so a
-  // mid-modal project switch can't re-target the preview/apply.
-  const defaultTier = 'project_shared';
+  // default) — the user can switch to their personal library. A caller MAY pass
+  // an explicit ``defaultTier`` (the Global-library section opens user-tier drift
+  // rows with 'user'); an unknown value falls back to project_shared so a bad
+  // caller can never strand the modal on no tier. Pin the effective project scope
+  // ONCE (like the Move/Copy modal's ``srcScopeIdEff``) so a mid-modal project
+  // switch can't re-target the preview/apply.
+  const _ALLOWED_TIERS = ['project_shared', 'user'];
+  const startTier = _ALLOWED_TIERS.includes(defaultTier) ? defaultTier : 'project_shared';
   const state = {
-    kind, name, tier: defaultTier, scopeId: _ctxEffectiveScopeId(),
+    kind, name, tier: startTier, scopeId: _ctxEffectiveScopeId(),
     selectedRuntime: null, lastPreview: null, _teardown: null,
   };
   _ctxPullState = state;
 
   modalEl.querySelectorAll('input[name="ctx-pull-tier"]').forEach((el) => {
-    el.checked = el.value === defaultTier;
+    el.checked = el.value === startTier;
   });
 
   const onTierChange = () => {

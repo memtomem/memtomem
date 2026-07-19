@@ -58,10 +58,14 @@ def test_header_utility_icons_are_dependency_free_inline_svg() -> None:
 def test_changed_static_assets_bump_cache_versions() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert "/style.css?v=138" in html
-    assert "/app.js?v=156" in html
+    assert "/style.css?v=139" in html
+    assert "/app.js?v=157" in html
     assert "/settings-harness.js?v=8" in html
     assert "/settings-config.js?v=19" in html
+    # ADR-0030 PR-F: the new Global-library fragment + the pull.js bump that added
+    # its defaultTier param must carry fresh cache versions.
+    assert "/context-gateway-global.js?v=1" in html
+    assert "/context-gateway-pull.js?v=2" in html
 
 
 def test_theme_icon_follows_document_theme_without_duplicate_js_state() -> None:

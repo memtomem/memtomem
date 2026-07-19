@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=138" />
+  <link rel="stylesheet" href="/style.css?v=139" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -548,6 +548,23 @@
             <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Push overview</span>
           </span>
         </button>
+        <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-global" data-group="integrations">
+          <span class="nav-icon" aria-hidden="true">🌐</span>
+          <span class="nav-labels">
+            <span class="nav-label" data-i18n="settings.nav.ctx_global">Global library</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_global_sub">Your user-tier Store</span>
+          </span>
+          <!-- ADR-0030 PR-F: pull-direction drift glance-dot (mirrors the wiki
+               dirty dot). Hidden until context-gateway-global.js flips it on when
+               the status-global probe reports has_pull_drift. role=img + an
+               aria-label folds the meaning into the button's accessible name; no
+               aria-live (ctx a11y — a glance dot, never announced as it appears). -->
+          <span class="ctx-global-nav-dot" role="img" hidden
+                data-i18n-title="settings.nav.ctx_global_drift_tip"
+                title="A tool's copy differs from your Store — Preview and Pull to reconcile."
+                data-i18n-aria-label="settings.nav.ctx_global_drift_tip"
+                aria-label="A tool's copy differs from your Store — Preview and Pull to reconcile."></span>
+        </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations">
           <span class="nav-icon" aria-hidden="true">📁</span>
           <span class="nav-labels">
@@ -656,6 +673,26 @@
                (_renderCtxSyncStatus); hidden until a Sync All run starts. -->
           <div id="ctx-sync-status" class="ctx-sync-status" role="status" aria-live="polite" hidden></div>
           <div id="ctx-overview-content"></div>
+        </div>
+
+        <!-- Context Gateway: Global library (ADR-0030 PR-F — the user-tier
+             ~/.memtomem Store. Host-global like the Wiki: NO ctx-toolbar /
+             project-tier bar (absent from _CTX_SECTION_BAR_TYPE). Shows the
+             global inventory + a READ-ONLY pull-direction drift summary; Pull is
+             a leaf action into the shared #ctx-pull-modal. -->
+        <div class="settings-section" id="settings-ctx-global">
+          <p class="settings-section-desc" data-i18n="settings.ctx.global_desc">Your user-tier Store (~/.memtomem) — the skills, subagents, and commands shared across every project. Detection is automatic; Pull to bring a tool's copy back into the Store.</p>
+          <div class="ctx-header">
+            <div class="ctx-header-title">
+              <h2 data-i18n="settings.ctx.global_title">Global library</h2>
+              <span class="badge ctx-global-scope-chip" data-i18n="settings.ctx.global_scope_chip">User tier</span>
+            </div>
+            <button id="ctx-global-refresh-btn" class="btn-ghost"
+                    data-i18n="settings.ctx.refresh"
+                    data-i18n-title="settings.ctx.refresh_tooltip"
+                    data-i18n-aria-label="settings.ctx.refresh_aria">Refresh</button>
+          </div>
+          <div id="ctx-global-content"></div>
         </div>
 
         <!-- Context Gateway: Projects (Portal) -->
@@ -1870,7 +1907,7 @@
   <script src="/vendor/prism-bash.min.js?v=1"></script>
   <script src="/vendor/prism-yaml.min.js?v=1"></script>
   <script src="/i18n.js?v=7"></script>
-  <script src="/app.js?v=156"></script>
+  <script src="/app.js?v=157"></script>
   <script src="/chunk-progress.js?v=1"></script>
   <script src="/settings-config.js?v=19"></script>
   <script src="/sources-memory-dirs.js?v=15"></script>
@@ -1886,7 +1923,8 @@
   <script src="/context-gateway-conflict.js?v=2"></script>
   <script src="/context-gateway-detail.js?v=5"></script>
   <script src="/context-gateway-actions.js?v=2"></script>
-  <script src="/context-gateway-pull.js?v=1"></script>
+  <script src="/context-gateway-pull.js?v=2"></script>
+  <script src="/context-gateway-global.js?v=1"></script>
   <script src="/context-portal.js?v=13"></script>
   <script src="/wiki.js?v=11"></script>
   <script src="/path-picker.js?v=4"></script>
