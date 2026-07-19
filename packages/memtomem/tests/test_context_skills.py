@@ -38,6 +38,24 @@ def _make_canonical_skill(project_root, name, body=SAMPLE_SKILL_MD, with_scripts
     return skill
 
 
+def _seed_store_metadata(skill):
+    """Plant the Store-owned top level PR-G3 will start writing (ADR-0030 §10).
+
+    ``versions/`` + ``versions.json`` (and the manifest's lock/temp sidecars)
+    plus the ``overrides/`` source, and a nested ``scripts/versions.json``
+    lookalike that must survive as ordinary content.
+    """
+    (skill / "versions").mkdir()
+    (skill / "versions" / "v1.md").write_text("old body\n", encoding="utf-8")
+    (skill / "versions.json").write_text('{"versions": {"v1": {}}}\n', encoding="utf-8")
+    (skill / ".versions.json.lock").write_text("", encoding="utf-8")
+    (skill / "overrides").mkdir()
+    (skill / "overrides" / "gemini.md").write_text("gemini flavor\n", encoding="utf-8")
+    (skill / "scripts").mkdir(exist_ok=True)
+    (skill / "scripts" / "versions.json").write_text("{}\n", encoding="utf-8")
+    return skill
+
+
 class TestCanonicalDiscovery:
     def test_list_empty(self, tmp_path):
         assert list_canonical_skills(tmp_path) == []
@@ -161,6 +179,56 @@ class TestGenerateAllSkills:
         assert "claude_skills" in SKILL_GENERATORS
         assert "gemini_skills" in SKILL_GENERATORS
         assert "codex_skills" in SKILL_GENERATORS
+
+
+class TestStoreMetadataNeverFansOut:
+    """ADR-0030 §10 (PR-G2): fan-out stages the PAYLOAD surface only.
+
+    Prep for PR-G3, which starts writing ``versions/vN/`` tree snapshots inside
+    the canonical skill dir. Un-converged, the first such snapshot would be
+    copied into every runtime (Store history leaking out of the Store) and
+    would then read as permanent drift, because a runtime legitimately has no
+    version store. Both halves are pinned here, before the writer exists.
+    """
+
+    def test_versions_and_overrides_are_not_copied_to_runtimes(self, tmp_path):
+        skill = _make_canonical_skill(tmp_path, "a", with_scripts=True)
+        _seed_store_metadata(skill)
+
+        generate_all_skills(tmp_path)
+
+        for runtime_root in (".claude/skills", ".gemini/skills", ".agents/skills", ".kimi/skills"):
+            landed = tmp_path / runtime_root / "a"
+            assert (landed / "SKILL.md").is_file()  # payload landed…
+            assert not (landed / "versions").exists()  # …metadata did not
+            assert not (landed / "versions.json").exists()
+            assert not (landed / ".versions.json.lock").exists()
+            assert not (landed / "overrides").exists()
+            # Root-only: a nested lookalike is ordinary user content.
+            assert (landed / "scripts" / "versions.json").is_file()
+
+    def test_versioned_skill_is_not_reported_as_drift(self, tmp_path):
+        skill = _make_canonical_skill(tmp_path, "a")
+        _seed_store_metadata(skill)
+
+        generate_all_skills(tmp_path)
+
+        assert all(status == "in sync" for _, _, status in diff_skills(tmp_path))
+
+    def test_metadata_leaked_onto_the_runtime_side_is_still_drift(self, tmp_path):
+        """The exclusion is canonical-side only — a ``versions/`` that somehow
+        reached a runtime must still be reported so re-sync cleans it."""
+        skill = _make_canonical_skill(tmp_path, "a")
+        _seed_store_metadata(skill)
+        generate_all_skills(tmp_path)
+
+        leaked = tmp_path / ".claude/skills/a/versions"
+        leaked.mkdir()
+        (leaked / "v1.md").write_text("stale\n", encoding="utf-8")
+
+        status_by_runtime = {runtime: status for runtime, _, status in diff_skills(tmp_path)}
+        assert status_by_runtime["claude_skills"] == "out of sync"
+        assert status_by_runtime["gemini_skills"] == "in sync"
 
 
 class TestUnreadableSources:

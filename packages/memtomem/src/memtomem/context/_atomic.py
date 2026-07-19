@@ -29,7 +29,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 import portalocker
 
@@ -348,6 +348,7 @@ def copy_tree_atomic(
     *,
     mode: int = 0o644,
     skip_top_level: frozenset[str] | None = None,
+    skip_top_level_pred: Callable[[str], bool] | None = None,
     skip_suffixes: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """Recursively mirror *src* → *dst*, each file via :func:`atomic_write_bytes`.
@@ -368,7 +369,14 @@ def copy_tree_atomic(
     depth. ``skip_top_level`` names additional entries skipped ONLY at the
     root of this call (it is deliberately not propagated into the recursion),
     so e.g. a skill's top-level ``overrides/`` source can be excluded without
-    also dropping a legitimate nested ``scripts/overrides/``. ``skip_suffixes``
+    also dropping a legitimate nested ``scripts/overrides/``.
+    ``skip_top_level_pred`` is the same root-only exclusion expressed as a
+    predicate over the entry NAME (skip when it returns ``True``), for callers
+    whose exclusion set is not a fixed name list — the skills fan-out skips the
+    version store's ``.versions.json.<rand>.tmp`` siblings, which no frozenset
+    can enumerate, and pre-listing ``src`` to build one would leave a TOCTOU
+    window against a concurrent version write. Both may be passed; an entry is
+    skipped if either matches. ``skip_suffixes``
     excludes entries by suffix at every depth — the wiki-install copies pass
     :data:`DIRTY_SKIP_SUFFIXES` so the installed surface equals the tracked
     surface (a wiki-shipped ``*.bak`` would be invisible to the dirty walk,
@@ -390,6 +398,7 @@ def copy_tree_atomic(
         digests,
         mode=mode,
         extra_skip=skip_top_level or frozenset(),
+        extra_skip_pred=skip_top_level_pred,
         skip_suffixes=skip_suffixes,
     )
     return digests
@@ -403,6 +412,7 @@ def _copy_tree_collect(
     *,
     mode: int,
     extra_skip: frozenset[str],
+    extra_skip_pred: Callable[[str], bool] | None = None,
     skip_suffixes: frozenset[str],
 ) -> None:
     """Recursive body of :func:`copy_tree_atomic`.
@@ -410,12 +420,14 @@ def _copy_tree_collect(
     Threads the accumulating rel→digest map and the rel prefix (the old
     self-recursion restarted relpaths at each level, which was fine for a
     count but not for a map keyed by root-relative paths). ``extra_skip``
-    is passed empty on recursion — ``skip_top_level`` is root-only by
-    contract.
+    and ``extra_skip_pred`` are passed empty/``None`` on recursion —
+    ``skip_top_level``/``skip_top_level_pred`` are root-only by contract.
     """
     dst.mkdir(parents=True, exist_ok=True)
     for entry in src.iterdir():
         if entry.name in COPY_SKIP_NAMES or entry.name in extra_skip:
+            continue
+        if extra_skip_pred is not None and extra_skip_pred(entry.name):
             continue
         if entry.suffix in skip_suffixes:
             continue
@@ -436,6 +448,7 @@ def _copy_tree_collect(
                 digests,
                 mode=mode,
                 extra_skip=frozenset(),
+                extra_skip_pred=None,
                 skip_suffixes=skip_suffixes,
             )
 
