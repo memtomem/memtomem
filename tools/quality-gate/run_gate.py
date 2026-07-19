@@ -84,9 +84,12 @@ def _resolve_mm_bin(override: str | None) -> str:
     """Locate the ``mm`` CLI: an explicit override, else next to this Python."""
     if override:
         return override
-    mm = shutil.which("mm", path=os.path.dirname(sys.executable)) or shutil.which("mm")
+    # Only next to this interpreter — NOT a global-PATH fallback, which could
+    # silently gate a `uv tool install`-ed released `mm` against the committed
+    # baseline. Exotic layouts pass --mm-bin explicitly.
+    mm = shutil.which("mm", path=os.path.dirname(sys.executable))
     if not mm:
-        raise _InfraError("setup", "mm binary not found")
+        raise _InfraError("setup", "mm binary not found next to this interpreter")
     return mm
 
 
@@ -353,7 +356,10 @@ def _validate_verdict(raw: Any, code: int) -> dict[str, Any]:
     """
     if not isinstance(raw, dict) or set(raw) != _VERDICT_KEYS:
         raise _InfraError("gate", "verdict has an unexpected shape")
-    if raw["schema_version"] != 1 or raw["kind"] != "replay_gate_verdict":
+    # `type(...) is int` rejects bool (True == 1), mirroring PR-A's load_policy.
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
+        raise _InfraError("gate", "verdict schema mismatch")
+    if raw["kind"] != "replay_gate_verdict":
         raise _InfraError("gate", "verdict schema mismatch")
     passed = raw["pass"]
     if not isinstance(passed, bool) or not isinstance(raw["summary_effective"], dict):
@@ -556,6 +562,12 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             raise _InfraError("setup", "invalid assets dir") from None
         mm = _resolve_mm_bin(args.mm_bin)
+        # Probe the emit-risk scanner up front so a missing memtomem fails fast
+        # with a stage diagnostic instead of after a full index/replay.
+        try:
+            import memtomem.privacy  # noqa: F401
+        except ImportError:
+            raise _InfraError("setup", "memtomem is not importable") from None
         fixture = _load_json(assets / "fixture.json", "fixture")
         with tempfile.TemporaryDirectory(prefix="mm-quality-gate-") as td:
             tmp = Path(td)
