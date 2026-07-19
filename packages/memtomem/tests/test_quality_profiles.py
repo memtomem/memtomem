@@ -268,9 +268,7 @@ def test_recognized_rerank_provider_model_mismatch_warns(provider, model):
     doc = load_profile_document(
         _doc({"rerank": {"enabled": True, "provider": provider, "model": model}})
     )
-    assert "rerank_provider_model_mismatch" in profile_warnings(
-        apply_profile(ambient, doc), doc
-    )
+    assert "rerank_provider_model_mismatch" in profile_warnings(apply_profile(ambient, doc), doc)
 
 
 @pytest.mark.parametrize(
@@ -304,9 +302,7 @@ def test_rerank_mismatch_uses_resolved_defaults(rerank_knobs):
     ambient = Mem2MemConfig()
     ambient.rerank.api_key = "test-key"
     doc = load_profile_document(_doc({"rerank": rerank_knobs}))
-    assert "rerank_provider_model_mismatch" in profile_warnings(
-        apply_profile(ambient, doc), doc
-    )
+    assert "rerank_provider_model_mismatch" in profile_warnings(apply_profile(ambient, doc), doc)
 
 
 @pytest.mark.parametrize("provider", ["fastembed", "cohere", "local"])
