@@ -36,6 +36,7 @@ __all__ = [
     "REPLAY_REPORT_KIND",
     "MAX_AS_OF_UNIX",
     "STAGE_OUTCOME_KEYS",
+    "resolve_case_ids",
     "replay_cases",
     "serialize_report",
     "report_case_to_fingerprint_input",
@@ -135,7 +136,7 @@ def _staleness(promoted: dict[str, Any], live: dict[str, str]) -> dict[str, bool
     return out
 
 
-async def _select_case_ids(
+async def resolve_case_ids(
     storage: SqliteBackend, case_ids: "list[str] | None"
 ) -> tuple[list[str], set[str], int]:
     """Resolve the replay selection to canonical, de-duplicated case_ids.
@@ -265,7 +266,7 @@ async def replay_cases(
     live_fps, knobs = current_fingerprints(storage, config)
     nd_stages = nondeterministic_stages(config, pipeline)
 
-    ordered_ids, explicit_ids, archived_skipped = await _select_case_ids(storage, case_ids)
+    ordered_ids, explicit_ids, archived_skipped = await resolve_case_ids(storage, case_ids)
 
     case_reports: list[dict[str, Any]] = []
     for cid in ordered_ids:

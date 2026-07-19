@@ -15,7 +15,8 @@ import pytest
 from helpers import make_chunk as _make_chunk
 
 from memtomem.errors import EvalCaseError
-from memtomem.quality.replay import replay_cases, serialize_report
+from memtomem.quality import replay as replay_module
+from memtomem.quality.replay import replay_cases, resolve_case_ids, serialize_report
 from memtomem.quality.state import nondeterministic_stages
 from memtomem.storage.mixins.eval_cases import (
     EVAL_CASE_SET_KIND,
@@ -238,6 +239,42 @@ class TestStaleness:
 
 
 class TestSelection:
+    async def test_public_resolver_preserves_order_and_tuple_contract(self, bm25_only_components):
+        assert "resolve_case_ids" in replay_module.__all__
+        comp, _ = bm25_only_components
+        storage = comp.storage
+        hashes = await _seed(storage, [("alpha", "a.md")])
+        await storage.import_eval_cases(
+            _envelope(
+                [
+                    _case("c-first", "alpha", [(hashes[0], "relevant")], name="first"),
+                    _case("c-second", "alpha", [(hashes[0], "relevant")], name="second"),
+                    _case(
+                        "c-archived",
+                        "alpha",
+                        [(hashes[0], "relevant")],
+                        name="archived",
+                        status="archived",
+                    ),
+                ]
+            )
+        )
+
+        active, explicit, archived_skipped = await resolve_case_ids(storage, None)
+        expected_active = [
+            case["case_id"] for case in await storage.list_eval_cases(status="active")
+        ]
+        assert active == expected_active
+        assert explicit == set()
+        assert archived_skipped == 1
+
+        ordered, explicit, archived_skipped = await resolve_case_ids(
+            storage, ["second", "first", "c-second"]
+        )
+        assert ordered == ["c-second", "c-first"]
+        assert explicit == {"c-first", "c-second"}
+        assert archived_skipped == 0
+
     async def test_archived_skipped_by_default_but_explicit_replays(self, bm25_only_components):
         comp, _ = bm25_only_components
         storage, pipeline = comp.storage, comp.search_pipeline

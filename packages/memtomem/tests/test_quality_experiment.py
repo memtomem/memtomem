@@ -365,7 +365,7 @@ def test_run_experiment_detects_post_run_drift(monkeypatch):
     async def fake_select(storage, selectors):
         return (["c1"], set(), 0)
 
-    monkeypatch.setattr("memtomem.quality.experiment._select_case_ids", fake_select)
+    monkeypatch.setattr("memtomem.quality.experiment.resolve_case_ids", fake_select)
 
     async def fake_replay(components, *, name, doc, case_ids, as_of_unix):
         return _run(name, _report([_case("c1", retrieved=["r"], relevant=["r"])]))
