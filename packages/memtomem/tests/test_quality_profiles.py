@@ -224,6 +224,15 @@ def test_no_secret_key_survives_into_canonical_output():
             assert not is_secret_key(str(key)), f"{section}.{key}"
 
 
+def test_description_allows_crlf_whitespace():
+    # A note round-tripped from Windows (\r\n) must be accepted; other control
+    # chars are still rejected.
+    doc = load_profile_document(_doc({}, description="line one\r\nline two\ttabbed"))
+    assert doc.description == "line one\r\nline two\ttabbed"
+    with pytest.raises(EvalCaseValidationError):
+        load_profile_document(_doc({}, description="bad\x00null"))
+
+
 def test_apply_profile_output_carries_no_secret_from_document():
     ambient = Mem2MemConfig()
     ambient.rerank.api_key = "AMBIENT-SENTINEL"

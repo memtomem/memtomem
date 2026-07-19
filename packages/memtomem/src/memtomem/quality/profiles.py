@@ -472,7 +472,9 @@ class RetrievalProfileDoc(BaseModel):
             return None
         if len(v) > _DESCRIPTION_MAX_LEN:
             raise ValueError(f"description must be <= {_DESCRIPTION_MAX_LEN} characters")
-        if any(ord(c) < 32 and c not in "\t\n" for c in v):
+        # Allow tab/newline/carriage-return so a note authored on Windows and
+        # round-tripped as escaped "\r\n" in JSON is not rejected.
+        if any(ord(c) < 32 and c not in "\t\n\r" for c in v):
             raise ValueError("description must not contain control characters")
         if "/" in v or "\\" in v or scan(v):
             raise ValueError("description must not contain a path or secret-shaped value")
@@ -597,8 +599,12 @@ def apply_profile(ambient: Mem2MemConfig, doc: RetrievalProfileDoc) -> Mem2MemCo
     """
     canonical = canonicalize_profile(doc)
     payload = ambient.model_dump(mode="python")
-    # Deprecated legacy field: dropping it avoids a DeprecationWarning on every
-    # apply (its effective value already lives in rerank.min_pool).
+    # Round-tripping a dumped config back through model_validate re-runs the
+    # section before-validators, including deprecation shims that warn when a
+    # deprecated field is present. Strip such fields so apply stays quiet. Today
+    # rerank.top_k (migrated to rerank.min_pool, whose effective value is already
+    # in the payload) is the only one; extend this list if another section grows
+    # a deprecated-on-load field, or those apply calls will each emit a warning.
     if isinstance(payload.get("rerank"), dict):
         payload["rerank"].pop("top_k", None)
     for section, eligible_values in canonical.items():
