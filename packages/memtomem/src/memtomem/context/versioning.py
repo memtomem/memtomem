@@ -16,7 +16,7 @@ CLI, MCP, or web. It owns one artifact's version store:
     ├── versions/
     │   ├── v1.md           ← immutable snapshot (write-once)
     │   └── v2.md
-    └── versions.json       ← {"versions": {...}, "labels": {...}} — only mutable state
+    └── versions.json       ← {"schema_version", "versions", "labels"} — only mutable state
 
 The unit that owns a store is ``(scope, type, name)`` (ADR-0022 Decision (b)):
 the directory passed as ``artifact_dir`` is already scope-specific because the
@@ -58,6 +58,7 @@ from memtomem.context._names import Layout
 
 __all__ = [
     "RESERVED_LABELS",
+    "SCHEMA_VERSION",
     "VersionRecord",
     "VersionsManifest",
     "VersionError",
@@ -91,6 +92,19 @@ RESERVED_LABELS: frozenset[str] = frozenset({"latest"})
 
 _VERSIONS_DIRNAME = "versions"
 _MANIFEST_FILENAME = "versions.json"
+
+#: The manifest schema this build understands. Absent on disk means 1 (the
+#: original ``{"versions", "labels"}`` shape). A later campaign bumps this when
+#: it starts writing tree-layout entries (ADR-0030 §10); this prep release
+#: (PR-G1) only teaches readers to refuse a *newer* schema loudly and writers to
+#: round-trip fields they do not recognize, so an old mutator cannot silently
+#: strip a future writer's ``schema_version`` / per-entry ``layout``.
+SCHEMA_VERSION = 1
+
+#: Top-level and per-entry keys this build owns. Anything else is preserved
+#: verbatim through a load→mutate→save cycle via the ``extra`` fields.
+_KNOWN_TOP_KEYS = frozenset({"schema_version", "versions", "labels"})
+_KNOWN_ENTRY_KEYS = frozenset({"created_at", "note"})
 
 
 class VersionError(ValueError):
@@ -133,6 +147,9 @@ class VersionRecord:
     tag: str  # "v1", "v2", … (validated against _VALID_TAG_RE)
     created_at: str  # ISO-8601 UTC, e.g. "2026-06-03T09:00:00Z"
     note: str = ""
+    #: Per-entry keys this build does not own (e.g. a future ``layout``),
+    #: preserved verbatim so an old mutator cannot strip them.
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -142,6 +159,10 @@ class VersionsManifest:
 
     versions: dict[str, VersionRecord] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)  # label_name → tag
+    #: Manifest schema on disk; absent on disk means :data:`SCHEMA_VERSION`.
+    schema_version: int = SCHEMA_VERSION
+    #: Top-level keys this build does not own, preserved verbatim.
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 def versions_dir(artifact_dir: Path) -> Path:
@@ -158,6 +179,35 @@ def _validate_tag(tag: str) -> str:
     if not _VALID_TAG_RE.fullmatch(tag):
         raise InvalidTagError(f"invalid version tag {tag!r} (expected ^v[1-9]\\d*$)")
     return tag
+
+
+def _validate_schema_version(raw: dict[str, object], path: Path) -> int:
+    """Return the manifest's ``schema_version``; absent means :data:`SCHEMA_VERSION`.
+
+    Fails LOUD rather than coercing: a manifest written by a newer build may use
+    a layout this one would misread (or silently strip), so refusing is the only
+    safe read. ``bool`` is rejected explicitly because ``isinstance(True, int)``
+    is ``True`` in Python and ``{"schema_version": true}`` must not read as 1.
+    """
+    value = raw.get("schema_version")
+    if value is None:
+        return SCHEMA_VERSION
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise VersionError(
+            f"malformed versions manifest at {path}: 'schema_version' must be a "
+            f"positive integer, got {value!r}"
+        )
+    if value < 1:
+        raise VersionError(
+            f"malformed versions manifest at {path}: 'schema_version' must be a "
+            f"positive integer, got {value!r}"
+        )
+    if value > SCHEMA_VERSION:
+        raise VersionError(
+            f"unsupported versions manifest at {path}: 'schema_version' {value} is "
+            f"newer than this build understands ({SCHEMA_VERSION}) — upgrade memtomem"
+        )
+    return value
 
 
 def _validate_label_name(label: str) -> str:
@@ -207,6 +257,9 @@ def load_manifest(artifact_dir: Path) -> VersionsManifest:
     # malformed file surfaces a clean VersionError, not an AttributeError.
     if not isinstance(raw, dict):
         raise VersionError(f"malformed versions manifest at {path}: expected an object")
+    # Refuse a newer schema BEFORE parsing anything else: a future layout could
+    # make the fields below mean something different.
+    schema_version = _validate_schema_version(raw, path)
     # ``None`` / absent → empty; any other non-dict shape (e.g. ``[]``) is
     # malformed and must error rather than be coerced to empty (so a wrong-type
     # ``"versions": []`` surfaces a clean VersionError, not a silent drop).
@@ -225,6 +278,7 @@ def load_manifest(artifact_dir: Path) -> VersionsManifest:
             tag=tag,
             created_at=str(meta.get("created_at", "")),
             note=str(meta.get("note", "")),
+            extra={k: v for k, v in meta.items() if k not in _KNOWN_ENTRY_KEYS},
         )
 
     labels: dict[str, str] = {}
@@ -240,7 +294,12 @@ def load_manifest(artifact_dir: Path) -> VersionsManifest:
         _validate_tag(str(tag))
         labels[str(label)] = str(tag)
 
-    return VersionsManifest(versions=versions, labels=labels)
+    return VersionsManifest(
+        versions=versions,
+        labels=labels,
+        schema_version=schema_version,
+        extra={k: v for k, v in raw.items() if k not in _KNOWN_TOP_KEYS},
+    )
 
 
 def _save_manifest(artifact_dir: Path, manifest: VersionsManifest) -> None:
@@ -251,15 +310,31 @@ def _save_manifest(artifact_dir: Path, manifest: VersionsManifest) -> None:
     every mutation runs inside the larger ``create_version`` / ``promote_label``
     / ``delete_label`` transaction.
     """
-    payload = {
+    payload: dict[str, object] = {
+        "schema_version": manifest.schema_version,
         "versions": {
-            tag: {"created_at": rec.created_at, "note": rec.note}
+            tag: _entry_payload(rec)
             for tag, rec in sorted(manifest.versions.items(), key=lambda kv: _tag_num(kv[0]))
         },
         "labels": {label: manifest.labels[label] for label in sorted(manifest.labels)},
     }
+    # Round-trip top-level keys this build does not own so a future writer's
+    # fields survive an old mutator's load→mutate→save cycle. Known keys win;
+    # sorted for a deterministic file.
+    for key in sorted(manifest.extra):
+        if key not in _KNOWN_TOP_KEYS:
+            payload[key] = manifest.extra[key]
     data = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     atomic_write_bytes(versions_json_path(artifact_dir), data)
+
+
+def _entry_payload(rec: VersionRecord) -> dict[str, object]:
+    """One ``versions.json`` entry, with unrecognized per-entry keys preserved."""
+    entry: dict[str, object] = {"created_at": rec.created_at, "note": rec.note}
+    for key in sorted(rec.extra):
+        if key not in _KNOWN_ENTRY_KEYS:
+            entry[key] = rec.extra[key]
+    return entry
 
 
 def _tag_num(tag: str) -> int:
