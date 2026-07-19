@@ -48,6 +48,7 @@ from memtomem.context.commands import resolve_canonical_command
 from memtomem.context.migrate import adopt_flat_to_dir
 from memtomem.context.versioning import (
     LabelNotFoundError,
+    UnsupportedSchemaVersionError,
     VersionError,
     VersionNotFoundError,
     VersionsDirMissingError,
@@ -121,6 +122,10 @@ def _version_http(exc: VersionError) -> HTTPException:
         return _error(404, "missing", msg)
     if isinstance(exc, VersionsDirMissingError):
         return _error(409, "conflict", msg, reason_code="versions_dir_missing")
+    if isinstance(exc, UnsupportedSchemaVersionError):
+        # Server-side state, not a bad request: the manifest was written by a
+        # newer build, so the remedy is "upgrade", not "fix your input".
+        return _error(409, "conflict", msg, reason_code="schema_unsupported")
     # ReservedLabelError / InvalidLabelError / InvalidTagError / base VersionError
     return _error(400, "validation", msg)
 
