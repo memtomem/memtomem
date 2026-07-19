@@ -1437,9 +1437,10 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
     "force_unsafe_import",
     is_flag=True,
     help=(
-        "Bypass Gate A for a reviewed false positive. user / project_local "
-        "destinations only — project_shared hard-refuses regardless (ADR-0011 "
-        "§5). Mirrors 'mm context init --force-unsafe-import'."
+        "Bypass Gate A for a reviewed false positive. user-tier destinations "
+        "only — project_shared hard-refuses regardless (ADR-0011 §5), and "
+        "project_local is not a Pull destination. Mirrors 'mm context init "
+        "--force-unsafe-import'."
     ),
 )
 @click.option(
@@ -1552,7 +1553,7 @@ def pull_cmd(
                 f"\nPull {kind}/{name} from {plan.selected_runtime} into {scope}?",
                 abort=True,
             )
-    result = commit_pull(plan, force_unsafe_import=force_unsafe_import)
+    result = commit_pull(plan)
     if result.status != "applied":
         raise click.ClickException(result.reason)
     _print_pull_applied(result)

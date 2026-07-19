@@ -265,11 +265,34 @@ def test_plan_stale_agents_store_changed(home: Path, proj: Path) -> None:
 # ── Gate A: blocked, force, audit-once ────────────────────────────────────────
 
 
+def test_gate_blocked_project_shared_records_bypass_attempt(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forced project_shared secret is a hard refusal that MUST still audit
+    the bypass attempt with the project_shared code (Codex code-review Major)."""
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", f"tok {_SECRET}")})
+    records: list[str] = []
+    audits: list[dict] = []
+    monkeypatch.setattr(privacy, "record", lambda outcome, tool: records.append(outcome))
+    monkeypatch.setattr(privacy, "emit_bypass_audit", lambda **kw: audits.append(kw))
+    out = prepare_pull(
+        "skills", "s", scope="project_shared", project_root=proj, force_unsafe_import=True
+    )
+    assert isinstance(out, PullApplyResult)
+    assert out.status == "gate_blocked"
+    assert out.reason_code == "privacy_blocked_project_shared"
+    assert out.force_bypassable is False
+    assert records == ["blocked_project_shared"]  # audited exactly once, right outcome
+    assert len(audits) == 1 and audits[0]["audit_context"]["blocked_scope"] == "project_shared"
+    assert not _store_skill_dir(proj, "s").exists()
+
+
 def test_gate_blocked_project_shared_not_bypassable(home: Path, proj: Path) -> None:
     seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", f"tok {_SECRET}")})
     out = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
     assert isinstance(out, PullApplyResult)
     assert out.status == "gate_blocked"
+    assert out.reason_code == "privacy_blocked"  # unforced block → plain code
     assert out.force_bypassable is False
     assert not _store_skill_dir(proj, "s").exists()
 
@@ -285,22 +308,38 @@ def test_gate_bypassable_tier_needs_force(home: Path, proj: Path) -> None:
     # With force → a plan, then applied.
     plan = prepare_pull("skills", "s", scope="user", project_root=proj, force_unsafe_import=True)
     assert isinstance(plan, PullPlan)
-    res = commit_pull(plan, force_unsafe_import=True)
+    res = commit_pull(plan)
     assert res.status == "applied"
 
 
-def test_audit_records_only_at_commit(
+def test_audit_records_once_per_pull(
     home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Prepare's gate is a non-recording check; commit's is the audited write."""
-    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "clean")})
-    calls: list[str] = []
-    monkeypatch.setattr(privacy, "record", lambda *a, **k: calls.append("record"))
+    """A clean multi-file skill records ONE aggregate pass, at commit-on-success
+    (not one per file, and never at prepare) — Codex code-review Major."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "clean")})
+    (written["claude"].parent / "extra.txt").write_text("more clean\n", encoding="utf-8")
+    records: list[str] = []
+    monkeypatch.setattr(privacy, "record", lambda outcome, tool: records.append(outcome))
     plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
     assert isinstance(plan, PullPlan)
-    assert calls == []  # prepare did not record
+    assert records == []  # prepare did not record a proceed
     commit_pull(plan)
-    assert calls  # commit recorded the audited scan
+    assert records == ["pass"]  # exactly one aggregate record, not one per file
+
+
+def test_declined_pull_leaves_no_record(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """prepare then NOT committing (user declined) records nothing (the batch
+    'no pass on rejected' invariant)."""
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "clean")})
+    records: list[str] = []
+    monkeypatch.setattr(privacy, "record", lambda outcome, tool: records.append(outcome))
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert isinstance(plan, PullPlan)
+    # Commit never called → no record.
+    assert records == []
 
 
 # ── write_failed + staging cleanup (R4 Major 4 / Minor 1) ─────────────────────

@@ -8,14 +8,18 @@ were judged.
 Two phases so a human approval in between cannot be raced:
 
 * :func:`prepare_pull` — collects candidates **once** (via the shared
-  ``pull_preview._collect``), runs the §5 decision, a Gate A CHECK, and the
-  pre-lock preflights, and returns a frozen :class:`PullPlan` carrying the
-  captured bytes the caller will confirm — or a typed refusal
-  :class:`PullApplyResult`.
+  ``pull_preview._collect``), runs the §5 decision, the pre-lock preflights,
+  and ONE aggregate Gate A decision over the captured bytes, and returns a
+  frozen :class:`PullPlan` carrying those bytes — or a typed refusal
+  :class:`PullApplyResult`. A Gate A block (including a forced ``project_shared``
+  bypass attempt) is recorded and refused here, before any confirmation prompt;
+  a pass/bypassed decision travels in the plan, its privacy counter deferred.
 * :func:`commit_pull` — takes the confirmed plan, acquires the canonical
-  name-lock, runs the AUDITED Gate A on the captured bytes, and writes them
-  **unchanged**. No second collection, no re-read of the runtime file: the
-  bytes the user approved are the bytes written.
+  name-lock, re-checks the destination precondition, writes the captured bytes
+  **unchanged**, and records the deferred pass/bypassed counter once — only on
+  a successful write (the ``mem_batch_add`` "no pass on a rejected pull"
+  invariant). No second collection, no re-read of the runtime file: the bytes
+  the user approved are the bytes written.
 
 Why the §5 decision runs OUTSIDE the lock (validated in design review): the
 divergence §5 guards against is a runtime-SOURCE race, and runtime writers are
@@ -45,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from memtomem import privacy
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context._canonical_txn import (
@@ -52,7 +57,7 @@ from memtomem.context._canonical_txn import (
     canonical_sidecar_lock,
     write_canonical_locked,
 )
-from memtomem.context._gate_a import GateABlocked, GateStatus, apply_gate_a
+from memtomem.context._gate_a import GateStatus
 from memtomem.context._names import Layout
 from memtomem.context._runtime_targets import resolve_import_runtimes
 from memtomem.context.pull_preview import (
@@ -144,20 +149,9 @@ class PullPlan:
     # ``expected_state`` precondition (present + content digest).
     store_present: bool
     expected_store_digest: str | None
-    gate_status: GateStatus | None = None
-
-
-class _GateBlock(Exception):
-    """Internal: raised by the audited Gate A pre_write to abort the write.
-
-    Carries the :class:`GateABlocked` so ``commit_pull`` maps it to a
-    ``gate_blocked`` result. Never escapes this module.
-    """
-
-    def __init__(self, blocked: GateABlocked, hint_bypassable: bool) -> None:
-        super().__init__(blocked.code)
-        self.blocked = blocked
-        self.hint_bypassable = hint_bypassable
+    # The passed/bypassed Gate A decision, deferred so its privacy counter
+    # records once, in commit, only when the write actually lands.
+    gate: _GateProceed | None = None
 
 
 # ── digests ────────────────────────────────────────────────────────────────
@@ -216,7 +210,35 @@ def _audit_context(
     }
 
 
-def _run_gate_a(
+@dataclass(frozen=True)
+class _GateProceed:
+    """Gate passed (clean, or a bypassed force) — the write may proceed.
+
+    The privacy counter is NOT recorded here: a Pull that the user then
+    declines, or that ``commit_pull`` refuses for a destination reason, must
+    not leave a ``pass`` record (the ``mem_batch_add`` "no pass on rejected
+    batch" invariant, ``privacy.enforce_write_guard`` docstring). Recording
+    happens once, in ``commit_pull``, only when the write actually lands.
+    """
+
+    outcome: str  # "pass" | "bypassed"
+    hits: int
+    content_chars: int
+    audit_context: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _GateBlocked:
+    """Gate refused the Pull — recorded HERE (a block is terminal, and a forced
+    project_shared bypass ATTEMPT must be audited even before the confirm
+    prompt)."""
+
+    code: skip_codes.SkipCode
+    hits: int
+    force_bypassable: bool
+
+
+def _evaluate_gate(
     kind: ArtifactKind,
     name: str,
     runtime: str,
@@ -227,33 +249,68 @@ def _run_gate_a(
     *,
     force_unsafe_import: bool,
     surface: str,
-) -> None:
-    """AUDITED Gate A over the captured surface — raises :class:`_GateBlock`.
+) -> _GateProceed | _GateBlocked:
+    """Decide the aggregate Gate A outcome for the whole Pull (one transaction).
 
-    ``record_outcome=True`` (inside ``apply_gate_a``), so the scan records
-    exactly once, at write time. Scans every file of the captured full copier
-    surface (parity with ``preview_pull``'s ``_gate_landing``); the first
-    blocked file aborts.
+    Scans every file of the captured full copier surface WITHOUT recording
+    (``record_outcome=False``), then commits ONE decision — the ``mem_batch_add``
+    idiom, so a multi-file skill is one audit event, not one per file, and a
+    declined/refused Pull leaves no ``pass`` record. A block (including a forced
+    ``project_shared`` bypass attempt, which is a hard refusal) is recorded and
+    audited immediately; a proceed (``pass`` / ``bypassed``) defers its record
+    to ``commit_pull`` on a successful write.
     """
+    results: list[privacy.WriteGuardResult] = []
+    total_chars = 0
     for rel, data in captured:
-        # For a single-file agent/command ``rel`` is ""; ``src`` is the runtime
-        # source file. For a skill tree ``src`` reconstructs each source file
-        # under the runtime skill dir for audit fidelity.
+        # Single-file agent/command: ``rel`` is "" and ``src`` is the runtime
+        # source file; a skill tree reconstructs each source path for audit.
         src = src_root if rel == "" else src_root / rel
-        outcome = apply_gate_a(
-            content_text=data.decode("utf-8", errors="replace"),
-            src=src,
-            scope=scope,
-            force_unsafe_import=force_unsafe_import,
-            audit_context=_audit_context(kind, runtime, name, src, dst),
-            message_kind=_MESSAGE_KIND[kind],
-            imported_so_far=0,
-            surface=surface,
-            raise_project_shared=False,
+        text = data.decode("utf-8", errors="replace")
+        total_chars += len(text)
+        results.append(
+            privacy.enforce_write_guard(
+                text,
+                surface=surface,
+                force_unsafe=force_unsafe_import,
+                scope=scope,
+                audit_context=_audit_context(kind, runtime, name, src, dst),
+                record_outcome=False,
+            )
         )
-        if isinstance(outcome, GateABlocked):
-            bypassable = outcome.code == skip_codes.PRIVACY_BLOCKED and scope != "project_shared"
-            raise _GateBlock(outcome, hint_bypassable=bypassable)
+    decisions = {r.decision for r in results}
+    total_hits = sum(len(r.hits) for r in results)
+    audit_ctx = _audit_context(kind, runtime, name, src_root, dst)
+    # Severity order (mirrors enforce_write_guard's own branch order):
+    # blocked_project_shared > blocked > bypassed > pass.
+    if "blocked_project_shared" in decisions:
+        privacy.record("blocked_project_shared", surface)
+        privacy.emit_bypass_audit(
+            surface=surface,
+            content_chars=total_chars,
+            hits=total_hits,
+            audit_context={**audit_ctx, "blocked_scope": "project_shared"},
+        )
+        return _GateBlocked(skip_codes.PRIVACY_BLOCKED_PROJECT_SHARED, total_hits, False)
+    if "blocked" in decisions:
+        privacy.record("blocked", surface)
+        # A plain block is force-bypassable only on the non-git-tracked tiers;
+        # project_shared has no bypass (ADR-0011 §5).
+        return _GateBlocked(skip_codes.PRIVACY_BLOCKED, total_hits, scope != "project_shared")
+    outcome = "bypassed" if "bypassed" in decisions else "pass"
+    return _GateProceed(outcome, total_hits, total_chars, audit_ctx)
+
+
+def _record_gate_success(gate: _GateProceed, surface: str) -> None:
+    """Record the deferred proceed outcome once the write has landed."""
+    privacy.record(gate.outcome, surface)
+    if gate.outcome == "bypassed":
+        privacy.emit_bypass_audit(
+            surface=surface,
+            content_chars=gate.content_chars,
+            hits=gate.hits,
+            audit_context=gate.audit_context,
+        )
 
 
 # ── prepare ──────────────────────────────────────────────────────────────────
@@ -288,7 +345,6 @@ def prepare_pull(
     distinct, ambiguous, _auto = _group_and_resolve(collected.working)
     working = collected.working
     importable = [c for c in working if c.importable]
-    has_landing_error = any(c.content_status == "landing_error" for c in importable)
 
     def _refuse(
         status: PullApplyStatus,
@@ -315,7 +371,7 @@ def prepare_pull(
             return _refuse(
                 "source_conflict",
                 skip_codes.SOURCE_CONFLICT,
-                _source_conflict_reason(kind, name, working, has_landing_error),
+                _source_conflict_reason(kind, name, working),
                 candidates=tuple(_public(c) for c in working),
                 distinct_landing_count=distinct,
             )
@@ -357,29 +413,10 @@ def prepare_pull(
             write_outcome="identical",
         )
 
-    # Gate A pre-check from the already-computed (non-recording) status, so a
-    # blocked pull is refused BEFORE any confirmation prompt (R1/R2 Minor 2).
-    gate = selected.gate_status
-    if gate == "blocked":
-        return _refuse(
-            "gate_blocked",
-            skip_codes.PRIVACY_BLOCKED,
-            f"Gate A blocked the pull into scope='{scope}' — no force bypass for "
-            f"project_shared (ADR-0011 §5). Remove the secret or pull into user / project_local.",
-            gate_status="blocked",
-            force_bypassable=False,
-        )
-    if gate == "requires_unsafe_confirmation" and not force_unsafe_import:
-        return _refuse(
-            "gate_blocked",
-            skip_codes.PRIVACY_BLOCKED,
-            f"Gate A flagged the '{selected.runtime}' copy — pass --force-unsafe-import "
-            f"to pull it into scope='{scope}' after review.",
-            gate_status="requires_unsafe_confirmation",
-            force_bypassable=True,
-        )
-
     # Store-present preflight (advisory — commit re-checks authoritatively).
+    # Ordered BEFORE the Gate A scan so a canonical_exists / skills-overwrite
+    # refusal never scans-and-records an ingress (mirrors the extract engines'
+    # exists-before-gate order).
     if collected.store_present:
         if kind == "skills":
             # Skills overwrite lands with tree snapshots (ADR-0030 §10, PR-G);
@@ -400,6 +437,46 @@ def prepare_pull(
                 f"(the current canonical is snapshotted first).",
             )
 
+    # Gate A — ONE audited decision for the whole Pull, over the captured bytes
+    # (so the bytes that were judged are the bytes committed). A block is
+    # recorded here and refused before any confirmation prompt (R1/R2 Minor 2);
+    # a proceed defers its counter record to commit-on-success.
+    assert selected.landing_full is not None  # computable candidates only reach here
+    captured = tuple(selected.landing_full)
+    src = _runtime_candidate_path(kind, selected.runtime, name, scope, resolved_root)
+    src_root = src.parent if kind == "skills" else src  # type: ignore[union-attr]
+    dst = canonical_artifact_dir(kind, scope, resolved_root) / name
+    gate = _evaluate_gate(
+        kind,
+        name,
+        selected.runtime,
+        scope,
+        src_root,
+        dst,
+        captured,
+        force_unsafe_import=force_unsafe_import,
+        surface=surface,
+    )
+    if isinstance(gate, _GateBlocked):
+        if gate.force_bypassable:
+            reason = (
+                f"Gate A flagged the '{selected.runtime}' copy — pass "
+                f"--force-unsafe-import to pull it into scope='{scope}' after review."
+            )
+        else:
+            reason = (
+                f"Gate A blocked the pull into scope='{scope}' — no force bypass for "
+                f"project_shared (ADR-0011 §5). Remove the secret or pull into "
+                f"user / project_local."
+            )
+        return _refuse(
+            "gate_blocked",
+            gate.code,
+            reason,
+            gate_hits=gate.hits,
+            force_bypassable=gate.force_bypassable,
+        )
+
     duplicates = tuple(
         c.runtime
         for c in working
@@ -408,19 +485,18 @@ def prepare_pull(
         and c.landing_group is not None
         and c.landing_group == selected.landing_group
     )
-    assert selected.landing_full is not None  # computable candidates only reach here
     return PullPlan(
         kind=kind,
         name=name,
         scope=scope,
         project_root=resolved_root,
         selected_runtime=selected.runtime,
-        captured=tuple(selected.landing_full),
+        captured=captured,
         overwrite=overwrite,
         duplicate_runtimes=duplicates,
         store_present=collected.store_present,
         expected_store_digest=_expected_digest(kind, collected.store_payload),
-        gate_status=selected.gate_status,
+        gate=gate,
     )
 
 
@@ -437,9 +513,7 @@ def _public(cand: _Cand) -> PullCandidate:
     )
 
 
-def _source_conflict_reason(
-    kind: ArtifactKind, name: str, working: list[_Cand], has_landing_error: bool
-) -> str:
+def _source_conflict_reason(kind: ArtifactKind, name: str, working: list[_Cand]) -> str:
     groups: dict[int, list[str]] = {}
     unreadable: list[str] = []
     for c in working:
@@ -449,18 +523,27 @@ def _source_conflict_reason(
             unreadable.append(c.runtime)
         elif c.landing_group is not None:
             groups.setdefault(c.landing_group, []).append(c.runtime)
-    parts = [f"{', '.join(rts)} (content #{gid + 1})" for gid, rts in sorted(groups.items())]
-    msg = (
-        f"multiple distinct contents would land for {kind}/{name}: "
-        + "; ".join(parts)
-        + " — pass --from <runtime> to choose."
-    )
-    if unreadable:
-        msg += (
-            f" (the {', '.join(unreadable)} copy could not be read; auto-selection "
-            f"is off until you name a source.)"
+    if len(groups) >= 2:
+        parts = [f"{', '.join(rts)} (content #{gid + 1})" for gid, rts in sorted(groups.items())]
+        msg = (
+            f"multiple distinct contents would land for {kind}/{name}: "
+            + "; ".join(parts)
+            + " — pass --from <runtime> to choose."
         )
-    return msg
+        if unreadable:
+            msg += (
+                f" (the {', '.join(unreadable)} copy could not be read; auto-selection "
+                f"is off until you name a source.)"
+            )
+        return msg
+    # Fewer than two computable groups: the ambiguity is driven purely by an
+    # incomputable candidate (an unreadable copy might be the divergent one), so
+    # auto-selection is off (fail-closed, ADR-0030 §5). Don't claim "multiple
+    # distinct contents" when the distinct count is zero or one.
+    return (
+        f"the {', '.join(unreadable)} copy of {kind}/{name} could not be read, so "
+        f"auto-selection is off — pass --from <runtime> to choose a source explicitly."
+    )
 
 
 # ── commit ───────────────────────────────────────────────────────────────────
@@ -469,41 +552,31 @@ def _source_conflict_reason(
 def commit_pull(
     plan: PullPlan,
     *,
-    force_unsafe_import: bool = False,
     surface: str = _SURFACE_DEFAULT,
     lock_timeout: float | None = None,
 ) -> PullApplyResult:
-    """Write ``plan.captured`` under the canonical lock; audited Gate A first.
+    """Write ``plan.captured`` under the canonical lock (Gate A already decided).
 
-    ``lock_timeout=None`` blocks (the CLI default, Ctrl-C-able); the async
-    Web/MCP surfaces pass a bound and map the ``lock_timeout`` result to a 503.
+    The Gate A decision was made and any refusal audited in ``prepare_pull``;
+    here we take the canonical name-lock, re-check the destination precondition,
+    write the captured bytes, and record the passed/bypassed privacy counter
+    once the write actually lands. ``lock_timeout=None`` blocks (the CLI
+    default, Ctrl-C-able); the async Web/MCP surfaces pass a bound and map the
+    ``lock_timeout`` result to a 503.
     """
     if plan.kind == "skills":
-        return _commit_skills(
-            plan,
-            force_unsafe_import=force_unsafe_import,
-            surface=surface,
-            lock_timeout=lock_timeout,
-        )
-    return _commit_atomic(
-        plan, force_unsafe_import=force_unsafe_import, surface=surface, lock_timeout=lock_timeout
-    )
+        return _commit_skills(plan, surface=surface, lock_timeout=lock_timeout)
+    return _commit_atomic(plan, surface=surface, lock_timeout=lock_timeout)
 
 
-def _commit_atomic(
-    plan: PullPlan, *, force_unsafe_import: bool, surface: str, lock_timeout: float | None
-) -> PullApplyResult:
+def _commit_atomic(plan: PullPlan, *, surface: str, lock_timeout: float | None) -> PullApplyResult:
     """Commit an agents/commands pull — single captured file via the shared
-    locked-write primitive (destination precondition + audited Gate A + write).
-    """
+    locked-write primitive (destination precondition + snapshot-first write)."""
     from memtomem.context._atomic_reverse import resolve_artifact_extract_target
 
     dir_filename = _dir_filename(plan.kind)
     canonical_root = canonical_artifact_dir(plan.kind, plan.scope, plan.project_root)
     captured_bytes = plan.captured[0][1]
-    src = _runtime_candidate_path(
-        plan.kind, plan.selected_runtime, plan.name, plan.scope, plan.project_root
-    )
 
     def _resolve() -> tuple[Path, Layout]:
         return resolve_artifact_extract_target(
@@ -512,24 +585,6 @@ def _commit_atomic(
             artifact_label=plan.kind,
             dir_filename=dir_filename,
             logger=logger,
-        )
-
-    def _pre_write() -> None:
-        # Audited Gate A on the CAPTURED bytes, inside the lock, only when a
-        # write is certain (write_canonical_locked calls this on the
-        # created/overwritten branches) → records exactly once.
-        assert src is not None
-        dst_now, _layout = _resolve()
-        _run_gate_a(
-            plan.kind,
-            plan.name,
-            plan.selected_runtime,
-            plan.scope,
-            src,
-            dst_now,
-            plan.captured,
-            force_unsafe_import=force_unsafe_import,
-            surface=surface,
         )
 
     try:
@@ -542,10 +597,7 @@ def _commit_atomic(
             snapshot_note=f"pre-overwrite snapshot (pull from {plan.selected_runtime})",
             lock_timeout=lock_timeout,
             expected_state=(plan.store_present, plan.expected_store_digest),
-            pre_write=_pre_write,
         )
-    except _GateBlock as gb:
-        return _gate_blocked_result(plan, gb)
     except TimeoutError:
         return _lock_timeout_result(plan)
     except SnapshotError as exc:
@@ -560,16 +612,17 @@ def _commit_atomic(
             plan, "write_failed", skip_codes.WRITE_FAILED, f"could not write the canonical: {exc}"
         )
 
+    if outcome in ("created", "overwritten") and plan.gate is not None:
+        # Record the passed/bypassed privacy counter once — only now that the
+        # write has actually landed (never on a stale/exists refusal).
+        _record_gate_success(plan.gate, surface)
     return _map_write_outcome(plan, outcome, dst, layout)
 
 
-def _commit_skills(
-    plan: PullPlan, *, force_unsafe_import: bool, surface: str, lock_timeout: float | None
-) -> PullApplyResult:
+def _commit_skills(plan: PullPlan, *, surface: str, lock_timeout: float | None) -> PullApplyResult:
     """Commit a skills pull — new-only, captured tree staged then exclusively
     promoted, all under the canonical name-lock (skills do not use
-    ``write_canonical_locked``).
-    """
+    ``write_canonical_locked``; Gate A was decided in ``prepare_pull``)."""
     from memtomem.context.skills import (
         _promote_race_conflict,
         _promote_staging,
@@ -607,26 +660,6 @@ def _commit_skills(
                     plan, "target_conflict", skip_codes.TARGET_CONFLICT, str(conflict)
                 )
 
-            # Audited Gate A on the captured tree, before staging.
-            src = _runtime_candidate_path(
-                "skills", plan.selected_runtime, plan.name, plan.scope, plan.project_root
-            )
-            assert src is not None
-            try:
-                _run_gate_a(
-                    "skills",
-                    plan.name,
-                    plan.selected_runtime,
-                    plan.scope,
-                    src.parent,  # the runtime skill dir
-                    dst,
-                    plan.captured,
-                    force_unsafe_import=force_unsafe_import,
-                    surface=surface,
-                )
-            except _GateBlock as gb:
-                return _gate_blocked_result(plan, gb)
-
             staging: Path | None = None
             try:
                 staging = _stage_captured_tree(plan.captured, dst)
@@ -647,6 +680,10 @@ def _commit_skills(
                 # success path the tree was renamed into dst, so this is a no-op.
                 if staging is not None and staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
+
+            # Write landed — record the passed/bypassed privacy counter once.
+            if plan.gate is not None:
+                _record_gate_success(plan.gate, surface)
     except TimeoutError:
         return _lock_timeout_result(plan)
 
@@ -750,23 +787,6 @@ def _refusal_for(
         reason=reason,
         reason_code=code,
         selected_runtime=plan.selected_runtime,
-    )
-
-
-def _gate_blocked_result(plan: PullPlan, gb: _GateBlock) -> PullApplyResult:
-    return PullApplyResult(
-        status="gate_blocked",
-        kind=plan.kind,
-        name=plan.name,
-        scope=plan.scope,
-        reason=(
-            f"Gate A blocked the pull: {gb.blocked.hits_count} privacy pattern hit(s)"
-            f"{gb.blocked.hint}"
-        ),
-        reason_code=gb.blocked.code,
-        selected_runtime=plan.selected_runtime,
-        gate_hits=gb.blocked.hits_count,
-        force_bypassable=gb.hint_bypassable,
     )
 
 

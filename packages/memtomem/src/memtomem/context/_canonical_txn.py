@@ -276,7 +276,6 @@ def write_canonical_locked(
     snapshot_note: str = "",
     lock_timeout: float | None = None,
     expected_state: tuple[bool, str | None] | None = None,
-    pre_write: Callable[[], None] | None = None,
 ) -> tuple[WriteOutcome, Path, Layout]:
     """Resolve the canonical destination and write *content_bytes* under the lock.
 
@@ -309,14 +308,6 @@ def write_canonical_locked(
     a state the user never previewed. ``digest`` is over a single canonical
     file (the agents/commands shape); the skills tree precondition is checked
     by ``pull_apply`` under its own lock, not here.
-
-    *pre_write* (opt-in — ``None`` for every existing caller): a callback run
-    **inside the lock**, only on the ``created``/``overwritten`` branches and
-    only right before the snapshot+write — never on ``exists``/``flat_refused``/
-    ``identical``/``stale`` (no audit for a non-write). It raises to abort
-    (``pull_apply`` passes the audited Gate A here so the scan records exactly
-    once, iff the write proceeds); the exception propagates like
-    :class:`SnapshotError`, leaving *dst* untouched.
 
     PR-B2b (ADR-0030 §6): the snapshot read + the replace run inside this one
     canonical-sidecar-lock transaction, so a concurrent writer cannot land
@@ -365,11 +356,6 @@ def write_canonical_locked(
                 ) from exc
             if old_bytes == content_bytes:
                 return "identical", dst, layout
-            if pre_write is not None:
-                # Audited Gate A (or any caller precondition) runs here — after
-                # we have committed to overwriting, before the snapshot+write —
-                # so it records exactly once, only when the write proceeds.
-                pre_write()
             # Snapshot the pre-image under the SAME transaction (canonical
             # sidecar already held → versions.json child lock, one budget).
             # ``source_bytes`` snapshots exactly the bytes we just read, closing
@@ -400,11 +386,6 @@ def write_canonical_locked(
                 raise SnapshotError(f"could not snapshot {dst} before overwrite: {exc}") from exc
             atomic_write_bytes(dst, content_bytes)
             return "overwritten", dst, layout
-        if pre_write is not None:
-            # Create branch: same audited-once contract as the overwrite branch
-            # above — run the caller precondition only now that a write is
-            # certain, before the file lands.
-            pre_write()
         dst.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_bytes(dst, content_bytes)
         return "created", dst, layout
