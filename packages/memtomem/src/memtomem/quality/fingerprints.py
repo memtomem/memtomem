@@ -45,8 +45,16 @@ __all__ = [
 
 
 def _sha256_json(value: Any) -> str:
-    """Canonical sha256 over a JSON-serializable value."""
-    canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    """Canonical sha256 over a JSON-serializable value.
+
+    ``allow_nan=False`` is defense in depth: callers validate to finite numbers
+    upstream, so byte-output is unchanged for every current input, but a
+    bypassed invariant fails loudly here rather than emitting non-standard
+    ``NaN``/``Infinity`` JSON.
+    """
+    canonical = json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
