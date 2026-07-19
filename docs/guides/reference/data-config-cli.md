@@ -302,7 +302,9 @@ mm quality import cases.json           # import a case-set envelope (--replace t
 mm quality replay --out base.json      # replay cases into a deterministic report (--as-of pins time; --format table|json)
 mm quality compare base.json cand.json # diff two replay reports (--fail-on-regression opts into a blocking gate)
 mm quality gate base.json cand.json --policy policy.json  # gate a comparison against a policy file: exit 0 pass / 1 violation / 2 bad input
+mm quality experiment --baseline base-profile.json --profile cand-a.json --profile cand-b.json  # replay a baseline + candidate profiles against one case set; --policy gates each candidate (exit 0/1/2), --as-of pins time. Never selects a winner.
 # A committed CI fixture + required gate lives in tools/quality-gate/ (see its README to refresh the baseline).
+# A retrieval profile is a portable, non-secret JSON document naming ranking knobs (search/decay/mmr/rerank/…); an omitted knob takes the package default, so set enable_dense:false explicitly for a BM25-only profile.
 
 # Multi-agent memory — per-agent scopes (see the MCP server's multi-agent workflow)
 mm agent register planner --description "research agent"  # register an agent id (optional --color)

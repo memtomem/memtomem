@@ -149,3 +149,181 @@ def test_quality_e2e_via_mm_binary(tmp_path):
     r = _run("quality", "import", str(export_file), "--replace")
     assert r.returncode == 0, f"re-import failed:\nstdout={r.stdout}\nstderr={r.stderr}"
     assert json.loads(r.stdout)["imported"] == 1
+
+
+def test_quality_experiment_e2e_via_mm_binary(tmp_path):
+    """Baseline + 2 candidates, BM25-only (no embedder download): the #1844
+    acceptance run — deterministic byte-identical output, name ordering,
+    shared-snapshot compatibility, a per-candidate gate, and no search-history
+    mutation (record=False)."""
+    mm_bin = _mm_bin()
+    home = tmp_path / "home"
+    (home / ".memtomem").mkdir(parents=True)
+    mem_dir = tmp_path / "mem"
+    mem_dir.mkdir()
+    db_path = tmp_path / "e2e.db"
+
+    (mem_dir / "note.md").write_text(
+        "# Alpha\n\nAlpha beta gamma retrieval quality lab content.\n",
+        encoding="utf-8",
+    )
+    config = {
+        "storage": {"sqlite_path": str(db_path)},
+        "indexing": {"memory_dirs": [str(mem_dir)]},
+        "embedding": {"provider": "none", "dimension": 1024},
+        "search": {"enable_dense": False},
+    }
+    (home / ".memtomem" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    env = os.environ.copy()
+    for var in _MEMTOMEM_ENV_VARS:
+        env.pop(var, None)
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+
+    def _run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [mm_bin, *args],
+            env=env,
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+
+    assert _run("index", str(mem_dir)).returncode == 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        content_hash = conn.execute("SELECT content_hash FROM chunks LIMIT 1").fetchone()[0]
+    finally:
+        conn.close()
+
+    envelope = {
+        "schema_version": 1,
+        "kind": "eval_case_set",
+        "cases": [
+            {
+                "case_id": "e2e-case-1",
+                "name": "alpha-q",
+                "query_text": "alpha",
+                "top_k": 5,
+                "version": 1,
+                "status": "active",
+                "filters": {"namespace": None, "scope": None},
+                "labels": [{"content_hash": content_hash, "judgment": "relevant"}],
+            }
+        ],
+    }
+    (tmp_path / "cases.json").write_text(json.dumps(envelope), encoding="utf-8")
+    assert _run("quality", "import", str(tmp_path / "cases.json")).returncode == 0
+
+    # BM25-only profiles: enable_dense is an eligible knob, so it MUST be set
+    # explicitly — an omitted knob resolves to the package default (dense on),
+    # which would need an embedder. Candidates differ only by rrf_k.
+    def _profile(name: str, rrf_k: int, extra_knobs: dict | None = None) -> str:
+        knobs = {"search": {"enable_dense": False, "rrf_k": rrf_k}}
+        if extra_knobs:
+            knobs.update(extra_knobs)
+        path = tmp_path / f"{name}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "retrieval_profile",
+                    "name": name,
+                    "knobs": knobs,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    baseline = _profile("baseline", 60)
+    cand_a = _profile("candidate-a", 40)
+    cand_b = _profile("candidate-b", 97)
+    # candidate-c enables access boost — its per-report index fingerprint folds
+    # in access counts, so it differs from the baseline's. This must NOT be
+    # treated as corpus/index drift (the profile-independent snapshot is what
+    # guards drift); it is the regression check for the profile-dependent-index
+    # false rejection.
+    cand_c = _profile("candidate-c", 60, {"access": {"enabled": True, "max_boost": 1.5}})
+
+    def _experiment(out_name: str, *extra: str) -> subprocess.CompletedProcess:
+        return _run(
+            "quality",
+            "experiment",
+            "--baseline",
+            baseline,
+            "--profile",
+            cand_b,  # deliberately out of name order to prove sorting
+            "--profile",
+            cand_a,
+            "--profile",
+            cand_c,
+            "--as-of",
+            "1784500000",
+            "--format",
+            "json",
+            "--out",
+            str(tmp_path / out_name),
+            *extra,
+        )
+
+    def _query_history_rows() -> int:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return conn.execute("SELECT COUNT(*) FROM query_history").fetchone()[0]
+        finally:
+            conn.close()
+
+    before = _query_history_rows()
+
+    r1 = _experiment("exp1.json")
+    assert r1.returncode == 0, f"experiment failed:\nstdout={r1.stdout}\nstderr={r1.stderr}"
+    r2 = _experiment("exp2.json")
+    assert r2.returncode == 0
+
+    exp1 = (tmp_path / "exp1.json").read_bytes()
+    exp2 = (tmp_path / "exp2.json").read_bytes()
+    assert exp1 == exp2, "same deterministic inputs must produce byte-identical output"
+
+    result = json.loads(exp1)
+    assert result["kind"] == "quality_experiment"
+    assert [c["profile_name"] for c in result["candidates"]] == [
+        "candidate-a",
+        "candidate-b",
+        "candidate-c",
+    ]
+    assert result["baseline"]["source"] == "document"
+    by_name = {c["profile_name"]: c for c in result["candidates"]}
+    for cand in result["candidates"]:
+        compat = cand["comparison"]["compatibility"]
+        assert compat["corpus_match"] is True
+        assert compat["case_set_match"] is True
+        assert compat["profile_match"] is False
+        assert cand["gate"] is None
+    # candidate-c enables access boost → a legitimately different per-report
+    # index fingerprint, which must NOT abort the experiment (blocker fix).
+    assert by_name["candidate-c"]["comparison"]["compatibility"]["index_match"] is False
+    assert by_name["candidate-a"]["comparison"]["compatibility"]["index_match"] is True
+
+    # record=False: replaying every profile mutated no search history.
+    assert _query_history_rows() == before
+
+    # A supplied policy is evaluated per candidate; min_compared_cases far above
+    # the single fixture case fails every candidate deterministically → exit 1,
+    # all verdicts present, result still emitted.
+    policy = tmp_path / "policy.json"
+    policy.write_text(
+        json.dumps({"schema_version": 1, "kind": "replay_gate_policy", "min_compared_cases": 99}),
+        encoding="utf-8",
+    )
+    rp = _experiment("exp3.json", "--policy", str(policy))
+    assert rp.returncode == 1
+    gated = json.loads((tmp_path / "exp3.json").read_text())
+    assert gated["policy_supplied"] is True
+    assert all(c["gate"]["pass"] is False for c in gated["candidates"])
