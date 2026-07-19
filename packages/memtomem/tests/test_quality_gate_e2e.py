@@ -121,6 +121,8 @@ def _run_driver(args: list[str], extra_env: dict[str, str] | None = None):
         [sys.executable, str(_DRIVER), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         env=env,
     )
@@ -176,8 +178,8 @@ def test_refresh_is_reproducible(tmp_path: Path) -> None:
     # content_hash labels are byte-reproducible (they carry no scores).
     assert (a1 / "cases.json").read_bytes() == (a2 / "cases.json").read_bytes()
 
-    b1 = json.loads((a1 / "baseline_replay.json").read_text())
-    b2 = json.loads((a2 / "baseline_replay.json").read_text())
+    b1 = json.loads((a1 / "baseline_replay.json").read_text(encoding="utf-8"))
+    b2 = json.loads((a2 / "baseline_replay.json").read_text(encoding="utf-8"))
     # The ranking-relevant fingerprints match; only the timestamp-folding
     # corpus/index fingerprints churn across re-indexes (documented).
     assert b1["fingerprints"]["profile"] == b2["fingerprints"]["profile"]
@@ -185,7 +187,7 @@ def test_refresh_is_reproducible(tmp_path: Path) -> None:
     # Two independent same-machine refreshes must gate as fully unchanged. Raw
     # BM25 score floats can wobble below epsilon across separate indexes, so the
     # guarantee is asserted at the gate's semantic level, not byte-exact dicts.
-    policy = load_policy(json.loads((a1 / "policy.json").read_text()))
+    policy = load_policy(json.loads((a1 / "policy.json").read_text(encoding="utf-8")))
     verdict = evaluate_gate(compare_reports(b1, b2), policy)
     assert verdict["pass"] is True, verdict["violations"]
     assert verdict["summary_effective"]["unchanged"] == len(b1["cases"])
@@ -198,7 +200,7 @@ def test_mutated_case_fails_gate(tmp_path: Path) -> None:
 
     # Mutate one committed case's top_k: the candidate's case set no longer
     # matches the baseline, so the required case_set_match flag fails.
-    cases = json.loads((assets / "cases.json").read_text())
+    cases = json.loads((assets / "cases.json").read_text(encoding="utf-8"))
     cases["cases"][0]["top_k"] = 1
     (assets / "cases.json").write_text(json.dumps(cases), encoding="utf-8")
 
