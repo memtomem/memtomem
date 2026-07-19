@@ -186,6 +186,7 @@ class GatePolicy(BaseModel):
     max_verdict_counts: dict[str, int] = {}
     aggregate_delta_floors: dict[str, float] = {}
     min_compared_cases: int = 0
+    max_incomplete_precision_cases: int | None = None
     allowlist: list[AllowlistEntry] = []
 
     @model_validator(mode="before")
@@ -245,6 +246,13 @@ class GatePolicy(BaseModel):
         mcc = data.get("min_compared_cases")
         if mcc is not None and (isinstance(mcc, bool) or not isinstance(mcc, int) or mcc < 0):
             raise ValueError("min_compared_cases must be an integer >= 0")
+
+        # ``None`` leaves the coverage rule off; any set value must be a real
+        # non-negative int (bool ⊂ int and float 1.0 are rejected, matching the
+        # strict treatment of ``min_compared_cases``).
+        mipc = data.get("max_incomplete_precision_cases")
+        if mipc is not None and (isinstance(mipc, bool) or not isinstance(mipc, int) or mipc < 0):
+            raise ValueError("max_incomplete_precision_cases must be an integer >= 0 or null")
 
         return data
 
@@ -420,6 +428,28 @@ def evaluate_gate(comparison: dict[str, Any], policy: GatePolicy) -> dict[str, A
                         "observed": mean_delta,
                     }
                 )
+
+    # --- precision-cohort coverage over the metric cohort ------------------- #
+    # The precision floor only sees the *comparable* subset; a compared case with
+    # incomplete precision (an unlabelled retrieved chunk on either side) is
+    # silently excluded, so a candidate that introduces one can slip through as
+    # `unchanged` while rank metrics stay flat (#1837). This rule caps how many
+    # compared cases may fall out of the precision cohort — with the committed
+    # floor of 0, any such coverage loss is a violation rather than a silent
+    # exclusion. Runs independently of whether a precision floor is set, and over
+    # the metric cohort so explicit allowlist waivers still apply.
+    if policy.max_incomplete_precision_cases is not None:
+        incomplete = [c for c in metric_cohort if c["precision_status"] != "comparable"]
+        if len(incomplete) > policy.max_incomplete_precision_cases:
+            violations.append(
+                {
+                    "rule": "precision_cohort_coverage",
+                    "metric": "precision",
+                    "max": policy.max_incomplete_precision_cases,
+                    "observed": len(incomplete),
+                    "case_ids": sorted(c["case_id"] for c in incomplete),
+                }
+            )
 
     violations.sort(key=lambda v: (v["rule"], v.get("key") or v.get("metric") or ""))
     warnings.sort()

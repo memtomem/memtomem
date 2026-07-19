@@ -61,15 +61,17 @@ hit leaves the four rank metrics unchanged, but because the appended chunk is a
 labelled `not_relevant` hit it lowers precision, so the gate catches it instead
 of classifying the case as `unchanged`.
 
-**Known residual.** This holds only while the corpus is unchanged. If a corpus
-change introduces a *new* chunk that a case retrieves, that chunk is unlabelled,
-so the gate engine (`quality/gate.py`) drops the case from the precision cohort
-rather than counting it against the floor; with the other cases' precision flat,
-the mean delta stays at zero and the case can slip through as `unchanged`. The
-gate does not require `corpus_match` (its fingerprint folds timestamps), so this
-is not closed here. Closing it needs a precision-cohort-coverage rule in the
-engine and is deferred to the advisory→required flip (PR-C); until then, treat a
-corpus edit as requiring a baseline refresh in the same PR.
+**Precision-cohort coverage.** The floor only sees the *comparable* subset, so a
+compared case whose precision goes incomplete is silently excluded from it. If a
+corpus change makes a case retrieve a *new* unlabelled chunk, that case drops out
+of the precision cohort; with the other cases' precision flat the mean delta
+stays at zero, and because the gate does not require `corpus_match` (its
+fingerprint folds timestamps) the case would otherwise slip through as
+`unchanged`. `policy.json` closes this with `max_incomplete_precision_cases: 0`:
+any compared case with incomplete precision is a `precision_cohort_coverage`
+violation rather than a silent exclusion (#1837). A corpus edit that legitimately
+changes retrieval therefore still requires refreshing the baseline in the same PR
+— now enforced, not just advised.
 
 ## Run it locally
 
