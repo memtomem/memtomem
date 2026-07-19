@@ -435,6 +435,24 @@ class TestExtractAgentsToCanonical:
         # Pre-image snapshotted before the overwrite.
         assert (canonical.parent / "versions" / "v1.md").read_text(encoding="utf-8") == "old"
 
+    def test_overwrite_dry_run_dir_layout_accrues_no_snapshot(self, tmp_path):
+        """A dry_run overwrite of a DIR-layout canonical previews the would-import
+        target but never accrues a snapshot (the whole write — snapshot included —
+        sits under ``if not dry_run:``). Preview never mutates disk."""
+        claude_dir = tmp_path / ".claude/agents"
+        claude_dir.mkdir(parents=True)
+        new_content = SAMPLE_MINIMAL_AGENT.replace("Generic helper", "UPDATED")
+        (claude_dir / "helper.md").write_text(new_content, encoding="utf-8")
+
+        canonical = tmp_path / CANONICAL_AGENT_ROOT / "helper" / "agent.md"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("old", encoding="utf-8")
+
+        result = extract_agents_to_canonical(tmp_path, overwrite=True, dry_run=True)
+        assert len(result.imported) == 1  # would-import preview
+        assert canonical.read_text(encoding="utf-8") == "old"  # untouched
+        assert not (canonical.parent / "versions").exists()  # no snapshot accrued
+
     def test_overwrite_flat_layout_refused(self, tmp_path):
         """A flat-layout canonical has no versions/ store to snapshot into, so
         an overwrite-import is refused with a migrate hint (ADR-0030 §6)."""
