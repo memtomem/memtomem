@@ -1,0 +1,52 @@
+{
+  "scope": "str",
+  "store": {
+    "skills": "int",
+    "agents": "int",
+    "commands": "int"
+  },
+  "runtime_coverage": [
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    },
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    },
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    },
+    {
+      "name": "str",
+      "available": "bool",
+      "installed": "bool",
+      "memtomem_registered": "bool"
+    }
+  ],
+  "pull_drift": {
+    "has_pull_drift": "bool",
+    "total": "int",
+    "differs": "int",
+    "errors": "int",
+    "identical": "int",
+    "rows": [
+      {
+        "kind": "str",
+        "name": "str",
+        "verdict": "str",
+        "runtimes": [
+          "str"
+        ],
+        "reason": "null"
+      }
+    ]
+  }
+}

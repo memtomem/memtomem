@@ -72,10 +72,15 @@ __all__ = [
     "ContextSyncProjectExecuted",
     "ContextSyncProjectFailed",
     "ContextSyncProjectSkipped",
+    "ContextGlobalRuntimeCoverage",
+    "ContextGlobalStoreCounts",
     "ContextPullApplyNeedsConfirmation",
     "ContextPullApplyResponse",
+    "ContextPullDriftRow",
+    "ContextPullDriftSummary",
     "ContextPullPreviewCandidate",
     "ContextPullPreviewResponse",
+    "ContextStatusGlobalResponse",
     "ContextWikiInstalls",
 ]
 
@@ -586,3 +591,76 @@ class ContextPullApplyNeedsConfirmation(BaseModel):
     confirm: str
     reason: str
     host_targets: list[str]
+
+
+# ── GET /context/status-global — user-tier portal (ADR-0030 §9 + §1, PR-F) ──
+
+
+class ContextGlobalStoreCounts(BaseModel):
+    """Per-kind canonical inventory of the user Store (the 'global library')."""
+
+    skills: int
+    agents: int
+    commands: int
+
+
+class ContextGlobalRuntimeCoverage(BaseModel):
+    """Host runtime coverage for the user tier.
+
+    A normalized :func:`memtomem.context.runtime_coverage.compute_runtime_coverage`
+    entry: the raw helper OMITS ``installed`` / ``memtomem_registered`` when the
+    registry probe found no client, but this module forbids optional keys, so the
+    handler fills them with ``None`` (probe unavailable) instead."""
+
+    name: str
+    available: bool
+    installed: bool | None
+    memtomem_registered: bool | None
+
+
+class ContextPullDriftRow(BaseModel):
+    """One Store artifact's pull-direction drift verdict (ADR-0030 §1).
+
+    ``verdict`` is a CLOSED ``Literal`` — the reduced badge view of the engine's
+    ``content_status`` — pinned against
+    :data:`memtomem.context.pull_preview.PullDriftVerdict` by
+    ``test_context_status_global.py`` (same discipline as
+    ``ContextPullPreviewCandidate``). ``reason`` is display-sanitized at the
+    route (never raw engine text / absolute paths)."""
+
+    kind: str
+    name: str
+    verdict: Literal["differs", "identical", "error"]
+    runtimes: list[str]
+    reason: str | None
+
+
+class ContextPullDriftSummary(BaseModel):
+    """Store-wide pull-direction drift summary (ADR-0030 §1 stage-1 probe).
+
+    ``has_pull_drift`` fires the portal badge/glance-dot on a DEFINITE runtime
+    divergence only (``differs > 0``); an ``error`` row is an indeterminate
+    check-failure, surfaced separately, never asserted as drift."""
+
+    has_pull_drift: bool
+    total: int
+    differs: int
+    errors: int
+    identical: int
+    rows: list[ContextPullDriftRow]
+
+
+class ContextStatusGlobalResponse(BaseModel):
+    """User-tier global portal status — ADR-0030 §9 + §1 (PR-F).
+
+    A SEPARATE endpoint from ``GET /context/status-all`` (which is
+    ``project_shared``-only and per-project): the user tier is one global
+    ``~/.memtomem`` Store with no per-project fan-out, so it gets its own frozen
+    wire shape rather than a mode-discriminated overload of the fleet endpoint
+    (ADR-0030 §9). Read-only — the drift summary is a detection probe; writes
+    stay explicit Pull/Push (ADR-0030 §1)."""
+
+    scope: Literal["user"]
+    store: ContextGlobalStoreCounts
+    runtime_coverage: list[ContextGlobalRuntimeCoverage]
+    pull_drift: ContextPullDriftSummary
