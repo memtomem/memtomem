@@ -10,6 +10,7 @@ verdicts, the top-level determinism roll-up, and byte-stable serialization.
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -107,13 +108,20 @@ def _report(
     }
 
 
-def _run(name: str, report: dict, *, source: str = "document") -> ProfileRun:
+def _run(
+    name: str,
+    report: dict,
+    *,
+    source: str = "document",
+    warnings: tuple[str, ...] = (),
+) -> ProfileRun:
     return ProfileRun(
         name=name,
         source=source,
         document=None if source == "ambient" else {"name": name},
         document_fingerprint=None if source == "ambient" else f"docfp-{name}",
         report=report,
+        warnings=warnings,
     )
 
 
@@ -145,6 +153,27 @@ def test_shared_fingerprints_hoisted_to_top_level():
     result = assemble_experiment(base, [c])
     assert set(result["fingerprints"]) == {"corpus", "index", "case_set"}
     assert result["fingerprints"]["corpus"] == "corp-1"
+
+
+def test_profile_warnings_survive_experiment_json_for_baseline_and_candidate():
+    baseline = _run(
+        "baseline",
+        _report([_case("c1", retrieved=["x", "r"], relevant=["r"])]),
+        warnings=("baseline_warning",),
+    )
+    candidate = _run(
+        "candidate",
+        _report(
+            [_case("c1", retrieved=["r", "x"], relevant=["r"])],
+            profile="candidate-profile",
+        ),
+        warnings=("rerank_provider_model_mismatch",),
+    )
+
+    payload = json.loads(serialize_experiment(assemble_experiment(baseline, [candidate])))
+
+    assert payload["baseline"]["warnings"] == ["baseline_warning"]
+    assert payload["candidates"][0]["warnings"] == ["rerank_provider_model_mismatch"]
 
 
 # --------------------------------------------------------------------------- #

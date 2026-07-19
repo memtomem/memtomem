@@ -373,12 +373,42 @@ class TestExperiment:
         )
         return str(p)
 
-    def _canned(self, *, policy_supplied=False, gate_pass=None, nondeterministic=False):
+    def _canned(
+        self,
+        *,
+        policy_supplied=False,
+        gate_pass=None,
+        nondeterministic=False,
+        baseline_warnings=(),
+        candidate_warnings=(),
+    ):
         cand = {
             "profile_name": "cand-a",
+            "profile_fingerprint": "candidate-profile-fingerprint",
             "deterministic": not nondeterministic,
             "nondeterministic_stages": ["rerank_remote"] if nondeterministic else [],
             "gate": None if gate_pass is None else {"pass": gate_pass},
+            "warnings": list(candidate_warnings),
+            "comparison": {
+                "aggregate_deltas": {
+                    "hit_rate": {"delta": 0.0},
+                    "reciprocal_rank": {"delta": 0.0},
+                    "recall_labeled": {"delta": 0.0},
+                    "ndcg": {"delta": 0.0},
+                    "precision": {"delta": 0.0, "cohort_size": 1},
+                    "cohort_size": 1,
+                },
+                "summary": {
+                    "improved": 0,
+                    "regressed": 0,
+                    "mixed": 0,
+                    "unchanged": 1,
+                    "candidate_degraded": 0,
+                    "excluded": 0,
+                },
+                "cases": [],
+                "compatibility": {"notes": []},
+            },
         }
         return {
             "schema_version": 1,
@@ -390,8 +420,17 @@ class TestExperiment:
             "fingerprints": {"corpus": "c", "index": "i", "case_set": "cs"},
             "baseline": {
                 "profile_name": "ambient",
+                "profile_fingerprint": "baseline-profile-fingerprint",
                 "deterministic": True,
                 "nondeterministic_stages": [],
+                "warnings": list(baseline_warnings),
+                "aggregate": {
+                    "mean_hit_rate": 1.0,
+                    "mrr": 1.0,
+                    "mean_recall_labeled": 1.0,
+                    "mean_ndcg": 1.0,
+                    "evaluated_cases": 1,
+                },
             },
             "candidates": [cand],
         }
@@ -515,3 +554,25 @@ class TestExperiment:
         assert result.exit_code == 0
         assert "nondeterministic" in result.output
         assert "rerank_remote" in result.output
+
+    def test_table_surfaces_baseline_and_candidate_profile_warnings(
+        self, monkeypatch, tmp_path
+    ):
+        comp = SimpleNamespace()
+        self._patch_run(
+            monkeypatch,
+            comp,
+            self._canned(
+                baseline_warnings=("baseline_warning",),
+                candidate_warnings=("rerank_provider_model_mismatch",),
+            ),
+        )
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", self._profile(tmp_path, "cand-a")]
+        )
+
+        assert result.exit_code == 0
+        baseline_warning = result.output.index("warning: baseline_warning")
+        candidate_header = result.output.index("cand-a cand-a")
+        candidate_warning = result.output.index("warning: rerank_provider_model_mismatch")
+        assert baseline_warning < candidate_header < candidate_warning

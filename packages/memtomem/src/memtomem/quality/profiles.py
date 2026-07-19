@@ -48,6 +48,7 @@ from memtomem.config import (
     SearchConfig,
     SessionSummaryConfig,
 )
+from memtomem.embedding.aliases import FASTEMBED_RERANKER_SIZES
 from memtomem.errors import EvalCaseValidationError
 from memtomem.privacy import scan
 from memtomem.quality.fingerprints import _sha256_json
@@ -612,6 +613,22 @@ def apply_profile(ambient: Mem2MemConfig, doc: RetrievalProfileDoc) -> Mem2MemCo
     return type(ambient).model_validate(payload)
 
 
+def _likely_rerank_model_provider(model: str) -> str | None:
+    """Classify model IDs with a strong provider-specific signature.
+
+    Unknown IDs intentionally stay unclassified: FastEmbed supports custom
+    model registration and the local provider accepts an open Hugging Face
+    model namespace, so this helper is an advisory heuristic, not a validator.
+    """
+    if model in FASTEMBED_RERANKER_SIZES:
+        return "fastembed"
+    if model.startswith("rerank-"):
+        return "cohere"
+    if model.startswith("cross-encoder/"):
+        return "local"
+    return None
+
+
 def profile_warnings(config: Mem2MemConfig, doc: RetrievalProfileDoc) -> list[str]:
     """Non-fatal advisories about a profile that will run but may surprise.
 
@@ -632,4 +649,8 @@ def profile_warnings(config: Mem2MemConfig, doc: RetrievalProfileDoc) -> list[st
         warnings.append("llm_strategy_without_provider")
     if config.rerank.enabled and config.rerank.provider == "cohere" and not config.rerank.api_key:
         warnings.append("rerank_cohere_without_api_key")
+    if config.rerank.enabled:
+        likely_provider = _likely_rerank_model_provider(config.rerank.model)
+        if likely_provider is not None and likely_provider != config.rerank.provider:
+            warnings.append("rerank_provider_model_mismatch")
     return sorted(warnings)
