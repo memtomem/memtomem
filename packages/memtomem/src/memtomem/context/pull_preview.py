@@ -823,6 +823,13 @@ def _drift_row(
             kind=kind, name=name, verdict="error", runtimes=(), reason=str(collected.store_err)
         )
 
+    # No divergence, no error → in sync. NOTE a ``new`` candidate (Store absent
+    # yet a runtime holds a landable copy) also lands here — but the probe only
+    # visits names ``_store_artifact_names`` already resolved in the Store, and
+    # the lister + ``_read_store`` resolve the SAME canonical path, so a listed
+    # name is ``store_present`` and ``new`` cannot arise. This fall-through is the
+    # deliberate resting state for that coupling; if the lister/reader ever
+    # diverge, a stray ``new`` reads as "not drift" (safe), not a crash.
     return PullDriftRow(kind=kind, name=name, verdict="identical", runtimes=(), reason=None)
 
 

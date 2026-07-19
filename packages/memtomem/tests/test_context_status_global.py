@@ -154,6 +154,27 @@ def test_probe_unreadable_store_no_runtime_is_error_not_identical(
     assert row.reason == "store unreadable"
 
 
+def test_probe_landing_error_when_runtime_copy_unreadable(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present runtime copy whose would-land bytes can't be computed
+    (``landing_error``) is an ``error`` row — the runtime-side sibling of the
+    store-side error path, pinned directly."""
+    _seed_store_skill("s", "store v1")
+    seed_multi_runtime(home, "skills", "s", {"claude": _skill_body("s", "v2")}, scope="user")
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise OSError("unreadable runtime copy")
+
+    monkeypatch.setattr(pull_preview, "_read_landing", _boom)
+
+    summary = probe_pull_drift(scope="user", project_root=None)
+    assert summary.errors == 1
+    row = _row(summary, "s")
+    assert row.verdict == "error"
+    assert "unreadable runtime copy" in (row.reason or "")
+
+
 def test_probe_spans_all_pull_kinds(home: Path) -> None:
     _seed_store_skill("sk", "v1")
     seed_multi_runtime(home, "skills", "sk", {"claude": _skill_body("sk", "v2")}, scope="user")
