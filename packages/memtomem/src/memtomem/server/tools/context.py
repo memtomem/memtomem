@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import click
+from pydantic import StrictBool
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from memtomem.context._names import Layout
     from memtomem.context.mcp_servers_copy import McpServerCopyResult
     from memtomem.context.migrate import MigrateRow, MigrateScopeResult
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.context.pull_preview import PullPreview
     from memtomem.context.scope_resolver import ArtifactKind
     from memtomem.context.transfer import TransferMode, TransferResult
     from memtomem.context.versioning import VersionsManifest
@@ -2562,3 +2565,404 @@ async def mem_context_promote(
         )
     except versioning.VersionError as exc:
         return f"error: {exc}"
+
+
+# ── mem_context_pull (ADR-0030 PR-H) ──────────────────────────────────────────
+# Headless parity for ``mm context pull`` (PR-C) and the web Pull route (PR-D)
+# over the SAME result-coded :mod:`context.pull_apply` engine (``prepare_pull``
+# → ``commit_pull``) and :mod:`context.pull_preview` (``preview_pull``). No
+# domain logic is re-implemented here: the tool validates the request shape,
+# renders the engine's typed outcome as prefix-coded text, and — because MCP
+# cannot prompt — gates destination consent by returning a ``needs
+# confirmation`` line (never a live prompt), exactly as ``mem_context_sync`` /
+# ``mem_context_artifact_transfer`` do for their host-write / project_shared
+# opt-ins.
+
+#: Canonical-lock acquisition budget forwarded to ``commit_pull``. Same value
+#: and rationale as the web route's ``_PULL_LOCK_BUDGET_S`` and this module's
+#: ``_TRANSFER_LOCK_BUDGET_S``: an MCP agent cannot Ctrl-C a stuck cross-process
+#: lock wait, so the engine self-aborts (writing nothing) and the tool renders
+#: the ``lock_timeout`` outcome instead of hanging the call.
+_PULL_LOCK_BUDGET_S = 30.0
+
+#: ``PullApplyStatus`` → rendering bucket. Exhaustive by construction: the
+#: ``applied`` / ``gate_blocked`` branches plus these two sets must cover every
+#: member (pinned by ``test_every_pull_status_has_a_render_branch``), and an
+#: unrecognized status fails CLOSED rather than defaulting to ``refused:`` —
+#: a new engine status must be classified deliberately, not inherit a prefix
+#: that could understate it (e.g. a future data-loss status rendering as a
+#: benign refusal).
+#: The four the web route maps to non-200 (503/409/500/500) → ``error:``.
+_PULL_ERROR_STATUSES = frozenset({"lock_timeout", "plan_stale", "snapshot_failed", "write_failed"})
+#: Actionable domain refusals the web route returns as a typed HTTP 200.
+_PULL_REFUSAL_STATUSES = frozenset(
+    {
+        "source_conflict",
+        "nothing_importable",
+        "selected_landing_error",
+        "canonical_exists",
+        "skills_overwrite_unsupported",
+        "snapshot_requires_dir_layout",
+        "target_conflict",
+    }
+)
+
+#: Write / consent flags on ``mem_context_pull`` — the two-layer guard's
+#: subject list, and the single source of truth the boundary tests parametrize
+#: over. ``mem_do`` forwards params RAW (``meta.py`` ``info.fn(**kwargs)``), so a
+#: stringified boolean reaches the tool untyped and reads truthy —
+#: ``apply="false"`` would execute and ``confirm_project_shared="false"`` would
+#: count as consent to write the git-tracked tier; each is therefore validated
+#: with :func:`_strict_bool` in the body. The direct tool-call path never sees
+#: those values because each is annotated ``StrictBool``, which FastMCP's
+#: otherwise-lax pydantic arg model enforces first.
+_PULL_BOOL_FLAGS = (
+    "overwrite",
+    "apply",
+    "force_unsafe_import",
+    "allow_host_writes",
+    "confirm_project_shared",
+)
+
+
+def _strict_bool(value: object, field: str) -> bool:
+    """Accept ONLY a literal ``True`` / ``False``; reject anything else.
+
+    The MCP twin of the web ``_only_literal_true`` validator, generalized to
+    both polarities because a *falsy-looking* string is the dangerous direction
+    here: ``"false"`` is truthy in Python, so a coercing implementation would
+    turn a declined consent into a write. Fails closed with a crisp message
+    instead of silently normalizing, so a malformed agent call is corrected
+    rather than acted on. ``1`` / ``0`` are rejected too (``1 is True`` is
+    ``False`` — ints are not booleans).
+    """
+    if value is True or value is False:
+        return value
+    raise ValueError(
+        f"{field} must be a literal boolean (true/false), got "
+        f"{type(value).__name__} {value!r} — a stringified boolean is refused "
+        "because 'false' would read as true."
+    )
+
+
+def _redact_pull_reason(reason: str | None, *roots: Path) -> str:
+    """Redact a Pull engine reason for the MCP wire (defense in depth).
+
+    ``_redact_reason`` strips the roots it is handed plus the import-frozen
+    ``$HOME``; :func:`scrub_absolute_paths` then removes any residual absolute
+    path under neither (mirrors the web ``_redact_pull_reason`` composition).
+    """
+    from memtomem.context.error_redact import scrub_absolute_paths
+
+    return scrub_absolute_paths(_redact_reason(reason, *roots))
+
+
+def _format_pull_preview(
+    preview: "PullPreview", root: Path, *, overwrite: bool, only_runtime: str | None
+) -> str:
+    """Dry-run Pull preview as a single prefix-free text blob (MCP twin of the
+    CLI ``_print_pull_preview``).
+
+    ``only_runtime`` (from ``from_runtime``) narrows the rows + summary to the
+    named source, so a scoped preview shows exactly what an ``apply`` from that
+    runtime would land. Every candidate ``reason`` is display-sanitized through
+    :func:`_redact_reason` — a ``*_error`` row's raw text may embed an absolute
+    source path, and this result flows to the calling agent's transcript.
+    """
+    rows = [c for c in preview.candidates if only_runtime is None or c.runtime == only_runtime]
+    lines: list[str] = [f"Pull preview: {preview.kind}/{preview.name} → {preview.scope}"]
+    if not rows:
+        who = f"runtime '{only_runtime}'" if only_runtime else "any runtime"
+        lines.append(f"  ({who} has no {preview.kind}/{preview.name} to pull)")
+    else:
+        for c in rows:
+            notes: list[str] = []
+            if c.override_warning:
+                notes.append("matches vendor override — pull would bake it into base")
+            reason = _redact_pull_reason(c.reason, root)
+            if reason:
+                notes.append(reason)
+            if c.landing_group is not None and preview.distinct_landing_count > 1:
+                notes.append(f"content #{c.landing_group + 1}")
+            gate = c.gate_status or "-"
+            suffix = f" — {'; '.join(notes)}" if notes else ""
+            lines.append(f"  {c.runtime}: content={c.content_status} gate={gate}{suffix}")
+    store = "present" if preview.store_present else "absent"
+    if only_runtime is not None:
+        lines.append(f"  store: {store} · source: {only_runtime}")
+    elif preview.ambiguous:
+        lines.append(
+            f"  store: {store} · distinct contents: {preview.distinct_landing_count} · "
+            "ambiguous — pass from_runtime=<runtime> to apply"
+        )
+    elif preview.auto_source:
+        lines.append(f"  store: {store} · auto-source: {preview.auto_source}")
+    else:
+        lines.append(f"  store: {store} · nothing pullable")
+    if preview.store_present and preview.kind == "skills":
+        lines.append(
+            "  note: the Store already has this skill; overwriting skills is not yet "
+            "supported (ADR-0030 §10) — delete the canonical skill first."
+        )
+    elif preview.store_present and not overwrite:
+        lines.append("  note: apply=True needs overwrite=True (the Store already has it).")
+    lines.append("  Re-call with apply=True to execute.")
+    return "\n".join(lines)
+
+
+def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
+    """Render a ``prepare_pull`` refusal / ``commit_pull`` outcome as a
+    prefix-coded MCP line (``error:`` / ``refused:`` / ``privacy block:`` /
+    success), mirroring the web ``_finalize_pull`` status routing.
+
+    The four HTTP-semantic statuses the web route maps to non-200
+    (``lock_timeout`` 503, ``plan_stale`` 409, ``snapshot_failed`` /
+    ``write_failed`` 500) have no status channel over MCP, so they surface as
+    ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
+    domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
+    no-op) is a success line.
+
+    EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
+    ``gate_blocked`` reason is built from runtime + scope only
+    (``pull_apply._evaluate_gate``) so there is no path to preserve — redacting
+    is a pure backstop for the day that reason gains one, exactly as the web
+    twin does (``_pull_apply_payload`` docstring). The ``mem_context_sync``
+    ``privacy block:`` exception does NOT transfer: it carries a
+    ``PrivacyScanError.message``, which genuinely names the offending file.
+    """
+    if result.status == "applied":
+        if result.write_outcome == "identical":
+            # Fixed fallback: _redact_reason coalesces None → "", so a future
+            # identical result without a reason must not render as an empty
+            # MCP response.
+            return _redact_pull_reason(result.reason, root) or (
+                f"{result.kind}/{result.name} is already identical in "
+                f"{result.scope} — nothing to pull."
+            )
+        dupes = (
+            f" (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})"
+            if result.duplicate_runtimes
+            else ""
+        )
+        return (
+            f"Pulled {result.kind}/{result.name} from {result.selected_runtime} "
+            f"into {result.scope} ({result.write_outcome}).{dupes}"
+        )
+    if result.status == "gate_blocked":
+        valve = (
+            " Re-call with force_unsafe_import=True to bypass for a reviewed "
+            "false positive (user tier only)."
+            if result.force_bypassable
+            else ""
+        )
+        return f"privacy block: {_redact_pull_reason(result.reason, root)}{valve}"
+    if result.status in _PULL_ERROR_STATUSES:
+        return f"error: {_redact_pull_reason(result.reason, root)}"
+    if result.status in _PULL_REFUSAL_STATUSES:
+        return f"refused: {_redact_pull_reason(result.reason, root)}"
+    # Fail closed: an engine status this tool has not classified must not
+    # inherit a benign prefix. Surface it as an error naming the status so the
+    # gap is visible (and the parity test fails first).
+    return (
+        f"error: unhandled Pull status {result.status!r} — this MCP surface has "
+        f"not classified it. {_redact_pull_reason(result.reason, root)}"
+    )
+
+
+@mcp.tool()
+@tool_handler
+@register("context")
+async def mem_context_pull(
+    kind: str = "",
+    name: str = "",
+    from_runtime: str = "",
+    scope: str = "",
+    # StrictBool, not bool: FastMCP builds a LAX pydantic arg model from these
+    # annotations, which coerces "true" / 1 / "yes" → True before the function
+    # body runs. That would let a non-literal value open the Gate A valve on the
+    # direct tool-call path, breaking parity with the web
+    # ``_only_literal_true``. StrictBool rejects anything but a real JSON
+    # boolean at the FastMCP boundary; ``_strict_bool`` in the body then covers
+    # the ``mem_do`` path, which bypasses this model entirely. Both are needed.
+    overwrite: StrictBool = False,
+    apply: StrictBool = False,
+    force_unsafe_import: StrictBool = False,
+    allow_host_writes: StrictBool = False,
+    confirm_project_shared: StrictBool = False,
+    ctx: CtxType = None,
+) -> str:
+    """Pull one runtime's copy of an artifact into the canonical Store.
+
+    Headless parity for ``mm context pull`` and the web Pull route — the reverse
+    of Push/fan-out (``mem_context_sync``): it brings a runtime's on-disk copy
+    (Claude Code / Gemini CLI / Codex CLI / Kimi) of a ``skills`` / ``agents`` /
+    ``commands`` artifact back into the ``.memtomem`` canonical Store, over the
+    same source-selectable, privacy-gated :mod:`context.pull_apply` engine. No
+    logic is re-implemented; refusals are the engine's typed result codes.
+
+    Dry-run by default (``apply=False``) returns a preview: each runtime's
+    content relation to the Store (``new`` / ``differs`` / ``identical`` /
+    error) and the privacy-gate outcome for the destination tier. Set
+    ``apply=True`` to execute. When runtime copies diverge, ``apply`` refuses
+    until you name a source via ``from_runtime`` (ADR-0030 §5).
+
+    Args:
+        kind: ``skills`` | ``agents`` | ``commands``. Required. (``settings`` /
+            ``mcp-servers`` have no per-runtime Pull source.)
+        name: Artifact name to pull. Required.
+        from_runtime: Pull from this runtime only (per-kind eligibility: skills
+            = claude/gemini/codex/kimi; agents/commands = claude/gemini).
+            Required when candidates diverge (else the apply refuses with
+            ``source_conflict``); omit to auto-select the single source.
+        scope: Destination canonical tier — ``user`` or ``project_shared``
+            (default ``project_shared``). ``apply=True`` into ``project_shared``
+            requires this passed explicitly (ADR-0030 §11); ``project_local`` is
+            rejected (no runtime fan-out to pull from — ADR-0011 §3).
+        overwrite: Allow replacing an existing Store entry (agents/commands: the
+            current canonical is snapshotted first; skills: not yet supported —
+            ADR-0030 §10).
+        apply: Execute the pull. Default ``False`` returns a dry-run preview.
+        force_unsafe_import: Bypass Gate A for a reviewed false positive — user
+            tier only (``project_shared`` hard-refuses regardless, ADR-0011 §5).
+            Literal ``True`` only; a string/int does not enable the bypass.
+        allow_host_writes: Required when ``scope='user'`` and ``apply=True`` —
+            the canonical lands at a host path outside any project root
+            (``~/.memtomem``). Re-call with ``allow_host_writes=True`` after
+            surfacing the host path to the user.
+        confirm_project_shared: Required when ``scope='project_shared'`` and
+            ``apply=True`` — the write lands in the git-tracked tier (history is
+            forever); MCP cannot prompt, so a missing confirmation returns a
+            ``needs confirmation`` line instead of writing.
+
+    Refusals are prefixed (``error:`` for bad input / a lock timeout / a stale
+    plan, ``refused:`` for a legitimate state that stops the pull — fix it and
+    re-call, ``needs confirmation:`` for a missing opt-in flag, ``privacy
+    block:`` for Gate A hits) so callers can branch on the prefix.
+    """
+    from memtomem.context._names import InvalidNameError, validate_name
+    from memtomem.context._runtime_targets import (
+        IMPORT_SOURCE_RUNTIMES,
+        resolve_import_runtimes,
+    )
+    from memtomem.context.pull_apply import (
+        PullApplyResult,
+        PullPlan,
+        commit_pull,
+        prepare_pull,
+    )
+    from memtomem.context.pull_preview import preview_pull
+    from memtomem.context.scope_resolver import canonical_artifact_dir
+
+    # Strict-boolean the write/consent flags BEFORE anything else: via mem_do
+    # these arrive raw, and a stringified boolean is truthy — "false" would
+    # execute the write and count as consent (see _strict_bool). Every flag is
+    # REASSIGNED from its validated value, so no raw parameter stays live in
+    # this body for a later edit to reach for by name.
+    try:
+        overwrite = _strict_bool(overwrite, "overwrite")
+        apply = _strict_bool(apply, "apply")
+        force_unsafe_import = _strict_bool(force_unsafe_import, "force_unsafe_import")
+        allow_host_writes = _strict_bool(allow_host_writes, "allow_host_writes")
+        confirm_project_shared = _strict_bool(confirm_project_shared, "confirm_project_shared")
+    except ValueError as exc:
+        return f"error: {exc}"
+    k = kind.strip()
+    nm = name.strip()
+    frm = from_runtime.strip() or None
+
+    if k not in IMPORT_SOURCE_RUNTIMES:
+        return (
+            f"error: kind {k or '(empty)'!r} has no Pull sources; choose one of: "
+            f"{', '.join(sorted(IMPORT_SOURCE_RUNTIMES))}."
+        )
+    scope_explicit = bool(scope.strip())
+    try:
+        artifact_scope = _resolve_artifact_mcp_scope(scope)
+    except ValueError as exc:
+        return f"error: {exc}"
+    if artifact_scope == "project_local":
+        return (
+            "error: project_local has no runtime fan-out to pull from (ADR-0011 §3); "
+            "pull into user or project_shared instead."
+        )
+    try:
+        validated = validate_name(nm, kind=f"{k[:-1]} name")
+    except InvalidNameError as exc:
+        return f"error: {exc}"
+    artifact_kind = cast("ArtifactKind", k)
+    # Validate from_runtime eligibility up front (export-only / unknown →
+    # ValueError), reusing the engine's wording — a request-shape error, not an
+    # engine outcome. Parity with the CLI / web boundary guard.
+    if frm is not None:
+        try:
+            resolve_import_runtimes(artifact_kind, frm)
+        except ValueError as exc:
+            return f"error: {exc}"
+
+    root = await asyncio.to_thread(_find_project_root)
+
+    if not apply:
+        preview = await asyncio.to_thread(
+            preview_pull,
+            artifact_kind,
+            validated,
+            scope=artifact_scope,
+            project_root=root,
+        )
+        return _format_pull_preview(preview, root, overwrite=overwrite, only_runtime=frm)
+
+    # ── apply ──
+    if artifact_scope == "project_shared" and not scope_explicit:
+        return (
+            "error: apply into the git-tracked project_shared tier requires an "
+            "explicit scope='project_shared' (ADR-0030 §11)."
+        )
+
+    outcome = await asyncio.to_thread(
+        prepare_pull,
+        artifact_kind,
+        validated,
+        scope=artifact_scope,
+        project_root=root,
+        source_runtime=frm,
+        overwrite=overwrite,
+        # Strict-booled above: only a literal True opens the Gate A valve
+        # (ADR-0011 §5; user tier only — project_shared hard-refuses in the
+        # engine regardless).
+        force_unsafe_import=force_unsafe_import,
+        surface="mcp_context_pull",
+    )
+    if isinstance(outcome, PullApplyResult):
+        # A refusal, or the byte-identical no-op (status == "applied") — neither
+        # writes, so no destination-consent gate applies.
+        return _format_pull_result(outcome, root)
+
+    # A committable plan → a write is imminent. Gate destination consent now
+    # (never before: a source_conflict / nothing_importable must not prompt).
+    plan: PullPlan = outcome
+    if plan.scope == "project_shared" and not confirm_project_shared:
+        return (
+            f"needs confirmation: Pull {k}/{nm} from {plan.selected_runtime} writes to "
+            "the git-tracked project_shared canonical (history is forever). Re-call "
+            "with confirm_project_shared=True to proceed."
+        )
+    if plan.scope == "user" and not allow_host_writes:
+        target = canonical_artifact_dir(plan.kind, "user", plan.project_root) / plan.name
+        # Disclose the host path HOME-relative off the LIVE, RESOLVED home
+        # (never ``str(target)`` — ``error_redact._HOME`` is frozen at import,
+        # so a process whose $HOME differs, or a symlinked home, would leak the
+        # absolute physical path + OS username into the agent transcript).
+        # Resolve BOTH sides so a symlinked home still matches. The fallback is
+        # a fixed string, never the formatted target.
+        try:
+            shown = "~/" + target.resolve().relative_to(Path.home().resolve()).as_posix()
+        except (ValueError, OSError):  # pragma: no cover — user tier is under HOME
+            shown = f"the user tier (~/.memtomem/{plan.kind}/{plan.name})"
+        return (
+            f"needs confirmation: Pull {k}/{nm} from {plan.selected_runtime} writes to "
+            f"the host path {shown} (outside any project root). Re-call with "
+            "allow_host_writes=True to proceed."
+        )
+
+    result = await asyncio.to_thread(commit_pull, plan, lock_timeout=_PULL_LOCK_BUDGET_S)
+    return _format_pull_result(result, root)

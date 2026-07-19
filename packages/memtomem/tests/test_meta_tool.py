@@ -185,6 +185,7 @@ class TestContextSurfacePosture:
             "context_artifact_transfer",
             "context_version",
             "context_promote",
+            "context_pull",
         }
     )
 

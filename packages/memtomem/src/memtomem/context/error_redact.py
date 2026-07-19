@@ -29,6 +29,7 @@ keeps its own fixed, path-free detail.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from memtomem.privacy import scan as _privacy_scan
@@ -40,6 +41,17 @@ _HOME = str(Path.home())
 _ERROR_MESSAGE_LIMIT = 200
 # Fixed display marker emitted after redaction; it is not authentication material.
 _SECRET_REDACTED_MARKER = "<redacted: secret-shape>"  # nosec B105
+
+# Residual absolute-path backstop — the neutral twin of
+# ``web/routes/context_gateway._ABS_PATH_RE``. Root-stripping + the ``$HOME``
+# collapse only cover paths under a root we know about; an engine ``OSError``
+# can still name a path under neither (a runtime dir symlinked to
+# ``/Volumes/shared/…``, a frozen-``_HOME`` mismatch). Two-or-more segments so
+# ordinary prose with a slash is left alone. Spaces are INCLUDED in a segment so
+# a mount like ``/Volumes/My Drive/x`` is scrubbed whole rather than leaving
+# ``Drive/x`` behind (the reason this is not ``[\w.\-]``).
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^/\\'\"\n]+){2,}")
+_PATH_REDACTED_MARKER = "<path>"
 
 
 def redact_message(message: str) -> str:
@@ -89,3 +101,16 @@ def redact_engine_reason(message: str | None, *project_roots: Path) -> str | Non
     for root in sorted(roots, key=len, reverse=True):
         cleaned = cleaned.replace(root + os.sep, "").replace(root, ".")
     return redact_message(cleaned)
+
+
+def scrub_absolute_paths(message: str) -> str:
+    """Replace any residual absolute path with ``<path>`` (defense in depth).
+
+    Neutral twin of the web ``context_gateway._redact_pull_reason`` backstop.
+    :func:`redact_engine_reason` only strips roots it was handed plus the
+    import-frozen ``$HOME``; a path under neither still reaches the wire. Pull
+    surfaces run engine reasons through this afterwards so an unreadable
+    runtime dir outside every known root cannot disclose its location to the
+    calling agent's transcript.
+    """
+    return _ABS_PATH_RE.sub(_PATH_REDACTED_MARKER, message)

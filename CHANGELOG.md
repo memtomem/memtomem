@@ -20,6 +20,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   next label operation. A build that predates this change will still strip
   unknown fields — which is exactly why it ships first, on its own.
 
+- **`mem_context_pull` — Pull from MCP** (ADR-0030 §8, PR-H1) — headless parity
+  for `mm context pull` and the web Pull flow, so an agent can now pull a
+  runtime's copy of a `skills` / `agents` / `commands` artifact into the Store,
+  not just push to it. Same engine and same gates as the other two surfaces:
+  dry-run preview by default (`apply=True` executes), `from_runtime` to choose a
+  source when copies diverge, and an explicit `scope='project_shared'` plus
+  `confirm_project_shared=True` — or `allow_host_writes=True` for the user tier —
+  before anything is written. MCP cannot prompt, so a missing opt-in comes back
+  as a `needs confirmation` line rather than a silent write, and only a literal
+  `True` opens the Gate A bypass. Host paths and engine reasons are redacted on
+  the way out, since a tool result lands in the calling agent's transcript.
 - **`mm context pull` — source-selectable, preview-first Import** (ADR-0030
   §5/§11) — pull one runtime's copy of a `skills` / `agents` / `commands`
   artifact into the Store, choosing which runtime to import from. Dry-run

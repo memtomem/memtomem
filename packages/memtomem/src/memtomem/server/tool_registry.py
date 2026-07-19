@@ -73,6 +73,10 @@ def register(category: str):
             type_str = str(ann) if ann != inspect.Parameter.empty else "Any"
             # Clean up forward-ref representations
             type_str = type_str.replace("typing.", "").replace("__future__.", "")
+            # ``StrictBool`` is a validation detail of the FastMCP boundary (it
+            # stops "true"/1 coercing into a real bool); to an agent reading
+            # ``mem_do(action="help")`` the parameter is simply a boolean.
+            type_str = type_str.replace("StrictBool", "bool")
             default = f" = {p.default!r}" if p.default != inspect.Parameter.empty else ""
             params[name] = f"{type_str}{default}"
 
