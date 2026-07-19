@@ -451,6 +451,8 @@ class TestExperiment:
                 "experiment",
                 "--profile",
                 self._profile(tmp_path, "cand-a"),
+                "--as-of",  # pin so no reproducibility warning pollutes stdout
+                "1784500000",
                 "--format",
                 "json",
                 "--out",
@@ -517,6 +519,8 @@ class TestExperiment:
                 self._profile(tmp_path, "cand-a"),
                 "--policy",
                 str(policy),
+                "--as-of",  # pin so no reproducibility warning pollutes stdout
+                "1784500000",
                 "--format",
                 "json",
             ],
@@ -574,6 +578,34 @@ class TestExperiment:
         candidate_header = result.output.index("cand-a cand-a")
         candidate_warning = result.output.index("warning: rerank_provider_model_mismatch")
         assert baseline_warning < candidate_header < candidate_warning
+
+    def test_missing_as_of_warns_not_reproducible(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--profile", self._profile(tmp_path, "cand-a"), "--format", "json"],
+        )
+        assert result.exit_code == 0
+        assert "not byte-reproducible" in result.output
+
+    def test_explicit_as_of_does_not_warn(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        result = CliRunner().invoke(
+            quality,
+            [
+                "experiment",
+                "--profile",
+                self._profile(tmp_path, "cand-a"),
+                "--as-of",
+                "1784500000",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "not byte-reproducible" not in result.output
 
     def test_unwritable_out_exits_2_without_path(self, monkeypatch, tmp_path):
         comp = SimpleNamespace()

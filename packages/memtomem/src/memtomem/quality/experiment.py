@@ -141,6 +141,9 @@ def assemble_experiment(
     profile names, or profile-independent (corpus/case-set) fingerprint drift
     across reports — none of which can yield a trustworthy comparison.
     """
+    # Presence + name-uniqueness are validated up front in run_experiment (before
+    # any replay); these are the pure re-check for callers that build ProfileRuns
+    # directly. Keep the two conditions in sync if either is changed.
     if not candidates:
         raise EvalCaseError("an experiment needs at least one candidate profile")
 

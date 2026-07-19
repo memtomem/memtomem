@@ -522,13 +522,23 @@ async def _experiment(
             )
     except GateInputError:
         raise
-    except click.ClickException as e:
-        # e.g. cli_components' "not configured" — operational, not a regression.
-        raise GateInputError("experiment could not run: not configured") from e
-    except (Mem2MemError, sqlite3.Error, OSError) as e:
+    except (Mem2MemError, sqlite3.Error, OSError, click.ClickException) as e:
+        # Every expected operational failure — including cli_components'
+        # "not configured" ClickException — funnels to a path-free exit 2 named
+        # only by exception type, so no message (which may carry a path) leaks.
         raise GateInputError(f"experiment could not run: {type(e).__name__}") from e
 
     canonical = serialize_experiment(result)
+    if as_of is None:
+        # The result pins as_of to the current time, but reports deterministic
+        # by pipeline stages, not by as_of. Without an explicit --as-of the
+        # artifact is not byte-reproducible; warn so an attached result is not
+        # mistaken for one a reviewer can regenerate.
+        click.echo(
+            "warning: --as-of was not pinned; this result is not byte-reproducible "
+            "(temporal validity + decay use the current time). Pass --as-of to reproduce.",
+            err=True,
+        )
     for entry in [result["baseline"], *result["candidates"]]:
         if not entry["deterministic"]:
             click.echo(
