@@ -236,6 +236,165 @@ def test_precision_cohort_empty_fails_closed():
 
 
 # --------------------------------------------------------------------------- #
+# precision-cohort-coverage rule (#1837)                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _complete_base() -> dict:
+    # Fully labelled: every retrieved item is relevant or not_relevant, so
+    # precision is comparable for the whole cohort (mirrors the committed fixture).
+    return _report(
+        [
+            _case("A", retrieved=["r1", "n1"], relevant=["r1"], not_relevant=["n1"]),
+            _case("B", retrieved=["r2", "n2"], relevant=["r2"], not_relevant=["n2"]),
+        ]
+    )
+
+
+def test_precision_cohort_coverage_catches_unlabelled_candidate_chunk():
+    # The #1837 residual: a candidate that retrieves a NEW unlabelled chunk in
+    # top-k makes that case's precision incomplete, so it silently drops from the
+    # precision cohort. Its rank metrics stay flat (the relevant hit is still
+    # rank 1), so without a coverage rule the case slips through as `unchanged`.
+    baseline = _complete_base()
+    candidate = _report(
+        [
+            _case("A", retrieved=["r1", "n1", "unl"], relevant=["r1"], not_relevant=["n1"]),
+            _case("B", retrieved=["r2", "n2"], relevant=["r2"], not_relevant=["n2"]),
+        ]
+    )
+    comparison = compare_reports(baseline, candidate)
+
+    # Precision floor set but no coverage rule -> the dropped case slips through.
+    passthrough = evaluate_gate(comparison, _pol(aggregate_delta_floors={"precision": 0.0}))
+    assert passthrough["pass"] is True
+
+    # Coverage cap at 0 -> the dropped case is a violation.
+    verdict = evaluate_gate(
+        comparison,
+        _pol(aggregate_delta_floors={"precision": 0.0}, max_incomplete_precision_cases=0),
+    )
+    assert verdict["pass"] is False
+    (v,) = [x for x in verdict["violations"] if x["rule"] == "precision_cohort_coverage"]
+    assert v["metric"] == "precision"
+    assert v["max"] == 0
+    assert v["observed"] == 1
+    assert v["case_ids"] == ["A"]
+
+
+def test_precision_cohort_coverage_off_by_default():
+    # The rule is strictly opt-in: with the field absent, the incomplete case
+    # still slips through (documents the pre-#1837 residual behaviour).
+    baseline = _complete_base()
+    candidate = _report(
+        [
+            _case("A", retrieved=["r1", "n1", "unl"], relevant=["r1"], not_relevant=["n1"]),
+            _case("B", retrieved=["r2", "n2"], relevant=["r2"], not_relevant=["n2"]),
+        ]
+    )
+    comparison = compare_reports(baseline, candidate)
+    verdict = evaluate_gate(comparison, _pol(aggregate_delta_floors={"precision": 0.0}))
+    assert verdict["pass"] is True
+    assert all(v["rule"] != "precision_cohort_coverage" for v in verdict["violations"])
+
+
+def test_precision_cohort_coverage_cap_boundary():
+    # Two incomplete cases: cap tolerates at-or-above the count, fails below it.
+    # No precision floor set -> the rule fires independently of the floor.
+    baseline = _complete_base()
+    candidate = _report(
+        [
+            _case("A", retrieved=["r1", "n1", "unl"], relevant=["r1"], not_relevant=["n1"]),
+            _case("B", retrieved=["r2", "n2", "unl2"], relevant=["r2"], not_relevant=["n2"]),
+        ]
+    )
+    comparison = compare_reports(baseline, candidate)
+    assert evaluate_gate(comparison, _pol(max_incomplete_precision_cases=2))["pass"] is True
+    verdict = evaluate_gate(comparison, _pol(max_incomplete_precision_cases=1))
+    assert verdict["pass"] is False
+    (v,) = [x for x in verdict["violations"] if x["rule"] == "precision_cohort_coverage"]
+    assert v["observed"] == 2
+    assert v["max"] == 1
+    assert v["case_ids"] == ["A", "B"]
+
+
+def test_precision_cohort_coverage_counts_all_incomplete_statuses():
+    # All four precision_status values, staying `compared` (labels identical
+    # across sides so definitions match; only `retrieved` differs). Every status
+    # except `comparable` is a coverage loss and must be counted — including
+    # baseline_incomplete (baseline already had a hole) per fail-closed intent.
+    baseline = _report(
+        [
+            _case("A", retrieved=["r1", "n1"], relevant=["r1"], not_relevant=["n1"]),  # comparable
+            _case(
+                "B", retrieved=["r2", "n2"], relevant=["r2"], not_relevant=["n2"]
+            ),  # -> cand incomplete
+            _case(
+                "C", retrieved=["r3", "unl3"], relevant=["r3"], not_relevant=["n3"]
+            ),  # -> base incomplete
+            _case(
+                "D", retrieved=["r4", "unl4"], relevant=["r4"], not_relevant=["n4"]
+            ),  # -> both incomplete
+        ]
+    )
+    candidate = _report(
+        [
+            _case("A", retrieved=["r1", "n1"], relevant=["r1"], not_relevant=["n1"]),
+            _case("B", retrieved=["r2", "n2", "unlB"], relevant=["r2"], not_relevant=["n2"]),
+            _case("C", retrieved=["r3", "n3"], relevant=["r3"], not_relevant=["n3"]),
+            _case("D", retrieved=["r4", "unl4b"], relevant=["r4"], not_relevant=["n4"]),
+        ]
+    )
+    comparison = compare_reports(baseline, candidate)
+    verdict = evaluate_gate(comparison, _pol(max_incomplete_precision_cases=0))
+    assert verdict["pass"] is False
+    (v,) = [x for x in verdict["violations"] if x["rule"] == "precision_cohort_coverage"]
+    assert v["observed"] == 3
+    assert v["case_ids"] == ["B", "C", "D"]  # A (comparable) excluded
+
+
+def test_precision_cohort_coverage_respects_allowlist():
+    # An incomplete case that is explicitly waived is not counted (the rule runs
+    # over the metric cohort, which already drops effective-allowlisted cases).
+    baseline = _complete_base()
+    candidate = _report(
+        [
+            _case("A", retrieved=["r1", "n1", "unl"], relevant=["r1"], not_relevant=["n1"]),
+            _case("B", retrieved=["r2", "n2"], relevant=["r2"], not_relevant=["n2"]),
+        ]
+    )
+    comparison = compare_reports(baseline, candidate)
+    verdict = evaluate_gate(
+        comparison,
+        _pol(
+            max_incomplete_precision_cases=0,
+            allowlist=[{"case_id": "A", "reason": "known incomplete see #1837"}],
+        ),
+    )
+    assert verdict["pass"] is True
+
+
+def test_precision_cohort_coverage_and_empty_can_coexist():
+    # When the whole cohort is incomplete AND a precision floor is set, both the
+    # empty-cohort rule and the coverage rule fire, in deterministic order.
+    rpt = _report(
+        [
+            _case("A", retrieved=["r1", "unl"], relevant=["r1"]),
+            _case("B", retrieved=["r2", "unl2"], relevant=["r2"]),
+        ]
+    )
+    comparison = compare_reports(rpt, rpt)
+    verdict = evaluate_gate(
+        comparison,
+        _pol(aggregate_delta_floors={"precision": 0.0}, max_incomplete_precision_cases=0),
+    )
+    assert verdict["pass"] is False
+    # Exactly these two, in deterministic (rule, key|metric) order — no more.
+    rules = [v["rule"] for v in verdict["violations"]]
+    assert rules == ["precision_cohort_coverage", "precision_cohort_empty"]
+
+
+# --------------------------------------------------------------------------- #
 # aggregate floor boundaries                                                  #
 # --------------------------------------------------------------------------- #
 
@@ -338,6 +497,11 @@ def test_required_flag_violation():
             "kind": "replay_gate_policy",
             "allowlist": [{"case_id": "a", "reason": "x" * 201}],
         },
+        # max_incomplete_precision_cases: bool / float / string / negative reject.
+        {"schema_version": 1, "kind": "replay_gate_policy", "max_incomplete_precision_cases": True},
+        {"schema_version": 1, "kind": "replay_gate_policy", "max_incomplete_precision_cases": 1.0},
+        {"schema_version": 1, "kind": "replay_gate_policy", "max_incomplete_precision_cases": "0"},
+        {"schema_version": 1, "kind": "replay_gate_policy", "max_incomplete_precision_cases": -1},
     ],
 )
 def test_invalid_policies_rejected(bad):
