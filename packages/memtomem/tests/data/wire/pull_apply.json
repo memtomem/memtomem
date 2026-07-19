@@ -1,0 +1,36 @@
+{
+  "status": "str",
+  "kind": "str",
+  "name": "str",
+  "target_scope": "str",
+  "reason": "str",
+  "reason_code": "str",
+  "selected_runtime": "null",
+  "write_outcome": "null",
+  "duplicate_runtimes": [],
+  "canonical_path": "null",
+  "candidates": [
+    {
+      "runtime": "str",
+      "content_status": "str",
+      "gate_status": "null",
+      "importable": "bool",
+      "landing_group": "int",
+      "override_warning": "bool",
+      "reason": "null"
+    },
+    {
+      "runtime": "str",
+      "content_status": "str",
+      "gate_status": "null",
+      "importable": "bool",
+      "landing_group": "int",
+      "override_warning": "bool",
+      "reason": "null"
+    }
+  ],
+  "distinct_landing_count": "int",
+  "gate_status": "null",
+  "gate_hits": "null",
+  "force_bypassable": "bool"
+}
