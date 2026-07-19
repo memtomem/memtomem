@@ -161,12 +161,13 @@ jobs:
       # tools/quality-gate/README.md). The check step also benefits from it.
       - run: uv python pin 3.12
       - run: uv sync --frozen
-      # Advisory during the introduction window: report drift without blocking
-      # the PR. Flipping to required = delete this one `continue-on-error` line
-      # (separate follow-up PR). Thresholds live in policy.json, never here.
-      - name: Replay quality gate (advisory)
+      # Required: a policy violation fails the PR. The advisory introduction
+      # window (#1837) closed with no mac↔Ubuntu ranking drift across PR-B, the
+      # Ubuntu baseline regen, and unrelated PRs, so the gate now blocks.
+      # Thresholds live in policy.json, never here; refresh the baseline in the
+      # same PR as any intended ranking change (see tools/quality-gate/README.md).
+      - name: Replay quality gate
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.refresh_baseline) }}
-        continue-on-error: true
         env:
           PYTHONHASHSEED: "0"
           OMP_NUM_THREADS: "1"
