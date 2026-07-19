@@ -255,7 +255,7 @@ from a payload definition:
   defines the artifact *content*: it excludes top-level `overrides/`,
   top-level `versions/` and `versions.json`, lock/staging artifacts
   (`COPY_SKIP_NAMES`), and symlinks. It drives the **snapshot content,
-  the tree digest, the Push diff, and the content Push fans out**. The
+  the tree digest, the Push diff, and the content that Push fans out**. The
   **ingress Gate-A privacy scan stays WIDE** — it scans the full
   would-land copier surface (payload **plus** `overrides/`), because a
   secret under runtime metadata must still be caught before it lands
@@ -270,7 +270,8 @@ from a payload definition:
   The digest is **file-only** — empty directories are not tracked — and
   the **executable bit is excluded** (the copier normalizes modes to
   0o644; preserving a bit it drops would make digests unreproducible).
-  Campaign 2's snapshot CAS adopts this same definition.
+  Campaign 2's snapshot CAS adopts this same definition — one digest, two
+  consumers; the master plan's exec-bit mention is superseded here.
 - Storage: `<canonical>/<name>/versions/vN/` directory snapshots beside
   today's `<canonical>/<name>/versions/vN.md` files, sharing
   `versions.json` with a per-entry `layout: "tree"` marker and a
