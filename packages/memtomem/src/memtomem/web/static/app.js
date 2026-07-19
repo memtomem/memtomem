@@ -1632,6 +1632,13 @@ function activateTab(tabName, opts = {}) {
     // absent wiki or fetch error. Guarded for script-load order (wiki.js loads
     // after app.js).
     if (typeof _probeWikiNavStatus === 'function') _probeWikiNavStatus();
+    // ADR-0030 §1 PR-F: flag user-tier pull drift on the Global nav dot whenever
+    // the gateway opens, so a cold visit landing on any OTHER section still
+    // shows it. When Global IS the landing section, switchSettingsSection above
+    // already ran loadCtxGlobal (which sets the dot) — skip the duplicate probe.
+    if (start !== 'ctx-global' && typeof _probeGlobalNavStatus === 'function') {
+      _probeGlobalNavStatus();
+    }
   }
   if (['search', 'timeline'].includes(tabName)) loadNamespaceDropdowns();
 }
@@ -1656,7 +1663,8 @@ const LEGACY_SECTION_MAP = { 'harness-watchdog': 'harness-health' };
 // CTA, settings-namespaces.js Quick Links — auto-redirects without
 // per-call-site updates.
 const GATEWAY_SECTIONS = new Set([
-  'ctx-overview', 'ctx-projects', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers',
+  'ctx-overview', 'ctx-global',
+  'ctx-projects', 'ctx-skills', 'ctx-commands', 'ctx-agents', 'ctx-mcp-servers',
   'hooks-sync',
   'ctx-wiki',
 ]);
@@ -1796,6 +1804,10 @@ function switchSettingsSection(sectionName) {
   if (sectionName === 'redaction' && typeof loadRedactionStats === 'function') loadRedactionStats();
   if (sectionName === 'hooks-sync') loadHooksSync();
   if (sectionName === 'ctx-overview') loadCtxOverview();
+  // ctx-global is a GLOBAL surface (the ~/.memtomem user Store), not project-
+  // scoped: like ctx-wiki it is absent from _CTX_SECTION_BAR_TYPE (bar hides) and
+  // dispatches to its own loader. See context-gateway-global.js (ADR-0030 PR-F).
+  if (sectionName === 'ctx-global' && typeof loadCtxGlobal === 'function') loadCtxGlobal();
   if (sectionName === 'ctx-projects') loadCtxProjects();
   if (sectionName === 'ctx-skills') loadCtxList('skills');
   if (sectionName === 'ctx-commands') loadCtxList('commands');
