@@ -67,6 +67,7 @@ __all__ = [
     "ReservedLabelError",
     "InvalidLabelError",
     "InvalidTagError",
+    "UnsupportedSchemaVersionError",
     "VersionsDirMissingError",
     "versions_dir",
     "versions_json_path",
@@ -135,6 +136,15 @@ class InvalidTagError(VersionError):
     """A tag string does not match ``^v[1-9]\\d*$``."""
 
 
+class UnsupportedSchemaVersionError(VersionError):
+    """``versions.json`` declares a ``schema_version`` newer than this build.
+
+    Distinct from the malformed-value case (a plain :class:`VersionError`)
+    because it is *server-side state*, not a bad request: the remedy is to
+    upgrade memtomem, so surfaces translate it to a conflict rather than a
+    validation failure."""
+
+
 class VersionsDirMissingError(VersionError):
     """Versioning was attempted on an artifact with no per-artifact directory
     (flat layout). Run ``mm context migrate`` first."""
@@ -192,18 +202,13 @@ def _validate_schema_version(raw: dict[str, object], path: Path) -> int:
     value = raw.get("schema_version")
     if value is None:
         return SCHEMA_VERSION
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise VersionError(
-            f"malformed versions manifest at {path}: 'schema_version' must be a "
-            f"positive integer, got {value!r}"
-        )
-    if value < 1:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise VersionError(
             f"malformed versions manifest at {path}: 'schema_version' must be a "
             f"positive integer, got {value!r}"
         )
     if value > SCHEMA_VERSION:
-        raise VersionError(
+        raise UnsupportedSchemaVersionError(
             f"unsupported versions manifest at {path}: 'schema_version' {value} is "
             f"newer than this build understands ({SCHEMA_VERSION}) — upgrade memtomem"
         )
@@ -273,6 +278,13 @@ def load_manifest(artifact_dir: Path) -> VersionsManifest:
     versions: dict[str, VersionRecord] = {}
     for tag, meta in raw_versions.items():
         _validate_tag(tag)
+        # A non-object entry is coerced to an empty one, which the next save
+        # then writes back as `{}` — a silent strip of whatever it held. That
+        # is only safe because a future writer using a different entry SHAPE
+        # must also bump ``schema_version``, which the gate above refuses
+        # before we get here. Keep those two facts together: if entries ever
+        # gain a non-object form under the CURRENT schema, this must become a
+        # hard error instead.
         meta = meta if isinstance(meta, dict) else {}
         versions[tag] = VersionRecord(
             tag=tag,

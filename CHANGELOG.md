@@ -7,6 +7,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
+- **`versions.json` forward-compatibility** (ADR-0030 §10, PR-G1) — the version
+  manifest now carries a `schema_version` and preserves fields it does not
+  recognize. Readers refuse a manifest written by a **newer** build loudly
+  (surfaced as a 409 `schema_unsupported` on the web API — "upgrade memtomem",
+  not a validation error) instead of misreading it, and every mutator
+  (`create` / `promote` / `delete-label`) round-trips unknown top-level and
+  per-entry keys instead of silently dropping them.
+  **Release ordering matters:** this prep ships *before* any release writes the
+  directory-tree version layout, so that by the time tree entries exist in the
+  wild, already-installed builds preserve them rather than stripping them on the
+  next label operation. A build that predates this change will still strip
+  unknown fields — which is exactly why it ships first, on its own.
+
 - **`mm context pull` — source-selectable, preview-first Import** (ADR-0030
   §5/§11) — pull one runtime's copy of a `skills` / `agents` / `commands`
   artifact into the Store, choosing which runtime to import from. Dry-run

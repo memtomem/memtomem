@@ -380,8 +380,61 @@ class TestSchemaCompat:
             json.dumps({"schema_version": v.SCHEMA_VERSION + 1, "versions": {}, "labels": {}}),
             encoding="utf-8",
         )
-        with pytest.raises(v.VersionError, match="schema_version"):
+        with pytest.raises(v.UnsupportedSchemaVersionError, match="schema_version"):
             v.load_manifest(artifact_dir)
+
+    def test_schema_gate_runs_before_shape_checks(self, tmp_path):
+        """Ordering is load-bearing: a newer schema may legitimately change the
+        shape of ``versions``/``labels``, so the schema refusal must win over
+        the shape validation rather than reporting a confusing shape error."""
+        artifact_dir, _ = _make_dir_agent(tmp_path)
+        (artifact_dir / "versions.json").write_text(
+            json.dumps({"schema_version": v.SCHEMA_VERSION + 1, "versions": [], "labels": 3}),
+            encoding="utf-8",
+        )
+        with pytest.raises(v.UnsupportedSchemaVersionError, match="schema_version"):
+            v.load_manifest(artifact_dir)
+
+    def test_newer_schema_fails_writes_closed(self, tmp_path):
+        """The invariant that actually prevents corruption: a mutator refuses a
+        newer-schema manifest too (every one loads under the lock before saving),
+        so an old build cannot rewrite — and thereby strip — a newer file."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        raw["schema_version"] = v.SCHEMA_VERSION + 1
+        before = json.dumps(raw)
+        (artifact_dir / "versions.json").write_text(before, encoding="utf-8")
+
+        with pytest.raises(v.UnsupportedSchemaVersionError):
+            v.promote_label(artifact_dir, "production", "v1")
+        with pytest.raises(v.UnsupportedSchemaVersionError):
+            v.delete_label(artifact_dir, "production")
+        with pytest.raises(v.UnsupportedSchemaVersionError):
+            v.create_version(artifact_dir, working)
+        # Refused means untouched, not partially rewritten.
+        assert (artifact_dir / "versions.json").read_text(encoding="utf-8") == before
+
+    def test_known_keys_win_over_extra(self, tmp_path):
+        """``extra`` is attacker-controlled content if a manifest is tampered
+        with — it must never shadow a field this build owns."""
+        artifact_dir, working = _make_dir_agent(tmp_path)
+        v.create_version(artifact_dir, working)
+
+        manifest = v.load_manifest(artifact_dir)
+        manifest.extra["versions"] = {"vBOGUS": {}}
+        manifest.extra["labels"] = {"evil": "v1"}
+        manifest.extra["schema_version"] = 999
+        manifest.versions["v1"].extra["created_at"] = "hacked"
+        manifest.versions["v1"].extra["note"] = "hacked"
+        v._save_manifest(artifact_dir, manifest)
+
+        raw = json.loads((artifact_dir / "versions.json").read_text(encoding="utf-8"))
+        assert list(raw["versions"]) == ["v1"]
+        assert raw["labels"] == {}
+        assert raw["schema_version"] == v.SCHEMA_VERSION
+        assert raw["versions"]["v1"]["created_at"] != "hacked"
+        assert raw["versions"]["v1"]["note"] != "hacked"
 
     @pytest.mark.parametrize(
         "bad",

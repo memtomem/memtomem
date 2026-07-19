@@ -131,6 +131,29 @@ class TestListVersions:
         assert r.json()["detail"]["error_kind"] == "missing"
 
     @pytest.mark.anyio
+    async def test_newer_schema_version_409_not_400(self, client, tmp_path):
+        """A manifest written by a NEWER build is server-side state, not a bad
+        request — the client's remedy is "upgrade", so it must not read as a
+        validation error (ADR-0030 §10 schema-compat prep)."""
+        artifact_dir = _make_dir_agent(tmp_path, "reviewer")
+        (artifact_dir / "versions.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": versioning.SCHEMA_VERSION + 1,
+                    "versions": {},
+                    "labels": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        r = await client.get("/api/context/agents/reviewer/versions")
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert detail["error_kind"] == "conflict"
+        assert detail["reason_code"] == "schema_unsupported"
+        assert "upgrade memtomem" in detail["message"]
+
+    @pytest.mark.anyio
     async def test_unsupported_type_mcp_servers_404(self, client, tmp_path):
         r = await client.get("/api/context/mcp-servers/anything/versions")
         assert r.status_code == 404
