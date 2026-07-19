@@ -652,7 +652,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     # reworded the KO body to ``가져오기를 누르거나`` — the KO marker is now
     # the Import noun, not the old ``눌러`` verb form.)
     assert "Click Pull" in banner_pre, (
-        f"EN runtime-only banner should contain 'Click Import': {banner_pre!r}"
+        f"EN runtime-only banner should contain 'Click Pull': {banner_pre!r}"
     )
 
     page.evaluate("async () => { await I18N.setLang('ko'); }")

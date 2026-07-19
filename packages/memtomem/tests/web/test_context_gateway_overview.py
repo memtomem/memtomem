@@ -1027,7 +1027,7 @@ def test_pointer_priority_order_with_all_three_counts(page, mm_web_url: str) -> 
     texts = [(pointers.nth(i).text_content() or "").strip() for i in range(3)]
     # missing_target = 3 → "Run Push All to push 3 missing entries."
     assert "3" in texts[0] and "Push All" in texts[0], (
-        f"first pointer must be missing_target (count=3, Sync All); got: {texts[0]!r}"
+        f"first pointer must be missing_target (count=3, Push All); got: {texts[0]!r}"
     )
     # out_of_sync = 2 → "Open Skills to resolve 2 differences."
     assert "2" in texts[1] and "Skills" in texts[1] and "differences" in texts[1], (
