@@ -236,7 +236,7 @@
         {
           "content_hash": "0c669d12550c57f50b0b5b934b4c2643bf645f89e5510d04a36c46143543e57f",
           "rank": 1,
-          "score": 21.389516076432162,
+          "score": 21.43823507392718,
           "source": "bm25"
         }
       ],
@@ -479,7 +479,7 @@
         {
           "content_hash": "f62c2f407ea741dec470638ac51fd64847ecf9534378cf6e21d93a51a12c66f6",
           "rank": 1,
-          "score": 22.919533915815475,
+          "score": 22.88657218545663,
           "source": "bm25"
         }
       ],
@@ -722,31 +722,31 @@
         {
           "content_hash": "e4b89e3032d8aa6ae943d34dc79f03dbfa7bb874ccc5c1c330876c8229d898e2",
           "rank": 1,
-          "score": 19.778713029288056,
+          "score": 19.72765247156979,
           "source": "bm25"
         },
         {
           "content_hash": "25dfd8a1c560510bb97a090b6c194df3b2f39544192645ea64431829eafab43a",
           "rank": 2,
-          "score": 9.771226865465723,
+          "score": 9.822412916815638,
           "source": "bm25"
         },
         {
           "content_hash": "f62c2f407ea741dec470638ac51fd64847ecf9534378cf6e21d93a51a12c66f6",
           "rank": 3,
-          "score": 5.173580248058972,
+          "score": 5.166179109891968,
           "source": "bm25"
         },
         {
           "content_hash": "3333df2bafe8e0985de098f28c56ff76591b4710efd5a3069de1125183ee3556",
           "rank": 4,
-          "score": 4.539224551914767,
+          "score": 4.539269149499752,
           "source": "bm25"
         },
         {
           "content_hash": "9339b05c340d4e24d195c263d7ced91f18b6049b9aad832cd67037525ae5ded4",
           "rank": 5,
-          "score": 4.51868851590577,
+          "score": 4.517009747567952,
           "source": "bm25"
         }
       ],
@@ -989,7 +989,7 @@
         {
           "content_hash": "9d5e31ed02d7f29f7d9b16698e81c0635f636684cf3506a9729d3e99b5eee187",
           "rank": 1,
-          "score": 30.54293072073873,
+          "score": 30.543118970143595,
           "source": "bm25"
         }
       ],
@@ -1232,31 +1232,31 @@
         {
           "content_hash": "632827d273a79533b4e811d7fef69089161af5b7cf44b0728e88fe1c781c7969",
           "rank": 1,
-          "score": 23.66362820631845,
+          "score": 23.626246863050568,
           "source": "bm25"
         },
         {
           "content_hash": "984deee396088ef7092949016a68750e88dde64d0d1ac7eb5af5e299b43e0149",
           "rank": 2,
-          "score": 14.248282276382444,
+          "score": 14.215904243804212,
           "source": "bm25"
         },
         {
           "content_hash": "ded9d3b76b2097159ce40c6fe2982dc5c2697a8631de9bd7ac15620fa9dc23b8",
           "rank": 3,
-          "score": 10.397957566718965,
+          "score": 10.411804959919907,
           "source": "bm25"
         },
         {
           "content_hash": "391af48631bc6fcbd09d10afc52972a498b0e6880b9bcd3c6995c114a8536d09",
           "rank": 4,
-          "score": 9.001592185449162,
+          "score": 8.990597570293076,
           "source": "bm25"
         },
         {
           "content_hash": "fe290bf026cb8bb9547339ff2ea4dcbb2b825339302502517a58310a31854d27",
           "rank": 5,
-          "score": 6.9858295773667995,
+          "score": 6.961278247080594,
           "source": "bm25"
         }
       ],
@@ -1499,7 +1499,7 @@
         {
           "content_hash": "488f80d64574c3bfceba7fb5401e9052adf2c0496baccbd83b053bb3fdebad68",
           "rank": 1,
-          "score": 30.256380091919137,
+          "score": 30.248739382935863,
           "source": "bm25"
         }
       ],
@@ -1742,7 +1742,7 @@
         {
           "content_hash": "e5fa80099aba917b3e980f98125aee7803c3d4d2fcad6879187a036b3555bc82",
           "rank": 1,
-          "score": 26.036385030297982,
+          "score": 26.04909727669366,
           "source": "bm25"
         }
       ],
@@ -1985,7 +1985,7 @@
         {
           "content_hash": "6d14020542ddabdf5e370fd5f45f55c83803b82eca910b59862acdbfef2d5e42",
           "rank": 1,
-          "score": 29.41318501604595,
+          "score": 29.20287690410058,
           "source": "bm25"
         }
       ],
@@ -2228,7 +2228,7 @@
         {
           "content_hash": "f4413422c6ed254a1048f21cb615602611da82427e8cf386a79e3bd0d749b54e",
           "rank": 1,
-          "score": 36.10529037039065,
+          "score": 36.19336739820755,
           "source": "bm25"
         }
       ],
@@ -2471,7 +2471,7 @@
         {
           "content_hash": "31b10381a0690fce5504bc31531d4b523fcf3a5a9169c834b741518cb14c29e2",
           "rank": 1,
-          "score": 26.501520780639236,
+          "score": 26.544458864986456,
           "source": "bm25"
         }
       ],
@@ -2714,31 +2714,31 @@
         {
           "content_hash": "29d0e87d4a9f898973621375aad5005a0ae612016f085dae9af822ecc87215ee",
           "rank": 1,
-          "score": 20.33238872896148,
+          "score": 20.35270692964107,
           "source": "bm25"
         },
         {
           "content_hash": "971406d2082f50faabf90b023681f56ea98a8ca5f0bc7964e63d5b4dfceb9a7b",
           "rank": 2,
-          "score": 12.269805601053681,
+          "score": 12.35260065915795,
           "source": "bm25"
         },
         {
           "content_hash": "a8c945d5cab2e83f5fbbb47b5efda9d7c9b4e35613defa32761c82451776a571",
           "rank": 3,
-          "score": 9.76290841952539,
+          "score": 9.741668750508378,
           "source": "bm25"
         },
         {
           "content_hash": "8d0fb915a2be7fdd8d06db562836b988213a03cb7a85283b744421d806230053",
           "rank": 4,
-          "score": 7.131765765633668,
+          "score": 7.098445380877179,
           "source": "bm25"
         },
         {
           "content_hash": "31b10381a0690fce5504bc31531d4b523fcf3a5a9169c834b741518cb14c29e2",
           "rank": 5,
-          "score": 4.967760056460987,
+          "score": 4.975808881360006,
           "source": "bm25"
         }
       ],
@@ -2981,31 +2981,31 @@
         {
           "content_hash": "21126bb46704c4637dc8493acc80c262a415179ce85a38adcff5a3da7904dbc4",
           "rank": 1,
-          "score": 39.52105246561045,
+          "score": 39.30183115723001,
           "source": "bm25"
         },
         {
           "content_hash": "77b43d0da1b489debc318303cb09fc712ee0c22c43b517f47ef94cb4f5e8cdac",
           "rank": 2,
-          "score": 13.100864063860431,
+          "score": 13.125651443614432,
           "source": "bm25"
         },
         {
           "content_hash": "54f1996e1df1bb47ffcac8e0b2e9b2b8b653ef8eb54731dfd0e79a1128609655",
           "rank": 3,
-          "score": 7.576287242322841,
+          "score": 7.595101837458682,
           "source": "bm25"
         },
         {
           "content_hash": "b29ad362d0eee48873a96905c017caa5d0be2b479d99f45ca19c5b4e953ba9cc",
           "rank": 4,
-          "score": 7.507066857609707,
+          "score": 7.545807695827159,
           "source": "bm25"
         },
         {
           "content_hash": "c19119934ba6985617fd5b656ebed660c5846a342e960ae842d077654b178165",
           "rank": 5,
-          "score": 6.758367541330266,
+          "score": 6.677383937777268,
           "source": "bm25"
         }
       ],
@@ -3038,8 +3038,8 @@
   "deterministic": true,
   "fingerprints": {
     "case_set": "a6fda5fcfc0d51b6abcf177e12ede56f27c782e3f537af42c429d38f84f5dccc",
-    "corpus": "d30e598b91e67a07a33f16876d270b2180e972f50f696de79ffa50e231822872",
-    "index": "3f47e7cd05fa153d2d8e600e3d60f9d635b2e869f1b70c3a9b825aa74b402883",
+    "corpus": "08516823c6d6c746b47f57e26025b68492d321650eba45699a67a6cd18d7bf7b",
+    "index": "8330f0a8e68610c9aac5dc8809d8d9dc625f680f892391dbc5d2fe9d5bbd1844",
     "profile": "e7f433e0427012008183bab8e0a8af96f66e1a7b541a8fff2f71d5f05329aec3"
   },
   "kind": "replay_report",
