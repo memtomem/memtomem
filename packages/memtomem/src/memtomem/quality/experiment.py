@@ -42,7 +42,7 @@ from memtomem.quality.profiles import (
     profile_doc_fingerprint,
     profile_warnings,
 )
-from memtomem.quality.replay import MAX_AS_OF_UNIX, _select_case_ids, replay_cases
+from memtomem.quality.replay import MAX_AS_OF_UNIX, replay_cases, resolve_case_ids
 
 if TYPE_CHECKING:
     from memtomem.quality.gate import GatePolicy
@@ -301,7 +301,7 @@ async def run_experiment(
     # Resolve the cohort once against the live DB so every replay runs the same
     # cases even if a case's status changes mid-run.
     selectors = list(case_selectors) if case_selectors else None
-    ordered_ids, _explicit, _archived = await _select_case_ids(components.storage, selectors)
+    ordered_ids, _explicit, _archived = await resolve_case_ids(components.storage, selectors)
     if not ordered_ids:
         raise EvalCaseError("no evaluation cases selected")
 
