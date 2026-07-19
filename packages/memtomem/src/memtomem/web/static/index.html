@@ -545,7 +545,7 @@
           <span class="nav-icon" aria-hidden="true">🔄</span>
           <span class="nav-labels">
             <span class="nav-label" data-i18n="settings.nav.ctx_overview">Overview</span>
-            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Sync overview</span>
+            <span class="nav-sub" data-i18n="settings.nav.ctx_overview_sub">Push overview</span>
           </span>
         </button>
         <button class="settings-nav-btn" data-ui-tier="prod" data-section="ctx-projects" data-group="integrations">
@@ -624,16 +624,16 @@
 
         <!-- Context Gateway: Overview -->
         <div class="settings-section active" id="settings-ctx-overview">
-          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Pick a section in the sidebar to import what you already have, or create something new — then sync it out to Claude Code, Codex, and your other detected runtimes.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.overview_desc">Pick a section in the sidebar to pull what you already have, or create something new — then push it out to Claude Code, Codex, and your other detected runtimes.</p>
           <div class="tab-help-bar" id="help-ctx-overview" role="status" hidden>
-            <span class="tab-help-bar-text" data-i18n="settings.ctx.primer">memtomem keeps your master copies in one Store (.memtomem/) and Syncs them out to your Runtimes — Claude Code, Codex, Kimi, and other detected tools. Import pulls a runtime's copy back in. It's one-way: edit in the Store, then Sync.</span>
+            <span class="tab-help-bar-text" data-i18n="settings.ctx.primer">memtomem keeps your master copies in one Store (.memtomem/) and Pushes them out to your Runtimes — Claude Code, Codex, Kimi, and other detected tools. Pull brings a runtime's copy back in. It's one-way: edit in the Store, then Push.</span>
             <button class="tab-help-bar-dismiss" data-help-tab="ctx-overview" data-i18n-title="common.dismiss_help" data-i18n-aria-label="common.dismiss_help" title="Dismiss help" aria-label="Dismiss help">✕</button>
           </div>
           <div class="ctx-header">
             <div class="ctx-header-title">
               <h2 data-i18n="settings.ctx.overview_title">Context Gateway</h2>
               <span id="ctx-simple-active-chip" class="ctx-simple-active-chip"></span>
-              <span class="help-tip" data-help-i18n="settings.ctx.status_legend" tabindex="0" role="img" aria-label="In sync — nothing to do. Out of sync — Sync to update the runtime. Not in runtime — Sync to add it. Not yet imported — Import to pull it into the Store.">i</span>
+              <span class="help-tip" data-help-i18n="settings.ctx.status_legend" tabindex="0" role="img" aria-label="In sync — nothing to do. Out of sync — Push to update the runtime. Not in runtime — Push to add it. Not yet pulled — Pull to bring it into the Store.">i</span>
             </div>
             <div>
               <button id="ctx-mode-toggle" class="btn-ghost ctx-mode-toggle" type="button"
@@ -647,7 +647,7 @@
               <button id="ctx-sync-all-btn" class="btn-primary"
                       data-i18n="settings.ctx.sync_all"
                       data-i18n-title="settings.ctx.sync_all_tooltip"
-                      data-i18n-aria-label="settings.ctx.sync_all_aria">Sync All</button>
+                      data-i18n-aria-label="settings.ctx.sync_all_aria">Push All</button>
             </div>
           </div>
           <!-- Sync All per-phase progress + result summary (ADR-0021 §C).
@@ -680,7 +680,7 @@
 
         <!-- Context Gateway: Skills -->
         <div class="settings-section" id="settings-ctx-skills">
-          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows stored in .memtomem/skills/ and synced to each runtime's skills folder (.claude/skills/ etc.).</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.skills_desc">Reusable workflows stored in .memtomem/skills/ and pushed to each runtime's skills folder (.claude/skills/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.skills_title">Skills</h2>
             <!-- rank 21: artifact-section toolbars render from one source
@@ -699,7 +699,7 @@
 
         <!-- Context Gateway: Commands -->
         <div class="settings-section" id="settings-ctx-commands">
-          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project slash commands stored in .memtomem/commands/ and synced to each runtime's commands folder (.claude/commands/ etc.).</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.commands_desc">Project slash commands stored in .memtomem/commands/ and pushed to each runtime's commands folder (.claude/commands/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.commands_title">Commands</h2>
             <div class="ctx-toolbar" data-type="commands"></div>
@@ -711,7 +711,7 @@
 
         <!-- Context Gateway: Agents -->
         <div class="settings-section" id="settings-ctx-agents">
-          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents stored in .memtomem/agents/ and synced to each runtime's agents folder (.claude/agents/ etc.).</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.agents_desc">Specialized subagents stored in .memtomem/agents/ and pushed to each runtime's agents folder (.claude/agents/ etc.).</p>
           <div class="ctx-header">
             <h2 data-i18n="settings.ctx.agents_title">Subagents</h2>
             <div class="ctx-toolbar" data-type="agents"></div>
@@ -723,7 +723,7 @@
 
         <!-- Context Gateway: MCP Servers -->
         <div class="settings-section" id="settings-ctx-mcp-servers">
-          <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">MCP server definitions stored in .memtomem/mcp-servers/ and synced to the project's .mcp.json. Project-scoped only — a single store, with no user-level copy.</p>
+          <p class="settings-section-desc" data-i18n="settings.ctx.mcp_servers_desc">MCP server definitions stored in .memtomem/mcp-servers/ and pushed to the project's .mcp.json. Project-scoped only — a single store, with no user-level copy.</p>
           <div class="ctx-header">
             <h2><span data-i18n="settings.ctx.mcp_servers_title">MCP Servers</span> <span class="help-tip" data-help-i18n="glossary.mcp" tabindex="0" role="img" aria-label="MCP (Model Context Protocol) is the open standard memtomem uses to expose memory tools to AI assistants.">i</span></h2>
             <div class="ctx-toolbar" data-type="mcp-servers"></div>
@@ -1761,7 +1761,7 @@
       </label>
       <label id="ctx-pull-force-row" class="ctx-pull-check-row" hidden>
         <input type="checkbox" id="ctx-pull-force">
-        <span data-i18n="settings.ctx.pull_force_unsafe">Import despite the security warning</span>
+        <span data-i18n="settings.ctx.pull_force_unsafe">Pull despite the security warning</span>
       </label>
 
       <p id="ctx-pull-warning" class="ctx-mc-warning" role="alert" hidden></p>

@@ -467,7 +467,7 @@ uses, so the output is identical. Useful as a sanity check between
 | **Config** | `mem_stats`, `mem_status`, `mem_config`\*, `mem_embedding_reset`\*, `mem_reset`\* |
 | **Evaluation** | `mem_eval` |
 | **Quality Lab** | `mem_quality_replay` (replay stored eval cases into a deterministic retrieval-quality report; promote/compare stay on `mm quality`) |
-| **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync`, `mem_context_memory_migrate`, `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version`, `mem_context_promote` — cross-runtime artifact sync (`mm context`). Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
+| **Context** | `mem_context_detect`, `mem_context_init`, `mem_context_generate`, `mem_context_diff`, `mem_context_sync`, `mem_context_memory_migrate`, `mem_context_artifact_migrate`, `mem_context_artifact_transfer`, `mem_context_version`, `mem_context_promote` — cross-runtime artifact push (`mm context`). Parameters: [Context tool reference](reference.md#context-tool-parameters); workflow: [Context Gateway](context-gateway.md) |
 | **Pinned Context** | `mem_pinned_list`, `mem_pinned_get`, `mem_pinned_set`, `mem_pinned_delete`, `mem_context_compose` |
 | **Formation** | `mem_formation_scan`, `mem_candidate_propose`, `mem_candidate_list`, `mem_candidate_review`, `mem_candidate_recover` |
 

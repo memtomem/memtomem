@@ -278,14 +278,14 @@ def test_tier_badge_html_helper_renders_project_tier_tokens_verbatim(page, mm_we
     assert "badge-tier--project_local" in local_badge
     # Memory rows don't carry the fan-out annotation (project_local
     # memory still fans out via memory's own contract per ADR-0011 §3).
-    assert "(not synced to runtimes)" not in local_badge
+    assert "(not pushed to runtimes)" not in local_badge
 
     # Context rows DO carry the annotation when project_local — ADR-0011
     # §3 zero-fan-out rule for agents/skills/commands.
     local_ctx_badge = page.evaluate(
         "window._tierBadgeHtml('project_local', { isContextRow: true })"
     )
-    assert "(not synced to runtimes)" in local_ctx_badge, (
+    assert "(not pushed to runtimes)" in local_ctx_badge, (
         f"context-row project_local badge missing fan-out annotation: {local_ctx_badge!r}"
     )
 

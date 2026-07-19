@@ -444,7 +444,7 @@ def test_write_blocked_banner_sits_above_runtime_only_banner(page, mm_web_url: s
     # #1263: the web Import path works on the user tier now (behind the
     # host-write confirm), so the remediation names it — and must not
     # carry the old read-only claim.
-    assert "import" in remediation_text.lower(), (
+    assert "pull" in remediation_text.lower(), (
         f"user-tier remediation must point at the Import path; got {remediation_text!r}"
     )
     assert "read-only" not in remediation_text.lower(), (

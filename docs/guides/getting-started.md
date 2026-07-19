@@ -254,7 +254,7 @@ Manual and plugin-managed server copies are not run simultaneously.
 The first-use flow indexes one local directory. To keep a private Markdown
 memory repository synchronized across your machines, follow
 [Multi-device sync](multi-device-sync.md). This is separate from database
-export/import and from Context Gateway artifact sync.
+export/import and from Context Gateway artifact push/pull.
 
 ## CLI reference
 
@@ -361,5 +361,5 @@ database or remove client registrations and project artifacts.
 - [MCP Client Setup](mcp-clients.md) — connect an editor.
 - [Core memory tools](reference/core-memory-tools.md) — index and search real data.
 - [Embeddings](embeddings.md) — improve semantic search quality.
-- [Context Gateway](context-gateway.md) — sync agent artifacts.
+- [Context Gateway](context-gateway.md) — push agent artifacts.
 - [Operations & troubleshooting](reference/operations.md) — diagnose and audit.

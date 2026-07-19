@@ -45,7 +45,7 @@ describe('Import-to-user-library button (rendering gate)', () => {
 
     const btn = detailEl.querySelector('.ctx-runtime-import-to-user');
     expect(btn).not.toBeNull();
-    expect(btn.textContent.trim()).toBe('Import to user library');
+    expect(btn.textContent.trim()).toBe('Pull to user library');
     // The plain Import button is still there too.
     expect(detailEl.querySelector('.ctx-runtime-only-import')).not.toBeNull();
   });

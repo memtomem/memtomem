@@ -59,7 +59,7 @@ describe('overview all-clear badge axes (#1646 item 1)', () => {
     const window = await boot();
     stubOverviewFetch(window, { skills: { total: 3, in_sync: 3 } });
     await window.loadCtxOverview();
-    expect(tileBadgeText(window, 'skills')).toContain('3/3 synced');
+    expect(tileBadgeText(window, 'skills')).toContain('3/3 pushed');
   });
 
   it('stays green — the two-axis copy is an all-clear rendering, not an issue', async () => {

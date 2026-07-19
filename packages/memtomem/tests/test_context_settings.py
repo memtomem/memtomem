@@ -1254,7 +1254,7 @@ class TestClaudeSettingsHostWritePrompt:
         assert result.exit_code == 0
         assert "modify the following files outside this project" in result.output
         assert str(claude_home / ".claude" / "settings.json") in result.output
-        assert "Skipped settings sync (declined)" in result.output
+        assert "Skipped settings push (declined)" in result.output
         assert not (claude_home / ".claude" / "settings.json").exists()
 
     def test_sync_proceeds_when_user_confirms(self, claude_home, tmp_path, monkeypatch):
@@ -1294,7 +1294,7 @@ class TestClaudeSettingsHostWritePrompt:
         result = runner.invoke(context, ["generate", "--include=settings"], input="n\n")
         assert result.exit_code == 0
         assert "modify the following files outside this project" in result.output
-        assert "Skipped settings sync (declined)" in result.output
+        assert "Skipped settings push (declined)" in result.output
         assert not (claude_home / ".claude" / "settings.json").exists()
 
     def test_generate_yes_flag_bypasses_prompt(self, claude_home, tmp_path, monkeypatch):

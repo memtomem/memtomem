@@ -40,15 +40,15 @@ pytestmark = pytest.mark.browser
 # i18n keys avoids the ``feedback_data_i18n_nested_children.md`` failure
 # mode (matching the markup rather than what the user sees). Default locale
 # is EN, so no explicit ``I18N.setLang`` call is needed.
-SYNC_ALL_TITLE = "Sync All"  # settings.ctx.sync_all
-SYNC_SUCCESS_TOAST = "Sync completed"  # settings.ctx.sync_success
+SYNC_ALL_TITLE = "Push All"  # settings.ctx.sync_all
+SYNC_SUCCESS_TOAST = "Push completed"  # settings.ctx.sync_success
 MTIME_CONFLICT_TOAST = "File was modified externally. Reloading..."  # settings.ctx.mtime_conflict
 SYNC_PARTIAL_NEEDS_CONFIRMATION_TOAST = (
-    "Sync All complete except Settings — confirm host writes in the Settings panel."
+    "Push All complete except Settings — confirm host writes in the Settings panel."
 )
 SYNC_FAILED_TEMPLATE = "Sync failed: {error}"  # toast.sync_failed
 SYNC_PARTIAL_FAILED_TEMPLATE = (
-    "{succeeded} synced — {failed_phase} failed: {reason}"  # toast.sync_partial_failed
+    "{succeeded} pushed — {failed_phase} failed: {reason}"  # toast.sync_partial_failed
 )
 # en.json source of truth — the SYNC privacy-block hint (#1409),
 # ``settings.ctx.privacy_blocked_shared_sync_hint``. A per-type sync privacy
@@ -57,8 +57,8 @@ SYNC_PARTIAL_FAILED_TEMPLATE = (
 # Distinct from the IMPORT hint (whose "Import to user library" remedy is wrong
 # for the fan-out direction).
 PRIVACY_BLOCKED_SHARED_SYNC_HINT = (
-    "Shared (project) sync can't override a flagged secret — git history is "
-    "permanent. Remove the flagged line, then re-run sync."
+    "Shared (project) push can't override a flagged secret — git history is "
+    "permanent. Remove the flagged line, then re-run push."
 )
 
 
@@ -1143,7 +1143,7 @@ def test_sync_all_noop_run_shows_nothing_synced_toast(page, mm_web_url: str) -> 
 
     toast = page.wait_for_selector("#toast-container .toast.toast-info", timeout=4_000)
     text = toast.text_content() or ""
-    assert "Nothing to sync yet" in text, (
+    assert "Nothing to push yet" in text, (
         f"no-op run must surface the nothing-synced toast, got {text!r}"
     )
     success = page.locator("#toast-container .toast.toast-success")
@@ -1249,7 +1249,7 @@ def test_sync_all_confirm_shows_per_type_runtime_breakdown(page, mm_web_url: str
 # routing, and the deliberate fallback: a 200 without ``phases`` (older
 # server / generic test double) re-enters the legacy per-type loop.
 
-NOTHING_SYNCED_TOAST = "Nothing to sync yet — every section is empty. Create or import artifacts first."  # settings.ctx.sync_all_nothing_synced
+NOTHING_SYNCED_TOAST = "Nothing to push yet — every section is empty. Create or pull artifacts first."  # settings.ctx.sync_all_nothing_synced
 
 
 def _batch_phase(phase_type: str, *, generated=(), skipped=(), status: str = "ok") -> dict:

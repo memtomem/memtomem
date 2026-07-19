@@ -154,7 +154,7 @@ See [MCP Client Setup](docs/guides/mcp-clients.md) for OpenCode / Codex / Cursor
 - **Namespaces** — organize memories into scoped groups with auto-derivation from folder names; review and label them (colour, description) from Settings → Namespaces in the Web UI
 - **Maintenance** — near-duplicate detection, time-based decay, TTL expiration, auto-tagging
 - **Web UI** — visual dashboard for search, sources, tags, timeline, dedup, and more (`mm web --dev` for the full maintainer surface)
-- **Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable assets from a separate Wiki, then sync them to supported AI runtimes. See [Context Gateway](docs/guides/context-gateway.md).
+- **Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable assets from a separate Wiki, then push them to supported AI runtimes. See [Context Gateway](docs/guides/context-gateway.md).
 - **MCP tools** — `mem_do` meta-tool routes all non-core actions in `core` mode for minimal context usage
 - **Predictable core** — memory operations run on explicit CLI/MCP calls (`mm add`, `mem_add`, `mem_index`, etc.). Optional client hooks are installed and removed separately rather than being a hidden runtime default.
 - **Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips the cold-start cost

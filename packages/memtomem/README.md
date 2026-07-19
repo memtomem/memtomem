@@ -58,7 +58,7 @@ open a new shell. If an install appears stale, re-run it with `--refresh`.
 - **🧹 Maintenance** — near-duplicate detection with merge, time-based score decay, TTL expiration, auto-tagging
 - **🔄 Export / import** — JSON bundle backup and restore with re-embedding
 - **🌐 Web UI** — polished SPA dashboard for search, sources, indexing, tags, and timeline (`mm web --dev` unlocks the full maintainer surface including Sessions, Working Memory, and Health Report)
-- **🧭 Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable Wiki assets, then sync them to supported runtimes
+- **🧭 Context Gateway** — keep canonical Skills, Commands, and Subagents in a project or user Store, optionally install reusable Wiki assets, then push them to supported runtimes
 - **⚙️ Scriptable CLI** — `--json` output on `mm status` and write commands (`mm add` / `mm reset` / `mm purge`); `mm warmup` pre-loads local models so the first query skips cold-start
 - **🛠️ 9-tool core mode** — a compact default surface, with `mem_do` routing the full feature set without loading every tool into agent context
 - **📌 Pinned Context** — small file-backed user/project/agent blocks are composed before retrieved memory
@@ -83,7 +83,7 @@ Full documentation lives in the [memtomem GitHub repo](https://github.com/memtom
 | [Core memory tools](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/core-memory-tools.md) | Index existing notes, search, and manage memories |
 | [Configuration](https://github.com/memtomem/memtomem/blob/main/docs/guides/configuration.md) | Supported config files, precedence, and environment variables |
 | [Embeddings](https://github.com/memtomem/memtomem/blob/main/docs/guides/embeddings.md) | ONNX, Ollama, and OpenAI providers, model dimensions, switching models |
-| [Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/context-gateway.md) | Author and sync canonical Skills, Commands, and Subagents to each type's supported AI tools |
+| [Context Gateway](https://github.com/memtomem/memtomem/blob/main/docs/guides/context-gateway.md) | Author and push canonical Skills, Commands, and Subagents to each type's supported AI tools |
 | [Operations & troubleshooting](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference/operations.md) | Web UI, privacy audits, diagnostics, and recovery |
 | [Reference](https://github.com/memtomem/memtomem/blob/main/docs/guides/reference.md) | Complete feature reference — all tools and patterns |
 | [memtomem-stm](https://github.com/memtomem/memtomem-stm) | Optional STM proxy for proactive memory surfacing (separate package) |

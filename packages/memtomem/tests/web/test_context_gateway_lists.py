@@ -412,7 +412,7 @@ def test_context_list_card_renders_project_local_tier_badge_with_annotation(
     card_name = page.locator("#ctx-skills-list .ctx-card-name").first
     text = card_name.text_content() or ""
     assert "project_local" in text
-    assert "(not synced to runtimes)" in text
+    assert "(not pushed to runtimes)" in text
     assert card_name.locator(".badge-tier--project_local").count() == 1
 
 
@@ -651,7 +651,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     # assertion robust against count/dir interpolation. (Copy-polish pass
     # reworded the KO body to ``가져오기를 누르거나`` — the KO marker is now
     # the Import noun, not the old ``눌러`` verb form.)
-    assert "Click Import" in banner_pre, (
+    assert "Click Pull" in banner_pre, (
         f"EN runtime-only banner should contain 'Click Import': {banner_pre!r}"
     )
 
@@ -669,7 +669,7 @@ def test_q_pr4_langchange_rerenders_runtime_only_banner(page, mm_web_url: str) -
     assert "가져오기" in banner_post, (
         f"KO runtime-only banner should contain '가져오기': {banner_post!r}"
     )
-    assert "Click Import" not in banner_post, (
+    assert "Click Pull" not in banner_post, (
         f"EN literal must not survive KO toggle: {banner_post!r}"
     )
 
@@ -707,7 +707,7 @@ def test_missing_canonical_remediation_lists_project_shared_cli_commands(
     )
     banner.wait_for(timeout=5_000)
     text = banner.text_content() or ""
-    assert "Click Import" in text, f"project_shared remediation should mention web Import: {text!r}"
+    assert "Click Pull" in text, f"project_shared remediation should mention web Import: {text!r}"
     assert (
         "mm context init --include=agents,commands,skills "
         "--scope project_shared --confirm-project-shared"

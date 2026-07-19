@@ -351,30 +351,30 @@ mm wiki init --from <url>                              # restore onto a fresh ma
 #     resolution — resolve merge conflicts / divergent histories with ordinary git, and avoid
 #     embedding credentials in the remote URL (prefer SSH keys or a git credential helper)
 
-# Agent context sync
+# Agent context push/pull
 mm context detect                      # find agent config files
 mm context init                        # create unified context.md (project_shared default)
 mm context init --scope user           # seed user-tier canonical (~/.memtomem/{agents,skills,commands}/)
 mm context init --scope project_local  # seed gitignored draft tier + auto-append .gitignore
 mm context init --scope project_shared --confirm-project-shared       # Gate B: explicit opt-in
 mm context init --include=agents --scope user --force-unsafe-import   # bypass Gate A on existing leaks
-mm context init --include=skills --only my-skill   # import ONE named runtime artifact (skips context.md + dir seeding)
+mm context init --include=skills --only my-skill   # pull ONE named runtime artifact (skips context.md + dir seeding)
 mm context generate --agent all        # generate all agent files
 mm context generate --include=agents --label production # generate files using the 'production' labeled snapshot (agents/commands only)
 mm context diff                        # check sync status
 mm context rescan --scope project_shared  # read-only privacy scan of canonical artifacts in one explicit tier
 mm context status                      # installed wiki assets + their drift state (read-only)
 mm context status --all-projects       # aggregated drift across enrolled on-disk projects (read-only; same data as GET /api/context/status-all)
-mm context sync                        # sync context.md → agent files (project_shared default)
+mm context sync                        # push context.md → agent files (project_shared default)
 mm context sync --scope user           # fan out from ~/.memtomem/... → ~/.{claude,gemini,codex,kimi}/... (Codex: skills → ~/.agents/skills, commands → ~/.codex/prompts)
 mm context sync --include=skills --scope user --force-unsafe   # bypass Gate A on a reviewed false positive (user/project_local only; project_shared hard-refuses)
 mm context sync --include=skills --scope project_local   # NO_FANOUT skip (no runtime per ADR §3)
-mm context sync --include=agents,commands --label production # sync using the 'production' labeled version (agents/commands only)
+mm context sync --include=agents,commands --label production # push using the 'production' labeled version (agents/commands only)
 mm context sync --all-projects --yes   # batch over every enrolled on-disk project (project_shared only, ADR-0025)
 mm context sync --runtime claude --include=skills   # fan out to ONE runtime only (repeatable; default all; skills/agents/commands only)
 mm context pull agents my-agent        # PREVIEW what a Pull would land in the Store, per runtime candidate (read-only, source-selectable)
 mm context pull agents my-agent --diff # preview + unified diff of the would-land content vs the current Store
-mm context pull agents my-agent --from gemini --apply --scope project_shared # import ONE runtime's copy; --from disambiguates divergent candidates (ADR-0030 §5)
+mm context pull agents my-agent --from gemini --apply --scope project_shared # pull ONE runtime's copy; --from disambiguates divergent candidates (ADR-0030 §5)
 mm context generate --include=settings # merge hooks → ~/.claude/settings.json
 mm context diff --include=settings     # check hook sync status
 mm context update skill <name> --force-head  # deliberately follow older/divergent Wiki HEAD; use --force separately for local edits
@@ -390,7 +390,7 @@ mm context version enable agents my-agent                          # adopt a fla
 mm context projects list               # discovered scopes: scope_id, health, enrollment
 mm context projects list --json        # same fields as GET /api/context/projects
 mm context projects add ~/work/proj --label "My Project"  # register (idempotent)
-mm context projects pause <scope_id|path>   # exclude from --all batches / web Sync
+mm context projects pause <scope_id|path>   # exclude from --all batches / web Push
 mm context projects resume <scope_id|path>  # re-include
 mm context projects remove <scope_id|path>  # unregister (project files untouched)
 
@@ -407,18 +407,18 @@ mm context move agents foo --from user --to project_local --apply       # --from
 # the source of truth — edit there, not in generated files.
 #
 # `--scope` semantics (ADR-0011 PR-E2 init / PR-E3 sync):
-#   user            → seeds ~/.memtomem/{agents,skills,commands}/; init imports from
+#   user            → seeds ~/.memtomem/{agents,skills,commands}/; init pulls from
 #                     ~/.claude/agents, ~/.gemini/agents, ~/.claude/skills, etc.;
-#                     sync fans canonical out to those same runtime roots.
-#   project_shared  → seeds <proj>/.memtomem/{agents,skills,commands}/; imports
+#                     push fans canonical out to those same runtime roots.
+#   project_shared  → seeds <proj>/.memtomem/{agents,skills,commands}/; pulls
 #                     from <proj>/.claude/agents etc.; git-tracked. Requires
 #                     --confirm-project-shared when --scope is explicit on init.
 #   project_local   → seeds <proj>/.memtomem/{agents,skills,commands}.local/;
 #                     auto-appends .memtomem/*.local/ + .memtomem/.staging/ to
 #                     <proj>/.gitignore (idempotent). No runtime fan-out
-#                     by design (ADR §3) — nothing to import or sync.
+#                     by design (ADR §3) — nothing to pull or push.
 #
-# Gate A on `init --include=...` import path: every source file is re-scanned
+# Gate A on `init --include=...` pull path: every source file is re-scanned
 # for secrets via enforce_write_guard. user / project_local destinations
 # can bypass with --force-unsafe-import (audit-logged); project_shared
 # destinations hard-refuse on any hit (no force bypass available).
@@ -430,11 +430,11 @@ mm context move agents foo --from user --to project_local --apply       # --from
 # destinations raise ClickException regardless of the flag (ADR §5: git history
 # is forever), with a remediation hint pointing at `mm context migrate` (PR-E4)
 # for moving the artifact to a writable tier first. Skills fan-out uses
-# staging-dir-first scan + atomic os.replace promote so a blocked sync leaves
+# staging-dir-first scan + atomic os.replace promote so a blocked push leaves
 # the existing dst tree unchanged.
 #
 # Web Context Gateway missing-canonical remediation:
-#   project_shared → web Import can initialize from detected runtime files;
+#   project_shared → web Pull can initialize from detected runtime files;
 #                    CLI bootstrap requires explicit git-tracked-tier confirmation.
 mm context init --include=agents,commands,skills --scope project_shared --confirm-project-shared
 mm context sync --include=agents,commands,skills --scope project_shared
@@ -443,7 +443,7 @@ mm context sync --include=agents,commands,skills --scope project_shared
 mm context init --include=agents,commands,skills --scope user
 mm context sync --include=agents,commands,skills --scope user
 #
-#   project_local  → gitignored draft tier; sync reports no runtime fan-out.
+#   project_local  → gitignored draft tier; push reports no runtime fan-out.
 mm context init --include=agents,commands,skills --scope project_local
 mm context sync --include=agents,commands,skills --scope project_local
 
@@ -481,7 +481,7 @@ All commands support `-h` and `--help`.
 
 ## Moving artifacts between tiers and projects
 
-> New to the Store → Sync → Runtime model? Start with the
+> New to the Store → Push → Runtime model? Start with the
 > [Context Gateway](../context-gateway.md) walkthrough; this section covers the
 > transfer verbs.
 
@@ -500,7 +500,7 @@ Shared rules, all verbs: destination collisions always refuse (no
 `--force` valve); destination runtime fan-out is **not** generated —
 the result prints the exact follow-up `mm context sync` command (for
 `mcp-servers`, `cd <dst> && mm context sync --include=mcp-servers
---scope project_shared`, with web Sync as an equivalent option); a
+--scope project_shared`, with web Push as an equivalent option); a
 `project_shared` landing runs the privacy scan (Gate A,
 no bypass) and requires `--confirm-project-shared` with `--apply`;
 default is always a dry-run preview.
@@ -518,7 +518,7 @@ mm context projects list                  # → p-1a2b3c4d5e6f  Other  ok
 mm context copy agents reviewer --to-project p-1a2b3c4d5e6f
 mm context copy agents reviewer --to-project p-1a2b3c4d5e6f --apply --confirm-project-shared
 
-# The result names the follow-up — destination fan-out is sync's job:
+# The result names the follow-up — destination fan-out is push's job:
 cd ~/work/other-proj && mm context sync --scope project_shared
 ```
 

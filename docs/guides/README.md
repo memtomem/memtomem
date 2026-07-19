@@ -48,7 +48,7 @@ guides are organized by outcome rather than by feature name.
 ## Share and sync
 
 - **[Context Gateway](context-gateway.md)** — keep one Store of Skills,
-  Commands, and Subagents and sync it to supported AI runtimes.
+  Commands, and Subagents and push it to supported AI runtimes.
 - **[Multi-device sync](multi-device-sync.md)** — sync markdown memories
   across your own machines with a private git repository.
 

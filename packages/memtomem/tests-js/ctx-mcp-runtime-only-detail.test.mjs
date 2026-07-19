@@ -80,13 +80,13 @@ describe('MCP missing-canonical banner copy (#1247 id 31, Codex impl review)', (
     await window.I18N.init();
 
     const mcpHtml = window._ctxMissingCanonicalRemediationHtml('mcp-servers', 2, ['.mcp.json']);
-    expect(mcpHtml).not.toContain('Click Import above');
+    expect(mcpHtml).not.toContain('Click Pull above');
     expect(mcpHtml).toContain('Create');
 
     // Sibling families keep the Import-oriented copy — the branch must not
     // over-reach.
     const skillsHtml = window._ctxMissingCanonicalRemediationHtml('skills', 1, ['.claude/skills']);
-    expect(skillsHtml).toContain('Click Import above');
+    expect(skillsHtml).toContain('Click Pull above');
   });
 });
 
