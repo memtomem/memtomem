@@ -475,29 +475,43 @@ async def _experiment(
     out: str | None,
     fmt: str,
 ) -> None:
+    import sqlite3
+
     from memtomem.cli._bootstrap import cli_components
-    from memtomem.errors import EvalCaseError
+    from memtomem.errors import EvalCaseError, Mem2MemError
     from memtomem.quality.experiment import run_experiment, serialize_experiment
     from memtomem.quality.gate import load_policy
-    from memtomem.quality.profiles import load_profile_document
 
     # Read + validate every input first, by role (never by path), so a bad file
-    # fails at exit 2 before any storage is opened and nothing is emitted.
+    # fails at exit 2 before any storage is opened and nothing is emitted. Each
+    # document is validated under its own role so the message names which input
+    # was rejected (still type-only — never the offending value). The presence of
+    # the --baseline FLAG (not the file's content) decides whether a baseline doc
+    # is required, so an explicit but falsy document ({}, null) is validated and
+    # rejected rather than silently treated as "use the ambient config".
     baseline_json = _read_json_role(baseline_path, "baseline profile") if baseline_path else None
     profile_jsons = [
         _read_json_role(path, f"profile #{i + 1}") for i, path in enumerate(profile_paths)
     ]
     policy_json = _read_json_role(policy_path, "policy") if policy_path else None
 
-    try:
-        baseline_doc = load_profile_document(baseline_json) if baseline_json is not None else None
-        candidate_docs = [load_profile_document(j) for j in profile_jsons]
-        policy = load_policy(policy_json) if policy_json is not None else None
-    except EvalCaseError as e:
-        raise GateInputError(f"experiment input rejected: {type(e).__name__}") from e
-
-    async with cli_components() as comp:
+    baseline_doc = _load_doc_role(baseline_json, "baseline profile") if baseline_path else None
+    candidate_docs = [_load_doc_role(j, f"profile #{i + 1}") for i, j in enumerate(profile_jsons)]
+    policy = None
+    if policy_json is not None:
         try:
+            policy = load_policy(policy_json)
+        except EvalCaseError as e:
+            raise GateInputError(f"policy rejected: {type(e).__name__}") from e
+
+    # Exit-code contract: 1 is reserved for an emitted policy failure (the
+    # SystemExit at the very end). EVERY expected operational "could not run"
+    # failure — unconfigured install, config/storage/embedding/LLM error, a raw
+    # SQLite read error from the fingerprint readers, a filesystem error, or an
+    # invalid experiment shape — maps to a path-free exit 2 so CI cannot confuse
+    # it with a regression and no raw message (which may carry a path) is emitted.
+    try:
+        async with cli_components() as comp:
             result = await run_experiment(
                 comp,
                 baseline_doc=baseline_doc,
@@ -506,8 +520,13 @@ async def _experiment(
                 as_of_unix=as_of,
                 policy=policy,
             )
-        except EvalCaseError as e:
-            raise GateInputError(f"experiment could not run: {type(e).__name__}") from e
+    except GateInputError:
+        raise
+    except click.ClickException as e:
+        # e.g. cli_components' "not configured" — operational, not a regression.
+        raise GateInputError("experiment could not run: not configured") from e
+    except (Mem2MemError, sqlite3.Error, OSError) as e:
+        raise GateInputError(f"experiment could not run: {type(e).__name__}") from e
 
     canonical = serialize_experiment(result)
     for entry in [result["baseline"], *result["candidates"]]:
@@ -519,7 +538,13 @@ async def _experiment(
                 err=True,
             )
     if out:
-        _write_file(out, canonical)
+        try:
+            _write_file(out, canonical)
+        except OSError as e:
+            # A path-free error at the same exit-2 boundary as bad input — never
+            # echo the output path, and never let an unwritable --out read as a
+            # policy failure (exit 1).
+            raise GateInputError(f"experiment output is not writable: {type(e).__name__}") from e
     if fmt == "json":
         click.echo(canonical, nl=False)
     else:
@@ -529,6 +554,17 @@ async def _experiment(
         c["gate"] is not None and not c["gate"]["pass"] for c in result["candidates"]
     ):
         raise SystemExit(1)
+
+
+def _load_doc_role(data: Any, role: str):
+    """Validate one profile document under a role-aware, value-free boundary."""
+    from memtomem.errors import EvalCaseError
+    from memtomem.quality.profiles import load_profile_document
+
+    try:
+        return load_profile_document(data)
+    except EvalCaseError as e:
+        raise GateInputError(f"{role} rejected: {type(e).__name__}") from e
 
 
 def _render_experiment_table(result: dict) -> None:

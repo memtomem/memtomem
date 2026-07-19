@@ -224,7 +224,10 @@ def test_quality_experiment_e2e_via_mm_binary(tmp_path):
     # BM25-only profiles: enable_dense is an eligible knob, so it MUST be set
     # explicitly — an omitted knob resolves to the package default (dense on),
     # which would need an embedder. Candidates differ only by rrf_k.
-    def _profile(name: str, rrf_k: int) -> str:
+    def _profile(name: str, rrf_k: int, extra_knobs: dict | None = None) -> str:
+        knobs = {"search": {"enable_dense": False, "rrf_k": rrf_k}}
+        if extra_knobs:
+            knobs.update(extra_knobs)
         path = tmp_path / f"{name}.json"
         path.write_text(
             json.dumps(
@@ -232,7 +235,7 @@ def test_quality_experiment_e2e_via_mm_binary(tmp_path):
                     "schema_version": 1,
                     "kind": "retrieval_profile",
                     "name": name,
-                    "knobs": {"search": {"enable_dense": False, "rrf_k": rrf_k}},
+                    "knobs": knobs,
                 }
             ),
             encoding="utf-8",
@@ -242,6 +245,12 @@ def test_quality_experiment_e2e_via_mm_binary(tmp_path):
     baseline = _profile("baseline", 60)
     cand_a = _profile("candidate-a", 40)
     cand_b = _profile("candidate-b", 97)
+    # candidate-c enables access boost — its per-report index fingerprint folds
+    # in access counts, so it differs from the baseline's. This must NOT be
+    # treated as corpus/index drift (the profile-independent snapshot is what
+    # guards drift); it is the regression check for the profile-dependent-index
+    # false rejection.
+    cand_c = _profile("candidate-c", 60, {"access": {"enabled": True, "max_boost": 1.5}})
 
     def _experiment(out_name: str, *extra: str) -> subprocess.CompletedProcess:
         return _run(
@@ -253,6 +262,8 @@ def test_quality_experiment_e2e_via_mm_binary(tmp_path):
             cand_b,  # deliberately out of name order to prove sorting
             "--profile",
             cand_a,
+            "--profile",
+            cand_c,
             "--as-of",
             "1784500000",
             "--format",
@@ -282,22 +293,30 @@ def test_quality_experiment_e2e_via_mm_binary(tmp_path):
 
     result = json.loads(exp1)
     assert result["kind"] == "quality_experiment"
-    assert [c["profile_name"] for c in result["candidates"]] == ["candidate-a", "candidate-b"]
+    assert [c["profile_name"] for c in result["candidates"]] == [
+        "candidate-a",
+        "candidate-b",
+        "candidate-c",
+    ]
     assert result["baseline"]["source"] == "document"
+    by_name = {c["profile_name"]: c for c in result["candidates"]}
     for cand in result["candidates"]:
         compat = cand["comparison"]["compatibility"]
         assert compat["corpus_match"] is True
-        assert compat["index_match"] is True
         assert compat["case_set_match"] is True
         assert compat["profile_match"] is False
         assert cand["gate"] is None
+    # candidate-c enables access boost → a legitimately different per-report
+    # index fingerprint, which must NOT abort the experiment (blocker fix).
+    assert by_name["candidate-c"]["comparison"]["compatibility"]["index_match"] is False
+    assert by_name["candidate-a"]["comparison"]["compatibility"]["index_match"] is True
 
     # record=False: replaying every profile mutated no search history.
     assert _query_history_rows() == before
 
     # A supplied policy is evaluated per candidate; min_compared_cases far above
-    # the single fixture case fails both candidates deterministically → exit 1,
-    # both verdicts present, result still emitted.
+    # the single fixture case fails every candidate deterministically → exit 1,
+    # all verdicts present, result still emitted.
     policy = tmp_path / "policy.json"
     policy.write_text(
         json.dumps({"schema_version": 1, "kind": "replay_gate_policy", "min_compared_cases": 99}),

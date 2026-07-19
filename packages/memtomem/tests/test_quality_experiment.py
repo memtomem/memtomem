@@ -131,6 +131,14 @@ def _baseline() -> ProfileRun:
     )
 
 
+# The profile-independent storage snapshot; corpus must match the reports' corpus.
+_SNAP = {"corpus": "corp-1", "index": "idx-full"}
+
+
+def _assemble(base, cands, *, snapshot=None, policy=None):
+    return assemble_experiment(base, cands, shared_snapshot=snapshot or _SNAP, policy=policy)
+
+
 # --------------------------------------------------------------------------- #
 # Ordering + structure
 # --------------------------------------------------------------------------- #
@@ -138,7 +146,7 @@ def test_candidates_ordered_by_name():
     base = _baseline()
     b = _run("bravo", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pb"))
     a = _run("alpha", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pa"))
-    result = assemble_experiment(base, [b, a])
+    result = _assemble(base, [b, a])
     assert [c["profile_name"] for c in result["candidates"]] == ["alpha", "bravo"]
     assert result["kind"] == EXPERIMENT_KIND
     assert result["schema_version"] == EXPERIMENT_SCHEMA_VERSION
@@ -150,9 +158,11 @@ def test_candidates_ordered_by_name():
 def test_shared_fingerprints_hoisted_to_top_level():
     base = _baseline()
     c = _run("c", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc"))
-    result = assemble_experiment(base, [c])
+    result = _assemble(base, [c])
     assert set(result["fingerprints"]) == {"corpus", "index", "case_set"}
     assert result["fingerprints"]["corpus"] == "corp-1"
+    # The top-level index comes from the profile-independent storage snapshot.
+    assert result["fingerprints"]["index"] == "idx-full"
 
 
 def test_profile_warnings_survive_experiment_json_for_baseline_and_candidate():
@@ -170,7 +180,7 @@ def test_profile_warnings_survive_experiment_json_for_baseline_and_candidate():
         warnings=("rerank_provider_model_mismatch",),
     )
 
-    payload = json.loads(serialize_experiment(assemble_experiment(baseline, [candidate])))
+    payload = json.loads(serialize_experiment(_assemble(baseline, [candidate])))
 
     assert payload["baseline"]["warnings"] == ["baseline_warning"]
     assert payload["candidates"][0]["warnings"] == ["rerank_provider_model_mismatch"]
@@ -181,33 +191,50 @@ def test_profile_warnings_survive_experiment_json_for_baseline_and_candidate():
 # --------------------------------------------------------------------------- #
 def test_empty_candidates_rejected():
     with pytest.raises(EvalCaseError):
-        assemble_experiment(_baseline(), [])
+        _assemble(_baseline(), [])
 
 
 def test_duplicate_candidate_names_rejected():
     base = _baseline()
     r = _report([_case("c1", retrieved=["r", "x"], relevant=["r"])])
     with pytest.raises(EvalCaseError):
-        assemble_experiment(base, [_run("dup", r), _run("dup", copy.deepcopy(r))])
+        _assemble(base, [_run("dup", r), _run("dup", copy.deepcopy(r))])
 
 
 def test_candidate_name_colliding_with_baseline_rejected():
     base = _baseline()  # named "ambient"
     r = _report([_case("c1", retrieved=["r", "x"], relevant=["r"])])
     with pytest.raises(EvalCaseError):
-        assemble_experiment(base, [_run("ambient", r)])
+        _assemble(base, [_run("ambient", r)])
 
 
-@pytest.mark.parametrize("axis", ["corpus", "index", "case_set"])
-def test_fingerprint_drift_rejected(axis):
+@pytest.mark.parametrize("axis", ["corpus", "case_set"])
+def test_profile_independent_fingerprint_drift_rejected(axis):
+    # corpus and case_set are profile-independent, so a mismatch across reports
+    # is real drift and must be rejected.
     base = _baseline()
     drifted = _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc")
-    if axis == "case_set":
-        drifted["fingerprints"]["case_set"] = "tampered"
-    else:
-        drifted["fingerprints"][axis] = "tampered"
+    drifted["fingerprints"][axis] = "tampered"
     with pytest.raises(EvalCaseError):
-        assemble_experiment(base, [_run("c", drifted)])
+        _assemble(base, [_run("c", drifted)])
+
+
+def test_differing_index_fingerprint_is_allowed():
+    # The index fingerprint legitimately varies by profile (access/link
+    # artifacts are folded in only when a profile reads them), so a candidate
+    # with a different index fingerprint over the same corpus is NOT drift.
+    base = _baseline()
+    cand = _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc", index="idx-2")
+    result = _assemble(base, [_run("c", cand)])
+    assert result["candidates"][0]["comparison"]["compatibility"]["index_match"] is False
+
+
+def test_snapshot_corpus_mismatch_rejected():
+    # The storage snapshot must agree with the reports' corpus.
+    base = _baseline()
+    c = _run("c", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc"))
+    with pytest.raises(EvalCaseError):
+        _assemble(base, [c], snapshot={"corpus": "different", "index": "idx-full"})
 
 
 # --------------------------------------------------------------------------- #
@@ -232,7 +259,7 @@ def test_gate_evaluated_independently_per_candidate():
     worse = _run(
         "worse", _report([_case("c1", retrieved=["x", "y"], relevant=["r"])], profile="pw")
     )
-    result = assemble_experiment(base, [better, worse], policy=_policy_no_ndcg_regression())
+    result = _assemble(base, [better, worse], policy=_policy_no_ndcg_regression())
     by_name = {c["profile_name"]: c for c in result["candidates"]}
     assert result["policy_supplied"] is True
     assert by_name["better"]["gate"]["pass"] is True
@@ -242,7 +269,7 @@ def test_gate_evaluated_independently_per_candidate():
 def test_no_policy_leaves_gate_null():
     base = _baseline()
     c = _run("c", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc"))
-    result = assemble_experiment(base, [c])
+    result = _assemble(base, [c])
     assert result["policy_supplied"] is False
     assert result["candidates"][0]["gate"] is None
 
@@ -258,7 +285,7 @@ def test_top_level_deterministic_is_and_of_entries():
             [_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pn", deterministic=False
         ),
     )
-    result = assemble_experiment(base, [nd])
+    result = _assemble(base, [nd])
     assert result["deterministic"] is False
     assert result["candidates"][0]["nondeterministic_stages"] == ["query_expansion_llm"]
 
@@ -266,7 +293,7 @@ def test_top_level_deterministic_is_and_of_entries():
 def test_serialize_is_byte_identical_across_key_shuffles():
     base = _baseline()
     c = _run("c", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc"))
-    first = serialize_experiment(assemble_experiment(base, [c]))
+    first = serialize_experiment(_assemble(base, [c]))
     # Re-assemble from deep copies with reversed dict insertion order.
     base2 = _run(
         "ambient",
@@ -274,14 +301,82 @@ def test_serialize_is_byte_identical_across_key_shuffles():
         source="ambient",
     )
     c2 = _run("c", {k: c.report[k] for k in reversed(list(c.report))})
-    second = serialize_experiment(assemble_experiment(base2, [c2]))
+    second = serialize_experiment(_assemble(base2, [c2]))
     assert first == second
 
 
 def test_serialize_rejects_nan():
     base = _baseline()
     c = _run("c", _report([_case("c1", retrieved=["r", "x"], relevant=["r"])], profile="pc"))
-    result = assemble_experiment(base, [c])
+    result = _assemble(base, [c])
     result["aggregate_smuggled"] = float("nan")
     with pytest.raises(ValueError):
         serialize_experiment(result)
+
+
+# --------------------------------------------------------------------------- #
+# run_experiment — pre-checks + post-run drift (fake storage, no real replay)
+# --------------------------------------------------------------------------- #
+import asyncio  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from memtomem.quality.experiment import run_experiment  # noqa: E402
+from memtomem.quality.profiles import load_profile_document  # noqa: E402
+
+
+def _doc(name):
+    return load_profile_document(
+        {"schema_version": 1, "kind": "retrieval_profile", "name": name, "knobs": {}}
+    )
+
+
+def test_run_experiment_rejects_duplicate_names_before_replay(monkeypatch):
+    replayed = []
+
+    async def spy_replay(*a, **k):
+        replayed.append(1)
+        raise AssertionError("should not replay when names are invalid")
+
+    monkeypatch.setattr("memtomem.quality.experiment._replay_profile", spy_replay)
+    comp = SimpleNamespace(storage=object())
+    with pytest.raises(EvalCaseError):
+        asyncio.run(
+            run_experiment(comp, baseline_doc=None, candidate_docs=[_doc("dup"), _doc("dup")])
+        )
+    assert not replayed  # rejected before any transient stack / replay
+
+
+def test_run_experiment_empty_candidates_rejected_before_replay(monkeypatch):
+    async def spy_replay(*a, **k):
+        raise AssertionError("should not replay")
+
+    monkeypatch.setattr("memtomem.quality.experiment._replay_profile", spy_replay)
+    with pytest.raises(EvalCaseError):
+        asyncio.run(
+            run_experiment(SimpleNamespace(storage=object()), baseline_doc=None, candidate_docs=[])
+        )
+
+
+def test_run_experiment_detects_post_run_drift(monkeypatch):
+    # First snapshot differs from the second → a writer changed the DB mid-run.
+    snaps = iter([{"corpus": "a", "index": "i"}, {"corpus": "b", "index": "i"}])
+    monkeypatch.setattr("memtomem.quality.experiment._shared_snapshot", lambda storage: next(snaps))
+
+    async def fake_select(storage, selectors):
+        return (["c1"], set(), 0)
+
+    monkeypatch.setattr("memtomem.quality.experiment._select_case_ids", fake_select)
+
+    async def fake_replay(components, *, name, doc, case_ids, as_of_unix):
+        return _run(name, _report([_case("c1", retrieved=["r"], relevant=["r"])]))
+
+    monkeypatch.setattr("memtomem.quality.experiment._replay_profile", fake_replay)
+    with pytest.raises(EvalCaseError):
+        asyncio.run(
+            run_experiment(
+                SimpleNamespace(storage=object()),
+                baseline_doc=None,
+                candidate_docs=[_doc("cand")],
+                as_of_unix=1000,
+            )
+        )

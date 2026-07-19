@@ -555,9 +555,7 @@ class TestExperiment:
         assert "nondeterministic" in result.output
         assert "rerank_remote" in result.output
 
-    def test_table_surfaces_baseline_and_candidate_profile_warnings(
-        self, monkeypatch, tmp_path
-    ):
+    def test_table_surfaces_baseline_and_candidate_profile_warnings(self, monkeypatch, tmp_path):
         comp = SimpleNamespace()
         self._patch_run(
             monkeypatch,
@@ -576,3 +574,122 @@ class TestExperiment:
         candidate_header = result.output.index("cand-a cand-a")
         candidate_warning = result.output.index("warning: rerank_provider_model_mismatch")
         assert baseline_warning < candidate_header < candidate_warning
+
+    def test_unwritable_out_exits_2_without_path(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        # Parent directory does not exist → _write_file raises FileNotFoundError.
+        bad_out = tmp_path / "nope" / "exp.json"
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--profile", self._profile(tmp_path, "cand-a"), "--out", str(bad_out)],
+        )
+        assert result.exit_code == 2
+        assert str(bad_out) not in result.output  # path never echoed
+        assert "not writable" in result.output
+
+    def test_storage_error_maps_to_exit_2(self, monkeypatch, tmp_path):
+        from memtomem.errors import StorageError
+
+        comp = SimpleNamespace()
+        _patch_components(monkeypatch, comp)
+        run = AsyncMock(side_effect=StorageError("db is locked"))
+        monkeypatch.setattr("memtomem.quality.experiment.run_experiment", run)
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", self._profile(tmp_path, "cand-a")]
+        )
+        assert result.exit_code == 2
+        assert "db is locked" not in result.output  # message is type-only
+
+    def test_invalid_baseline_names_its_role(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        bad = tmp_path / "bad-baseline.json"
+        bad.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "retrieval_profile",
+                    "name": "b",
+                    "knobs": {"search": {"rrf_k": -1}},
+                }
+            )
+        )
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--baseline", str(bad), "--profile", self._profile(tmp_path, "cand-a")],
+        )
+        assert result.exit_code == 2
+        assert "baseline profile rejected" in result.output
+
+    def test_explicit_falsy_baseline_is_validated_not_ignored(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        run = self._patch_run(monkeypatch, comp, self._canned())
+        empty = tmp_path / "empty.json"
+        empty.write_text("{}")  # a supplied but empty doc must be rejected, not skipped
+        result = CliRunner().invoke(
+            quality,
+            [
+                "experiment",
+                "--baseline",
+                str(empty),
+                "--profile",
+                self._profile(tmp_path, "cand-a"),
+            ],
+        )
+        assert result.exit_code == 2
+        assert run.call_count == 0  # never ran against ambient by mistake
+        assert "baseline profile rejected" in result.output
+
+    def test_config_error_maps_to_exit_2_without_path(self, monkeypatch, tmp_path):
+        from memtomem.errors import ConfigError
+
+        comp = SimpleNamespace()
+        _patch_components(monkeypatch, comp)
+        secret_path = "/private/secret/config.json"
+        run = AsyncMock(side_effect=ConfigError(f"bad config at {secret_path}"))
+        monkeypatch.setattr("memtomem.quality.experiment.run_experiment", run)
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", self._profile(tmp_path, "cand-a")]
+        )
+        assert result.exit_code == 2
+        assert secret_path not in result.output  # path never echoed
+
+    def test_sqlite_error_maps_to_exit_2(self, monkeypatch, tmp_path):
+        import sqlite3
+
+        comp = SimpleNamespace()
+        _patch_components(monkeypatch, comp)
+        run = AsyncMock(side_effect=sqlite3.OperationalError("no such table: chunks"))
+        monkeypatch.setattr("memtomem.quality.experiment.run_experiment", run)
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", self._profile(tmp_path, "cand-a")]
+        )
+        assert result.exit_code == 2
+
+    def test_invalid_second_profile_names_its_index(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        bad = tmp_path / "bad2.json"
+        bad.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "retrieval_profile",
+                    "name": "b2",
+                    "knobs": {"mmr": {"lambda_param": 5.0}},
+                }
+            )
+        )
+        result = CliRunner().invoke(
+            quality,
+            [
+                "experiment",
+                "--profile",
+                self._profile(tmp_path, "cand-a"),
+                "--profile",
+                str(bad),
+            ],
+        )
+        assert result.exit_code == 2
+        assert "profile #2 rejected" in result.output

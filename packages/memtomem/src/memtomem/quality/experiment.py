@@ -56,11 +56,39 @@ EXPERIMENT_SCHEMA_VERSION = 1
 EXPERIMENT_KIND = "quality_experiment"
 
 _AMBIENT_NAME = "ambient"
-# The fingerprint axes that must be identical for every replay in one run —
-# they describe the shared corpus/index snapshot and the case set, none of which
-# a profile can change. ``profile`` is intentionally excluded (it is what
-# differs between candidates).
-_SHARED_FINGERPRINT_AXES = ("corpus", "index", "case_set")
+# Fingerprint axes that are profile-INDEPENDENT and so must be identical for
+# every replay in one run: the retrieval-visible corpus and the labeled case
+# set. ``index`` is deliberately NOT here — ``current_fingerprints`` folds the
+# access-count / link-topology artifacts into the index fingerprint only when a
+# profile's config reads them, so two profiles over the identical database
+# legitimately produce different index fingerprints. The profile-independent
+# index snapshot is captured separately from storage (see ``_shared_snapshot``).
+_SHARED_FINGERPRINT_AXES = ("corpus", "case_set")
+
+
+def _shared_snapshot(storage: Any) -> dict[str, str]:
+    """A profile-independent fingerprint of the shared corpus + index.
+
+    Unlike the per-report index fingerprint (which includes optional artifacts
+    only when the *profile* reads them), this always folds in the full superset
+    — vectors, FTS rows, link topology, and access counts — so it depends only
+    on the database, not on any candidate config. Captured before and after the
+    replays to detect a concurrent writer mutating the shared snapshot mid-run.
+    """
+    from memtomem.quality.fingerprints import corpus_fingerprint, index_fingerprint
+
+    corpus_rows = storage.read_corpus_fingerprint_rows()
+    return {
+        "corpus": corpus_fingerprint(corpus_rows),
+        "index": index_fingerprint(
+            corpus_rows,
+            storage.read_vector_fingerprint_rows(),
+            storage.read_fts_fingerprint_rows(),
+            storage.stored_embedding_info,
+            link_rows=storage.read_link_topology_rows(),
+            access_rows=storage.read_access_counts(),
+        ),
+    }
 
 
 def serialize_experiment(doc: dict[str, Any]) -> str:
@@ -102,14 +130,16 @@ def assemble_experiment(
     baseline: ProfileRun,
     candidates: list[ProfileRun],
     *,
+    shared_snapshot: dict[str, str],
     policy: GatePolicy | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic experiment result from replayed profiles.
 
-    Pure. Raises :class:`~memtomem.errors.EvalCaseError` on an empty candidate
-    set, duplicate profile names (among candidates or against the baseline), or
-    corpus/index/case-set fingerprint drift across any two reports (a concurrent
-    writer mid-run) — none of which can yield a trustworthy comparison.
+    ``shared_snapshot`` is the profile-independent ``{corpus, index}`` fingerprint
+    captured from storage (see :func:`_shared_snapshot`). Pure. Raises
+    :class:`~memtomem.errors.EvalCaseError` on an empty candidate set, duplicate
+    profile names, or profile-independent (corpus/case-set) fingerprint drift
+    across reports — none of which can yield a trustworthy comparison.
     """
     if not candidates:
         raise EvalCaseError("an experiment needs at least one candidate profile")
@@ -119,14 +149,19 @@ def assemble_experiment(
         raise EvalCaseError("profile names must be unique across the baseline and candidates")
 
     all_runs = [baseline, *candidates]
+    # Only the profile-independent axes are compared across reports; the index
+    # fingerprint legitimately varies by profile, so its stability is enforced
+    # by the storage-level snapshot instead (checked in run_experiment).
     shared = {axis: baseline.report["fingerprints"][axis] for axis in _SHARED_FINGERPRINT_AXES}
     for run in all_runs:
         for axis in _SHARED_FINGERPRINT_AXES:
             if run.report["fingerprints"][axis] != shared[axis]:
                 raise EvalCaseError(
-                    f"{axis} fingerprint drifted across replays — the corpus or index "
-                    "changed mid-experiment; results are not comparable"
+                    f"{axis} fingerprint drifted across replays — the corpus or case "
+                    "set changed mid-experiment; results are not comparable"
                 )
+    if shared["corpus"] != shared_snapshot["corpus"]:
+        raise EvalCaseError("corpus fingerprint drifted between the snapshot and the replays")
 
     ordered = sorted(candidates, key=lambda c: c.name)
     candidate_entries: list[dict[str, Any]] = []
@@ -144,7 +179,11 @@ def assemble_experiment(
         "deterministic": all(r.report["deterministic"] for r in all_runs),
         "policy_supplied": policy is not None,
         "case_count": baseline.report["counts"]["replayed"],
-        "fingerprints": shared,
+        "fingerprints": {
+            "corpus": shared_snapshot["corpus"],
+            "index": shared_snapshot["index"],
+            "case_set": shared["case_set"],
+        },
         "baseline": _entry(baseline),
         "candidates": candidate_entries,
     }
@@ -241,12 +280,27 @@ async def run_experiment(
         raise EvalCaseError(f"as_of_unix must be between 0 and {MAX_AS_OF_UNIX} (a unix timestamp)")
     pinned = int(time.time()) if as_of_unix is None else int(as_of_unix)
 
+    # Validate presence + name uniqueness up front, BEFORE selecting cases or
+    # building any transient stack — an invalid experiment must not open a
+    # component stack or make an embedding/rerank call only to exit later.
+    baseline_name = _AMBIENT_NAME if baseline_doc is None else baseline_doc.name
+    names = [baseline_name] + [doc.name for doc in candidate_docs]
+    if not candidate_docs:
+        raise EvalCaseError("an experiment needs at least one candidate profile")
+    if len(names) != len(set(names)):
+        raise EvalCaseError("profile names must be unique across the baseline and candidates")
+
     # Resolve the cohort once against the live DB so every replay runs the same
     # cases even if a case's status changes mid-run.
     selectors = list(case_selectors) if case_selectors else None
     ordered_ids, _explicit, _archived = await _select_case_ids(components.storage, selectors)
     if not ordered_ids:
         raise EvalCaseError("no evaluation cases selected")
+
+    # Profile-independent snapshot before the replays; re-checked after so a
+    # concurrent writer that mutates the shared corpus/index at any point during
+    # the run (including during the last candidate's searches) is caught.
+    snapshot = _shared_snapshot(components.storage)
 
     baseline = await _replay_profile(
         components,
@@ -261,4 +315,9 @@ async def run_experiment(
         )
         for doc in candidate_docs
     ]
-    return assemble_experiment(baseline, candidates, policy=policy)
+
+    if _shared_snapshot(components.storage) != snapshot:
+        raise EvalCaseError(
+            "the shared corpus/index changed during the experiment; results are not comparable"
+        )
+    return assemble_experiment(baseline, candidates, shared_snapshot=snapshot, policy=policy)
