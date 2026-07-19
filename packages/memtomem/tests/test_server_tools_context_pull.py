@@ -29,7 +29,7 @@ import pytest
 
 from memtomem.context.scope_resolver import canonical_artifact_dir
 from memtomem.server.tool_registry import ACTIONS
-from memtomem.server.tools.context import mem_context_pull
+from memtomem.server.tools.context import _PULL_BOOL_FLAGS, mem_context_pull
 from memtomem.server.tools.meta import mem_do
 
 from .helpers import seed_multi_runtime
@@ -122,7 +122,10 @@ async def test_preview_from_narrows_to_source(proj: Path) -> None:
         ({"kind": "", "name": "a"}, "no Pull sources"),
         ({"kind": "agents", "name": "a", "scope": "project_local"}, "project_local"),
         ({"kind": "agents", "name": "a", "scope": "bogus"}, "Unknown scope"),
-        ({"kind": "agents", "name": "bad name!"}, "name"),
+        # Pin the InvalidNameError wording — a bare "name" needle appears in
+        # nearly every message in this table, so the row could not fail for its
+        # own reason.
+        ({"kind": "agents", "name": "bad name!"}, "must match [A-Za-z0-9._-]+"),
         ({"kind": "agents", "name": "a", "from_runtime": "bogus"}, "bogus"),
     ],
 )
@@ -318,10 +321,7 @@ async def test_user_tier_secret_bypassable_with_literal_true(proj: Path) -> None
     assert _store_exists(proj, "agents", "a", scope="user")
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ["overwrite", "apply", "force_unsafe_import", "allow_host_writes", "confirm_project_shared"],
-)
+@pytest.mark.parametrize("flag", _PULL_BOOL_FLAGS)
 @pytest.mark.parametrize("bad", ["false", "true", 1, 0, "yes", None])
 async def test_stringified_booleans_are_refused_via_mem_do(
     proj: Path, flag: str, bad: object
@@ -340,10 +340,7 @@ async def test_stringified_booleans_are_refused_via_mem_do(
     assert not _store_exists(proj, "agents", "a")
 
 
-@pytest.mark.parametrize(
-    "flag",
-    ["overwrite", "apply", "force_unsafe_import", "allow_host_writes", "confirm_project_shared"],
-)
+@pytest.mark.parametrize("flag", _PULL_BOOL_FLAGS)
 @pytest.mark.parametrize("bad", ["true", "false", 1, 0, "yes"])
 def test_fastmcp_boundary_rejects_non_literal_booleans(flag: str, bad: object) -> None:
     """The OTHER dispatch path: a direct ``mem_context_pull`` tool call goes
@@ -356,8 +353,14 @@ def test_fastmcp_boundary_rejects_non_literal_booleans(flag: str, bad: object) -
     Built via ``func_metadata`` rather than the tool manager so this runs in
     EVERY tool mode — the tool is pruned from ``mcp`` in the default ``core``
     mode (which CI uses), and a skip here would be a false green on the
-    security-relevant path."""
-    with pytest.raises(Exception):
+    security-relevant path.
+
+    Pins ``ValidationError`` specifically: this is the guard on the Gate A
+    valve, so a bare ``Exception`` would let a typo'd field, a renamed param, or
+    an import error inside ``_pull_arg_model`` pass as a "rejection"."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         _pull_arg_model().model_validate({"kind": "agents", "name": "a", flag: bad})
 
 
@@ -387,6 +390,54 @@ async def test_apply_false_string_does_not_write(proj: Path) -> None:
     )
     assert out.startswith("error:")
     assert not _store_exists(proj, "agents", "a")
+
+
+def test_gate_blocked_reason_is_redacted() -> None:
+    """``gate_blocked`` goes through the same redaction as every other branch.
+
+    Pull's engine reason is runtime + scope only (no path) today, so this is a
+    pure backstop — but the earlier code exempted it on a
+    ``mem_context_sync``-style "keep the full path for remediation" rationale
+    that does not hold here, which would have become a leak the first time the
+    engine enriched that reason. The web twin redacts it for the same reason.
+    """
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.server.tools.context import _format_pull_result
+
+    blocked = PullApplyResult(
+        status="gate_blocked",
+        kind="agents",
+        name="a",
+        scope="user",
+        reason="Gate A flagged the copy at /Volumes/secret/stuff/agent.md",
+        force_bypassable=True,
+    )
+    out = _format_pull_result(blocked, Path("/some/project"))
+    assert out.startswith("privacy block:")
+    assert "/Volumes" not in out
+    assert "<path>" in out
+    assert "force_unsafe_import=True" in out  # the valve hint survives
+
+
+def test_identical_noop_never_renders_empty() -> None:
+    """A future ``identical`` result without a reason must not produce an empty
+    MCP response (``_redact_reason`` coalesces ``None`` → ``""``)."""
+    from memtomem.context.pull_apply import PullApplyResult
+    from memtomem.server.tools.context import _format_pull_result
+
+    out = _format_pull_result(
+        PullApplyResult(
+            status="applied",
+            kind="agents",
+            name="a",
+            scope="user",
+            reason="",
+            write_outcome="identical",
+        ),
+        Path("/some/project"),
+    )
+    assert out.strip()
+    assert "already identical" in out
 
 
 def test_pull_reason_scrubs_residual_absolute_paths() -> None:

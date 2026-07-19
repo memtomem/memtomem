@@ -2607,11 +2607,15 @@ _PULL_REFUSAL_STATUSES = frozenset(
     }
 )
 
-#: Write / consent flags on ``mem_context_pull``. ``mem_do`` forwards params RAW
-#: (``meta.py`` ``info.fn(**kwargs)``), so a stringified boolean would reach the
-#: tool untyped and read truthy — ``apply="false"`` would execute, and
-#: ``confirm_project_shared="false"`` would count as consent to write the
-#: git-tracked tier. Every one of these is validated with :func:`_strict_bool`.
+#: Write / consent flags on ``mem_context_pull`` — the two-layer guard's
+#: subject list, and the single source of truth the boundary tests parametrize
+#: over. ``mem_do`` forwards params RAW (``meta.py`` ``info.fn(**kwargs)``), so a
+#: stringified boolean reaches the tool untyped and reads truthy —
+#: ``apply="false"`` would execute and ``confirm_project_shared="false"`` would
+#: count as consent to write the git-tracked tier; each is therefore validated
+#: with :func:`_strict_bool` in the body. The direct tool-call path never sees
+#: those values because each is annotated ``StrictBool``, which FastMCP's
+#: otherwise-lax pydantic arg model enforces first.
 _PULL_BOOL_FLAGS = (
     "overwrite",
     "apply",
@@ -2716,14 +2720,25 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
     ``write_failed`` 500) have no status channel over MCP, so they surface as
     ``error:`` text; ``gate_blocked`` is ``privacy block:``; the actionable
     domain refusals are ``refused:``; ``applied`` (incl. the byte-identical
-    no-op) is a success line. Every ``reason`` is redacted — except the
-    ``gate_blocked`` remediation text, which round-trips the full path so the
-    agent can act on it (matching ``mem_context_sync``'s ``privacy block:`` and
-    the web privacy 422; see ``context.error_redact`` module docstring).
+    no-op) is a success line.
+
+    EVERY ``reason`` is redacted, ``gate_blocked`` included. Pull's
+    ``gate_blocked`` reason is built from runtime + scope only
+    (``pull_apply._evaluate_gate``) so there is no path to preserve — redacting
+    is a pure backstop for the day that reason gains one, exactly as the web
+    twin does (``_pull_apply_payload`` docstring). The ``mem_context_sync``
+    ``privacy block:`` exception does NOT transfer: it carries a
+    ``PrivacyScanError.message``, which genuinely names the offending file.
     """
     if result.status == "applied":
         if result.write_outcome == "identical":
-            return f"{_redact_pull_reason(result.reason, root)}"
+            # Fixed fallback: _redact_reason coalesces None → "", so a future
+            # identical result without a reason must not render as an empty
+            # MCP response.
+            return _redact_pull_reason(result.reason, root) or (
+                f"{result.kind}/{result.name} is already identical in "
+                f"{result.scope} — nothing to pull."
+            )
         dupes = (
             f" (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})"
             if result.duplicate_runtimes
@@ -2734,15 +2749,13 @@ def _format_pull_result(result: "PullApplyResult", root: Path) -> str:
             f"into {result.scope} ({result.write_outcome}).{dupes}"
         )
     if result.status == "gate_blocked":
-        # Remediation-critical: keep the full path (the agent must locate the
-        # hit to review it), exactly as the sync ``privacy block:`` path does.
         valve = (
             " Re-call with force_unsafe_import=True to bypass for a reviewed "
             "false positive (user tier only)."
             if result.force_bypassable
             else ""
         )
-        return f"privacy block: {result.reason}{valve}"
+        return f"privacy block: {_redact_pull_reason(result.reason, root)}{valve}"
     if result.status in _PULL_ERROR_STATUSES:
         return f"error: {_redact_pull_reason(result.reason, root)}"
     if result.status in _PULL_REFUSAL_STATUSES:
@@ -2842,35 +2855,17 @@ async def mem_context_pull(
 
     # Strict-boolean the write/consent flags BEFORE anything else: via mem_do
     # these arrive raw, and a stringified boolean is truthy — "false" would
-    # execute the write and count as consent (see _strict_bool / _PULL_BOOL_FLAGS).
+    # execute the write and count as consent (see _strict_bool). Every flag is
+    # REASSIGNED from its validated value, so no raw parameter stays live in
+    # this body for a later edit to reach for by name.
     try:
-        flags = dict(
-            zip(
-                _PULL_BOOL_FLAGS,
-                (
-                    _strict_bool(v, f)
-                    for f, v in zip(
-                        _PULL_BOOL_FLAGS,
-                        (
-                            overwrite,
-                            apply,
-                            force_unsafe_import,
-                            allow_host_writes,
-                            confirm_project_shared,
-                        ),
-                        strict=True,
-                    )
-                ),
-                strict=True,
-            )
-        )
+        overwrite = _strict_bool(overwrite, "overwrite")
+        apply = _strict_bool(apply, "apply")
+        force_unsafe_import = _strict_bool(force_unsafe_import, "force_unsafe_import")
+        allow_host_writes = _strict_bool(allow_host_writes, "allow_host_writes")
+        confirm_project_shared = _strict_bool(confirm_project_shared, "confirm_project_shared")
     except ValueError as exc:
         return f"error: {exc}"
-    overwrite = flags["overwrite"]
-    apply = flags["apply"]
-    allow_host_writes = flags["allow_host_writes"]
-    confirm_project_shared = flags["confirm_project_shared"]
-
     k = kind.strip()
     nm = name.strip()
     frm = from_runtime.strip() or None
@@ -2895,10 +2890,6 @@ async def mem_context_pull(
     except InvalidNameError as exc:
         return f"error: {exc}"
     artifact_kind = cast("ArtifactKind", k)
-    # Gate A bypass valve — already strict-booled above, so nothing but a real
-    # ``True`` opens it (ADR-0011 §5; user tier only, project_shared hard-refuses
-    # in the engine regardless).
-    force_bypass = flags["force_unsafe_import"]
     # Validate from_runtime eligibility up front (export-only / unknown →
     # ValueError), reusing the engine's wording — a request-shape error, not an
     # engine outcome. Parity with the CLI / web boundary guard.
@@ -2935,7 +2926,10 @@ async def mem_context_pull(
         project_root=root,
         source_runtime=frm,
         overwrite=overwrite,
-        force_unsafe_import=force_bypass,
+        # Strict-booled above: only a literal True opens the Gate A valve
+        # (ADR-0011 §5; user tier only — project_shared hard-refuses in the
+        # engine regardless).
+        force_unsafe_import=force_unsafe_import,
         surface="mcp_context_pull",
     )
     if isinstance(outcome, PullApplyResult):
