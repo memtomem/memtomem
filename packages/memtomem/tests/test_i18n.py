@@ -836,6 +836,60 @@ class TestNoHardcodedStrings:
                     bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
         assert not bad_ph, "Move/Copy placeholder drift:\n" + "\n".join(bad_ph)
 
+    def test_pull_picker_keys_present(self, en: dict[str, str], ko: dict[str, str]) -> None:
+        """The ADR-0030 PR-D2 Pull picker sources every label / badge / toast /
+        confirm-dialog string from ``settings.ctx.pull*`` keys in both locales,
+        with the interpolating keys keeping their placeholders. The destination
+        tier radio reuses the existing ``settings.ctx.tier_option_*`` keys
+        (covered by the general parity test), so they are not re-listed here. The
+        badge keys are indexed by the engine enums (``content_status`` /
+        ``gate_status``); a missing one would render the raw key in the table."""
+        required = {
+            "settings.ctx.pull": set(),
+            "settings.ctx.pull_tooltip": set(),
+            "settings.ctx.pull_title": set(),
+            "settings.ctx.pull_subject": {"type", "name"},
+            "settings.ctx.pull_dest_label": set(),
+            "settings.ctx.pull_source_label": set(),
+            "settings.ctx.pull_loading": set(),
+            "settings.ctx.pull_nothing": {"type"},
+            "settings.ctx.pull_ambiguous": set(),
+            "settings.ctx.pull_auto": set(),
+            "settings.ctx.pull_override": set(),
+            "settings.ctx.pull_override_warning": set(),
+            "settings.ctx.pull_overwrite": set(),
+            "settings.ctx.pull_force_unsafe": set(),
+            "settings.ctx.pull_apply": set(),
+            "settings.ctx.pull_success": {"type", "name", "from"},
+            "settings.ctx.pull_gate_hard_refuse": set(),
+            "settings.ctx.pull_host_confirm_title": set(),
+            "settings.ctx.pull_host_confirm_message": set(),
+            "settings.ctx.pull_shared_confirm_title": set(),
+            "settings.ctx.pull_shared_confirm_message": set(),
+            # content_status badges (ContentStatus enum, minus never-shown values).
+            "settings.ctx.pull_status_new": set(),
+            "settings.ctx.pull_status_differs": set(),
+            "settings.ctx.pull_status_identical": set(),
+            "settings.ctx.pull_status_landing_error": set(),
+            "settings.ctx.pull_status_store_error": set(),
+            "settings.ctx.pull_status_not_importable": set(),
+            # gate_status badges (GateStatus enum).
+            "settings.ctx.pull_gate_ok": set(),
+            "settings.ctx.pull_gate_blocked": set(),
+            "settings.ctx.pull_gate_requires_unsafe_confirmation": set(),
+        }
+        missing_en = set(required) - set(en)
+        missing_ko = set(required) - set(ko)
+        assert not missing_en, f"Pull picker keys missing from en.json: {sorted(missing_en)}"
+        assert not missing_ko, f"Pull picker keys missing from ko.json: {sorted(missing_ko)}"
+        bad_ph: list[str] = []
+        for key, params in required.items():
+            for name, locale in [("en", en), ("ko", ko)]:
+                got = set(_PLACEHOLDER_RE.findall(locale[key]))
+                if got != params:
+                    bad_ph.append(f"  {name} {key}: expected {params}, got {got}")
+        assert not bad_ph, "Pull picker placeholder drift:\n" + "\n".join(bad_ph)
+
     def test_ctx_p0_onboarding_keys_jargon_free(
         self, en: dict[str, str], ko: dict[str, str]
     ) -> None:

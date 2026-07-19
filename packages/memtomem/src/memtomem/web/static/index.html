@@ -6,7 +6,7 @@
   <title>memtomem</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="apple-touch-icon" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css?v=137" />
+  <link rel="stylesheet" href="/style.css?v=138" />
   <link rel="stylesheet" href="/vendor/prism-tomorrow.min.css?v=1" />
 </head>
 <body>
@@ -1736,6 +1736,43 @@
     </div>
   </div>
 
+  <!-- Pull picker (ADR-0030 PR-D2) — source-selectable Pull from a tool -->
+  <div id="ctx-pull-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ctx-pull-title" aria-describedby="ctx-pull-subject">
+    <div class="modal-inner confirm-dialog ctx-pull-dialog">
+      <div class="modal-header">
+        <span id="ctx-pull-title" class="modal-title" data-i18n="settings.ctx.pull_title">Pull from a tool</span>
+      </div>
+      <p id="ctx-pull-subject" class="confirm-message"></p>
+
+      <fieldset id="ctx-pull-tier-field" class="ctx-mc-field">
+        <legend data-i18n="settings.ctx.pull_dest_label">Store in</legend>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-pull-tier" value="project_shared" checked><span data-i18n="settings.ctx.tier_option_project_shared">Project (shared)</span></label>
+        <label class="ctx-mc-radio"><input type="radio" name="ctx-pull-tier" value="user"><span data-i18n="settings.ctx.tier_option_user">User</span></label>
+      </fieldset>
+
+      <fieldset class="ctx-mc-field">
+        <legend data-i18n="settings.ctx.pull_source_label">Pull from</legend>
+        <div id="ctx-pull-candidates" class="ctx-pull-candidates"></div>
+      </fieldset>
+
+      <label id="ctx-pull-overwrite-row" class="ctx-pull-check-row" hidden>
+        <input type="checkbox" id="ctx-pull-overwrite">
+        <span data-i18n="settings.ctx.pull_overwrite">Replace the existing copy</span>
+      </label>
+      <label id="ctx-pull-force-row" class="ctx-pull-check-row" hidden>
+        <input type="checkbox" id="ctx-pull-force">
+        <span data-i18n="settings.ctx.pull_force_unsafe">Import despite the security warning</span>
+      </label>
+
+      <p id="ctx-pull-warning" class="ctx-mc-warning" role="alert" hidden></p>
+
+      <div class="confirm-actions">
+        <button id="ctx-pull-cancel-btn" class="btn-ghost" data-i18n="modal.cancel_btn">Cancel</button>
+        <button id="ctx-pull-apply-btn" class="btn-primary" data-i18n="settings.ctx.pull_apply" disabled>Pull</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Folder picker (issue #582 4.12) -->
   <div id="path-picker-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" data-i18n-aria-label="picker.aria_label">
     <div class="modal-inner path-picker-dialog">
@@ -1847,8 +1884,9 @@
   <script src="/context-gateway-overview.js?v=5"></script>
   <script src="/context-gateway-list.js?v=2"></script>
   <script src="/context-gateway-conflict.js?v=2"></script>
-  <script src="/context-gateway-detail.js?v=4"></script>
+  <script src="/context-gateway-detail.js?v=5"></script>
   <script src="/context-gateway-actions.js?v=2"></script>
+  <script src="/context-gateway-pull.js?v=1"></script>
   <script src="/context-portal.js?v=13"></script>
   <script src="/wiki.js?v=11"></script>
   <script src="/path-picker.js?v=4"></script>

@@ -42,6 +42,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   literal-`true`-only `force_unsafe_import` valve; and every reason/path is
   display-sanitized so no absolute path, secret, or raw artifact bytes cross the
   wire. (The picker UI that drives it lands in PR-D2.)
+- **Web Pull picker** (ADR-0030 §5/§11, PR-D2) — a "Pull" affordance on each
+  skill / subagent / command in the Connections tab opens a source-selectable
+  picker: it reads the read-only preview and lists every tool that has the
+  artifact with its two-axis content / privacy status, auto-selecting the
+  obvious source. When the tool copies diverge, Apply stays disabled until you
+  choose which one to pull — a stale copy can never silently beat a fresher one.
+  A destination-tier choice, an overwrite checkbox (shown only when the Store
+  already holds the item), and a security-bypass checkbox (shown only for a
+  reviewable privacy warning) round out the flow, which threads the shared
+  confirmation dialog before writing to the git-tracked project store or your
+  home folder.
 
 - **Explicit relevance feedback for search runs (Quality Lab)** (#1801) —
   a committed `query_run_id` now accepts local judgments (`relevant` /
