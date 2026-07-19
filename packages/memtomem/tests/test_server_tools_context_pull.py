@@ -64,6 +64,15 @@ def _store_exists(proj: Path, kind: str, name: str, scope: str = "project_shared
     return (canonical_artifact_dir(kind, scope, proj) / name).exists()
 
 
+def _pull_arg_model() -> type:
+    """The pydantic arg model FastMCP validates a direct ``mem_context_pull``
+    call against — built from the function so it is available in every tool
+    mode (the tool itself is pruned from ``mcp`` outside ``full``)."""
+    from mcp.server.fastmcp.utilities.func_metadata import func_metadata
+
+    return func_metadata(mem_context_pull).arg_model
+
+
 # ── registry classification ───────────────────────────────────────────────────
 
 
@@ -329,6 +338,38 @@ async def test_stringified_booleans_are_refused_via_mem_do(
     assert flag in out
     assert "literal boolean" in out
     assert not _store_exists(proj, "agents", "a")
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["overwrite", "apply", "force_unsafe_import", "allow_host_writes", "confirm_project_shared"],
+)
+@pytest.mark.parametrize("bad", ["true", "false", 1, 0, "yes"])
+def test_fastmcp_boundary_rejects_non_literal_booleans(flag: str, bad: object) -> None:
+    """The OTHER dispatch path: a direct ``mem_context_pull`` tool call goes
+    through FastMCP's pydantic arg model, which is LAX by default and would
+    coerce ``"true"`` / ``1`` / ``"yes"`` → ``True`` before the function body's
+    ``_strict_bool`` ever runs — opening the Gate A valve with a non-literal
+    value, which the web ``_only_literal_true`` refuses. ``StrictBool``
+    annotations close that; real JSON booleans still pass (below).
+
+    Built via ``func_metadata`` rather than the tool manager so this runs in
+    EVERY tool mode — the tool is pruned from ``mcp`` in the default ``core``
+    mode (which CI uses), and a skip here would be a false green on the
+    security-relevant path."""
+    with pytest.raises(Exception):
+        _pull_arg_model().model_validate({"kind": "agents", "name": "a", flag: bad})
+
+
+def test_fastmcp_boundary_accepts_real_booleans() -> None:
+    """Guard the other direction: StrictBool must not break legitimate calls."""
+    model = _pull_arg_model()
+    for val in (True, False):
+        m = model.model_validate({"kind": "agents", "name": "a", "force_unsafe_import": val})
+        assert m.force_unsafe_import is val
+    # The wire schema stays a plain boolean — clients see no StrictBool leak.
+    schema = model.model_json_schema()["properties"]["force_unsafe_import"]
+    assert schema["type"] == "boolean"
 
 
 async def test_apply_false_string_does_not_write(proj: Path) -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import click
+from pydantic import StrictBool
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
@@ -2763,11 +2764,18 @@ async def mem_context_pull(
     name: str = "",
     from_runtime: str = "",
     scope: str = "",
-    overwrite: bool = False,
-    apply: bool = False,
-    force_unsafe_import: bool = False,
-    allow_host_writes: bool = False,
-    confirm_project_shared: bool = False,
+    # StrictBool, not bool: FastMCP builds a LAX pydantic arg model from these
+    # annotations, which coerces "true" / 1 / "yes" → True before the function
+    # body runs. That would let a non-literal value open the Gate A valve on the
+    # direct tool-call path, breaking parity with the web
+    # ``_only_literal_true``. StrictBool rejects anything but a real JSON
+    # boolean at the FastMCP boundary; ``_strict_bool`` in the body then covers
+    # the ``mem_do`` path, which bypasses this model entirely. Both are needed.
+    overwrite: StrictBool = False,
+    apply: StrictBool = False,
+    force_unsafe_import: StrictBool = False,
+    allow_host_writes: StrictBool = False,
+    confirm_project_shared: StrictBool = False,
     ctx: CtxType = None,
 ) -> str:
     """Pull one runtime's copy of an artifact into the canonical Store.
