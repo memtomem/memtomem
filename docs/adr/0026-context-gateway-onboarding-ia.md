@@ -1,8 +1,10 @@
 # ADR-0026: Context Gateway first-time-user onboarding & comprehension layer
 
 **Status:** Accepted & partially shipped — P0, P1a/P1b, and the P1
-Simple-as-default flip (D-F) are merged; all of P2 remains deferred. See
-§"Implementation status (as of 2026-06-18)". **D-F shipped 2026-06-18 as a
+Simple-as-default flip (D-F) are merged. P2's **verb rename** (Sync→Push /
+Import→Pull) is **adopted via ADR-0030 §2** (campaign 1, PR-E) as reversible
+copy — see the P2 supersession note below; P2's **status collapse** remains
+deferred. See §"Implementation status (as of 2026-06-18)". **D-F shipped 2026-06-18 as a
 reversible experiment** (Simple is now the default) rather than gated on the
 §Validation user test — 6 naive participants proved impractical, and the
 Advanced toggle (per-user) plus the one-line constant (global) are the
@@ -281,6 +283,19 @@ tier labels under the same metaphor (e.g. Global/Shared/Draft). This relabels
 docs/screenshots, so it is **deferred pending** the §Validation user test.
 Backend `reason_code`s and request vocabulary (ADR-0015) are unchanged.
 
+> **Supersession note (2026-07-19, ADR-0030 §2).** The **verb-rename** portion
+> of P2 — Sync→Push / Import→Pull across UI labels, CLI help, and guides — is
+> **adopted** by ADR-0030 §2 (campaign 1, PR-E), a **narrow supersession of
+> this §P2's deferral** that reverses the "#1353 P2 NO-GO — deferred pending a
+> naive-user validation gate" posture. It ships as **reversible copy** (locale
+> / help / guide relabel; `reason_code`s, request/response identifiers, and
+> route paths stay frozen — exactly the cut described above), so it does not
+> require the §Validation gate. The **status collapse** to ahead/behind/in-sync
+> is **not** adopted: ADR-0030 §4 supersedes it with a two-axis preview model
+> (`content_status` × `gate_status`) that keeps `differs` / `in sync` / `out of
+> sync` rather than collapsing to a single directional set. The tier-label
+> re-framing under the same metaphor remains deferred.
+
 ## Consequences
 
 - A first-time user can state the canonical→runtime model and pick Sync
@@ -316,7 +331,7 @@ drifted.
 | **P1a — Simple-mode scaffold** — Simple/Advanced `localStorage` toggle, read-only (default later flipped to Simple — see the D-F row) | **Shipped** | #1358 |
 | **P1b — Simple-mode inline actions** — per-type Sync/Import rows, cross-tier empty-state summary (D-D lean iii), 3-state Simple labels | **Shipped** | #1360 |
 | **P1 — Simple-as-default flip** (D-F) | **Shipped (reversible)** — `_CTX_SIMPLE_DEFAULT = true` (`context-gateway.js`); Simple is the default-when-unset. Shipped 2026-06-18 as a reversible experiment instead of gating on the §Validation test (6 naive participants impractical): the Advanced toggle (per-user, persisted) + reverting the constant (global) are the rollback. Onboarding-docs fan-out shipped same-PR (the `context-gateway.md` guide). The "scoping tighten" the staged plan anticipated is a no-op — the nav/control-bar deep-link trap was already `:has`-guarded in P1a and the tile grid lives only in the Overview, so it cannot strand a user. | 2026-06-18 |
-| **P2 — Bold** — Push/Pull verb rename, status collapse to ahead/behind/in-sync (D-B / D-C) | **Deferred** — gated on the §Validation user test | — |
+| **P2 — Bold** — Push/Pull verb rename, status collapse to ahead/behind/in-sync (D-B / D-C) | **Verb rename adopted** via ADR-0030 §2 (reversible copy, no gate — see the P2 supersession note); **status collapse still deferred** (superseded by ADR-0030 §4's two-axis model) | verb rename: campaign-1 PR-E |
 
 **§Validation status:**
 
@@ -440,7 +455,9 @@ to the prior open question Q-x.)
   - **Alternatives (kept):** (a) no verb change — direction carried only by
     the diagram + legend (P0/P1); (c) **full** rename Sync→Push↑ /
     Import→Pull↓ (highest comprehension, one-way, breaks external
-    docs/screenshots) — still gated on the §Validation user test if chosen.
+    docs/screenshots) — **chosen and adopted 2026-07-19 by ADR-0030 §2** as
+    reversible copy (locale/help/guide relabel; wire vocabulary frozen), which
+    reframed it as reversible and therefore not gated on the §Validation test.
 - **D-C. Status-merge — mixed multi-runtime states.**
   - **Lean:** defer any status collapse to **P2 only** (post-validation);
     when rendering a **mixed** item (in-sync for one runtime, out-of-sync

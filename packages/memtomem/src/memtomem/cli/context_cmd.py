@@ -246,7 +246,7 @@ _SYNC_INCLUDE_OPTION = click.option(
         "Additional artifact kinds to fan out (repeatable or comma-separated). "
         "Supported: skills, agents, commands, settings, mcp-servers. "
         "mcp-servers (opt-in) fans canonical MCP server definitions into the "
-        "project .mcp.json; it is a sync-only kind."
+        "project .mcp.json; it is a push-only kind."
     ),
 )
 
@@ -494,7 +494,7 @@ def _print_pull_preview(
     elif preview.auto_source:
         summary = f"store: {store} · auto-source: {preview.auto_source}"
     else:
-        summary = f"store: {store} · nothing importable"
+        summary = f"store: {store} · nothing pullable"
     click.echo(f"  {summary}")
     if preview.store_present and preview.kind == "skills":
         click.secho(
@@ -759,7 +759,7 @@ def _confirm_settings_host_writes(root: Path, *, scope: str, yes: bool) -> bool:
     if yes:
         return True
     click.secho(
-        "Settings sync will modify the following files outside this project:",
+        "Settings push will modify the following files outside this project:",
         fg="yellow",
     )
     for p in pending:
@@ -860,7 +860,7 @@ def _confirm_mcp_servers_fanout(root: Path, *, yes: bool) -> bool:
     target = root / PROJECT_MCP_CONFIG
     verb = "rewrite" if target.exists() else "create"
     click.secho(
-        f"  mcp-servers sync will {verb} executable MCP server config at {target}",
+        f"  mcp-servers push will {verb} executable MCP server config at {target}",
         fg="yellow",
     )
     return click.confirm("  Continue?", default=False)
@@ -886,7 +886,7 @@ _LABEL_OPTION = click.option(
     "--label",
     default=None,
     help=(
-        "Sync the version at this label (e.g. 'production') or a bare version "
+        "Push the version at this label (e.g. 'production') or a bare version "
         "tag ('v2') instead of the working canonical. Applies to agents and "
         "commands only; 'latest' / omitted means the working file."
     ),
@@ -909,7 +909,7 @@ def _warn_label_ineligible_kinds(label: str | None, inc: set[str]) -> None:
     if ineligible:
         click.secho(
             f"  note: --label does not apply to {', '.join(ineligible)} "
-            "(only agents/commands are versioned); they sync from the working file.",
+            "(only agents/commands are versioned); they push from the working file.",
             fg="yellow",
         )
     if not (inc & _LABEL_ELIGIBLE_KINDS):
@@ -922,12 +922,12 @@ def _warn_label_ineligible_kinds(label: str | None, inc: set[str]) -> None:
 
 @click.group("context")
 def context() -> None:
-    """Manage the canonical artifact Store and sync it to your AI tools.
+    """Manage the canonical artifact Store and push it to your AI tools.
 
     The Store (``.memtomem/`` / ``~/.memtomem/``) holds your master copies
     of skills, agents, commands, MCP servers and settings. ``sync`` fans
     them out to detected runtimes (Claude Code, Codex, Kimi, Antigravity,
-    ...); ``init`` imports existing runtime copies into the Store;
+    ...); ``init`` pulls existing runtime copies into the Store;
     ``install`` / ``update`` / ``version`` manage wiki assets. Also
     includes the unified ``context.md`` generators (CLAUDE.md, GEMINI.md,
     etc.).
@@ -967,7 +967,7 @@ def detect_cmd(include: tuple[str, ...]) -> None:
 @click.option(
     "--overwrite",
     is_flag=True,
-    help="Overwrite existing canonical entries when importing from runtimes.",
+    help="Overwrite existing canonical entries when pulling from runtimes.",
 )
 @_SCOPE_OPTION
 @click.option(
@@ -984,7 +984,7 @@ def detect_cmd(include: tuple[str, ...]) -> None:
     is_flag=True,
     default=False,
     help=(
-        "Bypass Gate A on existing runtime files being imported. "
+        "Bypass Gate A on existing runtime files being pulled. "
         "user / project_local destinations only — project_shared "
         "hard-refuses (ADR-0011 §5)."
     ),
@@ -995,7 +995,7 @@ def detect_cmd(include: tuple[str, ...]) -> None:
     metavar="NAME",
     default=None,
     help=(
-        "Import only the runtime artifact with this exact name (import-only "
+        "Pull only the runtime artifact with this exact name (pull-only "
         "mode: skips context.md and directory seeding). Requires exactly one "
         "--include kind of skills, agents, or commands."
     ),
@@ -1008,22 +1008,22 @@ def init_cmd(
     force_unsafe_import: bool,
     only_name: str | None,
 ) -> None:
-    """Seed canonical artifact dirs and (optionally) import existing runtime files.
+    """Seed canonical artifact dirs and (optionally) pull existing runtime files.
 
     Without ``--scope`` the command preserves pre-PR-E2 behavior: writes
-    ``<proj>/.memtomem/context.md`` and (with ``--include``) imports under
+    ``<proj>/.memtomem/context.md`` and (with ``--include``) pulls under
     ``<proj>/.memtomem/{agents,skills,commands}/`` (the implicit
     ``project_shared`` tier). Pass ``--scope=user`` /
     ``--scope=project_local`` to seed at the user or local-draft tier
-    instead. ADR-0011 §5 Gate A scans every imported file's bytes for
+    instead. ADR-0011 §5 Gate A scans every pulled file's bytes for
     secrets; project_shared hard-refuses on any hit.
 
-    ``--only NAME`` (#1520 item 4) narrows the runtime import to one named
-    artifact — the CLI twin of the web's single-name import route. It is
-    import-only: context.md, directory seeding, and the .gitignore append
+    ``--only NAME`` (#1520 item 4) narrows the runtime pull to one named
+    artifact — the CLI twin of the web's single-name pull route. It is
+    pull-only: context.md, directory seeding, and the .gitignore append
     are skipped; the scope gates above still apply because they guard the
-    import write itself. ``--scope=project_local`` is rejected — the draft
-    tier has no runtime fan-out to import from, so the command could only
+    pull write itself. ``--scope=project_local`` is rejected — the draft
+    tier has no runtime fan-out to pull from, so the command could only
     ever no-op. Exits 1 when no runtime artifact matches (the engine
     contract reports not-found as empty ``imported`` + ``skipped``).
     """
@@ -1047,8 +1047,8 @@ def init_cmd(
         # having done literally nothing. Reject up front instead.
         if scope_flag == "project_local":
             raise click.UsageError(
-                "--only cannot import into --scope=project_local: the draft "
-                "tier has no runtime fan-out to import from (ADR-0011 §3)."
+                "--only cannot pull into --scope=project_local: the draft "
+                "tier has no runtime fan-out to pull from (ADR-0011 §3)."
             )
     root = _find_project_root()
     scope_explicit = scope_flag is not None
@@ -1153,7 +1153,7 @@ def init_cmd(
         atomic_write_text(ctx_path, sections_to_markdown(sections), 0o644)
         click.secho(f"Created {CONTEXT_FILENAME}", fg="green")
         click.echo(f"  Sections: {', '.join(sections.keys())}")
-        click.echo("  Edit this file, then run 'mm context generate' to sync.")
+        click.echo("  Edit this file, then run 'mm context generate' to push.")
 
     # Seed canonical sub-artifact dirs at the resolved scope (idempotent).
     # Skipped in --only import-only mode: the extract engines mkdir their
@@ -1209,7 +1209,7 @@ def init_cmd(
             # (mirrors the web single-name import's 404).
             if only_name and not result.imported and not result.skipped:
                 raise click.ClickException(
-                    f"No runtime {spec.kind} entry named {only_name!r} to import at scope='{scope}'"
+                    f"No runtime {spec.kind} entry named {only_name!r} to pull at scope='{scope}'"
                 )
 
 
@@ -1321,7 +1321,7 @@ def generate_cmd(
         if _confirm_settings_host_writes(root, scope=scope, yes=yes):
             _print_settings_generate(root, scope=scope, allow_host_writes=True)
         else:
-            click.secho("  Skipped settings sync (declined).", fg="yellow")
+            click.secho("  Skipped settings push (declined).", fg="yellow")
 
     click.secho("Done.", fg="green")
 
@@ -1597,7 +1597,7 @@ def pull_cmd(
     "all_projects",
     is_flag=True,
     help=(
-        "Sync every eligible discovered project (enrolled + on disk), not just "
+        "Push every eligible discovered project (enrolled + on disk), not just "
         "the current one. project_shared tier only; ineligible projects are "
         "reported and skipped. One project's failure does not abort the batch."
     ),
@@ -1640,12 +1640,12 @@ def sync_cmd(
     force_unsafe: bool,
     runtimes: tuple[str, ...],
 ) -> None:
-    """Sync context.md + included artifacts to detected agent files.
+    """Push context.md + included artifacts to detected agent files.
 
     Regenerates the detected project-memory files (CLAUDE.md / GEMINI.md /
     .cursorrules / …) from ``.memtomem/context.md``. For every kind passed via
     ``--include`` it also fans out the canonical artifacts: skills, agents,
-    commands, settings, and (opt-in) mcp-servers. ``--all-projects`` syncs
+    commands, settings, and (opt-in) mcp-servers. ``--all-projects`` pushes
     every enrolled/discovered project (project_shared tier only); ``--scope`` /
     ``--label`` pick the artifact tier; ``--force-unsafe`` bypasses Gate A on a
     reviewed false positive (user / project_local destinations only);
@@ -1663,7 +1663,7 @@ def sync_cmd(
             raise click.UsageError(
                 "--runtime filters artifact fan-out (skills/agents/commands); "
                 f"{', '.join(sorted(non_artifact))} has no per-runtime targeting — "
-                "sync those separately without --runtime."
+                "push those separately without --runtime."
             )
         if not inc & {"skills", "agents", "commands"}:
             raise click.UsageError(
@@ -1678,7 +1678,7 @@ def sync_cmd(
         if scope_flag not in (None, "project_shared"):
             raise click.UsageError(
                 "--all-projects syncs the project_shared tier only; drop "
-                "--scope or pass --scope project_shared (sync other tiers "
+                "--scope or pass --scope project_shared (push other tiers "
                 "per project, without --all-projects)."
             )
         # The batch is project_shared, where Gate A hard-refuses a forced
@@ -1688,7 +1688,7 @@ def sync_cmd(
             raise click.UsageError(
                 "--force-unsafe does not apply to --all-projects (project_shared "
                 "tier only — Gate A hard-refuses a forced fan-out there). "
-                "Force-sync a user / project_local tier per project, without "
+                "Force-push a user / project_local tier per project, without "
                 "--all-projects."
             )
         _warn_label_ineligible_kinds(label, inc)
@@ -1720,7 +1720,7 @@ def sync_cmd(
         # it — this used to just skip `Synced.` and still exit 0. Mirrors
         # generate_cmd; batch mode never reaches the False leg.
         raise SystemExit(1)
-    click.secho("Synced.", fg="green")
+    click.secho("Pushed.", fg="green")
 
 
 def _run_sync_legs(
@@ -1838,7 +1838,7 @@ def _run_sync_legs(
         if _confirm_settings_host_writes(root, scope=scope, yes=yes):
             _print_settings_generate(root, scope=scope, allow_host_writes=True)
         else:
-            click.secho("  Skipped settings sync (declined).", fg="yellow")
+            click.secho("  Skipped settings push (declined).", fg="yellow")
 
     if "mcp-servers" in inc:
         click.echo("")
@@ -1857,7 +1857,7 @@ def _run_sync_legs(
         if not batch or _confirm_mcp_servers_fanout(root, yes=yes):
             _print_mcp_servers_generate(root, surface=surface)
         else:
-            click.secho("  Skipped mcp-servers sync (declined).", fg="yellow")
+            click.secho("  Skipped mcp-servers push (declined).", fg="yellow")
 
     return True
 
@@ -1902,7 +1902,7 @@ def _run_sync_all_projects(
     click.echo(f"{len(rows)} project scope(s) discovered:")
     for s, code in rows:
         if code is None:
-            click.secho(f"  sync  {s.scope_id}  {s.label}  ({s.root})", fg="green")
+            click.secho(f"  push  {s.scope_id}  {s.label}  ({s.root})", fg="green")
         else:
             click.secho(
                 f"  skip  {s.scope_id}  {s.label}  ({s.root})  [{_CLI_SYNC_SKIP_REASONS[code]}]",
@@ -1910,11 +1910,11 @@ def _run_sync_all_projects(
             )
 
     if not runnable:
-        click.echo("No projects are eligible for sync; nothing to do.")
+        click.echo("No projects are eligible for push; nothing to do.")
         return
 
     if not yes:
-        click.confirm(f"\nSync {len(runnable)} project(s)?", abort=True)
+        click.confirm(f"\nPush {len(runnable)} project(s)?", abort=True)
 
     successes = 0
     failures = 0
@@ -1953,7 +1953,7 @@ def _run_sync_all_projects(
             successes += 1
 
     click.echo(
-        f"\nSummary: {successes} synced, {failures} failed, {len(rows) - len(runnable)} skipped."
+        f"\nSummary: {successes} pushed, {failures} failed, {len(rows) - len(runnable)} skipped."
     )
     if failures:
         raise click.exceptions.Exit(1)
@@ -3148,7 +3148,7 @@ def status_cmd(scope_flag: TargetScope, all_projects: bool) -> None:
             click.echo("\nNo user-tier assets found under ~/.memtomem/.")
             click.echo(
                 "Run 'mm context init --include=agents,commands,skills --scope=user' "
-                "to import from runtimes."
+                "to pull from runtimes."
             )
         else:
             click.echo(
@@ -3156,7 +3156,7 @@ def status_cmd(scope_flag: TargetScope, all_projects: bool) -> None:
                 f"in this project for tier {scope_flag}."
             )
             click.echo(
-                "Run 'mm context detect' to see importable runtime files, "
+                "Run 'mm context detect' to see pullable runtime files, "
                 "'mm context init' to seed canonicals, or "
                 "'mm context install <type> <name>' to install from the wiki."
             )
@@ -4970,7 +4970,7 @@ def _print_hook_copy_result(result: HookCopyResult) -> None:
     default=None,
     help=(
         "Destination Claude settings tier for the immediate fan-out. "
-        "Omitted: the resolved hooks.target_scope (the tier sync writes)."
+        "Omitted: the resolved hooks.target_scope (the tier push writes)."
     ),
 )
 @click.option(

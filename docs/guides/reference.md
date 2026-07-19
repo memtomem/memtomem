@@ -123,7 +123,7 @@ Use `mem_do(action="help")` to see all available actions, or `mem_do(action="hel
 
 ### Context tool parameters
 
-The `mem_context_*` tools (CLI: `mm context`) sync canonical artifacts — skills, sub-agents, commands, MCP-server definitions — across AI runtimes. See the [Context Gateway](context-gateway.md) guide for the Store → Sync → Runtime model, and [Moving artifacts between tiers and projects](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects) for the `move`/`copy`/`migrate` transfer verbs. The parameter surface:
+The `mem_context_*` tools (CLI: `mm context`) push canonical artifacts — skills, sub-agents, commands, MCP-server definitions — out to AI runtimes. See the [Context Gateway](context-gateway.md) guide for the Store → Push → Runtime model, and [Moving artifacts between tiers and projects](reference/data-config-cli.md#moving-artifacts-between-tiers-and-projects) for the `move`/`copy`/`migrate` transfer verbs. The parameter surface:
 
 - **All context tools** accept `include="skills,agents,commands"` to scope a canonical artifact workflow.
 - **`init`, `generate`, `sync`, `diff`, `version`, `promote`** accept `scope="project_shared|user|project_local"` — the canonical **tier** (ADR-0016 §2).

@@ -328,7 +328,7 @@ mm context settings-copy --event PostToolUse --matcher "Edit|Write" \
 
 `--to-project` takes a `p-<sha12>` scope_id from `mm context projects list`
 or a filesystem path. The copy writes the destination's canonical
-`.memtomem/settings.json` (so the destination's own syncs keep the rule
+`.memtomem/settings.json` (so the destination's own pushes keep the rule
 alive) plus the destination-tier Claude settings file (`--to <tier>`,
 defaulting to the resolved `hooks.target_scope`); Codex/Gemini/Kimi pick
 the entry up on the destination's next

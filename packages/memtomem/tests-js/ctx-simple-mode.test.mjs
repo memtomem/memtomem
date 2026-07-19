@@ -395,7 +395,7 @@ describe('ADR-0026 P1a — Context Gateway Simple mode', () => {
         .textContent.trim();
     // EN baseline — verdict escalates to attention (mcp parse_error in OVERVIEW).
     expect(verdict()).toBe('Some items need your attention — open Advanced to review.');
-    expect(skillsStatus()).toBe('Needs sync');
+    expect(skillsStatus()).toBe('Needs push');
 
     // setLang dispatches langchange; the listener re-renders the Overview from
     // cache. Simple is sticky, so the verdict + 3-state copy re-translate in

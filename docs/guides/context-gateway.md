@@ -1,4 +1,4 @@
-# Context Gateway: one Store, synced to all your AI tools
+# Context Gateway: one Store, pushed to all your AI tools
 
 > **Audience:** developers who use more than one AI coding tool (Claude Code,
 > Codex, Kimi, Antigravity, …) and want one project's skills, commands, and
@@ -6,10 +6,10 @@
 > hand-copying files into each tool's config directory.
 
 memtomem keeps your master copies in one **Store** (the `.memtomem/` tree) and
-**Syncs** them out to your **Runtimes** — the AI tools detected on your machine.
-**Import** is the reverse: it pulls a copy that already exists in a runtime back
-into the Store. The flow is one-way by default: edit in the Store, then Sync; a
-runtime's copy is overwritten on the next Sync.
+**Pushes** them out to your **Runtimes** — the AI tools detected on your machine.
+**Pull** is the reverse: it brings a copy that already exists in a runtime back
+into the Store. The flow is one-way by default: edit in the Store, then Push; a
+runtime's copy is overwritten on the next Push.
 
 This guide walks through that model and the first task most people want — getting
 a project's skills into their AI tools — from both the Web UI and the CLI. It
@@ -21,11 +21,11 @@ environment variables; it does not re-document those here.
 
 - [Prerequisites](#prerequisites)
 - [First success — put one skill under Store control](#first-success--put-one-skill-under-store-control)
-- [The model — Store, Runtimes, Sync, Import](#the-model--store-runtimes-sync-import)
+- [The model — Store, Runtimes, Push, Pull](#the-model--store-runtimes-push-pull)
 - [Where copies live — the "Stored in" tiers](#where-copies-live--the-stored-in-tiers)
 - [The wiki — a separate global library, not the Store](#the-wiki--a-separate-global-library-not-the-store)
 - [Walkthrough — get this project's skills into your AI tools](#walkthrough--get-this-projects-skills-into-your-ai-tools)
-- [Sync vs Import — reading the status](#sync-vs-import--reading-the-status)
+- [Push vs Pull — reading the status](#push-vs-pull--reading-the-status)
 - [From the Web UI — what the tab shows](#from-the-web-ui--what-the-tab-shows)
 - [From the CLI — the core loop](#from-the-cli--the-core-loop)
 - [Other artifact types and projects](#other-artifact-types-and-projects)
@@ -56,7 +56,7 @@ The directory must have a project marker such as `.git/` or `pyproject.toml`.
 
 Choose the path that matches where the skill exists today.
 
-### Import a skill that already exists in an AI runtime
+### Pull a skill that already exists in an AI runtime
 
 For a skill named `reviewer` already present in Claude, Codex, Kimi, or another
 supported runtime:
@@ -69,7 +69,7 @@ mm context diff --include=skills --scope project_shared
 mm context sync --include=skills --scope project_shared
 ```
 
-`init --only` imports exactly one runtime artifact into the git-tracked
+`init --only` pulls exactly one runtime artifact into the git-tracked
 project Store. Review and commit `.memtomem/skills/reviewer/` after the privacy
 gate passes. From then on, edit the Store copy and use `sync`; do not keep
 editing generated runtime copies.
@@ -90,10 +90,10 @@ mm context sync --include=skills --scope project_shared
 ```
 
 Success means the final `diff` no longer reports missing or out-of-sync
-runtime copies. The Wiki is not a Store tier and never syncs directly to
+runtime copies. The Wiki is not a Store tier and never pushes directly to
 runtimes; `context install` is the explicit Wiki → project Store step.
 
-## The model — Store, Runtimes, Sync, Import
+## The model — Store, Runtimes, Push, Pull
 
 Four words carry the whole feature:
 
@@ -103,14 +103,14 @@ Four words carry the whole feature:
 - **Runtimes** — the AI tools detected on the machine (Claude Code, Codex, Kimi,
   Antigravity, and others), each with its own config directory
   (`.claude/`, `.codex/`, `.gemini/`, `.kimi/`, …).
-- **Sync** — sends your stored copies *out* to the runtimes configured for the
+- **Push** — sends your stored copies *out* to the runtimes configured for the
   Store. This is the common direction.
-- **Import** — brings a runtime's existing copy *back in* to the Store. Use it
+- **Pull** — brings a runtime's existing copy *back in* to the Store. Use it
   once, when an artifact only lives in a tool and you want memtomem to own it.
 
-Because Sync is one-way, the Store is the source of truth: edit there, Sync, and
+Because Push is one-way, the Store is the source of truth: edit there, Push, and
 every runtime gets the same copy. A change you make directly in a runtime's
-config directory is overwritten the next time you Sync that artifact — Import it
+config directory is overwritten the next time you Push that artifact — Pull it
 first if you want to keep it.
 
 When the same artifact name exists in more than one runtime with different
@@ -120,9 +120,9 @@ writes anything: what would land in the Store, and whether the privacy gate
 would allow it. It is source-selectable and preview-first — a plain dry-run by
 default, `--apply` to execute. If the candidates diverge, `--apply` refuses
 until you name one with `--from <runtime>`, so a stale copy can never silently
-win. (Section-level batch Import keeps its existing first-wins behavior; `pull`
+win. (Section-level batch Pull keeps its existing first-wins behavior; `pull`
 is the single-artifact, choose-your-source path.) The complementary
-`mm context sync --runtime <name>` restricts a Sync's fan-out to specific
+`mm context sync --runtime <name>` restricts a Push's fan-out to specific
 runtimes.
 
 ## Where copies live — the "Stored in" tiers
@@ -131,7 +131,7 @@ Every stored artifact sits at one of three tiers (the **Stored in** axis in the
 Web UI). The display label is on the left; the literal token you pass to
 `--scope` on the CLI is in parentheses:
 
-| Tier | Where it lives | Synced to runtimes? | Shared with your team? |
+| Tier | Where it lives | Pushed to runtimes? | Shared with your team? |
 |---|---|---|---|
 | **User** (`user`) | `~/.memtomem/<artifact>/` | Yes | No — every project on this machine, just you |
 | **Project (shared)** (`project_shared`) | `<project>/.memtomem/<artifact>/` | Yes | Yes — committed to the project's git repo |
@@ -140,9 +140,9 @@ Web UI). The display label is on the left; the literal token you pass to
 A few load-bearing details:
 
 - **Project (shared)** means *git-tracked* (you commit it so teammates get it on
-  `git pull`). It does not mean "shared between tools" — every tier Syncs to the
+  `git pull`). It does not mean "shared between tools" — every tier Pushes to the
   tools; only the git-sharing differs.
-- **Project (local)** is a gitignored scratch tier. It is never Synced out to a
+- **Project (local)** is a gitignored scratch tier. It is never Pushed out to a
   runtime, by design — it is your private draft.
 - Writing a secret into **Project (shared)** is blocked outright (see
   [Privacy and git safety](#privacy-and-git-safety) below) because git history is
@@ -159,13 +159,13 @@ The names look alike, so state it plainly: **`~/.memtomem-wiki` is not
 - **`~/.memtomem-wiki/`** is the **wiki**: an *optional*, host-global **git
   library** of *canonical* skills, subagents, and commands you author once and
   reuse across every project. It is a normal git repo you can back up and clone
-  (`mm wiki push` / `pull`). It is **not** a Store tier and is never synced to a
+  (`mm wiki push` / `pull`). It is **not** a Store tier and is never pushed to a
   runtime directly.
 
 The wiki sits one step *upstream* of the Store — you pull from it explicitly:
 
 ```
-wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memtomem/)  ──sync──▶  runtime (.claude/ …)
+wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memtomem/)  ──push──▶  runtime (.claude/ …)
 ```
 
 - **Install** — `mm context install <type> <name>` (or the **Install** button in
@@ -204,7 +204,7 @@ wiki (~/.memtomem-wiki)  ──install──▶  project Store (<project>/.memto
 Install and Update only ever write the **project** Store. They do **not** edit
 `~/.memtomem/config.json` or the `~/.memtomem/<artifact>/` User tier — so a wiki
 install never changes your machine-wide settings or User-tier copies. Once
-installed, the snapshot is an ordinary Store artifact: you Sync it out to your
+installed, the snapshot is an ordinary Store artifact: you Push it out to your
 runtimes like any other.
 
 **Authoring a new asset** — `mm wiki <type> new <name>` scaffolds the
@@ -252,8 +252,8 @@ mm web      # http://127.0.0.1:8080
 Open the **Gateway** tab. Its default **Simple view** shows one row
 per artifact type — find the **Skills** row:
 
-- If the skill isn't in your tools yet the row reads **Needs sync** and offers a
-  **Sync** button. Click it.
+- If the skill isn't in your tools yet the row reads **Needs push** and offers a
+  **Push** button. Click it.
 - A confirmation appears first — it tells you exactly what will change, e.g.
   *"This will create N missing and overwrite M out-of-sync runtime files in:
   …"*. Read it, then confirm.
@@ -270,9 +270,9 @@ mm context sync --include=skills        # send the stored skills out to the runt
 ```
 
 `mm context diff` is the read-only CLI view of the status badges; `mm context
-sync` applies the changes. Syncing skills, agents, or commands writes directly —
-unlike the Web UI, which shows a confirmation for every Sync, the CLI does not
-prompt. (The one exception is a `settings` sync that writes files outside the
+sync` applies the changes. Pushing skills, agents, or commands writes directly —
+unlike the Web UI, which shows a confirmation for every Push, the CLI does not
+prompt. (The one exception is a `settings` push that writes files outside the
 project, which prompts unless you pass `--yes`.)
 
 To put a skill in your **User** tier instead (available to every project on this
@@ -283,7 +283,7 @@ mm context sync --include=skills --scope user
 # fans out from ~/.memtomem/skills/ → ~/.claude/skills/, ~/.gemini/skills/, ~/.agents/skills/ (Codex), ~/.kimi/skills/
 ```
 
-## Sync vs Import — reading the status
+## Push vs Pull — reading the status
 
 The **Advanced** view labels each artifact with one of these precise statuses
 (the default Simple view collapses them into a single per-row verdict + fix
@@ -292,17 +292,17 @@ button). Map the status to the action that resolves it:
 | Status | What it means | Action |
 |---|---|---|
 | **In sync** | The Store and the runtime copies match. | Nothing to do. |
-| **Out of sync** | A runtime copy drifted from the Store. | **Sync** (the Store copy wins). |
-| **Not in runtime** | The Store has it; a runtime doesn't. | **Sync** (creates it there). |
-| **Not yet imported** | A runtime has it; the Store doesn't. | **Import** (brings it in). |
+| **Out of sync** | A runtime copy drifted from the Store. | **Push** (the Store copy wins). |
+| **Not in runtime** | The Store has it; a runtime doesn't. | **Push** (creates it there). |
+| **Not yet pulled** | A runtime has it; the Store doesn't. | **Pull** (brings it in). |
 | **Parse error** | A file (Store or runtime) is malformed. | Open it, fix the file, then refresh. |
 
-The rule of thumb: if the Store should win, **Sync**; if a tool has something the
-Store is missing, **Import** it once and then the Store owns it.
+The rule of thumb: if the Store should win, **Push**; if a tool has something the
+Store is missing, **Pull** it once and then the Store owns it.
 
-When the same artifact exists in more than one runtime, Import takes the first
+When the same artifact exists in more than one runtime, Pull takes the first
 copy it finds, scanning runtimes in a fixed order (Claude first, then
-Antigravity; skills also import from Codex and Kimi). Other runtimes are
+Antigravity; skills also pull from Codex and Kimi). Other runtimes are
 export-only and are never read back.
 
 ## From the Web UI — what the tab shows
@@ -313,10 +313,10 @@ The Context Gateway tab has two views, toggled by the **Simple view** switch:
   button on each row, and a **Manage** link that drops you into Advanced for
   anything without a one-click fix.
 - **Advanced** — per-type sections (Skills, Subagents, Custom Commands, MCP
-  servers, settings/hooks), each with a status badge and per-row Sync/Import
+  servers, settings/hooks), each with a status badge and per-row Push/Pull
   buttons, plus a control bar to filter by artifact type, the **Stored in** tier,
-  project, and sync state. **Sync All** pushes everything in the current Store at
-  once (with the same create/overwrite confirmation). The **Simple view** toggle
+  project, and sync state. **Push All** sends everything in the current Store out
+  at once (with the same create/overwrite confirmation). The **Simple view** toggle
   switches back; your choice persists.
 
 The **Projects** portal lists the project roots memtomem knows about: the folder
@@ -325,8 +325,8 @@ the server is running in (marked *current folder*), any roots you registered, an
 shows a detection badge (*Not installed* / *Installed* / *Registered*).
 
 Shortly after the list paints, a background fleet check marks any project whose
-synced context has fallen out of step with the Store — wiki pins behind or
-runtime files changed — with a **drift** badge. Click **Sync** on that row to
+pushed context has fallen out of step with the Store — wiki pins behind or
+runtime files changed — with a **drift** badge. Click **Push** on that row to
 resolve it, or run `mm context status --all-projects` for the per-project
 breakdown.
 
@@ -348,20 +348,20 @@ Useful flags (see [the CLI reference](reference/data-config-cli.md#cli-reference
 list):
 
 - `--include=<kind>` — narrow to `skills`, `agents`, `commands`, or `settings`.
-  `mm context sync` *also* accepts `--include=mcp-servers` (sync-only, opt-in).
+  `mm context sync` *also* accepts `--include=mcp-servers` (push-only, opt-in).
 - `--scope user|project_shared|project_local` — pick the tier (see the table
   above). `project_local` never reaches a runtime.
-- `--all-projects` — batch a Project (shared) sync over every eligible project
+- `--all-projects` — batch a Project (shared) push over every eligible project
   (enrolled or discovered on disk; paused/ineligible ones are skipped).
 - `--yes` — skip the confirmation prompt shown before writing `settings` files
-  outside the project (it has no effect when syncing skills, agents, or commands).
+  outside the project (it has no effect when pushing skills, agents, or commands).
 
 ## Other artifact types and projects
 
-Skills are the walkthrough example, but the same Store → Sync → Runtime flow
+Skills are the walkthrough example, but the same Store → Push → Runtime flow
 covers **subagents** (`agents`), **custom commands** (`commands`), and
-**settings/hooks** (`settings`). MCP server definitions also Sync (into a
-project's `.mcp.json`), but as a sync-only, opt-in kind (`--include=mcp-servers`).
+**settings/hooks** (`settings`). MCP server definitions also Push (into a
+project's `.mcp.json`), but as a push-only, opt-in kind (`--include=mcp-servers`).
 
 To manage more than one project, register its root so it shows up in the
 Projects portal and `--all-projects` batches:
@@ -384,7 +384,7 @@ them out:
 - **Project (shared)** writes hard-refuse on a detected secret and **cannot** be
   overridden — `--force-unsafe` is rejected for `project_shared` because git
   history is permanent. Remove the flagged line, then re-run.
-- **User** writes can be overridden with `--force-unsafe` (CLI) or *Sync
+- **User** writes can be overridden with `--force-unsafe` (CLI) or *Push
   anyway* (Web) after you've reviewed a false positive — e.g. a type
   annotation like `api_key: str`.
 - **Project (local)** writes can be overridden with `--force-unsafe`, CLI
@@ -393,7 +393,7 @@ them out:
 
 The override flag has two spellings, one per direction: `mm context sync
 --force-unsafe` (Store → runtimes) and `mm context init --force-unsafe-import`
-(existing runtime files being imported into the Store). Both follow the tier
+(existing runtime files being pulled into the Store). Both follow the tier
 rules above — a `project_shared` destination always hard-refuses.
 
 See [`configuration.md#context-gateway`](configuration.md#context-gateway) for

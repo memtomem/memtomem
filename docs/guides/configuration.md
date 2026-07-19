@@ -957,20 +957,20 @@ and `project_local` tier entries; the `user` tier (per ADR-0011 §1) is a
 separate, always-visible axis whose canonical lives under
 `~/.memtomem/<artifact>/`.
 
-> For a task-first walkthrough of the Store → Sync → Runtime model, see the
+> For a task-first walkthrough of the Store → Push → Runtime model, see the
 > [Context Gateway](context-gateway.md) guide. This section is the
 > environment-variable reference.
 
-When an artifact row is `Not yet imported`, the Web Context Gateway shows a
+When an artifact row is `Not yet pulled`, the Web Context Gateway shows a
 scope-aware remediation block. `project_shared` can be bootstrapped with the
-web Import action or with `mm context init --include=agents,commands,skills
+web Pull action or with `mm context init --include=agents,commands,skills
 --scope project_shared --confirm-project-shared` followed by `mm context sync
 --include=agents,commands,skills --scope project_shared`. The `user` tier is
 read-only in the Web UI, so use the matching `--scope user` CLI flow. The
 `project_local` tier is a gitignored draft tier; use `--scope project_local`
-to seed drafts, and expect sync to report the no-runtime-fan-out skip.
+to seed drafts, and expect push to report the no-runtime-fan-out skip.
 
-All writes into the git-tracked `.memtomem/` tree — sync fan-out, `mm context
+All writes into the git-tracked `.memtomem/` tree — push fan-out, `mm context
 install`/`update` from the wiki, version create, and the web hook-rule
 promote — pass the ADR-0011 §5 privacy gate first: a detected secret
 hard-refuses the write with no bypass flag, because git history cannot be

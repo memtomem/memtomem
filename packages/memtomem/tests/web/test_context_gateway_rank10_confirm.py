@@ -168,7 +168,7 @@ def test_import_confirm_names_destination_and_dry_run_preview(page, mm_web_url: 
     # Destination: active project (Server CWD) · project_shared tier.
     assert "Server CWD" in message, f"import confirm should name the destination, got {message!r}"
     # Preview: 2 would-import, 1 already exists.
-    assert "2 to import" in message and "1 already exist" in message, (
+    assert "2 to pull" in message and "1 already exist" in message, (
         f"import confirm should name the dry-run counts, got {message!r}"
     )
     # Since 1 already exists, the preview ties that count to the Overwrite
@@ -214,7 +214,7 @@ def test_import_confirm_counts_only_canonical_exists_as_already_exist(
     page.locator("#settings-ctx-skills .ctx-import-btn[data-type='skills']").click()
     page.wait_for_selector("#confirm-modal:not([hidden])", timeout=3_000)
     message = page.locator("#confirm-message").text_content() or ""
-    assert "1 to import" in message, f"the importable item should still count, got {message!r}"
+    assert "1 to pull" in message, f"the importable item should still count, got {message!r}"
     # The lone skip is a dedup, not canonical_exists → 0 already exist, no hint.
     assert "0 already exist" in message, (
         f"a dedup skip must not count as 'already exist', got {message!r}"

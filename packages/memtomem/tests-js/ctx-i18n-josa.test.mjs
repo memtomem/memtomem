@@ -64,6 +64,6 @@ describe('I18N josa markers — locale isolation', () => {
     const { window } = dom;
     await window.I18N.init(); // en default in jsdom
     expect(window.t('settings.ctx.confirm_import', { type: 'skills', dest: 'user' }))
-      .toBe('Import skills from runtimes into user?');
+      .toBe('Pull skills from runtimes into user?');
   });
 });

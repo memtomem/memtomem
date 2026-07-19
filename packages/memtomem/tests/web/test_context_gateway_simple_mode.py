@@ -136,10 +136,10 @@ def test_default_is_simple_verdict_and_rows_visible(page, mm_web_url: str) -> No
     needs_sync = page.locator(".ctx-simple-row[data-section='ctx-skills']")
     assert needs_sync.get_attribute("data-state") == "needs_sync"
     status_text = (needs_sync.locator(".ctx-simple-status-text").text_content() or "").strip()
-    assert status_text == "Needs sync", f"3-state label must render as text; got {status_text!r}"
+    assert status_text == "Needs push", f"3-state label must render as text; got {status_text!r}"
 
     verdict = (page.locator(".ctx-simple-verdict").text_content() or "").strip()
-    assert verdict == "Some items aren't in your tools yet — sync to push them out.", (
+    assert verdict == "Some items aren't in your tools yet — push them out.", (
         f"aggregate verdict must surface the sync-direction line; got {verdict!r}"
     )
 
@@ -256,7 +256,7 @@ def test_inline_sync_button_focusable_and_opens_confirm(page, mm_web_url: str) -
 
     sync.click()
     page.locator("#confirm-modal").wait_for(state="visible", timeout=3_000)
-    assert (page.locator("#confirm-title").text_content() or "").strip() == "Sync"
+    assert (page.locator("#confirm-title").text_content() or "").strip() == "Push"
     page.locator("#confirm-cancel-btn").click()
 
 
@@ -307,7 +307,7 @@ def test_empty_state_shows_hint_and_open_advanced_cta(page, mm_web_url: str) -> 
     ctas = page.locator(".ctx-simple-advanced-cta")
     assert ctas.count() == 2, "empty state offers Import and Create CTAs"
     labels = [(ctas.nth(i).text_content() or "").strip() for i in range(2)]
-    assert labels == ["Import from tools", "Create a skill"]
+    assert labels == ["Pull from tools", "Create a skill"]
     verdict = (page.locator(".ctx-simple-verdict").text_content() or "").strip()
     assert verdict == "Nothing is stored for this project yet."
 

@@ -150,7 +150,7 @@ def test_decline_at_confirm_writes_nothing(
     )
     assert result.exit_code != 0
     assert "2 project scope(s) discovered:" in result.output
-    assert "Sync 2 project(s)?" in result.output
+    assert "Push 2 project(s)?" in result.output
     assert not _runtime_skill(a).exists()
     assert not _runtime_skill(b).exists()
 
@@ -172,7 +172,7 @@ def test_yes_executes_every_eligible_project(
     # The batch memory-leg note (a registered project without context.md
     # is not a failure) and the update-all-style summary.
     assert "missing — skipping project memory" in result.output.replace("context.md ", "")
-    assert "Summary: 2 synced, 0 failed, 0 skipped." in result.output
+    assert "Summary: 2 pushed, 0 failed, 0 skipped." in result.output
 
 
 def _seed_mcp(root: Path) -> None:
@@ -187,7 +187,7 @@ def _seed_mcp(root: Path) -> None:
 def test_all_projects_mcp_servers_declined_skips_write(
     tmp_path: Path, fake_home: Path, known_projects_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The count-only "Sync N project(s)?" gate never discloses the .mcp.json
+    """The count-only "Push N project(s)?" gate never discloses the .mcp.json
     rewrite, so the mcp-servers leg confirms per target in a batch; declining
     skips just that write and the project still succeeds (#1311)."""
     a = _project(tmp_path, "proj-a")
@@ -195,13 +195,13 @@ def test_all_projects_mcp_servers_declined_skips_write(
     _seed_known_projects(known_projects_path, [(a, True)])
     monkeypatch.chdir(a)
 
-    # "y" to the batch "Sync 1 project(s)?" gate, then "n" to the per-target
+    # "y" to the batch "Push 1 project(s)?" gate, then "n" to the per-target
     # mcp-servers fan-out confirm.
     result = CliRunner().invoke(
         context_group, ["sync", "--all-projects", "--include", "mcp-servers"], input="y\nn\n"
     )
     assert result.exit_code == 0, result.output
-    assert "Skipped mcp-servers sync (declined)." in result.output
+    assert "Skipped mcp-servers push (declined)." in result.output
     assert not (a / ".mcp.json").exists()
 
 
@@ -241,7 +241,7 @@ def test_subdirectory_run_anchors_at_project_root(
     )
     assert result.exit_code == 0, result.output
     assert f"({a})" in result.output  # the preview row names the project root
-    assert "Summary: 1 synced, 0 failed, 0 skipped." in result.output
+    assert "Summary: 1 pushed, 0 failed, 0 skipped." in result.output
     assert _runtime_skill(a).exists()
     assert not (subdir / ".claude").exists()
     assert not (subdir / ".memtomem").exists()
@@ -265,7 +265,7 @@ def test_skip_rows_paused_missing_stale(
     assert "paused — `mm context projects resume" in result.output
     assert "missing — root no longer exists" in result.output
     assert "stale — no .memtomem/ store" in result.output
-    assert "Summary: 1 synced, 0 failed, 3 skipped." in result.output
+    assert "Summary: 1 pushed, 0 failed, 3 skipped." in result.output
     assert _runtime_skill(a).exists()
     assert not _runtime_skill(paused).exists()
 
@@ -281,7 +281,7 @@ def test_zero_eligible_projects_is_noop_success(
 
     result = CliRunner().invoke(context_group, ["sync", "--all-projects"])
     assert result.exit_code == 0, result.output
-    assert "No projects are eligible for sync; nothing to do." in result.output
+    assert "No projects are eligible for push; nothing to do." in result.output
     assert "Sync " not in result.output  # never reached the confirm prompt
 
 
@@ -302,7 +302,7 @@ def test_privacy_block_fails_project_but_not_batch(
     assert result.exit_code == 1, result.output
     assert (a / ".claude" / "agents" / "reviewer.md").exists()
     assert f"✗ {leaky}" in result.output
-    assert "Summary: 1 synced, 1 failed, 0 skipped." in result.output
+    assert "Summary: 1 pushed, 1 failed, 0 skipped." in result.output
     # The blocked secret never reaches the runtime tree or the output.
     assert not (leaky / ".claude" / "agents" / "leaky.md").exists()
     assert "AKIA1234567890ABCDEF" not in result.output
@@ -373,7 +373,7 @@ def test_settings_leg_pinned_to_project_shared_despite_user_config(
     assert (a / ".claude" / "settings.json").is_file()
     assert (b / ".claude" / "settings.json").is_file()
     assert not (fake_home / ".claude" / "settings.json").exists()
-    assert "Summary: 2 synced, 0 failed, 0 skipped." in result.output
+    assert "Summary: 2 pushed, 0 failed, 0 skipped." in result.output
 
 
 def test_user_config_control_single_sync_does_write_home(

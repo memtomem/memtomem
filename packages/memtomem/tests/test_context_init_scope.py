@@ -1012,7 +1012,7 @@ class TestInitOnly:
         )
 
         assert result.exit_code == 2, result.output
-        assert "--only cannot import into --scope=project_local" in result.output
+        assert "--only cannot pull into --scope=project_local" in result.output
         assert not (proj / ".memtomem").exists()
 
     def test_only_agents_happy_path(
