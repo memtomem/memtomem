@@ -545,6 +545,7 @@ def _render_experiment_table(result: dict) -> None:
         f"recall={agg['mean_recall_labeled']:.3f}  ndcg={agg['mean_ndcg']:.3f}  "
         f"(over {agg['evaluated_cases']} case(s))"
     )
+    _render_profile_warnings(base)
     for cand in result["candidates"]:
         click.echo("")
         _render_profile_header(cand["profile_name"], cand, gate=cand["gate"])
@@ -562,8 +563,12 @@ def _render_experiment_table(result: dict) -> None:
                 click.echo(f"  violation: {v['rule']} ({detail})")
         for note in comparison["compatibility"]["notes"]:
             click.echo(f"  note: {note}")
-        for w in cand["warnings"]:
-            click.echo(f"  warning: {w}")
+        _render_profile_warnings(cand)
+
+
+def _render_profile_warnings(entry: dict) -> None:
+    for warning in entry["warnings"]:
+        click.echo(f"  warning: {warning}")
 
 
 def _render_profile_header(label: str, entry: dict, *, gate: dict | None) -> None:

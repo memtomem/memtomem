@@ -251,6 +251,111 @@ def test_mmr_without_dense_warns():
     assert "mmr_inactive_dense_disabled" in profile_warnings(apply_profile(ambient, doc), doc)
 
 
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("cohere", "Xenova/ms-marco-MiniLM-L-6-v2"),
+        ("local", "jinaai/jina-reranker-v2-base-multilingual"),
+        ("fastembed", "rerank-english-v3.0"),
+        ("fastembed", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        ("cohere", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        ("local", "rerank-multilingual-v3.0"),
+    ],
+)
+def test_recognized_rerank_provider_model_mismatch_warns(provider, model):
+    ambient = Mem2MemConfig()
+    ambient.rerank.api_key = "test-key"
+    doc = load_profile_document(
+        _doc({"rerank": {"enabled": True, "provider": provider, "model": model}})
+    )
+    assert "rerank_provider_model_mismatch" in profile_warnings(
+        apply_profile(ambient, doc), doc
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("fastembed", "Xenova/ms-marco-MiniLM-L-6-v2"),
+        ("cohere", "rerank-english-v3.0"),
+        ("local", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+    ],
+)
+def test_matching_rerank_provider_model_does_not_warn(provider, model):
+    ambient = Mem2MemConfig()
+    ambient.rerank.api_key = "test-key"
+    doc = load_profile_document(
+        _doc({"rerank": {"enabled": True, "provider": provider, "model": model}})
+    )
+    assert "rerank_provider_model_mismatch" not in profile_warnings(
+        apply_profile(ambient, doc), doc
+    )
+
+
+@pytest.mark.parametrize(
+    "rerank_knobs",
+    [
+        {"enabled": True, "provider": "cohere"},
+        {"enabled": True, "provider": "local"},
+        {"enabled": True, "model": "rerank-english-v3.0"},
+    ],
+)
+def test_rerank_mismatch_uses_resolved_defaults(rerank_knobs):
+    ambient = Mem2MemConfig()
+    ambient.rerank.api_key = "test-key"
+    doc = load_profile_document(_doc({"rerank": rerank_knobs}))
+    assert "rerank_provider_model_mismatch" in profile_warnings(
+        apply_profile(ambient, doc), doc
+    )
+
+
+@pytest.mark.parametrize("provider", ["fastembed", "cohere", "local"])
+def test_unknown_custom_rerank_model_does_not_warn(provider):
+    ambient = Mem2MemConfig()
+    ambient.rerank.api_key = "test-key"
+    doc = load_profile_document(
+        _doc(
+            {
+                "rerank": {
+                    "enabled": True,
+                    "provider": provider,
+                    "model": "acme/custom-reranker-v1",
+                }
+            }
+        )
+    )
+    assert "rerank_provider_model_mismatch" not in profile_warnings(
+        apply_profile(ambient, doc), doc
+    )
+
+
+def test_disabled_rerank_provider_model_mismatch_does_not_warn():
+    ambient = Mem2MemConfig()
+    doc = load_profile_document(
+        _doc(
+            {
+                "rerank": {
+                    "enabled": False,
+                    "provider": "cohere",
+                    "model": "Xenova/ms-marco-MiniLM-L-6-v2",
+                }
+            }
+        )
+    )
+    assert "rerank_provider_model_mismatch" not in profile_warnings(
+        apply_profile(ambient, doc), doc
+    )
+
+
+def test_rerank_mismatch_and_missing_key_warnings_are_sorted():
+    ambient = Mem2MemConfig()
+    doc = load_profile_document(_doc({"rerank": {"enabled": True, "provider": "cohere"}}))
+    assert profile_warnings(apply_profile(ambient, doc), doc) == [
+        "rerank_cohere_without_api_key",
+        "rerank_provider_model_mismatch",
+    ]
+
+
 def test_clean_profile_has_no_warnings():
     ambient = Mem2MemConfig()
     doc = load_profile_document(_doc({"decay": {"enabled": True}}))
