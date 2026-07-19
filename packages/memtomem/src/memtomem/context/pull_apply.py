@@ -66,9 +66,9 @@ from memtomem.context.pull_preview import (
     _collect,
     _group_and_resolve,
     _runtime_candidate_path,
-    iter_skill_payload_files,
 )
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
+from memtomem.context.skill_payload import iter_skill_payload_files, payload_digest
 
 logger = logging.getLogger(__name__)
 
@@ -159,22 +159,10 @@ class PullPlan:
 
 
 # ── digests ────────────────────────────────────────────────────────────────
-
-
-def _payload_digest(payload: list[tuple[str, bytes]]) -> str:
-    """Order-independent SHA-256 over a ``(relpath, bytes)`` payload (skills).
-
-    Length-prefixed framing so no ``(rel, data)`` pair can be confused with a
-    different split of the same bytes.
-    """
-    h = hashlib.sha256()
-    for rel, data in sorted(payload):
-        rel_b = rel.encode("utf-8")
-        h.update(len(rel_b).to_bytes(8, "big"))
-        h.update(rel_b)
-        h.update(len(data).to_bytes(8, "big"))
-        h.update(data)
-    return h.hexdigest()
+#
+# The skills tree digest itself lives in ``skill_payload.payload_digest`` — the
+# canonical ADR-0030 §10 serialization, shared with the snapshot/version
+# identity that PR-G3 adds. Only the kind dispatch below is local.
 
 
 def _expected_digest(
@@ -189,7 +177,7 @@ def _expected_digest(
     if store_payload is None:
         return None
     if kind == "skills":
-        return _payload_digest(store_payload)
+        return payload_digest(store_payload)
     # Single-file agents/commands: bytes of the one payload entry. ``_read_store``
     # guarantees a present (non-None) payload is non-empty for these kinds
     # (``[("", bytes)]``); guard it explicitly (not ``assert`` — stripped under
@@ -660,7 +648,7 @@ def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyRe
             actual_digest: str | None = None
             if present:
                 try:
-                    actual_digest = _payload_digest(iter_skill_payload_files(dst))
+                    actual_digest = payload_digest(iter_skill_payload_files(dst))
                 except OSError:
                     actual_digest = None
             if (present, actual_digest) != (plan.store_present, plan.expected_store_digest):

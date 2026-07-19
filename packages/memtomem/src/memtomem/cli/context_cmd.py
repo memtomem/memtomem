@@ -540,7 +540,7 @@ def _print_pull_diff(preview: PullPreview, *, only_runtime: str | None = None) -
     identical — is visible (ADR-0030 §4/§5, Codex R1/R2 Major 1). ``only_runtime``
     (from ``--from``) restricts the diff to the named source.
     """
-    from memtomem.context.pull_preview import _is_payload_relpath
+    from memtomem.context.skill_payload import is_payload_relpath
 
     store = dict(preview.store_content or ())
     for cand in preview.candidates:
@@ -554,7 +554,7 @@ def _print_pull_diff(preview: PullPreview, *, only_runtime: str | None = None) -
             if old == new:
                 continue
             label = rel or preview.name
-            if old is None and not _is_payload_relpath(rel):
+            if old is None and not is_payload_relpath(rel):
                 click.echo(f"    + would land (runtime metadata): {label}")
                 continue
             if new is None:

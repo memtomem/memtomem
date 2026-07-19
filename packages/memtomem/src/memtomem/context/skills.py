@@ -55,6 +55,7 @@ from memtomem.context._runtime_targets import (
     runtime_artifact_listing,
     runtime_fanout_root,
 )
+from memtomem.context.skill_payload import is_payload_top_name
 from memtomem.context.privacy_scan import (
     raise_or_collect,
     scan_artifact_tree,
@@ -75,12 +76,12 @@ SKILL_MANIFEST = "SKILL.md"
 # typed ``lock_timeout`` skip and a retry hint, and an ``asyncio.to_thread``
 # web caller can never be wedged by a stuck cross-process lock holder.
 _SKILLS_LOCK_BUDGET_S = 30.0
-# Canonical-side subdirectory that holds per-vendor SKILL.md overrides
-# (``<canonical>/<name>/overrides/<vendor>.<ext>`` — see
-# :mod:`memtomem.context.override`). It is the SOURCE of overrides, never part
-# of a runtime fan-out payload, so it is stripped from the staged tree before
-# fan-out and excluded from diff comparison.
-_OVERRIDES_DIRNAME = "overrides"
+# The canonical-side ``overrides/`` subdirectory (SOURCE of per-vendor
+# SKILL.md overrides — see :mod:`memtomem.context.override`) and the version
+# store are Store-owned, never part of a runtime fan-out payload. Both are
+# named once, in :mod:`memtomem.context.skill_payload`
+# (:func:`~memtomem.context.skill_payload.is_payload_top_name`), so the
+# fan-out staging surface and the diff comparison below cannot drift apart.
 
 
 class SkillGenerator(Protocol):
@@ -245,7 +246,7 @@ def list_canonical_skills(
 # ── Copy primitive ────────────────────────────────────────────────────
 
 
-def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path:
+def _stage_skill(src: Path, dst: Path, *, payload_only: bool = False) -> Path:
     """Mirror ``src`` into a same-fs staging directory under ``dst.parent``.
 
     Picks ``dst.parent / .staging-<dst.name>-<pid>-<rand>.tmp`` so the
@@ -257,13 +258,17 @@ def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path
     ``src`` MUST contain ``SKILL.md``. ``dst.parent`` is created if it
     does not yet exist.
 
-    ``strip_overrides`` removes the top-level ``overrides/`` directory from
-    the staged tree. Runtime fan-out passes ``True`` so the canonical
-    override SOURCE never lands in a runtime tree (which would leak every
-    other vendor's override bytes into this vendor's tree, and let one
-    vendor's override secret block the whole fan-out at scan time). Pure
-    canonical→canonical / runtime→canonical copies keep the default
-    (``False``) so the override source survives.
+    ``payload_only`` stages only the ADR-0030 §10 **payload surface**
+    (:func:`~memtomem.context.skill_payload.is_payload_top_name`), dropping the
+    Store-owned top level: ``overrides/`` (whose canonical SOURCE landing in a
+    runtime tree would leak every other vendor's override bytes into this
+    vendor's tree, and let one vendor's override secret block the whole fan-out
+    at scan time) and the version store — ``versions/`` + ``versions.json`` and
+    its lock/temp sidecars — which is Store history that must never fan out to
+    a runtime (a runtime copy of it would also read as permanent drift). Only
+    runtime fan-out passes ``True``; pure canonical→canonical and the reverse
+    runtime→canonical import keep the default (``False``), which stays the WIDE
+    copier surface Gate A scans.
     """
     manifest = src / SKILL_MANIFEST
     if not manifest.is_file():
@@ -277,22 +282,23 @@ def _stage_skill(src: Path, dst: Path, *, strip_overrides: bool = False) -> Path
         # happens, the leftover tree is from us; safe to remove.
         shutil.rmtree(staging)
     staging.mkdir()
-    # ``strip_overrides`` excludes the top-level ``overrides/`` source DURING
-    # the copy (via ``skip_top_level``) so those bytes never reach the runtime
-    # staging tree — no crash window where they exist, no silent leak if a
-    # post-copy delete failed. The override itself is applied separately from
-    # the canonical source via ``_override.resolve`` (which reads canonical,
-    # not staging), so the skip never affects override application; and the
-    # scan therefore never sees (and cannot block on) an unrelated vendor's
-    # override.
-    skip = frozenset({_OVERRIDES_DIRNAME}) if strip_overrides else None
+    # The non-payload top level is excluded DURING the copy (root-only, via
+    # ``skip_top_level_pred``) so those bytes never reach the runtime staging
+    # tree — no crash window where they exist, no silent leak if a post-copy
+    # delete failed. A predicate rather than a name set because the manifest's
+    # ``.versions.json.<rand>.tmp`` siblings cannot be enumerated up front. The
+    # override itself is applied separately from the canonical source via
+    # ``_override.resolve`` (which reads canonical, not staging), so the skip
+    # never affects override application; and the scan therefore never sees
+    # (and cannot block on) an unrelated vendor's override.
+    skip_pred = (lambda name: not is_payload_top_name(name)) if payload_only else None
     # Codex review fold: if ``copy_tree_atomic`` raises after partial
     # copy, the caller would never see ``staging`` (no return value),
     # leaving an unscanned partial tree under the runtime fan-out root.
     # Clean up here before re-raising so Gate A's staging-dir-first
     # contract holds even on copy failure.
     try:
-        copy_tree_atomic(src, staging, skip_top_level=skip)
+        copy_tree_atomic(src, staging, skip_top_level_pred=skip_pred)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -678,7 +684,7 @@ def generate_all_skills(
                     # commands.py read_bytes failure handling. Privacy block
                     # is the only failure that still aborts the batch.
                     try:
-                        staging = _stage_skill(skill_dir, dst, strip_overrides=True)
+                        staging = _stage_skill(skill_dir, dst, payload_only=True)
                     except OSError as exc:
                         skipped.append(
                             (skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR)
@@ -831,7 +837,7 @@ def generate_all_skills(
                 # an exception bubbling up — symmetric with agents.py /
                 # commands.py read_bytes failure handling.
                 try:
-                    staging = _stage_skill(skill_dir, dst, strip_overrides=True)
+                    staging = _stage_skill(skill_dir, dst, payload_only=True)
                 except OSError as exc:
                     skipped.append((skill_dir.name, f"unreadable: {exc}", skip_codes.PARSE_ERROR))
                     continue
@@ -1358,9 +1364,13 @@ def _skill_effective_equal(
     * :data:`COPY_SKIP_NAMES` (``.git`` / ``.DS_Store`` / ``__pycache__``) and
       symlinks are excluded at EVERY depth — sync never copies them, so they
       are ignored on both sides (a stray cache on either side is not drift).
-    * the top-level ``overrides/`` SOURCE directory is excluded from the
-      canonical side only (a leaked ``overrides/`` on the runtime side IS drift,
-      so re-sync is prompted to clean it).
+    * the non-payload top level (ADR-0030 §10: the ``overrides/`` SOURCE
+      directory and the ``versions/`` + ``versions.json`` version store) is
+      excluded from the canonical side only — fan-out does not copy it
+      (``_stage_skill(payload_only=True)``), so counting it would report every
+      override-carrying or versioned skill as permanently out of sync. The
+      asymmetry is deliberate: the same names leaked onto the RUNTIME side ARE
+      drift, so re-sync is prompted to clean them.
     * the top-level ``SKILL.md`` is replaced by ``override_bytes`` when a
       per-vendor override exists; everything else is byte-compared verbatim.
 
@@ -1375,7 +1385,7 @@ def _skill_effective_equal(
         for p in d.iterdir():
             if p.name in COPY_SKIP_NAMES or p.is_symlink():
                 continue
-            if top_level and is_canonical and p.name == _OVERRIDES_DIRNAME:
+            if top_level and is_canonical and not is_payload_top_name(p.name):
                 continue
             names.append(p.name)
         return sorted(names)
