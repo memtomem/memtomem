@@ -33,6 +33,12 @@ from memtomem.context.skill_payload import (
 from memtomem.context.skills import _iter_scannable_skill_files
 
 
+# ``os.geteuid`` is POSIX-only, and a decorator argument evaluates at COLLECTION
+# time — a second ``skipif(os.name == "nt")`` in front of it does not shield it,
+# so calling it inline breaks collection on Windows outright.
+_CAN_DENY_DIR_READ = hasattr(os, "geteuid") and os.geteuid() != 0
+
+
 def _make_skill(root):
     """A skill dir carrying payload, Store-owned metadata, and lookalikes."""
     skill = root / "demo"
@@ -165,8 +171,10 @@ class TestPayloadExclusionSet:
         assert "scripts/__pycache__/c.pyc" not in rels
         assert "scripts/link.sh" not in rels
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+    @pytest.mark.skipif(
+        not _CAN_DENY_DIR_READ,
+        reason="needs POSIX permission semantics and a non-root uid",
+    )
     def test_unreadable_subtree_fails_closed(self, tmp_path):
         """An unreadable subtree must RAISE, never silently shrink the payload
         — a shrunken surface is an unscanned/undigested subtree."""
