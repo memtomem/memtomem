@@ -471,6 +471,7 @@ def _collect(
     *,
     scope: TargetScope,
     project_root: Path | None,
+    scan_gate: bool = True,
 ) -> _Collected:
     """Read the Store + every runtime candidate once, capturing landing bytes.
 
@@ -479,6 +480,13 @@ def _collect(
     ``landing_full`` / ``landing_payload`` — the bytes a Pull WOULD land — so a
     downstream commit can write exactly what was judged. ``kind`` must be a key
     of :data:`IMPORT_SOURCE_RUNTIMES` (a bad kind is a ``KeyError``).
+
+    ``scan_gate=False`` skips the per-candidate ``classify_gate_status`` scan
+    (leaving ``gate_status=None``): the apply path (``pull_apply.prepare_pull``)
+    runs its OWN single audited Gate A decision over just the selected
+    candidate, so scanning every candidate here too would double-scan the
+    selected payload and waste a full-tree scan on the rest. The preview keeps
+    the default so its table can show a per-candidate gate column.
     """
     eligible = set(IMPORT_SOURCE_RUNTIMES[kind])
     store_present, store_payload, store_err = _read_store(kind, name, scope, project_root)
@@ -546,7 +554,7 @@ def _collect(
             )
             continue
 
-        gate = _gate_landing(landing_full, scope)
+        gate = _gate_landing(landing_full, scope) if scan_gate else None
         override = _override_warning(kind, name, runtime, scope, project_root, override_raw)
         content = _content_status(store_present, store_payload, store_err, landing_payload)
         # A store_error row carries the (unsanitized) Store read error as its

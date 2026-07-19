@@ -342,6 +342,60 @@ def test_declined_pull_leaves_no_record(
     assert records == []
 
 
+def test_selected_payload_scanned_once(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The apply path scans the selected payload ONCE (no _collect classify +
+    _evaluate_gate double-scan) — code-review Major."""
+    written = seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "a")})
+    (written["claude"].parent / "extra.txt").write_text("b\n", encoding="utf-8")
+    calls = {"n": 0}
+    real = privacy.enforce_write_guard
+
+    def _counting(*a: object, **k: object):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(privacy, "enforce_write_guard", _counting)
+    plan = prepare_pull("skills", "s", scope="project_shared", project_root=proj)
+    assert isinstance(plan, PullPlan)
+    # Two files, scanned once each in _evaluate_gate — NOT 4 (would be a
+    # _collect classify pass + an _evaluate_gate pass).
+    assert calls["n"] == 2
+
+
+def test_commit_records_under_prepare_surface(
+    home: Path, proj: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deferred pass/bypass counter records under the surface prepare used,
+    not commit's default — code-review Major."""
+    seed_multi_runtime(proj, "skills", "s", {"claude": _skill_body("s", "clean")})
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(privacy, "record", lambda outcome, tool: recorded.append((outcome, tool)))
+    plan = prepare_pull(
+        "skills", "s", scope="project_shared", project_root=proj, surface="mcp_context_pull"
+    )
+    assert isinstance(plan, PullPlan)
+    commit_pull(plan)
+    assert recorded == [("pass", "mcp_context_pull")]
+
+
+def test_flat_layout_overwrite_is_snapshot_requires_dir_layout(home: Path, proj: Path) -> None:
+    """A flat-layout Store + --overwrite refuses with snapshot_requires_dir_layout
+    (the actionable 'run mm context migrate'), not plan_stale."""
+    # Flat canonical: <canonical>/<name>.md (no dir layout).
+    base = canonical_artifact_dir("agents", "project_shared", proj)
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "a.md").write_text("---\nname: a\n---\nFLAT STORE\n", encoding="utf-8")
+    seed_multi_runtime(proj, "agents", "a", {"claude": "---\nname: a\n---\nRUNTIME B\n"})
+    plan = prepare_pull("agents", "a", scope="project_shared", project_root=proj, overwrite=True)
+    assert isinstance(plan, PullPlan)
+    res = commit_pull(plan)
+    assert res.status == "snapshot_requires_dir_layout"
+    assert "FLAT STORE" in (base / "a.md").read_text(encoding="utf-8")  # untouched
+    assert "RUNTIME B" not in (base / "a.md").read_text(encoding="utf-8")
+
+
 # ── write_failed + staging cleanup (R4 Major 4 / Minor 1) ─────────────────────
 
 

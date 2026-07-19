@@ -152,6 +152,10 @@ class PullPlan:
     # The passed/bypassed Gate A decision, deferred so its privacy counter
     # records once, in commit, only when the write actually lands.
     gate: _GateProceed | None = None
+    # The ingress surface from prepare, carried so commit records the deferred
+    # counter under the SAME surface (a Web/MCP prepare must not be attributed
+    # to the CLI at commit time).
+    surface: str = _SURFACE_DEFAULT
 
 
 # ── digests ────────────────────────────────────────────────────────────────
@@ -186,7 +190,11 @@ def _expected_digest(
         return None
     if kind == "skills":
         return _payload_digest(store_payload)
-    # Single-file agents/commands: bytes of the one payload entry.
+    # Single-file agents/commands: bytes of the one payload entry. ``_read_store``
+    # guarantees a present (non-None) payload is non-empty for these kinds
+    # (``[("", bytes)]``); assert it so a future contract change surfaces here
+    # rather than as a silent IndexError.
+    assert store_payload, "agents/commands store_payload must be non-empty when present"
     return hashlib.sha256(store_payload[0][1]).hexdigest()
 
 
@@ -341,7 +349,10 @@ def prepare_pull(
         # Validate eligibility up front (export-only / unknown → ValueError).
         resolve_import_runtimes(kind, source_runtime)
 
-    collected = _collect(kind, name, scope=scope, project_root=resolved_root)
+    # scan_gate=False: prepare runs its own single audited Gate A decision over
+    # the selected candidate (``_evaluate_gate``); scanning every candidate in
+    # the collect would double-scan the selected payload (code-review Major).
+    collected = _collect(kind, name, scope=scope, project_root=resolved_root, scan_gate=False)
     distinct, ambiguous, _auto = _group_and_resolve(collected.working)
     working = collected.working
     importable = [c for c in working if c.importable]
@@ -497,6 +508,7 @@ def prepare_pull(
         store_present=collected.store_present,
         expected_store_digest=_expected_digest(kind, collected.store_payload),
         gate=gate,
+        surface=surface,
     )
 
 
@@ -552,7 +564,6 @@ def _source_conflict_reason(kind: ArtifactKind, name: str, working: list[_Cand])
 def commit_pull(
     plan: PullPlan,
     *,
-    surface: str = _SURFACE_DEFAULT,
     lock_timeout: float | None = None,
 ) -> PullApplyResult:
     """Write ``plan.captured`` under the canonical lock (Gate A already decided).
@@ -560,16 +571,17 @@ def commit_pull(
     The Gate A decision was made and any refusal audited in ``prepare_pull``;
     here we take the canonical name-lock, re-check the destination precondition,
     write the captured bytes, and record the passed/bypassed privacy counter
-    once the write actually lands. ``lock_timeout=None`` blocks (the CLI
-    default, Ctrl-C-able); the async Web/MCP surfaces pass a bound and map the
-    ``lock_timeout`` result to a 503.
+    (under ``plan.surface`` — the surface prepare used) once the write actually
+    lands. ``lock_timeout=None`` blocks (the CLI default, Ctrl-C-able); the
+    async Web/MCP surfaces pass a bound and map the ``lock_timeout`` result to a
+    503.
     """
     if plan.kind == "skills":
-        return _commit_skills(plan, surface=surface, lock_timeout=lock_timeout)
-    return _commit_atomic(plan, surface=surface, lock_timeout=lock_timeout)
+        return _commit_skills(plan, lock_timeout=lock_timeout)
+    return _commit_atomic(plan, lock_timeout=lock_timeout)
 
 
-def _commit_atomic(plan: PullPlan, *, surface: str, lock_timeout: float | None) -> PullApplyResult:
+def _commit_atomic(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyResult:
     """Commit an agents/commands pull — single captured file via the shared
     locked-write primitive (destination precondition + snapshot-first write)."""
     from memtomem.context._atomic_reverse import resolve_artifact_extract_target
@@ -615,11 +627,11 @@ def _commit_atomic(plan: PullPlan, *, surface: str, lock_timeout: float | None) 
     if outcome in ("created", "overwritten") and plan.gate is not None:
         # Record the passed/bypassed privacy counter once — only now that the
         # write has actually landed (never on a stale/exists refusal).
-        _record_gate_success(plan.gate, surface)
+        _record_gate_success(plan.gate, plan.surface)
     return _map_write_outcome(plan, outcome, dst, layout)
 
 
-def _commit_skills(plan: PullPlan, *, surface: str, lock_timeout: float | None) -> PullApplyResult:
+def _commit_skills(plan: PullPlan, *, lock_timeout: float | None) -> PullApplyResult:
     """Commit a skills pull — new-only, captured tree staged then exclusively
     promoted, all under the canonical name-lock (skills do not use
     ``write_canonical_locked``; Gate A was decided in ``prepare_pull``)."""
@@ -683,7 +695,7 @@ def _commit_skills(plan: PullPlan, *, surface: str, lock_timeout: float | None) 
 
             # Write landed — record the passed/bypassed privacy counter once.
             if plan.gate is not None:
-                _record_gate_success(plan.gate, surface)
+                _record_gate_success(plan.gate, plan.surface)
     except TimeoutError:
         return _lock_timeout_result(plan)
 

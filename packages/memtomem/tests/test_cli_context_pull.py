@@ -72,6 +72,18 @@ def test_preview_diff_shows_unified(proj: Path) -> None:
     assert "+++" in res.output
 
 
+def test_preview_from_narrows_to_source(proj: Path) -> None:
+    """`--from gemini` narrows the preview + diff to gemini (not all candidates)."""
+    seed_multi_runtime(
+        proj, "agents", "a", {"claude": _agent("a", "CLAUDE"), "gemini": _agent("a", "GEM")}
+    )
+    res = _invoke(["pull", "agents", "a", "--from", "gemini", "--diff"])
+    assert res.exit_code == 0
+    assert "gemini" in res.output
+    assert "claude" not in res.output  # filtered out
+    assert "source: gemini" in res.output
+
+
 def test_preview_json_shape(proj: Path) -> None:
     seed_multi_runtime(proj, "agents", "a", {"claude": _agent("a", "c")})
     res = _invoke(["pull", "agents", "a", "--json"])

@@ -458,13 +458,22 @@ def _print_artifact_diff(
 # ── Pull (ADR-0030 PR-C) rendering ─────────────────────────────────────────
 
 
-def _print_pull_preview(preview: PullPreview, *, overwrite: bool) -> None:
-    """Human table + summary for ``mm context pull`` (dry-run default)."""
-    if not preview.candidates:
-        click.echo(f"  (no runtime has {preview.kind}/{preview.name} to pull)")
+def _print_pull_preview(
+    preview: PullPreview, *, overwrite: bool, only_runtime: str | None = None
+) -> None:
+    """Human table + summary for ``mm context pull`` (dry-run default).
+
+    ``only_runtime`` (from ``--from``) narrows the table + summary to the named
+    source, so ``pull … --from gemini`` previews exactly what a ``--apply``
+    would pull rather than every candidate.
+    """
+    rows = [c for c in preview.candidates if only_runtime is None or c.runtime == only_runtime]
+    if not rows:
+        who = f"runtime '{only_runtime}'" if only_runtime else "any runtime"
+        click.echo(f"  ({who} has no {preview.kind}/{preview.name} to pull)")
     else:
         click.secho(f"  {'runtime':10s}  {'content':14s}  {'gate':28s}  notes", fg="cyan")
-        for c in preview.candidates:
+        for c in rows:
             notes: list[str] = []
             if c.override_warning:
                 notes.append("matches vendor override — pull would bake it into base")
@@ -475,7 +484,9 @@ def _print_pull_preview(preview: PullPreview, *, overwrite: bool) -> None:
             gate = c.gate_status or "-"
             click.echo(f"  {c.runtime:10s}  {c.content_status:14s}  {gate:28s}  {'; '.join(notes)}")
     store = "present" if preview.store_present else "absent"
-    if preview.ambiguous:
+    if only_runtime is not None:
+        summary = f"store: {store} · source: {only_runtime}"
+    elif preview.ambiguous:
         summary = (
             f"store: {store} · distinct contents: {preview.distinct_landing_count} · "
             "ambiguous — pass --from <runtime> to --apply"
@@ -520,19 +531,20 @@ def _pull_preview_json(preview: PullPreview) -> dict[str, Any]:
     }
 
 
-def _print_pull_diff(preview: PullPreview) -> None:
+def _print_pull_diff(preview: PullPreview, *, only_runtime: str | None = None) -> None:
     """Unified diff of each candidate's FULL surface vs the Store payload.
 
     Candidate files outside the Store payload (top-level ``overrides/`` /
     ``versions/``) show as "would land (runtime metadata)" so a metadata-only
     divergence — which drives ``source_conflict`` yet leaves the payload
-    identical — is visible (ADR-0030 §4/§5, Codex R1/R2 Major 1).
+    identical — is visible (ADR-0030 §4/§5, Codex R1/R2 Major 1). ``only_runtime``
+    (from ``--from``) restricts the diff to the named source.
     """
     from memtomem.context.pull_preview import _is_payload_relpath
 
     store = dict(preview.store_content or ())
     for cand in preview.candidates:
-        if cand.content is None:
+        if cand.content is None or (only_runtime is not None and cand.runtime != only_runtime):
             continue
         click.secho(f"  diff  store → {cand.runtime}", fg="cyan")
         cand_files = dict(cand.content)
@@ -1510,9 +1522,9 @@ def pull_cmd(
         if json_out:
             click.echo(json.dumps(_pull_preview_json(preview), indent=2))
             return
-        _print_pull_preview(preview, overwrite=overwrite)
+        _print_pull_preview(preview, overwrite=overwrite, only_runtime=from_runtime)
         if show_diff:
-            _print_pull_diff(preview)
+            _print_pull_diff(preview, only_runtime=from_runtime)
         click.echo("\nRun with --apply to execute.")
         return
 
