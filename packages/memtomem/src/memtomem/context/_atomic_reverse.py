@@ -41,7 +41,7 @@ from typing import TypeVar, cast
 from memtomem.config import TargetScope
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.context import override as _override
-from memtomem.context._atomic import atomic_write_bytes
+from memtomem.context._canonical_txn import _CANONICAL_LOCK_BUDGET_S, write_canonical_locked
 from memtomem.context._gate_a import GateABlocked, apply_gate_a
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
@@ -199,6 +199,7 @@ def import_passthrough_runtime(
     logger: logging.Logger,
     source_runtimes: dict[str, str] | None = None,
     runtime_candidates: dict[str, list[str]] | None = None,
+    lock_remaining: Callable[[], float] | None = None,
 ) -> None:
     """Import one runtime's ``*.md`` files into the canonical dir, byte-exact.
 
@@ -207,15 +208,29 @@ def import_passthrough_runtime(
     (label, runtime, scope) tuple is in the table, so ``KeyError`` only
     fires for a future runtime added without table churn), ``*.md`` glob,
     name validation, cross-runtime dedupe, extract-target resolution,
-    overwrite gate, Gate A re-scan of the source bytes, and an atomic byte
-    write (skipped under ``dry_run``). Appends to the caller's ``imported``
-    / ``skipped`` and mutates ``seen`` in place so successive calls (agents:
+    overwrite gate, Gate A re-scan of the source bytes, and — inside the
+    canonical sidecar lock — an authoritative re-resolve + atomic byte write
+    (skipped under ``dry_run``). Appends to the caller's ``imported`` /
+    ``skipped`` and mutates ``seen`` in place so successive calls (agents:
     claude then gemini) and sibling inline branches (commands: gemini TOML)
     dedupe against each other.
 
+    ADR-0030 §6 (PR-B2a): the write goes through
+    :func:`memtomem.context._canonical_txn.write_canonical_locked`, which holds
+    the cross-process name-keyed canonical sidecar lock and **re-resolves the
+    destination inside the lock** — so a concurrent flat→dir migrate cannot
+    make this write a now-stale path. The lock-free resolve/exists checks above
+    stay as a fast path (skip early without reading bytes / scanning), mirroring
+    the skills importer's pre-lock preflight + under-lock re-check.
+    ``lock_remaining`` (set by the extract wrapper) is the whole-call
+    acquisition budget; ``None`` blocks indefinitely (CLI default). PR-B2a only
+    serializes the write — overwrite still clobbers; the snapshot lands in B2b.
+
     ``seen`` mutation contract (pre-extraction semantics, byte-identical):
-    a name is marked seen on CANONICAL_EXISTS, on a Gate A block, and on
-    successful import — NOT on invalid-name or unreadable skips.
+    a name is marked seen on CANONICAL_EXISTS (pre-lock or under-lock), on a
+    Gate A block, and on successful import — NOT on invalid-name, unreadable,
+    or lock-timeout skips (contention is transient and source-runtime-specific,
+    so a later runtime's copy keeps its fallback chance).
 
     ``audit_context`` builds the per-file Gate A audit dict from
     ``(src, dst, name)`` — the shapes intentionally differ per artifact
@@ -297,8 +312,44 @@ def import_passthrough_runtime(
         # would-import target but skips the write so the preview never
         # mutates disk (rank-10).
         if not dry_run:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(dst, content_bytes)
+
+            def _resolve() -> tuple[Path, Layout]:
+                # Re-resolve under the lock (ADR-0030 §6): the layout may have
+                # changed (flat→dir migrate) since the pre-lock resolve above.
+                return resolve_artifact_extract_target(
+                    canonical_root,
+                    name,
+                    artifact_label=artifact_label,
+                    dir_filename=dir_filename,
+                    logger=logger,
+                )
+
+            try:
+                write_outcome, dst, layout = write_canonical_locked(
+                    canonical_root,
+                    name,
+                    content_bytes,
+                    resolve_target=_resolve,
+                    overwrite=overwrite,
+                    lock_timeout=None if lock_remaining is None else lock_remaining(),
+                )
+            except TimeoutError:
+                reason = (
+                    "another process held the canonical destination lock past "
+                    f"the {_CANONICAL_LOCK_BUDGET_S:g}s acquisition budget — "
+                    "re-run the import to retry"
+                )
+                skipped.append((name, reason, skip_codes.LOCK_TIMEOUT))
+                logger.warning("skip %s from %s: %s", name, runtime_label, reason)
+                continue
+            if write_outcome == "exists":
+                # Under-lock re-check: a parallel importer landed dst between
+                # our lock-free preflight and the lock acquisition.
+                reason = "canonical exists (use --overwrite)"
+                skipped.append((name, reason, skip_codes.CANONICAL_EXISTS))
+                logger.warning("skip %s from %s: %s", name, runtime_label, reason)
+                seen[name] = runtime_label
+                continue
         imported.append((dst, layout))
         seen[name] = runtime_label
         if source_runtimes is not None:

@@ -44,6 +44,7 @@ from fastapi.responses import JSONResponse
 from memtomem.config import TargetScope
 from memtomem.context import versioning
 from memtomem.context._atomic import atomic_write_text
+from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.privacy_scan import PrivacyScanError
 from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
@@ -386,6 +387,73 @@ async def create_artifact(
     if gate is not None:
         return gate
 
+    # Encode the submitted content up front, before anything touches disk. A
+    # lone-surrogate body can't be UTF-8 encoded; failing after mkdir would
+    # leave an orphan dir that wedges retries on the 409 below. These exact
+    # bytes become source_bytes for create_version, so v1.md is byte-identical
+    # to the working file with no re-read race.
+    try:
+        content_bytes = body.content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _error(
+            400,
+            "validation",
+            f"{spec.kind.capitalize()} content is not valid UTF-8",
+        ) from exc
+
+    canonical_root = _artifacts_root(spec, project_root, scope=target_scope)
+    artifact_dir = canonical_root / name
+    path = artifact_dir / spec.dir_filename
+
+    def _create_locked() -> None:
+        # ADR-0030 §6: cross-process canonical lock (name-keyed) so a concurrent
+        # Pull / transfer / migrate / version op on this artifact can't race the
+        # create. One shared budget spans the canonical lock and create_version's
+        # versions.json lock (canonical → versions.json order), all well under
+        # the 60s route timeout. Runs in a worker thread — the blocking flock
+        # must never sit on the event loop (see _atomic._file_lock L2 note); the
+        # held ``_gateway_lock`` serializes in-process callers so the worker
+        # never self-contends.
+        budget = new_lock_budget()
+        with canonical_sidecar_lock(canonical_root, name, timeout=budget()):
+            # ADR-0030 §6: re-resolve BOTH layouts inside C0. The pre-lock check
+            # (outside the canonical lock) can go stale — a concurrent create /
+            # Pull / flat→dir migrate can land a flat OR dir canonical while we
+            # wait. ``resolve_canonical`` covers both layouts; the extra
+            # ``artifact_dir.exists()`` also catches a stale/orphan dir with no
+            # working file (mkdir would otherwise 500 on FileExistsError).
+            if (
+                spec.resolve_canonical(project_root, name, scope=target_scope) is not None
+                or artifact_dir.exists()
+            ):
+                raise _error(
+                    409,
+                    "conflict",
+                    f"{spec.kind.capitalize()} '{name}' already exists",
+                    reason_code="already_exists",
+                )
+            # ADR-0022: create in versioned directory layout (working file +
+            # versions/v1.md + manifest) from the start, so the artifact is
+            # immediately versionable in the detail panel instead of a flat file
+            # the version UI tells you to ``mm context migrate`` — which then
+            # skips it as an unowned manual flat (the split-brain).
+            artifact_dir.mkdir(parents=True)
+            try:
+                atomic_write_text(path, body.content)
+                versioning.create_version(
+                    artifact_dir,
+                    path,
+                    note="Initial version (created via web)",
+                    source_bytes=content_bytes,
+                    lock_timeout=budget(),
+                )
+            except BaseException:
+                # Roll back the partial artifact dir so a transient failure
+                # doesn't leave an empty directory that wedges every future
+                # create of this name on the orphan-dir 409 above.
+                shutil.rmtree(artifact_dir, ignore_errors=True)
+                raise
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
@@ -396,52 +464,7 @@ async def create_artifact(
                         f"{spec.kind.capitalize()} '{name}' already exists",
                         reason_code="already_exists",
                     )
-                # ADR-0022: create in versioned directory layout (working file +
-                # versions/v1.md + manifest) from the start, so the artifact is
-                # immediately versionable in the detail panel instead of a flat
-                # file the version UI tells you to ``mm context migrate`` — which
-                # then skips it as an unowned manual flat (the split-brain).
-                artifact_dir = _artifacts_root(spec, project_root, scope=target_scope) / name
-                if artifact_dir.exists():
-                    # resolve_canonical found no working file above, but a
-                    # stale/orphan directory remains — surface a clean 409 rather
-                    # than a 500 from mkdir()'s FileExistsError.
-                    raise _error(
-                        409,
-                        "conflict",
-                        f"{spec.kind.capitalize()} '{name}' already exists",
-                        reason_code="already_exists",
-                    )
-                # Encode the submitted content up front, before anything touches
-                # disk. A lone-surrogate body can't be UTF-8 encoded; failing
-                # after mkdir would leave an orphan dir that wedges retries on the
-                # 409 above. These exact bytes become source_bytes for
-                # create_version, so v1.md is byte-identical to the working file
-                # with no re-read race (_gateway_lock guards only this process).
-                try:
-                    content_bytes = body.content.encode("utf-8")
-                except UnicodeEncodeError as exc:
-                    raise _error(
-                        400,
-                        "validation",
-                        f"{spec.kind.capitalize()} content is not valid UTF-8",
-                    ) from exc
-                artifact_dir.mkdir(parents=True)
-                path = artifact_dir / spec.dir_filename
-                try:
-                    atomic_write_text(path, body.content)
-                    versioning.create_version(
-                        artifact_dir,
-                        path,
-                        note="Initial version (created via web)",
-                        source_bytes=content_bytes,
-                    )
-                except BaseException:
-                    # Roll back the partial artifact dir so a transient failure
-                    # doesn't leave an empty directory that wedges every future
-                    # create of this name on the orphan-dir 409 above.
-                    shutil.rmtree(artifact_dir, ignore_errors=True)
-                    raise
+                await asyncio.to_thread(_create_locked)
     except TimeoutError:
         raise _error(
             503,
@@ -486,29 +509,51 @@ async def update_artifact(
     if gate is not None:
         return JSONResponse(content=gate)
 
+    canonical_root = _artifacts_root(spec, project_root, scope=target_scope)
+
+    def _update_locked() -> tuple[str, int]:
+        # ADR-0030 §6: re-resolve, mtime re-check, AND write all under the
+        # cross-process canonical lock. Re-resolving inside C0 is load-bearing —
+        # a concurrent flat→dir migrate could have moved the working file since
+        # the pre-lock resolve, so the stale ``path`` would write to a shadowed
+        # or absent location. Returns ``(status, mtime_ns)`` with status one of
+        # "gone" / "conflict" / "ok". Worker-thread only (blocking flock off the
+        # loop); ``_gateway_lock`` (held) serializes in-process callers. B2a is
+        # lock-only — no auto-snapshot on edit save (that stays an explicit
+        # "create version" action; ADR-0030 §6).
+        with canonical_sidecar_lock(canonical_root, name, timeout=new_lock_budget()()):
+            _n, re_resolved = _resolve_existing(spec, project_root, name, scope=target_scope)
+            if re_resolved is None:
+                return "gone", 0
+            cur_path, _cur_layout = re_resolved
+            current_mtime_ns = cur_path.stat().st_mtime_ns
+            if current_mtime_ns != body_mtime_ns:
+                if not body.force:
+                    return "conflict", current_mtime_ns
+                logger.warning(
+                    "force-save bypassed mtime check on %s (client_mtime_ns=%s server_mtime_ns=%s)",
+                    cur_path,
+                    body_mtime_ns,
+                    current_mtime_ns,
+                )
+            atomic_write_text(cur_path, body.content)
+            return "ok", cur_path.stat().st_mtime_ns
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                current_mtime_ns = path.stat().st_mtime_ns
-                if current_mtime_ns != body_mtime_ns:
-                    if not body.force:
-                        return mtime_conflict_response(current_mtime_ns)
-                    logger.warning(
-                        "force-save bypassed mtime check on %s "
-                        "(client_mtime_ns=%s server_mtime_ns=%s)",
-                        path,
-                        body_mtime_ns,
-                        current_mtime_ns,
-                    )
-                atomic_write_text(path, body.content)
-                new_mtime_ns = path.stat().st_mtime_ns
+                status, mtime_ns = await asyncio.to_thread(_update_locked)
     except TimeoutError:
         raise _error(
             503,
             "busy",
             f"{spec.kind.capitalize()} update timed out — another sync may be in progress",
         )
-    return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
+    if status == "gone":
+        raise _error(404, "missing", f"{spec.kind} {name!r} not found")
+    if status == "conflict":
+        return mtime_conflict_response(mtime_ns)
+    return JSONResponse(content={"name": name, "mtime_ns": str(mtime_ns)})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────
@@ -543,36 +588,67 @@ async def delete_artifact(
     if gate is not None:
         return gate
 
+    canonical_root = _artifacts_root(spec, project_root, scope=target_scope)
+
+    def _delete_locked() -> tuple[dict | None, list[str], list[dict[str, str]]]:
+        removed: list[str] = []
+        skipped: list[dict[str, str]] = []
+
+        # ADR-0030 §6: under the cross-process name lock, RE-RESOLVE the
+        # canonical (a concurrent flat→dir migrate could have moved the working
+        # file since the pre-lock resolve) AND re-evaluate the host-write
+        # confirmation. The pre-lock gate ran on an unlocked snapshot; if the
+        # artifact (or a cascade target) was absent then but a concurrent
+        # create/transfer materialized it while we waited for the lock,
+        # deleting it now would bypass the user-tier host-write confirmation.
+        # Recompute the host targets from the CURRENT state and re-gate — a
+        # needs-confirmation envelope aborts the delete.
+        cascade_targets: list[Path] = []
+        with canonical_sidecar_lock(canonical_root, name, timeout=new_lock_budget()()):
+            _n, re_resolved = _resolve_existing(spec, project_root, name, scope=target_scope)
+            locked_pending: list[Path] = [re_resolved[0]] if re_resolved is not None else []
+            if cascade:
+                for gen in spec.generators().values():
+                    target = gen.target_file(project_root, name, scope=target_scope)
+                    if target is not None and target.is_file():
+                        cascade_targets.append(target)
+            locked_pending.extend(cascade_targets)
+            locked_gate = host_write_gate(
+                target_scope,
+                allow_host_writes,
+                action=f"Delete {spec.kind}",
+                host_targets=[str(p) for p in locked_pending],
+            )
+            if locked_gate is not None:
+                return locked_gate, removed, skipped
+
+            if re_resolved is not None:
+                cur_path, _cur_layout = re_resolved
+                try:
+                    cur_path.unlink()
+                    removed.append(_safe_rel(cur_path, project_root))
+                except OSError as e:
+                    skipped.append(delete_skip_entry(cur_path, e, project_root))
+
+        # Runtime cascade removals stay outside the lock, but delete ONLY the
+        # snapshot captured + confirmed under the gate above — never re-scan. A
+        # runtime-only artifact (no canonical) + cascade still removes those
+        # captured copies (#1247 id 46); a target that appeared AFTER the gate
+        # must not be deleted here without its own confirmation (ADR-0030 §6).
+        for target in cascade_targets:
+            if not target.is_file():
+                continue  # removed concurrently between the gate and here
+            try:
+                target.unlink()
+                removed.append(_safe_rel(target, project_root))
+            except OSError as e:
+                skipped.append(delete_skip_entry(target, e, project_root))
+        return None, removed, skipped
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                removed: list[str] = []
-                skipped: list[dict[str, str]] = []
-
-                if resolved is not None:
-                    path, _layout = resolved
-                    try:
-                        path.unlink()
-                        removed.append(_safe_rel(path, project_root))
-                    except OSError as e:
-                        skipped.append(delete_skip_entry(path, e, project_root))
-
-                # Sibling of the canonical branch, not nested inside it — a
-                # runtime-only artifact (no canonical) + cascade=true must still
-                # remove the runtime copies; the nested shape silently no-opped
-                # (#1247 id 46). Matches delete_skill.
-                if cascade:
-                    for gen in spec.generators().values():
-                        target = gen.target_file(project_root, name, scope=target_scope)
-                        if target is None:
-                            continue
-                        if not target.is_file():
-                            continue
-                        try:
-                            target.unlink()
-                            removed.append(_safe_rel(target, project_root))
-                        except OSError as e:
-                            skipped.append(delete_skip_entry(target, e, project_root))
+                gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
     except TimeoutError:
         raise _error(
             503,
@@ -580,6 +656,8 @@ async def delete_artifact(
             f"{spec.kind.capitalize()} delete timed out — another sync may be in progress",
         )
 
+    if gate_envelope is not None:
+        return gate_envelope
     return {"deleted": removed, "skipped": skipped}
 
 
@@ -801,7 +879,13 @@ async def import_artifacts(
     async def _run(dry: bool) -> Any:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                return spec.extract_to_canonical(
+                # ADR-0030 §6: the engine now takes the cross-process canonical
+                # flock per artifact, so it must run in a worker thread — a
+                # blocking flock on the event loop can deadlock (see
+                # _atomic._file_lock L2 note). ``_gateway_lock`` (held)
+                # serializes in-process callers so the worker never self-contends.
+                return await asyncio.to_thread(
+                    spec.extract_to_canonical,
                     project_root,
                     overwrite=overwrite,
                     dry_run=dry,
@@ -856,7 +940,10 @@ async def import_artifact(
     async def _run(dry: bool) -> Any:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                return spec.extract_to_canonical(
+                # ADR-0030 §6: offload — the engine now takes a blocking
+                # cross-process flock (see import_artifacts._run).
+                return await asyncio.to_thread(
+                    spec.extract_to_canonical,
                     project_root,
                     overwrite=overwrite,
                     only_name=name,

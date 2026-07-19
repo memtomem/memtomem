@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from memtomem.context._atomic import atomic_write_text
+from memtomem.context._canonical_txn import canonical_sidecar_lock, new_lock_budget
 from memtomem.context._names import InvalidNameError, validate_name
 from memtomem.context.detector import SKILL_DIRS
 from memtomem.context.privacy_scan import PrivacyScanError, scan_text_content
@@ -316,44 +317,46 @@ async def create_skill(
     if gate is not None:
         return gate
 
+    # Validate the submitted content encodes as UTF-8 before anything touches
+    # disk. A lone-surrogate body can't be UTF-8 encoded, so
+    # ``atomic_write_text`` (which does ``text.encode``) would raise
+    # UnicodeEncodeError AFTER ``mkdir``, leaving an orphan directory that
+    # wedges every retry on the 409 below.
+    try:
+        body.content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _error(400, "validation", "Skill content is not valid UTF-8") from exc
+
+    def _create_locked() -> None:
+        # ADR-0030 §6: cross-process canonical lock (the same
+        # ``<root>/.{name}.lock`` the skills importer takes) so a concurrent
+        # Pull / transfer / migrate can't race the create. Worker-thread only
+        # (blocking flock off the loop); ``_gateway_lock`` (held) serializes
+        # in-process callers.
+        with canonical_sidecar_lock(skill_dir.parent, body.name, timeout=new_lock_budget()()):
+            if skill_dir.exists():
+                # 409 Conflict, matching create_agent / create_command.
+                raise _error(
+                    409,
+                    "conflict",
+                    f"Skill '{body.name}' already exists",
+                    reason_code="already_exists",
+                )
+            skill_dir.mkdir(parents=True)
+            manifest = skill_dir / SKILL_MANIFEST
+            try:
+                atomic_write_text(manifest, body.content)
+            except BaseException:
+                # Roll back the partial skill dir so a transient failure doesn't
+                # leave an empty directory that wedges every future create of
+                # this name on the orphan-dir 409 above.
+                shutil.rmtree(skill_dir, ignore_errors=True)
+                raise
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                if skill_dir.exists():
-                    # 409 Conflict, matching create_agent / create_command.
-                    # A bare ValueError here maps to HTTP 400 via the app's
-                    # value_error_handler, diverging from the sibling routes
-                    # (and from the Web UI's 409 conflict-resolution flow).
-                    raise _error(
-                        409,
-                        "conflict",
-                        f"Skill '{body.name}' already exists",
-                        reason_code="already_exists",
-                    )
-                # Validate the submitted content encodes as UTF-8 before
-                # anything touches disk. A lone-surrogate body can't be UTF-8
-                # encoded, so ``atomic_write_text`` (which does ``text.encode``)
-                # would raise UnicodeEncodeError AFTER ``mkdir``, leaving an
-                # orphan directory that wedges every retry on the 409 above.
-                # Mirrors create_command / create_agent, which pre-encode for
-                # the same reason (they reuse the bytes as create_version's
-                # source_bytes; skills have no versioning layer, so the encoded
-                # bytes are discarded and only the validation matters here).
-                try:
-                    body.content.encode("utf-8")
-                except UnicodeEncodeError as exc:
-                    raise _error(400, "validation", "Skill content is not valid UTF-8") from exc
-                skill_dir.mkdir(parents=True)
-                manifest = skill_dir / SKILL_MANIFEST
-                try:
-                    atomic_write_text(manifest, body.content)
-                except BaseException:
-                    # Roll back the partial skill dir so a transient failure
-                    # doesn't leave an empty directory that wedges every future
-                    # create of this name on the orphan-dir 409 above. Mirrors
-                    # create_command / create_agent.
-                    shutil.rmtree(skill_dir, ignore_errors=True)
-                    raise
+                await asyncio.to_thread(_create_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill create timed out — another sync may be in progress")
     return {"name": body.name, "canonical_path": _safe_rel(skill_dir, project_root)}
@@ -421,25 +424,40 @@ async def update_skill(
     if gate is not None:
         return JSONResponse(content=gate)
 
+    def _update_locked() -> tuple[str, int]:
+        # ADR-0030 §6: existence + mtime re-check AND write under the
+        # cross-process canonical lock (lock-only in B2a — no auto-snapshot on
+        # edit save). The manifest existence is re-checked INSIDE C0 — a
+        # concurrent delete could have removed the skill since the pre-lock 404
+        # check, and a bare ``manifest.stat()`` would then 500. Returns
+        # ``(status, mtime_ns)`` with status "gone" / "conflict" / "ok".
+        with canonical_sidecar_lock(skill_dir.parent, name, timeout=new_lock_budget()()):
+            if not manifest.is_file():
+                return "gone", 0
+            current_mtime_ns = manifest.stat().st_mtime_ns
+            if current_mtime_ns != body_mtime_ns:
+                if not body.force:
+                    return "conflict", current_mtime_ns
+                logger.warning(
+                    "force-save bypassed mtime check on %s (client_mtime_ns=%s server_mtime_ns=%s)",
+                    manifest,
+                    body_mtime_ns,
+                    current_mtime_ns,
+                )
+            atomic_write_text(manifest, body.content)
+            return "ok", manifest.stat().st_mtime_ns
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                current_mtime_ns = manifest.stat().st_mtime_ns
-                if current_mtime_ns != body_mtime_ns:
-                    if not body.force:
-                        return mtime_conflict_response(current_mtime_ns)
-                    logger.warning(
-                        "force-save bypassed mtime check on %s "
-                        "(client_mtime_ns=%s server_mtime_ns=%s)",
-                        manifest,
-                        body_mtime_ns,
-                        current_mtime_ns,
-                    )
-                atomic_write_text(manifest, body.content)
-                new_mtime_ns = manifest.stat().st_mtime_ns
+                status, mtime_ns = await asyncio.to_thread(_update_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill update timed out — another sync may be in progress")
-    return JSONResponse(content={"name": name, "mtime_ns": str(new_mtime_ns)})
+    if status == "gone":
+        raise _error(404, "missing", f"skill {name!r} not found")
+    if status == "conflict":
+        return mtime_conflict_response(mtime_ns)
+    return JSONResponse(content={"name": name, "mtime_ns": str(mtime_ns)})
 
 
 # ── Delete ───────────────────────────────────────────────────────────────
@@ -492,34 +510,68 @@ async def delete_skill(
     if gate is not None:
         return gate
 
+    def _delete_locked() -> tuple[dict | None, list[str], list[dict[str, str]]]:
+        removed: list[str] = []
+        skipped: list[dict[str, str]] = []
+
+        # ADR-0030 §6: acquire the canonical name lock UNCONDITIONALLY, then
+        # re-evaluate BOTH existence and the host-write confirmation INSIDE it.
+        # The pre-lock gate ran on an unlocked snapshot; if the skill (or a
+        # cascade target) was absent then but a concurrent create/transfer
+        # materialized it while we waited for the lock, deleting it now would
+        # bypass the user-tier host-write confirmation. So recompute the host
+        # targets from the CURRENT state and re-gate — a needs-confirmation
+        # envelope aborts the delete (returned to the caller) rather than
+        # silently removing an unconfirmed user-tier artifact.
+        cascade_targets: list[Path] = []
+        with canonical_sidecar_lock(skill_dir.parent, name, timeout=new_lock_budget()()):
+            locked_pending: list[Path] = [skill_dir] if skill_dir.exists() else []
+            if cascade:
+                for gen in SKILL_GENERATORS.values():
+                    target = gen.target_dir(project_root, name, scope=target_scope)
+                    if target is not None and target.exists():
+                        cascade_targets.append(target)
+            locked_pending.extend(cascade_targets)
+            locked_gate = host_write_gate(
+                target_scope,
+                allow_host_writes,
+                action="Delete skill",
+                host_targets=[str(p) for p in locked_pending],
+            )
+            if locked_gate is not None:
+                return locked_gate, removed, skipped
+
+            if skill_dir.exists():
+                try:
+                    shutil.rmtree(skill_dir)
+                    removed.append(_safe_rel(skill_dir, project_root))
+                except OSError as e:
+                    skipped.append(delete_skip_entry(skill_dir, e, project_root))
+
+        # Runtime cascade removals (fan-out targets, not canonical) stay outside
+        # the lock, but delete ONLY the snapshot captured + confirmed under the
+        # gate above — never re-scan. Fan-out writers don't share the canonical
+        # lock, so a runtime target that appeared AFTER the gate must not be
+        # deleted here without its own confirmation (ADR-0030 §6).
+        for target in cascade_targets:
+            if not target.exists():
+                continue  # removed concurrently between the gate and here
+            try:
+                shutil.rmtree(target)
+                removed.append(_safe_rel(target, project_root))
+            except OSError as e:
+                skipped.append(delete_skip_entry(target, e, project_root))
+        return None, removed, skipped
+
     try:
         async with asyncio.timeout(60):
             async with _gateway_lock:
-                removed: list[str] = []
-                skipped: list[dict[str, str]] = []
-
-                if skill_dir.exists():
-                    try:
-                        shutil.rmtree(skill_dir)
-                        removed.append(_safe_rel(skill_dir, project_root))
-                    except OSError as e:
-                        skipped.append(delete_skip_entry(skill_dir, e, project_root))
-
-                if cascade:
-                    for gen in SKILL_GENERATORS.values():
-                        target = gen.target_dir(project_root, name, scope=target_scope)
-                        if target is None:
-                            continue
-                        if not target.exists():
-                            continue
-                        try:
-                            shutil.rmtree(target)
-                            removed.append(_safe_rel(target, project_root))
-                        except OSError as e:
-                            skipped.append(delete_skip_entry(target, e, project_root))
+                gate_envelope, removed, skipped = await asyncio.to_thread(_delete_locked)
     except TimeoutError:
         raise _error(503, "busy", "Skill delete timed out — another sync may be in progress")
 
+    if gate_envelope is not None:
+        return gate_envelope
     return {"deleted": removed, "skipped": skipped}
 
 

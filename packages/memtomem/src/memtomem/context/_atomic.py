@@ -180,9 +180,22 @@ def _lock_path_for(data_path: Path) -> Path:
 #       no path ever acquires L2 while holding L3.
 #   L4  storage / embedder / LLM — leaves; must never acquire L0–L3.
 #
-# Disjoint domains (config.json sidecar, context-gateway sidecars for
-# settings/skills/versions/wiki, web _gateway_lock/_config_lock) never nest
-# with this domain.
+# Disjoint domains (config.json sidecar, web _gateway_lock/_config_lock) never
+# nest with this memory-file domain.
+#
+# The context-artifact domain has its OWN two-level order (ADR-0030 §6,
+# ``context/_canonical_txn.py``), also disjoint from this one:
+#
+#   C0  canonical name-keyed sidecar — ``<canonical_root>/.{name}.lock`` (the
+#       layout-independent identity: flat ``<name>.md`` and dir ``<name>/``
+#       share it). Multi: sorted by str(lock_path) (cross-scope transfer).
+#       Held across resolve → snapshot → write so a concurrent flat→dir migrate
+#       can't strand a stale-path write.
+#   C1  the child sidecar the op needs — ``versions.json`` (version/label ops)
+#       or the wiki ``lock.json`` (install/update). NEVER acquire a canonical
+#       sidecar (C0) while holding a child (C1); the two children never nest
+#       with each other. ``create_version``/``promote_label``/``Lockfile`` take
+#       C1 internally, so callers hold C0 first.
 
 # Per-hold-span acquisition budgets (seconds). Monkeypatchable by dotted path
 # in tests, matching the ``config._CONFIG_LOCK_BUDGET_S`` convention. Fail-fast

@@ -49,6 +49,7 @@ from memtomem.context._atomic_reverse import (
     list_canonical_artifacts,
     resolve_artifact_under_root,
 )
+from memtomem.context._canonical_txn import new_lock_budget
 from memtomem.context._names import InvalidNameError, Layout, validate_name
 from memtomem.context._runtime_targets import (
     resolve_import_runtimes,
@@ -875,6 +876,9 @@ def extract_agents_to_canonical(
             "agent_name": agent_name,
         }
 
+    # One shared canonical-lock budget for the whole call (claude then gemini),
+    # so a batch import is bounded by one budget, not per-runtime (ADR-0030 §6).
+    lock_remaining = new_lock_budget()
     for runtime in runtimes:
         import_passthrough_runtime(
             runtime,
@@ -897,6 +901,7 @@ def extract_agents_to_canonical(
             source_runtimes=source_runtimes,
             runtime_candidates=runtime_candidates,
             logger=logger,
+            lock_remaining=lock_remaining,
         )
 
     return ExtractResult(

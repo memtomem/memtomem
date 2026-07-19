@@ -419,7 +419,9 @@ class Lockfile:
                 json.dumps(doc, indent=2, ensure_ascii=False).encode("utf-8"),
             )
 
-    def remove_entry(self, asset_type: str, name: str) -> bool:
+    def remove_entry(
+        self, asset_type: str, name: str, *, lock_timeout: float | None = None
+    ) -> bool:
         """Delete the ``(asset_type, name)`` entry if present.
 
         Returns ``True`` when an entry was removed, ``False`` when there
@@ -435,8 +437,13 @@ class Lockfile:
         dict is left in place rather than pruned, so a section a newer
         tool populated out-of-band is never dropped as a side effect of
         removing one entry.
+
+        ``lock_timeout`` bounds the sidecar-lock wait (``None`` blocks — the
+        historical default), matching :meth:`upsert_entry`; a caller inside a
+        bounded budget (transfer's canonical-lock span, ADR-0030 §6) forwards
+        its remaining deadline so a stuck holder can't outlive the request.
         """
-        with _file_lock(_lock_path_for(self._path)):
+        with _file_lock(_lock_path_for(self._path), timeout=lock_timeout):
             doc = self.load()
             section = doc.get(asset_type)
             if not isinstance(section, dict) or name not in section:

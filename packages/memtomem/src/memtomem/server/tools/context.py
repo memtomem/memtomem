@@ -10,6 +10,7 @@ import click
 
 from memtomem.config import TargetScope
 from memtomem.context import versioning
+from memtomem.context._canonical_txn import versioning_op_locked
 from memtomem.context.error_redact import redact_engine_reason
 from memtomem.context.scope_resolver import find_project_root
 from memtomem.server import mcp
@@ -2402,39 +2403,42 @@ async def mem_context_version(
         scan_text_content,
     )
 
-    try:
-        snapshot_bytes = await asyncio.to_thread(working_file.read_bytes)
-    except OSError as exc:
-        # ``working_file`` and ``str(OSError)`` both embed the absolute canonical
-        # path (the web twin never echoes it). Echo the basename only and strip
-        # the errno message's path.
-        detail = _redact_reason(str(exc), root)
-        return f"error: cannot read working canonical {working_file.name}: {detail}"
-    file_scan = await asyncio.to_thread(
-        lambda: scan_text_content(
+    def _create_locked(lt: float | None) -> versioning.VersionRecord:
+        # ADR-0030 §6: read + Gate-A scan + snapshot all run INSIDE the canonical
+        # lock (C0), so a concurrent Pull/CRUD edit between the read and the
+        # version write cannot slip unscanned / stale bytes into versions/vN.md.
+        # ``raise_or_collect`` hard-refuses project_shared on a hit and returns a
+        # (ignored) skip tuple for user / project_local.
+        snapshot_bytes = working_file.read_bytes()
+        file_scan = scan_text_content(
             snapshot_bytes.decode("utf-8", errors="replace"),
             source_path=working_file,
             surface="mcp_context_version_create",
             scope=artifact_scope,
             project_root=root,
         )
-    )
-    if file_scan.decision in ("blocked", "blocked_project_shared"):
-        try:
+        if file_scan.decision in ("blocked", "blocked_project_shared"):
             raise_or_collect(
                 file_scan, scope=artifact_scope, kind=artifact_type[:-1], artifact_name=name
             )
-        except PrivacyScanError as exc:
-            return f"privacy block: {exc.message}"
+        return versioning.create_version(
+            artifact_dir, working_file, note=note, source_bytes=snapshot_bytes, lock_timeout=lt
+        )
 
     try:
+        # Canonical name lock → versions.json (blocking, matching the MCP
+        # surface's historical unbounded waits — no route timeout here).
         record = await asyncio.to_thread(
-            versioning.create_version,
-            artifact_dir,
-            working_file,
-            note=note,
-            source_bytes=snapshot_bytes,
+            versioning_op_locked, artifact_dir, timeout=None, op=_create_locked
         )
+    except OSError as exc:
+        # ``working_file`` and ``str(OSError)`` both embed the absolute canonical
+        # path (the web twin never echoes it). Echo the basename only and strip
+        # the errno message's path.
+        detail = _redact_reason(str(exc), root)
+        return f"error: cannot read working canonical {working_file.name}: {detail}"
+    except PrivacyScanError as exc:
+        return f"privacy block: {exc.message}"
     except versioning.VersionError as exc:
         return f"error: {exc}"
 
@@ -2528,15 +2532,30 @@ async def mem_context_promote(
     artifact_dir = working_file.parent
 
     try:
+        # ADR-0030 §6 (Codex B4): canonical name lock FIRST, then versions.json,
+        # so a transfer moving the artifact dir can't race the pointer op. The
+        # manifest read rides the same locked worker thread.
         if delete:
-            await asyncio.to_thread(versioning.delete_label, artifact_dir, label)
-            manifest = await asyncio.to_thread(versioning.load_manifest, artifact_dir)
+
+            def _delete(lt: float | None) -> "VersionsManifest":
+                versioning.delete_label(artifact_dir, label, lock_timeout=lt)
+                return versioning.load_manifest(artifact_dir)
+
+            manifest = await asyncio.to_thread(
+                versioning_op_locked, artifact_dir, timeout=None, op=_delete
+            )
             return _format_label_result(
                 f"Dropped label {label!r} from {artifact_type}/{name} [{artifact_scope}]",
                 manifest,
             )
-        await asyncio.to_thread(versioning.promote_label, artifact_dir, label, version)
-        manifest = await asyncio.to_thread(versioning.load_manifest, artifact_dir)
+
+        def _promote(lt: float | None) -> "VersionsManifest":
+            versioning.promote_label(artifact_dir, label, version, lock_timeout=lt)
+            return versioning.load_manifest(artifact_dir)
+
+        manifest = await asyncio.to_thread(
+            versioning_op_locked, artifact_dir, timeout=None, op=_promote
+        )
         return _format_label_result(
             f"Promoted {artifact_type}/{name} [{artifact_scope}]: {label} → {version}",
             manifest,

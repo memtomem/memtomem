@@ -50,6 +50,7 @@ import click
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._atomic import _file_lock, _lock_path_for
+from memtomem.context._canonical_txn import canonical_sidecar_lock
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
 from memtomem.context._runtime_targets import runtime_fanout_root
 from memtomem.context.agents import (
@@ -531,37 +532,61 @@ def migrate_one(
 
     bak_path: Path | None = None
     try:
-        if row.state == "migrate":
-            if row.flat_dirty and not force:
+        # ADR-0030 §6: hold the name-keyed canonical lock across every mutating
+        # state — flat→dir replace, cleanup_flat unlink, .bak — so a concurrent
+        # Pull / transfer / version op on this artifact serializes with the
+        # layout change instead of racing it (the layout-independent identity is
+        # why flat ``<name>.md`` and dir ``<name>/`` share one lock).
+        with canonical_sidecar_lock(install_root, row.name):
+            # Reclassify UNDER the lock. ``row.state`` was decided from
+            # ``classify_migrate``'s call-time snapshot (its documented race
+            # policy); a concurrent transfer / migrate / CRUD can change the
+            # on-disk layout in the gap — e.g. a ``cleanup_flat`` whose dir was
+            # moved away by a transfer would otherwise delete the now-only flat
+            # canonical. Re-derive from disk and abort if the plan no longer
+            # holds, rather than executing a stale decision.
+            _fresh_entry = Lockfile.at(project_root_path).read_entry(row.asset_type, row.name)
+            fresh = _classify_row(project_root_path, row.asset_type, row.name, _fresh_entry)
+            if fresh is None or fresh.state != row.state:
+                now = fresh.state if fresh is not None else "gone"
                 return MigrateResult(
                     row=row,
                     bak_path=None,
                     ok=False,
-                    error="dirty flat requires --force",
+                    error=f"artifact changed under lock (was {row.state}, now {now}); re-run migrate",
                 )
-            bak_path = _execute_migrate(row, force=force)
-        elif row.state == "cleanup_flat":
-            if row.flat_dirty and not force:
-                return MigrateResult(
-                    row=row,
-                    bak_path=None,
-                    ok=False,
-                    error="dirty flat requires --force",
-                )
-            bak_path = _execute_cleanup_flat(row, force=force)
-        elif row.state == "refuse_dirty":
-            if not force:
-                return MigrateResult(
-                    row=row,
-                    bak_path=None,
-                    ok=False,
-                    error="dirty flat requires --force",
-                )
-            if row.dir_exists:
-                bak_path = _execute_cleanup_flat(row, force=True)
-            else:
-                bak_path = _execute_migrate(row, force=True)
-        # noop / skip_manual / skip_orphan → no writes
+            row = fresh  # execute against the freshly-verified on-disk state
+            if row.state == "migrate":
+                if row.flat_dirty and not force:
+                    return MigrateResult(
+                        row=row,
+                        bak_path=None,
+                        ok=False,
+                        error="dirty flat requires --force",
+                    )
+                bak_path = _execute_migrate(row, force=force)
+            elif row.state == "cleanup_flat":
+                if row.flat_dirty and not force:
+                    return MigrateResult(
+                        row=row,
+                        bak_path=None,
+                        ok=False,
+                        error="dirty flat requires --force",
+                    )
+                bak_path = _execute_cleanup_flat(row, force=force)
+            elif row.state == "refuse_dirty":
+                if not force:
+                    return MigrateResult(
+                        row=row,
+                        bak_path=None,
+                        ok=False,
+                        error="dirty flat requires --force",
+                    )
+                if row.dir_exists:
+                    bak_path = _execute_cleanup_flat(row, force=True)
+                else:
+                    bak_path = _execute_migrate(row, force=True)
+            # noop / skip_manual / skip_orphan → no writes
     except OSError as exc:
         return MigrateResult(row=row, bak_path=None, ok=False, error=str(exc))
 
@@ -649,17 +674,24 @@ def adopt_flat_to_dir(asset_type: str, flat_path: Path, dir_path: Path) -> Path:
     ):
         raise OSError(f"path escapes canonical root: {flat_path} / {dir_path}")
 
-    if target_file.exists():
-        # A dir-layout manifest already sits alongside the flat file — that is
-        # the flat+dir collision (``cleanup_flat`` / ``refuse_dirty``), which has
-        # user-edit semantics. Refuse; ``mm context migrate`` owns that path.
-        raise FileExistsError(
-            f"directory layout already exists at {target_file}; "
-            f"resolve the flat+dir collision with `mm context migrate` first"
-        )
+    # ADR-0030 §6: hold the name-keyed canonical lock across the
+    # collision-check + replace so a concurrent Pull / migrate / version op on
+    # this artifact serializes with the adopt (all three enable surfaces —
+    # web/CLI/MCP — reach the adopt through here). ``canonical_root`` is already
+    # ``.resolve()``d above, matching every other lock caller.
+    with canonical_sidecar_lock(canonical_root, flat_path.stem):
+        if target_file.exists():
+            # A dir-layout manifest already sits alongside the flat file — that
+            # is the flat+dir collision (``cleanup_flat`` / ``refuse_dirty``),
+            # which has user-edit semantics. Refuse; ``mm context migrate`` owns
+            # that path.
+            raise FileExistsError(
+                f"directory layout already exists at {target_file}; "
+                f"resolve the flat+dir collision with `mm context migrate` first"
+            )
 
-    dir_path.mkdir(parents=True, exist_ok=True)
-    os.replace(flat_path, target_file)
+        dir_path.mkdir(parents=True, exist_ok=True)
+        os.replace(flat_path, target_file)
     return target_file
 
 

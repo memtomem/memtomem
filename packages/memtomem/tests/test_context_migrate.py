@@ -657,9 +657,11 @@ def test_migrate_one_target_appears_mid_execution(tmp_path: Path) -> None:
     """Race between classify and execute: target_file appears, refuse to overwrite.
 
     Builds a clean classify result (state=migrate, dir absent) and then
-    materializes ``dir/agent.md`` before calling ``migrate_one``. The
-    execute path must surface the race rather than silently overwriting
-    the new bytes.
+    materializes ``dir/agent.md`` before calling ``migrate_one``. ADR-0030 §6
+    reclassifies UNDER the canonical lock, so the now flat+dir state is
+    re-derived as ``cleanup_flat`` — a mismatch against the planned ``migrate``
+    — and the execute path aborts rather than silently overwriting the new
+    bytes.
     """
     flat = _write_flat(tmp_path, "agents", "foo", b"flat-bytes\n")
     installed_at = _add_lock_entry(tmp_path, "agents", "foo")
@@ -679,7 +681,8 @@ def test_migrate_one_target_appears_mid_execution(tmp_path: Path) -> None:
     result = migrate_one(tmp_path, rows[0], force=False)
 
     assert result.ok is False
-    assert "appeared after classify" in (result.error or "")
+    # Reclassify-under-lock surfaces the layout change (migrate → cleanup_flat).
+    assert "changed under lock" in (result.error or "")
     # Raced bytes preserved (NOT overwritten by flat content).
     assert target_file.read_bytes() == b"raced bytes\n"
     # Flat preserved too (operation atomic — either both move or neither).
