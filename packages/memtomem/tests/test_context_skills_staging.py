@@ -21,7 +21,9 @@ that replaced the inline ``shutil.rmtree(dst); copy_tree_atomic`` in
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -111,6 +113,42 @@ class TestPromoteStaging:
         assert not staging.exists()
         # Positive marker: dst contents byte-equal to canonical.
         assert (dst / SKILL_MANIFEST).read_bytes() == (src / SKILL_MANIFEST).read_bytes()
+
+    def test_promote_no_replace_consumes_staging(self, tmp_path: Path) -> None:
+        src = _seed_canonical_skill(tmp_path, name="foo")
+        dst = tmp_path / ".claude" / "skills" / "foo"
+        staging = _stage_skill(src, dst)
+
+        _promote_staging(staging, dst, replace_existing=False)
+
+        assert not staging.exists()
+        assert (dst / SKILL_MANIFEST).read_bytes() == (src / SKILL_MANIFEST).read_bytes()
+
+    @pytest.mark.parametrize("valid_skill", [False, True], ids=["empty-dir", "valid-skill"])
+    def test_promote_no_replace_preserves_existing_destination(
+        self, tmp_path: Path, valid_skill: bool
+    ) -> None:
+        src = _seed_canonical_skill(
+            tmp_path,
+            name="foo",
+            skill_md="---\nname: foo\n---\nimport candidate\n",
+        )
+        dst = tmp_path / ".claude" / "skills" / "foo"
+        dst.mkdir(parents=True)
+        if valid_skill:
+            (dst / SKILL_MANIFEST).write_text("external writer\n", encoding="utf-8")
+        staging = _stage_skill(src, dst)
+
+        with pytest.raises(FileExistsError):
+            _promote_staging(staging, dst, replace_existing=False)
+
+        assert dst.is_dir()
+        assert staging.is_dir(), "collision cleanup belongs to the caller"
+        if valid_skill:
+            assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == "external writer\n"
+        else:
+            assert list(dst.iterdir()) == []
+        assert not list(dst.parent.glob(".old-foo-*.tmp"))
 
     def test_promote_replaces_existing_skill_dst(self, tmp_path: Path) -> None:
         src = _seed_canonical_skill(
@@ -335,6 +373,42 @@ class TestGenerateAllSkillsStagingFlow:
             p.name for p in target.parent.iterdir() if p.name.startswith((".staging-", ".old-"))
         ]
         assert leftovers == []
+
+    @pytest.mark.parametrize("scope", ["project_shared", "user"])
+    def test_sync_still_replaces_existing_runtime_skill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+    ) -> None:
+        if scope == "user":
+            set_home(monkeypatch, tmp_path / "home")
+        _seed_canonical_skill(
+            tmp_path,
+            name="hello",
+            scope=scope,
+            skill_md="---\nname: hello\n---\nnew canonical\n",
+            extras={"scripts/new.txt": "new auxiliary\n"},
+        )
+        dst = SKILL_GENERATORS["claude_skills"].target_dir(
+            tmp_path,
+            "hello",
+            scope=scope,  # type: ignore[arg-type]
+        )
+        assert dst is not None
+        dst.mkdir(parents=True)
+        (dst / SKILL_MANIFEST).write_text("old runtime\n", encoding="utf-8")
+        (dst / "stale.txt").write_text("remove me\n", encoding="utf-8")
+
+        result = generate_all_skills(
+            tmp_path,
+            runtimes=["claude_skills"],
+            scope=scope,  # type: ignore[arg-type]
+        )
+
+        assert result.generated == [("claude_skills", dst)]
+        assert (dst / SKILL_MANIFEST).read_text(encoding="utf-8") == (
+            "---\nname: hello\n---\nnew canonical\n"
+        )
+        assert (dst / "scripts/new.txt").read_text(encoding="utf-8") == "new auxiliary\n"
+        assert not (dst / "stale.txt").exists()
 
     def test_secret_in_scripts_blocks_user_scope(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -831,10 +905,10 @@ class TestExtractLock:
 
         orig_promote = skills_mod._promote_staging
 
-        def racing_promote(staging: Path, dst: Path) -> None:
+        def racing_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
             if dst.name == "foo":
                 raise OSError(_errno.ENOTEMPTY, "Directory not empty", str(dst))
-            orig_promote(staging, dst)
+            orig_promote(staging, dst, replace_existing=replace_existing)
 
         monkeypatch.setattr(skills_mod, "_promote_staging", racing_promote)
         result = extract_skills_to_canonical(tmp_path)
@@ -857,7 +931,7 @@ class TestExtractLock:
         _seed_runtime_skill(tmp_path, name="foo")
         canonical = canonical_skills_root(tmp_path)
 
-        def failing_promote(staging: Path, dst: Path) -> None:
+        def failing_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
             raise PermissionError(_errno.EACCES, "Permission denied", str(dst))
 
         monkeypatch.setattr(skills_mod, "_promote_staging", failing_promote)
@@ -878,7 +952,7 @@ class TestExtractLock:
 
         _seed_runtime_skill(tmp_path, name="foo")
 
-        def stranding_promote(staging: Path, dst: Path) -> None:
+        def stranding_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
             try:
                 raise OSError(_errno.EACCES, "rollback rename failed")
             except OSError as rollback_exc:
@@ -981,6 +1055,60 @@ class TestExtractLock:
         text = (racer_dst / SKILL_MANIFEST).read_text(encoding="utf-8")
         assert text == "racer won\n", "racing importer's tree was replaced despite overwrite=False"
 
+    @pytest.mark.parametrize("overwrite", [False, True])
+    def test_new_import_no_replace_preserves_skill_created_during_staging(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        overwrite: bool,
+    ) -> None:
+        """A valid skill created after the under-lock re-check wins the race.
+
+        ``overwrite=True`` is included because #1838 still classifies an absent
+        destination as a new import; it must not turn the final promote into a
+        replace operation merely because the flag was supplied (#1839).
+        """
+        import memtomem.context.skills as skills_mod
+
+        _seed_runtime_skill(tmp_path, name="foo", body="runtime candidate\n")
+        canonical = canonical_skills_root(tmp_path)
+        racer_dst = canonical / "foo"
+        staged = Event()
+        release_promote = Event()
+        orig_stage = skills_mod._stage_skill
+
+        def pausing_stage(src: Path, dst: Path, **kwargs) -> Path:
+            staging = orig_stage(src, dst, **kwargs)
+            staged.set()
+            if not release_promote.wait(timeout=5):
+                raise AssertionError("test did not release the paused skill promote")
+            return staging
+
+        monkeypatch.setattr(skills_mod, "_stage_skill", pausing_stage)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                extract_skills_to_canonical,
+                tmp_path,
+                overwrite,
+            )
+            try:
+                assert staged.wait(timeout=5), "import never reached the staging barrier"
+                racer_dst.mkdir(parents=True)
+                (racer_dst / SKILL_MANIFEST).write_text("external writer won\n", encoding="utf-8")
+                (racer_dst / "sentinel.txt").write_text("preserve me\n", encoding="utf-8")
+            finally:
+                release_promote.set()
+            result = future.result(timeout=5)
+
+        conflicts = [s for s in result.skipped if s[2] == skip_codes.TARGET_CONFLICT]
+        assert len(conflicts) == 1, result.skipped
+        assert conflicts[0][0] == "foo"
+        assert result.imported == []
+        assert (racer_dst / SKILL_MANIFEST).read_text(encoding="utf-8") == ("external writer won\n")
+        assert (racer_dst / "sentinel.txt").read_text(encoding="utf-8") == "preserve me\n"
+        assert not list(canonical.glob(".staging-foo-*.tmp"))
+        assert not list(canonical.glob(".old-foo-*.tmp"))
+
     def test_promote_runs_under_destination_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -995,13 +1123,13 @@ class TestExtractLock:
 
         orig_promote = skills_mod._promote_staging
 
-        def probing_promote(staging: Path, dst: Path) -> None:
+        def probing_promote(staging: Path, dst: Path, *, replace_existing: bool = True) -> None:
             try:
                 with _file_lock(_lock_path_for(dst), timeout=0):
                     contended.append(False)
             except TimeoutError:
                 contended.append(True)
-            orig_promote(staging, dst)
+            orig_promote(staging, dst, replace_existing=replace_existing)
 
         monkeypatch.setattr(skills_mod, "_promote_staging", probing_promote)
         result = extract_skills_to_canonical(tmp_path)
