@@ -83,6 +83,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Fixed
 
+- **Skills Pull no longer clobbers a skill created concurrently during
+  staging** (#1839) — a first-time runtime→Store import now promotes its staged
+  directory with an OS-level atomic no-replace rename. If a shell, editor, or
+  other writer creates the canonical skill after the under-lock existence
+  check, that tree is preserved and the import reports a typed
+  `target_conflict`; canonical→runtime sync keeps its existing replace
+  semantics.
 - **"Delete ALL data" now clears every table, including newer-schema ones**
   (#1826) — `reset_all` (`mm reset`, `mem_reset`, Web `POST /reset`) enumerates
   tables from `sqlite_master` instead of a hardcoded list, closing a
