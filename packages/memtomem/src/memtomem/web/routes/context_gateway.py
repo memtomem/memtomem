@@ -11,14 +11,16 @@ from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
+from pydantic import BaseModel, field_validator
 
 from memtomem.config import TargetScope
 from memtomem.context import override as _override
 from memtomem.context._names import GENERATOR_VENDOR, InvalidNameError, validate_name
-from memtomem.context._runtime_targets import IMPORT_SOURCE_RUNTIMES
+from memtomem.context._runtime_targets import IMPORT_SOURCE_RUNTIMES, resolve_import_runtimes
 from memtomem.context.projects import sync_skip_reason
+from memtomem.context.pull_apply import PullApplyResult, PullPlan, commit_pull, prepare_pull
 from memtomem.context.pull_preview import preview_pull
-from memtomem.context.scope_resolver import ArtifactKind
+from memtomem.context.scope_resolver import ArtifactKind, canonical_artifact_dir
 from memtomem.context.status import (
     ProjectStatus,
     classify_status,
@@ -27,10 +29,13 @@ from memtomem.context.status import (
     summarize_settings_statuses,
 )
 from memtomem.wiki.store import WikiStore
+from memtomem.web.routes._confirm import host_write_gate, needs_confirmation_envelope
 from memtomem.web.routes._errors import _classify_exception, _error, _redact_message
 from memtomem.web.routes.context_projects import _discover_for, resolve_scope_root
 from memtomem.web.schemas.context import (
     ContextOverviewResponse,
+    ContextPullApplyNeedsConfirmation,
+    ContextPullApplyResponse,
     ContextPullPreviewResponse,
     ContextRuntimesResponse,
     ContextStatusAllResponse,
@@ -810,3 +815,248 @@ async def context_pull_preview(
         "ambiguous": preview.ambiguous,
         "auto_source": preview.auto_source,
     }
+
+
+# ── POST /context/{kind}/{name}/pull (ADR-0030 PR-D) ─────────────────────────
+
+#: Web ingress surface tag for the deferred privacy counter — ``prepare_pull``
+#: carries it onto the ``PullPlan`` so ``commit_pull`` records the counter under
+#: THIS name (never the CLI's ``cli_context_pull``) when the write lands.
+_PULL_SURFACE = "web_context_pull"
+
+#: Whole-call lock budget for a Pull commit — the async surface bound the engine
+#: docstring requires (a ``lock_timeout`` result maps to 503). Mirrors the other
+#: locked context routes' 30s budget (``_INSTALL_LOCK_BUDGET_S`` /
+#: ``_TRANSFER_LOCK_BUDGET_S``), which stays under the client's request window.
+_PULL_LOCK_BUDGET_S = 30.0
+
+
+class PullApplyRequest(BaseModel):
+    """Body for ``POST /context/{kind}/{name}/pull`` — the source-selectable Pull.
+
+    ``source_runtime`` names the runtime to pull from (required when candidates
+    diverge — otherwise the engine refuses with ``source_conflict``).
+
+    Destination consent (mirrors the CLI's explicit ``--scope`` + confirm and
+    the web's #1263 host-write gate — a CSRF token proves request origin, not
+    the user's approval to write): a ``project_shared`` landing (git-tracked)
+    needs ``confirm_project_shared=true``; a ``user`` landing goes through
+    ``host_write_gate`` on ``allow_host_writes`` (the write lands on host paths
+    outside any project). An unconfirmed Pull that WOULD write returns the
+    ``needs_confirmation`` envelope and writes nothing.
+
+    ``force_unsafe_import`` is the Gate A bypass valve: it only bypasses a
+    *bypassable* tier (``user``) — ``project_shared`` hard-refuses regardless
+    (ADR-0011 §5), enforced in the engine. It is validated ``literal-true``: a
+    coercible ``"true"`` / ``"yes"`` / ``1`` does NOT enable the security bypass
+    (the web force-unsafe transport contract; mirrors
+    ``IndexRequest._only_literal_true``)."""
+
+    source_runtime: str | None = None
+    overwrite: bool = False
+    confirm_project_shared: bool = False
+    allow_host_writes: bool = False
+    force_unsafe_import: bool = False
+
+    @field_validator("force_unsafe_import", mode="before")
+    @classmethod
+    def _only_literal_true(cls, v: object) -> bool:
+        # Only a JSON literal ``true`` enables the Gate A bypass; Pydantic's
+        # default bool would coerce ``"true"`` / ``"yes"`` / ``1``. Fail closed
+        # on any non-boolean (mirrors ``IndexRequest._only_literal_true`` and the
+        # "literal true only" contract for every web force-unsafe valve).
+        return v is True
+
+
+def _pull_apply_payload(result: PullApplyResult, project_root: Path) -> dict:
+    """Project a :class:`PullApplyResult` onto the ``ContextPullApplyResponse``
+    wire dict (field/insertion order = the model's declared order).
+
+    Every ``reason`` — top-level and per-candidate — is display-sanitized
+    (``_redact_pull_reason``); the engine's ``gate_blocked`` reason is already
+    path-free (runtime + scope only) but is redacted anyway as a backstop. The
+    absolute destination ``dst`` is never sent raw: ``canonical_path`` goes
+    through the SAME ``_redact_pull_reason`` (not bare ``sanitize_diff_reason``)
+    so its residual absolute-path backstop masks a resolved / symlinked ``$HOME``
+    whose spelling doesn't match the cached one (the canonical-path-leak rule —
+    user-tier ``dst`` is a resolved host path). No raw bytes exist on this model
+    at all."""
+    canonical_path = (
+        _redact_pull_reason(str(result.dst), project_root) if result.dst is not None else None
+    )
+    return {
+        "status": result.status,
+        "kind": result.kind,
+        "name": result.name,
+        "target_scope": result.scope,
+        "reason": _redact_pull_reason(result.reason, project_root) or "",
+        "reason_code": result.reason_code,
+        "selected_runtime": result.selected_runtime,
+        "write_outcome": result.write_outcome,
+        "duplicate_runtimes": list(result.duplicate_runtimes),
+        "canonical_path": canonical_path,
+        "candidates": [
+            {
+                "runtime": c.runtime,
+                "content_status": c.content_status,
+                "gate_status": c.gate_status,
+                "importable": c.importable,
+                "landing_group": c.landing_group,
+                "override_warning": c.override_warning,
+                "reason": _redact_pull_reason(c.reason, project_root),
+            }
+            for c in result.candidates
+        ],
+        "distinct_landing_count": result.distinct_landing_count,
+        "gate_status": result.gate_status,
+        "gate_hits": result.gate_hits,
+        "force_bypassable": result.force_bypassable,
+    }
+
+
+def _finalize_pull(result: PullApplyResult, project_root: Path) -> dict:
+    """Map a :class:`PullApplyResult` onto its HTTP surface.
+
+    Domain decisions — the ``applied`` write and every refusal that hands the
+    picker something to act on (``source_conflict`` with its candidate rows,
+    ``gate_blocked`` with ``force_bypassable``, ``canonical_exists`` →
+    ``overwrite``, …) — are result-coded 200 bodies. The four statuses with
+    genuine HTTP meaning become error envelopes instead (the client ``api()``
+    helper drops structured detail on non-2xx, but these carry none the picker
+    needs): ``lock_timeout`` → 503 (transient, retry), ``plan_stale`` → 409
+    (destination changed under the lock — re-preview), and the two fail-closed
+    write failures ``snapshot_failed`` / ``write_failed`` → 500. Every message
+    is display-sanitized (an OSError reason may embed a path)."""
+    status = result.status
+    if status == "lock_timeout":
+        raise _error(
+            503,
+            "busy",
+            "the canonical store is locked by another write; retry shortly.",
+            reason_code=result.reason_code,
+        )
+    if status == "plan_stale":
+        raise _error(
+            409,
+            "conflict",
+            _redact_pull_reason(result.reason, project_root)
+            or "the Store changed since the preview; re-preview and retry.",
+            reason_code=result.reason_code,
+        )
+    if status in ("snapshot_failed", "write_failed"):
+        raise _error(
+            500,
+            "internal",
+            _redact_pull_reason(result.reason, project_root) or "the pull could not be written.",
+            reason_code=result.reason_code,
+        )
+    return _pull_apply_payload(result, project_root)
+
+
+@router.post(
+    "/context/{kind}/{name}/pull",
+    response_model=ContextPullApplyResponse | ContextPullApplyNeedsConfirmation,
+)
+async def context_pull_apply(
+    kind: str,
+    name: str,
+    body: PullApplyRequest,
+    project_root: Path = Depends(resolve_scope_root),
+    target_scope: TargetScope = Query(
+        ...,
+        description=(
+            "Destination canonical tier the Pull lands in — REQUIRED (no "
+            "default: an implicit project_shared would silently write to the "
+            "git-tracked tier). project_local is rejected (no runtime fan-out to "
+            "pull FROM — ADR-0011 §3); the explicit tier is the Gate B scope "
+            "choice, gated by confirm_project_shared / allow_host_writes."
+        ),
+    ),
+) -> dict:
+    """Execute a source-selectable Pull of ``name`` into the canonical Store.
+
+    ADR-0030 PR-D — the web sibling of ``mm context pull --apply`` (PR-C) over
+    the SAME :mod:`context.pull_apply` engine (``prepare_pull`` →
+    ``commit_pull``). The engine is result-coded on purpose, so every domain
+    decision — the ``applied`` write and every refusal (``source_conflict``
+    carrying its candidate rows, ``gate_blocked`` carrying ``force_bypassable``,
+    …) — returns HTTP 200 with a :class:`ContextPullApplyResponse` the picker
+    branches on; only the four HTTP-semantic statuses escape as error codes (see
+    :func:`_finalize_pull`).
+
+    Destination consent runs ONLY once ``prepare_pull`` yields a committable
+    plan (a write is imminent) — so refusals and the byte-identical no-op never
+    prompt: ``project_shared`` needs ``confirm_project_shared``; ``user`` runs
+    the #1263 ``host_write_gate``. Reasons/paths are display-sanitized and no raw
+    artifact bytes reach the wire.
+    """
+    if kind not in IMPORT_SOURCE_RUNTIMES:
+        raise _error(
+            400,
+            "validation",
+            f"kind {kind!r} has no Pull sources; choose one of: "
+            f"{', '.join(IMPORT_SOURCE_RUNTIMES)}.",
+        )
+    if target_scope == "project_local":
+        raise _error(
+            400,
+            "validation",
+            "project_local has no runtime fan-out to pull from (ADR-0011 §3); "
+            "pull into user or project_shared instead.",
+        )
+    try:
+        validated = validate_name(name, kind=f"{kind[:-1]} name")
+    except InvalidNameError as exc:
+        raise _error(400, "validation", str(exc))
+
+    # An ineligible/unknown --from is a request-shape error, not an engine
+    # outcome — reject at the boundary with the engine's own wording (parity
+    # with the CLI's up-front ``resolve_import_runtimes`` guard) rather than
+    # letting ``prepare_pull`` raise a bare ValueError into a 500.
+    artifact_kind = cast(ArtifactKind, kind)
+    if body.source_runtime is not None:
+        try:
+            resolve_import_runtimes(artifact_kind, body.source_runtime)
+        except ValueError as exc:
+            raise _error(400, "validation", str(exc))
+
+    outcome = await asyncio.to_thread(
+        prepare_pull,
+        artifact_kind,
+        validated,
+        scope=target_scope,
+        project_root=project_root,
+        source_runtime=body.source_runtime,
+        overwrite=body.overwrite,
+        force_unsafe_import=body.force_unsafe_import,
+        surface=_PULL_SURFACE,
+    )
+    if isinstance(outcome, PullApplyResult):
+        # A refusal, or the byte-identical no-op (status == "applied") — neither
+        # writes, so no destination-consent gate applies.
+        return _finalize_pull(outcome, project_root)
+
+    # A committable plan → a write IS imminent. Gate destination consent now
+    # (never before: a source_conflict / nothing_importable must not prompt).
+    plan: PullPlan = outcome
+    if plan.scope == "project_shared" and not body.confirm_project_shared:
+        return needs_confirmation_envelope(
+            f"Pull {kind}/{name} from {plan.selected_runtime} writes to the "
+            f"git-tracked project_shared canonical (history is forever). "
+            f"Re-send with confirm_project_shared=true after confirming.",
+            confirm="confirm_project_shared",
+            host_targets=[],
+        )
+    if plan.scope == "user":
+        target = canonical_artifact_dir(plan.kind, "user", plan.project_root) / plan.name
+        gate = host_write_gate(
+            plan.scope,
+            body.allow_host_writes,
+            action=f"Pull {kind}/{name} from {plan.selected_runtime}",
+            host_targets=[str(target)],
+        )
+        if gate is not None:
+            return gate
+
+    result = await asyncio.to_thread(commit_pull, plan, lock_timeout=_PULL_LOCK_BUDGET_S)
+    return _finalize_pull(result, project_root)

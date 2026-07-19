@@ -25,6 +25,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
   (skills/agents/commands only). Omitting it is unchanged (all detected
   runtimes); combining it with `--include settings` / `mcp-servers` (which have
   no per-runtime targeting) or with no artifact kind is a clear usage error.
+- **Web Pull apply route** (ADR-0030 §5/§11, PR-D backend) —
+  `POST /api/context/{kind}/{name}/pull` executes a source-selectable Pull from
+  the dashboard over the same engine as `mm context pull` (`prepare_pull` →
+  `commit_pull`). Domain decisions are delivered as a stable typed envelope the
+  UI branches on — the applied write and every refusal (`source_conflict`
+  carrying its candidate rows, `gate_blocked` carrying `force_bypassable`,
+  `canonical_exists` → overwrite, …) return HTTP 200; only the four statuses
+  with genuine HTTP meaning become error codes (lock-timeout → 503, stale plan
+  → 409, write failure → 500). Destination consent mirrors the CLI and the
+  dashboard's existing host-write gate: a `project_shared` landing (git-tracked)
+  requires `confirm_project_shared`, a `user` landing requires `allow_host_writes`
+  (disclosing the host paths), and `target_scope` is explicit (no silent
+  git-tier default). Runtime copies that diverge refuse until `source_runtime`
+  is named; `project_shared` hard-refuses any secret regardless of the
+  literal-`true`-only `force_unsafe_import` valve; and every reason/path is
+  display-sanitized so no absolute path, secret, or raw artifact bytes cross the
+  wire. (The picker UI that drives it lands in PR-D2.)
 
 - **Explicit relevance feedback for search runs (Quality Lab)** (#1801) —
   a committed `query_run_id` now accepts local judgments (`relevant` /

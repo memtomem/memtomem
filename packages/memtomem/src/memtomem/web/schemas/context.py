@@ -72,6 +72,8 @@ __all__ = [
     "ContextSyncProjectExecuted",
     "ContextSyncProjectFailed",
     "ContextSyncProjectSkipped",
+    "ContextPullApplyNeedsConfirmation",
+    "ContextPullApplyResponse",
     "ContextPullPreviewCandidate",
     "ContextPullPreviewResponse",
     "ContextWikiInstalls",
@@ -508,3 +510,79 @@ class ContextPullPreviewResponse(BaseModel):
     distinct_landing_count: int
     ambiguous: bool
     auto_source: str | None
+
+
+# ── POST /context/{kind}/{name}/pull (ADR-0030 PR-D) ─────────────────────
+
+
+class ContextPullApplyResponse(BaseModel):
+    """Result of a Pull apply — ADR-0030 PR-D.
+
+    Mirrors :class:`memtomem.context.pull_apply.PullApplyResult` on the wire.
+    The engine is result-coded *on purpose* ("so the Web/MCP surfaces get a
+    stable ``reason_code`` and the ``source_conflict`` payload travels with
+    it"), so every prepare/commit *domain decision* — the ``applied`` write and
+    every actionable refusal alike — returns HTTP 200 with this body (the four
+    statuses with genuine HTTP meaning are mapped to error codes instead: see
+    ``status`` below); the client picker branches
+    on ``status``. Only the infrastructural ``lock_timeout`` escapes as a 503
+    ``_error`` envelope (the one status the engine docstring maps to HTTP), so
+    it is absent from ``status`` here.
+
+    ``status`` is a CLOSED ``Literal`` — the *domain-decision* subset of the
+    engine's ``PullApplyStatus`` the route returns on a 200. The four statuses
+    that carry HTTP semantics are mapped to error codes and never appear in this
+    body: ``lock_timeout`` → 503, ``plan_stale`` → 409, and the two
+    infrastructural write failures (``snapshot_failed`` / ``write_failed``) →
+    500. ``test_web_routes_context_pull_apply.py`` pins that partition against
+    the engine enum, exactly as ``ContextPullPreviewCandidate`` pins
+    ``content_status``. Every ``reason`` (top-level and per-candidate) is
+    display-sanitized at the route; ``gate_blocked`` carries a fixed path-free
+    message (never the secret location); no raw bytes and no absolute ``dst``
+    ever reach the wire (``canonical_path`` is project-relative / ``~``-
+    collapsed, or ``None``)."""
+
+    status: Literal[
+        "applied",
+        "source_conflict",
+        "nothing_importable",
+        "selected_landing_error",
+        "canonical_exists",
+        "skills_overwrite_unsupported",
+        "snapshot_requires_dir_layout",
+        "target_conflict",
+        "gate_blocked",
+    ]
+    kind: str
+    name: str
+    target_scope: str
+    reason: str
+    reason_code: str | None
+    selected_runtime: str | None
+    write_outcome: str | None
+    duplicate_runtimes: list[str]
+    canonical_path: str | None
+    candidates: list[ContextPullPreviewCandidate]
+    distinct_landing_count: int
+    gate_status: Literal["ok", "blocked", "requires_unsafe_confirmation"] | None
+    gate_hits: int | None
+    force_bypassable: bool
+
+
+class ContextPullApplyNeedsConfirmation(BaseModel):
+    """Unconfirmed Pull write — the shared disclose-then-confirm envelope
+    (``_confirm.needs_confirmation_envelope``) for a Pull that WOULD write.
+
+    Returned (HTTP 200 — consent is application state, not a transport error)
+    when ``prepare_pull`` yields a committable plan but the destination tier's
+    opt-in is absent: ``project_shared`` needs ``confirm_project_shared`` (its
+    canonical is git-tracked), and ``user`` goes through the #1263
+    ``host_write_gate`` (``allow_host_writes``, disclosing the host paths).
+    ``confirm`` names the exact body flag to re-POST with; ``host_targets`` is
+    the host paths the confirmed write lands on (``[]`` for project_shared,
+    which writes inside the project root, not a host path)."""
+
+    status: Literal["needs_confirmation"]
+    confirm: str
+    reason: str
+    host_targets: list[str]

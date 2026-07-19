@@ -213,3 +213,21 @@ async def test_pull_preview_wire_shape(client, cwd_root: Path) -> None:
     resp = await client.get("/api/context/skills/demo/pull-preview")
     assert resp.status_code == 200, resp.text
     _assert_matches_golden("pull_preview", resp.json())
+
+
+@pytest.mark.asyncio
+async def test_pull_apply_wire_shape(client, cwd_root: Path) -> None:
+    """ADR-0030 PR-D — a divergent two-candidate skill (no source_runtime)
+    refuses with ``source_conflict``, pinning the richest apply-response shape:
+    the candidate rows plus every refusal field, all on a 200 (the result-coded
+    contract)."""
+    for runtime_dir, marker in ((".claude", "stale"), (".agents", "fresh")):
+        d = cwd_root / runtime_dir / "skills" / "demo"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_bytes(f"---\nname: demo\n---\n{marker}\n".encode())
+    resp = await client.post(
+        "/api/context/skills/demo/pull", params={"target_scope": "project_shared"}, json={}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "source_conflict"
+    _assert_matches_golden("pull_apply", resp.json())

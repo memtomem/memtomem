@@ -74,6 +74,7 @@ _CSRF_PROTECTED: frozenset[str] = frozenset(
         "context_commands.import_commands",
         "context_commands.sync_commands",
         "context_commands.update_command",
+        "context_gateway.context_pull_apply",
         "context_mcp_servers.create_mcp_server",
         "context_mutations.install_asset",
         "context_mutations.update_asset",
@@ -269,6 +270,11 @@ _REDACTION_EXEMPT: dict[str, str] = {
     "context_transfer.transfer_context_artifact": (
         "no content payload — moves/copies existing canonical bytes between "
         "stores; project_shared landings run Gate A in-engine on the staged tree"
+    ),
+    "context_gateway.context_pull_apply": (
+        "no content payload — pulls existing runtime bytes into the Store; Gate A "
+        "runs in-engine (prepare_pull over the captured tree), project_shared "
+        "hard-refuses, and every surfaced reason is display-sanitized"
     ),
     "context_projects.add_known_project": "path/label only, no prose",
     "context_projects.update_known_project": "label/enabled update, no prose",
