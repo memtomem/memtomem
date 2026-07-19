@@ -127,10 +127,28 @@ class TestPayloadExclusionSet:
             ("scripts/versions.json", True),
             ("scripts/overrides/note.md", True),
             ("docs/versions/v1.md", True),
+            # A sidecar-SHAPED top-level DIRECTORY takes its subtree with it —
+            # judging file-shaped names only at depth 0 would make these
+            # payload here while the listing-based filters (fan-out, diff)
+            # dropped them (Codex review).
+            ("versions.json/child.md", False),
+            (".versions.json.ab12cd.tmp/child.md", False),
+            (".staging-demo-1234-ab12cd.tmp/SKILL.md", False),
         ],
     )
     def test_relpath_predicate(self, rel, expected):
         assert is_payload_relpath(rel) is expected
+
+    @pytest.mark.parametrize(
+        "name",
+        ["SKILL.md", "scripts", "versions", "overrides", "versions.json", ".versions.json.lock"],
+    )
+    def test_relpath_and_top_name_predicates_agree(self, name):
+        """The listing filter (fan-out, diff) and the relpath filter (digest,
+        snapshot, Pull comparison) must judge the same top-level entry the same
+        way — at depth 0 AND for anything beneath it."""
+        assert is_payload_relpath(name) is is_payload_top_name(name)
+        assert is_payload_relpath(f"{name}/nested/file.md") is is_payload_top_name(name)
 
     def test_copier_skips_are_inherited(self, tmp_path):
         """Both surfaces inherit ``COPY_SKIP_NAMES`` and the symlink refusal

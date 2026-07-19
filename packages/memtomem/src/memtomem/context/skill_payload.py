@@ -81,19 +81,18 @@ def is_payload_top_name(name: str) -> bool:
 def is_payload_relpath(rel: str) -> bool:
     """Whether a posix relpath (relative to the skill root) is payload.
 
-    Only the FIRST segment is judged: the Store owns the top level, so a
-    nested ``scripts/versions.json`` or ``docs/overrides/x`` is user content.
-    A store-internal *file* name only excludes when it IS the top-level entry
-    (``len(parts) == 1``); a directory named ``versions`` excludes its whole
-    subtree because the first segment is the directory itself.
+    Only the FIRST segment is judged — the Store owns the top level — so a
+    nested ``scripts/versions.json`` or ``docs/overrides/x`` is user content
+    while an excluded top-level entry takes its whole subtree with it.
+
+    Delegates to :func:`is_payload_top_name` rather than re-deriving the
+    exclusion set: judging a *file*-shaped name only at ``len(parts) == 1``
+    would make a directory named ``versions.json`` (or a sidecar-shaped
+    ``.versions.json.<rand>.tmp/`` left by a crash) payload here while fan-out
+    and the diff — which filter a directory listing — dropped it, which is
+    exactly the digest-vs-fan-out disagreement this module exists to prevent.
     """
-    parts = rel.split("/")
-    top = parts[0]
-    if top in _PAYLOAD_EXCLUDED_TOP_DIRS or is_internal_artifact_dir(top):
-        return False
-    if len(parts) == 1 and _is_store_internal_top_file(top):
-        return False
-    return True
+    return is_payload_top_name(rel.split("/")[0])
 
 
 def read_skill_tree(root: Path) -> list[tuple[str, bytes]]:
