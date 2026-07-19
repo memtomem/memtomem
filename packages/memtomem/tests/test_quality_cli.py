@@ -349,3 +349,169 @@ class TestGateCommand:
         assert result.exit_code == 1
         assert "gate: FAIL" in result.output
         assert "verdict_count" in result.output
+
+
+class TestExperiment:
+    """`mm quality experiment` — exit-code contract and fail-fast ordering.
+
+    `run_experiment` is mocked (real storage orchestration lives in the
+    subprocess e2e); these pin the CLI's input validation, exit codes, and that
+    a rejected input never opens storage or writes `--out`.
+    """
+
+    def _profile(self, tmp_path, name, knobs=None):
+        p = tmp_path / f"{name}.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "retrieval_profile",
+                    "name": name,
+                    "knobs": knobs or {"search": {"rrf_k": 40}},
+                }
+            )
+        )
+        return str(p)
+
+    def _canned(self, *, policy_supplied=False, gate_pass=None, nondeterministic=False):
+        cand = {
+            "profile_name": "cand-a",
+            "deterministic": not nondeterministic,
+            "nondeterministic_stages": ["rerank_remote"] if nondeterministic else [],
+            "gate": None if gate_pass is None else {"pass": gate_pass},
+        }
+        return {
+            "schema_version": 1,
+            "kind": "quality_experiment",
+            "as_of_unix": 1000,
+            "deterministic": not nondeterministic,
+            "policy_supplied": policy_supplied,
+            "case_count": 1,
+            "fingerprints": {"corpus": "c", "index": "i", "case_set": "cs"},
+            "baseline": {
+                "profile_name": "ambient",
+                "deterministic": True,
+                "nondeterministic_stages": [],
+            },
+            "candidates": [cand],
+        }
+
+    def _patch_run(self, monkeypatch, comp, result):
+        _patch_components(monkeypatch, comp)
+        run = AsyncMock(return_value=result)
+        monkeypatch.setattr("memtomem.quality.experiment.run_experiment", run)
+        return run
+
+    def test_happy_path_json_out_matches_stdout(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        out = tmp_path / "exp.json"
+        result = CliRunner().invoke(
+            quality,
+            [
+                "experiment",
+                "--profile",
+                self._profile(tmp_path, "cand-a"),
+                "--format",
+                "json",
+                "--out",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["kind"] == "quality_experiment"
+        assert out.read_text() == result.output
+
+    def test_invalid_profile_exits_2_before_storage(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        run = self._patch_run(monkeypatch, comp, self._canned())
+        bad = tmp_path / "bad.json"
+        bad.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "retrieval_profile",
+                    "name": "x",
+                    "knobs": {"search": {"rrf_k": -5}},
+                }
+            )
+        )
+        out = tmp_path / "exp.json"
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", str(bad), "--out", str(out)]
+        )
+        assert result.exit_code == 2
+        assert run.call_count == 0  # fail-fast: never reached the orchestrator
+        assert not out.exists()  # nothing written on exit 2
+
+    def test_unreadable_profile_exits_2_without_path(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned())
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", str(tmp_path / "missing.json")]
+        )
+        assert result.exit_code == 2
+        assert "missing.json" not in result.output  # role, never path
+
+    def test_run_error_maps_to_exit_2(self, monkeypatch, tmp_path):
+        from memtomem.errors import EvalCaseError
+
+        comp = SimpleNamespace()
+        _patch_components(monkeypatch, comp)
+        run = AsyncMock(side_effect=EvalCaseError("no evaluation cases selected"))
+        monkeypatch.setattr("memtomem.quality.experiment.run_experiment", run)
+        result = CliRunner().invoke(
+            quality, ["experiment", "--profile", self._profile(tmp_path, "cand-a")]
+        )
+        assert result.exit_code == 2
+
+    def test_policy_failure_exits_1_with_result_emitted(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned(policy_supplied=True, gate_pass=False))
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps({"schema_version": 1, "kind": "replay_gate_policy"}))
+        result = CliRunner().invoke(
+            quality,
+            [
+                "experiment",
+                "--profile",
+                self._profile(tmp_path, "cand-a"),
+                "--policy",
+                str(policy),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 1
+        assert json.loads(result.output)["kind"] == "quality_experiment"  # emitted first
+
+    def test_policy_pass_exits_0(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned(policy_supplied=True, gate_pass=True))
+        policy = tmp_path / "policy.json"
+        policy.write_text(json.dumps({"schema_version": 1, "kind": "replay_gate_policy"}))
+        result = CliRunner().invoke(
+            quality,
+            [
+                "experiment",
+                "--profile",
+                self._profile(tmp_path, "cand-a"),
+                "--policy",
+                str(policy),
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0
+
+    def test_nondeterministic_profile_warns_on_stderr(self, monkeypatch, tmp_path):
+        comp = SimpleNamespace()
+        self._patch_run(monkeypatch, comp, self._canned(nondeterministic=True))
+        # Default CliRunner merges stderr into output (mix_stderr default).
+        result = CliRunner().invoke(
+            quality,
+            ["experiment", "--profile", self._profile(tmp_path, "cand-a"), "--format", "json"],
+        )
+        assert result.exit_code == 0
+        assert "nondeterministic" in result.output
+        assert "rerank_remote" in result.output

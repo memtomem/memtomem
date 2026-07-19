@@ -409,6 +409,199 @@ def _render_gate_table(verdict: dict) -> None:
         click.echo(f"  warning: {w}")
 
 
+# --------------------------------------------------------------------------- #
+# multi-candidate experiment                                                  #
+# --------------------------------------------------------------------------- #
+
+
+@quality.command("experiment")
+@click.option(
+    "--baseline",
+    "baseline_path",
+    type=click.Path(),
+    default=None,
+    help="Baseline profile document (default: the ambient effective config).",
+)
+@click.option(
+    "--profile",
+    "profile_paths",
+    multiple=True,
+    required=True,
+    help="Candidate profile document (repeatable).",
+)
+@click.option("--case", "case_selectors", multiple=True, help="Case id or name (repeatable).")
+@click.option(
+    "--as-of",
+    type=int,
+    default=None,
+    help="Pin temporal validity + decay (unix). Required for byte-identical reruns.",
+)
+@click.option(
+    "--policy",
+    "policy_path",
+    type=click.Path(),
+    default=None,
+    help="Gate-policy JSON, evaluated independently per candidate.",
+)
+@click.option("--out", type=click.Path(dir_okay=False), default=None, help="Write result to file.")
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+def experiment(
+    baseline_path: str | None,
+    profile_paths: tuple[str, ...],
+    case_selectors: tuple[str, ...],
+    as_of: int | None,
+    policy_path: str | None,
+    out: str | None,
+    fmt: str,
+) -> None:
+    """Replay a baseline + candidate profiles against one case set.
+
+    Replays the baseline (a ``--profile`` document, or the ambient config by
+    default) and every candidate against one pinned case set, then compares each
+    candidate with the baseline. Emits a deterministic, PR-attachable result; it
+    never selects a winner or changes defaults. Exit 0 = ran (no policy, or all
+    candidates pass the policy), 1 = a candidate failed the supplied ``--policy``
+    (result still emitted first), 2 = invalid input.
+    """
+    _run(_experiment(baseline_path, profile_paths, case_selectors, as_of, policy_path, out, fmt))
+
+
+async def _experiment(
+    baseline_path: str | None,
+    profile_paths: tuple[str, ...],
+    case_selectors: tuple[str, ...],
+    as_of: int | None,
+    policy_path: str | None,
+    out: str | None,
+    fmt: str,
+) -> None:
+    from memtomem.cli._bootstrap import cli_components
+    from memtomem.errors import EvalCaseError
+    from memtomem.quality.experiment import run_experiment, serialize_experiment
+    from memtomem.quality.gate import load_policy
+    from memtomem.quality.profiles import load_profile_document
+
+    # Read + validate every input first, by role (never by path), so a bad file
+    # fails at exit 2 before any storage is opened and nothing is emitted.
+    baseline_json = _read_json_role(baseline_path, "baseline profile") if baseline_path else None
+    profile_jsons = [
+        _read_json_role(path, f"profile #{i + 1}") for i, path in enumerate(profile_paths)
+    ]
+    policy_json = _read_json_role(policy_path, "policy") if policy_path else None
+
+    try:
+        baseline_doc = load_profile_document(baseline_json) if baseline_json is not None else None
+        candidate_docs = [load_profile_document(j) for j in profile_jsons]
+        policy = load_policy(policy_json) if policy_json is not None else None
+    except EvalCaseError as e:
+        raise GateInputError(f"experiment input rejected: {type(e).__name__}") from e
+
+    async with cli_components() as comp:
+        try:
+            result = await run_experiment(
+                comp,
+                baseline_doc=baseline_doc,
+                candidate_docs=candidate_docs,
+                case_selectors=list(case_selectors) or None,
+                as_of_unix=as_of,
+                policy=policy,
+            )
+        except EvalCaseError as e:
+            raise GateInputError(f"experiment could not run: {type(e).__name__}") from e
+
+    canonical = serialize_experiment(result)
+    for entry in [result["baseline"], *result["candidates"]]:
+        if not entry["deterministic"]:
+            click.echo(
+                f"warning: profile {entry['profile_name']!r} is nondeterministic "
+                f"({', '.join(entry['nondeterministic_stages'])}); "
+                "not valid as deterministic gate evidence",
+                err=True,
+            )
+    if out:
+        _write_file(out, canonical)
+    if fmt == "json":
+        click.echo(canonical, nl=False)
+    else:
+        _render_experiment_table(result)
+
+    if result["policy_supplied"] and any(
+        c["gate"] is not None and not c["gate"]["pass"] for c in result["candidates"]
+    ):
+        raise SystemExit(1)
+
+
+def _render_experiment_table(result: dict) -> None:
+    fp = result["fingerprints"]
+    click.echo(
+        f"experiment: {result['case_count']} case(s)  as_of={result['as_of_unix']}  "
+        f"corpus={fp['corpus'][:8]}  index={fp['index'][:8]}  case_set={fp['case_set'][:8]}"
+    )
+    base = result["baseline"]
+    _render_profile_header("baseline", base, gate=None)
+    agg = base["aggregate"]
+    click.echo(
+        f"  hit_rate={agg['mean_hit_rate']:.3f}  mrr={agg['mrr']:.3f}  "
+        f"recall={agg['mean_recall_labeled']:.3f}  ndcg={agg['mean_ndcg']:.3f}  "
+        f"(over {agg['evaluated_cases']} case(s))"
+    )
+    for cand in result["candidates"]:
+        click.echo("")
+        _render_profile_header(cand["profile_name"], cand, gate=cand["gate"])
+        comparison = cand["comparison"]
+        _render_candidate_deltas(comparison)
+        for case in comparison["cases"]:
+            label = case.get("classification") or case.get("status") or "?"
+            deltas = case.get("metric_deltas") or {}
+            ndcg = deltas.get("ndcg")
+            ndcg_str = f"  Δndcg={ndcg:+.3f}" if isinstance(ndcg, (int, float)) else ""
+            click.echo(f"    {case['case_id'][:8]}  {label}{ndcg_str}")
+        if cand["gate"] is not None:
+            for v in cand["gate"]["violations"]:
+                detail = ", ".join(f"{k}={v[k]}" for k in v if k != "rule")
+                click.echo(f"  violation: {v['rule']} ({detail})")
+        for note in comparison["compatibility"]["notes"]:
+            click.echo(f"  note: {note}")
+        for w in cand["warnings"]:
+            click.echo(f"  warning: {w}")
+
+
+def _render_profile_header(label: str, entry: dict, *, gate: dict | None) -> None:
+    if entry["deterministic"]:
+        det = "yes"
+    else:
+        det = f"NO ({', '.join(entry['nondeterministic_stages'])})"
+    gate_str = ""
+    if gate is not None:
+        gate_str = f"  gate={'PASS' if gate['pass'] else 'FAIL'}"
+    click.echo(
+        f"{label} {entry['profile_name']}  profile={entry['profile_fingerprint'][:8]}  "
+        f"deterministic={det}{gate_str}"
+    )
+
+
+def _render_candidate_deltas(comparison: dict) -> None:
+    d = comparison["aggregate_deltas"]
+    precision = d["precision"]
+    p_str = (
+        f"Δprecision={precision['delta']:+.3f} (cohort {precision['cohort_size']})"
+        if precision["cohort_size"]
+        else "Δprecision=n/a (cohort 0)"
+    )
+    click.echo(
+        f"  Δhit_rate={d['hit_rate']['delta']:+.3f}  "
+        f"Δmrr={d['reciprocal_rank']['delta']:+.3f}  "
+        f"Δrecall={d['recall_labeled']['delta']:+.3f}  "
+        f"Δndcg={d['ndcg']['delta']:+.3f}  {p_str} (cohort {d['cohort_size']})"
+    )
+    s = comparison["summary"]
+    click.echo(
+        f"  improved={s['improved']}  regressed={s['regressed']}  mixed={s['mixed']}  "
+        f"unchanged={s['unchanged']}  candidate_degraded={s['candidate_degraded']}  "
+        f"excluded={s['excluded']}"
+    )
+
+
 def _read_json_role(path: str, role: str) -> Any:
     """Read a JSON input, mapping any failure to a path-free exit-2 error.
 
