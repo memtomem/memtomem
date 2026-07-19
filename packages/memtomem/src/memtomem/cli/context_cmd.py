@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -147,6 +148,17 @@ from memtomem.context.skills import (
     diff_skills,
     extract_skills_to_canonical,
     generate_all_skills,
+)
+from memtomem.context.pull_apply import (
+    PullApplyResult,
+    PullPlan,
+    commit_pull,
+    prepare_pull,
+)
+from memtomem.context.pull_preview import PullPreview, preview_pull
+from memtomem.context._runtime_targets import (
+    KNOWN_RUNTIMES,
+    resolve_import_runtimes,
 )
 from memtomem.context import _skip_reasons as skip_codes
 from memtomem.wiki.store import WikiNotFoundError, WikiStore, WikiUnbornHeadError
@@ -386,10 +398,17 @@ def _print_artifact_generate(
     label: str | None = None,
     surface: str = "cli_context_sync",
     force_unsafe: bool = False,
+    runtimes_filter: tuple[str, ...] | None = None,
 ) -> None:
     kwargs: dict[str, Any] = {"scope": scope, "surface": surface, "force_unsafe": force_unsafe}
     if spec.generate_takes_strict:
         kwargs.update(strict=strict, on_drop=on_drop, label=label)
+    if runtimes_filter is not None:
+        # Bare runtime names → the engine's generator-name targets
+        # (``f"{runtime}_{kind}"`` — the registry convention). An unregistered
+        # combo (e.g. codex commands) surfaces as a typed UNKNOWN_RUNTIME skip
+        # row from the engine, not a silent no-op (ADR-0030 §5, PR-C).
+        kwargs["runtimes"] = [f"{r}_{spec.kind}" for r in runtimes_filter]
     try:
         result = spec.generate_fn(root, **kwargs)
     except (StrictDropError, CommandStrictDropError) as exc:
@@ -434,6 +453,135 @@ def _print_artifact_diff(
         click.secho(
             f"  {runtime:{spec.width}s}  {name}  [{status}]  scope={scope}{suffix}", fg=color
         )
+
+
+# ── Pull (ADR-0030 PR-C) rendering ─────────────────────────────────────────
+
+
+def _print_pull_preview(preview: PullPreview, *, overwrite: bool) -> None:
+    """Human table + summary for ``mm context pull`` (dry-run default)."""
+    if not preview.candidates:
+        click.echo(f"  (no runtime has {preview.kind}/{preview.name} to pull)")
+    else:
+        click.secho(f"  {'runtime':10s}  {'content':14s}  {'gate':28s}  notes", fg="cyan")
+        for c in preview.candidates:
+            notes: list[str] = []
+            if c.override_warning:
+                notes.append("matches vendor override — pull would bake it into base")
+            if c.reason:
+                notes.append(c.reason)
+            if c.landing_group is not None and preview.distinct_landing_count > 1:
+                notes.append(f"content #{c.landing_group + 1}")
+            gate = c.gate_status or "-"
+            click.echo(f"  {c.runtime:10s}  {c.content_status:14s}  {gate:28s}  {'; '.join(notes)}")
+    store = "present" if preview.store_present else "absent"
+    if preview.ambiguous:
+        summary = (
+            f"store: {store} · distinct contents: {preview.distinct_landing_count} · "
+            "ambiguous — pass --from <runtime> to --apply"
+        )
+    elif preview.auto_source:
+        summary = f"store: {store} · auto-source: {preview.auto_source}"
+    else:
+        summary = f"store: {store} · nothing importable"
+    click.echo(f"  {summary}")
+    if preview.store_present and preview.kind == "skills":
+        click.secho(
+            "  note: the Store already has this skill; overwriting skills is not yet "
+            "supported (ADR-0030 §10) — delete the canonical skill first.",
+            fg="yellow",
+        )
+    elif preview.store_present and not overwrite:
+        click.secho("  note: --apply needs --overwrite (the Store already has it).", fg="yellow")
+
+
+def _pull_preview_json(preview: PullPreview) -> dict[str, Any]:
+    """The wire-parallel preview shape (no raw bytes — CLI JSON is local)."""
+    return {
+        "kind": preview.kind,
+        "name": preview.name,
+        "target_scope": preview.scope,
+        "store_present": preview.store_present,
+        "distinct_landing_count": preview.distinct_landing_count,
+        "ambiguous": preview.ambiguous,
+        "auto_source": preview.auto_source,
+        "candidates": [
+            {
+                "runtime": c.runtime,
+                "content_status": c.content_status,
+                "gate_status": c.gate_status,
+                "importable": c.importable,
+                "landing_group": c.landing_group,
+                "override_warning": c.override_warning,
+                "reason": c.reason,
+            }
+            for c in preview.candidates
+        ],
+    }
+
+
+def _print_pull_diff(preview: PullPreview) -> None:
+    """Unified diff of each candidate's FULL surface vs the Store payload.
+
+    Candidate files outside the Store payload (top-level ``overrides/`` /
+    ``versions/``) show as "would land (runtime metadata)" so a metadata-only
+    divergence — which drives ``source_conflict`` yet leaves the payload
+    identical — is visible (ADR-0030 §4/§5, Codex R1/R2 Major 1).
+    """
+    from memtomem.context.pull_preview import _is_payload_relpath
+
+    store = dict(preview.store_content or ())
+    for cand in preview.candidates:
+        if cand.content is None:
+            continue
+        click.secho(f"  diff  store → {cand.runtime}", fg="cyan")
+        cand_files = dict(cand.content)
+        for rel in sorted(set(store) | set(cand_files)):
+            old = store.get(rel)
+            new = cand_files.get(rel)
+            if old == new:
+                continue
+            label = rel or preview.name
+            if old is None and not _is_payload_relpath(rel):
+                click.echo(f"    + would land (runtime metadata): {label}")
+                continue
+            if new is None:
+                click.echo(f"    - in store only: {label}")
+                continue
+            try:
+                old_lines = (old or b"").decode("utf-8").splitlines(keepends=True)
+                new_lines = new.decode("utf-8").splitlines(keepends=True)
+            except UnicodeDecodeError:
+                click.echo(
+                    f"    ~ binary content differs: {label} ({len(old or b'')} → {len(new)} bytes)"
+                )
+                continue
+            for line in difflib.unified_diff(
+                old_lines, new_lines, fromfile=f"store/{label}", tofile=f"{cand.runtime}/{label}"
+            ):
+                click.echo("    " + line.rstrip("\n"))
+
+
+def _render_pull_plan(plan: PullPlan) -> None:
+    action = "overwrite" if plan.store_present else "create"
+    click.echo(
+        f"  Pull {plan.kind}/{plan.name} from {plan.selected_runtime} → {plan.scope} ({action})"
+    )
+    if plan.duplicate_runtimes:
+        click.echo(f"    (byte-identical copies also in: {', '.join(plan.duplicate_runtimes)})")
+
+
+def _print_pull_applied(result: PullApplyResult) -> None:
+    if result.write_outcome == "identical":
+        click.secho(f"  {result.reason}", fg="green")
+        return
+    click.secho(
+        f"  Pulled {result.kind}/{result.name} from {result.selected_runtime} "
+        f"into {result.scope} ({result.write_outcome}).",
+        fg="green",
+    )
+    if result.duplicate_runtimes:
+        click.echo(f"    (byte-identical copies also in: {', '.join(result.duplicate_runtimes)})")
 
 
 @contextmanager
@@ -1232,6 +1380,184 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
         _print_settings_diff(root, scope=_resolve_cli_scope(scope_flag))
 
 
+@context.command("pull")
+@click.argument("kind", type=click.Choice(["skills", "agents", "commands"]))
+@click.argument("name")
+@click.option(
+    "--from",
+    "from_runtime",
+    metavar="RUNTIME",
+    default=None,
+    help=(
+        "Pull from this runtime only (per-kind eligibility: skills = "
+        "claude/gemini/codex/kimi; agents/commands = claude/gemini). Required "
+        "when candidates diverge."
+    ),
+)
+@click.option(
+    "--scope",
+    "scope_flag",
+    type=click.Choice(list(get_args(TargetScope))),
+    default=None,
+    help=(
+        "Destination canonical tier. The preview may infer project_shared; "
+        "--apply into project_shared requires this flag explicitly (ADR-0030 "
+        "§11). project_local is rejected (no runtime fan-out to pull from)."
+    ),
+)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help=(
+        "Allow replacing an existing Store entry (agents/commands: the current "
+        "canonical is snapshotted first; skills: not yet supported)."
+    ),
+)
+@click.option(
+    "--diff",
+    "show_diff",
+    is_flag=True,
+    help="Preview only: show unified diffs of the would-land content vs the Store.",
+)
+@click.option(
+    "--apply",
+    "apply_",
+    is_flag=True,
+    help="Execute the pull (default is a dry-run preview).",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help="Skip the confirmation prompt. Requires --apply.",
+)
+@click.option(
+    "--force-unsafe-import",
+    "force_unsafe_import",
+    is_flag=True,
+    help=(
+        "Bypass Gate A for a reviewed false positive. user / project_local "
+        "destinations only — project_shared hard-refuses regardless (ADR-0011 "
+        "§5). Mirrors 'mm context init --force-unsafe-import'."
+    ),
+)
+@click.option(
+    "--json",
+    "json_out",
+    is_flag=True,
+    help="Preview only: emit the structured preview as JSON.",
+)
+def pull_cmd(
+    kind: str,
+    name: str,
+    from_runtime: str | None,
+    scope_flag: str | None,
+    overwrite: bool,
+    show_diff: bool,
+    apply_: bool,
+    yes: bool,
+    force_unsafe_import: bool,
+    json_out: bool,
+) -> None:
+    """Pull one runtime's copy of an artifact into the canonical Store.
+
+    Dry-run preview by default (source-selectable, privacy-gated); --apply
+    executes. When runtime copies diverge, --apply refuses until you name a
+    source with --from (ADR-0030 §5).
+    """
+    artifact_kind = cast(ArtifactKind, kind)
+    # Flag-combination guards (exit 2), mirroring migrate's UsageError style.
+    if yes and not apply_:
+        raise click.UsageError("--yes only applies with --apply.")
+    if show_diff and apply_:
+        raise click.UsageError("--diff is a preview-only flag; drop --apply.")
+    if json_out and apply_:
+        raise click.UsageError("--json is a preview-only flag; drop --apply.")
+    if show_diff and json_out:
+        raise click.UsageError("--diff and --json cannot be combined.")
+
+    try:
+        validate_name(name, kind=f"{kind[:-1]} name")
+    except InvalidNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    scope_explicit = scope_flag is not None
+    scope = _resolve_artifact_cli_scope(scope_flag)
+    if scope == "project_local":
+        raise click.ClickException(
+            "project_local has no runtime fan-out to pull from (ADR-0011 §3); "
+            "pull into user or project_shared instead."
+        )
+    root = _find_project_root()
+    has_project_signal = (root / ".git").exists() or (root / "pyproject.toml").exists()
+    if scope_explicit and scope != "user" and not has_project_signal:
+        raise click.ClickException(
+            f"--scope={scope} requires a project root (with .git or pyproject.toml). "
+            "Use --scope=user from outside a project, or run from inside one."
+        )
+    # Validate --from eligibility early (reuse the engine's export-only /
+    # unknown-runtime wording verbatim), for both preview and apply.
+    if from_runtime is not None:
+        with _translate_to_click(ValueError):
+            resolve_import_runtimes(artifact_kind, from_runtime)
+
+    if not apply_:
+        preview = preview_pull(
+            artifact_kind, name, scope=scope, project_root=root, include_content=show_diff
+        )
+        if json_out:
+            click.echo(json.dumps(_pull_preview_json(preview), indent=2))
+            return
+        _print_pull_preview(preview, overwrite=overwrite)
+        if show_diff:
+            _print_pull_diff(preview)
+        click.echo("\nRun with --apply to execute.")
+        return
+
+    # ── apply ──
+    if scope == "project_shared" and not scope_explicit:
+        raise click.ClickException(
+            "--apply into the git-tracked project_shared tier requires an explicit "
+            "--scope project_shared (ADR-0030 §11)."
+        )
+    outcome = prepare_pull(
+        artifact_kind,
+        name,
+        scope=scope,
+        project_root=root,
+        source_runtime=from_runtime,
+        overwrite=overwrite,
+        force_unsafe_import=force_unsafe_import,
+    )
+    if isinstance(outcome, PullApplyResult):
+        # A refusal, or the byte-identical no-op (status == "applied").
+        if outcome.status == "applied":
+            _print_pull_applied(outcome)
+            return
+        raise click.ClickException(outcome.reason)
+
+    plan = outcome
+    _render_pull_plan(plan)
+    if not yes:
+        if scope == "project_shared":
+            prompt = (
+                f"\n--scope=project_shared writes to git-tracked {root}/.memtomem/. "
+                f"Pull {kind}/{name} from {plan.selected_runtime}. Continue?"
+            )
+            if not click.confirm(prompt, default=False):
+                raise click.Abort()
+        else:
+            click.confirm(
+                f"\nPull {kind}/{name} from {plan.selected_runtime} into {scope}?",
+                abort=True,
+            )
+    result = commit_pull(plan, force_unsafe_import=force_unsafe_import)
+    if result.status != "applied":
+        raise click.ClickException(result.reason)
+    _print_pull_applied(result)
+
+
 @context.command("sync")
 @_SYNC_INCLUDE_OPTION
 @click.option(
@@ -1278,6 +1604,18 @@ def diff_cmd(include: tuple[str, ...], scope_flag: str | None) -> None:
         "--force-unsafe-import'."
     ),
 )
+@click.option(
+    "--runtime",
+    "runtimes",
+    multiple=True,
+    type=click.Choice(list(KNOWN_RUNTIMES)),
+    help=(
+        "Restrict artifact fan-out to these runtimes (repeatable; default: all "
+        "detected). Applies to the skills/agents/commands legs only — "
+        "settings and mcp-servers have no per-runtime targeting. Additive: "
+        "omitting it keeps the default (all runtimes)."
+    ),
+)
 def sync_cmd(
     include: tuple[str, ...],
     strict: bool,
@@ -1287,6 +1625,7 @@ def sync_cmd(
     scope_flag: str | None,
     label: str | None,
     force_unsafe: bool,
+    runtimes: tuple[str, ...],
 ) -> None:
     """Sync context.md + included artifacts to detected agent files.
 
@@ -1296,11 +1635,28 @@ def sync_cmd(
     commands, settings, and (opt-in) mcp-servers. ``--all-projects`` syncs
     every enrolled/discovered project (project_shared tier only); ``--scope`` /
     ``--label`` pick the artifact tier; ``--force-unsafe`` bypasses Gate A on a
-    reviewed false positive (user / project_local destinations only).
+    reviewed false positive (user / project_local destinations only);
+    ``--runtime`` restricts the artifact fan-out to specific runtimes.
     """
     # sync accepts mcp-servers on top of the shared kinds (#1311); the other
     # context commands keep the default _KNOWN_INCLUDES set.
     inc = _parse_include(include, allowed=_SYNC_INCLUDES)
+
+    # --runtime filters the artifact fan-out (skills/agents/commands) only.
+    runtime_filter = tuple(dict.fromkeys(runtimes)) or None
+    if runtime_filter is not None:
+        non_artifact = inc & {"settings", "mcp-servers"}
+        if non_artifact:
+            raise click.UsageError(
+                "--runtime filters artifact fan-out (skills/agents/commands); "
+                f"{', '.join(sorted(non_artifact))} has no per-runtime targeting — "
+                "sync those separately without --runtime."
+            )
+        if not inc & {"skills", "agents", "commands"}:
+            raise click.UsageError(
+                "--runtime needs an artifact kind in --include "
+                "(skills, agents, or commands) to filter."
+            )
 
     if all_projects:
         # ADR-0025: the batch is project_shared-only — `user` would fan the
@@ -1323,7 +1679,14 @@ def sync_cmd(
                 "--all-projects."
             )
         _warn_label_ineligible_kinds(label, inc)
-        _run_sync_all_projects(inc=inc, strict=strict, on_drop=on_drop, yes=yes, label=label)
+        _run_sync_all_projects(
+            inc=inc,
+            strict=strict,
+            on_drop=on_drop,
+            yes=yes,
+            label=label,
+            runtime_filter=runtime_filter,
+        )
         return
 
     root = _find_project_root()
@@ -1336,6 +1699,7 @@ def sync_cmd(
         scope_flag=scope_flag,
         label=label,
         force_unsafe=force_unsafe,
+        runtime_filter=runtime_filter,
     ):
         # _run_sync_legs returns False only on the single-project
         # missing-context.md refusal (red note already printed, no legs ran).
@@ -1358,6 +1722,7 @@ def _run_sync_legs(
     batch: bool = False,
     surface: str = "cli_context_sync",
     force_unsafe: bool = False,
+    runtime_filter: tuple[str, ...] | None = None,
 ) -> bool:
     """Run one project's sync legs (project memory + included artifact kinds).
 
@@ -1447,6 +1812,7 @@ def _run_sync_legs(
                 label=label,
                 surface=surface,
                 force_unsafe=force_unsafe,
+                runtimes_filter=runtime_filter,
             )
 
     if "settings" in inc:
@@ -1500,6 +1866,7 @@ def _run_sync_all_projects(
     on_drop: str,
     yes: bool,
     label: str | None,
+    runtime_filter: tuple[str, ...] | None = None,
 ) -> None:
     """Orchestrate ``mm context sync --all-projects`` (ADR-0025, #1279).
 
@@ -1553,6 +1920,7 @@ def _run_sync_all_projects(
                 label=label,
                 batch=True,
                 surface="cli_context_sync_all_projects",
+                runtime_filter=runtime_filter,
             )
         except click.exceptions.Abort:
             # Strict-drop legs raise Abort after printing their [strict]

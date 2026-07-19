@@ -507,3 +507,68 @@ class TestContextInitGenerateSubprocess:
         # module-level path constant bound before the env override.
         assert not (home / ".claude" / "settings.json").exists()
         assert not (home / ".codex" / "agents").exists()
+
+    def test_context_pull_preview_then_apply_via_mm_binary(self, tmp_path):
+        """ADR-0030 PR-C — ``mm context pull`` across the process boundary:
+        divergent runtimes preview as ambiguous, ``--apply --from`` lands the
+        chosen source's bytes. Fixture-based (no real project committed)."""
+        bin_dir = os.path.dirname(sys.executable)
+        mm_bin = shutil.which("mm", path=bin_dir)
+        if mm_bin is None:
+            pytest.fail(
+                f"mm binary not found in {bin_dir}. "
+                "Run `uv pip install -e packages/memtomem[all]` before testing."
+            )
+
+        home = tmp_path / "home"
+        home.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        _seed_project(project)
+        (project / ".git").mkdir()  # project_shared needs a project root signal
+        for runtime, marker in (("claude", "CLAUDE stale"), ("gemini", "GEMINI fresh")):
+            d = project / f".{runtime}" / "agents"
+            d.mkdir(parents=True)
+            (d / "foo.md").write_text(
+                f"---\nname: foo\ndescription: t\n---\n{marker}\n", encoding="utf-8"
+            )
+
+        env = os.environ.copy()
+        for var in _MEMTOMEM_ENV_VARS:
+            env.pop(var, None)
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+
+        def _run(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [mm_bin, *args],
+                env=env,
+                cwd=str(project),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+
+        r = _run("context", "pull", "agents", "foo")
+        assert r.returncode == 0, f"preview failed:\nstdout={r.stdout}\nstderr={r.stderr}"
+        assert "ambiguous" in r.stdout
+
+        r = _run(
+            "context",
+            "pull",
+            "agents",
+            "foo",
+            "--apply",
+            "--from",
+            "gemini",
+            "--scope",
+            "project_shared",
+            "--yes",
+        )
+        assert r.returncode == 0, f"apply failed:\nstdout={r.stdout}\nstderr={r.stderr}"
+        canonical = project / ".memtomem" / "agents" / "foo" / "agent.md"
+        assert canonical.is_file()
+        assert "GEMINI fresh" in canonical.read_text(encoding="utf-8")
